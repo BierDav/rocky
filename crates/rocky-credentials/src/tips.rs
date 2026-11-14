@@ -12,7 +12,7 @@ use std::{
     sync::{Mutex, MutexGuard, PoisonError},
 };
 
-pub const SEAL_FORMAT: u32 = 2;
+pub const SEAL_FORMAT: u32 = 3;
 pub const TIP_OPENING_FORMAT: u32 = 3;
 pub const BOOKMARK_MOVE_FORMAT: u32 = 2;
 pub const GENESIS_LINE_FORMAT: u32 = 2;
@@ -127,10 +127,10 @@ pub fn genesis_tip(schema: Commitment) -> TipId {
     TipId(rocky_core::commitment("rocky.genesis-tip.v1", &schema))
 }
 
-/// Last included sequence of one node's author log, ordered by author number.
+/// Last included sequence of one node's author log, ordered by its writer key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorMark {
-    pub author: u32,
+    pub author: rocky_core::WriterId,
     pub sequence: u64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,11 +195,10 @@ impl SealStatement {
                 .frontier
                 .windows(2)
                 .any(|pair| pair[0].author >= pair[1].author)
-            || self.frontier.iter().any(|mark| {
-                mark.author == 0
-                    || mark.author > crate::MAX_AUTHOR
-                    || mark.sequence > i64::MAX as u64
-            })
+            || self
+                .frontier
+                .iter()
+                .any(|mark| mark.sequence > i64::MAX as u64)
         {
             return Err(denied("invalid seal frontier"));
         }
@@ -895,7 +894,10 @@ impl TipGraph {
         Ok(index)
     }
     /// Every signed statement: a lazy ID, its chain and its link.
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "lazy statement IDs borrow heterogeneous signed records"
+    )]
     fn signed(
         &self,
     ) -> impl Iterator<
@@ -1273,7 +1275,10 @@ impl TipGraph {
     /// first, and returns them; a stage the cut leaves out loses only what
     /// it signed past the live chain. Refuses more chains than a cut names,
     /// or more live leaves (forks) than fit.
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "returns retained cuts and omitted lane heads together"
+    )]
     pub fn proposed_cut(
         &self,
         identity: &PublicKey,

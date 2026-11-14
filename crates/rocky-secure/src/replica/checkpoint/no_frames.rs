@@ -29,7 +29,7 @@ impl<A: RowApplication> Inner<A> {
             };
             let header: p2panda_core::Header<Extensions> = decode(bytes)?;
             let extensions = &header.extensions;
-            let Some(author) = extensions.author else {
+            let Some(author) = extensions.author(&header.public_key) else {
                 return Ok(true);
             };
             // A frame of a tip the graph no longer resolves cannot be ruled out.
@@ -274,8 +274,8 @@ impl<A: RowApplication> Inner<A> {
         let graph = self.graph_for(extensions.scope.domain)?;
         let seal = graph.seal_by_id(sealed).map_err(credential)?;
         let author = extensions
-            .author
-            .ok_or_else(|| denied("node author number missing"))?;
+            .author(&header.public_key)
+            .ok_or_else(|| denied("node author missing"))?;
         if Self::covers_exact(
             graph,
             extensions.tip,
@@ -319,7 +319,7 @@ impl<A: RowApplication> Inner<A> {
         if !signed.statement.no_frames() {
             return Ok(());
         }
-        let covered = match (extensions.author, signed.statement.seal) {
+        let covered = match (extensions.author(&header.public_key), signed.statement.seal) {
             // Coverage that cannot be decided drops the candidate too.
             (Some(author), Some(sealed)) => self
                 .graph_for(extensions.scope.domain)

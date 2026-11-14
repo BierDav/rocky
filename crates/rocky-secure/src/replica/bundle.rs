@@ -214,16 +214,16 @@ impl<A: RowApplication> Inner<A> {
                 .change
                 .scope;
             let mut highest = self
-                .highest_identity(self.identity_allocation_scope(scope), author.number)
+                .highest_identity(self.identity_allocation_scope(scope), author.writer)
                 .await?;
             for id in ids {
-                if rocky_core::RowIdentity::next(author.number, highest)
+                if rocky_core::RowIdentity::next(author.writer, highest)
                     .map_err(|error| denied(&error.to_string()))?
                     != id
                 {
                     return Err(denied(&format!(
                         "insert id must continue the device's own table creation log: author {}, highest {}, received {}",
-                        author.number, highest, id
+                        author.writer, highest, id
                     )));
                 }
                 highest = id.sequence();
@@ -561,7 +561,7 @@ impl<A: RowApplication> Inner<A> {
             author: trigger
                 .header
                 .extensions
-                .author
+                .author(&trigger.header.public_key)
                 .map(|_| trigger.header.public_key),
         };
         if !required.contains(&(usize::from(membership.index), own)) {

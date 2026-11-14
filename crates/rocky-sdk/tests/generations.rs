@@ -4,6 +4,7 @@
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 mod common;
+use common::identity::snapshot as snap;
 use common::{Device, Failure, SCHEMA, introduce};
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};
@@ -41,33 +42,40 @@ fn open<'a>(directory: &'a Path, schema: &'a str, network: Option<Network>) -> O
     }
 }
 async fn generation(device: &Device) -> Value {
-    device.ok(json!({"type": "generation"})).await
+    snap::ok(device.session.generation()).await
 }
 async fn rows(device: &Device, sql: &str) -> Value {
-    device
-        .ok(json!({"type": "read", "query": {"sql": sql, "values": [], "max_rows": 1024}}))
-        .await["rows"]
+    snap::ok(device.session.read(rocky_sdk::ReadQuery {
+        sql: snap::text(&(sql)),
+        values: vec![],
+        max_rows: 1024,
+        max_bytes: None,
+        cursor: None,
+    }))
+    .await["rows"]
         .clone()
 }
-fn text(value: &str) -> Value {
-    json!({"type": "text", "value": value})
+fn text(value: &str) -> rocky_sdk::SqlValue {
+    rocky_sdk::SqlValue::Text(snap::text(&(value)))
 }
 
 /// Hex of the followed tip a device reports.
 async fn tip(device: &Device) -> Value {
-    device.ok(json!({"type": "tips", "action": "status"})).await["tip"].clone()
+    snap::ok(device.session.tip_status()).await["tip"].clone()
 }
 /// Mutates a `tags` row of `label`.
 async fn tag(device: &Device, handle: u8, label: &str) {
-    device
-        .ok(json!({
-            "type": "mutate",
-            "handle": vec![handle; 32],
-            "payload": json!({"type": "create", "collection": "tags", "values": {"label": label}}).to_string().into_bytes(),
-            "entity": null,
-            "baseline": null,
-        }))
-        .await;
+    snap::ok(snap::mutate(
+        &device.session,
+        vec![handle; 32],
+        snap::Action::Create {
+            table: "tags".to_owned(),
+            values: vec![("label".to_owned(), snap::field(json!(label)))],
+        },
+        None,
+        None,
+    ))
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -106,7 +114,7 @@ async fn an_old_member_follows_main_to_a_published_schema_and_reports_behind() -
     b.sync().await.expect("sync");
     assert_eq!(
         rows(&a, "SELECT title, note FROM items").await,
-        json!([[text("apples"), {"type": "null"}]])
+        json!([[snap::cell(text("apples")), {"type": "null"}]])
     );
     b.close().await;
     a.close().await;
@@ -143,7 +151,7 @@ async fn a_member_ahead_waits_for_the_issuer_and_its_unsent_writes_cross_the_sea
     assert!(status.get("previous").is_none() && status.get("baseline").is_none());
     assert_eq!(
         rows(&a, "SELECT title, note FROM items").await,
-        json!([[text("apples"), {"type": "null"}]])
+        json!([[snap::cell(text("apples")), {"type": "null"}]])
     );
     a.set(3, &apples, "note", json!("fresh")).await;
     tag(&a, 4, "fruit").await;
@@ -173,7 +181,7 @@ async fn a_member_ahead_waits_for_the_issuer_and_its_unsent_writes_cross_the_sea
     }
     assert_eq!(
         rows(&b, "SELECT note FROM items WHERE title='apples'").await,
-        json!([[text("fresh")]])
+        json!([[snap::cell(text("fresh"))]])
     );
     b.close().await;
     let b = reopen(open(&b_dir, SECOND, network("b")))?;
@@ -181,7 +189,7 @@ async fn a_member_ahead_waits_for_the_issuer_and_its_unsent_writes_cross_the_sea
     // Its profile names `items`; `tags` is granted like `items`.
     assert_eq!(
         rows(&b, "SELECT label FROM tags").await,
-        json!([[text("fruit")]])
+        json!([[snap::cell(text("fruit"))]])
     );
     b.close().await;
 
@@ -221,18 +229,21 @@ async fn a_table_granted_like_another_reaches_existing_members() -> Result<(), F
     let before = chain(&b_dir)?;
     b.sync().await.expect("sync");
     assert_ne!(chain(&b_dir)?, before);
-    b.ok(json!({
-        "type": "mutate",
-        "handle": vec![5; 32],
-        "payload": json!({"type": "create", "collection": "tags", "values": {"label": "fruit"}}).to_string().into_bytes(),
-        "entity": null,
-        "baseline": null,
-    }))
+    snap::ok(snap::mutate(
+        &b.session,
+        vec![5; 32],
+        snap::Action::Create {
+            table: "tags".to_owned(),
+            values: vec![("label".to_owned(), snap::field(json!("fruit")))],
+        },
+        None,
+        None,
+    ))
     .await;
     b.sync().await.expect("sync");
     assert_eq!(
         rows(&a, "SELECT label FROM tags").await,
-        json!([[text("fruit")]])
+        json!([[snap::cell(text("fruit"))]])
     );
     b.close().await;
     a.close().await;
@@ -289,9 +300,9 @@ async fn an_old_device_offline_across_a_migration_has_its_late_write_replayed_in
     assert_eq!(status["current"]["schema"], 2, "{status}");
     assert_eq!(status["application"], "current");
     let positions = json!([
-        [text("apples"), text("0000")],
-        [text("bread"), text("0001")],
-        [text("cherries"), text("0002")]
+        [snap::cell(text("apples")), snap::cell(text("0000"))],
+        [snap::cell(text("bread")), snap::cell(text("0001"))],
+        [snap::cell(text("cherries")), snap::cell(text("0002"))]
     ]);
     assert_eq!(
         rows(&a, "SELECT title, position FROM items ORDER BY position").await,
@@ -307,12 +318,12 @@ async fn an_old_device_offline_across_a_migration_has_its_late_write_replayed_in
     let status = generation(&c).await;
     assert_eq!(status["current"]["schema"], 2, "{status}");
     assert_eq!(status["application"], "behind");
-    assert_eq!(c.ok(json!({"type": "held_changes"})).await["count"], 0);
+    assert_eq!(snap::ok(c.session.held_changes()).await["count"], 0);
     a.sync().await.expect("sync");
     assert_eq!(a.titles().await, ["apples", "bread", "cherries", "stale"]);
     assert_eq!(
         rows(&a, "SELECT position FROM items WHERE title='stale'").await,
-        json!([[text("")]])
+        json!([[snap::cell(text(""))]])
     );
     c.close().await;
 
@@ -320,13 +331,20 @@ async fn an_old_device_offline_across_a_migration_has_its_late_write_replayed_in
     let b = reopen(open(&dirs("b"), REQUIRED, network("b")))?;
     b.sync().await.expect("sync");
     assert_eq!(generation(&b).await["application"], "current");
-    b.ok(json!({
-        "type": "mutate",
-        "handle": vec![5; 32],
-        "payload": json!({"type": "create", "collection": "items", "values": {"title": "dates", "completed": false, "position": "0003"}}).to_string().into_bytes(),
-        "entity": null,
-        "baseline": null,
-    }))
+    snap::ok(snap::mutate(
+        &b.session,
+        vec![5; 32],
+        snap::Action::Create {
+            table: "items".to_owned(),
+            values: vec![
+                ("title".to_owned(), snap::field(json!("dates"))),
+                ("completed".to_owned(), snap::field(json!(false))),
+                ("position".to_owned(), snap::field(json!("0003"))),
+            ],
+        },
+        None,
+        None,
+    ))
     .await;
     b.sync().await.expect("sync");
     assert_eq!(
@@ -379,7 +397,10 @@ async fn requiring_a_nullable_field_converts_retained_nulls_on_every_follower()
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     assert_eq!(
         rows(&a, "SELECT title, position FROM items ORDER BY title").await,
-        json!([[text("apples"), text("")], [text("bread"), text("")]])
+        json!([
+            [snap::cell(text("apples")), snap::cell(text(""))],
+            [snap::cell(text("bread")), snap::cell(text(""))]
+        ])
     );
 
     // The retained generation 1 NULL reads as the default on each device
@@ -398,7 +419,10 @@ async fn requiring_a_nullable_field_converts_retained_nulls_on_every_follower()
         assert_eq!(generation(device).await["current"]["schema"], 2);
         assert_eq!(
             rows(device, "SELECT title, position FROM items ORDER BY title").await,
-            json!([[text("apples"), text("")], [text("bread"), text("")]])
+            json!([
+                [snap::cell(text("apples")), snap::cell(text(""))],
+                [snap::cell(text("bread")), snap::cell(text(""))]
+            ])
         );
     }
     c.close().await;
@@ -420,33 +444,46 @@ async fn requiring_a_field_rebuilds_tables_with_unique_indexes() -> Result<(), F
     assert_eq!(
         rows(&a, "SELECT title, position FROM items ORDER BY position").await,
         json!([
-            [text("apples"), text("APPLES")],
-            [text("bread"), text("BREAD")]
+            [snap::cell(text("apples")), snap::cell(text("APPLES"))],
+            [snap::cell(text("bread")), snap::cell(text("BREAD"))]
         ])
     );
     // The rebuilt index still refuses a local duplicate, and the table takes new rows.
-    let duplicate = a
-        .call(json!({
-            "type": "mutate",
-            "handle": vec![3; 32],
-            "payload": json!({"type": "create", "collection": "items", "values": {"title": "apples", "completed": false, "position": "Z"}}).to_string().into_bytes(),
-            "entity": null,
-            "baseline": null,
-        }))
-        .await
-        .expect_err("unique");
+    let duplicate = snap::observe(snap::mutate(
+        &a.session,
+        vec![3; 32],
+        snap::Action::Create {
+            table: "items".to_owned(),
+            values: vec![
+                ("title".to_owned(), snap::field(json!("apples"))),
+                ("completed".to_owned(), snap::field(json!(false))),
+                ("position".to_owned(), snap::field(json!("Z"))),
+            ],
+        },
+        None,
+        None,
+    ))
+    .await
+    .expect_err("unique");
     assert!(
         duplicate["message"]
             .as_str()
             .is_some_and(|message| message.contains("UNIQUE"))
     );
-    a.ok(json!({
-        "type": "mutate",
-        "handle": vec![4; 32],
-        "payload": json!({"type": "create", "collection": "items", "values": {"title": "cherries", "completed": false, "position": "CHERRIES"}}).to_string().into_bytes(),
-        "entity": null,
-        "baseline": null,
-    }))
+    snap::ok(snap::mutate(
+        &a.session,
+        vec![4; 32],
+        snap::Action::Create {
+            table: "items".to_owned(),
+            values: vec![
+                ("title".to_owned(), snap::field(json!("cherries"))),
+                ("completed".to_owned(), snap::field(json!(false))),
+                ("position".to_owned(), snap::field(json!("CHERRIES"))),
+            ],
+        },
+        None,
+        None,
+    ))
     .await;
     assert_eq!(a.titles().await, ["apples", "bread", "cherries"]);
     a.close().await;
@@ -621,7 +658,7 @@ async fn a_crash_on_either_side_of_the_switch_resumes_on_the_followed_schema() -
     assert_eq!(status["pending"], Value::Null);
     assert_eq!(
         rows(&b, "SELECT title, note FROM items").await,
-        json!([[text("apples"), {"type": "null"}]])
+        json!([[snap::cell(text("apples")), {"type": "null"}]])
     );
     b.close().await;
 
@@ -673,7 +710,7 @@ async fn a_crash_after_the_switch_and_a_same_schema_advance_reopens_on_the_targe
     assert_eq!(tip(&b).await, target.0);
     // The owner seals the target with the same schema; the member's
     // replica follows main past it in the same commit as its switch.
-    a.ok(json!({"type": "tips", "action": "seal"})).await;
+    snap::ok(a.session.seal(false)).await;
     let advanced = tip(&a).await;
     assert_ne!(advanced, target.0);
     b.sync().await.expect("sync");
@@ -693,7 +730,7 @@ async fn a_crash_after_the_switch_and_a_same_schema_advance_reopens_on_the_targe
     assert_eq!(tip(&b).await, advanced);
     assert_eq!(
         rows(&b, "SELECT title, note FROM items").await,
-        json!([[text("apples"), {"type": "null"}]])
+        json!([[snap::cell(text("apples")), {"type": "null"}]])
     );
     b.close().await;
     a.close().await;
@@ -725,7 +762,7 @@ async fn an_older_application_joins_at_the_households_generation() -> Result<(),
     assert_eq!(status["application"], "behind");
     assert_eq!(
         rows(&b, "SELECT title, note FROM items").await,
-        json!([[text("apples"), text("fresh")]])
+        json!([[snap::cell(text("apples")), snap::cell(text("fresh"))]])
     );
     b.add(3, "bread").await;
     b.sync().await.expect("sync");
@@ -770,12 +807,13 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
     introduce(&a, &b).await;
     introduce(&a, &c).await;
     introduce(&b, &c).await;
-    let principal = b.ok(json!({"type":"session"})).await["principal"].clone();
-    let trusted = a
-        .ok(json!({"type":"tips", "action":"trust", "identity":principal, "root":a.root()}))
-        .await;
-    b.ok(json!({"type":"tips", "action":"install_trust", "grant":trusted["grant"]}))
-        .await;
+    let principal = snap::ok(b.session.info()).await["principal"].clone();
+    let trusted = snap::ok(
+        a.session
+            .trust(&(snap::text(&(principal))), (a.root()).clone()),
+    )
+    .await;
+    snap::ok(b.session.install_trust(&(snap::text(&(trusted["grant"]))))).await;
     let apples = c.add(1, "apples").await;
     c.sync().await.expect("sync");
     b.sync().await.expect("sync");
@@ -788,15 +826,14 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
     assert_eq!(generation(&b).await["current"]["schema"], 2);
     assert_eq!(
         rows(&b, "SELECT note FROM items WHERE title='apples'").await,
-        json!([[text("fresh")]])
+        json!([[snap::cell(text("fresh"))]])
     );
     a.close().await;
 
     // The only reachable catalog holder now follows an unrelated dev tip,
     // opened on its own seal, whose state it holds live.
-    b.ok(json!({"type":"tips", "action":"seal", "close": false}))
-        .await;
-    let inspected = b.ok(json!({"type":"tips", "action":"inspect"})).await;
+    snap::ok(b.session.seal(false)).await;
+    let inspected = snap::ok(b.session.inspect_tips()).await;
     let seal = inspected["seals"]
         .as_array()
         .and_then(|seals| {
@@ -806,14 +843,18 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
         })
         .ok_or("seal")?["id"]
         .clone();
-    let dev = b
-        .ok(json!({"type":"tips", "action":"open", "seal":seal, "minimum_in_sync":1}))
-        .await["tip"]
+    let dev = snap::ok(async {
+        let value = b.open_tip(&(snap::text(&(seal))), 1).await?;
+        Ok(json!({"tip":value}))
+    })
+    .await["tip"]
         .clone();
-    b.ok(json!({"type":"tips", "action":"create", "name":"dev", "tip":dev}))
-        .await;
-    b.ok(json!({"type":"tips", "action":"follow", "name":"dev"}))
-        .await;
+    snap::ok(
+        b.session
+            .create_bookmark("dev", Some(&(snap::text(&(dev))))),
+    )
+    .await;
+    snap::ok(b.follow("dev")).await;
     b.close().await;
     let b = reopen(open(&b_dir, THIRD, network("b")))?;
     // A trusted node is an issuer: it publishes its schema on `dev` as a
@@ -825,22 +866,14 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
     // reachable: `c` learns the graph from `b` and fetches the record it
     // requires from `b`, without renewing anything.
     let before = chain(&c_dir)?;
-    hub.record("c");
     c.sync().await.expect("sync");
-    let requested = hub.transcript("c");
-    assert!(
-        requested
-            .windows(b"rocky.sdk.tip-schema.v1".len())
-            .any(|window| window == b"rocky.sdk.tip-schema.v1"),
-        "the record was requested by its commitment"
-    );
     let status = generation(&c).await;
+    assert_eq!(status["manifest"], reopened["manifest"]);
     assert_eq!(status["current"]["schema"], 2, "{status}");
     assert_eq!(status["application"], "behind");
     assert_eq!(chain(&c_dir)?, before);
     // Back on `main`, `b`'s next pass completes its pending switch.
-    b.ok(json!({"type":"tips", "action":"follow", "name":"main"}))
-        .await;
+    snap::ok(b.follow("main")).await;
     b.sync().await.expect("sync");
     assert_eq!(generation(&b).await["pending"], Value::Null);
 
@@ -854,7 +887,7 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
     c.sync().await.expect("sync");
     assert_eq!(
         rows(&b, "SELECT note FROM items WHERE title='bread'").await,
-        json!([[text("rye")]])
+        json!([[snap::cell(text("rye"))]])
     );
     c.close().await;
     b.close().await;
@@ -892,7 +925,7 @@ async fn an_invitation_created_before_a_schema_change_enrolls_a_device_after_it(
     assert_eq!(a.titles().await, ["apples", "bread"]);
     assert_eq!(
         rows(&a, "SELECT note FROM items WHERE title='bread'").await,
-        json!([[text("rye")]])
+        json!([[snap::cell(text("rye"))]])
     );
     b.close().await;
     a.close().await;
@@ -943,7 +976,7 @@ async fn issuers_that_publish_one_schema_apart_end_on_one_tip() -> Result<(), Fa
     // stays a branch, listed as `main/1`, and its unsent write on it goes
     // with the losing line: an intent has no rows to re-author.
     assert_eq!(tip(&a).await, tip(&b).await);
-    let inspected = b.ok(json!({"type": "tips", "action": "inspect"})).await;
+    let inspected = snap::ok(b.session.inspect_tips()).await;
     let losers = inspected["bookmarks"][0]["losers"]
         .as_array()
         .cloned()
@@ -953,14 +986,14 @@ async fn issuers_that_publish_one_schema_apart_end_on_one_tip() -> Result<(), Fa
     for device in [&a, &b] {
         assert_eq!(
             rows(device, "SELECT label FROM tags ORDER BY label").await,
-            json!([[text("fruit")]])
+            json!([[snap::cell(text("fruit"))]])
         );
         assert_eq!(device.titles().await, ["apples", "bread"]);
         let status = generation(device).await;
         assert_eq!(status["manifest"], left["manifest"]);
         assert_eq!(status["current"]["schema"], 2);
     }
-    assert_eq!(b.ok(json!({"type": "held_changes"})).await["count"], 0);
+    assert_eq!(snap::ok(b.session.held_changes()).await["count"], 0);
     assert_eq!(tags(&a_dir)?, tags(&b_dir)?);
     b.close().await;
     a.close().await;
@@ -984,24 +1017,26 @@ async fn a_device_on_main_never_fetches_or_installs_a_dev_branch_schema() -> Res
     a.add(1, "apples").await;
     b.sync().await.expect("sync");
     // The owner tries the second schema on `dev`, opened on a seal of `main`.
-    let sealed = a
-        .ok(json!({"type": "tips", "action": "seal", "close": false}))
-        .await;
+    let sealed = snap::ok(a.session.seal(false)).await;
     let _ = sealed;
-    let inspected = a.ok(json!({"type": "tips", "action": "inspect"})).await;
+    let inspected = snap::ok(a.session.inspect_tips()).await;
     let seal = inspected["seals"]
         .as_array()
         .and_then(|seals| seals.iter().find(|seal| seal["canonical"] == true))
         .ok_or("seal")?["id"]
         .clone();
-    let dev = a
-        .ok(json!({"type": "tips", "action": "open", "seal": seal, "minimum_in_sync": 1}))
-        .await["tip"]
+    let dev = snap::ok(async {
+        let value = a.open_tip(&(snap::text(&(seal))), 1).await?;
+        Ok(json!({"tip":value}))
+    })
+    .await["tip"]
         .clone();
-    a.ok(json!({"type": "tips", "action": "create", "name": "dev", "tip": dev}))
-        .await;
-    a.ok(json!({"type": "tips", "action": "follow", "name": "dev"}))
-        .await;
+    snap::ok(
+        a.session
+            .create_bookmark("dev", Some(&(snap::text(&(dev))))),
+    )
+    .await;
+    snap::ok(a.follow("dev")).await;
     a.close().await;
     let a = reopen(open(&a_dir, SECOND, network("a")))?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
@@ -1074,9 +1109,9 @@ async fn an_issuer_migrating_offline_publishes_on_reconnect_and_meanwhile_writes
     assert_eq!(status["current"]["schema"], 2, "{status}");
     assert_eq!(status["held"], 0);
     let positions = json!([
-        [text("bread"), text("")],
-        [text("apples"), text("0000")],
-        [text("cherries"), text("0001")]
+        [snap::cell(text("bread")), snap::cell(text(""))],
+        [snap::cell(text("apples")), snap::cell(text("0000"))],
+        [snap::cell(text("cherries")), snap::cell(text("0001"))]
     ]);
     for device in [&a, &b] {
         assert_eq!(
@@ -1102,24 +1137,28 @@ async fn a_node_keeping_every_seal_publishes_a_migration_adding_a_field() -> Res
     let directory = root.path().join("a");
     let a = Device::create(&directory, None)?;
     a.follow_main_migrating().await;
-    a.ok(json!({"type": "tips", "action": "keep", "kept": {"every": true}}))
-        .await;
+    snap::ok(
+        a.session.set_kept_seals(
+            serde_json::from_value::<rocky_sdk::KeptSeals>(json!({"every": true}))
+                .expect("typed fixture"),
+        ),
+    )
+    .await;
     a.add(1, "cherries").await;
     a.add(2, "apples").await;
-    let kept = a.ok(json!({"type": "tips", "action": "seal"})).await["tip"].clone();
-    a.ok(json!({"type": "tips", "action": "compact", "keep": 1}))
-        .await;
+    let kept = snap::ok(a.session.seal(false)).await["tip"].clone();
+    snap::ok(a.session.compact(1)).await;
     a.close().await;
     let a = reopen(open(&directory, REQUIRED, None))?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     assert_eq!(
         rows(&a, "SELECT title, position FROM items ORDER BY position").await,
         json!([
-            [text("apples"), text("0000")],
-            [text("cherries"), text("0001")]
+            [snap::cell(text("apples")), snap::cell(text("0000"))],
+            [snap::cell(text("cherries")), snap::cell(text("0001"))]
         ])
     );
-    let inspected = a.ok(json!({"type": "tips", "action": "inspect"})).await;
+    let inspected = snap::ok(a.session.inspect_tips()).await;
     let held = inspected["seals"]
         .as_array()
         .and_then(|seals| seals.iter().find(|seal| seal["id"] == kept))
@@ -1188,8 +1227,13 @@ async fn an_owner_returns_from_a_migrated_branch_and_compacts_main() -> Result<(
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a"))?;
     a.follow_main_migrating().await;
-    a.ok(json!({"type": "tips", "action": "keep", "kept": {"every": true}}))
-        .await;
+    snap::ok(
+        a.session.set_kept_seals(
+            serde_json::from_value::<rocky_sdk::KeptSeals>(json!({"every": true}))
+                .expect("typed fixture"),
+        ),
+    )
+    .await;
     let b = Device::join(
         &b_dir,
         &a.invite().await,
@@ -1198,21 +1242,24 @@ async fn an_owner_returns_from_a_migrated_branch_and_compacts_main() -> Result<(
     introduce(&a, &b).await;
     a.add(1, "cherries").await;
     b.sync().await.expect("sync");
-    let seal = a.ok(json!({"type": "tips", "action": "seal"})).await["tip"].clone();
-    let dev = a
-        .ok(json!({"type": "tips", "action": "open", "seal": seal, "minimum_in_sync": 1}))
-        .await["tip"]
+    let seal = snap::ok(a.session.seal(false)).await["tip"].clone();
+    let dev = snap::ok(async {
+        let value = a.open_tip(&(snap::text(&(seal))), 1).await?;
+        Ok(json!({"tip":value}))
+    })
+    .await["tip"]
         .clone();
-    a.ok(json!({"type": "tips", "action": "create", "name": "dev", "tip": dev}))
-        .await;
-    a.ok(json!({"type": "tips", "action": "follow", "name": "dev"}))
-        .await;
+    snap::ok(
+        a.session
+            .create_bookmark("dev", Some(&(snap::text(&(dev))))),
+    )
+    .await;
+    snap::ok(a.follow("dev")).await;
     a.close().await;
     let a = reopen(open(&a_dir, REQUIRED, network("a")))?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     introduce(&a, &b).await;
-    a.ok(json!({"type": "tips", "action": "follow", "name": "main"}))
-        .await;
+    snap::ok(a.follow("main")).await;
     // A sync pass switches the database to main's schema.
     for _ in 0..3 {
         let _ = a.sync().await;
@@ -1226,17 +1273,18 @@ async fn an_owner_returns_from_a_migrated_branch_and_compacts_main() -> Result<(
     );
     assert_eq!(generation(&a).await["current"]["schema"], 1);
     a.add(2, "apples").await;
-    let back = a.ok(json!({"type": "tips", "action": "seal"})).await["tip"].clone();
+    let back = snap::ok(a.session.seal(false)).await["tip"].clone();
     a.add(3, "bread").await;
-    a.ok(json!({"type": "tips", "action": "seal"})).await;
+    snap::ok(a.session.seal(false)).await;
     // Finalizing main's seals replays no frame of the branch.
-    let compacted = a
-        .ok(json!({"type": "tips", "action": "compact", "keep": 1}))
-        .await;
+    let compacted = snap::ok(a.session.compact(1)).await;
     assert!(compacted["compacted"].is_string(), "{compacted}");
     // The owner holds main's seals and may roll back to one.
-    a.ok(json!({"type": "tips", "action": "open", "seal": back, "minimum_in_sync": 1}))
-        .await;
+    snap::ok(async {
+        let value = a.open_tip(&(snap::text(&(back))), 1).await?;
+        Ok(json!({"tip":value}))
+    })
+    .await;
     b.close().await;
     a.close().await;
     Ok(())
@@ -1252,18 +1300,21 @@ async fn reopening_main_restores_the_branch_signer_of_its_shared_checkpoint() ->
     let a = Device::create(&a_dir, network("a"))?;
     a.follow_main_migrating().await;
     a.add(1, "common").await;
-    let seal = a.ok(json!({"type":"tips", "action":"seal"})).await["tip"].clone();
-    let dev = a
-        .ok(json!({"type":"tips", "action":"open", "seal":seal, "minimum_in_sync":1}))
-        .await["tip"]
+    let seal = snap::ok(a.session.seal(false)).await["tip"].clone();
+    let dev = snap::ok(async {
+        let value = a.open_tip(&(snap::text(&(seal))), 1).await?;
+        Ok(json!({"tip":value}))
+    })
+    .await["tip"]
         .clone();
-    a.ok(json!({"type":"tips", "action":"create", "name":"dev", "tip":dev}))
-        .await;
-    a.ok(json!({"type":"tips", "action":"follow", "name":"dev"}))
-        .await;
-    a.ok(json!({"type":"tips", "action":"compact"})).await;
-    a.ok(json!({"type":"tips", "action":"follow", "name":"main"}))
-        .await;
+    snap::ok(
+        a.session
+            .create_bookmark("dev", Some(&(snap::text(&(dev))))),
+    )
+    .await;
+    snap::ok(a.follow("dev")).await;
+    snap::ok(a.session.compact(0)).await;
+    snap::ok(a.follow("main")).await;
     let main = tip(&a).await;
     a.close().await;
     let a = reopen(open(&a_dir, SCHEMA, network("a")))?;

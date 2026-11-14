@@ -2,6 +2,7 @@
 //! counter values through a claim right the owner grants, until the owner
 //! revokes it.
 use super::{fixture::*, *};
+use crate::snap;
 
 fn denied(error: &Failure) -> bool {
     error.downcast_ref::<CoordinationError>() == Some(&CoordinationError::Denied)
@@ -16,17 +17,40 @@ async fn unpushed(peer: &Peer) -> Result<bool, Failure> {
 /// An owner registered as the domain's only trusted identity on `bundle`.
 async fn owner(root: &std::path::Path, bundle: &TrustBundle) -> Result<Peer, Failure> {
     let a = Peer::start(&root.join("a"), SCHEMA, Some(bundle), None, true).await?;
-    let owner = a.call(json!({"type":"session"})).await?["principal"].clone();
+    let owner = snap::value(a.session.info()).await?["principal"].clone();
     let tenant = PrivateKey::new();
-    a.call(
-        json!({"type":"coordination_register","tenant":tenant.to_hex(),"registration":vec![1u8;32],
-        "trusted":[owner],"lifetime":3600,"root":a.root()}),
+    snap::value(
+        a.publish_coordination(
+            rocky_coordinator::control::ControlRequest {
+                tenant: rocky_sdk::credentials::PrivateKey::from_bytes(&snap::digest(
+                    &(tenant.to_hex()),
+                )),
+                trusted: serde_json::from_value::<Vec<rocky_sdk::credentials::PublicKey>>(json!([
+                    owner
+                ]))
+                .expect("typed fixture"),
+                lifetime: 3600,
+                id: serde_json::from_value::<[u8; 32]>(json!(vec![1u8; 32]))
+                    .expect("typed fixture"),
+                revision: rocky_coordinator::control::ControlRevision::Register {
+                    grant: serde_json::from_value::<
+                        Option<Box<rocky_sdk::credentials::SignedCoordinationGrant>>,
+                    >(json!(null))
+                    .expect("typed fixture"),
+                    admission: serde_json::from_value::<
+                        Option<Box<rocky_sdk::credentials::SignedTenantAdmission>>,
+                    >(json!(null))
+                    .expect("typed fixture"),
+                },
+            },
+            Some((a.root()).clone()),
+        ),
     )
     .await?;
     Ok(a)
 }
 async fn principal(peer: &Peer) -> Result<String, Failure> {
-    Ok(peer.call(json!({"type":"session"})).await?["principal"]
+    Ok(snap::value(peer.session.info()).await?["principal"]
         .as_str()
         .ok_or("principal")?
         .to_owned())
@@ -37,11 +61,34 @@ async fn a_member_claims_through_its_claim_right_until_it_is_revoked() -> Result
     let root = tempfile::tempdir()?;
     let (bundle, _admin) = service(root.path()).await?;
     let a = Peer::start(&root.path().join("a"), SCHEMA, Some(&bundle), None, true).await?;
-    let owner = a.call(json!({"type":"session"})).await?["principal"].clone();
+    let owner = snap::value(a.session.info()).await?["principal"].clone();
     let tenant = PrivateKey::new();
-    a.call(
-        json!({"type":"coordination_register","tenant":tenant.to_hex(),"registration":vec![1u8;32],
-        "trusted":[owner],"lifetime":3600,"root":a.root()}),
+    snap::value(
+        a.publish_coordination(
+            rocky_coordinator::control::ControlRequest {
+                tenant: rocky_sdk::credentials::PrivateKey::from_bytes(&snap::digest(
+                    &(tenant.to_hex()),
+                )),
+                trusted: serde_json::from_value::<Vec<rocky_sdk::credentials::PublicKey>>(json!([
+                    owner
+                ]))
+                .expect("typed fixture"),
+                lifetime: 3600,
+                id: serde_json::from_value::<[u8; 32]>(json!(vec![1u8; 32]))
+                    .expect("typed fixture"),
+                revision: rocky_coordinator::control::ControlRevision::Register {
+                    grant: serde_json::from_value::<
+                        Option<Box<rocky_sdk::credentials::SignedCoordinationGrant>>,
+                    >(json!(null))
+                    .expect("typed fixture"),
+                    admission: serde_json::from_value::<
+                        Option<Box<rocky_sdk::credentials::SignedTenantAdmission>>,
+                    >(json!(null))
+                    .expect("typed fixture"),
+                },
+            },
+            Some((a.root()).clone()),
+        ),
     )
     .await?;
     let m = Peer::start(
@@ -53,7 +100,7 @@ async fn a_member_claims_through_its_claim_right_until_it_is_revoked() -> Result
     )
     .await?;
     introduce(&a, &m).await?;
-    let member = m.call(json!({"type":"session"})).await?["principal"]
+    let member = snap::value(m.session.info()).await?["principal"]
         .as_str()
         .ok_or("principal")?
         .to_owned();
@@ -181,11 +228,34 @@ async fn another_issuer_renews_a_right_after_its_granting_issuer_is_gone() -> Re
     let root = tempfile::tempdir()?;
     let (bundle, _admin) = service(root.path()).await?;
     let a = Peer::start(&root.path().join("a"), SCHEMA, Some(&bundle), None, true).await?;
-    let owner = a.call(json!({"type":"session"})).await?["principal"].clone();
+    let owner = snap::value(a.session.info()).await?["principal"].clone();
     let tenant = PrivateKey::new();
-    a.call(
-        json!({"type":"coordination_register","tenant":tenant.to_hex(),"registration":vec![1u8;32],
-        "trusted":[owner],"lifetime":3600,"root":a.root()}),
+    snap::value(
+        a.publish_coordination(
+            rocky_coordinator::control::ControlRequest {
+                tenant: rocky_sdk::credentials::PrivateKey::from_bytes(&snap::digest(
+                    &(tenant.to_hex()),
+                )),
+                trusted: serde_json::from_value::<Vec<rocky_sdk::credentials::PublicKey>>(json!([
+                    owner
+                ]))
+                .expect("typed fixture"),
+                lifetime: 3600,
+                id: serde_json::from_value::<[u8; 32]>(json!(vec![1u8; 32]))
+                    .expect("typed fixture"),
+                revision: rocky_coordinator::control::ControlRevision::Register {
+                    grant: serde_json::from_value::<
+                        Option<Box<rocky_sdk::credentials::SignedCoordinationGrant>>,
+                    >(json!(null))
+                    .expect("typed fixture"),
+                    admission: serde_json::from_value::<
+                        Option<Box<rocky_sdk::credentials::SignedTenantAdmission>>,
+                    >(json!(null))
+                    .expect("typed fixture"),
+                },
+            },
+            Some((a.root()).clone()),
+        ),
     )
     .await?;
     let b = Peer::start(
@@ -207,11 +277,11 @@ async fn another_issuer_renews_a_right_after_its_granting_issuer_is_gone() -> Re
     .await?;
     introduce(&a, &m).await?;
     introduce(&b, &m).await?;
-    let member = m.call(json!({"type":"session"})).await?["principal"]
+    let member = snap::value(m.session.info()).await?["principal"]
         .as_str()
         .ok_or("principal")?
         .to_owned();
-    let b_node = b.call(json!({"type":"session"})).await?["node"].clone();
+    let b_node = snap::value(b.session.info()).await?["node"].clone();
     let invoices = counters::Name::new("invoices")?;
 
     let grant = a
@@ -228,10 +298,18 @@ async fn another_issuer_renews_a_right_after_its_granting_issuer_is_gone() -> Re
     );
     // B receives the grant's registry row; the member learns B as an issuer.
     b.sync().await?;
-    m.call(json!({"type":"renew"})).await?;
+    snap::value(async {
+        m.session.renew().await?;
+        m.session.info().await
+    })
+    .await?;
     a.close().await?;
 
-    m.call(json!({"type":"renew"})).await?;
+    snap::value(async {
+        m.session.renew().await?;
+        m.session.info().await
+    })
+    .await?;
     let held = m.session.held_claims().await?.ok_or("a held right")?;
     assert_eq!(Some(json!(held.issuer)), Some(b_node));
     assert!(held.expires >= grant.expires);
@@ -293,7 +371,7 @@ async fn a_revocation_pushed_while_the_service_was_down_reaches_it_at_a_later_sy
     // to a peer that then refuses the link.
     a.session.set_networking_enabled(false).await?;
     gate.store(false, Ordering::SeqCst);
-    a.call(json!({"type":"revoke","identity":admin})).await?;
+    snap::value(a.session.revoke_identity(&(snap::text(&(admin))))).await?;
     assert!(unpushed(&a).await?);
     // The dismissed issuer keeps signing; its holder installs the link.
     let fresh = b

@@ -1,6 +1,4 @@
-use crate::{
-    Coordination, Database, Failure, IdentityProvider, Network, Open, Opened, Schema, SecretStore,
-};
+use crate::{Database, Failure, IdentityProvider, Network, Open, Opened, Schema, SecretStore};
 use std::{path::PathBuf, sync::Arc};
 
 /// Reusable installation settings. Networking is opt-in; lifecycle operations are explicit.
@@ -11,7 +9,7 @@ pub struct Configuration {
     secrets: Option<Arc<dyn SecretStore>>,
     identity: Option<Arc<dyn IdentityProvider>>,
     network: Option<Network>,
-    coordination: Option<Coordination>,
+    coordination: Option<Arc<dyn rocky_credentials::Coordinator>>,
     name: String,
 }
 impl Configuration {
@@ -55,7 +53,7 @@ impl Configuration {
         self
     }
     #[must_use]
-    pub fn coordination(mut self, coordination: Coordination) -> Self {
+    pub fn coordination(mut self, coordination: Arc<dyn rocky_credentials::Coordinator>) -> Self {
         self.coordination = Some(coordination);
         self
     }

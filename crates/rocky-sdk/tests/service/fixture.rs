@@ -1,12 +1,17 @@
 use super::*;
+use crate::snap;
 use rocky_sdk::{Opened, Session};
 use std::path::Path;
 
 pub(super) struct Peer {
     pub opened: Opened,
+    control: Option<rocky_coordinator::control::ControlClient>,
+    application: String,
+    publisher: rocky_sdk::credentials::PublicKey,
+    coordinator_transport: Option<Arc<dyn rocky_core::net::Transport>>,
     identity: Arc<dyn rocky_sdk::IdentityProvider>,
     pub session: Session,
-    pub scope: Value,
+    pub scope: rocky_sdk::Scope,
 }
 impl Peer {
     pub async fn start(
@@ -18,7 +23,33 @@ impl Peer {
     ) -> Result<Self, Failure> {
         let directory = directory.to_owned();
         let schema = schema.to_owned();
-        let bundle = bundle.cloned();
+        let coordinator_transport = if bundle.is_some() {
+            Some(
+                starter()
+                    .start(*PrivateKey::new().as_bytes())
+                    .await?
+                    .transport(),
+            )
+        } else {
+            None
+        };
+        let coordination = bundle
+            .zip(coordinator_transport.as_ref())
+            .map(|(bundle, transport)| {
+                rocky_coordinator::Client::connect(bundle, transport.clone())
+            })
+            .transpose()?;
+        let control = bundle
+            .zip(coordinator_transport.as_ref())
+            .map(|(bundle, transport)| {
+                rocky_coordinator::control::ControlClient::new(
+                    bundle.clone(),
+                    transport.clone(),
+                    directory.clone(),
+                )
+            });
+        let application = rocky_sdk::Schema::parse(&schema)?.application;
+        let settings_path = directory.join("identity.json");
         let identity: Arc<dyn rocky_sdk::IdentityProvider> =
             Arc::new(rocky_sdk::IdentityKey::from_secret(rocky_core::commitment(
                 "fixture.service.identity",
@@ -32,7 +63,7 @@ impl Peer {
                 identity: Some(startup_identity),
                 secrets: None,
                 network: Some(Network::Owned(Arc::new(starter()))),
-                coordination: bundle.map(|bundle| Coordination::Service(Box::new(bundle))),
+                coordination,
             };
             match invitation {
                 Some(invitation) => Database::join(open, &invitation),
@@ -41,45 +72,63 @@ impl Peer {
             }
         })
         .await??;
+        let settings: Value = serde_json::from_slice(&std::fs::read(settings_path)?)?;
+        let publisher = serde_json::from_value(settings["publisher"].clone())?;
         Ok(Self {
+            control,
+            application,
+            publisher,
+            coordinator_transport,
             identity,
             session: opened.database.session(),
-            scope: serde_json::from_str(&opened.database.scope())?,
+            scope: opened.database.scope(),
             opened,
         })
     }
-    /// The root a created peer holds, as root-only calls name it.
-    pub fn root(&self) -> Value {
-        self.opened
-            .root
+    pub fn control(&self) -> &rocky_coordinator::control::ControlClient {
+        self.control.as_ref().expect("fixture coordinator")
+    }
+    pub async fn publish_coordination(
+        &self,
+        request: rocky_coordinator::control::ControlRequest,
+        root: Option<Arc<dyn rocky_sdk::IdentityProvider>>,
+    ) -> Result<rocky_coordinator::control::ControlReceipt, Failure> {
+        self.control
             .as_ref()
-            .map_or(Value::Null, |root| json!({"phrase": root.phrase()}))
+            .ok_or("fixture coordinator not configured")?
+            .publish(
+                rocky_coordinator::control::Domain {
+                    scope: self.scope,
+                    application: self.application.clone(),
+                    publisher: self.publisher,
+                },
+                request,
+                root,
+            )
+            .await
     }
-    pub async fn call(&self, request: Value) -> Result<Value, Failure> {
-        let reply: Value = serde_json::from_str(
-            &self
-                .session
-                .call_with_identity(
-                    json!({"version":1,"scope":self.scope,"request":request}).to_string(),
-                    self.identity.clone(),
-                )
-                .await?,
-        )?;
-        if reply["status"] == "ok" {
-            Ok(reply["value"].clone())
-        } else {
-            Err(format!("{} failed: {}", request["type"], reply["error"]).into())
-        }
+    /// The root a created peer holds, as root-only calls name it.
+    pub fn root(&self) -> Arc<dyn rocky_sdk::IdentityProvider> {
+        Arc::new(rocky_sdk::RootKey::from_secret(
+            self.opened.root.as_ref().expect("fixture root").secret(),
+        ))
     }
-    pub async fn tips(&self, action: &str, body: Value) -> Result<Value, Failure> {
-        let mut request = json!({"type":"tips", "action":action});
-        for (name, value) in body.as_object().into_iter().flatten() {
-            request[name] = value.clone();
-        }
-        self.call(request).await
+    pub async fn follow(&self, name: &str) -> Result<rocky_sdk::TipStatus, Failure> {
+        self.session
+            .follow_with_identity(name, self.identity.clone())
+            .await
+    }
+    pub async fn move_bookmark(
+        &self,
+        name: &str,
+        tip: &str,
+    ) -> Result<rocky_sdk::TipStatus, Failure> {
+        self.session
+            .move_bookmark_with_identity(name, tip, self.identity.clone())
+            .await
     }
     pub async fn sync(&self) -> Result<Value, Failure> {
-        self.call(json!({"type":"sync"})).await
+        snap::value(self.session.sync_once_with_identity(self.identity.clone())).await
     }
     pub async fn invite(&self, kind: &str) -> Result<String, Failure> {
         let profile = if kind == "issuer" {
@@ -87,62 +136,91 @@ impl Peer {
         } else {
             json!({"kind":kind,"scopes":["counts"]})
         };
-        Ok(self
-            .call(json!({"type": "invitation", "profile":profile}))
-            .await?["uri"]
+        Ok(snap::value(
+            self.session.invite(
+                Some(
+                    serde_json::from_value::<rocky_sdk::GrantProfile>(json!(profile))
+                        .expect("typed fixture"),
+                ),
+                None,
+            ),
+        )
+        .await?["uri"]
             .as_str()
             .ok_or("invitation")?
             .to_owned())
     }
     pub async fn write(&self, key: &str, handle: u32) -> Result<Value, Failure> {
-        self.call(json!({"type":"sql","sql":"BEGIN"})).await?;
+        snap::value(self.session.execute("BEGIN", Vec::new())).await?;
         let result = self.insert_and_commit(key, handle).await;
         if result.is_err() {
-            let _ = self.call(json!({"type":"sql","sql":"ROLLBACK"})).await;
+            let _ = snap::value(self.session.execute("ROLLBACK", Vec::new())).await;
         }
         result
     }
     async fn insert_and_commit(&self, key: &str, handle: u32) -> Result<Value, Failure> {
-        let id = self
-            .call(json!({"type":"next_id","table":"counts"}))
-            .await?["id"]
-            .clone();
-        self.call(
-            json!({"type":"sql","sql":"INSERT INTO counts(key,value,id) VALUES(?,5,?)",
-            "values":[{"type":"text","value":key},{"type":"integer","value":id}]}),
-        )
+        let id = snap::value(self.session.next_id("counts")).await?["id"].clone();
+        snap::value(self.session.execute(
+            "INSERT INTO counts(key,value,id) VALUES(?,5,?)",
+            vec![
+                rocky_sdk::SqlValue::Text(snap::text(&(key))),
+                snap::row_id(&(id)),
+            ],
+        ))
         .await?;
-        self.call(json!({"type":"sql","sql":"COMMIT",
-            "handle":rocky_core::commitment("rocky.sdk.service.test", &handle.to_be_bytes())}))
-            .await
+        snap::value(self.session.commit(rocky_core::commitment(
+            "fixture.service.handle",
+            &handle.to_le_bytes(),
+        )))
+        .await
     }
     pub async fn keys(&self) -> Result<Value, Failure> {
-        Ok(self.call(json!({"type":"read","query":{"sql":"SELECT key FROM counts ORDER BY key","values":[],"max_rows":1024}})).await?["rows"].clone())
+        Ok(snap::value(self.session.read(rocky_sdk::ReadQuery {
+            sql: "SELECT key FROM counts ORDER BY key".to_owned(),
+            values: vec![],
+            max_rows: 1024,
+            max_bytes: None,
+            cursor: None,
+        }))
+        .await?["rows"]
+            .clone())
     }
     pub async fn close(self) -> Result<(), Failure> {
         self.session.close().await;
         if let Some(network) = self.opened.network {
             network.close().await;
         }
-        self.opened.database.close().await
+        self.opened.database.close().await?;
+        if let Some(transport) = self.coordinator_transport {
+            transport.close().await;
+        }
+        Ok(())
     }
 }
 
 pub(super) async fn introduce(a: &Peer, t: &Peer) -> Result<(), Failure> {
     for (left, right) in [(a, t), (t, a)] {
-        let contact = right.call(json!({"type":"contact"})).await?["uri"].clone();
-        left.call(json!({"type":"peer_add","contact":contact}))
-            .await?;
+        let contact = snap::value(right.session.contact_info()).await?["uri"].clone();
+        snap::value(async {
+            let value = left.session.add_peer(&(snap::text(&(contact)))).await?;
+            Ok(json!({"node":value}))
+        })
+        .await?;
     }
     Ok(())
 }
 pub(super) async fn household(root: &Path, bundle: &TrustBundle) -> Result<(Peer, Peer), Failure> {
     let a = Peer::start(&root.join("a"), SCHEMA, Some(bundle), None, true).await?;
-    a.tips("create", json!({"name":"main"})).await?;
-    a.tips("follow", json!({"name":"main"})).await?;
-    a.tips("genesis_minimum", json!({"minimum_in_sync":1}))
-        .await?;
-    a.tips("keep", json!({"kept":{"every":true}})).await?;
+    snap::value(a.session.create_bookmark("main", None)).await?;
+    snap::value(a.session.follow("main")).await?;
+    snap::value(a.session.set_genesis_minimum(1)).await?;
+    snap::value(
+        a.session.set_kept_seals(
+            serde_json::from_value::<rocky_sdk::KeptSeals>(json!({"every":true}))
+                .expect("typed fixture"),
+        ),
+    )
+    .await?;
     let t = Peer::start(
         &root.join("t"),
         SCHEMA,
@@ -151,31 +229,53 @@ pub(super) async fn household(root: &Path, bundle: &TrustBundle) -> Result<(Peer
         false,
     )
     .await?;
-    let owner = a.call(json!({"type":"session"})).await?;
-    let trusted = t.call(json!({"type":"session"})).await?;
+    let owner = snap::value(a.session.info()).await?;
+    let trusted = snap::value(t.session.info()).await?;
     assert_ne!(owner["principal"], trusted["principal"]);
     for identity in [&owner, &trusted] {
         assert_ne!(identity["principal"], identity["node"]);
     }
-    let grant = a
-        .tips(
-            "trust",
-            json!({"identity":trusted["principal"], "root": a.root()}),
-        )
-        .await?;
-    t.tips("install_trust", json!({"grant":grant["grant"]}))
-        .await?;
+    let grant = snap::value(
+        a.session
+            .trust(&(snap::text(&(trusted["principal"]))), (a.root()).clone()),
+    )
+    .await?;
+    snap::value(t.session.install_trust(&(snap::text(&(grant["grant"]))))).await?;
     let tenant = PrivateKey::new();
-    a.call(
-        json!({"type":"coordination_register","tenant":tenant.to_hex(),"registration":vec![1u8;32],
-        "trusted":[owner["principal"],trusted["principal"]],"lifetime":3600,"root":a.root()}),
+    snap::value(
+        a.publish_coordination(
+            rocky_coordinator::control::ControlRequest {
+                tenant: rocky_sdk::credentials::PrivateKey::from_bytes(&snap::digest(
+                    &(tenant.to_hex()),
+                )),
+                trusted: serde_json::from_value::<Vec<rocky_sdk::credentials::PublicKey>>(json!([
+                    owner["principal"],
+                    trusted["principal"]
+                ]))
+                .expect("typed fixture"),
+                lifetime: 3600,
+                id: serde_json::from_value::<[u8; 32]>(json!(vec![1u8; 32]))
+                    .expect("typed fixture"),
+                revision: rocky_coordinator::control::ControlRevision::Register {
+                    grant: serde_json::from_value::<
+                        Option<Box<rocky_sdk::credentials::SignedCoordinationGrant>>,
+                    >(json!(null))
+                    .expect("typed fixture"),
+                    admission: serde_json::from_value::<
+                        Option<Box<rocky_sdk::credentials::SignedTenantAdmission>>,
+                    >(json!(null))
+                    .expect("typed fixture"),
+                },
+            },
+            Some((a.root()).clone()),
+        ),
     )
     .await?;
     introduce(&a, &t).await?;
     t.sync().await?;
     a.sync().await?;
     assert_eq!(
-        t.call(json!({"type":"coordinated"})).await?["trusted"],
+        snap::value(t.session.coordinated_status()).await?["trusted"],
         true
     );
     a.session.set_automatic_sync(true).await?;
@@ -184,7 +284,11 @@ pub(super) async fn household(root: &Path, bundle: &TrustBundle) -> Result<(Peer
     loop {
         let mut connected = true;
         for peer in [&a, &t] {
-            let peers = peer.call(json!({"type":"peers"})).await?;
+            let peers = snap::value(async {
+                let network = peer.session.network().await?;
+                Ok(json!({"peers":network.peers,"discovery":network.discovery}))
+            })
+            .await?;
             connected &= peers["peers"]
                 .as_array()
                 .is_some_and(|peers| peers.iter().any(|peer| peer["link"]["state"] == "open"));
@@ -211,8 +315,8 @@ pub(super) async fn final_on_both(a: &Peer, t: &Peer, id: &Value) -> Result<(), 
     loop {
         t.sync().await?;
         a.sync().await?;
-        let a_graph = a.tips("inspect", json!({})).await?;
-        let t_graph = t.tips("inspect", json!({})).await?;
+        let a_graph = snap::value(a.session.inspect_tips()).await?;
+        let t_graph = snap::value(t.session.inspect_tips()).await?;
         if seal(&a_graph, id)["final"] == true && seal(&t_graph, id)["final"] == true {
             return Ok(());
         }

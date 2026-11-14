@@ -60,7 +60,9 @@ impl Node {
         .await;
         if let Err(error) = published {
             self.activity
-                .record_changed("member_seal_failed", json!({"error": error.to_string()}));
+                .record_changed(crate::ActivityKind::MemberSealFailed {
+                    error: (error.to_string()).to_owned(),
+                });
             if sealing {
                 return Some(format!("failed: {error}"));
             }
@@ -91,17 +93,19 @@ impl Node {
             }
             let awaiting = self.replica.awaiting_outcomes().await?;
             if !awaiting.is_empty() {
-                self.activity.record_changed(
-                    "replayed_awaiting_outcomes",
-                    json!({"transactions": awaiting.len()}),
-                );
+                self.activity
+                    .record_changed(crate::ActivityKind::ReplayedAwaitingOutcomes {
+                        transactions: awaiting.len(),
+                    });
             }
             Ok::<_, Failure>(None)
         }
         .await;
         sealed.unwrap_or_else(|error| {
             self.activity
-                .record_changed("routine_seal_failed", json!({"error": error.to_string()}));
+                .record_changed(crate::ActivityKind::RoutineSealFailed {
+                    error: (error.to_string()).to_owned(),
+                });
             Some(format!("failed: {error}"))
         })
     }
@@ -169,10 +173,10 @@ impl Node {
             let blockers = match self.recover_locally().await {
                 Ok(blockers) => blockers,
                 Err(error) => {
-                    self.activity.record_changed(
-                        "local_recovery_failed",
-                        json!({"error": error.to_string()}),
-                    );
+                    self.activity
+                        .record_changed(crate::ActivityKind::LocalRecoveryFailed {
+                            error: (error.to_string()).to_owned(),
+                        });
                     self.blockers().await.unwrap_or_default()
                 }
             };

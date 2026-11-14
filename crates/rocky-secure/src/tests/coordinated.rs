@@ -137,7 +137,7 @@ async fn a_seal_ends_its_log_once_and_a_retry_answers_the_same_position() {
 /// batches never hold the received quota.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn refused_received_batches_leave_the_journal() {
-    use rocky_credentials::{AuthorMark, MAX_AUTHOR, SignedSeal};
+    use rocky_credentials::{AuthorMark, SignedSeal};
     let fixture = Fixture::new(1).await;
     seals::follow_main(&fixture).await;
     let alice = &fixture.alice.1;
@@ -163,7 +163,7 @@ async fn refused_received_batches_leave_the_journal() {
         for n in 0..32u8 {
             let mut statement = statement.clone();
             statement.frontier.push(AuthorMark {
-                author: MAX_AUTHOR,
+                author: rocky_core::WriterId::from_bytes([0xff; 32]),
                 sequence: u64::from(n) + 1,
             });
             let batch = vec![crate::TipStatement::Seal(

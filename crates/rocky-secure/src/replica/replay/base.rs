@@ -30,7 +30,7 @@ pub(in crate::replica) const SCHEMA: &[&str] = &[
     // While rows are taken at a seal: per lowercase table and encoded key,
     // the row's image before the earliest open member that changed it, and
     // that member's order; no image when the member created it.
-    "CREATE TABLE IF NOT EXISTS secure_seal_undone(tbl TEXT NOT NULL,key BLOB NOT NULL,era INTEGER NOT NULL,clock INTEGER NOT NULL,author INTEGER NOT NULL,sequence INTEGER NOT NULL,image BLOB,PRIMARY KEY(tbl,key)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_seal_undone(tbl TEXT NOT NULL,key BLOB NOT NULL,era INTEGER NOT NULL,clock INTEGER NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,image BLOB,PRIMARY KEY(tbl,key)) WITHOUT ROWID",
 ];
 
 const ROW_LABEL: &str = "rocky.replayed-row.v1";
@@ -1018,7 +1018,7 @@ impl<A: RowApplication> Inner<A> {
                 .row_identity(&change)
                 .map_err(|error| denied(&error))?
                 && !marks.iter().any(|mark| {
-                    mark.author == identity.author()
+                    mark.author == identity.writer()
                         && mark.sequence >= identity.sequence()
                         && mark.own >= identity.sequence()
                 })

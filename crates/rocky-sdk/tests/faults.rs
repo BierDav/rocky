@@ -3,12 +3,12 @@
 //! survives, nothing is applied in part and resources stay bounded.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
+use common::identity::snapshot as snap;
 use common::{Device, Failure};
 use rocky_sdk::{
     Network,
     transport::{Connector, Protocol, memory::Hub},
 };
-use serde_json::json;
 use std::{
     sync::{Arc, atomic::Ordering},
     time::Duration,
@@ -50,8 +50,7 @@ async fn a_cut_stream_loses_nothing_and_applies_nothing_in_part() -> Result<(), 
     let mut failed = 0;
     // Cuts during the handshake, the push and the pull.
     for bytes in [0, 300, 3_000, 9_000, 20_000, 45_000] {
-        b.ok(json!({"type": "networking_control", "enabled": true}))
-            .await;
+        snap::ok(b.session.set_networking_enabled(true)).await;
         hub.cut_after(Some(bytes));
         failed += usize::from(common::exchange_failed(&b.sync().await));
         hub.cut_after(None);
@@ -72,8 +71,7 @@ async fn a_cut_stream_loses_nothing_and_applies_nothing_in_part() -> Result<(), 
     assert_eq!(last["outcome"] == "completed", b.items().await == union());
 
     // The interrupted sync repeats safely, and a duplicate changes nothing.
-    b.ok(json!({"type": "networking_control", "enabled": true}))
-        .await;
+    snap::ok(b.session.set_networking_enabled(true)).await;
     for _ in 0..2 {
         b.sync().await.map_err(|error| error.to_string())?;
         assert_eq!(b.items().await, union());
@@ -104,50 +102,67 @@ async fn a_slow_reader_holds_the_writer_back_without_loss() -> Result<(), Failur
     Ok(())
 }
 
-async fn inbound(device: &Device, field: &str) -> u64 {
-    let value = device.ok(json!({"type": "network"})).await["inbound"][field].clone();
-    value
-        .as_u64()
-        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
-        .unwrap_or(u64::MAX)
-}
-async fn until(device: &Device, field: &str, expected: u64) -> Result<(), Failure> {
-    for _ in 0..2_000 {
-        if inbound(device, field).await == expected {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
-    Err(format!("inbound {field} never reached {expected}").into())
-}
-
 #[tokio::test]
 async fn inbound_streams_over_budget_are_dropped_and_served_again_later() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let (a, b) = diverged(root.path(), &hub).await?;
-    let limit = inbound(&a, "limit").await;
+    let mut changes = hub.admission_changes();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            changes.borrow_and_update();
+            if hub.rpc_admission("a").ok_or("RPC listener")?.active == 0 {
+                return Ok::<_, Failure>(());
+            }
+            changes.changed().await?;
+        }
+    })
+    .await??;
+    let limit = hub.rpc_admission("a").ok_or("RPC listener")?.limit;
     assert_eq!(limit, 32);
     // An unauthenticated dialer holds every slot without ever speaking.
     let stranger = hub.connector("x").start(false, [0; 32]).await?;
     let mut held = Vec::new();
     for open in 1..=limit {
-        held.push(stranger.connect("a", Protocol::Renew).await?);
-        until(&a, "active", open).await?;
+        held.push(stranger.connect("a", Protocol::Rpc, None).await?);
+        assert_eq!(hub.rpc_admission("a").ok_or("RPC listener")?.active, open);
     }
     for dropped in 1..=3 {
-        held.push(stranger.connect("a", Protocol::Renew).await?);
-        until(&a, "refused", dropped).await?;
+        assert!(stranger.connect("a", Protocol::Rpc, None).await.is_err());
+        assert_eq!(
+            hub.rpc_admission("a").ok_or("RPC listener")?.refused,
+            dropped
+        );
     }
-    assert_eq!(inbound(&a, "active").await, limit);
+    assert_eq!(hub.rpc_admission("a").ok_or("RPC listener")?.active, limit);
+    assert_eq!(
+        a.session
+            .network()
+            .await?
+            .inbound
+            .ok_or("database admission")?
+            .active,
+        0
+    );
     // The database is as usable as before, and nothing was stored.
     assert_eq!(a.items().await, own('a'));
     // Links have their own budget: an enrolled device still syncs.
     b.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(a.items().await, union());
 
+    let mut changed = hub.admission_changes();
     drop(held);
-    until(&a, "active", 0).await?;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            changed.borrow_and_update();
+            if hub.rpc_admission("a").ok_or("RPC listener")?.active == 0 {
+                return Ok::<_, Failure>(());
+            }
+            changed.changed().await?;
+        }
+    })
+    .await??;
+    drop(stranger.connect("a", Protocol::Rpc, None).await?);
     stranger.close().await;
     a.close().await;
     b.close().await;

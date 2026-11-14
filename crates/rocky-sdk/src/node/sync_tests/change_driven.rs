@@ -1,3 +1,4 @@
+use crate::test_snapshot as snap;
 mod cancellation;
 use super::*;
 use std::future::Future;
@@ -45,11 +46,7 @@ pub(super) async fn targets(a: &Node, peers: &[Arc<Node>]) -> Result<(), Failure
     Ok(())
 }
 pub(super) async fn start(node: &Node, enabled: bool) -> Result<Value, Failure> {
-    node.dispatch(
-        &*node.client(1)?,
-        &json!({"type":"sync_start", "enabled":enabled}),
-    )
-    .await
+    snap::value(node.set_automatic_sync(enabled)).await
 }
 pub(super) async fn transport(node: &Node) -> Result<Arc<dyn Transport>, Failure> {
     Ok(node
@@ -65,7 +62,17 @@ async fn settled(node: &Node) {
     until(|| !*node.worker_running.borrow()).await;
 }
 async fn rows(node: &Node) -> Result<Vec<String>, Failure> {
-    let page = node.dispatch(&*node.client(1)?, &json!({"type":"read", "query":{"sql":"SELECT key,title FROM items ORDER BY key", "max_rows":64}})).await?;
+    let page = snap::value(node.read(
+        &*node.client(1)?,
+        rocky_sdk::ReadQuery {
+            sql: "SELECT key,title FROM items ORDER BY key".to_owned(),
+            values: Vec::new(),
+            max_rows: 64,
+            max_bytes: None,
+            cursor: None,
+        },
+    ))
+    .await?;
     page["rows"]
         .as_array()
         .ok_or("rows")?
@@ -88,9 +95,11 @@ async fn enrollment_reaches_the_caller_before_its_return_route_wakes_sync() -> R
             let hub = Arc::new(Hub::default());
             let issuer = enrolled(&root.path().join("issuer"), &hub, "issuer", None).await?;
             issuer
-                .dispatch(
-                    &*issuer.client(1)?,
-                    &json!({"type": "invitation", "profile":{"kind":"reader", "scopes":["items"]}}),
+                .invitation(
+                    Some(Profile::Reader {
+                        scopes: ["items".into()].into(),
+                    }),
+                    None,
                 )
                 .await?;
             let token = issuer.vault.get("invitation")?;
@@ -107,15 +116,25 @@ async fn enrollment_reaches_the_caller_before_its_return_route_wakes_sync() -> R
                     issuer.settings.lock().await.database_context()?,
                 ),
             )
-            .with_routes(&token, vec![("memory".into(), "member".into())])
-            .to_bytes()?;
+            .with_routes(&token, vec![("memory".into(), "member".into())]);
+            let request = crate::peer::encode(&crate::peer::RequestFrame {
+                version: crate::peer::VERSION,
+                request: PeerRequest::Pair(request),
+            })?;
             let before = *issuer.sync_events.borrow();
             let (mut caller, server) = tokio::io::duplex(64 * 1024);
             let serving = issuer.clone();
-            let served = tokio::task::spawn_local(async move {
-                serving
-                    .serve(Protocol::Pair, crate::transport::Stream::new(server))
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+            let framed = tokio::task::spawn_local(async move {
+                rocky_core::net::framing::serve(crate::transport::Stream::new(server), &sender)
                     .await
+            });
+            let served = tokio::task::spawn_local(async move {
+                let Some(rocky_core::net::Incoming::Request(request)) = receiver.recv().await
+                else {
+                    return Err("missing request".into());
+                };
+                serving.serve(request).await
             });
             caller.write_u32(u32::try_from(request.len())?).await?;
             caller.write_all(&request).await?;
@@ -123,10 +142,11 @@ async fn enrollment_reaches_the_caller_before_its_return_route_wakes_sync() -> R
             assert_eq!(*issuer.sync_events.borrow(), before);
             let mut reply = vec![0; length];
             caller.read_exact(&mut reply).await?;
-            let reply: Value = serde_json::from_slice(&reply)?;
-            assert!(reply["reply"].is_string(), "{reply}");
+            let reply: crate::peer::ReplyFrame = crate::peer::decode(&reply)?;
+            assert!(matches!(reply.result, Ok(PeerReply::Pair(_))));
             assert_eq!(*issuer.sync_events.borrow(), before);
             caller.shutdown().await?;
+            framed.await??;
             served.await??;
             assert_eq!(*issuer.sync_events.borrow(), before.wrapping_add(1));
             Ok(())
@@ -239,6 +259,7 @@ async fn peer_signals(bootstrap: bool) -> Result<(), Failure> {
                     PrivateKey::from_bytes(&peer.vault.get("node").expect("node key")).public_key()
                 })
                 .collect();
+
             until(|| {
                 a.reached().expect("reached").contains_key(&keys[0])
                     && a.reached().expect("reached").contains_key(&keys[1])
@@ -248,22 +269,28 @@ async fn peer_signals(bootstrap: bool) -> Result<(), Failure> {
             assert!(*a.worker_running.borrow());
             assert_eq!(rows(&peers[0]).await?, ["1"]);
             assert_eq!(rows(&peers[1]).await?, ["1"]);
+
             hub.wait_dials("d", 1).await;
             tokio::time::advance(Duration::from_secs(15)).await;
+
             until(|| {
                 a.retries
                     .lock()
                     .expect("retries")
                     .get(&keys[2])
-                    .is_some_and(|state| state.retry.deadline().is_some())
+                    .is_some_and(|state| {
+                        state.retry.deadline().is_some() || state.link_retry.deadline().is_some()
+                    })
             })
             .await;
+
             settled(&a).await;
             let stalled = hub.dials_to("d");
             add(&a, 2).await?;
             while rows(&peers[0]).await? != ["1", "2"] || rows(&peers[1]).await? != ["1", "2"] {
                 tokio::task::yield_now().await;
             }
+
             settled(&a).await;
             assert_eq!(
                 hub.dials_to("d"),
@@ -287,40 +314,47 @@ async fn peer_signals(bootstrap: bool) -> Result<(), Failure> {
             tokio::task::yield_now().await;
             assert_eq!(hub.dials_to("d"), stalled);
             tokio::time::advance(Duration::from_millis(1)).await;
+
             hub.wait_dials("d", stalled + 1).await;
             tokio::time::advance(Duration::from_secs(15)).await;
+
             settled(&a).await;
             hub.network_changed();
+
             hub.wait_dials("d", stalled + 2).await;
             tokio::time::advance(Duration::from_secs(15)).await;
+
             settled(&a).await;
             let changed_contact = contact(&peers[2]).await?;
-            a.dispatch(
-                &*a.client(1)?,
-                &json!({"type":"peer_add", "contact":changed_contact}),
-            )
-            .await?;
+            snap::value(a.add_peer(&(snap::text(&(changed_contact))))).await?;
+
             hub.wait_dials("d", stalled + 3).await;
             tokio::time::advance(Duration::from_secs(15)).await;
+
             settled(&a).await;
             // An authenticated inbound session resets just its peer, even if empty.
             hub.stall_peer("d", false);
             let d = &peers[2];
             let dials = hub.dials_to("d");
+
             d.sync(&*transport(d).await?).await?;
+
             hub.wait_dials("d", dials + 1).await;
+
             settled(&a).await;
             assert_eq!(rows(d).await?, ["1", "2"]);
             // After inbound success resets its deadline, an explicit pass reaches every ready peer.
             hub.stall_peer("d", true);
             hub.network_changed();
+
             hub.wait_dials("d", dials + 2).await;
             tokio::time::advance(Duration::from_secs(15)).await;
+
             settled(&a).await;
             start(&a, false).await?;
             hub.stall_peer("d", false);
             let counts = ["b", "c", "d"].map(|name| hub.dials_to(name));
-            a.dispatch(&*a.client(1)?, &json!({"type":"sync"})).await?;
+            snap::value(a.sync_once()).await?;
             assert!(
                 ["b", "c", "d"]
                     .iter()
@@ -560,11 +594,7 @@ async fn at_most_four_peers_are_in_flight_and_online_resets_backoff() -> Result<
                     .all(|state| !state.retry.ready())
             );
             let before = hub.counts()[1];
-            a.dispatch(
-                &*a.client(1)?,
-                &json!({"type":"networking_control", "enabled":true}),
-            )
-            .await?;
+            snap::value(a.set_networking_enabled(true)).await?;
             until(|| hub.counts()[1] >= before + 5).await;
             start(&a, false).await?;
             a.detach(None).await;
@@ -605,23 +635,15 @@ async fn going_online_does_not_republish_offline() -> Result<(), Failure> {
             let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
             start(&a, true).await?;
             settled(&a).await;
-            let client = a.client(1)?;
-            a.dispatch(
-                &client,
-                &json!({"type":"networking_control", "enabled":false}),
-            )
-            .await?;
-            until(|| a.sync_status.borrow()["state"] == "networking_disabled").await;
-            a.dispatch(
-                &client,
-                &json!({"type":"networking_control", "enabled":true}),
-            )
-            .await?;
+            let _client = a.client(1)?;
+            snap::value(a.set_networking_enabled(false)).await?;
+            until(|| a.sync_status.borrow().state == SyncState::NetworkingDisabled).await;
+            snap::value(a.set_networking_enabled(true)).await?;
             for _ in 0..64 {
                 tokio::task::yield_now().await;
             }
             settled(&a).await;
-            assert_ne!(a.sync_status.borrow()["state"], "networking_disabled");
+            assert_ne!(a.sync_status.borrow().state, SyncState::NetworkingDisabled);
             start(&a, false).await?;
             a.detach(None).await;
             Ok(())
@@ -660,7 +682,7 @@ async fn a_retry_wakeup_still_initializes_an_unattempted_peer() -> Result<(), Fa
             );
             // A queued frame wakeup can precede enabling the worker.
             let (status, retry) = a.sync_pass(&*transport(&a).await?, true, true).await?;
-            assert_eq!(status["state"], "connected");
+            assert_eq!(status.state, SyncState::Connected);
             assert!(!retry);
             assert_eq!(rows(&b).await?, ["1"]);
             a.detach(None).await;

@@ -340,7 +340,7 @@ mod tests {
                 },
                 generation: rocky_core::KeyEpoch::new(1, &[6; 32]),
                 chain: [7; 32],
-                author: Some(1),
+                authored: true,
                 author_sequence: 1,
                 row_format: crate::wire::ROW_FORMAT,
                 births: vec![],

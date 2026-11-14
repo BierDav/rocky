@@ -1,18 +1,18 @@
 //! The simulated nodes: databases hosted on the simulation's thread, each
 //! with its directory, its secrets and its name on the hub.
+use crate::SqlValue;
 use crate::{
     Database, Failure, Network, Open, SecretStore, Session, database::Install,
     enrollment::DEFAULT_TTL, node::Node, transport::memory::Hub,
 };
-use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError, Weak},
 };
 
-fn text(value: &str) -> Value {
-    json!({"type": "text", "value": value})
+fn text(value: &str) -> SqlValue {
+    SqlValue::Text(value.into())
 }
 
 pub(super) const SCHEMA: &str = r#"{"application":"simulation","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
@@ -49,7 +49,6 @@ impl SecretStore for Keys {
 pub(super) struct Running {
     pub(super) database: Arc<Database>,
     session: Session,
-    scope: Value,
     pub(super) node: Weak<Node>,
 }
 /// One simulated device, open or not.
@@ -117,14 +116,11 @@ impl Member {
         let database = hosted.opened.database;
         self.running = Some(Running {
             session: database.session(),
-            scope: serde_json::from_str(&database.scope())?,
             database,
             node: hosted.node,
         });
         if self.node_key.is_none() {
-            self.node_key = self.call(json!({"type": "session"})).await?["node"]
-                .as_str()
-                .map(String::from);
+            self.node_key = Some(self.session()?.info().await?.node.to_hex());
         }
         Ok(())
     }
@@ -168,25 +164,31 @@ impl Member {
             running.database.crash().await;
         }
     }
-    /// The value of a call, or its error object as an error.
-    pub(super) async fn call(&self, request: Value) -> Result<Value, Failure> {
-        let running = self.running.as_ref().ok_or("the node is not running")?;
-        // Interactive branch changes may certify an additional writer node.
-        let identity = self
-            .root
+    pub(super) fn session(&self) -> Result<&Session, Failure> {
+        Ok(&self
+            .running
             .as_ref()
-            .filter(|_| request["type"] == "tips")
-            .map(|root| Arc::new(root.identity()) as Arc<dyn crate::IdentityProvider>);
-        let call = json!({"version": 1, "scope": running.scope, "request": request}).to_string();
-        let reply = match identity {
-            Some(identity) => running.session.call_with_identity(call, identity).await?,
-            None => running.session.call(call).await?,
-        };
-        let reply: Value = serde_json::from_str(&reply)?;
-        if reply["status"] == "ok" {
-            Ok(reply["value"].clone())
-        } else {
-            Err(reply["error"].to_string().into())
+            .ok_or("the node is not running")?
+            .session)
+    }
+    pub(super) async fn sync(&self) -> Result<crate::ReconciliationReport, Failure> {
+        match &self.root {
+            Some(root) => {
+                self.session()?
+                    .sync_once_with_identity(Arc::new(root.identity()))
+                    .await
+            }
+            None => self.session()?.sync_once().await,
+        }
+    }
+    pub(super) async fn follow(&self, name: &str) -> Result<crate::TipStatus, Failure> {
+        match &self.root {
+            Some(root) => {
+                self.session()?
+                    .follow_with_identity(name, Arc::new(root.identity()))
+                    .await
+            }
+            None => self.session()?.follow(name).await,
         }
     }
     /// One transaction of two rows, `key-a` and `key-b`, under a handle
@@ -217,36 +219,32 @@ impl Member {
         &self,
         table: &str,
         columns: &str,
-        rows: &[Vec<Value>],
+        rows: &[Vec<SqlValue>],
         handle: u64,
         kind: u8,
     ) -> Result<(), Failure> {
-        self.call(json!({"type": "sql", "sql": "BEGIN"})).await?;
+        self.session()?.execute("BEGIN", Vec::new()).await?;
         let result = async {
             for values in rows {
-                let id = self
-                    .call(json!({"type": "next_id", "table": table}))
-                    .await?["id"]
-                    .clone();
+                let id = self.session()?.next_id(table).await?;
                 let mut values = values.clone();
-                values.push(json!({"type": "integer", "value": id}));
+                values.push(id.sql());
                 let places = vec!["?"; values.len()].join(", ");
-                self.call(json!({
-                    "type": "sql",
-                    "sql": format!("INSERT INTO {table}({columns}, id) VALUES({places})"),
-                    "values": values,
-                }))
-                .await?;
+                self.session()?
+                    .execute(
+                        &format!("INSERT INTO {table}({columns}, id) VALUES({places})"),
+                        values,
+                    )
+                    .await?;
             }
             let mut bytes = [0u8; 32];
             bytes[..8].copy_from_slice(&handle.to_be_bytes());
             bytes[8] = kind;
-            self.call(json!({"type": "sql", "sql": "COMMIT", "handle": bytes.to_vec()}))
-                .await
+            self.session()?.commit(bytes).await
         }
         .await;
         if result.is_err() {
-            let _ = self.call(json!({"type": "sql", "sql": "ROLLBACK"})).await;
+            let _ = self.session()?.execute("ROLLBACK", Vec::new()).await;
         }
         result.map(drop)
     }
@@ -255,16 +253,13 @@ impl Member {
         let mut keys = Vec::new();
         let mut after = String::new();
         loop {
-            let page = self
-                .call(json!({"type": "read", "query": {
-                    "sql": "SELECT key FROM items WHERE key > ? ORDER BY key",
-                    "values": [{"type": "text", "value": after}],
-                    "max_rows": 512,
-                }}))
-                .await?;
-            let rows = page["rows"].as_array().ok_or("rows")?;
+            let mut query =
+                crate::ReadQuery::new("SELECT key FROM items WHERE key > ? ORDER BY key", 512);
+            query.values = vec![SqlValue::Text(after)];
+            let page = self.session()?.read(query).await?;
+            let rows = &page.rows;
             for row in rows {
-                keys.push(row[0]["value"].as_str().ok_or("key")?.to_owned());
+                keys.push(row[0].to_text().ok_or("key")?);
             }
             match keys.last() {
                 Some(last) if rows.len() == 512 => after = last.clone(),
@@ -273,9 +268,6 @@ impl Member {
         }
     }
     pub(super) async fn contact(&self) -> Result<String, Failure> {
-        Ok(self.call(json!({"type": "contact"})).await?["uri"]
-            .as_str()
-            .ok_or("contact")?
-            .to_owned())
+        self.session()?.contact().await
     }
 }

@@ -3,7 +3,7 @@
 Rocky provides local-first SQLite storage, encrypted peer replication,
 credentials, seal coordination and optional iroh networking.
 
-Current work follows the [schema grant families roadmap](docs/features_17/README.md).
+Current work follows the [personal database roadmap](docs/features_18.md).
 See [AGENTS.md](AGENTS.md) for contribution rules. Use Cargo manifests, module
 declarations and tests to navigate the implementation.
 
@@ -69,9 +69,22 @@ wasm32 (a browser, in a dedicated Worker) is a supported target of the same
 crates; `./scripts/check --wasm` runs clippy for it and the tests in headless
 Firefox.
 
-An application uses one `rocky-sdk` dependency for native nodes and the
-browser; native-only networking and files are selected per target, not by
-features. Building for `wasm32-unknown-unknown` compiles C (SQLite, ring), so
+`rocky-sdk` starts without networking on native targets and in the browser.
+Applications select a connector explicitly: add `rocky-iroh` and supply its
+`Options` through `Network::Owned`, or attach an application's endpoint with
+`Attachment::transport` and `Network::Borrowed`. `Attachment::connected` also
+supplies optional discovery and network-change events through `Network::Attached`.
+One attachment routes RPC and replication streams to independent database scopes.
+Endpoint diagnostics and lifecycle controls belong to the iroh attachment.
+Coordination is an application-owned slot: supply `Arc<dyn rocky_sdk::Coordinator>`
+with `Configuration::coordination` (or the engine/custody equivalents).
+For voters, construct `rocky_coordinator::Client::connect(&bundle, transport)`
+and pass the returned client. The SDK binds its database node credentials;
+it never starts a coordinator or closes the application's coordinator transport.
+Without one, counter claims and reads return `CoordinatorNotConfigured`.
+Local storage, enrollment and peer replication work independently.
+
+Building for `wasm32-unknown-unknown` compiles C (SQLite, ring), so
 it needs a clang that targets wasm32 and an `llvm-ar` that indexes wasm
 objects, which Apple's `ar` does not. In the application's
 `.cargo/config.toml` (`rustup component add llvm-tools`; the path names your

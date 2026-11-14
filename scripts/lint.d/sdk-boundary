@@ -1,0 +1,38 @@
+# shellcheck shell=sh disable=SC2034
+# Cargo must already be fetched (CI bootstraps it); this check never uses the network.
+tools="cargo python3"
+check() {
+    python3 - <<'PYTHON'
+import json
+import subprocess
+
+metadata = json.loads(subprocess.check_output(
+    ["cargo", "metadata", "--offline", "--locked", "--no-deps", "--format-version", "1"], text=True))
+sdk = next(package for package in metadata["packages"] if package["name"] == "rocky-sdk")
+if any(dependency["name"] in {"rocky-iroh", "rocky-coordinator"} and dependency["kind"] != "dev"
+       for dependency in sdk["dependencies"]):
+    raise SystemExit("sdk-boundary: coordinator clients and iroh connectors belong to applications; rocky-sdk normal dependencies must exclude rocky-coordinator and rocky-iroh")
+if "iroh" in sdk["features"]:
+    raise SystemExit("sdk-boundary: coordinator and transport composition must not require an SDK iroh feature")
+if sdk["features"].get("default"):
+    raise SystemExit("sdk-boundary: the SDK defaults must not select a network")
+
+for target in (None, "wasm32-unknown-unknown"):
+    command = ["cargo", "tree", "--offline", "--locked", "--package", "rocky-sdk",
+               "--edges", "normal", "--prefix", "none", "--format", "{p}"]
+    if target:
+        command.extend(["--target", target])
+    result = subprocess.run(command, text=True, capture_output=True)
+    label = target or "native"
+    if result.returncode:
+        raise SystemExit(f"sdk-boundary: cannot inspect {label} normal dependencies; "
+                         "run cargo fetch --locked first.\n" + result.stderr)
+    packages = {line.split()[0] for line in result.stdout.splitlines() if line.strip()}
+    forbidden = packages & {"rocky-voter", "rocky-coordinator", "openraft", "fs2", "rocky-iroh", "iroh"}
+    if forbidden:
+        raise SystemExit(f"sdk-boundary: rocky-sdk normal dependencies for {label} include "
+                         f"server or default transport packages: {', '.join(sorted(forbidden))}. "
+                         "Keep servers and transport selection in application crates and SDK fixtures in dev-dependencies.")
+    print(f"sdk-boundary: {label} default normal dependencies contain no voter server or iroh transport packages")
+PYTHON
+}

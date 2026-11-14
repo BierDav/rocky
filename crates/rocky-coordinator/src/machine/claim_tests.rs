@@ -43,7 +43,7 @@ impl Fixture {
             )
             .unwrap();
         let chain = CredentialChain(vec![link])
-            .certify_claims(&identity, node.public_key(), 1)
+            .certify_claims(&identity, node.public_key())
             .unwrap();
         Holder {
             identity,
@@ -124,6 +124,7 @@ impl Fixture {
                 identities: [identity].into(),
                 capabilities: Default::default(),
                 cut: Default::default(),
+                mode: rocky_credentials::RevocationMode::Lost,
                 recovery: None,
             },
             &self.owner,
@@ -139,7 +140,7 @@ impl Fixture {
             crate::transport::nonce(),
             Operation::Revoke {
                 scope: self.scope,
-                revocations: RevocationSet::try_from(vec![statement]).unwrap(),
+                revocations: Box::new(RevocationSet::try_from(vec![statement]).unwrap()),
             },
             pusher,
             time,
@@ -217,7 +218,7 @@ fn non_holders_and_other_counters_are_denied() {
             .issue_claims(identity.public_key(), f.right(None), 1, (T, CLAIM_LIFETIME))
             .unwrap();
         let chain = CredentialChain(vec![link])
-            .certify_claims(&identity, node.public_key(), 1)
+            .certify_claims(&identity, node.public_key())
             .unwrap();
         Holder {
             identity,
@@ -374,6 +375,7 @@ fn a_revoked_holder_is_refused_at_the_push_or_when_its_link_expires() {
             identities: [lapsing.identity.public_key()].into(),
             capabilities: Default::default(),
             cut: Default::default(),
+            mode: rocky_credentials::RevocationMode::Lost,
             recovery: None,
         },
         &stranger,
@@ -385,7 +387,7 @@ fn a_revoked_holder_is_refused_at_the_push_or_when_its_link_expires() {
         [2; 32],
         Operation::Revoke {
             scope: f.scope,
-            revocations: RevocationSet::try_from(vec![forged]).unwrap(),
+            revocations: Box::new(RevocationSet::try_from(vec![forged]).unwrap()),
         },
         &stranger,
         T + CLAIM_LIFETIME,
@@ -414,7 +416,7 @@ fn a_delegate_claims_only_within_its_delegators_right() {
         .unwrap();
     let delegate = Holder {
         chain: narrowed
-            .certify_claims(&identity, node.public_key(), 2)
+            .certify_claims(&identity, node.public_key())
             .unwrap(),
         identity,
         node,

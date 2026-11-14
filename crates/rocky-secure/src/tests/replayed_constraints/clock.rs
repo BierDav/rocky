@@ -87,7 +87,8 @@ async fn a_stamp_beyond_the_clock_bound_is_refused_and_authoring_stops_before_it
     }
     assert!(devices[1].rows(&c).await["teams"].is_empty());
     // The decoded stamps of rows and checkpoints carry the same bound.
-    let stamp = |clock: u64| encode(&(clock, 1_u32, 0_u64)).unwrap();
+    let writer = rocky_core::WriterId::from_bytes([1; 32]);
+    let stamp = |clock: u64| encode(&(clock, writer, 0_u64)).unwrap();
     assert!(decode::<rocky_core::SecureStamp>(&stamp(MAX_CLOCK)).is_ok());
     assert!(decode::<rocky_core::SecureStamp>(&stamp(MAX_CLOCK + 1)).is_err());
     let position = |clock: u64| {
@@ -170,7 +171,7 @@ async fn frames_from_a_clock_ahead_wait_until_this_clock_is_near_them() {
     assert!(
         expected.rows["teams"]
             .iter()
-            .any(|row| row.contains(&SqlValue::Integer(red)))
+            .any(|row| row.contains(&SqlValue::from(red)))
     );
     for device in devices.iter().chain([&receiver]) {
         device

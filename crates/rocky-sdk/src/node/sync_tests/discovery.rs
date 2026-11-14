@@ -1,5 +1,6 @@
 //! Discovery on the hub's deterministic capability; see decision 0057.
 use super::*;
+use crate::test_snapshot as snap;
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -35,12 +36,17 @@ async fn announce(node: &Node) -> Result<(), Failure> {
     Ok(())
 }
 async fn titles(node: &Node) -> Result<Value, Failure> {
-    let page = node
-        .dispatch(
-            &*node.client(1)?,
-            &json!({"type":"read","query":{"sql":"SELECT key FROM items ORDER BY key","max_rows":8}}),
-        )
-        .await?;
+    let page = snap::value(node.read(
+        &*node.client(1)?,
+        rocky_sdk::ReadQuery {
+            sql: "SELECT key FROM items ORDER BY key".to_owned(),
+            values: Vec::new(),
+            max_rows: 8,
+            max_bytes: None,
+            cursor: None,
+        },
+    ))
+    .await?;
     Ok(page["rows"].clone())
 }
 
@@ -60,7 +66,7 @@ async fn members_converge_with_discovery_as_their_only_source_of_contacts() -> R
             // derives no topic and announces nothing.
             announce(&b).await?;
             assert!(hub.topics(b_route).is_empty());
-            assert_eq!(b.discovery_status()["announcing"], false);
+            assert!(!b.discovery_status().announcing);
             // C meets the issuer before the row exists; only B receives it.
             pass(&c).await?;
             add(&a, 1).await?;
@@ -94,16 +100,16 @@ async fn members_converge_with_discovery_as_their_only_source_of_contacts() -> R
             assert_eq!(titles(&c).await?.as_array().map(Vec::len), Some(1));
             assert_eq!(hub.dials_to("a"), dials);
             let found = b
-                .peers()
+                .observed_peers()
                 .await
                 .into_iter()
-                .find(|peer| peer["node"] == c_key.to_hex())
+                .find(|peer| peer.node == c_key.to_hex())
                 .ok_or("found peer")?;
             assert_eq!(
-                (&found["source"], &found["local"], &found["choice"]),
-                (&json!("discovery"), &json!(true), &json!("selected_local"))
+                (found.source.as_str(), found.is_local, found.choice.as_str()),
+                ("discovery", true, "selected_local")
             );
-            let status = b.readiness().await?["network"]["discovery"].clone();
+            let status = serde_json::to_value(b.observed_status().await?.network.discovery)?;
             assert_eq!(status["announcing"], true);
             assert_eq!(status["local"], json!({"state": "on", "reason": null}));
             assert_eq!(status["topic"]["state"], "unavailable");
@@ -140,8 +146,8 @@ async fn members_converge_with_discovery_as_their_only_source_of_contacts() -> R
             b.detach(None).await;
             assert!(hub.topics(b_route).is_empty());
             assert_eq!(
-                b.discovery_status()["paths"]["local"],
-                json!({"state": "off"})
+                b.discovery_status().local.state,
+                crate::DiscoveryPathState::Off
             );
             c.detach(None).await;
             Ok(())
@@ -174,7 +180,7 @@ async fn a_revoked_device_and_an_outsider_find_no_peer_after_the_window() -> Res
             // The revoked device accepts no session, so nobody tells it; the
             // others come to hold the statement and its discovery value.
             let c_port = c.current().ok_or("link")?.transport.clone();
-            c_port.listen(false);
+            c_port.listen(None, false).expect("listen");
             let c_identity = c.settings.lock().await.identity;
             a.revoke(crate::enrollment::Revoke::Identity(c_identity))
                 .await?;
@@ -205,7 +211,7 @@ async fn a_revoked_device_and_an_outsider_find_no_peer_after_the_window() -> Res
             for node in [&a, &b, &c] {
                 node.discovery_skew.store(0, Ordering::SeqCst);
             }
-            c_port.listen(true);
+            c_port.listen(None, true).expect("listen");
             announce(&b).await?;
             announce(&c).await?;
             until(async || b.settings.lock().await.revocations.revokes(&c_key)).await?;
@@ -231,12 +237,12 @@ async fn a_transport_without_the_capability_reports_each_path_unavailable() -> R
             let b = enrolled(&root.path().join("b"), &hub, "b", Some((&a, writer()))).await?;
             pass(&b).await?;
             let status = b.discovery_status();
-            assert_eq!(status["announcing"], false);
-            for path in ["local", "topic"] {
-                assert_eq!(status["paths"][path]["state"], "unavailable");
+            assert!(!status.announcing);
+            for path in [status.local, status.topic] {
+                assert_eq!(path.state, crate::DiscoveryPathState::Unavailable);
                 assert_eq!(
-                    status["paths"][path]["reason"],
-                    "the memory transport has no discovery"
+                    path.reason.as_deref(),
+                    Some("the memory transport has no discovery")
                 );
             }
             assert!(hub.topics("b").is_empty());

@@ -49,8 +49,8 @@ impl Node {
         Ok(())
     }
     /// Registers a node for the followed line when writes need one: a
-    /// saved node of the line, else a newly certified one. Readers hold no
-    /// author range and write nothing.
+    /// saved node of the line, else a newly certified one. Readers write
+    /// nothing.
     pub(crate) async fn ensure_tip_node(&self) -> Result<(), Failure> {
         self.tip_node(false).await
     }
@@ -89,9 +89,6 @@ impl Node {
             .await?
             .line_root(self.replica.followed_tip().await)?;
         let line = HEXLOWER.encode(&line.0);
-        let Some(range) = settings.identity_links().authors()? else {
-            return Ok(());
-        };
         let mut saved = match self.vault.load_bytes(ROLE)? {
             Some(bytes) => serde_json::from_slice::<SavedNodes>(&bytes)?,
             None => SavedNodes {
@@ -133,8 +130,8 @@ impl Node {
             .collect();
         for index in indexes {
             let key = PrivateKey::from_bytes(&saved.nodes[index].key);
-            // A schema change may grant new tables: the same node and
-            // number are certified again for the installed definition.
+            // A schema change may grant new tables: the same node is
+            // certified again for the installed definition.
             if saved.nodes[index].credentials.certificate().is_some() {
                 let certificate = saved.nodes[index]
                     .credentials
@@ -177,16 +174,11 @@ impl Node {
         let previous = membership
             .head(settings.identity)
             .map(|head| head.certificate);
-        let author = range
-            .first
-            .checked_add(u32::try_from(sequence)?)
-            .filter(|author| settings.node_numbers(range).contains(*author))
-            .ok_or("no free author number for another node")?;
         let key = PrivateKey::from_bytes(&rocky_platform::entropy::random());
         let links = settings.identity_links();
         let certificate = links
             .clone()
-            .certify_member(&*identity, key.public_key(), author, sequence, previous)?
+            .certify_member(&*identity, key.public_key(), sequence, previous)?
             .0
             .pop()
             .ok_or("missing node certificate")?;
@@ -210,7 +202,9 @@ impl Node {
     pub(crate) async fn try_ensure_tip_node(&self) {
         if let Err(error) = self.ensure_tip_node().await {
             self.activity
-                .record_changed("line_node_failed", json!({"error": error.to_string()}));
+                .record_changed(crate::ActivityKind::LineNodeFailed {
+                    error: (error.to_string()).to_owned(),
+                });
         }
     }
 }

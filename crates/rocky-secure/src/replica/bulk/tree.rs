@@ -111,15 +111,14 @@ impl<A: RowApplication> Inner<A> {
             })
             .ok_or_else(|| denied("migration opening missing"))?;
         let mut s = MigrationPublicationStatement {
-            format: 1,
+            format: rocky_core::MIGRATION_PUBLICATION_FORMAT,
             scope: stage.scope,
             tip: stage.target,
             opening: opening.id().map_err(credential)?,
             parent: opening.statement.seal,
             schema: opening.statement.schema,
             publication: stage.publication,
-            writer: *author.key.public_key().as_bytes(),
-            author: author.number,
+            writer: *author.writer.as_bytes(),
             frames: 0,
             bytes: 0,
             root: [0; 32],

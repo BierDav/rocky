@@ -419,9 +419,9 @@ impl<A: RowApplication> Inner<A> {
                 return Err(Error::Corrupt("held schema reference".into()));
             };
             let frame: EncryptedFrame = decode(bytes)?;
-            let header = &frame.operation_ref()?.header.extensions;
-            if header.scope.domain == domain {
-                frames.push(header.clone());
+            let header = &frame.operation_ref()?.header;
+            if header.extensions.scope.domain == domain {
+                frames.push(headers::ScannedHeader::new(header.clone()));
             }
         }
         requirements.visit(HeaderSource::HeldFrame, frames)?;
@@ -519,7 +519,11 @@ struct Requirements {
     required: BTreeSet<(TipId, Commitment)>,
 }
 impl Requirements {
-    fn visit(&mut self, source: HeaderSource, headers: Vec<Extensions>) -> Result<(), Error> {
+    fn visit(
+        &mut self,
+        source: HeaderSource,
+        headers: Vec<headers::ScannedHeader>,
+    ) -> Result<(), Error> {
         for header in headers {
             match source {
                 HeaderSource::Retained if self.path.contains(&header.tip) => {
@@ -1448,7 +1452,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             (
                 author.key.public_key(),
                 author.credentials.clone(),
-                author.number,
+                author.writer,
             )
         };
         encode(&(

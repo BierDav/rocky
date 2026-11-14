@@ -44,7 +44,6 @@ async fn switching_back_and_sideways_invalidates_warmed_inherited_frontiers() {
                 .certify_member(
                     &identity,
                     node.public_key(),
-                    2,
                     1,
                     replica
                         .revocations()
@@ -107,7 +106,7 @@ async fn equal_size_revocation_replacements_and_graph_reload_invalidate_without_
                 },
             )
             .unwrap()
-            .issue_issuer(issuer.public_key(), None, validity())
+            .issue_issuer(issuer.public_key(), validity())
             .unwrap(),
         ]);
         seals.push(

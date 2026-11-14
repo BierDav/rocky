@@ -40,8 +40,8 @@ fn column(name: &str, affinity: Affinity, not_null: bool) -> LogicalColumn {
     }
 }
 fn table(name: &str, sql: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable {
-    columns.push(column("id", Affinity::Integer, true));
-    let sql = format!("{},id INTEGER NOT NULL)", sql.trim_end_matches(')'));
+    columns.push(column("id", Affinity::Blob, true));
+    let sql = format!("{},id BLOB NOT NULL)", sql.trim_end_matches(')'));
     LogicalTable {
         sql_name: name.into(),
         granted_like: None,
@@ -184,28 +184,6 @@ impl Typed {
         grants: Vec<ResourceGrant>,
         expires: u64,
     ) -> CredentialChain {
-        self.credentials_number_until(
-            node,
-            grants,
-            crate::tests::node_number(node.public_key()),
-            expires,
-        )
-    }
-    fn credentials_number(
-        &self,
-        node: &PrivateKey,
-        grants: Vec<ResourceGrant>,
-        number: u32,
-    ) -> CredentialChain {
-        self.credentials_number_until(node, grants, number, crate::tests::lifetime().1)
-    }
-    fn credentials_number_until(
-        &self,
-        node: &PrivateKey,
-        grants: Vec<ResourceGrant>,
-        number: u32,
-        expires: u64,
-    ) -> CredentialChain {
         let user = PrivateKey::new();
         let capability = |subject, kind, delegations| Capability {
             subject,
@@ -223,12 +201,6 @@ impl Typed {
             },
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
-                authors: Some(if kind == PrincipalKind::Node {
-                    rocky_credentials::AuthorRange::new(number, number).unwrap()
-                } else {
-                    rocky_credentials::AuthorRange::new(number, rocky_credentials::MAX_AUTHOR)
-                        .unwrap()
-                }),
                 node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
                 database: Some(rocky_credentials::DatabaseContext {
                     publisher: self.publisher.public_key(),
@@ -267,23 +239,6 @@ impl Typed {
         grants: Vec<ResourceGrant>,
         keys: &[ResourceScope],
     ) -> EncryptedReplica<TypedRows> {
-        self.open_number(
-            path,
-            node,
-            grants,
-            keys,
-            crate::tests::node_number(node.public_key()),
-        )
-        .await
-    }
-    async fn open_number(
-        &self,
-        path: &std::path::Path,
-        node: &PrivateKey,
-        grants: Vec<ResourceGrant>,
-        keys: &[ResourceScope],
-        number: u32,
-    ) -> EncryptedReplica<TypedRows> {
         let replica = EncryptedReplica::open(
             path,
             self.app(),
@@ -292,7 +247,7 @@ impl Typed {
                 manifest: self.manifest.clone(),
                 revocations: self.policy.clone(),
                 node: node.clone(),
-                credentials: self.credentials_number(node, grants, number),
+                credentials: self.credentials(node, grants),
                 keys: keys.iter().map(|scope| self.key(*scope)).collect(),
             },
         )
@@ -400,11 +355,15 @@ async fn insert(
                     depth -= 1;
                     if depth == 0 {
                         let id = if name == "drafts" {
-                            4294967297
+                            rocky_core::RowIdentity::new(
+                                rocky_core::WriterId::from_bytes([1; 32]),
+                                1,
+                            )
+                            .map_err(|error| denied(&error.to_string()))?
                         } else {
-                            session.next_id(name).await?.integer()
+                            session.next_id(name).await?
                         };
-                        rewritten.push_str(&format!(",{id}"));
+                        rewritten.push_str(&format!(",X'{id}'"));
                     }
                 }
             }
@@ -1627,12 +1586,11 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
     let node = PrivateKey::new();
     let key = node.clone();
     let replica = fixture
-        .open_number(
+        .open(
             &path,
             &node,
             fixture.full(),
             &[fixture.items, fixture.salaries],
-            17,
         )
         .await;
     // The node chain is stored with its first operation.
@@ -1659,7 +1617,8 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
     );
     session_sql.run("BEGIN", vec![]).await.unwrap();
     let first = session_sql.next_id("items").await.unwrap();
-    assert_eq!((first.author(), first.sequence()), (17, 1));
+    let own = crate::writer::writer(&key.public_key());
+    assert_eq!((first.writer(), first.sequence()), (own, 1));
     assert_eq!(session_sql.next_id("items").await.unwrap().sequence(), 2);
     session_sql.run("ROLLBACK", vec![]).await.unwrap();
     session_sql.run("BEGIN", vec![]).await.unwrap();
@@ -1667,7 +1626,7 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
     session_sql
         .run(
             "INSERT INTO items(key,title,id) VALUES(?,?,?)",
-            vec![text("a"), text("first"), SqlValue::Integer(first.integer())],
+            vec![text("a"), text("first"), first.sql()],
         )
         .await
         .unwrap();
@@ -1679,7 +1638,13 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
         .unwrap();
     let operation = commit.frames[0].operation().unwrap();
     assert_eq!(operation.header.public_key, key.public_key());
-    assert_eq!(operation.header.extensions.author, Some(17));
+    assert_eq!(
+        operation
+            .header
+            .extensions
+            .author(&operation.header.public_key),
+        Some(own)
+    );
     assert_eq!(
         operation.header.extensions.row_format,
         crate::wire::ROW_FORMAT
@@ -1694,12 +1659,11 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
     replica.audit(fixture.items).await.unwrap();
     drop(replica);
     let replica = fixture
-        .open_number(
+        .open(
             &path,
             &node,
             fixture.full(),
             &[fixture.items, fixture.salaries],
-            17,
         )
         .await;
     let session_sql = sql(&replica, &[fixture.items]).await;
@@ -1714,12 +1678,11 @@ async fn identity_reservations_follow_savepoints_and_one_node_signer_form_one_bu
     let directory = rocky_platform::fs::Scratch::new().await;
     let node = PrivateKey::new();
     let replica = fixture
-        .open_number(
+        .open(
             &directory.path().join("writer.sqlite"),
             &node,
             fixture.full(),
             &[fixture.items, fixture.salaries],
-            11,
         )
         .await;
     let writer = sql(&replica, &[fixture.items, fixture.salaries]).await;
@@ -1733,21 +1696,21 @@ async fn identity_reservations_follow_savepoints_and_one_node_signer_form_one_bu
     writer
         .run(
             "INSERT INTO items(key,title,id) VALUES('z','item',?)",
-            vec![SqlValue::Integer(item.integer())],
+            vec![item.sql()],
         )
         .await
         .unwrap();
     writer
         .run(
             "INSERT INTO items(key,title,id) VALUES('a','second',?)",
-            vec![SqlValue::Integer(unused.integer())],
+            vec![unused.sql()],
         )
         .await
         .unwrap();
     writer
         .run(
             "INSERT INTO salaries(amount,id) VALUES(5,?)",
-            vec![SqlValue::Integer(salary.integer())],
+            vec![salary.sql()],
         )
         .await
         .unwrap();
@@ -1777,10 +1740,7 @@ async fn identity_reservations_follow_savepoints_and_one_node_signer_form_one_bu
             .await
             .unwrap()
             .rows,
-        vec![
-            vec![SqlValue::Integer(item.integer())],
-            vec![SqlValue::Integer(unused.integer())]
-        ]
+        vec![vec![item.sql()], vec![unused.sql()]]
     );
     assert_eq!(
         reader
@@ -1788,11 +1748,15 @@ async fn identity_reservations_follow_savepoints_and_one_node_signer_form_one_bu
             .await
             .unwrap()
             .rows,
-        vec![vec![SqlValue::Integer(salary.integer())]]
+        vec![vec![salary.sql()]]
     );
     for (statement, values) in [(
         "UPDATE items SET id=? WHERE key='z'",
-        vec![SqlValue::Integer(item.integer() + 10)],
+        vec![
+            rocky_core::RowIdentity::new(item.writer(), item.sequence() + 10)
+                .unwrap()
+                .sql(),
+        ],
     )] {
         assert!(writer.run(statement, values).await.is_err());
     }
@@ -1802,7 +1766,7 @@ async fn identity_reservations_follow_savepoints_and_one_node_signer_form_one_bu
             .await
             .unwrap()
             .rows,
-        vec![vec![SqlValue::Integer(item.integer())]]
+        vec![vec![item.sql()]]
     );
 }
 
@@ -1812,12 +1776,11 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
     let directory = rocky_platform::fs::Scratch::new().await;
     let node = PrivateKey::new();
     let replica = fixture
-        .open_number(
+        .open(
             &directory.path().join("writer.sqlite"),
             &node,
             fixture.full(),
             &[fixture.items, fixture.salaries],
-            31,
         )
         .await;
     let key = node.clone();
@@ -1828,7 +1791,7 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
     writer
         .run(
             "INSERT INTO items(key,title,id) VALUES('a','first',?)",
-            vec![SqlValue::Integer(id.integer())],
+            vec![id.sql()],
         )
         .await
         .unwrap();
@@ -1839,7 +1802,7 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
     writer
         .run(
             "INSERT INTO items(key,title,id) VALUES('a','first',?)",
-            vec![SqlValue::Integer(id.integer())],
+            vec![id.sql()],
         )
         .await
         .unwrap();
@@ -1859,21 +1822,24 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
     )
     .unwrap()
     .payload;
+    // A frame that claims no table author cannot create a row identity.
     let mut extensions = operation.header.extensions;
-    extensions.author = Some(32);
+    extensions.authored = false;
     let forged = crate::wire::author(
         &key,
-        extensions,
-        frame.chain().unwrap().clone(),
-        &fixture.key(fixture.items).key,
-        (
-            operation.header.seq_num,
-            operation.header.backlink,
-            operation.header.timestamp,
-        ),
-        operation.header.previous,
-        None,
-        &plaintext,
+        crate::wire::FrameDraft {
+            extensions,
+            chain: frame.chain().unwrap().clone(),
+            encryption_key: &fixture.key(fixture.items).key,
+            log: (
+                operation.header.seq_num,
+                operation.header.backlink,
+                operation.header.timestamp,
+            ),
+            previous: operation.header.previous,
+            partition: None,
+            plaintext: &plaintext,
+        },
     )
     .unwrap();
     let peer = fixture
@@ -1884,13 +1850,8 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
             &[fixture.items, fixture.salaries],
         )
         .await;
-    assert!(
-        peer.receive(forged)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("author number")
-    );
+    let error = peer.receive(forged).await.unwrap_err().to_string();
+    assert!(error.contains("node author missing"), "{error}");
     assert_eq!(
         peer.receive(frame.clone()).await.unwrap(),
         ReceiveStatus::Applied
@@ -1910,18 +1871,22 @@ async fn local_identity_columns_refuse_reserved_kinds_and_mutation() {
         )
         .await;
     let writer = sql(&replica, &[fixture.items]).await;
-    let id = rocky_core::RowIdentity::new(99, 1).unwrap();
+    let id = rocky_core::RowIdentity::new(rocky_core::WriterId::from_bytes([99; 32]), 1).unwrap();
     writer
         .run(
             "INSERT INTO drafts(id,body) VALUES(?,'local')",
-            vec![SqlValue::Integer(id.integer())],
+            vec![id.sql()],
         )
         .await
         .unwrap();
     for (statement, values) in [
         (
             "UPDATE drafts SET id=?",
-            vec![SqlValue::Integer(id.integer() + 1)],
+            vec![
+                rocky_core::RowIdentity::new(id.writer(), id.sequence() + 1)
+                    .unwrap()
+                    .sql(),
+            ],
         ),
         ("INSERT INTO drafts(id,body) VALUES(0,'virtual')", vec![]),
     ] {
@@ -1933,12 +1898,12 @@ async fn local_identity_columns_refuse_reserved_kinds_and_mutation() {
             .await
             .unwrap()
             .rows,
-        vec![vec![SqlValue::Integer(id.integer())]]
+        vec![vec![id.sql()]]
     );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn two_nodes_of_one_principal_write_every_table_and_refuse_number_changes() {
+async fn two_nodes_of_one_principal_write_every_table_under_their_own_keys() {
     let fixture = identity_fixture();
     let directory = rocky_platform::fs::Scratch::new().await;
     let principal = PrivateKey::new();
@@ -1947,24 +1912,20 @@ async fn two_nodes_of_one_principal_write_every_table_and_refuse_number_changes(
         .issue_terms(
             principal.public_key(),
             fixture.full(),
-            (
-                1,
-                Some(crate::credentials::AuthorRange::new(100, 110).unwrap()),
-            ),
+            rocky_credentials::DelegationTerms { delegations: 1 },
             crate::tests::validity(),
         )
         .unwrap();
     let prefix = CredentialChain(vec![root]);
     let initial = prefix
         .clone()
-        .certify(&principal, nodes[0].public_key(), 100)
+        .certify(&principal, nodes[0].public_key())
         .unwrap();
     let next = prefix
         .clone()
         .certify_member(
             &principal,
             nodes[1].public_key(),
-            101,
             1,
             Some(initial.certificate().unwrap().id().unwrap()),
         )
@@ -1990,7 +1951,6 @@ async fn two_nodes_of_one_principal_write_every_table_and_refuse_number_changes(
                     .certify_member(
                         &principal,
                         nodes[index].public_key(),
-                        number,
                         u64::from(number - 100),
                         match number {
                             100 => None,
@@ -2029,19 +1989,22 @@ async fn two_nodes_of_one_principal_write_every_table_and_refuse_number_changes(
         writer.run("BEGIN", vec![]).await.unwrap();
         let item = writer.next_id("items").await.unwrap();
         let salary = writer.next_id("salaries").await.unwrap();
-        assert_eq!(item.author(), 100 + index as u32);
-        assert_eq!(salary.author(), item.author());
+        assert_eq!(
+            item.writer(),
+            crate::writer::writer(&nodes[index].public_key())
+        );
+        assert_eq!(salary.writer(), item.writer());
         writer
             .run(
                 "INSERT INTO items(key,title,id) VALUES(?,'item',?)",
-                vec![text(&index.to_string()), SqlValue::Integer(item.integer())],
+                vec![text(&index.to_string()), item.sql()],
             )
             .await
             .unwrap();
         writer
             .run(
                 "INSERT INTO salaries(amount,id) VALUES(5,?)",
-                vec![SqlValue::Integer(salary.integer())],
+                vec![salary.sql()],
             )
             .await
             .unwrap();
@@ -2055,7 +2018,13 @@ async fn two_nodes_of_one_principal_write_every_table_and_refuse_number_changes(
         for frame in committed.frames {
             let operation = frame.operation().unwrap();
             assert_eq!(operation.header.public_key, nodes[index].public_key());
-            assert_eq!(operation.header.extensions.author, Some(item.author()));
+            assert_eq!(
+                operation
+                    .header
+                    .extensions
+                    .author(&operation.header.public_key),
+                Some(item.writer())
+            );
             if index == 0 {
                 second.receive(frame).await.unwrap();
             } else {
@@ -2084,7 +2053,8 @@ async fn two_nodes_of_one_principal_write_every_table_and_refuse_number_changes(
         .await,
         vec![vec![SqlValue::Integer(2)]]
     );
-    // A second authentic leaf for the same node cannot change its number.
+    // A node key reused in a fresh database restarts its log and row
+    // sequence: a replica holding the log refuses the fork.
     let forged = open("conflicting.sqlite", 0, 102).await;
     let writer = sql(&forged, &[fixture.items]).await;
     writer.run("BEGIN", vec![]).await.unwrap();
@@ -2092,47 +2062,157 @@ async fn two_nodes_of_one_principal_write_every_table_and_refuse_number_changes(
     writer
         .run(
             "INSERT INTO items(key,title,id) VALUES('conflict','item',?)",
-            vec![SqlValue::Integer(id.integer())],
+            vec![id.sql()],
         )
         .await
         .unwrap();
     let committed = writer.commit([202; 32]).await.unwrap().committed.unwrap();
-    let conflicting_checkpoint = compacted_base(&forged, &fixture.publisher, fixture.items).await;
-    drop(second);
-    let second = open("second.sqlite", 1, 101).await;
-    assert!(
-        second
-            .begin_rebootstrap(conflicting_checkpoint)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("different author numbers")
-    );
-    assert!(
-        second
-            .receive(committed.frames[0].clone())
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("different author numbers")
-    );
+    assert_eq!(id, ids[0].0);
+    let error = second
+        .receive(committed.frames[0].clone())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("author log fork"), "{error}");
+    // Another membership sequence for the same node keeps its writer.
     let changed = prefix
         .certify_member(
             &principal,
             nodes[0].public_key(),
-            102,
             2,
             Some(next.certificate().unwrap().id().unwrap()),
         )
         .unwrap();
-    assert!(
-        first
-            .renew_credentials(changed)
+    first.renew_credentials(changed).await.unwrap();
+    let writer = sql(&first, &[fixture.items]).await;
+    writer.run("BEGIN", vec![]).await.unwrap();
+    let renewed = writer.next_id("items").await.unwrap();
+    assert_eq!(renewed.writer(), ids[0].0.writer());
+    assert!(renewed > ids[0].0);
+    writer.run("ROLLBACK", vec![]).await.unwrap();
+}
+
+/// Rows `replica` authors offline: one transaction of `count` salaries.
+async fn author_salaries(
+    replica: &EncryptedReplica<TypedRows>,
+    scope: ResourceScope,
+    count: i64,
+    handle: u8,
+) -> (Vec<rocky_core::RowIdentity>, Vec<EncryptedFrame>) {
+    let session = sql(replica, &[scope]).await;
+    session.run("BEGIN", vec![]).await.unwrap();
+    let mut ids = Vec::new();
+    for amount in 0..count {
+        let id = session.next_id("salaries").await.unwrap();
+        session
+            .run(
+                "INSERT INTO salaries(amount,id) VALUES(?,?)",
+                vec![SqlValue::Integer(amount), id.sql()],
+            )
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+    let frames = session
+        .commit([handle; 32])
+        .await
+        .unwrap()
+        .committed
+        .unwrap()
+        .frames;
+    (ids, frames)
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn devices_authoring_from_one_snapshot_merge_in_both_orders_without_collisions() {
+    let fixture = identity_fixture();
+    let directory = rocky_platform::fs::Scratch::new().await;
+    let scope = fixture.salaries;
+    let open = async |name: &str| {
+        let key = PrivateKey::new();
+        let replica = fixture
+            .open(&directory.path().join(name), &key, fixture.full(), &[scope])
+            .await;
+        (key, replica)
+    };
+    let (origin_key, origin) = open("origin.sqlite").await;
+    let (old_ids, old) = author_salaries(&origin, scope, 2, 1).await;
+    // Both devices start from the same old state and then write offline.
+    let ((left_key, left), (right_key, right)) =
+        (open("left.sqlite").await, open("right.sqlite").await);
+    for device in [&left, &right] {
+        for frame in &old {
+            assert_eq!(
+                device.receive(frame.clone()).await.unwrap(),
+                ReceiveStatus::Applied
+            );
+        }
+    }
+    let (left_ids, left_frames) = author_salaries(&left, scope, 3, 2).await;
+    let (right_ids, right_frames) = author_salaries(&right, scope, 3, 3).await;
+    // Each device numbers its rows from its own key's first sequence.
+    for (ids, key) in [
+        (&old_ids, &origin_key),
+        (&left_ids, &left_key),
+        (&right_ids, &right_key),
+    ] {
+        let writer = crate::writer::writer(&key.public_key());
+        let sequences: Vec<u64> = ids.iter().map(|id| id.sequence()).collect();
+        assert!(ids.iter().all(|id| id.writer() == writer));
+        assert_eq!(sequences, (1..=ids.len() as u64).collect::<Vec<_>>());
+    }
+    let (_, forward) = open("forward.sqlite").await;
+    let (_, backward) = open("backward.sqlite").await;
+    let deliver = async |replica: &EncryptedReplica<TypedRows>, frames: &[&[EncryptedFrame]]| {
+        for frame in frames.iter().flat_map(|frames| frames.iter()) {
+            assert_eq!(
+                replica.receive(frame.clone()).await.unwrap(),
+                ReceiveStatus::Applied
+            );
+        }
+    };
+    deliver(&left, &[&right_frames]).await;
+    deliver(&right, &[&left_frames]).await;
+    deliver(&forward, &[&old, &left_frames, &right_frames]).await;
+    deliver(&backward, &[&old, &right_frames, &left_frames]).await;
+    let mut expected: Vec<_> = [old_ids, left_ids, right_ids].concat();
+    expected.sort();
+    expected.dedup();
+    assert_eq!(expected.len(), 8, "every row keeps a distinct identity");
+    let rows = |replica| async move {
+        select(
+            &sql(replica, &[scope]).await,
+            "SELECT id,amount FROM salaries ORDER BY id",
+        )
+        .await
+    };
+    let merged = rows(&left).await;
+    assert_eq!(
+        merged.iter().map(|row| row[0].clone()).collect::<Vec<_>>(),
+        expected.iter().map(|id| id.sql()).collect::<Vec<_>>()
+    );
+    for replica in [&origin, &left, &right, &forward, &backward] {
+        if !std::ptr::eq(replica, &origin) {
+            assert_eq!(rows(replica).await, merged);
+            assert_eq!(
+                replica.snapshot(scope).await.unwrap().rows,
+                left.snapshot(scope).await.unwrap().rows
+            );
+        }
+        assert_eq!(replica.equivocations().await.unwrap(), 0);
+        assert_eq!(replica.revocations().await.statements().count(), 0);
+    }
+    // The former packed integer and its text are no row identities.
+    let session = sql(&left, &[scope]).await;
+    for old in ["4294967297", "'4294967297'"] {
+        let statement = format!("INSERT INTO salaries(amount,id) VALUES(1,{old})");
+        let error = session
+            .run(&statement, vec![])
             .await
             .unwrap_err()
-            .to_string()
-            .contains("cannot change")
-    );
+            .to_string();
+        assert!(error.contains("require a 40-byte row identity"), "{error}");
+    }
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

@@ -3,7 +3,7 @@ use rocky_core::{
     DomainId, PartitionSelection, PartitionSelector, PartitionTuple, PartitionValue,
     SchemaDefinition, SqlValue, TypedRows,
 };
-use rocky_credentials::{AuthorRange, Authority, PartitionGrant};
+use rocky_credentials::{Authority, PartitionGrant};
 use web_time::Instant;
 
 use std::path::Path;
@@ -168,7 +168,6 @@ async fn measure(tables: usize, partitions: i64) {
                     Right::Custody,
                 ],
             ),
-            Some((PrivateKey::new(), 1)),
             vec![],
         )
         .await;
@@ -206,7 +205,6 @@ async fn measure(tables: usize, partitions: i64) {
                     Right::Custody,
                 ],
             ),
-            None,
             vec![],
         )
         .await;
@@ -291,7 +289,6 @@ async fn measure(tables: usize, partitions: i64) {
                     Right::Custody,
                 ],
             ),
-            None,
             keys,
         )
         .await;

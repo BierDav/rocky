@@ -72,6 +72,8 @@ mod removal;
 pub(crate) mod replay;
 pub use removal::{local_row_counts, local_table_digests};
 pub use replay::outcomes::OutcomeDivergence;
+mod reset_fence;
+pub use reset_fence::ResetEndsSigner;
 mod restore;
 mod revoked_heads;
 pub(super) mod roles;
@@ -116,6 +118,7 @@ pub(crate) fn take_hashed() -> usize {
 use super::store::{SCHEMA, TransactionStore};
 use super::wire::{Chain, Extensions, Membership, ROW_FORMAT, RowPayload, author, decrypt};
 use super::*;
+use crate::writer::{WriterId, stored_writer, writer, writer_key, writer_value};
 use crate::{
     database::DatabaseOwner,
     scoped_connection::ScopedConnection,
@@ -311,8 +314,7 @@ pub(super) struct Materialized {
     deleted: bool,
     creation: Hash,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(with = "identity::decimal")]
-    identity: Option<i64>,
+    identity: Option<rocky_core::RowIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(with = "serde_bytes")]
     key: Option<Commitment>,
@@ -388,7 +390,6 @@ pub(super) struct Inner<A> {
     pub(crate) readiness: blockers::Readiness,
     metadata: metadata::Metadata,
     held_refresh: std::sync::Mutex<BTreeMap<ResourceScope, Commitment>>,
-    stamp_authors: stamp_authors::Cache,
     author_sets: std::sync::Mutex<author_sets::Cache>,
     record_dictionary: std::sync::Mutex<records::Dictionary>,
     /// During a tip statement admission, what each domain's replay ledgers
@@ -837,7 +838,6 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         moves::SCHEMA,
         records::SCHEMA,
         records::SHAPE_SCHEMA,
-        stamp_authors::SCHEMA,
         author_sets::SCHEMA,
         partition::SCHEMA,
         checkpoint::SCHEMA,
@@ -1141,7 +1141,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             held_refresh: Default::default(),
             record_dictionary: Default::default(),
             seeded_ledgers: Default::default(),
-            stamp_authors: Default::default(),
             author_sets: Default::default(),
             #[cfg(test)]
             frontier_headers: Default::default(),
@@ -1409,7 +1408,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     [identity.clone()],
                 )
                 .await?;
-            inner.bind_node_author(&inner.config.credentials).await?;
+            identity::check_node_chain(&inner.config.credentials)?;
             Ok(())
         })?;
         inner.load_schemas().await?;
@@ -1457,8 +1456,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .contains(&scope)
     }
     #[cfg(test)]
-    // Pause hooks of native-only tests.
-    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    #[cfg_attr(
+        target_family = "wasm",
+        expect(
+            dead_code,
+            reason = "Flush pause hooks are exercised only by native thread tests."
+        )
+    )]
     pub(crate) async fn pause_flush(
         &self,
     ) -> (
@@ -1867,117 +1871,88 @@ impl<A: RowApplication> EncryptedReplica<A> {
         revocations: &RevocationSet,
     ) -> Result<Vec<SignedRevocation>, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        revocations
-            .verify_in(
-                inner
-                    .config
-                    .credentials
-                    .database_context(inner.config.publisher)
-                    .map_err(credential)?,
-            )
-            .map_err(credential)?;
-        let mut merged = inner.config.revocations.clone();
-        let added = merged
-            .merge(
-                revocations,
-                inner.config.publisher,
-                inner.definition.app,
-                now()?,
-            )
-            .map_err(credential)?;
-        if merged == inner.config.revocations {
-            return Ok(added);
-        }
-        let authority_changed = !added.is_empty()
-            || inner.config.revocations.certificates().any(|certificate| {
-                let node = certificate.capability.subject;
-                merged.ends_node_of(certificate.issuer, node, false)
-                    != inner
-                        .config
-                        .revocations
-                        .ends_node_of(certificate.issuer, node, false)
-            });
-        let membership_changed = merged
-            .certificates()
-            .ne(inner.config.revocations.certificates());
-        let update = if authority_changed {
-            "UPDATE secure_metadata SET revocations=?,revision=revision+1 WHERE id=1"
-        } else {
-            "UPDATE secure_metadata SET revocations=? WHERE id=1"
-        };
-        let bytes = merged.to_bytes().map_err(credential)?;
-        // Seals and moves of a revoked signer leave resolution with the
-        // set, and the followed bookmark moves in the same commit.
-        let old_graphs = inner.graphs.clone();
-        let old_tip = inner.workspace.tip;
-        let old_author = inner.node_author.clone();
-        let old_nodes = inner.line_nodes.clone();
-        let old_followed = inner.workspace.followed.clone();
-        let old_revocations = inner.config.revocations.clone();
-        let result = transaction!(inner, |inner| {
-            inner.invalidate_context();
-            // Checks inside the commit, such as installing a pulled state,
-            // see the merged set.
-            inner.config.revocations = merged.clone();
-            inner.graphs = old_graphs.clone();
-            inner.workspace.tip = old_tip;
-            inner.node_author = old_author.clone();
-            inner.line_nodes = old_nodes.clone();
-            inner.workspace.followed = old_followed.clone();
-            inner.conn.execute(update, [bytes.clone()]).await?;
-            if authority_changed {
-                inner.resolve_revoked(&merged).await?;
-                inner.drop_revoked_escrow(None).await?;
-            }
-            Ok(())
-        });
-        if let Err(error) = result {
-            inner.invalidate_context();
-            inner.graphs = old_graphs;
-            inner.workspace.tip = old_tip;
-            inner.node_author = old_author;
-            inner.line_nodes = old_nodes;
-            inner.workspace.followed = old_followed;
-            inner.config.revocations = old_revocations;
-            return Err(error);
-        }
-        inner.invalidate_context();
-        inner.config.revocations = merged;
-        if authority_changed {
-            inner.bump_authority();
-        }
-        if authority_changed {
-            inner.publish_revision().await?;
-        }
-        if membership_changed {
-            inner.membership_events.send_replace(());
-        }
+        let added = inner.merge_revocations(revocations).await?;
         drop(inner);
         self.settle().await?;
         Ok(added)
     }
-    /// Merges the statements a session peer sent, except one that revokes
-    /// `own`, this device's chain: a replica never holds the statement that
-    /// revokes itself, which its owner records instead. Returns that
-    /// statement, verified, if one came.
+    /// Signs and merges an owner reset under one lock: its fence is this
+    /// replica's applied prefix of every log of a writer it does not keep,
+    /// so no operation of an ended writer applies here past the fence.
+    /// `sign` sees the held set, which the reset follows and is checked
+    /// against. Nothing is recorded when signing fails, or when the reset
+    /// would end this replica's own credentials.
+    pub async fn install_reset<E: From<Error> + From<ResetEndsSigner>>(
+        &self,
+        keep: &BTreeSet<PeerId>,
+        sign: impl FnOnce(
+            &RevocationSet,
+            Vec<rocky_credentials::FenceScope>,
+        ) -> Result<SignedRevocation, E>,
+    ) -> Result<SignedRevocation, E> {
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
+        let fence = inner.reset_fence(keep).await?;
+        let signed = sign(&inner.config.revocations, fence)?;
+        let single = RevocationSet::try_from(vec![signed.clone()]).map_err(credential)?;
+        let time = now()?;
+        let mut held = inner.config.revocations.clone();
+        held.merge(&single, inner.config.publisher, inner.definition.app, time)
+            .map_err(credential)?;
+        let node = inner.config.node.public_key();
+        if inner
+            .resolve_chain(&inner.config.credentials, node, &held, time)
+            .is_err()
+        {
+            return Err(ResetEndsSigner.into());
+        }
+        inner.merge_revocations(&single).await?;
+        drop(inner);
+        self.settle().await?;
+        Ok(signed)
+    }
+    /// Merges the statements a session peer sent, except those that revoke
+    /// `own`, this device's chain: a replica never holds a statement that
+    /// revokes itself, which its owner records instead. Returns the first
+    /// of them, verified, if one came.
     pub(crate) async fn learn_session_revocations(
         &self,
         statements: Vec<SignedRevocation>,
         own: &CredentialChain,
     ) -> Result<Option<SignedRevocation>, Error> {
-        let (publisher, app) = {
+        let (publisher, app, node) = {
             let inner = self.inner.lock(crate::replica::Class::Background).await;
-            (inner.config.publisher, inner.definition.app)
+            (
+                inner.config.publisher,
+                inner.definition.app,
+                PeerId::of(inner.config.node.public_key()),
+            )
         };
         let mut revoking = None;
         let mut others = Vec::new();
+        // A reset ends this node only while no reset following it keeps the
+        // node: judge resets against everything held and sent.
+        let mut all = self.revocations().await;
+        for signed in &statements {
+            if signed.statement.reset().is_some() {
+                let single = RevocationSet::try_from(vec![signed.clone()]).map_err(credential)?;
+                all.merge(&single, publisher, app, now()?)
+                    .map_err(credential)?;
+            }
+        }
         for signed in statements {
             signed.verify(publisher, app).map_err(credential)?;
             let single = RevocationSet::try_from(vec![signed.clone()]).map_err(credential)?;
             single
                 .verify_in(own.database_context(publisher).map_err(credential)?)
                 .map_err(credential)?;
-            if single.revoking_holder(own).map_err(credential)?.is_some() {
+            // Every reset that ends this node, not only the first.
+            let ends_own = if signed.statement.reset().is_some() {
+                let id = signed.id().map_err(credential)?;
+                all.ending_resets(&node).contains(&id)
+            } else {
+                single.revoking_holder(own).map_err(credential)?.is_some()
+            };
+            if ends_own {
                 revoking.get_or_insert(signed);
             } else {
                 others.push(signed);
@@ -2288,7 +2263,27 @@ impl<A: RowApplication> Inner<A> {
         credentials: &CredentialChain,
         time: u64,
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
-        self.header_authority(header, credentials, &self.config.revocations, time)
+        self.header_authority(header, credentials, self.header_revocations(header), time)
+    }
+    /// The revocations that judge an operation: an owner reset's fence keeps
+    /// the covered operations of a writer it ends, which every other
+    /// statement still judges; any other operation of that writer stays
+    /// refused with the whole set.
+    pub(super) fn header_revocations(
+        &self,
+        header: &p2panda_core::Header<Extensions>,
+    ) -> &RevocationSet {
+        let revocations = &self.config.revocations;
+        match revocations.reset_standing(
+            &header.extensions.scope,
+            &header.public_key,
+            header.seq_num,
+        ) {
+            rocky_credentials::ResetStanding::Covered => revocations.unfenced(),
+            rocky_credentials::ResetStanding::Live | rocky_credentials::ResetStanding::Fenced => {
+                revocations
+            }
+        }
     }
     /// A placed header's authority. A partition this replica has not
     /// registered is one it cannot recognize; its header shows only that
@@ -2306,11 +2301,11 @@ impl<A: RowApplication> Inner<A> {
                 .map(|_| ());
         }
         self.check_header_table(extension)?;
-        let number = extension
-            .author
-            .ok_or_else(|| denied("node author number missing"))?;
-        self.verified_chain(credentials, &self.config.revocations, time)?
-            .unseen_partition_author(header.public_key, number, extension.scope, time)
+        if !extension.authored {
+            return Err(denied("node author missing"));
+        }
+        self.verified_chain(credentials, self.header_revocations(header), time)?
+            .unseen_partition_author(header.public_key, extension.scope, time)
             .map_err(credential)
     }
     fn check_header_table(&self, extension: &Extensions) -> Result<(), Error> {
@@ -2339,15 +2334,15 @@ impl<A: RowApplication> Inner<A> {
         let extension = &header.extensions;
         self.check_header_table(extension)?;
         let partition = self.authenticated_partition(extension.scope)?;
-        let number = extension
-            .author
-            .ok_or_else(|| denied("node author number missing"))?;
+        if !extension.authored {
+            return Err(denied("node author missing"));
+        }
         let verified = self.verified_chain(credentials, revocations, time)?;
         let grants = match partition {
             Some(tuple) => {
-                verified.partition_author(header.public_key, number, extension.scope, tuple, time)
+                verified.partition_author(header.public_key, extension.scope, tuple, time)
             }
-            None => verified.author(header.public_key, number, extension.scope.table, time),
+            None => verified.author(header.public_key, extension.scope.table, time),
         }
         .map_err(credential)?;
         if !grants.iter().any(|grant| {
@@ -2609,4 +2604,101 @@ async fn configure(conn: &ScopedConnection) -> Result<(), Error> {
         rows(conn, &format!("PRAGMA {name}={value}")).await?;
     }
     Ok(())
+}
+
+impl<A: RowApplication> Inner<A> {
+    /// Merges `revocations` into the held set inside one commit; the caller settles.
+    async fn merge_revocations(
+        &mut self,
+        revocations: &RevocationSet,
+    ) -> Result<Vec<SignedRevocation>, Error> {
+        revocations
+            .verify_in(
+                self.config
+                    .credentials
+                    .database_context(self.config.publisher)
+                    .map_err(credential)?,
+            )
+            .map_err(credential)?;
+        let mut merged = self.config.revocations.clone();
+        let added = merged
+            .merge(
+                revocations,
+                self.config.publisher,
+                self.definition.app,
+                now()?,
+            )
+            .map_err(credential)?;
+        if merged == self.config.revocations {
+            return Ok(added);
+        }
+        let authority_changed = !added.is_empty()
+            || self.config.revocations.certificates().any(|certificate| {
+                let node = certificate.capability.subject;
+                merged.ends_node_of(certificate.issuer, node, false)
+                    != self
+                        .config
+                        .revocations
+                        .ends_node_of(certificate.issuer, node, false)
+            });
+        let membership_changed = merged
+            .certificates()
+            .ne(self.config.revocations.certificates());
+        let update = if authority_changed {
+            "UPDATE secure_metadata SET revocations=?,revision=revision+1 WHERE id=1"
+        } else {
+            "UPDATE secure_metadata SET revocations=? WHERE id=1"
+        };
+        let bytes = merged.to_bytes().map_err(credential)?;
+        // Seals and moves of a revoked signer leave resolution with the
+        // set, and the followed bookmark moves in the same commit.
+        let old_graphs = self.graphs.clone();
+        let old_tip = self.workspace.tip;
+        let old_author = self.node_author.clone();
+        let old_nodes = self.line_nodes.clone();
+        let old_followed = self.workspace.followed.clone();
+        let old_revocations = self.config.revocations.clone();
+        let result = transaction!(self, |inner| {
+            inner.invalidate_context();
+            // Checks inside the commit, such as installing a pulled state,
+            // see the merged set.
+            inner.config.revocations = merged.clone();
+            inner.graphs = old_graphs.clone();
+            inner.workspace.tip = old_tip;
+            inner.node_author = old_author.clone();
+            inner.line_nodes = old_nodes.clone();
+            inner.workspace.followed = old_followed.clone();
+            inner.conn.execute(update, [bytes.clone()]).await?;
+            if authority_changed {
+                inner.resolve_revoked(&merged).await?;
+                inner.drop_revoked_escrow(None).await?;
+                inner
+                    .rejudge_reset_writers(&old_revocations, &merged)
+                    .await?;
+            }
+            Ok(())
+        });
+        if let Err(error) = result {
+            self.invalidate_context();
+            self.graphs = old_graphs;
+            self.workspace.tip = old_tip;
+            self.node_author = old_author;
+            self.line_nodes = old_nodes;
+            self.workspace.followed = old_followed;
+            self.config.revocations = old_revocations;
+            return Err(error);
+        }
+        self.invalidate_context();
+        self.config.revocations = merged;
+        if authority_changed {
+            self.bump_authority();
+        }
+        if authority_changed {
+            self.publish_revision().await?;
+        }
+        if membership_changed {
+            self.membership_events.send_replace(());
+        }
+        Ok(added)
+    }
 }

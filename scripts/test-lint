@@ -2,9 +2,11 @@
 """Check lint failure propagation without builds or external lint tools."""
 import os
 from pathlib import Path
+import runpy
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 
@@ -48,6 +50,108 @@ class LintStatus(unittest.TestCase):
                                      [*WORKFLOW_CHECKS[:completed], "after"])
                     if failing:
                         self.assertIn("lint: failed: workflows", result.stderr)
+
+
+class RustAttributes(unittest.TestCase):
+    def test_allow_forms_including_inactive_and_nested_cfg_attr(self):
+        violations = runpy.run_path(str(SCRIPTS / 'lint-rust'))['violations']
+        source = '''#[allow(dead_code)]
+#![allow(dead_code, reason = "still forbidden")]
+#[cfg_attr(any(), allow(dead_code))]
+#[cfg_attr(all(), cfg_attr(any(), allow(dead_code)), allow(unused))]
+# /* comment */ ! [r#allow(dead_code)]
+'''
+        self.assertEqual(list(violations(source)), [1, 2, 3, 4, 4, 5])
+
+    def test_comments_literals_and_other_attributes_are_not_exceptions(self):
+        violations = runpy.run_path(str(SCRIPTS / 'lint-rust'))['violations']
+        source = '''// #[allow(dead_code)]
+/* outer /* #[allow(dead_code)] */ comment */
+const TEXT: &str = "#[allow(dead_code)]";
+const RAW: &str = r###"#[allow(dead_code)]"###;
+const BYTE: &[u8] = br#"#[allow(dead_code)]"#;
+#[doc = "#[allow(dead_code)]"]
+#[expect(dead_code, reason = "fixture")]
+fn unused<'a>() { let _ = '['; }
+fn allow() {}
+#[tool::allow(dead_code)]
+'''
+        self.assertEqual(list(violations(source)), [])
+
+    def test_error_includes_replacement_and_source_location(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'fixture.rs'
+            source.write_text('\n#![allow(dead_code, reason = "fixture")]\n')
+            result = subprocess.run([str(SCRIPTS / 'lint-rust'), str(source)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(f'{source}:2: error:', result.stderr)
+            self.assertIn('use #[expect(lint, reason = "...")] instead', result.stderr)
+
+
+class ClippyConfiguration(unittest.TestCase):
+    def test_shared_settings_reach_both_targets_and_wasm_stays_isolated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scripts = root / 'scripts'
+            (scripts / 'clippy-wasm').mkdir(parents=True)
+            shutil.copy2(SCRIPTS / 'clippy', scripts / 'clippy')
+            (root / 'clippy.toml').write_text(
+                'allow-unwrap-in-tests = true\n'
+                '[[enforced-import-renames]]\n'
+                'path = "serde_json::Value"\n'
+                'rename = "JsonValue"\n')
+            (scripts / 'clippy-wasm/clippy.toml').write_text(
+                'disallowed-methods = ["std::fs::read"]\n')
+            binary = root / 'bin'
+            binary.mkdir()
+            cargo = binary / 'cargo'
+            cargo.write_text('#!/bin/sh\n'
+                             'cat "$CLIPPY_CONF_DIR/clippy.toml" > "$CLIPPY_CAPTURE"\n'
+                             'echo "$CLIPPY_CONF_DIR" > "$CLIPPY_DIRECTORY"\n'
+                             'exit "$CLIPPY_STATUS"\n')
+            cargo.chmod(0o755)
+            capture = root / 'config'
+            config_directory = root / 'directory'
+            environment = dict(os.environ, PATH=f'{binary}:{os.environ["PATH"]}',
+                               CLIPPY_CONF_DIR='/ignored', CLIPPY_CAPTURE=str(capture),
+                               CLIPPY_DIRECTORY=str(config_directory))
+            generated_mtime = None
+            for target in ([], ['--target', 'wasm32-unknown-unknown'],
+                           ['--target=wasm32-unknown-unknown']):
+                for status in (0, 17):
+                    with self.subTest(target=target, status=status):
+                        result = subprocess.run([str(scripts / 'clippy'), *target],
+                                                cwd=root, capture_output=True, text=True,
+                                                env=dict(environment, CLIPPY_STATUS=str(status)))
+                        self.assertEqual(result.returncode, status, result.stderr)
+                        config = tomllib.loads(capture.read_text())
+                        self.assertTrue(config['allow-unwrap-in-tests'])
+                        self.assertEqual(config['enforced-import-renames'],
+                                         [{'path': 'serde_json::Value', 'rename': 'JsonValue'}])
+                        self.assertEqual('disallowed-methods' in config, bool(target))
+                        if target:
+                            generated = Path(config_directory.read_text().strip())
+                            self.assertEqual(generated.resolve(), (root / 'local/clippy-wasm').resolve())
+                            self.assertEqual(list(generated.iterdir()), [generated / 'clippy.toml'])
+                            mtime = (generated / 'clippy.toml').stat().st_mtime_ns
+                            if generated_mtime is not None:
+                                self.assertEqual(mtime, generated_mtime)
+                            generated_mtime = mtime
+                        else:
+                            self.assertEqual(Path(config_directory.read_text().strip()).resolve(), root.resolve())
+            (root / 'clippy.toml').write_text('disallowed-methods = []\n')
+            duplicate = subprocess.run([str(scripts / 'clippy'), '--target=wasm32-unknown-unknown'],
+                                       cwd=root, capture_output=True, text=True,
+                                       env=dict(environment, CLIPPY_STATUS='0'))
+            self.assertEqual(duplicate.returncode, 1)
+            self.assertIn('browser restrictions must only be defined', duplicate.stderr)
+
+    def test_browser_overlay_contains_only_browser_restrictions(self):
+        overlay = tomllib.loads((SCRIPTS / 'clippy-wasm/clippy.toml').read_text())
+        self.assertEqual(set(overlay), {'disallowed-methods', 'disallowed-types'})
+        shared = (SCRIPTS.parent / 'clippy.toml').read_text()
+        tomllib.loads(shared + '\n' + (SCRIPTS / 'clippy-wasm/clippy.toml').read_text())
 
 
 if __name__ == "__main__":

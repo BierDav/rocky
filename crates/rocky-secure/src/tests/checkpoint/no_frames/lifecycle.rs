@@ -924,7 +924,7 @@ async fn a_covered_placement_is_refused_under_a_base_and_drops_a_candidate() {
     let header = &x.covered.operation().unwrap().header;
     let request = crate::PlacementRequest {
         seal: x.sealed,
-        author: header.extensions.author.unwrap(),
+        author: header.extensions.author(&header.public_key).unwrap(),
         from: 0,
         to: header.extensions.author_sequence,
     };
@@ -1141,7 +1141,7 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
             },
         )
         .unwrap()
-        .issue_issuer(issuer.public_key(), None, crate::tests::validity())
+        .issue_issuer(issuer.public_key(), crate::tests::validity())
         .unwrap(),
     ]);
     let tip = c.followed_tip().await;
@@ -1295,13 +1295,15 @@ async fn an_author_log_fork_rolls_back_the_pulled_candidate_drop() {
         + 1;
     let fork = crate::wire::author(
         &x.e_key,
-        extension,
-        x.covered.chain().unwrap().clone(),
-        &[22; 32],
-        (header.seq_num, header.backlink, header.timestamp),
-        header.previous,
-        None,
-        &plaintext,
+        crate::wire::FrameDraft {
+            extensions: extension,
+            chain: x.covered.chain().unwrap().clone(),
+            encryption_key: &[22; 32],
+            log: (header.seq_num, header.backlink, header.timestamp),
+            previous: header.previous,
+            partition: None,
+            plaintext: &plaintext,
+        },
     )
     .unwrap();
     assert_eq!(d.receive(fork).await.unwrap(), ReceiveStatus::MissingKey);
@@ -1661,7 +1663,7 @@ async fn a_revocation_that_moves_the_followed_bookmark_through_a_pulled_seal_dro
             },
         )
         .unwrap()
-        .issue_issuer(issuer.public_key(), None, crate::tests::validity())
+        .issue_issuer(issuer.public_key(), crate::tests::validity())
         .unwrap(),
     ]);
     let sealed = SignedSeal::endorse(

@@ -31,7 +31,14 @@ async fn an_open_revocation_loader_retry_keeps_supplied_statements_past_expired_
             },
         )
         .unwrap()
-        .issue_issuer(signer.public_key(), None, (0, 86400, 0))
+        .issue_issuer(
+            signer.public_key(),
+            rocky_credentials::Validity {
+                issued_at: 0,
+                lifetime: std::time::Duration::from_secs(86400),
+                clock_skew: std::time::Duration::from_secs(0),
+            },
+        )
         .unwrap(),
     ]);
     let expired = rocky_credentials::Revocation {
@@ -42,6 +49,7 @@ async fn an_open_revocation_loader_retry_keeps_supplied_statements_past_expired_
         identities: [PrivateKey::from_bytes(&[252; 32]).public_key()].into(),
         capabilities: BTreeSet::new(),
         cut: Default::default(),
+        mode: rocky_credentials::RevocationMode::Lost,
         recovery: None,
     };
     assert!(!expired.live(now().unwrap()));
@@ -91,7 +99,7 @@ async fn an_open_revocation_loader_retry_keeps_supplied_statements_past_expired_
             },
         )
         .unwrap()
-        .issue_issuer(issuer.public_key(), None, crate::tests::validity())
+        .issue_issuer(issuer.public_key(), crate::tests::validity())
         .unwrap(),
     ]);
     let sealed = SignedSeal::endorse(

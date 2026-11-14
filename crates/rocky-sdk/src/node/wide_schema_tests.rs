@@ -1,4 +1,5 @@
 //! Wide schemas use one signed grant family and one delivered group secret.
+use crate::test_snapshot as snap;
 use crate::{
     Database, Network, NetworkService, Open, Opened, Schema, Session, enrollment::Settings,
     transport::memory::Hub,
@@ -27,14 +28,14 @@ struct Device {
     database: Arc<Database>,
     _network: Option<NetworkService>,
     session: Session,
-    scope: Value,
+
     identity: Option<Arc<dyn crate::IdentityProvider>>,
 }
 impl Device {
     fn new(opened: Opened) -> Result<Self, Failure> {
         Ok(Self {
             session: opened.database.session(),
-            scope: serde_json::from_str(&opened.database.scope())?,
+
             database: opened.database,
             _network: opened.network,
             identity: None,
@@ -44,42 +45,28 @@ impl Device {
         self.identity = Some(identity);
         self
     }
-    async fn call(&self, request: Value) -> Result<Value, Value> {
-        let call = json!({"version":1,"scope":self.scope,"request":request}).to_string();
-        let reply = match &self.identity {
-            Some(identity) => {
-                self.session
-                    .call_with_identity(call, identity.clone())
-                    .await
-            }
-            None => self.session.call(call).await,
-        }
-        .map_err(|error| json!(error.to_string()))?;
-        let reply: Value =
-            serde_json::from_str(&reply).map_err(|error| json!(error.to_string()))?;
-        if reply["status"] == "ok" {
-            Ok(reply["value"].clone())
-        } else {
-            Err(reply["error"].clone())
-        }
-    }
-    async fn ok(&self, request: Value) -> Value {
-        self.call(request.clone())
-            .await
-            .unwrap_or_else(|error| panic!("{request}: {error}"))
-    }
+
     async fn contact(&self) -> String {
-        self.ok(json!({"type":"contact"})).await["uri"]
+        snap::ok(self.session.contact_info()).await["uri"]
             .as_str()
             .unwrap()
             .into()
     }
     async fn sync(&self) -> Result<Value, Value> {
-        self.call(json!({"type":"sync"})).await
+        snap::observe(async {
+            match &self.identity {
+                Some(identity) => self.session.sync_once_with_identity(identity.clone()).await,
+                None => self.session.sync_once().await,
+            }
+        })
+        .await
     }
     async fn add_peer(&self, contact: &str) -> Result<Value, Value> {
-        self.call(json!({"type":"peer_add","contact":contact}))
-            .await
+        snap::observe(async {
+            let value = self.session.add_peer(&(snap::text(&(contact)))).await?;
+            Ok(json!({"node":value}))
+        })
+        .await
     }
 }
 
@@ -129,11 +116,16 @@ fn metric(label: &str, chain: &CredentialChain) -> usize {
     println!("{label}: grants={held}, chain_bytes={bytes}");
     bytes
 }
-fn epochs_request() -> Value {
-    json!({"type":"partition_status","group":"book","values":[{"type":"text","value":"A"}]})
-}
 async fn assert_epochs(device: &Device, count: usize, expected: &[u64]) {
-    let status = device.ok(epochs_request()).await;
+    let status = snap::ok(
+        device
+            .session
+            .partition_status(rocky_sdk::PartitionTarget::Group {
+                group: "book".into(),
+                values: vec![rocky_sdk::SqlValue::Text("A".into())],
+            }),
+    )
+    .await;
     let tables = status["tables"].as_array().unwrap();
     assert_eq!(tables.len(), count);
     for table in tables {
@@ -172,7 +164,11 @@ async fn exercise(count: usize, legacy: bool) -> Result<(), Failure> {
         let capability = authority.hold(
             grants,
             partitions,
-            (crate::enrollment::now()?, held.ttl, 300),
+            rocky_credentials::Validity {
+                issued_at: crate::enrollment::now()?,
+                lifetime: std::time::Duration::from_secs(held.ttl),
+                clock_skew: std::time::Duration::from_secs(300),
+            },
         )?;
         links.0.extend([capability, certificate]);
         links.verify_selectors(
@@ -196,10 +192,32 @@ async fn exercise(count: usize, legacy: bool) -> Result<(), Failure> {
     );
     let contact = owner.contact().await;
     let mut members = Vec::new();
-    for kind in ["writer", "reader"] {
+    for (kind, profile) in [
+        (
+            "writer",
+            crate::GrantProfile::Writer {
+                scopes: ["table_000".into()].into(),
+            },
+        ),
+        (
+            "reader",
+            crate::GrantProfile::Reader {
+                scopes: ["table_000".into()].into(),
+            },
+        ),
+    ] {
         let dir = root.path().join(kind);
         let keys = node_keys(&dir)?;
-        let supplied = owner.ok(json!({"type":"grant","device":keys,"profile":{"kind":kind,"scopes":["table_000"]},"delegations":2})).await["supplied"].clone();
+        let supplied = snap::ok(owner.session.grant(
+            keys,
+            profile,
+            rocky_sdk::GrantTerms {
+                ttl: None,
+                delegations: Some(2),
+            },
+        ))
+        .await["supplied"]
+            .clone();
         let device = Device::new(Database::install(
             open(&dir, &schema, &hub, kind),
             serde_json::from_value(supplied)?,
@@ -210,8 +228,16 @@ async fn exercise(count: usize, legacy: bool) -> Result<(), Failure> {
         assert_eq!(grant_count(&settings(&dir).credentials), 2);
         members.push((device, keys, dir));
     }
-    owner.ok(json!({"type":"partition_create","group":"book","values":[{"type":"text","value":"A"}]})).await;
-    owner.ok(json!({"type":"partition_share","group":"book","values":[{"type":"text","value":"A"}],"recipients":[members[0].1.node,members[1].1.node]})).await;
+    snap::ok(
+        owner
+            .session
+            .create_partition(rocky_sdk::PartitionTarget::Group {
+                group: "book".to_owned(),
+                values: vec![rocky_sdk::SqlValue::Text("A".to_owned())],
+            }),
+    )
+    .await;
+    snap::ok(owner.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "book".to_owned(), values: vec![rocky_sdk::SqlValue::Text("A".to_owned())] }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([members[0].1.node,members[1].1.node])).expect("typed fixture"), None)).await;
     let saved = settings(&owner_dir);
     let delivery = saved
         .deliveries
@@ -254,10 +280,19 @@ async fn exercise(count: usize, legacy: bool) -> Result<(), Failure> {
     }
     let table = format!("table_{:03}", count - 1);
     let writer = &members[0].0;
-    writer.ok(json!({"type":"sql","sql":"BEGIN"})).await;
-    let id = writer.ok(json!({"type":"next_id","table":table,"partition_values":[{"type":"text","value":"A"}]})).await["id"].clone();
-    writer.ok(json!({"type":"sql","sql":format!("INSERT INTO {table}(id,book,title) VALUES(?,'A','written')"),"values":[{"type":"integer","value":id}]})).await;
-    writer.ok(json!({"type":"sql","sql":"COMMIT"})).await;
+    snap::ok(writer.session.execute("BEGIN", Vec::new())).await;
+    let id = snap::ok(writer.session.next_partition_id(
+        &(snap::text(&(table))),
+        vec![rocky_sdk::SqlValue::Text("A".to_owned())],
+    ))
+    .await["id"]
+        .clone();
+    snap::ok(writer.session.execute(
+        &(snap::text(&(format!("INSERT INTO {table}(id,book,title) VALUES(?,'A','written')")))),
+        vec![snap::row_id(&(id))],
+    ))
+    .await;
+    snap::ok(writer.session.execute("COMMIT", Vec::new())).await;
     let writer_sync = writer.sync().await.map_err(|e| e.to_string())?;
     owner
         .add_peer(&writer.contact().await)
@@ -265,38 +300,58 @@ async fn exercise(count: usize, legacy: bool) -> Result<(), Failure> {
         .map_err(|e| e.to_string())?;
     let owner_sync = owner.sync().await.map_err(|e| e.to_string())?;
     let reader_sync = members[1].0.sync().await.map_err(|e| e.to_string())?;
-    let page = members[1].0.ok(json!({"type":"read","query":{"sql":format!("SELECT title FROM {table}"),"values":[],"max_rows":2}})).await;
+    let page = snap::ok(members[1].0.session.read(rocky_sdk::ReadQuery {
+        sql: snap::text(&(format!("SELECT title FROM {table}"))),
+        values: vec![],
+        max_rows: 2,
+        max_bytes: None,
+        cursor: None,
+    }))
+    .await;
     if page["rows"][0][0]["value"] != "written" {
         println!(
             "writer sync: {writer_sync}; owner sync: {owner_sync}; reader sync: {reader_sync}"
         );
         println!(
             "writer peers: {}; owner peers: {}; reader peers: {}",
-            writer.ok(json!({"type":"peers"})).await,
-            owner.ok(json!({"type":"peers"})).await,
-            members[1].0.ok(json!({"type":"peers"})).await
+            snap::ok(async {
+                let network = writer.session.network().await?;
+                Ok(json!({"peers":network.peers,"discovery":network.discovery}))
+            })
+            .await,
+            snap::ok(async {
+                let network = owner.session.network().await?;
+                Ok(json!({"peers":network.peers,"discovery":network.discovery}))
+            })
+            .await,
+            snap::ok(async {
+                let network = members[1].0.session.network().await?;
+                Ok(json!({"peers":network.peers,"discovery":network.discovery}))
+            })
+            .await
         );
         println!(
             "owner activity: {}",
-            owner.ok(json!({"type":"activity"})).await
+            snap::ok(owner.session.activity(0)).await
         );
     }
     assert_eq!(page["rows"][0][0]["value"], "written");
-    members[1].0.ok(json!({"type":"sql","sql":"BEGIN"})).await;
+    snap::ok(members[1].0.session.execute("BEGIN", Vec::new())).await;
     assert!(
-        members[1]
-            .0
-            .call(json!({"type":"sql","sql":format!("UPDATE {table} SET title='forged'")}))
-            .await
-            .is_err()
+        snap::observe(members[1].0.session.execute(
+            &(snap::text(&(format!("UPDATE {table} SET title='forged'")))),
+            Vec::new()
+        ))
+        .await
+        .is_err()
     );
-    members[1]
-        .0
-        .ok(json!({"type":"sql","sql":"ROLLBACK"}))
-        .await;
-    owner
-        .ok(json!({"type":"revoke","identity":members[0].1.identity}))
-        .await;
+    snap::ok(members[1].0.session.execute("ROLLBACK", Vec::new())).await;
+    snap::ok(
+        owner
+            .session
+            .revoke_identity(&(snap::text(&(members[0].1.identity)))),
+    )
+    .await;
     members[1].0.sync().await.map_err(|e| e.to_string())?;
     assert_epochs(&members[1].0, count, &[1, 2]).await;
     assert_epochs(&members[0].0, count, &[1]).await;
@@ -346,12 +401,37 @@ async fn local_sql_sessions_cover_more_than_256_authorized_scopes() -> Result<()
         },
         None,
     )?)?;
-    device.ok(json!({"type":"partition_create","group":"book","values":[{"type":"text","value":"A"}]})).await;
-    device.ok(json!({"type":"sql","sql":"BEGIN"})).await;
-    let id = device.ok(json!({"type":"next_id","table":"table_159","partition_values":[{"type":"text","value":"A"}]})).await["id"].clone();
-    device.ok(json!({"type":"sql","sql":"INSERT INTO table_159(id,book,title) VALUES(?,'A','wide')","values":[{"type":"integer","value":id}]})).await;
-    device.ok(json!({"type":"sql","sql":"COMMIT"})).await;
-    let rows = device.ok(json!({"type":"read","query":{"sql":"SELECT title FROM table_159","values":[],"max_rows":2}})).await;
+    snap::ok(
+        device
+            .session
+            .create_partition(rocky_sdk::PartitionTarget::Group {
+                group: "book".to_owned(),
+                values: vec![rocky_sdk::SqlValue::Text("A".to_owned())],
+            }),
+    )
+    .await;
+    snap::ok(device.session.execute("BEGIN", Vec::new())).await;
+    let id = snap::ok(
+        device
+            .session
+            .next_partition_id("table_159", vec![rocky_sdk::SqlValue::Text("A".to_owned())]),
+    )
+    .await["id"]
+        .clone();
+    snap::ok(device.session.execute(
+        "INSERT INTO table_159(id,book,title) VALUES(?,'A','wide')",
+        vec![snap::row_id(&(id))],
+    ))
+    .await;
+    snap::ok(device.session.execute("COMMIT", Vec::new())).await;
+    let rows = snap::ok(device.session.read(rocky_sdk::ReadQuery {
+        sql: "SELECT title FROM table_159".to_owned(),
+        values: vec![],
+        max_rows: 2,
+        max_bytes: None,
+        cursor: None,
+    }))
+    .await;
     assert_eq!(rows["rows"][0][0]["value"], "wide");
     device.database.close().await?;
     Ok(())

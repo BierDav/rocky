@@ -1,18 +1,13 @@
 //! Ordinary rows, seal finality, staged publication and rollback over real voters.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
-#![cfg(feature = "iroh")]
+use support::snapshot as snap;
 mod support;
-use rocky_coordinator::{
-    certified::*,
-    service::{NetworkCoordinator, VoterService},
-};
+use rocky_coordinator::{certified::*, service::NetworkCoordinator};
 use rocky_core::{MeshId, net::Protocol};
 use rocky_sdk::credentials::PrivateKey;
-use rocky_sdk::{
-    Coordination, CoordinationError, Database, Network, Open, counters, params,
-    transport::TransportOptions,
-};
+use rocky_sdk::{CoordinationError, Database, Network, Open, counters, params};
+use rocky_voter::VoterService;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
@@ -36,75 +31,61 @@ type Failure = Box<dyn std::error::Error + Send + Sync>;
 
 const SCHEMA: &str = r#"{"application":"counter","version":1,"format":6,"tables":[{"name":"counts","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"value","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
 
-async fn call(
-    session: &rocky_sdk::Session,
-    scope: &Value,
-    request: Value,
-) -> Result<Value, Failure> {
-    let reply: Value = serde_json::from_str(
-        &session
-            .call(json!({"version": 1, "scope": scope, "request": request}).to_string())
-            .await?,
-    )?;
-    if reply["status"] == "ok" {
-        Ok(reply["value"].clone())
-    } else {
-        Err(format!("{} failed: {}", request["type"], reply["error"]).into())
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_registered_service_domain_commits_ordinary_rows_and_closes() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let (bundle, _admin) = service(root.path()).await?;
-    let directory = root.path().join("a");
-    let opened = tokio::task::spawn_blocking(move || {
-        Database::create(
-            Open {
-                identity: None,
-                directory: &directory,
-                schema: SCHEMA,
-                secrets: None,
-                network: Some(Network::Owned(Arc::new(starter()))),
-                coordination: Some(Coordination::Service(Box::new(bundle))),
-            },
-            None,
-        )
-    })
-    .await??;
-    let session = opened.database.session();
-    let scope: Value = serde_json::from_str(&opened.database.scope())?;
-    let identity = call(&session, &scope, json!({"type": "session"})).await?;
+    let peer =
+        fixture::Peer::start(&root.path().join("a"), SCHEMA, Some(&bundle), None, true).await?;
+    let opened = &peer.opened;
+    let session = &peer.session;
+    let identity = snap::value(session.info()).await?;
     // Controls trust identities; the node presents its certificate.
     let trusted = identity["principal"].clone();
     let tenant = PrivateKey::new();
-    let register = json!({"type": "coordination_register", "tenant": tenant.to_hex(),
-        "registration": vec![1u8; 32], "trusted": [trusted], "lifetime": 3600,
-        "root": {"phrase": opened.root.as_ref().ok_or("created with a root")?.phrase()}});
-    let registered = call(&session, &scope, register.clone()).await?;
+    let register = || {
+        peer.publish_coordination(
+            rocky_coordinator::control::ControlRequest {
+                tenant: rocky_sdk::credentials::PrivateKey::from_bytes(&snap::digest(
+                    &(tenant.to_hex()),
+                )),
+                trusted: serde_json::from_value::<Vec<rocky_sdk::credentials::PublicKey>>(json!([
+                    trusted
+                ]))
+                .expect("typed fixture"),
+                lifetime: 3600,
+                id: serde_json::from_value::<[u8; 32]>(json!(vec![1u8; 32]))
+                    .expect("typed fixture"),
+                revision: rocky_coordinator::control::ControlRevision::Register {
+                    grant: serde_json::from_value::<
+                        Option<Box<rocky_sdk::credentials::SignedCoordinationGrant>>,
+                    >(json!(null))
+                    .expect("typed fixture"),
+                    admission: serde_json::from_value::<
+                        Option<Box<rocky_sdk::credentials::SignedTenantAdmission>>,
+                    >(json!(null))
+                    .expect("typed fixture"),
+                },
+            },
+            Some(std::sync::Arc::new(
+                rocky_sdk::RootKey::from_phrase(&snap::text(
+                    &(opened.root.as_ref().expect("created with a root").phrase()),
+                ))
+                .expect("root"),
+            )),
+        )
+    };
+    let registered = snap::value(register()).await?;
     assert_eq!(registered["tenant"], tenant.public_key().to_hex());
-    assert_eq!(call(&session, &scope, register).await?, registered);
-    call(&session, &scope, json!({"type": "sql", "sql": "BEGIN"})).await?;
-    let id = call(
-        &session,
-        &scope,
-        json!({"type":"next_id", "table":"counts"}),
-    )
-    .await?["id"]
-        .clone();
-    call(
-        &session,
-        &scope,
-        json!({"type":"sql", "sql":"INSERT INTO counts(key,value,id) VALUES('total',5,?)",
-        "values":[{"type":"integer", "value": id}]}),
-    )
+    assert_eq!(snap::value(register()).await?, registered);
+    snap::value(session.execute("BEGIN", Vec::new())).await?;
+    let id = snap::value(session.next_id("counts")).await?["id"].clone();
+    snap::value(session.execute(
+        "INSERT INTO counts(key,value,id) VALUES('total',5,?)",
+        vec![snap::row_id(&(id))],
+    ))
     .await?;
-    let committed = call(
-        &session,
-        &scope,
-        json!({"type":"sql", "sql":"COMMIT", "handle":vec![2u8;32]}),
-    )
-    .await?;
+    let committed = snap::value(session.commit([2u8; 32])).await?;
     assert!(!committed["committed"].is_null());
     // A claim is a coordinator decision outside any transaction: the
     // application keeps the claim, uses the value in an ordinary write and
@@ -131,18 +112,19 @@ async fn a_registered_service_domain_commits_ordinary_rows_and_closes() -> Resul
         )
         .await?;
     transaction.commit().await?;
-    let usage = call(
-        &session,
-        &scope,
-        json!({"type":"coordination_usage", "tenant":tenant.to_hex()}),
+    let usage = snap::value(
+        peer.control()
+            .usage(rocky_sdk::credentials::PrivateKey::from_bytes(
+                &snap::digest(&(tenant.to_hex())),
+            )),
     )
     .await?;
     assert_eq!(usage["open_domains"], 1);
-    call(
-        &session,
-        &scope,
-        json!({"type":"coordination_close", "tenant":tenant.to_hex(), "id":vec![3u8;32]}),
-    )
+    snap::value(peer.control().close(
+        peer.scope,
+        rocky_sdk::credentials::PrivateKey::from_bytes(&snap::digest(&(tenant.to_hex()))),
+        [3u8; 32],
+    ))
     .await?;
     // A closed domain takes no claim.
     let refused = database
@@ -153,10 +135,6 @@ async fn a_registered_service_domain_commits_ordinary_rows_and_closes() -> Resul
         refused.downcast_ref::<CoordinationError>(),
         Some(&CoordinationError::Denied)
     );
-    session.close().await;
-    if let Some(network) = opened.network {
-        network.close().await;
-    }
-    opened.database.close().await?;
+    peer.close().await?;
     Ok(())
 }

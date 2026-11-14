@@ -15,11 +15,10 @@ pub mod roles;
 
 use rocky_sdk::{
     Affinity, Column, Configuration, Database, DeleteAction, DropReason, Failure,
-    ForeignKeyDefinition, IndexColumn, IndexDefinition, Row, Schema, SqlValue, Table,
+    ForeignKeyDefinition, IndexColumn, IndexDefinition, Row, RowIdentity, Schema, SqlValue, Table,
     TableDefinition, Transaction, TransactionOutcome, TransactionToken, params,
 };
 pub use roles::{Member, Role};
-use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
 
 pub const APPLICATION: &str = "todo";
@@ -42,7 +41,7 @@ pub fn schema() -> Result<Schema, Failure> {
     );
     let mut todos = grouped(
         Table::replayed(TODOS)
-            .column(Column::new("list", Affinity::Integer).required())
+            .column(Column::new("list", Affinity::Blob).required())
             .column(Column::new("title", Affinity::Text).required())
             .column(
                 Column::new("completed", Affinity::Integer)
@@ -108,14 +107,14 @@ pub fn configuration(directory: impl Into<PathBuf>) -> Result<Configuration, Fai
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct List {
-    pub id: i64,
+    pub id: RowIdentity,
     pub title: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Todo {
-    pub id: i64,
-    pub list: i64,
+    pub id: RowIdentity,
+    pub list: RowIdentity,
     pub title: String,
     pub completed: bool,
     pub priority: i64,
@@ -139,15 +138,14 @@ const TODO_COLUMNS: &str = "id,list,title,completed,priority,position";
 /// still drop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Created {
-    pub id: i64,
+    pub id: RowIdentity,
     pub token: Option<TransactionToken>,
 }
 
 #[derive(Debug)]
 pub enum TodoError {
     InvalidTitle,
-    /// A reply of the call contract lacked a field.
-    Reply(&'static str),
+    UnknownRole,
 }
 impl std::fmt::Display for TodoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -155,7 +153,7 @@ impl std::fmt::Display for TodoError {
             Self::InvalidTitle => {
                 write!(f, "a title needs text and at most {MAX_TITLE_BYTES} bytes")
             }
-            Self::Reply(field) => write!(f, "Rocky's reply lacks {field}"),
+            Self::UnknownRole => write!(f, "the device has an unknown role"),
         }
     }
 }
@@ -182,33 +180,11 @@ impl Todos {
     pub fn database(&self) -> &Arc<Database> {
         &self.database
     }
-    /// One request of Rocky's call contract; partitions have no typed API.
-    pub(crate) async fn call(&self, request: Value) -> Result<Value, Failure> {
-        let scope: Value = serde_json::from_str(&self.database.scope())?;
-        let reply: Value = serde_json::from_str(
-            &self
-                .database
-                .session()
-                .call(json!({"version": 1, "scope": scope, "request": request}).to_string())
-                .await?,
-        )?;
-        if reply["status"] == "ok" {
-            Ok(reply["value"].clone())
-        } else {
-            Err(reply["error"]["message"]
-                .as_str()
-                .unwrap_or("Rocky refused the request")
-                .to_owned()
-                .into())
-        }
-    }
-
     /// Creates a list in a new partition and shares it with the full and
     /// trusted devices.
     pub async fn create_list(&self, name: &str) -> Result<Created, Failure> {
         let name = title(name)?;
-        self.call(json!({"type": "partition_next", "table": LISTS}))
-            .await?;
+        self.database.session().next_partition(LISTS).await?;
         let mut transaction = self.database.transaction().await?;
         let id = transaction.next_id(LISTS, params![]).await?;
         transaction
@@ -220,7 +196,7 @@ impl Todos {
     }
     pub async fn rename_list(
         &self,
-        list: i64,
+        list: RowIdentity,
         name: &str,
     ) -> Result<Option<TransactionToken>, Failure> {
         let name = title(name)?;
@@ -228,7 +204,10 @@ impl Todos {
             .await
     }
     /// Deletes the list and, by cascade, its todos.
-    pub async fn delete_list(&self, list: i64) -> Result<Option<TransactionToken>, Failure> {
+    pub async fn delete_list(
+        &self,
+        list: RowIdentity,
+    ) -> Result<Option<TransactionToken>, Failure> {
         self.write("DELETE FROM lists WHERE id=?", params![list])
             .await
     }
@@ -251,7 +230,7 @@ impl Todos {
     }
 
     /// Appends a todo to the end of `list`.
-    pub async fn add(&self, list: i64, name: &str) -> Result<Created, Failure> {
+    pub async fn add(&self, list: RowIdentity, name: &str) -> Result<Created, Failure> {
         let name = title(name)?;
         let mut transaction = self.database.transaction().await?;
         let id = transaction.next_id(TODOS, params![list]).await?;
@@ -268,8 +247,8 @@ impl Todos {
     }
     pub async fn rename(
         &self,
-        list: i64,
-        todo: i64,
+        list: RowIdentity,
+        todo: RowIdentity,
         name: &str,
     ) -> Result<Option<TransactionToken>, Failure> {
         let name = title(name)?;
@@ -281,8 +260,8 @@ impl Todos {
     }
     pub async fn set_completed(
         &self,
-        list: i64,
-        todo: i64,
+        list: RowIdentity,
+        todo: RowIdentity,
         completed: bool,
     ) -> Result<Option<TransactionToken>, Failure> {
         self.write(
@@ -294,8 +273,8 @@ impl Todos {
     /// Raises the priority by one; concurrent raises all count.
     pub async fn raise_priority(
         &self,
-        list: i64,
-        todo: i64,
+        list: RowIdentity,
+        todo: RowIdentity,
     ) -> Result<Option<TransactionToken>, Failure> {
         self.write(
             "UPDATE todos SET priority=priority+? WHERE list=? AND id=?",
@@ -307,8 +286,8 @@ impl Todos {
     /// past the end appends.
     pub async fn move_to(
         &self,
-        list: i64,
-        todo: i64,
+        list: RowIdentity,
+        todo: RowIdentity,
         index: usize,
     ) -> Result<Option<TransactionToken>, Failure> {
         let mut transaction = self.database.transaction().await?;
@@ -324,7 +303,11 @@ impl Todos {
             .await?;
         Ok(transaction.commit().await?)
     }
-    pub async fn delete(&self, list: i64, todo: i64) -> Result<Option<TransactionToken>, Failure> {
+    pub async fn delete(
+        &self,
+        list: RowIdentity,
+        todo: RowIdentity,
+    ) -> Result<Option<TransactionToken>, Failure> {
         self.write(
             "DELETE FROM todos WHERE list=? AND id=?",
             params![list, todo],
@@ -332,7 +315,7 @@ impl Todos {
         .await
     }
     /// `list`'s todos in order.
-    pub async fn todos(&self, list: i64) -> Result<Vec<Todo>, Failure> {
+    pub async fn todos(&self, list: RowIdentity) -> Result<Vec<Todo>, Failure> {
         self.select(
             &format!("SELECT {TODO_COLUMNS} FROM todos WHERE list=? ORDER BY position"),
             params![list],
@@ -378,14 +361,17 @@ impl Todos {
 /// `list`'s positions in order, without `except`.
 async fn positions(
     transaction: &mut Transaction,
-    list: i64,
-    except: Option<i64>,
+    list: RowIdentity,
+    except: Option<RowIdentity>,
 ) -> Result<Vec<String>, Failure> {
     let rows = transaction
         .query(
             "SELECT position FROM todos WHERE list=? AND id<>? ORDER BY position",
-            // Ids are positive, so 0 excludes nothing.
-            params![list, except.unwrap_or(0)],
+            // An empty blob is no identity, so it excludes nothing.
+            params![
+                list,
+                except.map_or(rocky_sdk::SqlValue::Blob(Vec::new()), RowIdentity::sql)
+            ],
         )
         .await?
         .collect()

@@ -90,30 +90,24 @@ fn transaction(frame: &EncryptedFrame, key: [u8; 32], f: &Fixture) -> rocky_core
 async fn a_partial_holder_drops_its_member_when_a_full_holders_record_says_so() {
     let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
-    let open =
-        |name: &'static str, node: &PrivateKey, held: Option<&'static [&'static str]>, number| {
-            let (f, root, node) = (&f, &root, node.clone());
-            async move {
-                let replica = f
-                    .open(
-                        &root.path().join(name),
-                        node.clone(),
-                        f.grant(held, &all()),
-                        Some((node, number)),
-                    )
-                    .await;
-                for (list, key) in [("A", [1; 32]), ("B", [2; 32])] {
-                    if held.is_none_or(|held| held.contains(&list)) {
-                        f.key(&replica, list, key).await;
-                    }
+    let open = |name: &'static str, node: &PrivateKey, held: Option<&'static [&'static str]>| {
+        let (f, root, node) = (&f, &root, node.clone());
+        async move {
+            let replica = f
+                .open(&root.path().join(name), node.clone(), f.grant(held, &all()))
+                .await;
+            for (list, key) in [("A", [1; 32]), ("B", [2; 32])] {
+                if held.is_none_or(|held| held.contains(&list)) {
+                    f.key(&replica, list, key).await;
                 }
-                replica
             }
-        };
+            replica
+        }
+    };
     let (w, x, r) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
-    let writer = open("w.sqlite", &w, None, 1).await;
-    let full = open("x.sqlite", &x, None, 2).await;
-    let partial = open("r.sqlite", &r, Some(&["A"]), 3).await;
+    let writer = open("w.sqlite", &w, None).await;
+    let full = open("x.sqlite", &x, None).await;
+    let partial = open("r.sqlite", &r, Some(&["A"])).await;
 
     // X creates `k` in B; the writer, not having seen it, creates `a` in A
     // and `k` in B in one transaction, which X must drop.
@@ -198,7 +192,6 @@ async fn a_seal_covers_a_transaction_once_every_member_has_a_record() {
             &root.path().join("w.sqlite"),
             w.clone(),
             f.grant(None, &all()),
-            Some((w.clone(), 1)),
         )
         .await;
     let partial = f
@@ -206,7 +199,6 @@ async fn a_seal_covers_a_transaction_once_every_member_has_a_record() {
             &root.path().join("r.sqlite"),
             r.clone(),
             f.grant(Some(&["A"]), &all()),
-            Some((r.clone(), 3)),
         )
         .await;
     f.key(&writer, "A", [1; 32]).await;
@@ -257,21 +249,16 @@ async fn a_rewind_waits_for_its_partition_keys_and_records_only_changed_outcomes
     let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
     let (w, x, r) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
-    let open = |name: &'static str, node: &PrivateKey, number| {
+    let open = |name: &'static str, node: &PrivateKey| {
         let (f, root, node) = (&f, &root, node.clone());
         async move {
-            f.open(
-                &root.path().join(name),
-                node.clone(),
-                f.grant(None, &all()),
-                Some((node, number)),
-            )
-            .await
+            f.open(&root.path().join(name), node.clone(), f.grant(None, &all()))
+                .await
         }
     };
-    let writer = open("w.sqlite", &w, 1).await;
-    let other = open("x.sqlite", &x, 2).await;
-    let reader = open("r.sqlite", &r, 3).await;
+    let writer = open("w.sqlite", &w).await;
+    let other = open("x.sqlite", &x).await;
+    let reader = open("r.sqlite", &r).await;
     for replica in [&writer, &other, &reader] {
         f.key(replica, "A", [1; 32]).await;
         f.key(replica, "B", [2; 32]).await;
@@ -289,7 +276,7 @@ async fn a_rewind_waits_for_its_partition_keys_and_records_only_changed_outcomes
     // Reopened with only A's key, the reader cannot redo the transaction's
     // member in B: the earlier arrival waits instead of being rejected.
     drop(reader);
-    let reader = open("r.sqlite", &r, 3).await;
+    let reader = open("r.sqlite", &r).await;
     f.key(&reader, "A", [1; 32]).await;
     assert_ne!(
         reader.receive(earlier.clone()).await.unwrap(),
@@ -323,16 +310,11 @@ async fn a_disagreeing_outcome_record_is_refused_as_divergence_naming_both_engin
     let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
     let (w, x, r) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
-    let open = |name: &'static str, node: &PrivateKey, number| {
+    let open = |name: &'static str, node: &PrivateKey| {
         let (f, root, node) = (&f, &root, node.clone());
         async move {
             let replica = f
-                .open(
-                    &root.path().join(name),
-                    node.clone(),
-                    f.grant(None, &all()),
-                    Some((node, number)),
-                )
+                .open(&root.path().join(name), node.clone(), f.grant(None, &all()))
                 .await;
             f.key(&replica, "A", [1; 32]).await;
             f.key(&replica, "B", [2; 32]).await;
@@ -340,9 +322,9 @@ async fn a_disagreeing_outcome_record_is_refused_as_divergence_naming_both_engin
         }
     };
     let (writer, forger, reader) = (
-        open("w.sqlite", &w, 1).await,
-        open("x.sqlite", &x, 2).await,
-        open("r.sqlite", &r, 3).await,
+        open("w.sqlite", &w).await,
+        open("x.sqlite", &x).await,
+        open("r.sqlite", &r).await,
     );
     let both = insert(&f, &writer, &["A", "B"], &[("A", "a", 1), ("B", "b", 1)], 1).await;
     for status in forger.receive_all(both.clone()).await {

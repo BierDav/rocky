@@ -8,8 +8,9 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// Current descriptor format: replayed and local tables only.
-pub const LOGICAL_SCHEMA_FORMAT: u32 = 6;
+/// Current descriptor format: replayed and local tables only, each with a
+/// 40-byte BLOB `id` naming its creating writer and creation sequence.
+pub const LOGICAL_SCHEMA_FORMAT: u32 = 7;
 /// The domain rule and operation shape of a typed manifest.
 pub const TYPED_RULE: &str = "rocky.sdk.typed.v2";
 /// Largest canonical descriptor a parser accepts.
@@ -997,18 +998,18 @@ impl LogicalSchema {
                 let name = "id";
                 let column = table.column(name).ok_or_else(|| {
                     SchemaError::Invalid(format!(
-                        "{}.{} is required by descriptor format 6",
+                        "{}.{} is required by descriptor format 7",
                         table.sql_name, name
                     ))
                 })?;
                 if column.sql_name != name
-                    || column.affinity != Affinity::Integer
+                    || column.affinity != Affinity::Blob
                     || !column.not_null
                     || column.collation != Collation::Binary
                     || column.class != ColumnClass::Replicated
                 {
                     return invalid(format!(
-                        "{}.{} must be a non-null integer identity column",
+                        "{}.{} must be a non-null BLOB identity column",
                         table.sql_name, name
                     ));
                 }
@@ -1148,9 +1149,20 @@ impl LogicalSchema {
             }
             for key in &table.foreign_keys {
                 if let Some(target) = self.table(&key.table) {
-                    for name in &key.references {
+                    for (column, name) in key.columns.iter().zip(&key.references) {
                         if target.column(name).is_none() {
                             return invalid(format!("{} column {name}", target.sql_name));
+                        }
+                        // A reference holds the parent's portable identity.
+                        if name.eq_ignore_ascii_case("id")
+                            && table
+                                .column(column)
+                                .is_some_and(|column| column.affinity != Affinity::Blob)
+                        {
+                            return invalid(format!(
+                                "{}.{column} references {}.id and must be a blob",
+                                table.sql_name, target.sql_name
+                            ));
                         }
                     }
                     let reason = if !target.partition_by.is_empty()
@@ -1384,9 +1396,9 @@ mod tests {
                 sql_name: "items".into(),
             granted_like: None,
                 class: TableClass::Replayed,
-                create_sql: "CREATE TABLE `items` (`key` TEXT NOT NULL, `title` TEXT NOT NULL, `id` INTEGER NOT NULL, PRIMARY KEY(`key`))".into(),
+                create_sql: "CREATE TABLE `items` (`key` TEXT NOT NULL, `title` TEXT NOT NULL, `id` BLOB NOT NULL, PRIMARY KEY(`key`))".into(),
                 auto_generate: false,
-                columns: vec![column("key", Affinity::Text), column("title", Affinity::Text), column("id", Affinity::Integer)],
+                columns: vec![column("key", Affinity::Text), column("title", Affinity::Text), column("id", Affinity::Blob)],
                 primary_key: vec!["key".into()],
                 partition_by: Vec::new(),
             partition_group: None,
@@ -1415,7 +1427,7 @@ mod tests {
             on_update: "NO ACTION".into(),
             deferred: false,
         };
-        table.columns.push(column("link", Affinity::Integer));
+        table.columns.push(column("link", Affinity::Blob));
         table.create_sql.pop();
         table
             .create_sql

@@ -52,7 +52,10 @@ pub enum EarlierEpochWrites {
 impl<A: RowApplication> Inner<A> {
     /// Every locally held operation and void header of the domain. A scan
     /// of headers, never of rows; explicit developer calls only.
-    pub(super) async fn domain_headers(&self, scope: Scope) -> Result<Vec<Extensions>, Error> {
+    pub(super) async fn domain_headers(
+        &self,
+        scope: Scope,
+    ) -> Result<Vec<headers::ScannedHeader>, Error> {
         self.domain_headers_from(scope, true).await
     }
     /// `domain_headers`, without operations still pending unless `pending`.
@@ -60,7 +63,7 @@ impl<A: RowApplication> Inner<A> {
         &self,
         scope: Scope,
         pending: bool,
-    ) -> Result<Vec<Extensions>, Error> {
+    ) -> Result<Vec<headers::ScannedHeader>, Error> {
         let mut headers = Vec::new();
         for row in rows(
             &self.conn,
@@ -81,12 +84,16 @@ impl<A: RowApplication> Inner<A> {
             };
             let header: p2panda_core::Header<Extensions> = decode(bytes)?;
             if header.extensions.scope.domain == scope {
-                headers.push(header.extensions);
+                headers.push(headers::ScannedHeader::new(header));
             }
         }
         Ok(headers)
     }
-    fn visible_header(&self, graph: &TipGraph, header: &Extensions) -> Result<bool, Error> {
+    fn visible_header(
+        &self,
+        graph: &TipGraph,
+        header: &headers::ScannedHeader,
+    ) -> Result<bool, Error> {
         let author = header.author.ok_or_else(|| denied("node author missing"))?;
         self.visible_frame(
             graph,
@@ -142,7 +149,7 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    fn inherited_marks(&self, graph: &TipGraph) -> Result<BTreeMap<u32, u64>, Error> {
+    fn inherited_marks(&self, graph: &TipGraph) -> Result<BTreeMap<WriterId, u64>, Error> {
         Ok(Self::tip_parent(graph, self.workspace.tip)?
             .map(|(_, inherited)| {
                 inherited
@@ -155,8 +162,8 @@ impl<A: RowApplication> Inner<A> {
     fn fold_marks(
         &self,
         graph: &TipGraph,
-        marks: &mut BTreeMap<u32, u64>,
-        headers: Vec<Extensions>,
+        marks: &mut BTreeMap<WriterId, u64>,
+        headers: Vec<headers::ScannedHeader>,
     ) -> Result<(), Error> {
         for header in headers {
             if self.visible_header(graph, &header)? {
@@ -234,13 +241,13 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-fn into_marks(marks: BTreeMap<u32, u64>) -> Vec<AuthorMark> {
+fn into_marks(marks: BTreeMap<WriterId, u64>) -> Vec<AuthorMark> {
     marks
         .into_iter()
         .map(|(author, sequence)| AuthorMark { author, sequence })
         .collect()
 }
-fn covers(frontier: &[AuthorMark], header: &Extensions, author: u32) -> bool {
+fn covers(frontier: &[AuthorMark], header: &Extensions, author: WriterId) -> bool {
     frontier
         .iter()
         .any(|mark| mark.author == author && header.author_sequence <= mark.sequence)
@@ -342,7 +349,7 @@ impl<A: RowApplication> Inner<A> {
     async fn scan_earlier_epochs(
         &mut self,
         scan: &mut EpochScan,
-        headers: Vec<Extensions>,
+        headers: Vec<headers::ScannedHeader>,
     ) -> Result<(), Error> {
         for header in headers {
             let Some(author) = header.author else {

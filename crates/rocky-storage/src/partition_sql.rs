@@ -185,6 +185,8 @@ fn value(expr: &Expr, bindings: &Bindings<'_>) -> Option<SqlValue> {
                 .get(&(value.span.start.line, value.span.start.column))
                 .cloned(),
             Value::Boolean(value) => Some(SqlValue::Integer(i64::from(*value))),
+            // A row identity's blob literal, as in `X'…'`.
+            Value::HexStringLiteral(hex) => blob_literal(hex).map(SqlValue::Blob),
             _ => None,
         },
         Expr::UnaryOp {
@@ -197,6 +199,19 @@ fn value(expr: &Expr, bindings: &Bindings<'_>) -> Option<SqlValue> {
         },
         _ => None,
     }
+}
+fn blob_literal(hex: &str) -> Option<Vec<u8>> {
+    let (pairs, rest) = hex.as_bytes().as_chunks::<2>();
+    if !rest.is_empty() {
+        return None;
+    }
+    pairs
+        .iter()
+        .map(|[high, low]| {
+            let digit = |byte: u8| char::from(byte).to_digit(16);
+            u8::try_from((digit(*high)? << 4) | digit(*low)?).ok()
+        })
+        .collect()
 }
 #[derive(Default)]
 struct Proof {
@@ -946,6 +961,39 @@ mod tests {
             },
         )]
         .into()
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_row_identity_blob_literal_names_its_partition() {
+        let id = [7_u8; 40];
+        let hex: String = id.iter().map(|byte| format!("{byte:02x}")).collect();
+        let rules: BTreeMap<String, TablePartitions> = [(
+            "items".into(),
+            TablePartitions {
+                columns: vec![PartitionColumn {
+                    name: "list".into(),
+                    key: KeyColumn {
+                        affinity: rocky_core::Affinity::Blob,
+                        collation: rocky_core::Collation::Binary,
+                    },
+                }],
+                complete: false,
+                held: vec![vec![SqlValue::Blob(id.to_vec())]],
+                waiting: Vec::new(),
+            },
+        )]
+        .into();
+        check(
+            &format!("SELECT * FROM items WHERE list=X'{hex}'"),
+            &[],
+            &rules,
+        )
+        .unwrap();
+        let other = format!("SELECT * FROM items WHERE list=X'{}'", "08".repeat(40));
+        assert!(check(&other, &[], &rules).is_err());
+        assert_eq!(blob_literal(&hex), Some(id.to_vec()));
+        for invalid in ["0", "zz", "0g"] {
+            assert_eq!(blob_literal(invalid), None, "{invalid}");
+        }
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn aliases_in_bindings_or_and_outer_join_proofs_are_checked() {

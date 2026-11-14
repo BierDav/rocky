@@ -8,9 +8,9 @@ use super::*;
 use rocky_core::Scope;
 
 pub(super) const SCHEMA: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS secure_placements(domain BLOB NOT NULL,author INTEGER NOT NULL,sequence INTEGER NOT NULL,scope BLOB NOT NULL,hash BLOB NOT NULL,header BLOB NOT NULL,PRIMARY KEY(domain,author,sequence)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_placements(domain BLOB NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,scope BLOB NOT NULL,hash BLOB NOT NULL,header BLOB NOT NULL,PRIMARY KEY(domain,author,sequence)) WITHOUT ROWID",
     // Two signed headers of one node at one position: kept as evidence.
-    "CREATE TABLE IF NOT EXISTS secure_equivocations(domain BLOB NOT NULL,author INTEGER NOT NULL,sequence INTEGER NOT NULL,first BLOB NOT NULL,second BLOB NOT NULL,PRIMARY KEY(domain,author,sequence)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_equivocations(domain BLOB NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,first BLOB NOT NULL,second BLOB NOT NULL,PRIMARY KEY(domain,author,sequence)) WITHOUT ROWID",
 ];
 
 /// Headers a placement page carries at most.
@@ -25,7 +25,7 @@ const MAX_REQUESTS: usize = 16;
 #[serde(deny_unknown_fields)]
 pub struct PlacementRequest {
     pub seal: Commitment,
-    pub author: u32,
+    pub author: WriterId,
     pub from: u64,
     pub to: u64,
 }
@@ -45,8 +45,8 @@ struct PlacementPlan {
     authority: u64,
     tip: TipId,
     scopes: Vec<(ResourceScope, Option<i64>)>,
-    held: BTreeMap<u32, super::positions::Runs>,
-    last: BTreeMap<(ResourceScope, u32), u64>,
+    held: BTreeMap<WriterId, super::positions::Runs>,
+    last: BTreeMap<(ResourceScope, WriterId), u64>,
     checks: Vec<(
         rocky_credentials::SignedSeal,
         Option<rocky_credentials::SignedSeal>,
@@ -183,7 +183,7 @@ impl<A: RowApplication> Inner<A> {
             let decoded: p2panda_core::Header<Extensions> = decode(&header)?;
             let e = &decoded.extensions;
             if e.scope.domain != domain
-                || e.author != Some(request.author)
+                || e.author(&decoded.public_key) != Some(request.author)
                 || !(request.from..=request.to).contains(&e.author_sequence)
             {
                 return Err(Error::Corrupt("indexed placement source".into()));
@@ -304,7 +304,7 @@ impl<A: RowApplication> Inner<A> {
                 .get(&e.chain)
                 .ok_or_else(|| denied(crate::wire::INCOMPLETE_FRAME))?;
             if e.scope.domain != domain
-                || e.author != Some(request.author)
+                || e.author(&header.public_key) != Some(request.author)
                 || !(request.from..=request.to.min(mark)).contains(&e.author_sequence)
             {
                 return Err(denied("placement outside its request"));
@@ -347,7 +347,7 @@ impl<A: RowApplication> Inner<A> {
         encoded: &[u8],
     ) -> Result<(), Error> {
         let e = &header.extensions;
-        let Some(author) = e.author else {
+        let Some(author) = e.author(&header.public_key) else {
             return Ok(());
         };
         self.conn
@@ -355,7 +355,7 @@ impl<A: RowApplication> Inner<A> {
                 "INSERT OR IGNORE INTO secure_placements VALUES(?,?,?,?,?,?)",
                 bindings(vec![
                     SqlValue::Blob(encode(&e.scope.domain)?),
-                    SqlValue::Integer(i64::from(author)),
+                    writer_value(author),
                     SqlValue::Integer(
                         i64::try_from(e.author_sequence)
                             .map_err(|_| denied("author sequence overflow"))?,
@@ -378,8 +378,8 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<bool, Error> {
         let e = &header.extensions;
         let author = e
-            .author
-            .ok_or_else(|| denied("node author number missing"))?;
+            .author(&header.public_key)
+            .ok_or_else(|| denied("node author missing"))?;
         let hash = header.hash();
         if let Some(known) = self
             .header_at(domain, author, e.author_sequence, hash)
@@ -396,7 +396,7 @@ impl<A: RowApplication> Inner<A> {
                 "INSERT OR IGNORE INTO secure_placements VALUES(?,?,?,?,?,?)",
                 bindings(vec![
                     SqlValue::Blob(encode(&domain)?),
-                    SqlValue::Integer(i64::from(author)),
+                    writer_value(author),
                     SqlValue::Integer(e.author_sequence as i64),
                     SqlValue::Blob(encode(&e.scope)?),
                     SqlValue::Blob(hash.as_bytes().to_vec()),
@@ -413,7 +413,7 @@ impl<A: RowApplication> Inner<A> {
     async fn headers_at(
         &self,
         domain: Scope,
-        author: u32,
+        author: WriterId,
         from: u64,
         to: u64,
     ) -> Result<Vec<(Vec<u8>, bool)>, Error> {
@@ -422,7 +422,7 @@ impl<A: RowApplication> Inner<A> {
             self.conn
                 .query(
                     "SELECT DISTINCT scope FROM secure_position_ranges WHERE author=? AND kind<2",
-                    [i64::from(author)],
+                    bindings(vec![writer_value(author)]),
                 )
                 .await?,
         )
@@ -438,7 +438,7 @@ impl<A: RowApplication> Inner<A> {
                 "SELECT o.header,length(o.body)>0 FROM secure_position_sources p JOIN secure_operations o ON o.hash=p.hash WHERE p.scope=?1 AND p.author=?2 AND p.sequence BETWEEN ?3 AND ?4 AND p.kind=0 UNION ALL SELECT v.header,0 FROM secure_position_sources p JOIN secure_voids v ON v.hash=p.hash WHERE p.scope=?1 AND p.author=?2 AND p.sequence BETWEEN ?3 AND ?4 AND p.kind=1",
                 bindings(vec![
                     SqlValue::Blob(scope.clone()),
-                    SqlValue::Integer(i64::from(author)),
+                    writer_value(author),
                     SqlValue::Integer(i64::try_from(from).map_err(|_| denied("placement sequence"))?),
                     SqlValue::Integer(i64::try_from(to).map_err(|_| denied("placement sequence"))?),
                 ]),
@@ -456,7 +456,7 @@ impl<A: RowApplication> Inner<A> {
     async fn header_at(
         &self,
         domain: Scope,
-        author: u32,
+        author: WriterId,
         sequence: u64,
         incoming: Hash,
     ) -> Result<Option<p2panda_core::Header<Extensions>>, Error> {
@@ -466,7 +466,7 @@ impl<A: RowApplication> Inner<A> {
                     "SELECT header FROM secure_placements WHERE domain=? AND author=? AND sequence=?",
                     bindings(vec![
                         SqlValue::Blob(encode(&domain)?),
-                        SqlValue::Integer(i64::from(author)),
+                        writer_value(author),
                         SqlValue::Integer(sequence as i64),
                     ]),
                 )
@@ -482,7 +482,7 @@ impl<A: RowApplication> Inner<A> {
             let e = &header.extensions;
             // An equal match must not hide evidence of another signed header.
             if e.scope.domain == domain
-                && e.author == Some(author)
+                && e.author(&header.public_key) == Some(author)
                 && e.author_sequence == sequence
                 && known
                     .as_ref()
@@ -510,7 +510,7 @@ impl<A: RowApplication> Inner<A> {
         header: &p2panda_core::Header<Extensions>,
     ) -> Result<(), Error> {
         let e = &header.extensions;
-        let Some(author) = e.author else {
+        let Some(author) = e.author(&header.public_key) else {
             return Ok(());
         };
         let domain = e.scope.domain;
@@ -520,7 +520,7 @@ impl<A: RowApplication> Inner<A> {
                     "SELECT header FROM secure_placements WHERE domain=? AND author=? AND sequence=?",
                     bindings(vec![
                         SqlValue::Blob(encode(&domain)?),
-                        SqlValue::Integer(i64::from(author)),
+                        writer_value(author),
                         SqlValue::Integer(e.author_sequence as i64),
                     ]),
                 )
@@ -539,7 +539,7 @@ impl<A: RowApplication> Inner<A> {
                 "DELETE FROM secure_placements WHERE domain=? AND author=? AND sequence=?",
                 bindings(vec![
                     SqlValue::Blob(encode(&domain)?),
-                    SqlValue::Integer(i64::from(author)),
+                    writer_value(author),
                     SqlValue::Integer(e.author_sequence as i64),
                 ]),
             )
@@ -558,7 +558,7 @@ impl<A: RowApplication> Inner<A> {
                 "INSERT OR IGNORE INTO secure_equivocations VALUES(?,?,?,?,?)",
                 bindings(vec![
                     SqlValue::Blob(encode(&domain)?),
-                    SqlValue::Integer(i64::from(e.author.unwrap_or_default())),
+                    writer_value(writer(&first.public_key)),
                     SqlValue::Integer(e.author_sequence as i64),
                     SqlValue::Blob(encode(first)?),
                     SqlValue::Blob(encode(second)?),
@@ -591,7 +591,7 @@ impl<A: RowApplication> Inner<A> {
                     "DELETE FROM secure_placements WHERE domain=? AND author=? AND sequence<=?",
                     bindings(vec![
                         SqlValue::Blob(encode(&domain)?),
-                        SqlValue::Integer(i64::from(mark.author)),
+                        writer_value(mark.author),
                         SqlValue::Integer(mark.sequence as i64),
                     ]),
                 )

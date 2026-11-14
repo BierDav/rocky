@@ -1,7 +1,7 @@
 //! Rust SQL conveniences over the same secure connections used by the bindings.
 use crate::{
-    Connection, ConnectionOptions, Database, Durability, Failure, Page, SqlFailure, SqlValue,
-    TransactionToken,
+    Connection, ConnectionOptions, Database, Durability, Failure, Page, RowIdentity, SqlFailure,
+    SqlValue, TransactionToken,
 };
 use std::{collections::VecDeque, sync::Arc};
 
@@ -59,6 +59,13 @@ impl IntoSqlValue for &[u8] {
 impl IntoSqlValue for TransactionToken {
     fn into_sql_value(self) -> SqlValue {
         SqlValue::Blob(self.0.to_vec())
+    }
+}
+/// A row identity binds as its canonical 40-byte BLOB: `id` columns and
+/// the references to them.
+impl IntoSqlValue for RowIdentity {
+    fn into_sql_value(self) -> SqlValue {
+        self.sql()
     }
 }
 /// A fixed-size BLOB, such as a UUID's 16 bytes in RFC 9562 order
@@ -154,6 +161,14 @@ impl FromSqlValue for TransactionToken {
                 .map_err(|_| DecodeError("expected a 32-byte transaction token".into())),
             _ => Err(DecodeError("expected a transaction token BLOB".into())),
         }
+    }
+}
+/// An `id` column or a reference to one; other storage classes and
+/// lengths are refused.
+impl FromSqlValue for RowIdentity {
+    fn from_sql_value(value: &SqlValue) -> Result<Self, DecodeError> {
+        RowIdentity::from_sql(value)
+            .map_err(|_| DecodeError("expected a 40-byte row identity BLOB".into()))
     }
 }
 /// Exactly `N` bytes of a BLOB.
@@ -429,7 +444,11 @@ impl Transaction {
         Rows::new(Source::Borrowed(&self.connection), sql, params).await
     }
     /// Allocates an identity in this transaction, optionally within a partition.
-    pub async fn next_id(&mut self, table: &str, partition: Vec<SqlValue>) -> Result<i64, Failure> {
+    pub async fn next_id(
+        &mut self,
+        table: &str,
+        partition: Vec<SqlValue>,
+    ) -> Result<RowIdentity, Failure> {
         let mut values = vec![SqlValue::Text(table.into())];
         values.extend(partition);
         let placeholders = vec!["?"; values.len()].join(",");

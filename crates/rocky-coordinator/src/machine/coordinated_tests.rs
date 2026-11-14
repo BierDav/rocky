@@ -608,7 +608,7 @@ fn certificate(
     node: &PrivateKey,
     database: rocky_credentials::DatabaseContext,
 ) -> rocky_credentials::SignedCapability {
-    use rocky_credentials::{AuthorRange, Capability, Extended, Extension, PeerId};
+    use rocky_credentials::{Capability, Extended, Extension, PeerId};
     rocky_credentials::SignedCapability::sign(
         Capability {
             subject: node.public_key(),
@@ -619,7 +619,6 @@ fn certificate(
             delegations: 0,
             extension: Extension::new(Extended {
                 node: Some(PeerId::of(node.public_key())),
-                authors: Some(AuthorRange::new(1, 1).unwrap()),
                 database: Some(database),
                 sequence: Some(0),
                 ..Extended::default()
@@ -844,15 +843,10 @@ fn a_trusted_identity_cannot_present_another_databases_node_certificate() {
         let node = PrivateKey::new();
         let chain = rocky_credentials::CredentialChain(vec![
             rocky_credentials::Authority::owner(&root)
-                .issue_trusted(
-                    identity.public_key(),
-                    namespace,
-                    rocky_credentials::AuthorRange::ALL,
-                    T,
-                )
+                .issue_trusted(identity.public_key(), namespace, T)
                 .unwrap(),
         ])
-        .certify(&identity, node.public_key(), 1)
+        .certify(&identity, node.public_key())
         .unwrap();
         let request = Request::certified(
             [0; 32],

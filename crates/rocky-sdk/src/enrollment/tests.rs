@@ -8,8 +8,7 @@ fn member_chain(
     user: &PrivateKey,
     node: PublicKey,
 ) -> Result<CredentialChain, Failure> {
-    let first = links.authors()?.ok_or("principal range")?.first;
-    Ok(links.clone().complete(user, node, first)?)
+    Ok(links.clone().complete(user, node)?)
 }
 
 const SCHEMA: &str = r#"{"format":6,"application":"holders","version":1,"tables":[{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"}]}"#;
@@ -64,7 +63,7 @@ fn revoking_an_identity_known_only_by_its_grant_ends_it_under_any_node_key() -> 
         user.public_key(),
         vec![],
         grants.clone(),
-        (1, Some(rocky_credentials::AuthorRange::ALL)),
+        rocky_credentials::DelegationTerms { delegations: 1 },
         issuer.validity()?,
     )?;
     let mut rows = BTreeMap::new();
@@ -439,6 +438,7 @@ fn the_1025th_live_statement_is_refused_by_name_and_rotates_nothing() -> Result<
                         identities: [PrivateKey::new().public_key()].into(),
                         capabilities: BTreeSet::new(),
                         cut: Default::default(),
+                        mode: rocky_credentials::RevocationMode::Lost,
                         recovery: None,
                     },
                     rocky_credentials::Signer::node(&node, &credentials)?,
@@ -858,7 +858,7 @@ fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), 
         &domain,
         user.public_key(),
         grants_of(&profile, &domain)?,
-        (false, Some(AuthorRange::new(2, 1025)?)),
+        false,
     )?;
     let chain = member_chain(
         &issuer.authority(&issuer_node)?.chain_of(capability),
@@ -1113,6 +1113,7 @@ fn any_issuer_renews_a_recorded_claim_right_and_none_a_revoked_one() -> Result<(
                 identities,
                 capabilities,
                 cut: Default::default(),
+                mode: rocky_credentials::RevocationMode::Lost,
                 recovery: None,
             },
             rocky_credentials::Signer::node(&issuer_node, &credentials)?,

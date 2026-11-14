@@ -208,25 +208,23 @@ jobs:
       matrix:
         # Native runners, not QEMU: a release build of a Rust workspace under
         # emulation is many times slower than the hosted arm64 runner.
-        # Deployments are described in docs/runtime/coordinator-operations.md
-        # and docs/runtime/always-on-peer.md.
         include:
           - image: coordinator
             arch: amd64
             platform: linux/amd64
             runner: ubuntu-latest
             package: rocky-db-coordinator
-            dockerfile: crates/rocky-coordinator/Dockerfile
+            dockerfile: crates/rocky-voter/Dockerfile
             title: rocky-voter
-            description: Rocky DB public coordination voter
+            description: Rocky DB public coordination voter and relay
           - image: coordinator
             arch: arm64
             platform: linux/arm64
             runner: ubuntu-24.04-arm
             package: rocky-db-coordinator
-            dockerfile: crates/rocky-coordinator/Dockerfile
+            dockerfile: crates/rocky-voter/Dockerfile
             title: rocky-voter
-            description: Rocky DB public coordination voter
+            description: Rocky DB public coordination voter and relay
     steps:
       - name: Download the exact source revision
         env:
@@ -264,7 +262,7 @@ jobs:
           context: source
           file: source/${{ matrix.dockerfile }}
           platforms: ${{ matrix.platform }}
-          push: true
+          load: true
           tags: ${{ env.IMAGE }}:${{ needs.version.outputs.revision }}-${{ matrix.arch }}
           cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.arch }},ignore-error=true
@@ -273,6 +271,27 @@ jobs:
             org.opencontainers.image.revision=${{ needs.version.outputs.revision }}
             org.opencontainers.image.title=${{ matrix.title }}
             org.opencontainers.image.description=${{ matrix.description }}
+
+      - name: Check the packaged relay before pushing
+        env:
+          RELEASE_REVISION: ${{ needs.version.outputs.revision }}
+          IMAGE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          image="${IMAGE}:${RELEASE_REVISION}-${IMAGE_ARCH}"
+          container=$(docker run --detach --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges --user=10001:10001 \
+            --publish 127.0.0.1::8080 "$image" relay 0.0.0.0:8080)
+          trap 'docker logs "$container"; docker rm --force "$container" >/dev/null' EXIT
+          address=$(docker port "$container" 8080/tcp)
+          curl --fail --silent --show-error --retry 30 --retry-connrefused \
+            --retry-delay 1 --retry-max-time 30 --max-time 2 "http://${address}/ping"
+
+      - name: Push the checked architecture image
+        env:
+          RELEASE_REVISION: ${{ needs.version.outputs.revision }}
+          IMAGE_ARCH: ${{ matrix.arch }}
+        run: docker push "${IMAGE}:${RELEASE_REVISION}-${IMAGE_ARCH}"
 
   image-manifest:
     name: Publish the ${{ matrix.image }} manifest
@@ -287,9 +306,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        # New GHCR packages are private. The coordinator stays private and its
-        # deployment supplies a ghcr-pull registry secret; set the peer package's
-        # visibility to public once, or the cluster cannot pull it anonymously.
+        # The coordinator package stays private; deployments supply pull credentials.
         include:
           - image: coordinator
             package: rocky-db-coordinator
@@ -326,6 +343,20 @@ jobs:
             --tag "${IMAGE}:sha-${RELEASE_REVISION}" \
             "${IMAGE}:${RELEASE_REVISION}-amd64" \
             "${IMAGE}:${RELEASE_REVISION}-arm64"
+
+      - name: Check both published platforms and their child manifests
+        env:
+          RELEASE_REVISION: ${{ needs.version.outputs.revision }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect --raw "${IMAGE}:sha-${RELEASE_REVISION}" > index.json
+          jq --exit-status '
+            [.manifests[].platform | .os + "/" + .architecture] | sort ==
+            ["linux/amd64", "linux/arm64"]
+          ' index.json
+          while IFS= read -r digest; do
+            docker buildx imagetools inspect --raw "${IMAGE}@${digest}" > /dev/null
+          done < <(jq --raw-output '.manifests[].digest' index.json)
 
       - name: Report the manifest digest
         env:

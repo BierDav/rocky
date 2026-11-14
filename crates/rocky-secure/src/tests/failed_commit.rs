@@ -4,15 +4,15 @@ use super::generations::{Lineage, select, session, text};
 use super::*;
 use rocky_core::SqlValue;
 
-async fn begin_two(sql: &crate::SecureSql<rocky_core::TypedRows>) -> Vec<i64> {
+async fn begin_two(sql: &crate::SecureSql<rocky_core::TypedRows>) -> Vec<rocky_core::RowIdentity> {
     sql.run("BEGIN", vec![]).await.unwrap();
     let mut identities = Vec::new();
     for name in ["one", "two"] {
         let id = sql.next_id("items").await.unwrap();
-        identities.push(id.integer());
+        identities.push(id);
         sql.run(
             "INSERT INTO items(key,title,id) VALUES(?,?,?)",
-            vec![text(name), text(name), SqlValue::Integer(id.integer())],
+            vec![text(name), text(name), id.sql()],
         )
         .await
         .unwrap();
@@ -54,8 +54,8 @@ async fn a_failed_sql_commit_changes_nothing_and_the_same_handle_retries_once() 
     assert!(observer.has_changed().unwrap());
     assert!(tables.try_next().unwrap().is_some());
     let rows = vec![
-        vec![SqlValue::Integer(ids[0]), text("one")],
-        vec![SqlValue::Integer(ids[1]), text("two")],
+        vec![ids[0].sql(), text("one")],
+        vec![ids[1].sql(), text("two")],
     ];
     assert_eq!(
         select(&replica, "SELECT id,title FROM items ORDER BY key").await,

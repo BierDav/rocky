@@ -24,7 +24,7 @@ fn statement(log: TipLog, recovery: Recovery) -> SealStatement {
         scope: log.scope,
         tip: log.tip,
         frontier: vec![AuthorMark {
-            author: 1,
+            author: rocky_core::WriterId::from_bytes([1; 32]),
             sequence: 4,
         }],
         action: SealAction::Continue { schema: [5; 32] },

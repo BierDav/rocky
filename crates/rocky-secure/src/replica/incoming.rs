@@ -652,10 +652,10 @@ impl<A: RowApplication> Inner<A> {
             return self.hold_closed_one(frame, time).await;
         }
         // Every frame of a revoked author is refused, also one whose
-        // dependencies, its author's earlier frames, never apply.
+        // dependencies, its author's earlier frames, never apply. An owner
+        // reset's fence keeps what its ended writers wrote before it.
         if self
-            .config
-            .revocations
+            .header_revocations(&operation.header)
             .revoking(frame.chain()?.credentials())
             .map_err(credential)?
             .is_some()
@@ -943,7 +943,7 @@ impl<A: RowApplication> Inner<A> {
                         .await?
                         .and_then(|record| record.signed)
                     && checkpoint.statement.identities.iter().any(|mark| {
-                        mark.author == identity.author() && mark.sequence >= identity.sequence()
+                        mark.author == identity.writer() && mark.sequence >= identity.sequence()
                     })
                 {
                     retired_creations.insert(hash);

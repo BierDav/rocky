@@ -56,10 +56,8 @@ impl OsCallback for WasmOsCallback {
     }
 }
 
-#[allow(non_camel_case_types)]
 type c_size_t = usize;
 
-#[allow(non_camel_case_types)]
 type c_time_t = c_longlong;
 
 #[wasm_bindgen]

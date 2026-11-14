@@ -41,7 +41,6 @@ fn eight_links(grants: usize) -> CredentialChain {
                         expires: u64::MAX,
                         delegations: index as u8,
                         extension: Extension::new(Extended {
-                            authors: Some(rocky_credentials::AuthorRange::ALL),
                             ..Extended::default()
                         })
                         .unwrap(),

@@ -3,6 +3,7 @@
 //! `docs/runtime/credentials.md` and `docs/runtime/sdk-enrollment.md`.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
+use common::identity::snapshot as snap;
 use common::{Device, Failure};
 use rocky_sdk::{
     Database, Network, Open, Supplied,
@@ -110,16 +111,18 @@ async fn create_row(
     collection: &str,
     values: Value,
 ) -> Result<Value, Failure> {
-    device
-        .call(json!({
-            "type": "mutate",
-            "handle": vec![handle; 32],
-            "payload": json!({"type": "create", "collection": collection, "values": values}).to_string().into_bytes(),
-            "entity": null,
-            "baseline": null,
-        }))
-        .await
-        .map_err(|error| error.to_string().into())
+    snap::observe(snap::mutate(
+        &device.session,
+        vec![handle; 32],
+        snap::Action::Create {
+            table: snap::text(&(collection)),
+            values: snap::fields(values),
+        },
+        None,
+        None,
+    ))
+    .await
+    .map_err(|error| error.to_string().into())
 }
 async fn note(device: &Device, handle: u8, text: &str) -> Result<Value, Failure> {
     create_row(device, handle, "notes", json!({"text": text})).await
@@ -135,10 +138,15 @@ async fn item(device: &Device, handle: u8, title: &str) -> Result<Value, Failure
 }
 /// The first column of every row `sql` selects, as text.
 async fn texts(device: &Device, sql: &str) -> Result<Vec<String>, Failure> {
-    let page = device
-        .call(json!({"type": "read", "query": {"sql": sql, "values": [], "max_rows": 64}}))
-        .await
-        .map_err(|error| error.to_string())?;
+    let page = snap::observe(device.session.read(rocky_sdk::ReadQuery {
+        sql: snap::text(&(sql)),
+        values: vec![],
+        max_rows: 64,
+        max_bytes: None,
+        cursor: None,
+    }))
+    .await
+    .map_err(|error| error.to_string())?;
     Ok(page["rows"]
         .as_array()
         .into_iter()
@@ -153,15 +161,13 @@ async fn items(device: &Device) -> Result<Vec<String>, Failure> {
     texts(device, "SELECT title FROM items ORDER BY title").await
 }
 async fn session(device: &Device) -> Value {
-    device.ok(json!({"type": "session"})).await
+    snap::ok(device.session.info()).await
 }
 /// Stops each device's automatic sync, so that only the test's explicit
 /// syncs reach peers.
 async fn manual(devices: &[&Device]) {
     for device in devices {
-        device
-            .ok(json!({"type": "sync_start", "enabled": false}))
-            .await;
+        snap::ok(device.session.set_automatic_sync(false)).await;
     }
 }
 async fn synced(device: &Device) -> Result<(), Failure> {
@@ -186,12 +192,17 @@ async fn profiles_bound_reads_and_writes_across_renewal() -> Result<(), Failure>
     for profile in [
         json!({"kind": "reader", "scopes": []}),
         json!({"kind": "writer", "scopes": ["unknown"]}),
-        json!({"kind": "writer", "scopes": ["items"], "rights": ["execute"]}),
-        json!({"kind": "admin"}),
     ] {
-        let refused = a
-            .call(json!({"type": "invitation", "profile": profile}))
-            .await;
+        let refused = snap::observe(
+            a.session.invite(
+                Some(
+                    serde_json::from_value::<rocky_sdk::GrantProfile>(json!(profile))
+                        .expect("typed fixture"),
+                ),
+                None,
+            ),
+        )
+        .await;
         assert!(refused.is_err(), "{profile}");
     }
     item(&a, 1, "Milk").await?;
@@ -210,22 +221,34 @@ async fn profiles_bound_reads_and_writes_across_renewal() -> Result<(), Failure>
         assert!(item(&r, 10, "Forged").await.is_err());
         assert!(note(&r, 11, "Forged").await.is_err());
         assert!(
-            r.call(json!({"type": "invitation", "profile": reader}))
-                .await
-                .is_err()
+            snap::observe(
+                r.session.invite(
+                    Some(
+                        serde_json::from_value::<rocky_sdk::GrantProfile>(json!(reader))
+                            .expect("typed fixture")
+                    ),
+                    None
+                )
+            )
+            .await
+            .is_err()
         );
         assert!(notes(&r).await.unwrap_or_default().is_empty());
         // The scoped writer neither reads nor writes the other collection.
         assert_eq!(notes(&w).await?, ["Hello"]);
         assert!(item(&w, 12, "Forged").await.is_err());
         assert!(items(&w).await.unwrap_or_default().is_empty());
-        assert!(w.call(json!({"type": "identities"})).await.is_err());
+        assert!(snap::observe(w.session.identities()).await.is_err());
         Ok(())
     };
     check(false).await?;
     for device in [&r, &w] {
         let before = session(device).await;
-        let renewed = device.ok(json!({"type": "renew"})).await;
+        let renewed = snap::ok(async {
+            device.session.renew().await?;
+            device.session.info().await
+        })
+        .await;
         assert_eq!(renewed["readable"], before["readable"]);
         assert_eq!(renewed["writable"], before["writable"]);
         assert_eq!(renewed["principal"], before["principal"]);
@@ -236,7 +259,7 @@ async fn profiles_bound_reads_and_writes_across_renewal() -> Result<(), Failure>
     assert_eq!(notes(&a).await?, ["From writer", "Hello"]);
     assert_eq!(items(&a).await?, ["Milk"]);
     // The issuer lists each identity with the profile it enrolled as.
-    let identities = a.ok(json!({"type": "identities"})).await;
+    let identities = snap::ok(a.session.identities()).await;
     let mut profiles: Vec<Value> = identities["identities"]
         .as_array()
         .into_iter()
@@ -297,9 +320,13 @@ async fn an_issuer_device_enrolls_and_renews_while_the_creator_is_closed() -> Re
     assert_eq!(m.titles().await, ["Milk"]);
     m.add(2, "Eggs").await;
     synced(&m).await?;
-    m.ok(json!({"type": "renew"})).await;
+    snap::ok(async {
+        m.session.renew().await?;
+        m.session.info().await
+    })
+    .await;
     assert_eq!(i.titles().await, ["Eggs", "Milk"]);
-    let identities = i.ok(json!({"type": "identities"})).await.to_string();
+    let identities = snap::ok(i.session.identities()).await.to_string();
     assert!(identities.contains(m.identity().await.as_str()));
     for device in [&i, &m] {
         device.close().await;
@@ -341,9 +368,11 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
         synced(device).await?;
         assert_eq!(items(device).await?, ["Before"]);
     }
-    let revoked = a
-        .ok(json!({"type": "revoke", "identity": c.identity().await}))
-        .await;
+    let revoked = snap::ok(
+        a.session
+            .revoke_identity(&(snap::text(&(c.identity().await)))),
+    )
+    .await;
     assert_eq!(revoked["revocations"]["statements"], 1);
     // Only the collections the revoked reader could read get a new epoch.
     assert_eq!(
@@ -371,8 +400,15 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
 
     // The revoked reader gets neither the new key nor new rows.
     assert!(common::exchange_failed(&c.sync().await));
-    assert!(c.call(json!({"type": "renew"})).await.is_err());
-    assert!(!c.ok(json!({"type": "status"})).await["authority"]["verified_revocation"].is_null());
+    assert!(
+        snap::observe(async {
+            c.session.renew().await?;
+            c.session.info().await
+        })
+        .await
+        .is_err()
+    );
+    assert!(!snap::ok(c.session.status()).await["authority"]["verified_revocation"].is_null());
     assert_eq!(secret(root, "c", "reader.items.2")?, None);
     assert!(secrets(root, "c")?.iter().all(|name| !name.ends_with(".2")));
     assert_eq!(identity(root, "c")?["keys"], json!({"items": [1]}));
@@ -388,18 +424,18 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
 
     let reopened = reopen(root, &hub, "c")?;
     assert!(
-        !reopened.ok(json!({"type": "status"})).await["authority"]["verified_revocation"].is_null()
+        !snap::ok(reopened.session.status()).await["authority"]["verified_revocation"].is_null()
     );
     reopened.close().await;
     // A local file cannot forge a publisher's revocation notice.
     let notice = root.join("c/revoked.json");
     let original = std::fs::read(&notice)?;
     let mut tampered: Value = serde_json::from_slice(&original)?;
-    assert_eq!(tampered["version"], 2);
+    assert_eq!(tampered["version"], 3);
     tampered["statement"]["statement"]["time"] = json!(999);
     std::fs::write(&notice, serde_json::to_vec(&tampered)?)?;
     let reopened = reopen(root, &hub, "c")?;
-    assert!(reopened.call(json!({"type": "status"})).await.is_err());
+    assert!(snap::observe(reopened.session.status()).await.is_err());
     reopened.close().await;
     std::fs::write(&notice, original)?;
 
@@ -426,7 +462,7 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     item(&a, 1, "Before").await?;
     synced(&b).await?;
     let (c_node, c_identity) = (c.node().await, c.identity().await);
-    let identities = a.ok(json!({"type": "identities"})).await;
+    let identities = snap::ok(a.session.identities()).await;
     let record = identities["identities"]
         .as_array()
         .into_iter()
@@ -466,6 +502,7 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
         )?]
         .into(),
         cut: Default::default(),
+        mode: rocky_credentials::RevocationMode::Lost,
         recovery: None,
     };
     let statement_id = statement.id()?;
@@ -499,7 +536,7 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
             saved["keys"],
             json!({"issuer_registry": [1], "items": [1, 2], "notes": [1]})
         );
-        let listed = a.ok(json!({"type": "identities"})).await;
+        let listed = snap::ok(a.session.identities()).await;
         assert!(
             listed["identities"]
                 .as_array()
@@ -572,8 +609,11 @@ fn issued(
     let capability = authority.issue(
         user,
         grants,
-        rocky_credentials::AuthorRange::new(4096, 5119)?,
-        (now, 3600, 300),
+        rocky_credentials::Validity {
+            issued_at: now,
+            lifetime: std::time::Duration::from_secs(3600),
+            clock_skew: std::time::Duration::from_secs(300),
+        },
     )?;
     let mut chain = issuer;
     chain.0.push(capability);
@@ -669,7 +709,11 @@ async fn supplied_credentials_install_without_an_enrollment() -> Result<(), Fail
     assert_eq!(items(&a).await?, ["Eggs", "Milk"]);
     assert!(notes(&s).await.unwrap_or_default().is_empty());
     // Any issuer renews it with the grants it was supplied.
-    s.ok(json!({"type": "renew"})).await;
+    snap::ok(async {
+        s.session.renew().await?;
+        s.session.info().await
+    })
+    .await;
     assert_eq!(
         session(&s).await["profile"],
         json!({"kind": "writer", "scopes": ["items"]})

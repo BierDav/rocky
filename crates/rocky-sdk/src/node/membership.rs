@@ -2,7 +2,7 @@
 use super::*;
 
 impl Node {
-    pub(super) async fn unlink(&self, node: PublicKey) -> Result<Value, Failure> {
+    pub(super) async fn unlink(&self, node: PublicKey) -> Result<rocky_core::Commitment, Failure> {
         let registry = self.registry().await?;
         let graph = self.replica.tip_graph(self.domain().scope).await?;
         let mut settings = self.settings.lock().await;
@@ -39,6 +39,7 @@ impl Node {
             identities: Default::default(),
             capabilities: Default::default(),
             cut,
+            mode: rocky_credentials::RevocationMode::Lost,
             recovery: None,
         };
         // The identity signs outside the replica transaction. The target certificate proves ownership.
@@ -95,23 +96,26 @@ impl Node {
                 .values()
                 .map(|contact| contact.addresses(link.transport.kind()))
                 .collect();
-            let request = [crate::enrollment::UNLINK, &known.to_bytes()?].concat();
+            let request = PeerRequest::Unlink(known.clone());
             for addresses in contacts.into_iter().take(crate::enrollment::MAX_DIALED) {
                 if addresses.is_empty() {
                     continue;
                 }
                 if let Err(error) =
-                    exchange(&*link.transport, &addresses, Protocol::Renew, &request).await
+                    exchange(&*link.transport, &addresses, self.domain().scope, &request).await
                 {
-                    self.activity
-                        .record("unlink_unpushed", json!({"error": error.to_string()}));
+                    self.activity.record(crate::ActivityKind::UnlinkUnpushed {
+                        error: (error.to_string()).to_owned(),
+                    });
                 }
             }
         }
-        Ok(json!({"statement": HEXLOWER.encode(&id)}))
+        Ok(id)
     }
-    pub(super) async fn accept_unlink(&self, bytes: &[u8]) -> Result<Vec<u8>, Failure> {
-        let known = RevocationSet::from_bytes(bytes)?;
+    pub(super) async fn accept_unlink(
+        &self,
+        known: RevocationSet,
+    ) -> Result<RevocationSet, Failure> {
         known.verify_in(self.settings.lock().await.database_context()?)?;
         let registry = self.registry().await?;
         let mut settings = self.settings.lock().await;
@@ -148,10 +152,12 @@ impl Node {
         }
         self.forget_readers().await;
         self.wake_sync();
-        Ok(known.to_bytes()?)
+        Ok(known)
     }
-    pub(super) async fn accept_link(&self, bytes: &[u8]) -> Result<Vec<u8>, Failure> {
-        let certificate: rocky_credentials::SignedCapability = serde_json::from_slice(bytes)?;
+    pub(super) async fn accept_link(
+        &self,
+        certificate: rocky_credentials::SignedCapability,
+    ) -> Result<RevocationSet, Failure> {
         certificate.certifies(certificate.capability.subject, now()?)?;
         let mut current = self.settings.lock().await;
         if certificate.capability.extended()?.database != Some(current.database_context()?) {
@@ -201,12 +207,12 @@ impl Node {
         draft.save(&self.path)?;
         *current = draft;
         self.replica.learn_revocations(&known).await?;
-        self.activity.record(
-            "membership_link_recorded",
-            json!({
-                "identity": current.identity.to_hex(), "node": link.node, "sequence": link.sequence,
-            }),
-        );
-        Ok(known.to_bytes()?)
+        self.activity
+            .record(crate::ActivityKind::MembershipLinkRecorded {
+                identity: (current.identity).to_owned(),
+                node: link.node,
+                sequence: link.sequence,
+            });
+        Ok(known)
     }
 }

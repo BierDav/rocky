@@ -16,7 +16,7 @@ fn ledger() -> Constrained {
              "columns": [{"name": "name", "type": "text", "not_null": true}],
              "primary_key": ["id"]},
             {"name": "entries", "class": "replayed",
-             "columns": [{"name": "batch", "type": "integer", "not_null": true},
+             "columns": [{"name": "batch", "type": "blob", "not_null": true},
                          {"name": "status", "type": "text", "not_null": true, "collation": "nocase"},
                          {"name": "amount", "type": "integer", "not_null": true}],
              "checks": ["status IN ('draft', 'posted')"],
@@ -153,10 +153,10 @@ async fn restrictions_refuse_local_updates_and_deletes_of_protected_rows() {
     assert_eq!(
         rows["entries"],
         [vec![
-            SqlValue::Integer(may),
+            SqlValue::from(may),
             SqlValue::Text("POSTED".into()),
             SqlValue::Integer(5),
-            SqlValue::Integer(posted),
+            SqlValue::from(posted),
         ]]
     );
     assert_eq!(rows["audit"].len(), 2);

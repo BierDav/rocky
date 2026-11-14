@@ -498,17 +498,15 @@ async fn process_exit_inside_a_group_leaves_each_handle_whole_or_absent() {
     }
 }
 /// Public futures stay `Send`, so callers can spawn them.
-#[allow(dead_code)]
-fn public_futures_are_send(
-    replica: EncryptedReplica<Employees>,
-    f: Fixture,
-    frame: EncryptedFrame,
-) {
-    fn send<T: Send>(_: T) {}
-    send(replica.author([1; 32], insert(&f, 1), vec![]));
-    send(replica.receive(frame.clone()));
-    send(replica.receive_all(vec![frame]));
-    send(replica.learn_revocations(&f.policy.clone()));
+#[test]
+fn public_futures_are_send() {
+    let _: fn(EncryptedReplica<Employees>, Fixture, EncryptedFrame) = |replica, f, frame| {
+        fn send<T: Send>(_: T) {}
+        send(replica.author([1; 32], insert(&f, 1), vec![]));
+        send(replica.receive(frame.clone()));
+        send(replica.receive_all(vec![frame]));
+        send(replica.learn_revocations(&f.policy.clone()));
+    };
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

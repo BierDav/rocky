@@ -1,12 +1,16 @@
 //! Phase 8: sibling histories and writer convergence through the in-process hub.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
+use common::identity::snapshot as snap;
 use common::{Device, Failure};
 use rocky_sdk::{Database, Network, Open, credentials::PrivateKey, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 mod common;
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "this suite uses only the registry fixture key store"
+)]
 #[path = "registry_revocation/fixture.rs"]
 mod fixture;
 const SCHEMA: &str = r#"{"application":"siblings","version":1,"format":6,"tables":[
@@ -48,28 +52,59 @@ fn winner(root: &Path, name: &str, collection: &str) -> rocky_core::KeyEpoch {
         serde_json::from_value(identity(root, name)["keys"][collection].clone()).unwrap();
     *epochs.iter().max().unwrap()
 }
-fn values() -> Value {
-    json!([{"type":"text","value":"L"}])
+fn values() -> Vec<rocky_sdk::SqlValue> {
+    vec![rocky_sdk::SqlValue::Text("L".to_owned())]
 }
-async fn partition(device: &Device, kind: &str) -> Value {
-    device
-        .ok(json!({"type":kind,"group":"list","values":values()}))
-        .await
+async fn partition(device: &Device) -> Value {
+    snap::ok(
+        device
+            .session
+            .partition_status(rocky_sdk::PartitionTarget::Group {
+                group: "list".into(),
+                values: values(),
+            }),
+    )
+    .await
+}
+async fn create_partition(device: &Device) -> Value {
+    snap::ok(
+        device
+            .session
+            .create_partition(rocky_sdk::PartitionTarget::Group {
+                group: "list".into(),
+                values: values(),
+            }),
+    )
+    .await
 }
 async fn write_group(device: &Device, prefix: &str) {
-    let _scope: Value = serde_json::from_str(&device.database.scope()).unwrap();
-
-    device.ok(json!({"type":"sql","sql":"BEGIN"})).await;
+    snap::ok(device.session.execute("BEGIN", Vec::new())).await;
     for table in ["parts", "labels", "attachments"] {
-        let id = device
-            .ok(json!({"type":"next_id","table":table,"partition_values":values()}))
-            .await;
-        device.ok(json!({"type":"sql","sql":format!("INSERT INTO {table}(list,key,id) VALUES ('L', '{prefix}', ?)"),"values":[{"type":"integer","value":id["id"]}]})).await;
+        let id = snap::ok(
+            device
+                .session
+                .next_partition_id(&(snap::text(&(table))), (values()).clone()),
+        )
+        .await;
+        snap::ok(device.session.execute(
+            &(snap::text(
+                &(format!("INSERT INTO {table}(list,key,id) VALUES ('L', '{prefix}', ?)")),
+            )),
+            vec![snap::row_id(&(id["id"]))],
+        ))
+        .await;
     }
-    device.ok(json!({"type":"sql","sql":"COMMIT"})).await;
+    snap::ok(device.session.execute("COMMIT", Vec::new())).await;
 }
 async fn rows(device: &Device, table: &str) -> Vec<String> {
-    let page = device.ok(json!({"type":"read","query":{"sql":format!("SELECT key FROM {table} WHERE list='L' ORDER BY key"),"values":[],"max_rows":16}})).await;
+    let page = snap::ok(device.session.read(rocky_sdk::ReadQuery {
+        sql: snap::text(&(format!("SELECT key FROM {table} WHERE list='L' ORDER BY key"))),
+        values: vec![],
+        max_rows: 16,
+        max_bytes: None,
+        cursor: None,
+    }))
+    .await;
     page["rows"]
         .as_array()
         .unwrap()
@@ -86,19 +121,19 @@ async fn concurrent_group_creation_opens_every_table_and_converges_after_one_syn
     let hub = Arc::new(Hub::default());
     let a = Device::new(Database::create(open(&root.join("a"), &hub, "a"), None)?)?;
     let b = join(root, &hub, "b", &a, json!({"kind":"issuer"}), SCHEMA).await?;
-    let ea = partition(&a, "partition_create").await["epoch"].clone();
-    let eb = partition(&b, "partition_create").await["epoch"].clone();
+    let ea = create_partition(&a).await["epoch"].clone();
+    let eb = create_partition(&b).await["epoch"].clone();
     assert_ne!(ea, eb);
     write_group(&a, "a").await;
     write_group(&b, "b").await;
     a.sync().await.map_err(|e| e.to_string())?;
     b.sync().await.map_err(|e| e.to_string())?;
-    let left = partition(&a, "partition_status").await;
-    let right = partition(&b, "partition_status").await;
+    let left = partition(&a).await;
+    let right = partition(&b).await;
     assert_eq!(left["current"], right["current"]);
     assert_eq!(left["epochs"].as_array().unwrap().len(), 2);
     for device in [&a, &b] {
-        let status = partition(device, "partition_status").await;
+        let status = partition(device).await;
         for table in status["tables"].as_array().unwrap() {
             assert_eq!(table["current"], status["current"]);
             assert_eq!(table["epochs"], status["epochs"]);
@@ -146,9 +181,12 @@ async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_re
     .await?;
     offline.close().await;
     for device in [&a, &b] {
-        device
-            .ok(json!({"type":"revoke","identity":PrivateKey::new().public_key().to_hex()}))
-            .await;
+        snap::ok(
+            device
+                .session
+                .revoke_identity(&(PrivateKey::new().public_key().to_hex())),
+        )
+        .await;
     }
     let before_a = winner(root, "a", "items");
     let before_b = winner(root, "b", "items");
@@ -175,7 +213,11 @@ async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_re
     let mut options = open(&directory, &hub, "offline");
     options.schema = common::SCHEMA;
     let offline = Device::new(Database::open(options)?)?;
-    offline.ok(json!({"type":"renew"})).await;
+    snap::ok(async {
+        offline.session.renew().await?;
+        offline.session.info().await
+    })
+    .await;
     assert_eq!(winner(root, "offline", "items"), current);
     offline.add(3, "after renewal").await;
     for device in [&a, &b, &offline] {
@@ -189,14 +231,22 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
 -> Result<(), Failure> {
     const LIST_SCHEMA: &str = r#"{"application":"exposure","version":1,"format":6,"tables":[{"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
     async fn write(device: &Device, key: &str) {
-        let _scope: Value = serde_json::from_str(&device.database.scope()).unwrap();
-
-        device.ok(json!({"type":"sql","sql":"BEGIN"})).await;
-        let id = device
-            .ok(json!({"type":"next_id","table":"parts","partition_values":values()}))
-            .await;
-        device.ok(json!({"type":"sql","sql":"INSERT INTO parts(list,key,id) VALUES ('L', ?, ?)","values":[{"type":"text","value":key},{"type":"integer","value":id["id"]}]})).await;
-        device.ok(json!({"type":"sql","sql":"COMMIT"})).await;
+        snap::ok(device.session.execute("BEGIN", Vec::new())).await;
+        let id = snap::ok(
+            device
+                .session
+                .next_partition_id("parts", (values()).clone()),
+        )
+        .await;
+        snap::ok(device.session.execute(
+            "INSERT INTO parts(list,key,id) VALUES ('L', ?, ?)",
+            vec![
+                rocky_sdk::SqlValue::Text(snap::text(&(key))),
+                snap::row_id(&(id["id"])),
+            ],
+        ))
+        .await;
+        snap::ok(device.session.execute("COMMIT", Vec::new())).await;
     }
     let root = common::identity::small_directory()?;
     let root = root.path();
@@ -206,7 +256,7 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
     options.schema = LIST_SCHEMA;
     let a = Device::new(Database::create(options, None)?)?;
     a.follow_main().await;
-    partition(&a, "partition_create").await;
+    create_partition(&a).await;
     write(&a, "before").await;
     let b = join(root, &hub, "b", &a, json!({"kind":"issuer"}), LIST_SCHEMA).await?;
     let reader = json!({"kind":"reader","scopes":["parts"]});
@@ -220,47 +270,55 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
         .map_err(|e| format!("b sync before revocations: {e}"))?;
     for (device, other, original) in [(&carol, &b, &a), (&dave, &a, &b)] {
         common::introduce(device, other).await;
-        device
-            .ok(json!({"type":"peer_remove","node":original.node().await}))
-            .await;
+        snap::ok(
+            device
+                .session
+                .remove_peer(&(snap::text(&(original.node().await)))),
+        )
+        .await;
     }
-    a.ok(json!({"type": "revoke", "identity": carol.identity().await}))
-        .await;
-    b.ok(json!({"type": "revoke", "identity": dave.identity().await}))
-        .await;
+    snap::ok(
+        a.session
+            .revoke_identity(&(snap::text(&(carol.identity().await)))),
+    )
+    .await;
+    snap::ok(
+        b.session
+            .revoke_identity(&(snap::text(&(dave.identity().await)))),
+    )
+    .await;
     write(&a, "a").await;
     write(&b, "b").await;
     // Each issuer's base after its own rotation is what its reader
     // imports; their two seals race and resolve when they meet. Sealing
     // offline keeps the issuers apart, as the rotations were.
     for issuer in [&a, &b] {
-        issuer
-            .ok(json!({"type":"networking_control","enabled":false}))
-            .await;
+        snap::ok(issuer.session.set_networking_enabled(false)).await;
         issuer.seal_and_compact().await;
     }
     for issuer in [&a, &b] {
-        issuer
-            .ok(json!({"type":"networking_control","enabled":true}))
-            .await;
+        snap::ok(issuer.session.set_networking_enabled(true)).await;
     }
     for (device, original) in [(&carol, &a), (&dave, &b)] {
         // A reader that switched tips retries every issuer; the one that
         // revoked it stays out of reach here, as the scenario requires.
-        original
-            .ok(json!({"type":"networking_control","enabled":false}))
-            .await;
-        device.ok(json!({"type":"renew"})).await;
-        device
-            .ok(json!({"type":"peer_remove","node":original.node().await}))
-            .await;
+        snap::ok(original.session.set_networking_enabled(false)).await;
+        snap::ok(async {
+            device.session.renew().await?;
+            device.session.info().await
+        })
+        .await;
+        snap::ok(
+            device
+                .session
+                .remove_peer(&(snap::text(&(original.node().await)))),
+        )
+        .await;
         device
             .sync()
             .await
             .map_err(|e| format!("reader sync: {e}"))?;
-        original
-            .ok(json!({"type":"networking_control","enabled":true}))
-            .await;
+        snap::ok(original.session.set_networking_enabled(true)).await;
     }
     assert_eq!(rows(&carol, "parts").await, ["b", "before"]);
     assert_eq!(rows(&dave, "parts").await, ["a", "before"]);
@@ -270,12 +328,12 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
     b.sync()
         .await
         .map_err(|e| format!("b sync after revocations: {e}"))?;
-    let current = partition(&a, "partition_status").await["current"].clone();
+    let current = partition(&a).await["current"].clone();
     assert_eq!(current["generation"], 3);
-    assert_eq!(partition(&b, "partition_status").await["current"], current);
+    assert_eq!(partition(&b).await["current"], current);
     write(&a, "after").await;
     for device in [&carol, &dave] {
-        let held = partition(device, "partition_status").await;
+        let held = partition(device).await;
         assert!(
             held["epochs"]
                 .as_array()

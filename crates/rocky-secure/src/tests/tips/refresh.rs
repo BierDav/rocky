@@ -61,8 +61,14 @@ async fn abandoned_history_walks_bookmarks_once_per_source_and_refresh() {
     let inputs: Vec<_> = [&first, &second]
         .into_iter()
         .map(|frame| {
-            let e = &frame.operation_ref().unwrap().header.extensions;
-            (f.public.domain, e.tip, e.author.unwrap(), e.author_sequence)
+            let header = &frame.operation_ref().unwrap().header;
+            let e = &header.extensions;
+            (
+                f.public.domain,
+                e.tip,
+                e.author(&header.public_key).unwrap(),
+                e.author_sequence,
+            )
         })
         .collect();
     let inner = a.inner.lock(crate::replica::Class::Background).await;
@@ -121,7 +127,11 @@ async fn fixture() -> (
         .map(|frame| {
             let operation = frame.operation_ref().unwrap();
             AuthorMark {
-                author: operation.header.extensions.author.unwrap(),
+                author: operation
+                    .header
+                    .extensions
+                    .author(&operation.header.public_key)
+                    .unwrap(),
                 sequence: operation.header.extensions.author_sequence,
             }
         })
@@ -210,7 +220,7 @@ async fn metadata_close_is_discovered_lazily_per_author_and_sequence() {
             (
                 f.public.domain,
                 op.header.extensions.tip,
-                op.header.extensions.author.unwrap(),
+                op.header.extensions.author(&op.header.public_key).unwrap(),
                 op.header.extensions.author_sequence,
             )
         })
@@ -392,7 +402,7 @@ async fn a_new_refresh_uses_the_new_winning_close_after_an_issuer_continue() {
             },
         )
         .unwrap()
-        .issue_issuer(issuer.public_key(), None, validity())
+        .issue_issuer(issuer.public_key(), validity())
         .unwrap(),
     ]);
     let continued = SignedSeal::endorse(
@@ -437,15 +447,9 @@ async fn refresh_checks_index_coordinates_and_only_opens_candidate_frames() {
     for (column, value, original) in [
         (
             "author",
-            SqlValue::Integer(-1),
-            SqlValue::Integer(i64::from(
-                selected
-                    .operation_ref()
-                    .unwrap()
-                    .header
-                    .extensions
-                    .author
-                    .unwrap(),
+            SqlValue::Blob(vec![0xff; 31]),
+            crate::writer::writer_value(crate::writer::writer(
+                &selected.operation_ref().unwrap().header.public_key,
             )),
         ),
         (
@@ -606,13 +610,13 @@ async fn identical_genesis_ids_still_query_each_domain_and_empty_refresh_is_lazy
         (
             f.public.domain,
             op.header.extensions.tip,
-            op.header.extensions.author.unwrap(),
+            op.header.extensions.author(&op.header.public_key).unwrap(),
             0,
         ),
         (
             other,
             op.header.extensions.tip,
-            op.header.extensions.author.unwrap(),
+            op.header.extensions.author(&op.header.public_key).unwrap(),
             0,
         ),
     ];

@@ -180,17 +180,15 @@ impl Node {
     }
     pub(super) fn record_delivery(&self, peer: PublicKey, report: Delivered) {
         if report != Delivered::default() {
-            self.activity.record(
-                "envelopes_delivered",
-                json!({
-                    "peer": peer.to_hex(),
-                    "handed": report.handed,
-                    "deposited": report.deposited,
-                    "refused": report.refused,
-                    "received": report.received,
-                    "receipts": report.receipts,
-                }),
-            );
+            self.activity
+                .record(crate::ActivityKind::EnvelopesDelivered {
+                    peer: (peer).to_owned(),
+                    handed: (report.handed) as u64,
+                    deposited: (report.deposited) as u64,
+                    refused: (report.refused) as u64,
+                    received: (report.received) as u64,
+                    receipts: (report.receipts) as u64,
+                });
         }
     }
     async fn outgoing(
@@ -254,10 +252,10 @@ impl Node {
             match self.accept_delivery(&node, &delivery).await {
                 Ok(()) => receipts.push(DeliveryReceipt::sign(&node, delivery.digest()?)?),
                 Err(error) => {
-                    self.activity.record(
-                        "envelope_refused",
-                        json!({"peer": peer.to_hex(), "error": error.to_string()}),
-                    );
+                    self.activity.record(crate::ActivityKind::EnvelopeRefused {
+                        peer: (peer).to_owned(),
+                        error: (error.to_string()).to_owned(),
+                    });
                 }
             }
         }
@@ -322,17 +320,20 @@ impl Node {
                 bootstrap,
             )
             .await?;
-        let named = json!({
-            "group": contents.group,
-            "values": values.into_iter().map(Cell::from).collect::<Vec<_>>(),
-        });
+        let target = crate::PartitionTarget::Group {
+            group: contents.group,
+            values,
+        };
         if installed {
             self.activity
-                .record("partition_key_installed", named.clone());
+                .record(crate::ActivityKind::PartitionKeyInstalled {
+                    target: target.clone(),
+                });
         }
         if bootstrap {
             self.hold(&partition, &BTreeSet::new(), true).await?;
-            self.activity.record("partition_bootstrap", named);
+            self.activity
+                .record(crate::ActivityKind::PartitionBootstrap { target });
         }
         self.forget_readers().await;
         self.wake_sync();

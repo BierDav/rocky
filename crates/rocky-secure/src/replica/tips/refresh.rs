@@ -126,7 +126,7 @@ impl<'a> RefreshGraphContext<'a> {
         &mut self,
         scope: Scope,
         source: TipId,
-        author: u32,
+        author: WriterId,
         sequence: u64,
     ) -> Result<bool, Error> {
         let key = (scope, source, self.target);
@@ -163,7 +163,7 @@ impl<'a> RefreshGraphContext<'a> {
         inner: &Inner<A>,
         scope: Scope,
         source: TipId,
-        author: u32,
+        author: WriterId,
         sequence: u64,
     ) -> Result<bool, Error> {
         let key = (scope, source);
@@ -222,7 +222,7 @@ type ReachChecks = Vec<Result<String, String>>;
 impl<A: RowApplication> Inner<A> {
     pub(crate) fn refresh_reach_for_test(
         &self,
-        inputs: &[(Scope, TipId, u32, u64)],
+        inputs: &[(Scope, TipId, WriterId, u64)],
         fallback: bool,
     ) -> (
         ReachChecks,
@@ -272,7 +272,7 @@ mod tests {
             (scope, tip, tip),
             FramePath {
                 bounds: vec![vec![rocky_credentials::AuthorMark {
-                    author: 1,
+                    author: WriterId::from_bytes([1; 32]),
                     sequence: 5,
                 }]],
                 end: PathEnd::Cyclic,
@@ -280,11 +280,11 @@ mod tests {
         );
         assert!(
             !context
-                .visible::<employees_app::Employees>(scope, tip, 1, 6)
+                .visible::<employees_app::Employees>(scope, tip, WriterId::from_bytes([1; 32]), 6)
                 .unwrap()
         );
         assert!(
-            matches!(context.visible::<employees_app::Employees>(scope, tip, 1, 5), Err(Error::Rejected(message)) if message == "cyclic tip graph")
+            matches!(context.visible::<employees_app::Employees>(scope, tip, WriterId::from_bytes([1; 32]), 5), Err(Error::Rejected(message)) if message == "cyclic tip graph")
         );
         assert_eq!(context.hits, 2);
         assert_eq!(context.misses, 0);

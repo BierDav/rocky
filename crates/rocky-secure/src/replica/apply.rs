@@ -175,7 +175,7 @@ impl<A: RowApplication> Inner<A> {
             let finalized = self.seal_finalized(scope).await?;
             let ceiling = Stamp {
                 clock: operation.header.timestamp,
-                author: operation.header.extensions.author.unwrap_or(0),
+                author: writer(&operation.header.public_key),
                 sequence: operation.header.extensions.author_sequence,
             };
             for (ordinal, write) in &current {
@@ -216,7 +216,7 @@ impl<A: RowApplication> Inner<A> {
                                 identity,
                                 provenance,
                                 signer,
-                                author: extension.author,
+                                author: extension.author(&operation.header.public_key),
                                 carried: carried.is_some(),
                                 existing: current.is_some(),
                                 finalized,
@@ -296,14 +296,17 @@ impl<A: RowApplication> Inner<A> {
                         .ok_or_else(|| denied("numeric birth requires a creation proof"))?;
                     let verified = proof
                         .verify_with_bindings(
-                            self.config.publisher,
-                            self.manifest_of_tip(extension.tip)?,
-                            scope.table,
-                            identity,
-                            &ceiling,
+                            moves::CreationClaim {
+                                publisher: self.config.publisher,
+                                manifest: self.manifest_of_tip(extension.tip)?,
+                                table: scope.table,
+                                id: identity,
+                                ceiling: &ceiling,
+                                families: self
+                                    .families_at(self.manifest_of_tip(extension.tip)?)?
+                                    .as_ref(),
+                            },
                             Some(&mut bindings),
-                            self.families_at(self.manifest_of_tip(extension.tip)?)?
-                                .as_ref(),
                         )
                         .and_then(|()| match proof.stamp() == &ceiling {
                             true => Ok(()),
@@ -317,12 +320,10 @@ impl<A: RowApplication> Inner<A> {
                     record.proof = Some(proof.stored()?);
                 }
                 record.key = Some(change.row);
-                record.identity = birth
-                    .or(self
-                        .app
-                        .row_identity(change)
-                        .map_err(|message| denied(&message))?)
-                    .map(|identity| identity.integer());
+                record.identity = birth.or(self
+                    .app
+                    .row_identity(change)
+                    .map_err(|message| denied(&message))?);
                 // Validate both the signed transition and the actual candidate under concurrent merges.
                 if changes(&actual) {
                     let valid = self
@@ -387,7 +388,7 @@ impl<A: RowApplication> Inner<A> {
                     Some(receipts::FrameReceipt {
                         frame: operation.hash,
                         signer: operation.header.public_key,
-                        author: extension.author,
+                        author: extension.author(&operation.header.public_key),
                         scope,
                         allocation: allocation
                             .map_or(receipts::ReceiptAllocation::Unresolved, |(_, scope)| {
@@ -400,7 +401,7 @@ impl<A: RowApplication> Inner<A> {
                         target,
                         floor: target.map(|_| {
                             extension
-                                .author
+                                .author(&operation.header.public_key)
                                 .and_then(|author| own.get(&author).copied())
                                 .unwrap_or(0)
                         }),
@@ -485,15 +486,17 @@ impl<A: RowApplication> Inner<A> {
         };
         let scope = operation.header.extensions.scope;
         let id = self.scope_id(scope).await?;
-        if let Some(author) = operation.header.extensions.author {
-            self.keep_stamp_author(scope.domain, author, operation.header.public_key)
-                .await?;
+        if let Some(author) = operation
+            .header
+            .extensions
+            .author(&operation.header.public_key)
+        {
+            self.keep_stamp_author(author, operation.header.public_key)?;
         }
         for write in payload.writes() {
             if let Some(carried) = payload.carried(&write.change.row) {
                 for (author, signer) in &carried.authors {
-                    self.keep_stamp_author(scope.domain, *author, *signer)
-                        .await?;
+                    self.keep_stamp_author(*author, *signer)?;
                 }
             }
         }
@@ -533,19 +536,17 @@ impl<A: RowApplication> Inner<A> {
         (sets.rows, sets.tombstones, sets.digest) = (rows, tombstones, digest);
         for (change, record, old_record) in materialized {
             let row = match record.identity {
-                Some(id) => rocky_core::commitment("rocky.row-incarnation.v2", &id.to_le_bytes()),
+                Some(id) => identity::incarnation(id),
                 None => change.row,
             };
             if record.creation == operation.hash
                 && payload.carried(&change.row).is_none()
                 && let Some(identity) = record.identity
             {
-                let identity = rocky_core::RowIdentity::from_integer(identity)
-                    .map_err(|error| denied(&error.to_string()))?;
                 self.put_identity_mark(
                     scope,
                     &checkpoint::IdentityMark {
-                        author: identity.author(),
+                        author: identity.writer(),
                         signer: operation.header.public_key,
                         sequence: identity.sequence(),
                     },
@@ -636,7 +637,7 @@ pub(super) fn merge_row(
         key: Some(change.row),
         created: Some(Stamp {
             clock: operation.header.timestamp,
-            author: operation.header.extensions.author.unwrap_or(0),
+            author: writer(&operation.header.public_key),
             sequence: operation.header.extensions.author_sequence,
         }),
     });
@@ -657,7 +658,7 @@ pub(super) fn merge_row(
     } else if !record.deleted {
         let stamp = Stamp {
             clock: operation.header.timestamp,
-            author: operation.header.extensions.author.unwrap_or(0),
+            author: writer(&operation.header.public_key),
             sequence: operation.header.extensions.author_sequence,
         };
         let after = change
@@ -685,7 +686,7 @@ pub(super) fn merge_row(
         record.created = Some(carried.proof.stamp().clone());
         record.moved_from = carried.moved_from.clone();
     }
-    let author = operation.header.extensions.author.unwrap_or(0);
+    let author = writer(&operation.header.public_key);
     if let Some(old) = record.authors.insert(author, operation.header.public_key)
         && old != operation.header.public_key
     {

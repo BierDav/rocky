@@ -291,8 +291,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })?;
         Ok(ack)
     }
-    /// The node and author number used to acknowledge the composed log.
-    pub async fn terminal_author(&self) -> Result<(PublicKey, u32), Error> {
+    /// The node and writer used to acknowledge the composed log.
+    pub async fn terminal_author(&self) -> Result<(PublicKey, WriterId), Error> {
         let coordinator = self.domain_log().ok_or_else(|| denied("no composed log"))?;
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         if let Some(author) = inner
@@ -300,18 +300,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .as_ref()
             .filter(|a| *a.key.public_key().as_bytes() == coordinator.node())
         {
-            return Ok((author.key.public_key(), author.number));
+            return Ok((author.key.public_key(), author.writer));
         }
         if *inner.config.node.public_key().as_bytes() != coordinator.node() {
             return Err(denied("composed log belongs to another node"));
         }
+        let node = inner.config.node.public_key();
         Ok((
-            inner.config.node.public_key(),
-            inner
-                .config
-                .credentials
-                .author_number()
-                .map_err(credential)?,
+            node,
+            identity::node_writer(&inner.config.credentials, &node)?,
         ))
     }
     /// Installs an owner-direct trusted acknowledgment chain for an owned

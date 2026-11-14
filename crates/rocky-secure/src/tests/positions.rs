@@ -318,7 +318,7 @@ async fn waiting_seal_and_invalidated_frontier_match_the_log() {
             scope: f.public.domain,
             tip: last.extensions.tip,
             frontier: vec![AuthorMark {
-                author: last.extensions.author.unwrap(),
+                author: last.extensions.author(&last.public_key).unwrap(),
                 sequence: last.extensions.author_sequence + 1,
             }],
             action: SealAction::Continue {

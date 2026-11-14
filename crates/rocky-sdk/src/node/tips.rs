@@ -26,17 +26,12 @@ fn authority(authority: rocky_credentials::TipAuthority) -> String {
     }
     .into()
 }
-fn digest(request: &Value, name: &str) -> Result<rocky_core::Commitment, Failure> {
-    request[name]
-        .as_str()
-        .and_then(|hex| HEXLOWER.decode(hex.as_bytes()).ok())
+fn parse_digest(text: &str) -> Result<rocky_core::Commitment, Failure> {
+    HEXLOWER
+        .decode(text.as_bytes())
+        .ok()
         .and_then(|bytes| bytes.try_into().ok())
-        .ok_or_else(|| refused(format!("{name} must be a hex digest")))
-}
-fn text<'a>(request: &'a Value, name: &str) -> Result<&'a str, Failure> {
-    request[name]
-        .as_str()
-        .ok_or_else(|| refused(format!("{name} must be a string")))
+        .ok_or_else(|| refused("expected a hex digest"))
 }
 
 /// Who signs tip statements: the identity and the links its authority
@@ -158,130 +153,55 @@ impl Signer {
 }
 
 impl Node {
-    #[cfg(test)]
-    pub(super) async fn tips(&self, request: &Value) -> Result<Value, Failure> {
-        self.tips_with(request, &super::Root::default()).await
-    }
-    /// Creates `name` on the followed tip and follows it, as a created
-    /// domain's device does before it is handed out.
+    /// Creates and follows a created domain's initial bookmark.
     pub(crate) async fn follow_new_bookmark(&self, name: &str) -> Result<(), Failure> {
+        use crate::request::TipChange;
         let root = super::Root::default();
-        for action in ["create", "follow"] {
-            self.tips_with(&json!({"action": action, "name": name}), &root)
-                .await?;
-        }
+        self.change_tip(
+            TipChange::Create {
+                name: name.into(),
+                tip: None,
+            },
+            &root,
+        )
+        .await?;
+        self.change_tip(TipChange::Follow { name: name.into() }, &root)
+            .await?;
         Ok(())
     }
-    pub(super) async fn tips_with(
+
+    pub(super) async fn change_tip(
         &self,
-        request: &Value,
+        change: crate::request::TipChange,
         root: &super::Root,
-    ) -> Result<Value, Failure> {
-        let action = request["action"].as_str().unwrap_or_default();
+    ) -> Result<TipStatus, Failure> {
+        use crate::request::TipChange;
         let scope = self.domain().scope;
-        match action {
-            "status" => {}
-            "inspect" => return Ok(serde_json::to_value(self.inspect_tips(scope).await?)?),
-            "kept" => return Ok(serde_json::to_value(self.kept_seals().await?)?),
-            "keep" => {
-                let config: KeptSeals =
-                    serde_json::from_value(request.get("kept").cloned().unwrap_or(Value::Null))
-                        .map_err(|error| {
-                            refused(format!("kept must name the seals to keep: {error}"))
-                        })?;
+        match change {
+            TipChange::Status => {}
+            TipChange::Seal { close } => self.seal_followed(scope, close).await?,
+            TipChange::Recover => self.recover_followed(scope, root).await?,
+            TipChange::Pull { seal } => {
                 self.replica
-                    .keep_seals(rocky_secure::KeptSeals {
-                        bookmarked: config.bookmarked,
-                        latest: config.latest,
-                        every: config.every,
-                    })
-                    .await?;
-                self.observations.touch();
-                return Ok(serde_json::to_value(self.kept_seals().await?)?);
-            }
-            "compaction" => {
-                return Ok(serde_json::to_value(
-                    self.compaction(scope, 0, Vec::new()).await?,
-                )?);
-            }
-            "compact" => {
-                let keep = match &request["keep"] {
-                    Value::Null => 0,
-                    keep => keep
-                        .as_u64()
-                        .and_then(|keep| usize::try_from(keep).ok())
-                        .ok_or_else(|| refused("keep must be a non-negative number"))?,
-                };
-                let report = self.replica.compact(scope, keep).await?;
-                self.list_checkpoints(scope).await?;
-                self.replica.drop_unrequired_schemas().await?;
-                self.observations.touch();
-                let blocked = report
-                    .blocked
-                    .iter()
-                    .map(|(scope, block)| {
-                        Ok(TipPruneBlock {
-                            scope: serde_json::to_string(scope)?,
-                            reason: format!("{block:?}"),
-                        })
-                    })
-                    .collect::<Result<_, Failure>>()?;
-                return Ok(serde_json::to_value(
-                    self.compaction(scope, report.pruned, blocked).await?,
-                )?);
-            }
-            "seal" => {
-                let close = match &request["close"] {
-                    Value::Null => false,
-                    Value::Bool(close) => *close,
-                    _ => return Err(refused("close must be a boolean")),
-                };
-                self.seal_followed(scope, close).await?;
-            }
-            "recover" => self.recover_followed(scope, root).await?,
-            "pull" => {
-                self.replica
-                    .want_seal(scope, digest(request, "seal")?)
+                    .want_seal(scope, parse_digest(&seal)?)
                     .await
                     .map_err(refused)?;
                 self.wake_sync();
             }
-            "open" => {
-                let minimum = request["minimum_in_sync"]
-                    .as_u64()
-                    .and_then(|minimum| u32::try_from(minimum).ok())
-                    .ok_or_else(|| refused("minimum_in_sync must be a positive number"))?;
-                let tip = self
-                    .open_tip(scope, digest(request, "seal")?, minimum)
-                    .await?;
-                return Ok(json!({"tip": hex(&tip.0)}));
-            }
-            "genesis_minimum" => {
-                let minimum = request["minimum_in_sync"]
-                    .as_u64()
-                    .and_then(|minimum| u32::try_from(minimum).ok())
-                    .ok_or_else(|| refused("minimum_in_sync must be a positive number"))?;
-                self.sign_genesis_minimum(scope, minimum, root).await?;
-            }
-            "create" => {
-                let tip = match request.get("tip") {
-                    None | Some(Value::Null) => None,
-                    Some(_) => Some(TipId(digest(request, "tip")?)),
-                };
-                self.create_bookmark(scope, text(request, "name")?, tip)
+            TipChange::GenesisMinimum { minimum_in_sync } => {
+                self.sign_genesis_minimum(scope, minimum_in_sync, root)
                     .await?;
             }
-            "move" => {
-                let tip = TipId(digest(request, "tip")?);
-                self.move_bookmark(scope, text(request, "name")?, Some(tip))
+            TipChange::Create { name, tip } => {
+                let tip = tip.as_deref().map(parse_digest).transpose()?.map(TipId);
+                self.create_bookmark(scope, &name, tip).await?;
+            }
+            TipChange::Move { name, tip } => {
+                self.move_bookmark(scope, &name, Some(TipId(parse_digest(&tip)?)))
                     .await?;
             }
-            "delete" => {
-                self.move_bookmark(scope, text(request, "name")?, None)
-                    .await?;
-            }
-            "follow_when_ready" => {
-                let name = text(request, "name")?;
+            TipChange::Delete { name } => self.move_bookmark(scope, &name, None).await?,
+            TipChange::FollowWhenReady { name } => {
                 let inspection = self.inspect_tips(scope).await?;
                 if !inspection
                     .bookmarks
@@ -291,17 +211,17 @@ impl Node {
                     return Err(refused("unknown or deleted bookmark"));
                 }
                 self.configure(|settings| {
-                    settings.pending_follow = Some(name.into());
+                    settings.pending_follow = Some(name);
                     Ok(())
                 })
                 .await?;
                 self.complete_pending_follow().await?;
                 self.wake_sync();
             }
-            "follow" => {
+            TipChange::Follow { name } => {
                 let before = self.replica.followed_tip().await;
                 self.replica
-                    .follow_bookmark(scope, text(request, "name")?)
+                    .follow_bookmark(scope, &name)
                     .await
                     .map_err(refused)?;
                 self.configure(|settings| {
@@ -313,42 +233,16 @@ impl Node {
                 self.ensure_tip_node().await?;
                 self.observations.touch();
             }
-            "drop" => {
+            TipChange::Drop { tip } => {
                 self.replica
-                    .drop_tip(TipId(digest(request, "tip")?))
+                    .drop_tip(TipId(parse_digest(&tip)?))
                     .await
                     .map_err(refused)?;
                 self.observations.touch();
             }
-            "trust" => {
-                let identity: PublicKey = text(request, "identity")?
-                    .parse()
-                    .map_err(|_| refused("identity must be a hex key"))?;
-                let registry = self.registry().await?;
-                let (link, changes) = self
-                    .settings
-                    .lock()
-                    .await
-                    .trust(&registry, identity, root.signer())
-                    .map_err(|error| -> Failure {
-                        if error.is::<crate::enrollment::PublisherRequired>() {
-                            error
-                        } else {
-                            refused(error)
-                        }
-                    })?;
-                crate::registry::write(&self.replica, self.domain().registry(), &changes).await?;
-                self.observations.touch();
-                self.wake_sync();
-                return Ok(json!({
-                    "identity": identity.to_hex(),
-                    "capability": hex(&link.id()?),
-                    "grant": HEXLOWER.encode(&rocky_credentials::encode(&link)?),
-                }));
-            }
-            "install_trust" => {
+            TipChange::InstallTrust { grant } => {
                 let link = HEXLOWER
-                    .decode(text(request, "grant")?.as_bytes())
+                    .decode(grant.as_bytes())
                     .ok()
                     .and_then(|bytes| {
                         rocky_credentials::decode_bounded::<rocky_credentials::SignedCapability>(
@@ -368,9 +262,67 @@ impl Node {
                 self.observations.touch();
                 self.wake_sync();
             }
-            _ => return Err(refused("unknown tips action")),
         }
-        Ok(serde_json::to_value(self.tip_status(scope).await?)?)
+        self.tip_status(scope).await
+    }
+
+    pub(super) async fn set_kept_seals(&self, config: KeptSeals) -> Result<KeptSeals, Failure> {
+        self.replica
+            .keep_seals(rocky_secure::KeptSeals {
+                bookmarked: config.bookmarked,
+                latest: config.latest,
+                every: config.every,
+            })
+            .await?;
+        self.observations.touch();
+        self.kept_seals().await
+    }
+
+    pub(super) async fn compact_tips(&self, keep: usize) -> Result<TipCompaction, Failure> {
+        let scope = self.domain().scope;
+        let report = self.replica.compact(scope, keep).await?;
+        self.list_checkpoints(scope).await?;
+        self.replica.drop_unrequired_schemas().await?;
+        self.observations.touch();
+        let blocked = report
+            .blocked
+            .iter()
+            .map(|(scope, block)| {
+                Ok(TipPruneBlock {
+                    scope: *scope,
+                    reason: format!("{block:?}"),
+                })
+            })
+            .collect::<Result<_, Failure>>()?;
+        self.compaction(scope, report.pruned, blocked).await
+    }
+
+    pub(super) async fn trust_identity(
+        &self,
+        identity: PublicKey,
+        root: &super::Root,
+    ) -> Result<crate::TrustGrant, Failure> {
+        let registry = self.registry().await?;
+        let (link, changes) = self
+            .settings
+            .lock()
+            .await
+            .trust(&registry, identity, root.signer())
+            .map_err(|error| -> Failure {
+                if error.is::<crate::enrollment::PublisherRequired>() {
+                    error
+                } else {
+                    refused(error)
+                }
+            })?;
+        crate::registry::write(&self.replica, self.domain().registry(), &changes).await?;
+        self.observations.touch();
+        self.wake_sync();
+        Ok(crate::TrustGrant {
+            identity: identity.to_hex(),
+            capability: hex(&link.id()?),
+            grant: HEXLOWER.encode(&rocky_credentials::encode(&link)?),
+        })
     }
 
     pub(super) async fn complete_pending_follow(&self) -> Result<(), Failure> {
@@ -390,10 +342,11 @@ impl Node {
                 Ok(())
             })
             .await?;
-            self.activity.record(
-                "bookmark_follow_failed",
-                json!({"name": name, "reason": "deleted"}),
-            );
+            self.activity
+                .record(crate::ActivityKind::BookmarkFollowFailed {
+                    name: (name).to_owned(),
+                    reason: ("deleted").to_owned(),
+                });
             return Ok(());
         };
         let seal = inspection
@@ -437,7 +390,7 @@ impl Node {
         Ok(())
     }
 
-    async fn tip_status(&self, scope: Scope) -> Result<TipStatus, Failure> {
+    pub(super) async fn tip_status(&self, scope: Scope) -> Result<TipStatus, Failure> {
         let observed = self.replica.tip_observation(scope).await?;
         Ok(TipStatus {
             bookmark: observed.bookmark,
@@ -457,7 +410,7 @@ impl Node {
                             .into_iter()
                             .map(|frontier| {
                                 Ok(TipScopeFrontier {
-                                    scope: serde_json::to_string(&frontier.scope)?,
+                                    scope: frontier.scope,
                                     logs: frontier
                                         .logs
                                         .into_iter()
@@ -476,7 +429,7 @@ impl Node {
         })
     }
 
-    async fn compaction(
+    pub(super) async fn compaction(
         &self,
         scope: Scope,
         pruned: u64,
@@ -494,7 +447,7 @@ impl Node {
         })
     }
 
-    async fn kept_seals(&self) -> Result<KeptSeals, Failure> {
+    pub(super) async fn kept_seals(&self) -> Result<KeptSeals, Failure> {
         let config = self.replica.kept_seal_config().await?;
         Ok(KeptSeals {
             bookmarked: config.bookmarked,
@@ -503,7 +456,7 @@ impl Node {
         })
     }
 
-    async fn inspect_tips(&self, scope: Scope) -> Result<TipInspection, Failure> {
+    pub(super) async fn inspect_tips(&self, scope: Scope) -> Result<TipInspection, Failure> {
         let graph = self.replica.tip_graph(scope).await?;
         let mut held = std::collections::BTreeMap::new();
         for seal in &graph.seals {
@@ -547,7 +500,7 @@ impl Node {
                         .map(|record| {
                             Ok(TipCheckpoint {
                                 id: hex(&record.id()?),
-                                scope: serde_json::to_string(&record.statement.table)?,
+                                scope: record.statement.table,
                                 checkpoint: hex(&record.statement.checkpoint),
                                 signer: record.statement.signer.to_hex(),
                                 authority: authority(graph.authority(record.endorsement())),
@@ -637,7 +590,7 @@ impl Node {
             })
             .collect();
         Ok(TipInspection {
-            scope: serde_json::to_string(&scope)?,
+            scope,
             genesis: hex(&graph.genesis().0),
             schema: hex(&graph.genesis_schema),
             genesis_minimum: graph
@@ -1045,16 +998,18 @@ impl Node {
                 Ok(_) => self.observations.touch(),
                 Err(error) => {
                     self.activity
-                        .record("finalization_failed", json!({"error": error.to_string()}));
+                        .record(crate::ActivityKind::FinalizationFailed {
+                            error: (error.to_string()).to_owned(),
+                        });
                 }
             }
         }
         if self.replica.domain_log().is_some() {
             if let Err(error) = self.prepare_terminal_credentials().await {
-                self.activity.record(
-                    "terminal_credentials_failed",
-                    json!({"error":error.to_string()}),
-                );
+                self.activity
+                    .record(crate::ActivityKind::TerminalCredentialsFailed {
+                        error: (error.to_string()).to_owned(),
+                    });
             }
             let before = self.replica.followed_tip().await;
             match self.replica.settle_tip_statements().await {
@@ -1062,32 +1017,34 @@ impl Node {
                 Ok(_) => {
                     self.followed_tip_changed(before).await;
                     if let Err(error) = self.ensure_tip_node().await {
-                        self.activity
-                            .record("line_node_failed", json!({"error": error.to_string()}));
+                        self.activity.record(crate::ActivityKind::LineNodeFailed {
+                            error: (error.to_string()).to_owned(),
+                        });
                     }
                     self.observations.touch();
                 }
                 Err(error) => {
-                    self.activity.record(
-                        "seal_settlement_failed",
-                        json!({"error": error.to_string()}),
-                    );
+                    self.activity
+                        .record(crate::ActivityKind::SealSettlementFailed {
+                            error: (error.to_string()).to_owned(),
+                        });
                 }
             }
             match self.replica.finalize_seals(self.domain().scope).await {
                 Ok(0) => {}
                 Ok(_) => self.observations.touch(),
                 Err(error) => {
-                    self.activity
-                        .record("finality_failed", json!({"error": error.to_string()}));
+                    self.activity.record(crate::ActivityKind::FinalityFailed {
+                        error: (error.to_string()).to_owned(),
+                    });
                 }
             }
         }
         if let Err(error) = self.compact_final_seal().await {
-            self.activity.record(
-                "final_compaction_failed",
-                json!({"error": error.to_string()}),
-            );
+            self.activity
+                .record(crate::ActivityKind::FinalCompactionFailed {
+                    error: (error.to_string()).to_owned(),
+                });
         }
     }
 
@@ -1115,7 +1072,7 @@ impl Node {
     }
 
     /// Opens a tip on `seal`; only the owner and trusted identities may.
-    async fn open_tip(
+    pub(super) async fn open_tip(
         &self,
         scope: Scope,
         seal: rocky_core::Commitment,

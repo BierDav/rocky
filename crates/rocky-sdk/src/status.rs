@@ -1,4 +1,4 @@
-//! Observable native SDK contract. Bindings are generated from these declarations.
+//! Typed observations of database authority, storage and network resources.
 pub use rocky_core::{Blocker, BlockerKind, ClearsBy, FrameReplay, WaitReason};
 use serde::{Deserialize, Serialize};
 
@@ -39,10 +39,6 @@ pub enum AttemptOperation {
     ResolveContact,
     OpenLink,
     Reconcile,
-    CoordinatorRegister,
-    CoordinatorControl,
-    CoordinatorClose,
-    CoordinatorUsage,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -116,18 +112,6 @@ pub struct RevocationStatus {
     pub unpushed: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StatusGrant {
-    pub scope: String,
-    pub rights: Vec<String>,
-    pub columns: Option<Vec<String>>,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuthorityProfile {
-    pub kind: String,
-    pub scopes: Vec<String>,
-    pub grants: Vec<StatusGrant>,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifiedRevocation {
     pub id: String,
     pub statement: Vec<u8>,
@@ -141,15 +125,19 @@ pub enum RevocationReason {
     Node,
     /// This device's identity.
     Identity,
-    /// The root revoked the trusted identity `trusted` that first enrolled
-    /// this identity: this device did nothing wrong and may enroll again
-    /// through another trusted node.
-    Origin { trusted: String },
+    /// The root marked the first trusted issuer compromised. This identity
+    /// ended by cascade and may enroll again through another trusted node.
+    Cascade { trusted: String },
     /// A root recovery that kept the trusted identity `recovered` ended
     /// every trusted grant before its own: this device's, or that of the
     /// trusted identity that first enrolled it. It may enroll again
     /// through a trusted node the recovery kept or the root added since.
     Recovery { recovered: String },
+    /// The owner chose "this is everything: sign out everywhere else" on
+    /// another device: reset `reset` keeps only that device and its named
+    /// custodians. This node's operations outside the reset's fence are
+    /// discarded everywhere; sign in again as a new device.
+    Reset { reset: rocky_core::Commitment },
     /// A capability or an issuer above it.
     Capability,
 }
@@ -169,7 +157,7 @@ pub struct AuthorityStatus {
     pub logged_out: bool,
     pub verified_revocation: Option<VerifiedRevocation>,
     pub revocations: RevocationStatus,
-    pub profile: AuthorityProfile,
+    pub profile: crate::GrantProfile,
     pub renewal_routes: Vec<RenewalRoute>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,6 +176,8 @@ pub struct PendingGeneration {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GenerationStatus {
+    pub follow_required: bool,
+    pub held: usize,
     pub manifest: String,
     pub current: Generation,
     pub pending: Option<PendingGeneration>,
@@ -307,28 +297,9 @@ pub struct DiscoveryStatus {
     pub topic: DiscoveryPath,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LinkPath {
-    pub selected: bool,
-    pub kind: String,
-    pub remote: String,
-    pub local: Option<String>,
-    pub round_trip_micros: u64,
-    pub mtu: u32,
-    pub window: u64,
-    pub sent_bytes: u64,
-    pub sent_datagrams: u64,
-    pub received_bytes: u64,
-    pub received_datagrams: u64,
-    pub lost_packets: u64,
-    pub lost_bytes: u64,
-    pub congestion_events: u64,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerLink {
     pub state: LinkState,
     pub opened_at_epoch_seconds: Option<u64>,
-    pub round_trip_millis: Option<u64>,
-    pub paths: Vec<LinkPath>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetryStatus {
@@ -351,19 +322,6 @@ pub struct Peer {
     pub retry: Option<RetryStatus>,
     /// The last exchange with this peer that was not skipped.
     pub last_sync: Option<PeerReconciliation>,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RelayStatus {
-    pub url: String,
-    pub connected: bool,
-    pub last_error: Option<String>,
-    pub auth_denied_reason: Option<String>,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RelayObservation {
-    pub initial_configuration: Option<String>,
-    /// None when the attached transport cannot expose relay observations.
-    pub relays: Option<Vec<RelayStatus>>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -393,7 +351,6 @@ pub struct NetworkStatus {
     pub connected_peer_count: u64,
     pub contact_resolutions: Vec<AttemptObservation>,
     pub discovery: DiscoveryStatus,
-    pub relay: RelayObservation,
     pub last_reconciliation: Option<ReconciliationReport>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -489,14 +446,9 @@ pub enum AlertKind {
     },
     /// Two root recoveries met: the later, which kept the identity `kept`,
     /// ended every trusted grant before it, the earlier recovered identity
-    /// `ended` too, whose writes every holder refuses from then on. With
-    /// `shared_slot` both took the same author numbers. Recover once; a
-    /// device of `ended` enrolls again through `kept`.
-    RecoveriesMet {
-        kept: String,
-        ended: String,
-        shared_slot: bool,
-    },
+    /// `ended` too, whose writes every holder refuses from then on. Recover
+    /// once; a device of `ended` enrolls again through `kept`.
+    RecoveriesMet { kept: String, ended: String },
     /// The root recovery that kept the trusted identity `recovered` ended
     /// the trusted identity `ended`, whose grant came before it, and with
     /// it every identity `ended` first enrolled: their devices are refused
@@ -632,6 +584,26 @@ pub struct CallFailure {
     pub code: String,
     pub retryable: bool,
     pub detail: String,
+    pub coordinator_time: Option<u64>,
+    pub blockers: Vec<rocky_core::Blocker>,
+}
+impl CallFailure {
+    pub fn from_failure(error: &crate::Failure) -> Self {
+        crate::node::call_failure(error)
+    }
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+    pub fn retryable(&self) -> bool {
+        self.retryable
+    }
+    pub(crate) fn boxed(error: crate::Failure) -> crate::Failure {
+        if error.is::<crate::ServiceError>() {
+            error
+        } else {
+            Box::new(Self::from_failure(&error))
+        }
+    }
 }
 impl std::fmt::Display for CallFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

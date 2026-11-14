@@ -438,7 +438,7 @@ impl Renewal {
         request: &RenewRequest,
         prior: &Capability,
         revocations: RevocationSet,
-        validity: (u64, u64, u64),
+        validity: crate::Validity,
         payload: &[u8],
     ) -> Result<Self, Error> {
         if revocations.revokes(&request.node) {

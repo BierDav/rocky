@@ -19,8 +19,13 @@ use tokio::sync::watch;
 use web_time::Instant;
 
 #[cfg(test)]
-// The process-killing faults belong to crash tests, which run natively.
-#[cfg_attr(target_family = "wasm", allow(dead_code))]
+#[cfg_attr(
+    target_family = "wasm",
+    expect(
+        dead_code,
+        reason = "Process-exiting faults are exercised only by native crash tests."
+    )
+)]
 pub(crate) enum Fault {
     FailBeforeCommit,
     RetryBeforeCommit(usize),

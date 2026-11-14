@@ -27,22 +27,6 @@ impl<A: RowApplication> Inner<A> {
         scope: SqlValue,
         stubs: Option<i64>,
     ) -> Result<Sets, Error> {
-        let resource: ResourceScope = match &scope {
-            SqlValue::Blob(bytes) => decode(bytes)?,
-            SqlValue::Integer(id) => {
-                let mut rows = self
-                    .conn
-                    .query("SELECT scope FROM secure_scope_state WHERE id=?", [*id])
-                    .await?;
-                let bytes: Vec<u8> = rows
-                    .next()
-                    .await?
-                    .ok_or_else(|| Error::Corrupt("row set scope missing".into()))?
-                    .get(0)?;
-                decode(&bytes)?
-            }
-            _ => return Err(Error::Corrupt("row set scope".into())),
-        };
         let mut witnessed = BTreeSet::new();
         let mut sets = Sets::new();
         let mut cursor = Vec::new();
@@ -73,7 +57,7 @@ impl<A: RowApplication> Inner<A> {
                     self.stored_bindings(proof.bindings()).await?;
                 }
                 for (author, signer) in &record.authors {
-                    if self.stamp_author(resource.domain, *author).await? != *signer {
+                    if self.stamp_author(*author)? != *signer {
                         return Err(Error::Corrupt(
                             "stamp author differs from its committed signer".into(),
                         ));
@@ -139,15 +123,18 @@ impl<A: RowApplication> Inner<A> {
                 let mut marks = ledger.clone();
                 let last = inner
                     .replay_sealed(
-                        scope,
-                        id,
-                        Overlay::Scratch,
-                        inner.workspace.tip,
-                        (cursor, i64::MAX),
-                        STEP_OPERATIONS,
+                        checkpoint::ReplayRequest {
+                            scope,
+                            id,
+                            overlay: Overlay::Scratch,
+                            target: inner.workspace.tip,
+                            after: cursor,
+                            through: i64::MAX,
+                            limit: STEP_OPERATIONS,
+                            mode: checkpoint::ReplayMode::Check,
+                        },
                         &mut next,
                         &mut marks,
-                        checkpoint::ReplayMode::Check,
                     )
                     .await?;
                 Ok((last, next, marks))
@@ -437,9 +424,9 @@ impl<A: RowApplication> Inner<A> {
                             .into_values()
                             .map(|birth| {
                                 vec![
-                                    SqlValue::Integer(i64::from(birth.author)),
+                                    writer_value(birth.author),
                                     SqlValue::Blob(birth.signer.as_bytes().to_vec()),
-                                    SqlValue::Integer(i64::from(birth.sequence)),
+                                    SqlValue::Integer(birth.sequence as i64),
                                 ]
                             })
                             .collect::<Vec<_>>();

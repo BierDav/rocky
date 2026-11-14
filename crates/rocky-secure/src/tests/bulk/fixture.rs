@@ -37,7 +37,14 @@ async fn candidate_kind(n: usize, tags: bool, issuer: bool) -> (Candidate, Optio
                     },
                 )
                 .unwrap()
-                .issue_issuer(issuer.public_key(), None, (start, end - start, 0))
+                .issue_issuer(
+                    issuer.public_key(),
+                    rocky_credentials::Validity {
+                        issued_at: start,
+                        lifetime: std::time::Duration::from_secs(end - start),
+                        clock_skew: std::time::Duration::from_secs(0),
+                    },
+                )
                 .unwrap(),
             ])
         });
@@ -132,7 +139,7 @@ async fn candidate_kind(n: usize, tags: bool, issuer: bool) -> (Candidate, Optio
         .unwrap();
     let writer = PrivateKey::new();
     let credentials = l.certified(3, signer, &writer);
-    let author = credentials.author_number().unwrap();
+    let author = crate::writer::writer(&writer.public_key());
     replica
         .register_line_node(LineNode {
             key: writer,
@@ -155,7 +162,7 @@ async fn candidate_kind(n: usize, tags: bool, issuer: bool) -> (Candidate, Optio
             vec![
                 SqlValue::Text(format!("k{i}")),
                 SqlValue::Text(format!("item{i}")),
-                SqlValue::Integer(RowIdentity::new(author, (i + 1) as u32).unwrap().integer()),
+                RowIdentity::new(author, (i + 1) as u64).unwrap().sql(),
             ],
         )
         .await
@@ -164,9 +171,7 @@ async fn candidate_kind(n: usize, tags: bool, issuer: bool) -> (Candidate, Optio
     if tags && n > 0 {
         sql.run(
             "INSERT INTO tags(key,label,id) VALUES('tag','private companion',?)",
-            vec![SqlValue::Integer(
-                RowIdentity::new(author, 1).unwrap().integer(),
-            )],
+            vec![RowIdentity::new(author, 1).unwrap().sql()],
         )
         .await
         .unwrap();

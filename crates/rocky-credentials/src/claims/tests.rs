@@ -49,7 +49,7 @@ fn holder_chain(
     )
     .unwrap();
     CredentialChain(vec![link])
-        .certify_claims(holder, node.public_key(), 10)
+        .certify_claims(holder, node.public_key())
         .unwrap()
 }
 
@@ -140,7 +140,7 @@ fn claim_links_expire_within_a_day_and_end_with_their_revocation() {
     let mut long = chain.0[0].capability.clone();
     long.expires = long.not_before + CLAIM_LIFETIME + CLAIM_SKEW + 1;
     let long = CredentialChain(vec![SignedCapability::sign(long, &owner).unwrap()])
-        .certify_claims(&holder, node.public_key(), 10)
+        .certify_claims(&holder, node.public_key())
         .unwrap();
     assert!(
         long.claimant(
@@ -176,6 +176,7 @@ fn claim_links_expire_within_a_day_and_end_with_their_revocation() {
             identities: [holder.public_key()].into(),
             capabilities: Default::default(),
             cut: Default::default(),
+            mode: crate::RevocationMode::Lost,
             recovery: None,
         },
         &owner,
@@ -223,7 +224,7 @@ fn delegation_never_exceeds_the_delegators_claim_right() {
     let narrowed = delegate_with(only(&["invoices"])).unwrap();
     let chain = narrowed
         .clone()
-        .certify_claims(&delegate, node.public_key(), 12)
+        .certify_claims(&delegate, node.public_key())
         .unwrap();
     let claim = |chain: &CredentialChain, counter: &str| {
         chain.claimant(
@@ -265,7 +266,7 @@ fn delegation_never_exceeds_the_delegators_claim_right() {
         held.0[0].clone(),
         SignedCapability::sign(wide, &holder).unwrap(),
     ])
-    .certify_claims(&delegate, node.public_key(), 12)
+    .certify_claims(&delegate, node.public_key())
     .unwrap();
     assert!(claim(&wide, "refunds").is_err());
     assert!(claim(&wide, "invoices").is_err());
@@ -289,8 +290,11 @@ fn an_issuer_grants_claims_and_a_node_certificate_carries_none() {
     .unwrap()
     .issue_issuer(
         issuer.public_key(),
-        Some(crate::AuthorRange::ALL),
-        (NOW, 86_400 * 30, 60),
+        crate::Validity {
+            issued_at: NOW,
+            lifetime: std::time::Duration::from_secs(86_400 * 30),
+            clock_skew: std::time::Duration::from_secs(60),
+        },
     )
     .unwrap();
     let links = CredentialChain(vec![issuer_link]);
@@ -300,7 +304,7 @@ fn an_issuer_grants_claims_and_a_node_certificate_carries_none() {
         .unwrap();
     let chain = authority
         .chain_of(link)
-        .certify_claims(&holder, node.public_key(), 11)
+        .certify_claims(&holder, node.public_key())
         .unwrap();
     assert_eq!(
         chain
@@ -338,8 +342,11 @@ fn revoking_a_grant_ends_every_issuers_links_of_it_and_no_other_grant() {
             .unwrap()
             .issue_issuer(
                 issuer.public_key(),
-                Some(crate::AuthorRange::ALL),
-                (NOW, 86_400 * 30, 60),
+                crate::Validity {
+                    issued_at: NOW,
+                    lifetime: std::time::Duration::from_secs(86_400 * 30),
+                    clock_skew: std::time::Duration::from_secs(60),
+                },
             )
             .unwrap(),
         ]);
@@ -349,7 +356,7 @@ fn revoking_a_grant_ends_every_issuers_links_of_it_and_no_other_grant() {
             .unwrap();
         authority
             .chain_of(link)
-            .certify_claims(&holder, node.public_key(), 11)
+            .certify_claims(&holder, node.public_key())
             .unwrap()
     };
     // The first issuer signs the right; the second renews it after the
@@ -381,6 +388,7 @@ fn revoking_a_grant_ends_every_issuers_links_of_it_and_no_other_grant() {
             identities: Default::default(),
             capabilities: [every().grant].into(),
             cut: Default::default(),
+            mode: crate::RevocationMode::Lost,
             recovery: None,
         },
         &owner,

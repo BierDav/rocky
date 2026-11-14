@@ -39,7 +39,6 @@ impl Author {
                 &root.join(format!("author{number}.sqlite")),
                 node.clone(),
                 f.grant(None, &all()),
-                Some((node.clone(), number)),
             )
             .await;
         for (name, key) in KEYS {
@@ -117,7 +116,7 @@ fn text(value: &str) -> SqlValue {
 /// One replayed member as the reference sees it.
 struct Member {
     scope: ResourceScope,
-    stamp: (u64, u32, u64),
+    stamp: (u64, rocky_core::WriterId, u64),
     transaction: Commitment,
     members: usize,
     statements: Vec<rocky_core::replay::IntentStatement>,
@@ -166,7 +165,7 @@ fn canonical_sealed(f: &Fixture, eras: &[&[EncryptedFrame]], sealed: usize) -> C
                     scope: frame.scope().unwrap(),
                     stamp: (
                         header.timestamp,
-                        header.extensions.author.unwrap(),
+                        header.extensions.author(&header.public_key).unwrap(),
                         header.extensions.author_sequence,
                     ),
                     transaction: membership.transaction,
@@ -203,7 +202,7 @@ fn canonical_sealed(f: &Fixture, eras: &[&[EncryptedFrame]], sealed: usize) -> C
     let db = rusqlite::Connection::open_in_memory().unwrap();
     rocky_storage::exact::register(&db).unwrap();
     db.execute_batch(
-        "CREATE TABLE items(list TEXT NOT NULL,key TEXT NOT NULL,amount INTEGER NOT NULL,id INTEGER NOT NULL,PRIMARY KEY(list,key));
+        "CREATE TABLE items(list TEXT NOT NULL,key TEXT NOT NULL,amount INTEGER NOT NULL,id BLOB NOT NULL,PRIMARY KEY(list,key));
          CREATE UNIQUE INDEX items_identity ON items(list,id);",
     )
     .unwrap();
@@ -293,7 +292,7 @@ enum Fault {
 /// Opens a receiver holding both partitions that writes nothing itself.
 async fn receiver(f: &Fixture, path: &Path, node: &PrivateKey) -> EncryptedReplica<TypedRows> {
     let replica = f
-        .open(path, node.clone(), f.grant(None, &[Right::Read]), None)
+        .open(path, node.clone(), f.grant(None, &[Right::Read]))
         .await;
     // Keys come from the device's key store on every open.
     for (name, key) in KEYS {

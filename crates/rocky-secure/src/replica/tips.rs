@@ -221,8 +221,8 @@ impl<A: RowApplication> Inner<A> {
             extension.scope.domain,
             extension.tip,
             extension
-                .author
-                .ok_or_else(|| denied("node author number missing"))?,
+                .author(&operation.header.public_key)
+                .ok_or_else(|| denied("node author missing"))?,
             extension.author_sequence,
             operation.header.timestamp,
         )
@@ -231,7 +231,7 @@ impl<A: RowApplication> Inner<A> {
         &self,
         scope: Scope,
         tip: TipId,
-        author: u32,
+        author: WriterId,
         sequence: u64,
         _timestamp: u64,
     ) -> Result<FrameReach, Error> {
@@ -241,7 +241,7 @@ impl<A: RowApplication> Inner<A> {
         &self,
         scope: Scope,
         tip: TipId,
-        author: u32,
+        author: WriterId,
         sequence: u64,
         _timestamp: u64,
         mut context: Option<&mut refresh::RefreshGraphContext<'_>>,
@@ -361,7 +361,7 @@ impl<A: RowApplication> Inner<A> {
         graph: &TipGraph,
         scope: Scope,
         source: TipId,
-        author: u32,
+        author: WriterId,
         sequence: u64,
         context: &mut Option<&mut refresh::RefreshGraphContext<'_>>,
     ) -> Result<bool, Error> {
@@ -421,7 +421,7 @@ impl<A: RowApplication> Inner<A> {
         &self,
         graph: &TipGraph,
         source: TipId,
-        author: u32,
+        author: WriterId,
         sequence: u64,
         target: TipId,
     ) -> Result<bool, Error> {
@@ -449,7 +449,7 @@ impl<A: RowApplication> Inner<A> {
     pub(super) fn covers_exact(
         graph: &TipGraph,
         source: TipId,
-        author: u32,
+        author: WriterId,
         sequence: u64,
         seal: &rocky_credentials::SignedSeal,
     ) -> Result<bool, Error> {
@@ -1520,7 +1520,8 @@ impl<A: RowApplication> Inner<A> {
             Some(graph) => self.visible_frame(
                 graph,
                 e.tip,
-                e.author.ok_or_else(|| denied("node author missing"))?,
+                e.author(&operation.header.public_key)
+                    .ok_or_else(|| denied("node author missing"))?,
                 e.author_sequence,
                 self.workspace.tip,
             ),
@@ -1978,31 +1979,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
         {
             chain.0.pop();
         }
-        let range = chain
-            .0
-            .last()
-            .ok_or_else(|| denied("identity credential missing"))?
-            .capability
-            .authors()
-            .map_err(credential)?
-            .ok_or_else(|| denied("identity author range missing"))?;
         let membership = known.membership().map_err(credential)?;
         if !membership.can_link(owner, |node| known.identity_unlinks(owner, node)) {
             return Err(denied("identity membership limit reached"));
         }
         let sequence = membership.next_sequence(owner).map_err(credential)?;
-        let capacity = (range.last - range.first).div_ceil(2).clamp(1, 256);
-        let author = u32::try_from(sequence)
-            .ok()
-            .filter(|sequence| *sequence < capacity)
-            .and_then(|sequence| range.first.checked_add(sequence))
-            .ok_or_else(|| denied("identity node author range exhausted"))?;
         let key = PrivateKey::new();
         let credentials = chain
             .certify_member(
                 identity,
                 key.public_key(),
-                author,
                 sequence,
                 membership.head(owner).map(|head| head.certificate),
             )
@@ -2050,12 +2036,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         let root = decode(line)?;
         let author = identity::NodeAuthor {
-            number: node.credentials.author_number().map_err(credential)?,
+            writer: identity::node_writer(&node.credentials, &node.key.public_key())?,
             chain: Chain::new(node.credentials.clone())?,
             credentials: node.credentials,
             key: node.key,
         };
-        inner.bind_node_author(&author.credentials).await?;
+        identity::check_node_chain(&author.credentials)?;
         inner.line_nodes.insert(root, author);
         Ok(())
     }
@@ -2093,13 +2079,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         inner.verify_chain(&node.credentials, node.key.public_key(), now()?)?;
         let selected = identity::NodeAuthor {
-            number: node.credentials.author_number().map_err(credential)?,
+            writer: identity::node_writer(&node.credentials, &node.key.public_key())?,
             chain: Chain::new(node.credentials.clone())?,
             credentials: node.credentials,
             key: node.key,
         };
         transaction!(inner, |inner| {
-            inner.bind_node_author(&selected.credentials).await?;
+            identity::check_node_chain(&selected.credentials)?;
             let existing = collect_rows(
                 inner
                     .conn
@@ -2207,7 +2193,7 @@ pub(super) struct StoredHeader {
     seq_num: u64,
     pub(super) tip: TipId,
     pub(super) scope: ResourceScope,
-    pub(super) author: Option<u32>,
+    pub(super) author: Option<WriterId>,
     pub(super) author_sequence: u64,
 }
 
@@ -2264,7 +2250,7 @@ impl<A: RowApplication> Inner<A> {
             seq_num: header.seq_num,
             tip: e.tip,
             scope: e.scope,
-            author: e.author,
+            author: e.author(&header.public_key),
             author_sequence: e.author_sequence,
         };
         self.frontier_headers
@@ -2317,7 +2303,7 @@ pub(super) struct LedgerView {
     seals: Vec<rocky_credentials::SignedSeal>,
 }
 impl FramePath {
-    pub(super) fn admits(&self, author: u32, sequence: u64) -> Result<bool, Error> {
+    pub(super) fn admits(&self, author: WriterId, sequence: u64) -> Result<bool, Error> {
         if !self.bounds.iter().all(|frontier| {
             frontier
                 .iter()

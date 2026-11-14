@@ -13,7 +13,7 @@ pub(super) const SCHEMA: &[&str] = &[
 impl<A: RowApplication> Inner<A> {
     /// Stores a chain a row of the same transaction is about to name.
     pub(super) async fn keep_chain(&self, chain: &Chain) -> Result<(), Error> {
-        self.bind_node_author(chain.credentials()).await?;
+        identity::check_node_chain(chain.credentials())?;
         if self.chain_kept(chain.digest()).await? {
             return Ok(());
         }

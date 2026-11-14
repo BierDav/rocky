@@ -5,6 +5,7 @@
 //! else nothing.
 // The SDK's blocking constructors and native archives.
 #![cfg(not(target_family = "wasm"))]
+use common::identity::snapshot as snap;
 use rocky_credentials::{RootEscrow, RootKey};
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};
@@ -34,24 +35,35 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>) -> Open<'a> {
         coordination: None,
     }
 }
-fn values(list: &str) -> Value {
-    json!([{"type":"text","value":list}])
+fn values(list: &str) -> Vec<rocky_sdk::SqlValue> {
+    vec![rocky_sdk::SqlValue::Text(snap::text(&(list)))]
 }
 async fn sql(device: &Device, statement: String, id: Value) {
-    device
-        .ok(json!({"type":"sql","sql":statement,"values":[{"type":"integer","value":id}]}))
-        .await;
+    snap::ok(
+        device
+            .session
+            .execute(&(snap::text(&(statement))), vec![snap::row_id(&(id))]),
+    )
+    .await;
 }
 /// Writes item `key` of `list`, creating the list's row first.
 async fn write_item(device: &Device, list: &str, key: &str) {
-    let listed = device
-        .ok(json!({"type":"read","query":{"sql":format!("SELECT name FROM lists WHERE name='{list}'"),"values":[],"max_rows":1}}))
-        .await;
-    device.ok(json!({"type":"sql","sql":"BEGIN"})).await;
+    let listed = snap::ok(device.session.read(rocky_sdk::ReadQuery {
+        sql: snap::text(&(format!("SELECT name FROM lists WHERE name='{list}'"))),
+        values: vec![],
+        max_rows: 1,
+        max_bytes: None,
+        cursor: None,
+    }))
+    .await;
+    snap::ok(device.session.execute("BEGIN", Vec::new())).await;
     if listed["rows"].as_array().is_none_or(Vec::is_empty) {
-        let id = device
-            .ok(json!({"type":"next_id","table":"lists","partition_values":values(list)}))
-            .await;
+        let id = snap::ok(
+            device
+                .session
+                .next_partition_id("lists", (values(list)).clone()),
+        )
+        .await;
         sql(
             device,
             format!("INSERT INTO lists(name,title,id) VALUES('{list}','{list}',?)"),
@@ -59,32 +71,40 @@ async fn write_item(device: &Device, list: &str, key: &str) {
         )
         .await;
     }
-    let id = device
-        .ok(json!({"type":"next_id","table":"items","partition_values":values(list)}))
-        .await;
+    let id = snap::ok(
+        device
+            .session
+            .next_partition_id("items", (values(list)).clone()),
+    )
+    .await;
     sql(
         device,
         format!("INSERT INTO items(list,key,id) VALUES('{list}','{key}',?)"),
         id["id"].clone(),
     )
     .await;
-    device.ok(json!({"type":"sql","sql":"COMMIT"})).await;
+    snap::ok(device.session.execute("COMMIT", Vec::new())).await;
 }
 async fn write_note(device: &Device, key: &str) {
-    device.ok(json!({"type":"sql","sql":"BEGIN"})).await;
-    let id = device.ok(json!({"type":"next_id","table":"notes"})).await;
+    snap::ok(device.session.execute("BEGIN", Vec::new())).await;
+    let id = snap::ok(device.session.next_id("notes")).await;
     sql(
         device,
         format!("INSERT INTO notes(key,id) VALUES('{key}',?)"),
         id["id"].clone(),
     )
     .await;
-    device.ok(json!({"type":"sql","sql":"COMMIT"})).await;
+    snap::ok(device.session.execute("COMMIT", Vec::new())).await;
 }
 async fn column(device: &Device, query: &str) -> Vec<String> {
-    let read = device
-        .ok(json!({"type":"read","query":{"sql":query,"values":[],"max_rows":256}}))
-        .await;
+    let read = snap::ok(device.session.read(rocky_sdk::ReadQuery {
+        sql: snap::text(&(query)),
+        values: vec![],
+        max_rows: 256,
+        max_bytes: None,
+        cursor: None,
+    }))
+    .await;
     read["rows"]
         .as_array()
         .into_iter()
@@ -143,24 +163,44 @@ fn secrets(directory: &Path) -> Result<Vec<[u8; 32]>, Failure> {
 /// installed: the revocation rotates both keys.
 async fn rotate(issuer: &Device, directory: &Path, list: &str) -> Result<(), Failure> {
     let device = common::node_keys(directory, None)?;
-    issuer
-        .ok(json!({"type":"grant","device":device,"profile":{"kind":"reader","scopes":["notes"]}}))
-        .await;
-    let address = issuer
-        .ok(json!({"type":"partition_address","table":"items","values":values(list)}))
-        .await;
+    snap::ok(issuer.session.grant(
+        device,
+        rocky_sdk::GrantProfile::Reader {
+            scopes: ["notes".to_owned()].into_iter().collect(),
+        },
+        rocky_sdk::GrantTerms {
+            ttl: None,
+            delegations: None,
+        },
+    ))
+    .await;
+    let address = snap::ok(
+        issuer
+            .session
+            .partition_address("items", (values(list)).clone()),
+    )
+    .await;
     let part = &address["tuple"][0];
     let grant = json!([{"domain":issuer.scope(),"table":address["scope"]["table"],"selector":[[part[0],{"Only":[part[1]]}]],"rows":"All","rights":["Read"],"fields":[]}]);
-    issuer
-        .ok(json!({"type":"partition_grant","device":device,"partitions":grant}))
-        .await;
-    issuer
-        .ok(json!({"type":"revoke","identity":device.identity.to_string()}))
-        .await;
+    snap::ok(
+        issuer.session.grant_partitions(
+            device,
+            serde_json::from_value::<Vec<rocky_sdk::credentials::PartitionGrant>>(json!(grant))
+                .expect("typed fixture"),
+            1,
+        ),
+    )
+    .await;
+    snap::ok(
+        issuer
+            .session
+            .revoke_identity(&(snap::text(&(device.identity.to_string())))),
+    )
+    .await;
     Ok(())
 }
 async fn principal(device: &Device) -> String {
-    device.ok(json!({"type":"session"})).await["principal"]
+    snap::ok(device.session.info()).await["principal"]
         .as_str()
         .unwrap_or_default()
         .into()
@@ -188,9 +228,15 @@ async fn the_root_phrase_and_a_backup_recover_every_partition_with_every_device_
     let issuer = Device::new(opened)?;
     let lost = principal(&issuer).await;
     for list in LISTS {
-        issuer
-            .ok(json!({"type":"partition_create","group":"list","values":values(list)}))
-            .await;
+        snap::ok(
+            issuer
+                .session
+                .create_partition(rocky_sdk::PartitionTarget::Group {
+                    group: "list".to_owned(),
+                    values: (values(list)).clone(),
+                }),
+        )
+        .await;
         write_item(&issuer, list, "before").await;
     }
     write_note(&issuer, "before").await;
@@ -250,14 +296,20 @@ async fn the_root_phrase_and_a_backup_recover_every_partition_with_every_device_
     );
     assert!(now.len() > kept.len(), "the rotated epochs are escrowed");
     // The recovered node is a trusted node of its own identity: it writes
-    // under the current keys, with author numbers no one else held.
+    // under the current keys and its own node key.
     assert_ne!(saved["identity"], held["identity"]);
     write_item(&device, LISTS[1], "recovered").await;
     write_note(&device, "recovered").await;
     assert_eq!(everything(&device).await.len(), 8);
-    let status = device
-        .ok(json!({"type":"partition_status","group":"list","values":values(LISTS[0])}))
-        .await;
+    let status = snap::ok(
+        device
+            .session
+            .partition_status(rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values(LISTS[0])).clone(),
+            }),
+    )
+    .await;
     let epochs: Vec<_> = status["epochs"]
         .as_array()
         .ok_or("epochs")?
@@ -296,9 +348,15 @@ async fn a_revoked_trusted_node_gains_nothing_from_escrow_records() -> Result<()
     let issuer = Device::new(opened)?;
     issuer.follow_main().await;
     for list in LISTS {
-        issuer
-            .ok(json!({"type":"partition_create","group":"list","values":values(list)}))
-            .await;
+        snap::ok(
+            issuer
+                .session
+                .create_partition(rocky_sdk::PartitionTarget::Group {
+                    group: "list".to_owned(),
+                    values: (values(list)).clone(),
+                }),
+        )
+        .await;
         write_item(&issuer, list, "before").await;
     }
     // A second trusted node, which holds every key, is later compromised.
@@ -307,12 +365,14 @@ async fn a_revoked_trusted_node_gains_nothing_from_escrow_records() -> Result<()
         open(&trusted, &hub),
         &issuer.invite_as(json!({"kind": "issuer"})).await,
     )?)?;
-    let t_identity = t.ok(json!({"type":"session"})).await["principal"].clone();
-    let grant = issuer
-        .ok(json!({"type":"tips","action":"trust","identity":t_identity,"root":issuer.root()}))
-        .await;
-    t.ok(json!({"type":"tips","action":"install_trust","grant":grant["grant"]}))
-        .await;
+    let t_identity = snap::ok(t.session.info()).await["principal"].clone();
+    let grant = snap::ok(
+        issuer
+            .session
+            .trust(&(snap::text(&(t_identity))), (issuer.root()).clone()),
+    )
+    .await;
+    snap::ok(t.session.install_trust(&(snap::text(&(grant["grant"]))))).await;
     let t_records = escrow(&trusted)?;
     assert!(t_records.len() > LISTS.len(), "it escrows what it holds");
     let stolen = secrets(&trusted)?;
@@ -322,9 +382,13 @@ async fn a_revoked_trusted_node_gains_nothing_from_escrow_records() -> Result<()
     );
     t.close().await;
     drop(t);
-    issuer
-        .ok(json!({"type":"revoke","identity":t_identity,"root":issuer.root()}))
-        .await;
+    snap::ok(issuer.session.revoke_identity_with_root(
+        &(snap::text(&(t_identity))),
+        rocky_sdk::RevocationMode::Compromised,
+        Some((issuer.root()).clone()),
+        true,
+    ))
+    .await;
     write_item(&issuer, LISTS[0], "after").await;
 
     // No secret it held opens a record, its own or the creator's after the
@@ -396,18 +460,18 @@ async fn a_revoked_trusted_node_gains_nothing_from_escrow_records() -> Result<()
     Ok(())
 }
 
-fn minting(directory: &Path) -> Result<(u64, u64), Failure> {
-    let range = &identity(directory)?["minting"]["range"];
-    Ok((
-        range["first"].as_u64().ok_or("first")?,
-        range["last"].as_u64().ok_or("last")?,
-    ))
+/// The writer `device`'s rows and stamps name: its node key.
+async fn writer(device: &Device) -> String {
+    snap::ok(device.session.info()).await["writer"]
+        .as_str()
+        .unwrap_or_default()
+        .into()
 }
 
-/// The backup predates an issuer its node enrolled: the recovered identity
-/// still takes numbers no trusted node handed out.
+/// The backup predates an issuer its node enrolled: the recovered node
+/// writes under its own key, which no trusted node holds.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_recovery_takes_author_numbers_no_trusted_node_handed_out() -> Result<(), Failure> {
+async fn a_recovery_writes_under_a_key_no_trusted_node_holds() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let creator = root.path().join("creator");
@@ -422,8 +486,7 @@ async fn a_recovery_takes_author_numbers_no_trusted_node_handed_out() -> Result<
         open(&later, &hub),
         &issuer.invite_as(json!({"kind": "issuer"})).await,
     )?)?;
-    let handed = minting(&later)?;
-    let kept = minting(&creator)?;
+    let (handed, kept) = (writer(&enrolled).await, writer(&issuer).await);
     enrolled.close().await;
     issuer.close().await;
     std::fs::remove_dir_all(&creator)?;
@@ -434,15 +497,8 @@ async fn a_recovery_takes_author_numbers_no_trusted_node_handed_out() -> Result<
         &archive,
         &RootKey::from_phrase(&phrase)?,
     )?)?;
-    let taken = minting(&recovered)?;
-    for other in [handed, kept] {
-        assert!(
-            taken.1 < other.0 || other.1 < taken.0,
-            "{taken:?} overlaps {other:?}"
-        );
-    }
-    assert!(taken.0 >= u64::from(rocky_credentials::RECOVERY_FIRST));
-    assert!(handed.1 < u64::from(rocky_credentials::RECOVERY_FIRST));
+    let taken = writer(&device).await;
+    assert!(!taken.is_empty() && taken != handed && taken != kept);
     write_note(&device, "recovered").await;
     assert_eq!(
         column(&device, "SELECT key FROM notes ORDER BY key").await,
@@ -468,12 +524,18 @@ async fn a_recovery_revokes_every_lost_trusted_identity_it_knows() -> Result<(),
         &issuer.invite_as(json!({"kind": "issuer"})).await,
     )?)?;
     let second = principal(&trusted).await;
-    let grant = issuer
-        .ok(json!({"type":"tips","action":"trust","identity":second,"root":issuer.root()}))
-        .await;
-    trusted
-        .ok(json!({"type":"tips","action":"install_trust","grant":grant["grant"]}))
-        .await;
+    let grant = snap::ok(
+        issuer
+            .session
+            .trust(&(snap::text(&(second))), (issuer.root()).clone()),
+    )
+    .await;
+    snap::ok(
+        trusted
+            .session
+            .install_trust(&(snap::text(&(grant["grant"])))),
+    )
+    .await;
     let mut lost = vec![principal(&issuer).await, second];
     lost.sort();
     let archive = root.path().join("creator.backup");
@@ -504,7 +566,11 @@ async fn a_recovery_revokes_every_lost_trusted_identity_it_knows() -> Result<(),
         let refused = device
             .database
             .session()
-            .revoke_trusted(identity, Arc::new(RootKey::from_phrase(&phrase)?))
+            .revoke_trusted(
+                identity,
+                rocky_sdk::RevocationMode::Compromised,
+                Arc::new(RootKey::from_phrase(&phrase)?),
+            )
             .await
             .err()
             .ok_or("revoked twice")?;
@@ -527,9 +593,15 @@ async fn a_custodians_store_and_the_root_recover_what_it_holds() -> Result<(), F
     let phrase = opened.root.as_ref().ok_or("root")?.phrase();
     let issuer = Device::new(opened)?;
     let lost = principal(&issuer).await;
-    let created = issuer
-        .ok(json!({"type":"partition_create","group":"list","values":values(LISTS[0])}))
-        .await;
+    let created = snap::ok(
+        issuer
+            .session
+            .create_partition(rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values(LISTS[0])).clone(),
+            }),
+    )
+    .await;
     let custody = root.path().join("custody");
     let custodian = Device::new(Database::join(
         open(&custody, &hub),
@@ -538,9 +610,20 @@ async fn a_custodians_store_and_the_root_recover_what_it_holds() -> Result<(), F
             .await,
     )?)?;
     for table in ["lists", "items"] {
-        custodian
-            .ok(json!({"type":"partition_register","table":table,"values":values(LISTS[0]),"name":created["name"]}))
-            .await;
+        snap::ok(
+            custodian.session.register_partition(
+                rocky_sdk::PartitionTarget::Table {
+                    table: snap::text(&(table)),
+                    values: (values(LISTS[0])).clone(),
+                },
+                rocky_sdk::PartitionSelection {
+                    name: Some(snap::digest(&(created["name"]))),
+                    omit: serde_json::from_value::<std::collections::BTreeSet<String>>(json!([]))
+                        .expect("typed fixture"),
+                },
+            ),
+        )
+        .await;
     }
     common::introduce(&issuer, &custodian).await;
     write_item(&issuer, LISTS[0], "before").await;
@@ -594,11 +677,11 @@ async fn a_custodians_store_and_the_root_recover_what_it_holds() -> Result<(), F
 
 /// Why `device`'s status says a verified revocation ends it, if one does.
 async fn revocation_reason(device: &Device) -> Value {
-    device.ok(json!({"type":"status"})).await["authority"]["verified_revocation"]["reason"].clone()
+    snap::ok(device.session.status()).await["authority"]["verified_revocation"]["reason"].clone()
 }
 /// Alerts of `kind` in `device`'s status.
 async fn alerts(device: &Device, kind: &str) -> Vec<Value> {
-    device.ok(json!({"type":"status"})).await["alerts"]
+    snap::ok(device.session.status()).await["alerts"]
         .as_array()
         .into_iter()
         .flatten()
@@ -627,12 +710,18 @@ async fn a_recovery_ends_trusted_identities_its_backup_never_knew() -> Result<()
         &issuer.invite_as(json!({"kind": "issuer"})).await,
     )?)?;
     let promoted = principal(&trusted).await;
-    let grant = issuer
-        .ok(json!({"type":"tips","action":"trust","identity":promoted,"root":issuer.root()}))
-        .await;
-    trusted
-        .ok(json!({"type":"tips","action":"install_trust","grant":grant["grant"]}))
-        .await;
+    let grant = snap::ok(
+        issuer
+            .session
+            .trust(&(snap::text(&(promoted))), (issuer.root()).clone()),
+    )
+    .await;
+    snap::ok(
+        trusted
+            .session
+            .install_trust(&(snap::text(&(grant["grant"])))),
+    )
+    .await;
     let member = Device::new(Database::join(
         open(&root.path().join("member"), &hub),
         &trusted
@@ -656,7 +745,11 @@ async fn a_recovery_ends_trusted_identities_its_backup_never_knew() -> Result<()
     for ended in [&trusted, &member] {
         common::introduce(&device, ended).await;
         let _ = ended.sync().await;
-        let _ = ended.call(json!({"type": "renew"})).await;
+        let _ = snap::observe(async {
+            ended.session.renew().await?;
+            ended.session.info().await
+        })
+        .await;
         assert_eq!(
             revocation_reason(ended).await,
             json!({"type":"recovery","recovered":kept})
@@ -668,13 +761,17 @@ async fn a_recovery_ends_trusted_identities_its_backup_never_knew() -> Result<()
         &device.invite_as(json!({"kind": "issuer"})).await,
     )?)?;
     let identity = principal(&again).await;
-    let grant = device
-        .ok(json!({"type":"tips","action":"trust","identity":identity,
-            "root":{"phrase":phrase}}))
-        .await;
-    again
-        .ok(json!({"type":"tips","action":"install_trust","grant":grant["grant"]}))
-        .await;
+    let grant = snap::ok(device.session.trust(
+        &(snap::text(&(identity))),
+        std::sync::Arc::new(rocky_sdk::RootKey::from_phrase(&snap::text(&(phrase))).expect("root")),
+    ))
+    .await;
+    snap::ok(
+        again
+            .session
+            .install_trust(&(snap::text(&(grant["grant"])))),
+    )
+    .await;
     write_note(&again, "again").await;
     common::introduce(&device, &again).await;
     again.sync().await.map_err(|error| error.to_string())?;
@@ -715,10 +812,9 @@ async fn of_two_recoveries_that_meet_the_later_ends_the_earlier() -> Result<(), 
             &RootKey::from_phrase(&phrase)?,
         )?)?;
         write_note(&device, name).await;
-        recovered.push((device, minting(&directory)?));
+        recovered.push(device);
     }
-    let shared_slot = recovered[0].1 == recovered[1].1;
-    let [(first, _), (second, _)] = &recovered[..] else {
+    let [first, second] = &recovered[..] else {
         return Err("two recoveries".into());
     };
     common::introduce(first, second).await;
@@ -742,14 +838,10 @@ async fn of_two_recoveries_that_meet_the_later_ends_the_earlier() -> Result<(), 
     );
     assert_eq!(
         alerts(kept, "recoveries_met").await,
-        [
-            json!({"type":"recoveries_met","kept":kept_identity,"ended":ended_identity,
-            "shared_slot":shared_slot})
-        ]
+        [json!({"type":"recoveries_met","kept":kept_identity,"ended":ended_identity})]
     );
     // The earlier recovered node's writes, before or after they met, never
-    // reach the kept one, so no author number of a shared slot is taken
-    // twice there.
+    // reach the kept one.
     write_note(ended, "late").await;
     let _ = ended.sync().await;
     let _ = kept.sync().await;
@@ -783,22 +875,27 @@ async fn survivors_report_the_trusted_identities_a_recovery_ended() -> Result<()
         &issuer.invite_as(json!({"kind": "issuer"})).await,
     )?)?;
     let second = principal(&trusted).await;
-    let grant = issuer
-        .ok(json!({"type":"tips","action":"trust","identity":second,"root":issuer.root()}))
-        .await;
-    trusted
-        .ok(json!({"type":"tips","action":"install_trust","grant":grant["grant"]}))
-        .await;
-    // Each signs a chained tip statement, which carries its trusted grant.
-    for action in ["create", "follow"] {
+    let grant = snap::ok(
         issuer
-            .ok(json!({"type":"tips","action":action,"name":"main"}))
-            .await;
-    }
+            .session
+            .trust(&(snap::text(&(second))), (issuer.root()).clone()),
+    )
+    .await;
+    snap::ok(
+        trusted
+            .session
+            .install_trust(&(snap::text(&(grant["grant"])))),
+    )
+    .await;
+    // Each signs a chained tip statement, which carries its trusted grant.
+    issuer
+        .session
+        .create_bookmark("main", None)
+        .await
+        .expect("bookmark");
+    issuer.follow("main").await.expect("follow");
     for (device, minimum) in [(&issuer, 1), (&trusted, 2)] {
-        device
-            .ok(json!({"type":"tips","action":"genesis_minimum","minimum_in_sync":minimum}))
-            .await;
+        snap::ok(device.session.set_genesis_minimum(minimum)).await;
     }
     common::introduce(&issuer, &trusted).await;
     trusted.sync().await.map_err(|error| error.to_string())?;
@@ -831,13 +928,17 @@ async fn survivors_report_the_trusted_identities_a_recovery_ended() -> Result<()
         &device.invite_as(json!({"kind": "issuer"})).await,
     )?)?;
     let identity = principal(&again).await;
-    let grant = device
-        .ok(json!({"type":"tips","action":"trust","identity":identity,
-            "root":{"phrase":phrase}}))
-        .await;
-    again
-        .ok(json!({"type":"tips","action":"install_trust","grant":grant["grant"]}))
-        .await;
+    let grant = snap::ok(device.session.trust(
+        &(snap::text(&(identity))),
+        std::sync::Arc::new(rocky_sdk::RootKey::from_phrase(&snap::text(&(phrase))).expect("root")),
+    ))
+    .await;
+    snap::ok(
+        again
+            .session
+            .install_trust(&(snap::text(&(grant["grant"])))),
+    )
+    .await;
     common::introduce(&device, &again).await;
     again.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(revocation_reason(&again).await, Value::Null);

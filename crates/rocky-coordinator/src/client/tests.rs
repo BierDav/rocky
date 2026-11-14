@@ -67,6 +67,17 @@ impl Memory {
 /// The client's transport of kind `.1`: each stream reaches the test voter.
 struct Lane(Arc<Memory>, &'static str);
 impl Transport for Lane {
+    fn request<'a>(
+        &'a self,
+        _: &'a [String],
+        _: Scope,
+        _: &'a [u8],
+    ) -> BoxFuture<'a, Result<Vec<u8>, Failure>> {
+        Box::pin(async { Err("the test voter serves coordination only".into()) })
+    }
+    fn session<'a>(&'a self, _: &'a [String], _: Scope) -> BoxFuture<'a, Result<Stream, Failure>> {
+        Box::pin(async { Err("the test voter serves coordination only".into()) })
+    }
     fn kind(&self) -> &str {
         self.1
     }
@@ -77,6 +88,7 @@ impl Transport for Lane {
         &'a self,
         _: &'a str,
         protocol: Protocol,
+        _scope: Option<rocky_core::Scope>,
     ) -> BoxFuture<'a, Result<Stream, Failure>> {
         Box::pin(async move {
             if protocol != Protocol::Coordinate {
@@ -88,7 +100,7 @@ impl Transport for Lane {
             Ok(Stream::new(client))
         })
     }
-    fn accept(&self) -> BoxFuture<'_, Option<(Protocol, Stream)>> {
+    fn accept(&self) -> BoxFuture<'_, Option<rocky_core::net::Incoming>> {
         Box::pin(async { None })
     }
     fn close(&self) -> BoxFuture<'_, ()> {
@@ -346,7 +358,7 @@ async fn a_claim_right_holder_claims_until_its_revocation_is_pushed() {
         )
         .unwrap();
     let chain = CredentialChain(vec![link])
-        .certify_claims(&identity, node.public_key(), 1)
+        .certify_claims(&identity, node.public_key())
         .unwrap();
     let holder = service.client(&node);
     let invoices = Name::new("invoices").unwrap();
@@ -391,6 +403,7 @@ async fn a_claim_right_holder_claims_until_its_revocation_is_pushed() {
             identities: [identity.public_key()].into(),
             capabilities: Default::default(),
             cut: Default::default(),
+            mode: rocky_credentials::RevocationMode::Lost,
             recovery: None,
         },
         &service.publisher,
@@ -483,4 +496,53 @@ fn a_client_needs_an_endpoint_of_its_transport_kind() {
         NetworkCoordinator::connect(&bundle, PrivateKey::new(), Arc::new(Lane(memory, "other"))),
         Err(CoordinationError::Configuration)
     ));
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn application_client_bindings_keep_node_authority_and_observers_independent() {
+    let service = Service::start().await;
+    let client =
+        crate::Client::connect(&service.bundle, Arc::new(Lane(service.voter.clone(), KIND)))
+            .unwrap();
+    let bind = |key: &PrivateKey| {
+        client
+            .bind(
+                key.clone(),
+                self_certificate_in(
+                    key,
+                    rocky_credentials::DatabaseContext {
+                        publisher: service.publisher.public_key(),
+                        scope: service.scope,
+                    },
+                ),
+            )
+            .unwrap()
+    };
+    let trusted = bind(&service.node);
+    let stranger = bind(&PrivateKey::new());
+    assert_eq!(trusted.node(), *service.node.public_key().as_bytes());
+    assert_ne!(trusted.node(), stranger.node());
+    let trusted_calls = Arc::new(AtomicUsize::new(0));
+    let stranger_calls = Arc::new(AtomicUsize::new(0));
+    for (client, calls) in [
+        (&trusted, trusted_calls.clone()),
+        (&stranger, stranger_calls.clone()),
+    ] {
+        client.observe(Arc::new(move |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+        }));
+    }
+    let counter = Name::new("invoices").unwrap();
+    let claim = Claim::fresh().unwrap();
+    assert_eq!(
+        trusted.claim(service.scope, counter.clone(), claim).await,
+        Ok(1)
+    );
+    assert_eq!(
+        stranger.claim(service.scope, counter.clone(), claim).await,
+        Err(CoordinationError::Denied)
+    );
+    assert_eq!(trusted.claim(service.scope, counter, claim).await, Ok(1));
+    assert_eq!(trusted_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(stranger_calls.load(Ordering::SeqCst), 1);
 }

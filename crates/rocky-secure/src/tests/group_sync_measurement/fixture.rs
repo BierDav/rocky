@@ -21,7 +21,7 @@ impl Fixture {
         .into_iter()
         .take(tables - 1)
         {
-            members.push(serde_json::json!({"name":name,"class":"replayed","columns":[{"name":"customer","type":"integer","not_null":true},{"name":"parent","type":"integer","not_null":true},{"name":"title","type":"text"}],"primary_key":["customer","id"],"partition_by":["customer"],"partition_group":"erp","foreign_keys":[{"columns":["customer","parent"],"table":parent,"on_delete":"cascade"}]}));
+            members.push(serde_json::json!({"name":name,"class":"replayed","columns":[{"name":"customer","type":"integer","not_null":true},{"name":"parent","type":"blob","not_null":true},{"name":"title","type":"text"}],"primary_key":["customer","id"],"partition_by":["customer"],"partition_group":"erp","foreign_keys":[{"columns":["customer","parent"],"table":parent,"on_delete":"cascade"}]}));
         }
         members.push(serde_json::json!({"name":"products","class":"replayed","columns":[{"name":"title","type":"text"}],"primary_key":["id"]}));
         let definition = serde_json::json!({"format":6,"publisher":publisher.public_key().to_string(),"application":"erp-measurement","tables":members});
@@ -130,7 +130,6 @@ impl Fixture {
         path: &Path,
         node: PrivateKey,
         grants: Vec<PartitionGrant>,
-        signer: Option<(PrivateKey, u32)>,
         keys: Vec<KeyMaterial>,
     ) -> EncryptedReplica<TypedRows> {
         let user = PrivateKey::new();
@@ -152,42 +151,21 @@ impl Fixture {
                 )
             })
             .collect();
-        let recorded = if rocky_platform::fs::exists(path) {
-            let (owner, conn) = crate::database::DatabaseOwner::open(path).await.unwrap();
-            let mut rows = conn
-                .query(
-                    "SELECT number FROM secure_node_authors WHERE node=?",
-                    [node.public_key().as_bytes().to_vec()],
-                )
-                .await
-                .unwrap();
-            let number = rows
-                .next()
-                .await
-                .unwrap()
-                .map(|row| row.get::<i64>(0).unwrap() as u32);
-            drop(rows);
-            drop(conn);
-            drop(owner);
-            number
-        } else {
-            None
-        };
-        let number = recorded.unwrap_or_else(|| signer.as_ref().map_or(999, |(_, number)| *number));
         let root = Authority::owner(&self.publisher)
             .issue_partition_terms(
                 user.public_key(),
                 raw.clone(),
                 grants.clone(),
-                (1, Some(AuthorRange::new(number, number).unwrap())),
-                (time, 3600, 5),
+                rocky_credentials::DelegationTerms { delegations: 1 },
+                rocky_credentials::Validity {
+                    issued_at: time,
+                    lifetime: std::time::Duration::from_secs(3600),
+                    clock_skew: std::time::Duration::from_secs(5),
+                },
             )
             .unwrap();
         let prefix = CredentialChain(vec![root]);
-        let credentials = prefix
-            .clone()
-            .complete(&user, node.public_key(), number)
-            .unwrap();
+        let credentials = prefix.clone().complete(&user, node.public_key()).unwrap();
         let replica = EncryptedReplica::open(
             path,
             self.app(),
@@ -286,18 +264,14 @@ impl Fixture {
                 let id = sql.next_id(name).await.unwrap();
                 (
                     "INSERT INTO products(title,id) VALUES(?,?)".to_string(),
-                    vec![
-                        SqlValue::Text("Product".into()),
-                        SqlValue::Integer(id.integer()),
-                    ],
+                    vec![SqlValue::Text("Product".into()), id.sql()],
                 )
             } else {
                 let partition = SqlValue::Integer(partition);
                 let id = sql
                     .next_id_partition(name, std::slice::from_ref(&partition))
                     .await
-                    .unwrap()
-                    .integer();
+                    .unwrap();
                 let statement = match parent {
                     None => format!("INSERT INTO {name}(customer,title,id) VALUES(?,?,?)"),
                     Some(_) => {
@@ -305,9 +279,9 @@ impl Fixture {
                     }
                 };
                 let mut values = vec![partition];
-                values.extend(parent.map(SqlValue::Integer));
+                values.extend(parent.map(rocky_core::RowIdentity::sql));
                 values.push(SqlValue::Text((*name).into()));
-                values.push(SqlValue::Integer(id));
+                values.push(id.sql());
                 parent = Some(id);
                 (statement, values)
             };

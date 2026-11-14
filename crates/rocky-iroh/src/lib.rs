@@ -1,11 +1,19 @@
 //! Rocky's network port on iroh. `Attachment` serves Rocky's protocols on
 //! an endpoint and router the application owns; `Options` is the starter
-//! that binds and owns its own. See `docs/runtime/sdk-transports.md`.
+//! that binds and owns its own. Scope routing and endpoint controls stay here.
 use rocky_core::net::{
-    BoxFuture, Connector, Discovery, Failure, NetworkPath, PathSource, Protocol, SessionStream,
-    Stream, Transport,
+    BoxFuture, Connected, Connector, Discovery, Failure, Incoming, Protocol, SessionStream, Stream,
+    Transport,
 };
-use serde::Deserialize;
+use rocky_core::{
+    Scope,
+    net::{ScopeRefusal, framing},
+};
+use serde::{Deserialize, Serialize};
+mod diagnostics;
+pub use diagnostics::{NetworkPath, RelayStatus};
+mod scoped;
+use scoped::Route;
 use std::{
     collections::HashMap,
     pin::Pin,
@@ -17,7 +25,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, Join, ReadBuf},
+    io::{AsyncRead, AsyncWrite, Join, ReadBuf},
     sync::{Mutex, Semaphore, mpsc, watch},
 };
 
@@ -41,6 +49,21 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router, RouterBuilder},
 };
 
+/// Current ALPNs. Old protocol names are refused.
+pub fn alpn(protocol: Protocol) -> &'static [u8] {
+    match protocol {
+        Protocol::Rpc => b"rocky/rpc",
+        Protocol::Link => b"rocky/link",
+        Protocol::Coordinate => b"rocky/coordinator/3",
+    }
+}
+pub fn protocol_named(name: &[u8]) -> Option<Protocol> {
+    Protocol::ALL
+        .into_iter()
+        .chain([Protocol::Coordinate])
+        .find(|protocol| alpn(*protocol) == name)
+}
+
 /// The `Transport::kind` of iroh addresses.
 pub const KIND: &str = "iroh";
 /// Dialing and opening a stream each take at most this long.
@@ -54,6 +77,8 @@ pub const CACHED: usize = 64;
 /// Inbound streams one connection has in flight; further streams wait in
 /// QUIC, so no single peer fills the shared queue.
 pub const STREAMS_PER_CONNECTION: usize = 4;
+/// Fully framed or still arriving RPCs in flight across the endpoint.
+pub const RPC_REQUESTS: usize = 32;
 /// An inbound connection with no stream in flight this long is closed, so
 /// idle cached connections cannot keep holding `CONNECTIONS`. A dialer reuses
 /// a connection only within half of it since its last stream opened.
@@ -67,9 +92,25 @@ const REBIND: Duration = Duration::from_secs(3);
 /// One bidirectional stream; it keeps its connection open.
 struct QuicStream {
     _connection: Connection,
+    reusable: Option<Arc<AtomicBool>>,
     io: Join<RecvStream, SendStream>,
+    read_incomplete: bool,
+    write_incomplete: bool,
     /// An inbound stream's share of its connection.
     _slot: Option<Slot>,
+}
+impl Drop for QuicStream {
+    fn drop(&mut self) {
+        // A cancelled exchange can hide a dead peer. Fresh streams must dial
+        // again, while other exchanges on this connection may still finish.
+        if (self.read_incomplete || self.write_incomplete)
+            && let Some(reusable) = &self.reusable
+        {
+            reusable.store(false, Ordering::SeqCst);
+            let _ = self.io.reader_mut().stop(CLOSED.into());
+            let _ = self.io.writer_mut().reset(CLOSED.into());
+        }
+    }
 }
 /// Releases its connection's stream slot and marks it idle when the last ends.
 struct Slot {
@@ -104,7 +145,9 @@ impl AsyncRead for QuicStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.io).poll_read(cx, buf)
+        let result = Pin::new(&mut self.io).poll_read(cx, buf);
+        self.read_incomplete = !matches!(result, Poll::Ready(Ok(())));
+        result
     }
 }
 impl AsyncWrite for QuicStream {
@@ -113,28 +156,42 @@ impl AsyncWrite for QuicStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.io).poll_write(cx, buf)
+        let result = Pin::new(&mut self.io).poll_write(cx, buf);
+        self.write_incomplete = !matches!(result, Poll::Ready(Ok(_)));
+        result
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.io).poll_flush(cx)
+        let result = Pin::new(&mut self.io).poll_flush(cx);
+        self.write_incomplete = !matches!(result, Poll::Ready(Ok(())));
+        result
     }
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.io).poll_shutdown(cx)
+        let result = Pin::new(&mut self.io).poll_shutdown(cx);
+        self.write_incomplete = !matches!(result, Poll::Ready(Ok(())));
+        result
     }
 }
-fn stream(connection: Connection, (send, recv): (SendStream, RecvStream)) -> Stream {
-    Stream::with_paths(
-        QuicStream {
-            _connection: connection.clone(),
-            io: tokio::io::join(recv, send),
-            _slot: None,
-        },
-        Arc::new(Paths(connection)),
-    )
+fn stream(
+    connection: Connection,
+    (send, recv): (SendStream, RecvStream),
+    reusable: Arc<AtomicBool>,
+) -> Stream {
+    Stream::new(QuicStream {
+        _connection: connection,
+        reusable: Some(reusable),
+        io: tokio::io::join(recv, send),
+        read_incomplete: false,
+        write_incomplete: false,
+        _slot: None,
+    })
 }
 
 /// A link owns its connection, including the lanes hidden from the service.
-struct LinkConnection(Connection);
+struct LinkConnection(
+    Connection,
+    std::sync::Mutex<Option<Scope>>,
+    std::sync::Mutex<Option<std::sync::Weak<Route>>>,
+);
 impl Drop for LinkConnection {
     fn drop(&mut self) {
         self.0.close(CLOSED.into(), b"link ended");
@@ -201,11 +258,20 @@ impl AsyncWrite for LinkLane {
 async fn link_stream(
     connection: Connection,
     dialing: bool,
-    links: &std::sync::Mutex<Vec<std::sync::Weak<LinkConnection>>>,
-) -> Result<Stream, Failure> {
-    let owner = Arc::new(LinkConnection(connection.clone()));
+    shared: &Arc<Shared>,
+    scope: Option<Scope>,
+    route_owner: Option<Arc<Route>>,
+) -> Result<(Stream, Option<Arc<Route>>), Failure> {
+    let owner = Arc::new(LinkConnection(
+        connection.clone(),
+        std::sync::Mutex::new(scope),
+        std::sync::Mutex::new(route_owner.as_ref().map(Arc::downgrade)),
+    ));
     {
-        let mut links = links.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut links = shared
+            .link_connections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         links.retain(|link| link.strong_count() > 0);
         if links.len() >= 2 * CONNECTIONS {
             return Err("link connection quota".into());
@@ -213,32 +279,43 @@ async fn link_stream(
         links.push(Arc::downgrade(&owner));
     }
     let mut lanes: Vec<Box<dyn SessionStream>> = Vec::new();
+    let mut routed: Option<Arc<Route>> = None;
     for lane in 0..5u8 {
-        let (mut send, mut recv) = if dialing {
+        let (send, recv) = if dialing {
             connection.open_bi().await?
         } else {
             connection.accept_bi().await?
         };
-        // Opening a QUIC stream becomes visible only after its first write.
+        let mut io = tokio::io::join(recv, send);
         if dialing {
-            send.write_all(&[lane]).await?;
-        } else if recv.read_u8().await? != lane {
-            return Err("link lane order".into());
+            scoped::outbound(&mut io, scope, lane).await?;
+        } else {
+            let route = scoped::inbound(&mut io, shared, lane).await?;
+            if routed
+                .as_ref()
+                .is_some_and(|prior| !Arc::ptr_eq(prior, &route))
+            {
+                return Err("link lanes belong to different scopes".into());
+            }
+            *owner.1.lock().unwrap_or_else(PoisonError::into_inner) =
+                *route.scope.lock().unwrap_or_else(PoisonError::into_inner);
+            *owner.2.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::downgrade(&route));
+            routed = Some(route);
         }
         lanes.push(Box::new(LinkLane {
-            io: tokio::io::join(recv, send),
+            io,
             shutdown: None,
             finished: false,
             _owner: owner.clone(),
         }));
     }
     let control = lanes.remove(0);
-    Ok(Stream::with_paths(control, Arc::new(Paths(connection))).with_lanes(lanes))
+    Ok((Stream::new(control).with_lanes(lanes), routed))
 }
 
 /// iroh's per-path QUIC measurements of one connection.
 struct Paths(Connection);
-impl PathSource for Paths {
+impl Paths {
     fn paths(&self) -> Vec<NetworkPath> {
         let list = self.0.paths();
         let mut paths: Vec<_> = list
@@ -278,20 +355,32 @@ impl PathSource for Paths {
     }
 }
 
+#[derive(Clone)]
+struct CachedConnection {
+    connection: Connection,
+    used: rocky_platform::time::Instant,
+    reusable: Arc<AtomicBool>,
+}
+impl CachedConnection {
+    fn reusable(&self) -> bool {
+        self.reusable.load(Ordering::SeqCst)
+            && self.connection.close_reason().is_none()
+            && self.used.elapsed() < IDLE / 2
+    }
+}
+
 struct Shared {
     endpoint: watch::Sender<Endpoint>,
     restart: Mutex<Option<(Options, [u8; 32])>>,
-    sender: mpsc::Sender<(Protocol, Stream)>,
-    incoming: Mutex<mpsc::Receiver<(Protocol, Stream)>>,
+    routes: std::sync::Mutex<HashMap<Option<Scope>, std::sync::Weak<Route>>>,
+    default_route: Arc<Route>,
     /// Dialed connections and when each last opened a stream.
-    connections:
-        Mutex<HashMap<(EndpointId, Protocol), (Connection, rocky_platform::time::Instant)>>,
+    connections: Mutex<HashMap<(EndpointId, Protocol), CachedConnection>>,
     link_connections: std::sync::Mutex<Vec<std::sync::Weak<LinkConnection>>>,
     inbound: Semaphore,
+    rpc: Arc<Semaphore>,
     inbound_links: Semaphore,
     closed: watch::Sender<bool>,
-    /// Whether a service takes what the handler queues.
-    listening: AtomicBool,
     refused: AtomicU64,
     /// The starter's router, which owns the endpoint.
     router: std::sync::Mutex<Option<Router>>,
@@ -302,6 +391,7 @@ struct Shared {
     protocols: Vec<Protocol>,
     /// Present only when the attachment was asked to find peers.
     finder: Option<discovery::Finder>,
+    discover: Discover,
     /// The runtime the attachment was made on, normally the endpoint's. A
     /// connection's driver runs where it was dialed: dialed on a database's
     /// runtime it would end with the database and leave the endpoint
@@ -345,23 +435,23 @@ impl Attachment {
         discover: Discover,
         initial_relay_configuration: Option<String>,
     ) -> Self {
-        let (sender, receiver) = mpsc::channel(PENDING);
         let endpoint = watch::channel(endpoint).0;
         let finder = (discover != Discover::default())
-            .then(|| discovery::Finder::new(endpoint.subscribe(), discover));
+            .then(|| discovery::Finder::new(endpoint.subscribe(), discover.clone()));
         Self(Arc::new(Shared {
             home: rocky_platform::task::Home::current(),
             finder,
+            discover,
             endpoint,
             restart: Mutex::new(None),
-            sender,
-            incoming: Mutex::new(receiver),
+            routes: Default::default(),
+            default_route: Arc::new(Route::new()),
             connections: Mutex::new(HashMap::new()),
             link_connections: Default::default(),
             inbound: Semaphore::new(CONNECTIONS),
+            rpc: Arc::new(Semaphore::new(RPC_REQUESTS)),
             inbound_links: Semaphore::new(CONNECTIONS),
             closed: watch::channel(false).0,
-            listening: AtomicBool::new(false),
             refused: AtomicU64::new(0),
             router: std::sync::Mutex::new(None),
             relays,
@@ -369,9 +459,9 @@ impl Attachment {
             protocols,
         }))
     }
-    /// The ALPNs Rocky answers, each a versioned protocol name.
+    /// The ALPNs Rocky answers; the first frame selects the current wire format.
     pub fn alpns() -> impl Iterator<Item = &'static [u8]> {
-        Protocol::ALL.into_iter().map(Protocol::name)
+        Protocol::ALL.into_iter().map(alpn)
     }
     /// The handler of every Rocky ALPN.
     pub fn handler(&self) -> Handler {
@@ -381,12 +471,15 @@ impl Attachment {
     /// protocols: Rocky's database protocols unless built with `serving`.
     pub fn register(&self, router: RouterBuilder) -> RouterBuilder {
         self.0.protocols.iter().fold(router, |router, protocol| {
-            router.accept(protocol.name(), self.handler())
+            router.accept(alpn(*protocol), self.handler())
         })
     }
     /// The network to attach to a database as `Network::Borrowed`.
     pub fn transport(&self) -> Arc<dyn Transport> {
-        Arc::new(self.clone())
+        Arc::new(Port {
+            attachment: self.clone(),
+            route: Arc::new(Route::new()),
+        })
     }
     pub fn endpoint(&self) -> Endpoint {
         self.0.endpoint.borrow().clone()
@@ -468,12 +561,12 @@ impl ProtocolHandler for Handler {
         let attachment = Attachment(self.0.clone());
         let mut closed = self.0.closed.subscribe();
         let Some(protocol) =
-            Protocol::named(connection.alpn()).filter(|p| self.0.protocols.contains(p))
+            protocol_named(connection.alpn()).filter(|p| self.0.protocols.contains(p))
         else {
             attachment.refuse(&connection, CLOSED, b"unknown protocol");
             return Ok(());
         };
-        if *closed.borrow() || !self.0.listening.load(Ordering::SeqCst) {
+        if *closed.borrow() {
             attachment.refuse(&connection, CLOSED, b"no service");
             return Ok(());
         }
@@ -489,12 +582,16 @@ impl ProtocolHandler for Handler {
         if protocol == Protocol::Link {
             match rocky_platform::time::timeout(
                 TIMEOUT,
-                link_stream(connection.clone(), false, &self.0.link_connections),
+                link_stream(connection.clone(), false, &self.0, None, None),
             )
             .await
             {
-                Ok(Ok(stream)) => {
-                    if self.0.sender.try_send((protocol, stream)).is_err() {
+                Ok(Ok((stream, Some(route)))) => {
+                    if route
+                        .sender
+                        .try_send(Incoming::Stream(protocol, stream))
+                        .is_err()
+                    {
                         self.0.refused.fetch_add(1, Ordering::Relaxed);
                     }
                     tokio::select! {
@@ -528,24 +625,50 @@ impl ProtocolHandler for Handler {
             let (Ok(slot), Ok((send, recv))) = accepted else {
                 break;
             };
-            if !self.0.listening.load(Ordering::SeqCst) {
-                attachment.refuse(&connection, CLOSED, b"no service");
-                break;
-            }
             active.send_modify(|active| *active += 1);
-            let inbound = Stream::with_paths(
-                QuicStream {
-                    _connection: connection.clone(),
-                    io: tokio::io::join(recv, send),
-                    _slot: Some(Slot {
-                        _permit: slot,
-                        active: active.clone(),
-                    }),
-                },
-                Arc::new(Paths(connection.clone())),
-            );
-            // A full queue resets the stream: the dialer fails at once.
-            if self.0.sender.try_send((protocol, inbound)).is_err() {
+            let mut inbound = Stream::new(QuicStream {
+                _connection: connection.clone(),
+                reusable: None,
+                io: tokio::io::join(recv, send),
+                read_incomplete: false,
+                write_incomplete: false,
+                _slot: Some(Slot {
+                    _permit: slot,
+                    active: active.clone(),
+                }),
+            });
+            let route = if protocol == Protocol::Coordinate {
+                self.0
+                    .routes
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&None)
+                    .and_then(std::sync::Weak::upgrade)
+            } else {
+                rocky_platform::time::timeout(TIMEOUT, scoped::inbound(&mut inbound, &self.0, 0))
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+            };
+            let Some(route) = route else { continue };
+            if protocol == Protocol::Rpc {
+                let Ok(permit) = self.0.rpc.clone().try_acquire_owned() else {
+                    self.0.refused.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                };
+                rocky_platform::task::spawn(async move {
+                    let _permit = permit;
+                    let mut closed = route.closed.subscribe();
+                    tokio::select! {
+                        _ = rocky_platform::time::timeout(2 * TIMEOUT, framing::serve(inbound, &route.sender)) => {},
+                        _ = closed.wait_for(|closed| *closed) => {},
+                    }
+                });
+            } else if route
+                .sender
+                .try_send(Incoming::Stream(protocol, inbound))
+                .is_err()
+            {
                 self.0.refused.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -553,8 +676,8 @@ impl ProtocolHandler for Handler {
     }
 }
 
-impl Transport for Attachment {
-    fn connectivity(&self) -> Option<watch::Receiver<()>> {
+impl Attachment {
+    pub fn connectivity(&self) -> Option<watch::Receiver<()>> {
         let (events, receiver) = watch::channel(());
         let mut endpoints = self.0.endpoint.subscribe();
         let mut addresses = self
@@ -589,16 +712,16 @@ impl Transport for Attachment {
         Some(receiver)
     }
 
-    fn initial_relay_configuration(&self) -> Option<String> {
+    pub fn initial_relay_configuration(&self) -> Option<String> {
         self.0.initial_relay_configuration.clone()
     }
-    fn relays(&self) -> Option<Vec<rocky_core::net::RelayStatus>> {
+    pub fn relays(&self) -> Option<Vec<RelayStatus>> {
         Some(
             self.endpoint()
                 .home_relay_status()
                 .get()
                 .iter()
-                .map(|relay| rocky_core::net::RelayStatus {
+                .map(|relay| RelayStatus {
                     url: relay.url().to_string(),
                     connected: relay.is_connected(),
                     last_error: relay.last_error().map(ToString::to_string),
@@ -607,10 +730,251 @@ impl Transport for Attachment {
                 .collect(),
         )
     }
-    fn discovery(&self) -> Option<Arc<dyn Discovery>> {
+    pub fn discovery(&self) -> Option<Arc<dyn Discovery>> {
         let finder = self.0.finder.clone()?;
         Some(Arc::new(finder))
     }
+    pub fn connected(&self) -> Connected {
+        let finder = (self.0.discover != Discover::default())
+            .then(|| discovery::Finder::new(self.0.endpoint.subscribe(), self.0.discover.clone()));
+        let discovery = finder
+            .clone()
+            .map(|finder| Arc::new(finder) as Arc<dyn Discovery>);
+        let route = Arc::new(Route::with_finder(finder));
+        Connected {
+            transport: Arc::new(Port {
+                attachment: self.clone(),
+                route,
+            }),
+            discovery,
+            changes: self.connectivity(),
+        }
+    }
+}
+
+impl Attachment {
+    async fn connect_scoped(
+        &self,
+        address: &str,
+        protocol: Protocol,
+        scope: Option<Scope>,
+        route_owner: Option<Arc<Route>>,
+    ) -> Result<Stream, Failure> {
+        let span = tracing::debug_span!("iroh_connect", outcome = tracing::field::Empty);
+        async move {
+            let result = tracing::Instrument::instrument(
+                async move {
+                    if *self.0.closed.borrow() {
+                        return Err("the iroh attachment is closed".into());
+                    }
+                    // An endpoint the OS reclaimed heals on the next dial.
+                    if self.endpoint().is_closed() {
+                        self.revive().await?;
+                    }
+                    let address: EndpointAddr = serde_json::from_str(address)?;
+                    let key = (address.id, protocol);
+                    let cached = self.0.connections.lock().await.get(&key).cloned();
+                    // The acceptor closes a connection idle for `IDLE`; never race it.
+                    if protocol != Protocol::Link
+                        && let Some(cached) = cached
+                        && cached.reusable()
+                        && let Ok(Ok(pair)) =
+                            rocky_platform::time::timeout(TIMEOUT, cached.connection.open_bi())
+                                .await
+                    {
+                        self.0.connections.lock().await.insert(
+                            key,
+                            CachedConnection {
+                                used: rocky_platform::time::Instant::now(),
+                                ..cached.clone()
+                            },
+                        );
+                        let mut stream = stream(cached.connection, pair, cached.reusable);
+                        if protocol != Protocol::Coordinate {
+                            scoped::outbound(&mut stream, scope, 0).await?;
+                        }
+                        return Ok(stream);
+                    }
+                    let dial = |address: EndpointAddr| {
+                        let endpoint = self.endpoint();
+                        async move {
+                            rocky_platform::time::timeout(
+                                TIMEOUT,
+                                endpoint.connect(address, alpn(protocol)),
+                            )
+                            .await
+                        }
+                    };
+                    let dialed = match &self.0.home {
+                        Some(home) => home.spawn(dial(address.clone())).await.ok(),
+                        None => None,
+                    };
+                    // Without a home runtime, or once it ended, the caller's drives the dial.
+                    let connection = match dialed {
+                        Some(dialed) => dialed,
+                        None => dial(address).await,
+                    }??;
+                    if protocol == Protocol::Link {
+                        return rocky_platform::time::timeout(
+                            TIMEOUT,
+                            link_stream(connection, true, &self.0, scope, route_owner),
+                        )
+                        .await?
+                        .map(|(stream, _)| stream);
+                    }
+                    let pair =
+                        rocky_platform::time::timeout(TIMEOUT, connection.open_bi()).await??;
+                    let reusable = Arc::new(AtomicBool::new(true));
+                    let mut connections = self.0.connections.lock().await;
+                    connections.retain(|_, cached| cached.reusable());
+                    if connections.len() >= CACHED {
+                        connections.clear();
+                    }
+                    connections.insert(
+                        key,
+                        CachedConnection {
+                            connection: connection.clone(),
+                            used: rocky_platform::time::Instant::now(),
+                            reusable: reusable.clone(),
+                        },
+                    );
+                    drop(connections);
+                    let mut stream = stream(connection, pair, reusable);
+                    if protocol != Protocol::Coordinate {
+                        scoped::outbound(&mut stream, scope, 0).await?;
+                    }
+                    Ok(stream)
+                },
+                span.clone(),
+            )
+            .await;
+            span.record("outcome", if result.is_ok() { "ok" } else { "error" });
+            result
+        }
+        .await
+    }
+    async fn dial_routes(
+        &self,
+        addresses: &[String],
+        protocol: Protocol,
+        scope: Scope,
+        route_owner: Arc<Route>,
+    ) -> Result<Stream, Failure> {
+        let mut failure: Failure = "no route".into();
+        for address in addresses {
+            match rocky_platform::time::timeout(
+                3 * TIMEOUT,
+                self.connect_scoped(address, protocol, Some(scope), Some(route_owner.clone())),
+            )
+            .await
+            {
+                Ok(Ok(stream)) => return Ok(stream),
+                Ok(Err(error)) => {
+                    if !error.is::<ScopeRefusal>() {
+                        self.forget_route(address, protocol, scope);
+                    }
+                    failure = error;
+                }
+                Err(error) => {
+                    self.forget_route(address, protocol, scope);
+                    failure = error.into();
+                }
+            }
+        }
+        Err(failure)
+    }
+}
+
+impl Attachment {
+    fn default_port(&self) -> Port {
+        Port {
+            attachment: self.clone(),
+            route: self.0.default_route.clone(),
+        }
+    }
+    /// Live QUIC path observations for the endpoint behind this address.
+    pub async fn paths(&self, address: &str) -> Result<Vec<NetworkPath>, Failure> {
+        let address: EndpointAddr = serde_json::from_str(address)?;
+        let connections: Vec<_> = self
+            .0
+            .connections
+            .lock()
+            .await
+            .iter()
+            .filter(|((id, _), _)| *id == address.id)
+            .map(|(_, cached)| cached.connection.clone())
+            .collect();
+        let mut paths: Vec<_> = connections
+            .into_iter()
+            .flat_map(|connection| Paths(connection).paths())
+            .collect();
+        for link in self
+            .0
+            .link_connections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+        {
+            if link.0.remote_id() == address.id {
+                paths.extend(Paths(link.0.clone()).paths());
+            }
+        }
+        Ok(paths)
+    }
+}
+impl Transport for Attachment {
+    fn kind(&self) -> &str {
+        KIND
+    }
+    fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
+        Box::pin(async move { self.default_port().address().await })
+    }
+    fn connect<'a>(
+        &'a self,
+        address: &'a str,
+        protocol: Protocol,
+        scope: Option<rocky_core::Scope>,
+    ) -> BoxFuture<'a, Result<Stream, Failure>> {
+        Box::pin(async move { self.default_port().connect(address, protocol, scope).await })
+    }
+    fn request<'a>(
+        &'a self,
+        addresses: &'a [String],
+        scope: Scope,
+        request: &'a [u8],
+    ) -> BoxFuture<'a, Result<Vec<u8>, Failure>> {
+        Box::pin(async move { self.default_port().request(addresses, scope, request).await })
+    }
+    fn session<'a>(
+        &'a self,
+        addresses: &'a [String],
+        scope: Scope,
+    ) -> BoxFuture<'a, Result<Stream, Failure>> {
+        Box::pin(async move { self.default_port().session(addresses, scope).await })
+    }
+    fn accept(&self) -> BoxFuture<'_, Option<rocky_core::net::Incoming>> {
+        Box::pin(async move { self.default_port().accept().await })
+    }
+    fn listen(&self, scope: Option<Scope>, listening: bool) -> Result<(), Failure> {
+        self.default_port().listen(scope, listening)
+    }
+    fn close(&self) -> BoxFuture<'_, ()> {
+        Attachment::close(self)
+    }
+}
+
+struct Port {
+    attachment: Attachment,
+    route: Arc<Route>,
+}
+impl std::ops::Deref for Port {
+    type Target = Attachment;
+    fn deref(&self) -> &Attachment {
+        &self.attachment
+    }
+}
+impl Transport for Port {
     fn kind(&self) -> &str {
         KIND
     }
@@ -629,91 +993,61 @@ impl Transport for Attachment {
         &'a self,
         address: &'a str,
         protocol: Protocol,
+        scope: Option<rocky_core::Scope>,
     ) -> BoxFuture<'a, Result<Stream, Failure>> {
-        let span = tracing::debug_span!("iroh_connect", outcome = tracing::field::Empty);
+        Box::pin(
+            self.attachment
+                .connect_scoped(address, protocol, scope, Some(self.route.clone())),
+        )
+    }
+    fn request<'a>(
+        &'a self,
+        addresses: &'a [String],
+        scope: Scope,
+        request: &'a [u8],
+    ) -> BoxFuture<'a, Result<Vec<u8>, Failure>> {
         Box::pin(async move {
-            let result = tracing::Instrument::instrument(
-                async move {
-                    if *self.0.closed.borrow() {
-                        return Err("the iroh attachment is closed".into());
-                    }
-                    // An endpoint the OS reclaimed heals on the next dial.
-                    if self.endpoint().is_closed() {
-                        self.revive().await?;
-                    }
-                    let address: EndpointAddr = serde_json::from_str(address)?;
-                    let key = (address.id, protocol);
-                    let cached = self.0.connections.lock().await.get(&key).cloned();
-                    // The acceptor closes a connection idle for `IDLE`; never race it.
-                    if protocol != Protocol::Link
-                        && let Some((connection, used)) = cached
-                        && used.elapsed() < IDLE / 2
-                        && connection.close_reason().is_none()
-                        && let Ok(Ok(pair)) =
-                            rocky_platform::time::timeout(TIMEOUT, connection.open_bi()).await
-                    {
-                        self.0.connections.lock().await.insert(
-                            key,
-                            (connection.clone(), rocky_platform::time::Instant::now()),
-                        );
-                        return Ok(stream(connection, pair));
-                    }
-                    let dial = |address: EndpointAddr| {
-                        let endpoint = self.endpoint();
-                        async move {
-                            rocky_platform::time::timeout(
-                                TIMEOUT,
-                                endpoint.connect(address, protocol.name()),
-                            )
-                            .await
-                        }
-                    };
-                    let dialed = match &self.0.home {
-                        Some(home) => home.spawn(dial(address.clone())).await.ok(),
-                        None => None,
-                    };
-                    // Without a home runtime, or once it ended, the caller's drives the dial.
-                    let connection = match dialed {
-                        Some(dialed) => dialed,
-                        None => dial(address).await,
-                    }??;
-                    if protocol == Protocol::Link {
-                        return rocky_platform::time::timeout(
-                            TIMEOUT,
-                            link_stream(connection, true, &self.0.link_connections),
+            let mut failure: Failure = "no route".into();
+            for address in addresses {
+                let result = rocky_platform::time::timeout(3 * TIMEOUT, async {
+                    let mut stream = self
+                        .connect_scoped(
+                            address,
+                            Protocol::Rpc,
+                            Some(scope),
+                            Some(self.route.clone()),
                         )
                         .await?;
-                    }
-                    let pair =
-                        rocky_platform::time::timeout(TIMEOUT, connection.open_bi()).await??;
-                    let mut connections = self.0.connections.lock().await;
-                    connections.retain(|_, (connection, used)| {
-                        connection.close_reason().is_none() && used.elapsed() < IDLE / 2
-                    });
-                    if connections.len() >= CACHED {
-                        connections.clear();
-                    }
-                    connections.insert(
-                        key,
-                        (connection.clone(), rocky_platform::time::Instant::now()),
-                    );
-                    Ok(stream(connection, pair))
-                },
-                span.clone(),
-            )
-            .await;
-            span.record("outcome", if result.is_ok() { "ok" } else { "error" });
-            result
+                    framing::write(&mut stream, request).await?;
+                    let reply = framing::read(&mut stream).await?;
+                    let _ = tokio::io::AsyncWriteExt::shutdown(&mut stream).await;
+                    Ok::<_, Failure>(reply)
+                })
+                .await;
+                match result {
+                    Ok(Ok(reply)) => return Ok(reply),
+                    Ok(Err(error)) => failure = error,
+                    Err(error) => failure = error.into(),
+                }
+            }
+            Err(failure)
         })
     }
-    fn accept(&self) -> BoxFuture<'_, Option<(Protocol, Stream)>> {
+    fn session<'a>(
+        &'a self,
+        addresses: &'a [String],
+        scope: Scope,
+    ) -> BoxFuture<'a, Result<Stream, Failure>> {
+        Box::pin(self.dial_routes(addresses, Protocol::Link, scope, self.route.clone()))
+    }
+    fn accept(&self) -> BoxFuture<'_, Option<rocky_core::net::Incoming>> {
         Box::pin(async {
             // `close` takes this lock after marking the attachment closed.
-            let mut closed = self.0.closed.subscribe();
+            let mut closed = self.route.closed.subscribe();
             let mut incoming = tokio::select! {
                 biased;
                 _ = closed.wait_for(|closed| *closed) => return None,
-                incoming = self.0.incoming.lock() => incoming,
+                incoming = self.route.incoming.lock() => incoming,
             };
             tokio::select! {
                 biased;
@@ -722,11 +1056,112 @@ impl Transport for Attachment {
             }
         })
     }
-    fn listen(&self, listening: bool) {
-        self.0.listening.store(listening, Ordering::SeqCst);
+    fn listen(&self, scope: Option<Scope>, listening: bool) -> Result<(), Failure> {
+        let mut routes = self.0.routes.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut bound = self
+            .route
+            .scope
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        routes.retain(|_, route| route.strong_count() > 0);
+        if listening {
+            if scope.is_none()
+                && self
+                    .0
+                    .protocols
+                    .iter()
+                    .any(|protocol| *protocol != Protocol::Coordinate)
+            {
+                return Err(ScopeRefusal::UnknownScope.into());
+            }
+            if *self.route.closed.borrow() {
+                return Err(ScopeRefusal::NotListening.into());
+            }
+            if self.route.listening.load(Ordering::SeqCst) && *bound != scope {
+                return Err(ScopeRefusal::AlreadyAttached.into());
+            }
+            if routes
+                .get(&scope)
+                .and_then(std::sync::Weak::upgrade)
+                .is_some_and(|route| !Arc::ptr_eq(&route, &self.route))
+            {
+                return Err(ScopeRefusal::AlreadyAttached.into());
+            }
+            *bound = scope;
+            routes.insert(scope, Arc::downgrade(&self.route));
+        } else if routes
+            .get(&scope)
+            .and_then(std::sync::Weak::upgrade)
+            .is_some_and(|route| Arc::ptr_eq(&route, &self.route))
+        {
+            routes.remove(&scope);
+        }
+        self.route.listening.store(listening, Ordering::SeqCst);
+        Ok(())
+    }
+    fn close(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {
+            let scope = *self
+                .route
+                .scope
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let _ = self.listen(scope, false);
+            self.route.closed.send_replace(true);
+            if let Some(finder) = &self.route.finder {
+                finder.close();
+            }
+            self.route.incoming.lock().await.close();
+            for link in self
+                .0
+                .link_connections
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .filter_map(std::sync::Weak::upgrade)
+            {
+                let owner = link
+                    .2
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .as_ref()
+                    .and_then(std::sync::Weak::upgrade);
+                if owner.is_some_and(|owner| Arc::ptr_eq(&owner, &self.route)) {
+                    link.0.close(CLOSED.into(), b"database detached");
+                }
+            }
+            if self.0.restart.lock().await.is_some() {
+                self.attachment.close().await;
+            }
+        })
+    }
+}
+impl Attachment {
+    fn forget_route(&self, address: &str, protocol: Protocol, scope: Scope) {
+        let Ok(address) = serde_json::from_str::<EndpointAddr>(address) else {
+            return;
+        };
+        if protocol == Protocol::Link {
+            for link in self
+                .0
+                .link_connections
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .filter_map(std::sync::Weak::upgrade)
+            {
+                if link.0.remote_id() == address.id
+                    && *link.1.lock().unwrap_or_else(PoisonError::into_inner) == Some(scope)
+                {
+                    link.0.close(CLOSED.into(), b"route failed");
+                }
+            }
+        } else if let Ok(mut connections) = self.0.connections.try_lock() {
+            connections.remove(&(address.id, protocol));
+        }
     }
     /// A restarted peer leaves a cached connection that looks open.
-    fn forget(&self, address: &str) {
+    pub fn forget(&self, address: &str) {
         let Ok(address) = serde_json::from_str::<EndpointAddr>(address) else {
             return;
         };
@@ -743,23 +1178,23 @@ impl Transport for Attachment {
             }
         }
         if let Ok(mut connections) = self.0.connections.try_lock() {
-            connections.retain(|(id, _), (connection, _)| {
+            connections.retain(|(id, _), cached| {
                 let keep = *id != address.id;
                 if !keep {
-                    connection.close(CLOSED.into(), b"forgotten");
+                    cached.connection.close(CLOSED.into(), b"forgotten");
                 }
                 keep
             });
         }
     }
     #[cfg(feature = "qualification")]
-    fn fault_close_sockets(&self) -> BoxFuture<'_, Result<(), Failure>> {
+    pub fn fault_close_sockets(&self) -> BoxFuture<'_, Result<(), Failure>> {
         Box::pin(async {
             self.endpoint().close().await;
             Ok(())
         })
     }
-    fn foreground(&self) -> BoxFuture<'_, Result<(), Failure>> {
+    pub fn foreground(&self) -> BoxFuture<'_, Result<(), Failure>> {
         Box::pin(async {
             // No clone of a dead endpoint may outlive its rebind.
             if self.endpoint().is_closed() {
@@ -776,16 +1211,31 @@ impl Transport for Attachment {
     }
     /// Ends Rocky's streams and connections. Only a starter's own router
     /// and endpoint are shut down; a borrowed endpoint stays open.
-    fn close(&self) -> BoxFuture<'_, ()> {
+    pub fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {
             let _restart = self.0.restart.lock().await;
             self.0.closed.send_replace(true);
+            self.0.default_route.closed.send_replace(true);
             if let Some(finder) = &self.0.finder {
                 finder.close();
             }
-            self.0.incoming.lock().await.close();
-            for (_, (connection, _)) in self.0.connections.lock().await.drain() {
-                connection.close(CLOSED.into(), b"closed");
+            let routes: Vec<_> = self
+                .0
+                .routes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .drain()
+                .filter_map(|(_, route)| route.upgrade())
+                .collect();
+            for route in routes {
+                route.closed.send_replace(true);
+                if let Some(finder) = &route.finder {
+                    finder.close();
+                }
+                route.incoming.lock().await.close();
+            }
+            for (_, cached) in self.0.connections.lock().await.drain() {
+                cached.connection.close(CLOSED.into(), b"closed");
             }
             for link in self
                 .0
@@ -967,12 +1417,8 @@ impl Options {
     }
 }
 impl Connector for Options {
-    fn start(
-        &self,
-        _accepts: bool,
-        secret: [u8; 32],
-    ) -> BoxFuture<'_, Result<Arc<dyn Transport>, Failure>> {
-        Box::pin(async move { Ok(Options::start(self, secret).await?.transport()) })
+    fn start(&self, _accepts: bool, secret: [u8; 32]) -> BoxFuture<'_, Result<Connected, Failure>> {
+        Box::pin(async move { Ok(Options::start(self, secret).await?.connected()) })
     }
 }
 
@@ -980,6 +1426,112 @@ impl Connector for Options {
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn coordinate(client: &Attachment, server: &Attachment) -> Result<(), Failure> {
+        let mut near = client
+            .connect(&server.address().await?, Protocol::Coordinate, None)
+            .await?;
+        near.write_u8(7).await?;
+        let Some(Incoming::Stream(Protocol::Coordinate, mut far)) = server.accept().await else {
+            return Err("coordinator stream expected".into());
+        };
+        assert_eq!(far.read_u8().await?, 7);
+        far.write_u8(9).await?;
+        assert_eq!(near.read_u8().await?, 9);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_stream_retires_reuse_without_closing_concurrent_streams()
+    -> Result<(), Failure> {
+        rocky_platform::time::timeout(Duration::from_secs(30), async {
+            let client = Attachment::serving(
+                Options::isolated("127.0.0.1:0").bind([81; 32]).await?,
+                vec![],
+            );
+            let server = Attachment::serving(
+                Options::isolated("127.0.0.1:0").bind([82; 32]).await?,
+                vec![Protocol::Coordinate],
+            );
+            let router = server.register(Router::builder(server.endpoint())).spawn();
+            server.listen(None, true)?;
+            coordinate(&client, &server).await?;
+            let key = (server.endpoint().id(), Protocol::Coordinate);
+            let cached = client.0.connections.lock().await[&key].connection.clone();
+            assert!(
+                cached.close_reason().is_none(),
+                "completed exchanges remain reusable"
+            );
+
+            let mut near = client
+                .connect(&server.address().await?, Protocol::Coordinate, None)
+                .await?;
+            assert_eq!(
+                client.0.connections.lock().await[&key]
+                    .connection
+                    .stable_id(),
+                cached.stable_id()
+            );
+            near.write_u8(7).await?;
+            let Some(Incoming::Stream(Protocol::Coordinate, mut far)) = server.accept().await
+            else {
+                return Err("coordinator stream expected".into());
+            };
+            assert_eq!(far.read_u8().await?, 7);
+            let mut healthy = client
+                .connect(&server.address().await?, Protocol::Coordinate, None)
+                .await?;
+            healthy.write_u8(11).await?;
+            let Some(Incoming::Stream(Protocol::Coordinate, mut healthy_far)) =
+                server.accept().await
+            else {
+                return Err("second coordinator stream expected".into());
+            };
+            assert_eq!(healthy_far.read_u8().await?, 11);
+            assert_eq!(
+                client.0.connections.lock().await[&key]
+                    .connection
+                    .stable_id(),
+                cached.stable_id()
+            );
+            // Hold the answer, poll the read to Pending, then cancel it as a deadline does.
+            {
+                let read = near.read_u8();
+                tokio::pin!(read);
+                std::future::poll_fn(|cx| {
+                    assert!(read.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+            }
+            let reusable = client.0.connections.lock().await[&key].reusable.clone();
+            drop(near);
+            coordinate(&client, &server).await?;
+            assert_ne!(
+                client.0.connections.lock().await[&key]
+                    .connection
+                    .stable_id(),
+                cached.stable_id()
+            );
+            healthy_far.write_u8(13).await?;
+            assert_eq!(healthy.read_u8().await?, 13);
+            assert!(
+                cached.close_reason().is_none(),
+                "cancellation closed a shared connection"
+            );
+            assert!(
+                !reusable.load(Ordering::SeqCst),
+                "cancelled exchange left its connection reusable"
+            );
+            drop((far, healthy, healthy_far));
+            client.close().await;
+            client.endpoint().close().await;
+            router.shutdown().await?;
+            Ok::<_, Failure>(())
+        })
+        .await?
+    }
 
     #[tokio::test(start_paused = true)]
     async fn a_connection_idles_only_after_its_last_stream_ends() {

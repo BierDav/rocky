@@ -1,9 +1,9 @@
 use rocky_core::{AppId, DomainId, MeshId, PrincipalKind, Scope, TipId};
 use rocky_credentials::{
-    AuthorMark, AuthorRange, Authority, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement,
-    CredentialChain, Extended, Extension, LogPoint, PrivateKey, Recovery, RevocationSet,
-    SEAL_FORMAT, SealAction, SealStatement, SignedBookmarkMove, SignedCapability, SignedSeal,
-    SignedTipOpening, TIP_OPENING_FORMAT, TipGraph, TipOpeningStatement, encode, genesis_tip,
+    AuthorMark, Authority, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, CredentialChain, Extended,
+    Extension, LogPoint, PrivateKey, Recovery, RevocationSet, SEAL_FORMAT, SealAction,
+    SealStatement, SignedBookmarkMove, SignedCapability, SignedSeal, SignedTipOpening,
+    TIP_OPENING_FORMAT, TipGraph, TipOpeningStatement, encode, genesis_tip,
 };
 
 fn graph() -> TipGraph {
@@ -23,7 +23,7 @@ fn seal(graph: &TipGraph, tip: TipId, sequence: u64, owner: &PrivateKey) -> Sign
             scope: graph.scope,
             tip,
             frontier: vec![AuthorMark {
-                author: 1,
+                author: rocky_core::WriterId::from_bytes([1; 32]),
                 sequence,
             }],
             action: SealAction::Continue {
@@ -155,8 +155,11 @@ fn two_issuers_seal_concurrently_and_lower_digest_wins_in_every_order() {
             .unwrap()
             .issue_issuer(
                 issuer.public_key(),
-                Some(rocky_credentials::AuthorRange::ALL),
-                (100, 1000, 0),
+                rocky_credentials::Validity {
+                    issued_at: 100,
+                    lifetime: std::time::Duration::from_secs(1000),
+                    clock_skew: std::time::Duration::from_secs(0),
+                },
             )
             .unwrap(),
         ]);
@@ -285,8 +288,11 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
         .unwrap()
         .issue_issuer(
             issuer.public_key(),
-            Some(rocky_credentials::AuthorRange::ALL),
-            (100, 1000, 0),
+            rocky_credentials::Validity {
+                issued_at: 100,
+                lifetime: std::time::Duration::from_secs(1000),
+                clock_skew: std::time::Duration::from_secs(0),
+            },
         )
         .unwrap(),
     ]);
@@ -303,7 +309,7 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
             },
         )
         .unwrap()
-        .issue_trusted(trusted.public_key(), graph.scope, AuthorRange::ALL, 100)
+        .issue_trusted(trusted.public_key(), graph.scope, 100)
         .unwrap(),
     ]);
     let first = seal(&graph, graph.genesis(), 1, &owner);
@@ -367,7 +373,7 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
     }
     assert!(
         rocky_credentials::testing::authority(&issuer, &issuer_chain)
-            .issue_trusted(trusted.public_key(), graph.scope, AuthorRange::ALL, 100)
+            .issue_trusted(trusted.public_key(), graph.scope, 100)
             .is_err()
     );
     let forged = SignedCapability::sign(trusted_chain.0[0].capability.clone(), &issuer).unwrap();
@@ -441,26 +447,22 @@ fn schema_changes_are_allowed_but_partial_and_node_authority_and_invalid_frontie
         .unwrap();
     for frontier in [
         vec![AuthorMark {
-            author: 0,
-            sequence: 1,
-        }],
-        vec![AuthorMark {
-            author: 1,
+            author: rocky_core::WriterId::from_bytes([1; 32]),
             sequence: u64::MAX,
         }],
         vec![
             AuthorMark {
-                author: 2,
+                author: rocky_core::WriterId::from_bytes([2; 32]),
                 sequence: 1,
             },
             AuthorMark {
-                author: 1,
+                author: rocky_core::WriterId::from_bytes([1; 32]),
                 sequence: 1,
             },
         ],
         vec![
             AuthorMark {
-                author: 1,
+                author: rocky_core::WriterId::from_bytes([1; 32]),
                 sequence: 1
             };
             2
@@ -486,7 +488,6 @@ fn schema_changes_are_allowed_but_partial_and_node_authority_and_invalid_frontie
         expires: 1000,
         delegations: 1,
         extension: Extension::new(Extended {
-            authors: Some(AuthorRange::ALL),
             ..Default::default()
         })
         .unwrap(),
@@ -523,9 +524,9 @@ fn node_signatures_never_inherit_trusted_identity_control() {
         },
     )
     .unwrap()
-    .issue_trusted(identity.public_key(), graph.scope, AuthorRange::ALL, 100)
+    .issue_trusted(identity.public_key(), graph.scope, 100)
     .unwrap();
-    let chain = rocky_credentials::device_chain(root, &identity, node.public_key(), 1).unwrap();
+    let chain = rocky_credentials::device_chain(root, &identity, node.public_key()).unwrap();
     chain
         .verify(
             owner.public_key(),
@@ -575,8 +576,11 @@ fn issuer_chain(owner: &PrivateKey, issuer: &PrivateKey) -> CredentialChain {
         .unwrap()
         .issue_issuer(
             issuer.public_key(),
-            Some(rocky_credentials::AuthorRange::ALL),
-            (100, 1000, 0),
+            rocky_credentials::Validity {
+                issued_at: 100,
+                lifetime: std::time::Duration::from_secs(1000),
+                clock_skew: std::time::Duration::from_secs(0),
+            },
         )
         .unwrap(),
     ])
@@ -595,12 +599,7 @@ fn trusted_chain(graph: &TipGraph, owner: &PrivateKey, trusted: &PrivateKey) -> 
             },
         )
         .unwrap()
-        .issue_trusted(
-            trusted.public_key(),
-            graph.scope,
-            AuthorRange::new(5, 5).unwrap(),
-            100,
-        )
+        .issue_trusted(trusted.public_key(), graph.scope, 100)
         .unwrap(),
     ])
 }
@@ -634,6 +633,7 @@ fn revoking(owner: &PrivateKey, identities: &[rocky_credentials::PublicKey]) -> 
         identities: identities.iter().copied().collect(),
         capabilities: Default::default(),
         cut: Default::default(),
+        mode: rocky_credentials::RevocationMode::Lost,
         recovery: None,
     };
     let signed = Authority::owner_in(
@@ -821,9 +821,9 @@ fn trusted_node(graph: &TipGraph, owner: &PrivateKey) -> (PrivateKey, Credential
         },
     )
     .unwrap()
-    .issue_trusted(identity.public_key(), graph.scope, AuthorRange::ALL, 100)
+    .issue_trusted(identity.public_key(), graph.scope, 100)
     .unwrap();
-    let chain = rocky_credentials::device_chain(root, &identity, node.public_key(), 1).unwrap();
+    let chain = rocky_credentials::device_chain(root, &identity, node.public_key()).unwrap();
     (node, chain)
 }
 fn ack(
@@ -1299,10 +1299,10 @@ fn a_control_only_trusted_identity_certifies_acknowledgers_without_row_authority
         },
     )
     .unwrap()
-    .issue_trusted(identity.public_key(), graph.scope, AuthorRange::ALL, 100)
+    .issue_trusted(identity.public_key(), graph.scope, 100)
     .unwrap();
     let chain = CredentialChain(vec![grant])
-        .certify(&identity, node.public_key(), 1)
+        .certify(&identity, node.public_key())
         .unwrap();
     assert_eq!(
         chain
@@ -1385,6 +1385,7 @@ fn cutting(
         identities: [identity].into(),
         capabilities: Default::default(),
         cut: cut.into_iter().collect(),
+        mode: rocky_credentials::RevocationMode::Lost,
         recovery: None,
     };
     RevocationSet::try_from(vec![
@@ -1576,6 +1577,7 @@ fn a_cut_binds_its_chain_to_the_identity_it_names() {
             }],
             acknowledgments: None,
         }],
+        mode: rocky_credentials::RevocationMode::Lost,
         recovery: None,
     };
     let revocations = RevocationSet::try_from(vec![
@@ -1640,6 +1642,7 @@ fn a_cut_binds_its_chain_to_the_identity_it_names() {
             statements: Vec::new(),
             acknowledgments: None,
         }],
+        mode: rocky_credentials::RevocationMode::Lost,
         recovery: None,
     };
     assert!(
@@ -1766,6 +1769,7 @@ fn a_stage_branches_off_the_live_chain_and_a_cut_keeps_the_branches_it_names() {
             identities: [trusted.public_key()].into(),
             capabilities: Default::default(),
             cut: vec![cut],
+            mode: rocky_credentials::RevocationMode::Lost,
             recovery: None,
         };
         RevocationSet::try_from(vec![
@@ -1938,6 +1942,7 @@ fn a_cut_strips_the_acknowledgments_past_its_head_from_finality_records() {
                 id: kept.id().unwrap(),
             }),
         }],
+        mode: rocky_credentials::RevocationMode::Lost,
         recovery: None,
     };
     let revocations = RevocationSet::try_from(vec![

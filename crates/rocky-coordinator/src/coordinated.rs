@@ -926,6 +926,8 @@ struct MemoryLogs {
     /// Seconds added to the system clock.
     skew: u64,
     unavailable: bool,
+    counters: std::collections::BTreeMap<Scope, crate::counters::Counters>,
+    revocations: std::collections::BTreeMap<Scope, rocky_credentials::RevocationSet>,
 }
 impl MemoryLog {
     pub fn new() -> Self {
@@ -1225,5 +1227,83 @@ fn committed(
             })
         }
         _ => Err(CoordinationError::Corrupt),
+    }
+}
+
+impl rocky_credentials::Coordinator for MemoryLogClient {
+    fn bind(
+        &self,
+        key: rocky_credentials::PrivateKey,
+        _: rocky_credentials::SignedCapability,
+    ) -> std::result::Result<std::sync::Arc<dyn rocky_credentials::Coordinator>, CoordinationError>
+    {
+        Ok(std::sync::Arc::new(self.logs.client(key.public_key())))
+    }
+    fn certify(&self, _: rocky_credentials::SignedCapability) {}
+    fn observe(&self, _: rocky_credentials::CoordinationObserver) {}
+    fn present_claims(&self, _: Option<rocky_credentials::CredentialChain>) {}
+    fn claim(
+        &self,
+        scope: Scope,
+        counter: crate::counters::Name,
+        claim: crate::counters::Claim,
+    ) -> rocky_core::CoordinationFuture<'_, u64> {
+        Box::pin(async move {
+            let mut state = self.logs.lock();
+            if state.unavailable {
+                return Err(CoordinationError::Unavailable);
+            }
+            let time = crate::certified::now()?.saturating_add(state.skew);
+            state
+                .counters
+                .entry(scope)
+                .or_default()
+                .claim(&counter, claim, time, usize::MAX)
+        })
+    }
+    fn counter(
+        &self,
+        scope: Scope,
+        counter: crate::counters::Name,
+        claim: Option<crate::counters::Claim>,
+    ) -> rocky_core::CoordinationFuture<'_, crate::counters::Reading> {
+        Box::pin(async move {
+            let state = self.logs.lock();
+            if state.unavailable {
+                return Err(CoordinationError::Unavailable);
+            }
+            let time = crate::certified::now()?.saturating_add(state.skew);
+            state
+                .counters
+                .get(&scope)
+                .cloned()
+                .unwrap_or_default()
+                .read(&counter, claim, time)
+        })
+    }
+    fn revoke(
+        &self,
+        scope: Scope,
+        revocations: rocky_credentials::RevocationSet,
+    ) -> rocky_core::CoordinationFuture<'_, Commitment> {
+        Box::pin(async move {
+            let mut state = self.logs.lock();
+            if state.unavailable {
+                return Err(CoordinationError::Unavailable);
+            }
+            let publisher = *state
+                .owners
+                .get(&scope)
+                .ok_or(CoordinationError::UnknownDomain)?;
+            let time = crate::certified::now()?.saturating_add(state.skew);
+            let held = state.revocations.entry(scope).or_default();
+            held.merge_in(
+                &revocations,
+                rocky_credentials::DatabaseContext { publisher, scope },
+                time,
+            )
+            .map_err(|_| CoordinationError::Denied)?;
+            held.digest(time).map_err(|_| CoordinationError::Corrupt)
+        })
     }
 }

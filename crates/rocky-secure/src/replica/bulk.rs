@@ -191,7 +191,7 @@ impl<A: RowApplication> Inner<A> {
         if e.tip != s.tip
             || e.scope.domain != s.scope
             || op.header.public_key.as_bytes() != &s.writer
-            || e.author != Some(s.author)
+            || !e.authored
             || e.author_sequence != proof.index
         {
             return Err(denied(

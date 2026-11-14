@@ -1,4 +1,4 @@
-use crate::{Commitment, RowIdentity, commitment};
+use crate::{Commitment, RowIdentity, WriterId, commitment};
 use serde::{Deserialize, Serialize};
 
 /// The original birth statement, independent of its transport and signature.
@@ -29,12 +29,12 @@ impl CreationStatement {
     }
 
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        let mut bytes = b"rocky.row-creation-statement.v2".to_vec();
+        let mut bytes = b"rocky.row-creation-statement.v3".to_vec();
         bytes.extend(self.manifest);
         bytes.extend(self.table);
-        bytes.extend(self.identity.integer().to_le_bytes());
+        bytes.extend(self.identity.to_bytes());
         bytes.extend(self.stamp.clock.to_le_bytes());
-        bytes.extend(self.stamp.author.to_le_bytes());
+        bytes.extend(self.stamp.author.as_bytes());
         bytes.extend(self.stamp.sequence.to_le_bytes());
         bytes.extend(self.bindings);
         bytes
@@ -64,18 +64,19 @@ pub fn bounded_clock<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Resul
     Ok(clock)
 }
 
-/// Register order within a domain; author numbers are unique in that domain.
+/// Register order within a domain: clock, then the writing node's key,
+/// then its domain-wide sequence.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(try_from = "(u64, u32, u64)", into = "(u64, u32, u64)")]
+#[serde(try_from = "(u64, WriterId, u64)", into = "(u64, WriterId, u64)")]
 pub struct SecureStamp {
     pub clock: u64,
-    pub author: u32,
+    pub author: WriterId,
     pub sequence: u64,
 }
 
-impl TryFrom<(u64, u32, u64)> for SecureStamp {
+impl TryFrom<(u64, WriterId, u64)> for SecureStamp {
     type Error = &'static str;
-    fn try_from((clock, author, sequence): (u64, u32, u64)) -> Result<Self, Self::Error> {
+    fn try_from((clock, author, sequence): (u64, WriterId, u64)) -> Result<Self, Self::Error> {
         if clock > MAX_CLOCK {
             return Err("clock beyond its bound");
         }
@@ -87,7 +88,7 @@ impl TryFrom<(u64, u32, u64)> for SecureStamp {
     }
 }
 
-impl From<SecureStamp> for (u64, u32, u64) {
+impl From<SecureStamp> for (u64, WriterId, u64) {
     fn from(stamp: SecureStamp) -> Self {
         (stamp.clock, stamp.author, stamp.sequence)
     }

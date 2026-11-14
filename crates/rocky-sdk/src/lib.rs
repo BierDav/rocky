@@ -1,11 +1,18 @@
 #![recursion_limit = "256"]
 // The protocol suites run natively; their test support is unused in a browser.
-#![cfg_attr(all(test, target_family = "wasm"), allow(dead_code, unused_imports))]
+#![cfg_attr(
+    all(test, target_family = "wasm"),
+    expect(
+        dead_code,
+        unused_imports,
+        reason = "native protocol test support is unused in browser tests"
+    )
+)]
 //! Rocky DB's official Rust application SDK.
 //!
 //! Add `rocky-sdk = "<release version>"` to your dependencies.
-//! Disable default features for storage without iroh. No ORM or native binding
-//! generator is needed. Run async SDK methods inside a Tokio runtime.
+//! Networking is opt-in through an application-supplied connector. No ORM or
+//! native binding generator is needed. Run async SDK methods inside a Tokio runtime.
 //!
 //! ```no_run
 //! use rocky_sdk::{Affinity, Column, Configuration, Failure, Schema, Table, params};
@@ -161,14 +168,18 @@ mod escrow;
 mod generation;
 mod groups;
 mod identities;
+mod inspection;
 mod join_requests;
 mod membership;
 mod mesh;
 mod node;
-mod owner;
+mod partitions;
+mod peer;
 mod reactor;
 mod recovery;
 mod registry;
+mod request;
+mod reset;
 mod rollout;
 mod scheduling;
 mod schema;
@@ -191,6 +202,7 @@ mod tip_schemas;
 mod tips;
 pub mod transport;
 
+pub use activity::{ActivityEvent, ActivityKind, ActivityPage, ActivityScope, ActivityTransfer};
 pub use backup::{Entry as BackupEntry, Inventory as BackupInventory};
 pub use claims::ClaimGrant;
 pub use configuration::Configuration;
@@ -198,23 +210,37 @@ pub use connection::{
     Binding, ConnectionOptions, Durability, Page, Profile, SqlFailure, TableChange, TableEvents,
 };
 #[cfg(not(target_family = "wasm"))]
-pub use custody::CustodyPeer;
-pub use database::{Connection, Coordination, Database, NetworkService, Open, Opened, Session};
+pub use custody::{CustodyConfiguration, CustodyPeer};
+pub use database::{Connection, Database, NetworkService, Open, Opened, Session};
+pub use delivery::State as DeliveryState;
 #[cfg(not(target_family = "wasm"))]
-pub use engine::Engine;
+pub use engine::{Engine, EngineMode, EngineOptions};
 pub use enrollment::{
-    AwaitingAdmission, JoinRefused, NodeKeys, PublisherRequired, Supplied, route_enrollment,
+    AwaitingAdmission, JoinRefused, NodeKeys, PublisherRequired, Supplied, Terms as GrantTerms,
+    route_enrollment,
 };
+pub use inspection::*;
+pub use join_requests::Dropped as JoinRequestDropReason;
+pub use partitions::*;
 #[cfg(feature = "qualification")]
 pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
-/// Named domain counters whose idempotent claims hand out unique,
-/// increasing values; see [`Database::claim`]. Claims go through the
-/// coordination service.
-#[cfg(feature = "iroh")]
-pub use rocky_coordinator::counters;
-/// The client of a coordination service and the bundle that pins it.
-#[cfg(feature = "iroh")]
-pub use rocky_coordinator::{certified::TrustBundle, service::NetworkCoordinator};
+pub use registry::{
+    ClaimRecord as RecordedClaimRight, Grant as RecordedPartitionGrant, Kind as IdentityOrigin,
+};
+pub(crate) use reset::ResetRefused;
+pub use reset::{Freshness, ResetReceipt, RestoreChoice};
+pub use rocky_credentials::Coordinator;
+pub use rocky_credentials::counters;
+
+/// An operation requiring coordination was called without an application coordinator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CoordinatorNotConfigured;
+impl std::fmt::Display for CoordinatorNotConfigured {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("coordinator not configured")
+    }
+}
+impl std::error::Error for CoordinatorNotConfigured {}
 /// Coordinator refusals, such as `Unavailable` (uncertain: retry the same
 /// claim) and `Expired`, inside a claim's [`Failure`].
 pub use rocky_core::CoordinationError;
@@ -224,26 +250,41 @@ pub use rocky_core::{
     IndexDefinition, LogicalAssertion, LogicalRestriction, LogicalView, TableClass,
     TableDefinition,
 };
-pub use rocky_core::{NodeId, PrincipalId, Scope, SqlValue, TransactionToken};
+pub use rocky_core::{
+    Commitment, KeyEpoch, NodeId, PartitionName, PartitionTuple, PrincipalId, ResourceScope,
+    RowIdentity, Scope, SqlValue, TipId, TransactionToken, WriterId,
+};
 /// Signed credentials, grant profiles and the key provider contract.
 pub use rocky_credentials as credentials;
 pub use rocky_credentials::Profile as GrantProfile;
 /// The identity port an application supplies, and a file-backed provider.
 pub use rocky_credentials::{
-    FileIdentityProvider, IdentityKey, IdentityProvider, Purpose, RootKey,
+    FileIdentityProvider, IdentityKey, IdentityProvider, Purpose, RevocationMode, RootKey,
 };
+pub use rocky_secure::{
+    CheckpointStatus, CurrentValue, HeldChange, HeldField, HeldKind, HeldRow, Holding,
+    RetentionLimits, RetentionPolicy,
+};
+pub use rocky_secure::{ReplicaRole, RoleConfig as ReplicaRoleConfig};
 pub use rollout::{RemovalImpact, RolloutConfirmationRequired, RolloutImpact};
 pub use schema::{Column, Migration, MigrationStep, Schema, SchemaBuilder, Table};
 pub use secrets::{FileSecretStore, SecretStore};
 pub use service::{Network, ServiceError};
-pub use session::{Admit, Discovered, Invitation, JoinRequest, LinkRequest, SeenDevice};
+pub use session::{
+    Admit, CommitSummary, ContactInfo, Discovered, DroppedStage, Invitation, InvitationState,
+    JoinRequest, LinkRequest, ReadPage, ReadQuery, RevocationResult, SeenDevice, SessionInfo,
+    SessionRows,
+};
 pub use sql::{DecodeError, FromSqlValue, IntoSqlValue, Row, Rows, Timestamp, Transaction};
 pub use status::*;
 pub use tips::*;
 pub type Failure = Box<dyn std::error::Error + Send + Sync>;
 /// Rocky's handlers for an application-owned iroh endpoint, and the iroh
 /// version they attach to.
-#[cfg(feature = "iroh")]
-pub use rocky_iroh as iroh;
-
 pub use self_enrollment::AwaitingLink;
+
+#[cfg(test)]
+extern crate self as rocky_sdk;
+#[cfg(test)]
+#[path = "../tests/support/snapshot.rs"]
+mod test_snapshot;

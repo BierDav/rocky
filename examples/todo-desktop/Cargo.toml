@@ -15,6 +15,7 @@ todo-app.workspace = true
 rocky-sdk = { path = "../../crates/rocky-sdk" }
 employees-app = { path = "../employees-app" }
 rocky-core.workspace = true
+rocky-iroh.workspace = true
 dioxus = { version = "=0.7.3", features = ["desktop"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 

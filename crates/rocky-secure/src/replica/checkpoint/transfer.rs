@@ -160,7 +160,7 @@ struct ExportSource {
 enum PageMetadata<'a> {
     Header(&'a Arc<crypto::CreationHeader>),
     Bindings(&'a Vec<u8>),
-    Author(u32, PublicKey),
+    Author(&'a WriterId, &'a PublicKey),
 }
 /// Authenticated rows committed in one step, with their complete page's identity.
 struct PageStep {
@@ -397,11 +397,7 @@ pub(in crate::replica) struct Staging {
 }
 
 impl<A: RowApplication> Inner<A> {
-    async fn store_page_metadata(
-        &self,
-        scope: ResourceScope,
-        items: &[PageMetadata<'_>],
-    ) -> Result<(), Error> {
+    async fn store_page_metadata(&self, items: &[PageMetadata<'_>]) -> Result<(), Error> {
         for item in items {
             match item {
                 PageMetadata::Header(header) => self.put_verified_creation_header(header).await?,
@@ -409,8 +405,7 @@ impl<A: RowApplication> Inner<A> {
                     self.put_bindings(set).await?;
                 }
                 PageMetadata::Author(author, signer) => {
-                    self.keep_stamp_author(scope.domain, *author, *signer)
-                        .await?
+                    self.keep_stamp_author(**author, **signer)?
                 }
             }
         }
@@ -729,16 +724,14 @@ impl<A: RowApplication> Inner<A> {
                     return Err(denied("checkpoint row differs from its partition"));
                 }
             }
-            if let Some(identity) = record.identity {
-                let identity = rocky_core::RowIdentity::from_integer(identity)
-                    .map_err(|error| denied(&error.to_string()))?;
-                if !statement.identities.iter().any(|mark| {
-                    mark.author == identity.author()
+            if let Some(identity) = record.identity
+                && !statement.identities.iter().any(|mark| {
+                    mark.author == identity.writer()
                         && mark.sequence >= identity.sequence()
                         && (record.moved_from.is_some() || mark.own >= identity.sequence())
-                }) {
-                    return Err(denied("checkpoint identity exceeds its permanent mark"));
-                }
+                })
+            {
+                return Err(denied("checkpoint identity exceeds its permanent mark"));
             }
             if staging.direct {
                 self.index_row_key(&blob, row, None, record).await?;
@@ -1741,7 +1734,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         transaction!(inner, |inner| {
             let id = inner.scope_id(scope).await?;
-            inner.bind_node_author(&signed.credentials).await?;
+            identity::check_node_chain(&signed.credentials)?;
             inner.check_frontier(id, &signed).await?;
             if inner
                 .staging(id)
@@ -2010,7 +2003,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 opened
                     .authors
                     .iter()
-                    .map(|(author, signer)| PageMetadata::Author(*author, *signer)),
+                    .map(|(author, signer)| PageMetadata::Author(author, signer)),
             )
             .collect();
         // The final bounded metadata group commits with the first row step.
@@ -2035,7 +2028,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner.verify_import_statement(&staging.signed).await?;
             #[cfg(any(test, feature = "qualification"))]
             inner.units("checkpoint_store_metadata", chunk.len() as u64);
-            transaction!(@commit inner, |inner| inner.store_page_metadata(scope, chunk).await)?;
+            transaction!(@commit inner, |inner| inner.store_page_metadata(chunk).await)?;
             source = (writes.count(), inner.authority, inner.workspace.tip);
         }
         let finish_cursor = opened.rows.last().map(|(row, ..)| *row);
@@ -2164,7 +2157,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         .keep_carried_escrow_rows(escrow_peer, &escrow, escrow_time)
                         .await?;
                 }
-                inner.store_page_metadata(scope, metadata).await?;
+                inner.store_page_metadata(metadata).await?;
                 inner.store_page(scope, id, &staging, &chunk, if chunk_index + 1 == chunks { Some(finish_cursor) } else { None }).await
             })?;
             source = (writes.count(), inner.authority, inner.workspace.tip);
@@ -2452,7 +2445,7 @@ impl<A: RowApplication> Inner<A> {
             false => Some(self.scope_key(scope)?),
         };
         if key.is_some() {
-            self.bind_node_author(&signed.credentials).await?;
+            identity::check_node_chain(&signed.credentials)?;
         }
         self.check_frontier(id, signed).await?;
         // A replacement of an off-path base that leaves this node's pruned
@@ -2761,9 +2754,7 @@ impl<A: RowApplication> Inner<A> {
                 held.iter()
                     .any(|held| held.author == mark.author && held.signer != mark.signer)
             }) {
-                return Err(denied(
-                    "checkpoint author number belongs to another signing key",
-                ));
+                return Err(denied("checkpoint writer belongs to another signing key"));
             }
         }
         Ok(())
@@ -2816,8 +2807,6 @@ impl<A: RowApplication> Inner<A> {
         let (Some(identity), Some(proof)) = (record.identity, &record.proof) else {
             return Ok(());
         };
-        let identity = rocky_core::RowIdentity::from_integer(identity)
-            .map_err(|error| Error::Corrupt(error.to_string()))?;
         let provenance = proof.provenance()?;
         if self
             .claims_on(allocation, identity)

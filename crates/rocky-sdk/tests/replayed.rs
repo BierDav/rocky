@@ -34,7 +34,7 @@ async fn create(database: &Database, key: &str, amount: i64) -> Result<Transacti
         vec![
             SqlValue::Text(key.into()),
             SqlValue::Integer(amount),
-            SqlValue::Integer(id),
+            id.sql(),
         ],
     )
     .await?;

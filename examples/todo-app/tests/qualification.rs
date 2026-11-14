@@ -409,7 +409,7 @@ async fn a_killed_app_reopens_offline_with_whole_transactions() -> Result<(), Fa
     todos.database().close().await?;
 
     let mut killed = child("one", &directory)?;
-    let id: i64 = reports(&mut killed)?
+    let id: rocky_sdk::RowIdentity = reports(&mut killed)?
         .next()
         .ok_or("the child committed nothing")?
         .parse()?;

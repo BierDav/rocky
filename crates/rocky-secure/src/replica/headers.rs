@@ -15,6 +15,27 @@ pub(crate) const HEADER_ROWS: usize = if cfg!(test) { 2 } else { 256 };
 pub(super) const SCAN_PASSES: usize = 3;
 const TABLES: [&str; 3] = ["secure_operations", "secure_voids", "secure_held_frames"];
 
+/// A scanned header's extensions with its table author, resolved from
+/// the signing key the extensions do not repeat.
+pub(super) struct ScannedHeader {
+    pub(super) author: Option<WriterId>,
+    extensions: Extensions,
+}
+impl ScannedHeader {
+    pub(super) fn new(header: p2panda_core::Header<Extensions>) -> Self {
+        Self {
+            author: header.extensions.author(&header.public_key),
+            extensions: header.extensions,
+        }
+    }
+}
+impl std::ops::Deref for ScannedHeader {
+    type Target = Extensions;
+    fn deref(&self) -> &Extensions {
+        &self.extensions
+    }
+}
+
 /// Where a scanned header came from.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum HeaderSource {
@@ -107,7 +128,7 @@ impl HeaderScan {
     pub(super) async fn page<A: RowApplication>(
         &mut self,
         inner: &Inner<A>,
-    ) -> Result<Option<(HeaderSource, Vec<Extensions>)>, Error> {
+    ) -> Result<Option<(HeaderSource, Vec<ScannedHeader>)>, Error> {
         self.check(inner)?;
         if self.table == self.tables.len() {
             return Ok(None);
@@ -143,16 +164,13 @@ impl HeaderScan {
             let [SqlValue::Blob(hash), SqlValue::Blob(bytes)] = record.as_slice() else {
                 return Err(Error::Corrupt("domain header".into()));
             };
-            let header = match source {
-                HeaderSource::Retained => {
-                    decode::<p2panda_core::Header<Extensions>>(bytes)?.extensions
-                }
+            let header = ScannedHeader::new(match source {
+                HeaderSource::Retained => decode::<p2panda_core::Header<Extensions>>(bytes)?,
                 HeaderSource::HeldFrame => decode::<EncryptedFrame>(bytes)?
                     .operation_ref()?
                     .header
-                    .extensions
                     .clone(),
-            };
+            });
             self.after.clone_from(hash);
             if header.scope.domain == self.domain {
                 headers.push(header);
@@ -174,7 +192,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         domain: Scope,
         begin: impl Fn(&Inner<A>) -> Result<S, Error>,
-        visit: impl AsyncFnMut(&mut Inner<A>, &mut S, Vec<Extensions>) -> Result<(), Error>,
+        visit: impl AsyncFnMut(&mut Inner<A>, &mut S, Vec<ScannedHeader>) -> Result<(), Error>,
         finish: impl AsyncFnOnce(&mut Inner<A>, S) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let mut visit = visit;
@@ -202,7 +220,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             &mut Inner<A>,
             &mut S,
             HeaderSource,
-            Vec<Extensions>,
+            Vec<ScannedHeader>,
         ) -> Result<(), Error>,
         finish: impl AsyncFnOnce(&mut Inner<A>, S) -> Result<T, Error>,
     ) -> Result<T, Error> {
@@ -228,7 +246,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             &mut Inner<A>,
             &mut S,
             HeaderSource,
-            Vec<Extensions>,
+            Vec<ScannedHeader>,
         ) -> Result<(), Error>,
     ) -> Result<(lock::Guard<tokio::sync::MutexGuard<'_, Inner<A>>>, S), Error> {
         let mut inner = self.inner.lock(Class::Background).await;

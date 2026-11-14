@@ -51,17 +51,19 @@ pub(in crate::tests) fn reseal(
     extension.births = original.rebound_births_for_test(&chain).unwrap();
     crate::wire::author(
         node,
-        extension,
-        chain,
-        key,
-        (
-            operation.header.seq_num,
-            operation.header.backlink,
-            operation.header.timestamp,
-        ),
-        operation.header.previous.clone(),
-        None,
-        &plaintext,
+        crate::wire::FrameDraft {
+            extensions: extension,
+            chain,
+            encryption_key: key,
+            log: (
+                operation.header.seq_num,
+                operation.header.backlink,
+                operation.header.timestamp,
+            ),
+            previous: operation.header.previous.clone(),
+            partition: None,
+            plaintext: &plaintext,
+        },
     )
     .unwrap()
 }

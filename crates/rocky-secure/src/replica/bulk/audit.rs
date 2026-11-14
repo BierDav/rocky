@@ -85,7 +85,7 @@ impl<A: RowApplication> Inner<A> {
                             || stage.publication != s.publication
                             || opening.statement.seal != s.parent
                             || opening.statement.schema != s.schema
-                            || chain.author_number().map_err(credential)? != s.author
+                            || identity::check_node_chain(&chain).is_err()
                             || chain.0.last().map(|c| c.issuer)
                                 != Some(opening.endorsement().signer(self.config.publisher))
                         {

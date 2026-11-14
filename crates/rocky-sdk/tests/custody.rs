@@ -2,6 +2,7 @@
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 mod common;
+use common::identity::snapshot as snap;
 use common::{Device, Failure, introduce};
 use rocky_sdk::{Network, transport::memory::Hub};
 use serde_json::json;
@@ -46,66 +47,79 @@ async fn devices_never_online_together_converge_via_keyless_custody() -> Result<
     introduce(&a, &relay).await;
     introduce(&b, &relay).await;
     issuer.close().await;
-    b.ok(json!({"type": "networking_control", "enabled": false}))
-        .await;
+    snap::ok(b.session.set_networking_enabled(false)).await;
     a.add(1, "Milk").await;
     a.sync().await.expect("upload");
     assert!(
-        relay
-            .call(json!({"type": "read", "query": {"sql": "SELECT * FROM items", "max_rows": 64}}))
-            .await
-            .is_err()
+        snap::observe(relay.session.read(rocky_sdk::ReadQuery {
+            sql: "SELECT * FROM items".to_owned(),
+            values: Vec::new(),
+            max_rows: 64,
+            max_bytes: None,
+            cursor: None
+        }))
+        .await
+        .is_err()
     );
     relay.close().await;
     let relay = Device::open(&root.path().join("relay"), net("relay"))?;
-    a.ok(json!({"type": "networking_control", "enabled": false}))
-        .await;
-    b.ok(json!({"type": "networking_control", "enabled": true}))
-        .await;
+    snap::ok(a.session.set_networking_enabled(false)).await;
+    snap::ok(b.session.set_networking_enabled(true)).await;
     b.sync().await.expect("catch up");
     assert_eq!(b.titles().await, ["Milk"]);
     b.add(2, "Eggs").await;
     b.sync().await.expect("upload");
-    b.ok(json!({"type": "networking_control", "enabled": false}))
-        .await;
-    a.ok(json!({"type": "networking_control", "enabled": true}))
-        .await;
+    snap::ok(b.session.set_networking_enabled(false)).await;
+    snap::ok(a.session.set_networking_enabled(true)).await;
     a.sync().await.expect("catch up");
     assert_eq!(a.titles().await, ["Eggs", "Milk"]);
     // A keyless custodian cannot issue enrollment or renewal.
     assert!(
-        relay
-            .call(json!({"type": "invitation", "profile": {"kind": "writer", "scopes": ["items"]}}))
-            .await
-            .is_err()
+        snap::observe(relay.session.invite(
+            Some(rocky_sdk::GrantProfile::Writer {
+                scopes: ["items".to_owned()].into_iter().collect()
+            }),
+            None
+        ))
+        .await
+        .is_err()
     );
-    assert!(b.call(json!({"type": "renew"})).await.is_err());
+    assert!(
+        snap::observe(async {
+            b.session.renew().await?;
+            b.session.info().await
+        })
+        .await
+        .is_err()
+    );
     a.close().await;
     b.close().await;
     relay.close().await;
     Ok(())
 }
 
-#[cfg(feature = "iroh")]
 #[tokio::test]
 async fn configuration_enrolls_resumes_and_refuses_reading_identities() -> Result<(), Failure> {
-    use rocky_sdk::{CustodyPeer, transport::TransportOptions};
+    use rocky_sdk::CustodyPeer;
     let root = tempfile::tempdir()?;
     let iroh = || {
-        Some(Network::Owned(Arc::new(TransportOptions::isolated_iroh(
+        Some(Network::Owned(Arc::new(rocky_iroh::Options::isolated(
             "127.0.0.1:0",
         ))))
     };
     let issuer = Device::create(&root.path().join("issuer"), iroh())?;
-    let config = |invitation: String, directory: &str| {
-        json!({
-        "directory": root.path().join(directory), "schema": serde_json::from_str::<serde_json::Value>(common::SCHEMA).expect("schema"),
-        "transport": {"kind": "iroh", "relay": "disabled", "lookup": "disabled", "topic": false, "local": false, "bind": "127.0.0.1:0"}, "invitation": invitation,
-    }).to_string()
+    let config = |invitation: String, directory: &str| rocky_sdk::CustodyConfiguration {
+        coordination: None,
+        directory: root.path().join(directory),
+        schema: rocky_sdk::Schema::parse(common::SCHEMA).expect("schema"),
+        transport: Arc::new(rocky_iroh::Options::isolated("127.0.0.1:0")),
+        invitation: Some(invitation),
+        peers: Vec::new(),
+        enrollment_upstream: None,
     };
     let wrong = config(issuer.invite().await, "wrong");
     assert!(
-        tokio::task::spawn_blocking(move || CustodyPeer::open(&wrong))
+        tokio::task::spawn_blocking(move || CustodyPeer::open(wrong))
             .await?
             .is_err()
     );
@@ -117,12 +131,12 @@ async fn configuration_enrolls_resumes_and_refuses_reading_identities() -> Resul
         "relay",
     );
     let first = config.clone();
-    let peer = tokio::task::spawn_blocking(move || CustodyPeer::open(&first)).await??;
+    let peer = tokio::task::spawn_blocking(move || CustodyPeer::open(first)).await??;
     let contact = peer.contact().await?;
     assert!(contact.starts_with("rocky://peer/"));
     peer.backup(&root.path().join("archive")).await?;
     peer.close().await?;
-    let peer = tokio::task::spawn_blocking(move || CustodyPeer::open(&config)).await??;
+    let peer = tokio::task::spawn_blocking(move || CustodyPeer::open(config)).await??;
     assert!(peer.contact().await?.starts_with("rocky://peer/"));
     peer.close().await?;
     issuer.close().await;
@@ -155,7 +169,7 @@ async fn container_resumes_from_configuration_and_drains_on_sigterm() -> Result<
     issuer.close().await;
     std::fs::write(root.path().join("peer.json"), json!({
         "directory":"/data", "schema":serde_json::from_str::<serde_json::Value>(common::SCHEMA)?,
-        "transport":{"kind":"iroh", "relay":"disabled", "lookup":"disabled", "topic":false, "local":false, "bind":"0.0.0.0:7447"}, "peers":[]
+        "transport":{"relay":"disabled", "lookup":"disabled", "topic":false, "local":false, "bind":"0.0.0.0:7447"}, "peers":[]
     }).to_string())?;
     let name = format!(
         "rocky-p06-{}",
@@ -206,7 +220,7 @@ async fn container_resumes_from_configuration_and_drains_on_sigterm() -> Result<
     // A clean exit must leave a custody file the native SDK can reopen.
     let reopened = Device::open(&root.path().join("relay"), None)?;
     assert_eq!(
-        reopened.ok(json!({"type":"session"})).await["profile"]["kind"],
+        snap::ok(reopened.session.info()).await["profile"]["kind"],
         "custody"
     );
     reopened.close().await;
@@ -234,9 +248,12 @@ async fn custody_forwards_pairing_and_renewal_to_an_explicit_issuer_with_creator
         net("relay").ok_or("network")?,
     )?;
     let issuer_contact = issuer.contact().await;
-    relay
-        .ok(json!({"type":"enrollment_upstream","contact":issuer_contact}))
-        .await;
+    snap::ok(
+        relay
+            .session
+            .set_enrollment_upstream(Some(&(snap::text(&(issuer_contact))))),
+    )
+    .await;
     let relay_contact = relay.contact().await;
     let invitation = issuer.invite().await;
     let routed = route_enrollment(&invitation, &relay_contact)?;
@@ -246,14 +263,18 @@ async fn custody_forwards_pairing_and_renewal_to_an_explicit_issuer_with_creator
         &routed,
         net("device").ok_or("network")?,
     )?;
-    let original = device.ok(json!({"type":"session"})).await;
+    let original = snap::ok(device.session.info()).await;
     assert_eq!(
         original["profile"],
         json!({"kind":"writer","scopes":["items"]})
     );
-    device.ok(json!({"type":"renew"})).await;
+    snap::ok(async {
+        device.session.renew().await?;
+        device.session.info().await
+    })
+    .await;
     assert_eq!(
-        device.ok(json!({"type":"session"})).await["profile"],
+        snap::ok(device.session.info()).await["profile"],
         original["profile"]
     );
     introduce(&device, &relay).await;
@@ -269,25 +290,35 @@ async fn custody_forwards_pairing_and_renewal_to_an_explicit_issuer_with_creator
         issuer.node().await
     );
     assert!(
-        relay
-            .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":["items"]}}))
-            .await
-            .is_err()
+        snap::observe(relay.session.invite(
+            Some(rocky_sdk::GrantProfile::Writer {
+                scopes: ["items".to_owned()].into_iter().collect()
+            }),
+            None
+        ))
+        .await
+        .is_err()
     );
     // The forwarding configuration survives a restart without acquiring any key.
     relay.close().await;
     let relay = Device::open(&root.path().join("relay"), net("relay"))?;
-    device.ok(json!({"type":"renew"})).await;
+    snap::ok(async {
+        device.session.renew().await?;
+        device.session.info().await
+    })
+    .await;
     let identity: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.path().join("relay/identity.json"))?)?;
     assert_eq!(identity["keys"], json!({}));
     assert_eq!(identity["authority"], json!(null));
     issuer.close().await;
-    let error = device
-        .call(json!({"type":"renew"}))
-        .await
-        .err()
-        .ok_or("all issuers offline must refuse")?;
+    let error = snap::observe(async {
+        device.session.renew().await?;
+        device.session.info().await
+    })
+    .await
+    .err()
+    .ok_or("all issuers offline must refuse")?;
     assert_eq!(error["code"], "unreachable");
     assert_eq!(error["retryable"], true);
     assert!(

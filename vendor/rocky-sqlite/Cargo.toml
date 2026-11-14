@@ -15,8 +15,13 @@ include = ["src/**/*.rs", "build.rs", "sqlite3/*.c", "sqlite3/*.h", "shim/**/*.h
 
 # Upstream code: SQLite's C ABI needs `unsafe`, so the workspace lints do not
 # apply.
+[lints.rust]
+unfulfilled_lint_expectations = "deny"
+
 [lints.clippy]
 all = { level = "deny", priority = -1 }
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
 
 [dependencies]
 rusqlite = { workspace = true, features = ["modern_sqlite"] }

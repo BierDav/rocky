@@ -98,8 +98,13 @@ struct Outcome {
 
 /// Fault points inside a group, for crash and visibility tests.
 #[cfg(test)]
-// The exiting faults belong to crash tests, which run natively.
-#[cfg_attr(target_family = "wasm", allow(dead_code))]
+#[cfg_attr(
+    target_family = "wasm",
+    expect(
+        dead_code,
+        reason = "Process-exiting faults are exercised only by native crash tests."
+    )
+)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum GroupFault {
     ExitAfterRequests(usize),

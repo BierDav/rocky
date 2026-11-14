@@ -348,7 +348,7 @@ async fn malformed_forged_or_unauthorized_no_frames_records_are_refused() {
         |s| {
             s.identities = vec![crate::replica::checkpoint::CoveredMark {
                 own: 1,
-                author: 7,
+                author: rocky_core::WriterId::from_bytes([7; 32]),
                 signer: PrivateKey::new().public_key(),
                 sequence: 1,
             }]

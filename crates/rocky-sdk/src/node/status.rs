@@ -23,110 +23,106 @@ impl Node {
             partition: root.is_some_and(|(_, root)| root != scope),
         }
     }
-    pub(super) async fn observed_peers(&self) -> Result<Vec<crate::Peer>, Failure> {
+    pub(super) async fn observed_peers(&self) -> Vec<crate::Peer> {
         let observations = self.observations.snapshot();
-        let mut peers = Vec::new();
-        for value in self.peers().await {
-            let node = value["node"]
-                .as_str()
-                .ok_or("missing peer node")?
-                .to_owned();
-            let link = &value["link"];
-            fn count(value: &Value, key: &str) -> Result<u64, Failure> {
-                Ok(value[key].as_str().ok_or("missing path count")?.parse()?)
-            }
-            let paths = link["paths"]
-                .as_array()
-                .ok_or("missing paths")?
-                .iter()
-                .map(|path| {
-                    Ok(crate::LinkPath {
-                        selected: path["selected"].as_bool().ok_or("missing selected path")?,
-                        kind: path["kind"].as_str().ok_or("missing path kind")?.into(),
-                        remote: path["remote"].as_str().ok_or("missing remote path")?.into(),
-                        local: path["local"].as_str().map(str::to_owned),
-                        round_trip_micros: count(path, "rtt_us")?,
-                        mtu: u32::try_from(count(path, "mtu")?)?,
-                        window: count(path, "window")?,
-                        sent_bytes: count(path, "sent_bytes")?,
-                        sent_datagrams: count(path, "sent_datagrams")?,
-                        received_bytes: count(path, "received_bytes")?,
-                        received_datagrams: count(path, "received_datagrams")?,
-                        lost_packets: count(path, "lost_packets")?,
-                        lost_bytes: count(path, "lost_bytes")?,
-                        congestion_events: count(path, "congestion_events")?,
-                    })
-                })
-                .collect::<Result<Vec<_>, Failure>>()?;
-            let key: PublicKey = node.parse()?;
-            let retry = self
-                .retries
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(&key)
-                .map(|retry| RetryStatus {
-                    pending: retry.pending.pending(),
-                    reconciliation_retry_at_epoch_millis: retry.retry.deadline_epoch_millis(),
-                    link_retry_at_epoch_millis: retry.link_retry.deadline_epoch_millis(),
-                });
-            peers.push(crate::Peer {
-                node: node.clone(),
-                is_issuer: value["issuer"].as_bool().ok_or("missing issuer")?,
-                is_configured: value["configured"]
-                    .as_bool()
-                    .ok_or("missing configured peer")?,
-                source: value["source"]
-                    .as_str()
-                    .ok_or("missing peer source")?
-                    .into(),
-                choice: value["choice"]
-                    .as_str()
-                    .ok_or("missing peer choice")?
-                    .into(),
-                routes: serde_json::from_value(value["routes"].clone())?,
-                is_local: value["local"].as_bool().ok_or("missing locality")?,
-                link: PeerLink {
-                    state: serde_json::from_value(link["state"].clone())?,
-                    opened_at_epoch_seconds: link["opened"].as_str().map(str::parse).transpose()?,
-                    round_trip_millis: link["round_trip_ms"]
-                        .as_str()
-                        .map(str::parse)
-                        .transpose()?,
-                    paths,
-                },
-                attempts: observations
-                    .iter()
-                    .filter(|attempt| attempt.target == node)
-                    .cloned()
-                    .collect(),
-                last_authenticated_exchange_at_epoch_seconds: self
-                    .met
+        let settings = self.settings.lock().await;
+        let met = self.met.lock().unwrap_or_else(PoisonError::into_inner);
+        let service = self.current();
+        let live_nodes = service
+            .as_ref()
+            .map(|service| service.live.nodes())
+            .unwrap_or_default();
+        let nodes: std::collections::BTreeSet<PublicKey> = settings
+            .peers
+            .keys()
+            .chain(met.keys())
+            .chain(live_nodes.iter())
+            .filter(|node| live_nodes.contains(node) || !settings.revocations.revokes(node))
+            .copied()
+            .collect();
+        nodes
+            .into_iter()
+            .map(|key| {
+                let node = key.to_hex();
+                let contact = settings.peers.get(&key);
+                let retry = self
+                    .retries
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .get(&key)
-                    .copied(),
-                retry,
-                last_sync: self
-                    .last_syncs
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .get(&node)
-                    .cloned(),
-            });
-        }
-        Ok(peers)
+                    .map(|retry| RetryStatus {
+                        pending: retry.pending.pending(),
+                        reconciliation_retry_at_epoch_millis: retry.retry.deadline_epoch_millis(),
+                        link_retry_at_epoch_millis: retry.link_retry.deadline_epoch_millis(),
+                    });
+                crate::Peer {
+                    node: node.clone(),
+                    is_issuer: settings.issuers.contains(&key),
+                    is_configured: contact.is_some(),
+                    source: settings
+                        .contact_meta
+                        .get(&key)
+                        .map_or_else(
+                            || {
+                                if contact.is_some() {
+                                    "enrollment"
+                                } else if met.contains_key(&key) {
+                                    "session"
+                                } else {
+                                    "link"
+                                }
+                            },
+                            |meta| meta.source.as_str(),
+                        )
+                        .into(),
+                    choice: self
+                        .choices
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .get(&key)
+                        .copied()
+                        .unwrap_or("not_considered")
+                        .into(),
+                    routes: contact
+                        .into_iter()
+                        .flat_map(|contact| &contact.routes)
+                        .map(|route| crate::Route {
+                            transport: route.transport.clone(),
+                            address: route.address.clone(),
+                        })
+                        .collect(),
+                    is_local: settings
+                        .contact_meta
+                        .get(&key)
+                        .is_some_and(|meta| meta.local),
+                    link: service.as_ref().map_or_else(
+                        || PeerLink {
+                            state: LinkState::Closed,
+                            opened_at_epoch_seconds: None,
+                        },
+                        |service| service.live.status(key),
+                    ),
+                    attempts: observations
+                        .iter()
+                        .filter(|attempt| attempt.target == node)
+                        .cloned()
+                        .collect(),
+                    last_authenticated_exchange_at_epoch_seconds: met.get(&key).copied(),
+                    retry,
+                    last_sync: self
+                        .last_syncs
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .get(&node)
+                        .cloned(),
+                }
+            })
+            .collect()
     }
     pub(super) async fn observed_network(&self) -> Result<crate::NetworkStatus, Failure> {
         let service = self.current();
         let discovery = self.discovery_status();
-        let path = |name: &str| -> Result<DiscoveryPath, Failure> {
-            let path = &discovery["paths"][name];
-            Ok(DiscoveryPath {
-                state: serde_json::from_value(path["state"].clone())?,
-                reason: path["reason"].as_str().map(str::to_owned),
-            })
-        };
-        let peers = self.observed_peers().await?;
+        let peers = self.observed_peers().await;
         let connected_peer_count = peers
             .iter()
             .filter(|peer| peer.link.state == LinkState::Open)
@@ -153,7 +149,7 @@ impl Node {
             foreground: self.foreground.load(Ordering::SeqCst),
             worker_enabled: self.automatic.load(Ordering::SeqCst),
             worker_running: *self.worker_running.borrow(),
-            reconciling: *self.sync_state.borrow() != "idle",
+            reconciling: *self.sync_state.borrow() != SyncActivityState::Idle,
             inbound: service.as_ref().map(|service| InboundStatus {
                 active: (INBOUND - service.active.available_permits()) as u64,
                 limit: INBOUND as u64,
@@ -168,37 +164,12 @@ impl Node {
                 .into_iter()
                 .filter(|attempt| attempt.operation == AttemptOperation::ResolveContact)
                 .collect(),
-            discovery: DiscoveryStatus {
-                announcing: discovery["announcing"]
-                    .as_bool()
-                    .ok_or("missing announcement state")?,
-                local: path("local")?,
-                topic: path("topic")?,
-            },
+            discovery,
             last_reconciliation: self
                 .last_reconciliation
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone(),
-            relay: RelayObservation {
-                initial_configuration: service
-                    .as_ref()
-                    .and_then(|service| service.transport.initial_relay_configuration()),
-                relays: service
-                    .as_ref()
-                    .and_then(|service| service.transport.relays())
-                    .map(|relays| {
-                        relays
-                            .into_iter()
-                            .map(|relay| crate::RelayStatus {
-                                url: relay.url,
-                                connected: relay.connected,
-                                last_error: relay.last_error,
-                                auth_denied_reason: relay.auth_denied_reason,
-                            })
-                            .collect()
-                    }),
-            },
         })
     }
     pub(super) async fn observed_status(&self) -> Result<DatabaseStatus, Failure> {
@@ -220,7 +191,6 @@ impl Node {
             rocky_platform::fs::exists(self.path.with_file_name("bootstrap.json"))
                 || imports.iter().any(|scope| scope.checkpoint.is_some());
         let renewal_routes = settings.renewal_routes();
-        let profile = serde_json::to_value(&settings.profile)?;
         // Drop the watch read guard before any replica calls can publish a commit.
         let revision = *self.replica.observe_revision().borrow();
         let mut status = DatabaseStatus {
@@ -235,7 +205,7 @@ impl Node {
                 is_issuer: settings.issuer(),
                 expires_at_epoch_seconds: settings.expires(),
                 expired: settings.expires() <= self.status_time()?,
-                logged_out: self.ended.lock().await.is_some() || settings.logged_out,
+                logged_out: self.lifecycle.lock().await.is_logged_out() || settings.logged_out,
                 verified_revocation: settings
                     .revocation(&self.path)?
                     .map(|notice| {
@@ -252,28 +222,15 @@ impl Node {
                         })
                     })
                     .transpose()?,
-                revocations: serde_json::from_value(settings.revocation_status()?)?,
-                profile: AuthorityProfile {
-                    kind: profile["kind"]
-                        .as_str()
-                        .ok_or("missing grant profile kind")?
-                        .into(),
-                    scopes: profile
-                        .get("scopes")
-                        .map(|scopes| serde_json::from_value(scopes.clone()))
-                        .transpose()?
-                        .unwrap_or_default(),
-                    grants: profile
-                        .get("grants")
-                        .map(|grants| serde_json::from_value(grants.clone()))
-                        .transpose()?
-                        .unwrap_or_default(),
-                },
+                revocations: settings.revocation_status()?,
+                profile: settings.profile.clone(),
                 renewal_routes,
             },
             data: DataStatus {
                 revision,
                 generation: crate::GenerationStatus {
+                    follow_required: self.replica.followed_bookmark().await.is_none(),
+                    held: self.replica.held_changes().await?.len(),
                     manifest: HEXLOWER.encode(&generation.manifest),
                     current: crate::Generation {
                         schema: generation.current.schema,
@@ -296,7 +253,7 @@ impl Node {
                 },
                 blockers: self.blockers().await?,
                 bootstrap_pending,
-                bootstrap: serde_json::from_value(self.bootstrap_progress().await?)?,
+                bootstrap: self.bootstrap_progress().await?,
                 imports,
                 key_epochs: settings
                     .keys
@@ -328,7 +285,7 @@ impl Node {
             },
             mesh: self.mesh_status().await?,
             coordination: CoordinationStatus {
-                mode: if self.service.is_some() {
+                mode: if self.coordinator().is_some() {
                     CoordinationMode::Service
                 } else {
                     CoordinationMode::NotConfigured
@@ -343,10 +300,6 @@ impl Node {
         };
         let mut token_status = status.clone();
         token_status.observed_at_epoch_millis = None;
-        for peer in &mut token_status.network.peers {
-            peer.link.paths.clear();
-            peer.link.round_trip_millis = None;
-        }
         // A refreshed report wakes no wait; a changed one or silence does.
         for device in token_status.mesh.iter_mut().flatten() {
             device.report.produced_at_epoch_seconds = 0;
@@ -565,7 +518,7 @@ impl Node {
         transport: Option<&dyn Transport>,
         automatic: bool,
         retry_only: bool,
-    ) -> Result<(ReconciliationReport, Value, bool), Failure> {
+    ) -> Result<(ReconciliationReport, SyncStatus, bool), Failure> {
         let _syncing = self.syncing.lock().await;
         if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
             return Err(Box::new(crate::enrollment::Revoked(statement)));
@@ -581,7 +534,7 @@ impl Node {
             None
         };
         let result = if skip.is_some() {
-            Ok((json!({"state":"idle"}), false))
+            Ok((SyncStatus::new(SyncState::Idle), false))
         } else {
             let transport = transport.ok_or(ServiceError::NetworkRequired("sync"))?;
             let span = tracing::info_span!(
@@ -621,10 +574,13 @@ impl Node {
             span.record("outcome", if result.is_ok() { "ok" } else { "error" });
             // Statements held or learned in this pass reach the coordination
             // service, whatever became of the peers.
-            #[cfg(feature = "iroh")]
+
             if let Err(error) = self.push_revocations().await {
                 self.activity
-                    .record("revocations_unpushed", json!({"error": error.to_string()}));
+                    .record(crate::ActivityKind::RevocationsUnpushed {
+                        error: (error.to_string()).to_owned(),
+                        retry: None,
+                    });
             }
             result
         };

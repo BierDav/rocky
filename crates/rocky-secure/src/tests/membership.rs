@@ -1,5 +1,5 @@
 use super::*;
-use rocky_credentials::{AuthorRange, Authority, MAX_MEMBERSHIP_NODES};
+use rocky_credentials::{Authority, MAX_MEMBERSHIP_NODES};
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn relayed_frames_cannot_hide_nodes_past_the_membership_bound() {
@@ -9,15 +9,10 @@ async fn relayed_frames_cannot_hide_nodes_past_the_membership_bound() {
     let receiver_identity = PrivateKey::new();
     let receiver_chain = CredentialChain(vec![
         Authority::owner(&fixture.publisher)
-            .issue(
-                receiver_identity.public_key(),
-                fixture.full(),
-                AuthorRange::new(1, 99).unwrap(),
-                validity(),
-            )
+            .issue(receiver_identity.public_key(), fixture.full(), validity())
             .unwrap(),
     ])
-    .certify(&receiver_identity, receiver_key.public_key(), 1)
+    .certify(&receiver_identity, receiver_key.public_key())
     .unwrap();
     let mut config = fixture.config(&receiver_key, fixture.full(), &[fixture.public]);
     config.credentials = receiver_chain;
@@ -28,12 +23,7 @@ async fn relayed_frames_cannot_hide_nodes_past_the_membership_bound() {
     let identity = PrivateKey::new();
     let links = CredentialChain(vec![
         Authority::owner(&fixture.publisher)
-            .issue(
-                identity.public_key(),
-                fixture.full(),
-                AuthorRange::new(100, 199).unwrap(),
-                validity(),
-            )
+            .issue(identity.public_key(), fixture.full(), validity())
             .unwrap(),
     ]);
     let mut previous = None;
@@ -44,13 +34,7 @@ async fn relayed_frames_cannot_hide_nodes_past_the_membership_bound() {
         let node = PrivateKey::new();
         let chain = links
             .clone()
-            .certify_member(
-                &identity,
-                node.public_key(),
-                100 + sequence as u32,
-                sequence as u64,
-                previous,
-            )
+            .certify_member(&identity, node.public_key(), sequence as u64, previous)
             .unwrap();
         previous = Some(chain.certificate().unwrap().id().unwrap());
         let mut config = fixture.config(&node, fixture.full(), &[fixture.public]);
@@ -116,15 +100,10 @@ async fn an_existing_link_refreshes_membership_without_changing_the_row_revision
     let identity = PrivateKey::new();
     let chain = CredentialChain(vec![
         Authority::owner(&f.publisher)
-            .issue(
-                identity.public_key(),
-                f.full(),
-                AuthorRange::new(100, 199).unwrap(),
-                validity(),
-            )
+            .issue(identity.public_key(), f.full(), validity())
             .unwrap(),
     ])
-    .certify(&identity, PrivateKey::new().public_key(), 100)
+    .certify(&identity, PrivateKey::new().public_key())
     .unwrap();
     let certificate = chain.certificate().unwrap().clone();
     let mut evidence = RevocationSet::new();

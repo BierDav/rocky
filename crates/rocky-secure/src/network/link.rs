@@ -214,25 +214,7 @@ impl Link {
             replica,
             (local, credentials),
             expected,
-            (HANDSHAKE_VERSION, false),
-        ))
-        .await?
-        .ok_or_else(|| denied("link handshake required"))
-    }
-    /// Accepts a link, or answers a pinned contact reference's resolution
-    /// (`NativeSession::resolve_peer`) with `None`.
-    pub async fn accept_or_resolve<A: RowApplication>(
-        stream: impl SessionStream + 'static,
-        replica: &EncryptedReplica<A>,
-        local: PrivateKey,
-        credentials: CredentialChain,
-    ) -> Result<Option<Self>, Error> {
-        Box::pin(Self::open_as(
-            stream,
-            replica,
-            (local, credentials),
-            None,
-            (HANDSHAKE_VERSION, true),
+            HANDSHAKE_VERSION,
         ))
         .await
     }
@@ -250,18 +232,17 @@ impl Link {
             replica,
             (local, credentials),
             expected,
-            (version, false),
+            version,
         ))
-        .await?
-        .ok_or_else(|| denied("link handshake required"))
+        .await
     }
     async fn open_as<A: RowApplication>(
         stream: impl SessionStream + 'static,
         replica: &EncryptedReplica<A>,
         local: (PrivateKey, CredentialChain),
         expected: Option<PublicKey>,
-        version: (u32, bool),
-    ) -> Result<Option<Self>, Error> {
+        version: u32,
+    ) -> Result<Self, Error> {
         let span = tracing::debug_span!(
             "admission",
             dialing = expected.is_some(),
@@ -281,7 +262,7 @@ impl Link {
             span.clone(),
         )
         .await;
-        if let Ok(Some(link)) = &result {
+        if let Ok(link) = &result {
             span.record("peer", crate::network::trace::peer(&link.peer));
             span.record("scopes", link.held.len() as u64);
         }
@@ -293,14 +274,14 @@ impl Link {
         replica: &EncryptedReplica<A>,
         (local, credentials): (PrivateKey, CredentialChain),
         expected: Option<PublicKey>,
-        version: (u32, bool),
-    ) -> Result<Option<Self>, Error> {
+        version: u32,
+    ) -> Result<Self, Error> {
         let side = if expected.is_some() {
             Side::Initiator
         } else {
             Side::Acceptor
         };
-        let session = NativeSession::handshake(
+        let (mut session, clock_offset) = NativeSession::handshake(
             Box::new(stream),
             replica,
             (local, credentials.clone()),
@@ -309,9 +290,6 @@ impl Link {
             version,
         )
         .await?;
-        let Some((mut session, clock_offset)) = session else {
-            return Ok(None);
-        };
         #[cfg(test)]
         let handshake_bytes = MAX_SECURE_BYTES - session.remaining;
         let mut scopes = Vec::new();
@@ -367,7 +345,7 @@ impl Link {
             return Err(denied("link handshake requires a transport"));
         };
         let (read, write) = tokio::io::split(stream);
-        Ok(Some(Self {
+        Ok(Self {
             peer: session.peer,
             #[cfg(test)]
             handshake_bytes,
@@ -394,7 +372,7 @@ impl Link {
                 signing: session.signing,
                 sequence: session.sent,
             }),
-        }))
+        })
     }
 }
 impl Link {
@@ -824,15 +802,7 @@ mod tests {
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn only_current_link_name_and_handshake_label() {
-        // Transport and handshake each accept one current version.
-        assert_eq!(
-            rocky_core::net::Protocol::named(b"rocky/link/5"),
-            Some(rocky_core::net::Protocol::Link)
-        );
-        assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/1"), None);
-        assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/2"), None);
-        assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/3"), None);
-        assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/4"), None);
+        // The cryptographic handshake accepts one current version.
         assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v28");
     }
 }
@@ -909,7 +879,7 @@ mod integration_tests {
         };
         tokio::pin!(trickle);
         let admitted = tokio::select! {
-            admitted = Link::accept_or_resolve(near, &replica, node.clone(), chain) => admitted,
+            admitted = Link::open(near, &replica, node.clone(), chain, None) => admitted,
             () = &mut trickle => unreachable!(),
         };
         let Err(error) = admitted else {

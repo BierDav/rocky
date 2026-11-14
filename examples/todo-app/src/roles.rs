@@ -8,8 +8,9 @@
 //!   each list with it.
 //! - **Partial**: a writer holding only the lists shared with it.
 use crate::{Configuration, DEVICES, LIST_GROUP, LISTS, TODOS, TodoError, Todos};
-use rocky_sdk::{Failure, GrantProfile, params};
-use serde_json::json;
+use rocky_sdk::{
+    Failure, GrantProfile, PartitionTarget, ReplicaRole, ReplicaRoleConfig, RowIdentity, params,
+};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -82,7 +83,13 @@ pub async fn join(configuration: &Configuration, code: &str, name: &str) -> Resu
     let todos = Todos::new(configuration.join(uri).await?.database);
     if role == Role::Partial {
         todos
-            .call(json!({"type": "partition_role", "role": {"role": "Partial", "full_nodes": [], "custody": 0}}))
+            .database
+            .session()
+            .set_replica_role(ReplicaRoleConfig {
+                role: ReplicaRole::Partial,
+                full_nodes: BTreeSet::new(),
+                custody: 0,
+            })
             .await?;
     }
     todos.register(role, name).await?;
@@ -140,22 +147,12 @@ impl Todos {
         if node == self.node().await? {
             return Err("a device cannot remove itself; reset it instead".into());
         }
-        let identities = self.call(json!({"type": "identities"})).await?;
-        let identity = identities["identities"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find_map(|record| {
-                record["nodes"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .find(|linked| linked["node"] == node)
-                    .and_then(|_| record["identity"].as_str())
-            })
+        let session = self.database.session();
+        let identity = session
+            .identity_for_node(node.parse()?)
+            .await?
             .ok_or("the node is not linked to a recorded identity")?;
-        self.call(json!({"type": "revoke", "identity": identity}))
-            .await?;
+        session.revoke_identity(&identity.to_hex()).await?;
         let mut transaction = self.database.transaction().await?;
         transaction
             .execute("DELETE FROM devices WHERE node=?", params![node])
@@ -190,36 +187,42 @@ impl Todos {
                 let role: String = row.get_at(1)?;
                 Ok(Member {
                     node: row.get_at(0)?,
-                    role: Role::parse(&role).ok_or(TodoError::Reply("a known role"))?,
+                    role: Role::parse(&role).ok_or(TodoError::UnknownRole)?,
                     name: row.get_at(2)?,
                 })
             })
             .collect()
     }
     /// Devices this device shared `list` with.
-    pub async fn shared_with(&self, list: i64) -> Result<BTreeSet<String>, Failure> {
-        let status = self
-            .call(json!({"type": "partition_status", "group": LIST_GROUP, "values": list_values(list)}))
-            .await?;
-        Ok(status["recipients"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|recipient| recipient["node"].as_str().map(str::to_owned))
+    pub async fn shared_with(&self, list: RowIdentity) -> Result<BTreeSet<String>, Failure> {
+        Ok(self
+            .database
+            .session()
+            .partition_recipients(list_target(list))
+            .await?
+            .iter()
+            .map(|node| node.to_hex())
             .collect())
     }
     /// Delivers `list`'s key to `nodes`; they hold it after their next sync.
-    pub async fn share(&self, list: i64, nodes: &[String]) -> Result<(), Failure> {
+    pub async fn share(&self, list: RowIdentity, nodes: &[String]) -> Result<(), Failure> {
         if nodes.is_empty() {
             return Ok(());
         }
-        self.call(json!({"type": "partition_share", "group": LIST_GROUP, "values": list_values(list), "recipients": nodes}))
+        let nodes = nodes
+            .iter()
+            .map(|node| node.parse())
+            .collect::<Result<_, _>>()?;
+        self.database
+            .session()
+            .share_partition(list_target(list), nodes, None)
             .await
             .map(drop)
     }
+
     /// Shares `list` with every trusted and full device not yet sent it
     /// from here.
-    pub async fn share_with_members(&self, list: i64) -> Result<(), Failure> {
+    pub async fn share_with_members(&self, list: RowIdentity) -> Result<(), Failure> {
         let own = self.node().await?;
         let shared = self.shared_with(list).await?;
         let missing: Vec<String> = self
@@ -247,6 +250,9 @@ impl Todos {
     }
 }
 
-fn list_values(list: i64) -> serde_json::Value {
-    json!([{"type": "integer", "value": list.to_string()}])
+fn list_target(list: RowIdentity) -> PartitionTarget {
+    PartitionTarget::Group {
+        group: LIST_GROUP.into(),
+        values: vec![list.sql()],
+    }
 }

@@ -31,8 +31,8 @@ pub(super) const SCHEMA: &str = r#"{"application":"relational","version":1,"form
   "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list"},
  {"name":"cards","class":"replayed","columns":[
    {"name":"list","type":"text","not_null":true},
-   {"name":"board","type":"integer","not_null":true},
-   {"name":"pinned","type":"integer"},
+   {"name":"board","type":"blob","not_null":true},
+   {"name":"pinned","type":"blob"},
    {"name":"name","type":"text","not_null":true},
    {"name":"points","type":"integer","not_null":true}],
   "checks":["points BETWEEN 0 AND 9"],
@@ -44,10 +44,10 @@ pub(super) const SCHEMA: &str = r#"{"application":"relational","version":1,"form
 "assertions":[{"name":"board_cap","select_sql":"SELECT b.id FROM boards b JOIN cards c ON c.list = b.list AND c.board = b.id GROUP BY b.list, b.id HAVING SUM(c.points) > MIN(b.cap)"}]}"#;
 
 const REFERENCE_DDL: &str = "PRAGMA foreign_keys=ON;
-CREATE TABLE boards(list TEXT NOT NULL, code TEXT NOT NULL, cap INTEGER NOT NULL, id INTEGER NOT NULL,
+CREATE TABLE boards(list TEXT NOT NULL, code TEXT NOT NULL, cap INTEGER NOT NULL, id BLOB NOT NULL,
   PRIMARY KEY(list, id), UNIQUE(list, code), CHECK(cap BETWEEN 1 AND 12));
-CREATE TABLE cards(list TEXT NOT NULL, board INTEGER NOT NULL, pinned INTEGER, name TEXT NOT NULL,
-  points INTEGER NOT NULL, id INTEGER NOT NULL, PRIMARY KEY(list, id), UNIQUE(list, name),
+CREATE TABLE cards(list TEXT NOT NULL, board BLOB NOT NULL, pinned BLOB, name TEXT NOT NULL,
+  points INTEGER NOT NULL, id BLOB NOT NULL, PRIMARY KEY(list, id), UNIQUE(list, name),
   CHECK(points BETWEEN 0 AND 9),
   FOREIGN KEY(list, board) REFERENCES boards(list, id) ON DELETE CASCADE,
   FOREIGN KEY(list, pinned) REFERENCES boards(list, id));
@@ -108,7 +108,7 @@ async fn ids(
     transaction: &mut crate::Transaction,
     table: &str,
     list: &str,
-) -> Result<Vec<i64>, Failure> {
+) -> Result<Vec<rocky_core::RowIdentity>, Failure> {
     let rows = transaction
         .query(
             &format!("SELECT id FROM {table} WHERE list = ? ORDER BY id"),
@@ -118,10 +118,13 @@ async fn ids(
         .collect()
         .await?;
     rows.iter()
-        .map(|row| row.get_at::<i64>(0).map_err(|error| error.0.into()))
+        .map(|row| {
+            row.get_at::<rocky_core::RowIdentity>(0)
+                .map_err(|error| error.0.into())
+        })
         .collect()
 }
-fn pick(ids: &[i64], index: u8) -> Result<i64, Failure> {
+fn pick(ids: &[rocky_core::RowIdentity], index: u8) -> Result<rocky_core::RowIdentity, Failure> {
     match ids {
         [] => Err("skipped: nothing to pick".into()),
         ids => Ok(ids[usize::from(index) % ids.len()]),
@@ -145,7 +148,7 @@ async fn statements(
                     text(list),
                     text(&format!("c{code}")),
                     Integer(i64::from(*cap)),
-                    Integer(id),
+                    id.sql(),
                 ],
             ));
         }
@@ -159,7 +162,7 @@ async fn statements(
             let boards = ids(transaction, "boards", list).await?;
             let board = pick(&boards, *board)?;
             let pinned = match pinned {
-                Some(index) => Integer(pick(&boards, *index)?),
+                Some(index) => pick(&boards, *index)?.sql(),
                 None => SqlValue::Null,
             };
             let id = transaction.next_id("cards", vec![text(list)]).await?;
@@ -168,11 +171,11 @@ async fn statements(
                     .into(),
                 vec![
                     text(list),
-                    Integer(board),
+                    board.sql(),
                     pinned,
                     text(&format!("n{name}")),
                     Integer(i64::from(*points)),
-                    Integer(id),
+                    id.sql(),
                 ],
             ));
         }
@@ -186,18 +189,18 @@ async fn statements(
             let card = transaction.next_id("cards", vec![text(list)]).await?;
             run.push((
                 "INSERT INTO boards(list, code, cap, id) VALUES(?, ?, 6, ?)".into(),
-                vec![text(list), text(&format!("c{code}")), Integer(board)],
+                vec![text(list), text(&format!("c{code}")), board.sql()],
             ));
             run.push((
                 "INSERT INTO cards(list, board, pinned, name, points, id) VALUES(?, ?, ?, ?, ?, ?)"
                     .into(),
                 vec![
                     text(list),
-                    Integer(board),
-                    Integer(board),
+                    board.sql(),
+                    board.sql(),
                     text(&format!("n{name}")),
                     Integer(i64::from(*points)),
-                    Integer(card),
+                    card.sql(),
                 ],
             ));
         }
@@ -205,28 +208,28 @@ async fn statements(
             let card = pick(&ids(transaction, "cards", list).await?, *card)?;
             run.push((
                 "UPDATE cards SET points = points + ? WHERE list = ? AND id = ?".into(),
-                vec![Integer(i64::from(*by)), text(list), Integer(card)],
+                vec![Integer(i64::from(*by)), text(list), card.sql()],
             ));
         }
         Change::Recode { list, board, code } => {
             let board = pick(&ids(transaction, "boards", list).await?, *board)?;
             run.push((
                 "UPDATE boards SET code = ? WHERE list = ? AND id = ?".into(),
-                vec![text(&format!("c{code}")), text(list), Integer(board)],
+                vec![text(&format!("c{code}")), text(list), board.sql()],
             ));
         }
         Change::DropBoard { list, board } => {
             let board = pick(&ids(transaction, "boards", list).await?, *board)?;
             run.push((
                 "DELETE FROM boards WHERE list = ? AND id = ?".into(),
-                vec![text(list), Integer(board)],
+                vec![text(list), board.sql()],
             ));
         }
         Change::DropCard { list, card } => {
             let card = pick(&ids(transaction, "cards", list).await?, *card)?;
             run.push((
                 "DELETE FROM cards WHERE list = ? AND id = ?".into(),
-                vec![text(list), Integer(card)],
+                vec![text(list), card.sql()],
             ));
         }
         Change::MoveCard {
@@ -240,14 +243,14 @@ async fn statements(
             run.push((
                 "UPDATE cards SET list = ?, board = ?, pinned = NULL WHERE list = ? AND id = ?"
                     .into(),
-                vec![text(to), Integer(board), text(from), Integer(card)],
+                vec![text(to), board.sql(), text(from), card.sql()],
             ));
         }
         Change::MoveBoard { from, to, board } => {
             let board = pick(&ids(transaction, "boards", from).await?, *board)?;
             run.push((
                 "UPDATE boards SET list = ? WHERE list = ? AND id = ?".into(),
-                vec![text(to), text(from), Integer(board)],
+                vec![text(to), text(from), board.sql()],
             ));
         }
     }

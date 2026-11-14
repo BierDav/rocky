@@ -4,8 +4,8 @@ use rocky_core::SqlValue;
 use std::collections::BTreeSet;
 
 type Positions = (
-    BTreeMap<u32, BTreeSet<u64>>,
-    BTreeMap<(ResourceScope, u32), u64>,
+    BTreeMap<rocky_core::WriterId, BTreeSet<u64>>,
+    BTreeMap<(ResourceScope, rocky_core::WriterId), u64>,
 );
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -353,7 +353,7 @@ async fn warm_syntax_keeps_pending_key_ready_and_status_predicates_live() {
     let (f, _dir, target, frames) = pending().await;
     let header: p2panda_core::Header<crate::wire::Extensions> =
         crate::decode(frames[0].header_bytes()).unwrap();
-    let author = header.extensions.author.unwrap();
+    let author = header.extensions.author(&header.public_key).unwrap();
     let position = header.extensions.author_sequence;
     let scopes = [(f.public, None)];
     let held = BTreeSet::from([f.public]);
@@ -450,7 +450,7 @@ async fn warm_void_and_placement_headers_keep_distinct_coverage_powers() {
     let (f, _dir, target, frames) = pending().await;
     let header: p2panda_core::Header<crate::wire::Extensions> =
         crate::decode(frames[0].header_bytes()).unwrap();
-    let author = header.extensions.author.unwrap();
+    let author = header.extensions.author(&header.public_key).unwrap();
     let sequence = header.extensions.author_sequence;
     let hash = frames[0].id().unwrap();
     assert!(
@@ -490,7 +490,7 @@ async fn warm_void_and_placement_headers_keep_distinct_coverage_powers() {
             "INSERT INTO secure_placements VALUES(?,?,?,?,?,?)",
             crate::storage::bindings(vec![
                 SqlValue::Blob(crate::encode(&f.public.domain).unwrap()),
-                SqlValue::Integer(i64::from(author)),
+                crate::writer::writer_value(author),
                 SqlValue::Integer(sequence as i64),
                 SqlValue::Blob(crate::encode(&f.public).unwrap()),
                 SqlValue::Blob(hash.as_bytes().to_vec()),
@@ -653,7 +653,7 @@ async fn shared_parsing_keeps_frontier_hash_author_and_live_status_checks() {
     );
     let mut header: p2panda_core::Header<crate::wire::Extensions> =
         crate::decode(original).unwrap();
-    header.extensions.author = None;
+    header.extensions.authored = false;
     let bytes = crate::encode(&header).unwrap();
     inner
         .conn

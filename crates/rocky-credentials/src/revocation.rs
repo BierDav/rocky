@@ -23,8 +23,21 @@ pub const MAX_REVOCATION_BYTES: usize = 8 * 1024;
 pub const SIGNATURE_OVERHEAD: usize = 1024;
 /// Largest encoded set, a bound on what any merge accepts.
 pub const MAX_REVOCATION_SET_BYTES: usize = 4 * 1024 * 1024;
+/// The encoded resets one set holds together, within its bound: resets are
+/// permanent, so the rest of the set always stays for other statements.
+pub const MAX_RESET_SET_BYTES: usize = 1024 * 1024;
 /// The named refusal of a revocation beyond the live bound.
 pub const REVOCATION_SET_FULL: &str = "revocation set full: 1,024 live statements";
+
+/// How a root revocation treats identities first enrolled by its target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevocationMode {
+    /// End only the named identity; its enrollees may renew elsewhere.
+    Lost,
+    /// Also end every identity whose first trusted issuer was the target.
+    Compromised,
+}
 
 /// One revocation: the identities, node certificates and capability IDs it
 /// ends, the identity that signed it and when. Its ID is its hash. Signed
@@ -40,6 +53,8 @@ pub struct Revocation {
     /// The signing identity: the owner's or an issuer's.
     pub issuer: PublicKey,
     pub time: u64,
+    /// Signed policy for origin cascades. Only the root may cascade.
+    pub mode: RevocationMode,
     pub nodes: BTreeSet<crate::PeerId>,
     pub identities: BTreeSet<PublicKey>,
     pub capabilities: BTreeSet<Commitment>,
@@ -48,8 +63,32 @@ pub struct Revocation {
     /// revokes, the heads of its chains that stay valid. A chain without
     /// an entry keeps nothing once its signer is revoked.
     pub cut: Vec<Cut>,
-    /// Only in a root statement: the recovery that signed it.
-    pub recovery: Option<RootRecovery>,
+    /// Only in a root statement: the whole-database decision it makes.
+    pub recovery: Option<RootDecision>,
+}
+/// A root statement's whole-database decision after devices were lost.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RootDecision {
+    /// Destructive recovery: ends trusted grants older than its own.
+    Grants(RootRecovery),
+    /// Sign out everywhere else: ends every node it does not keep, and
+    /// keeps their operations only within its fence.
+    Reset(Box<crate::Reset>),
+}
+impl RootDecision {
+    pub fn grants(&self) -> Option<RootRecovery> {
+        match self {
+            Self::Grants(recovery) => Some(*recovery),
+            Self::Reset(_) => None,
+        }
+    }
+    pub fn reset(&self) -> Option<&crate::Reset> {
+        match self {
+            Self::Reset(reset) => Some(reset),
+            Self::Grants(_) => None,
+        }
+    }
 }
 /// A root recovery's statement: it ends every trusted grant valid before
 /// the recovered identity's own, with what those identities first
@@ -57,13 +96,12 @@ pub struct Revocation {
 /// root signs later stay. Ordered by time, then key: of two recoveries
 /// the later ends the earlier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RootRecovery {
     /// The `not_before` of the recovered identity's trusted grant.
     pub since: u64,
     /// The recovered identity.
     pub keep: PublicKey,
-    /// The recovery slot of author numbers its grant holds.
-    pub slot: u32,
 }
 impl RootRecovery {
     /// Whether it ends a trusted grant to `identity` valid from `since`.
@@ -95,7 +133,7 @@ pub const MAX_CUT_HEADS: usize = 64;
 impl Revocation {
     pub fn id(&self) -> Result<Commitment, Error> {
         Ok(rocky_core::commitment(
-            "rocky.revocation.id.v4",
+            "rocky.revocation.id.v6",
             &encode(self)?,
         ))
     }
@@ -121,15 +159,41 @@ impl Revocation {
             && self.capabilities.is_empty()
             && self.recovery.is_none()
     }
-    /// A recovery only in a root statement, naming a slot that exists.
+    /// The recovery's root-recovery grants decision, if any.
+    pub fn grants(&self) -> Option<RootRecovery> {
+        self.recovery.as_ref().and_then(RootDecision::grants)
+    }
+    /// The owner reset this statement makes, if any.
+    pub fn reset(&self) -> Option<&crate::Reset> {
+        self.recovery.as_ref().and_then(RootDecision::reset)
+    }
+    /// Recovery stays destructive. A reset is a root statement of its own:
+    /// it names nothing else and cascades no origin.
     fn valid_recovery(&self, root: bool) -> bool {
-        self.recovery
-            .is_none_or(|recovery| root && recovery.slot < crate::RECOVERY_SLOTS)
+        match &self.recovery {
+            None => true,
+            Some(RootDecision::Grants(_)) => root && self.mode == RevocationMode::Compromised,
+            Some(RootDecision::Reset(reset)) => {
+                root && self.mode == RevocationMode::Lost
+                    && self.nodes.is_empty()
+                    && self.identities.is_empty()
+                    && self.capabilities.is_empty()
+                    && reset.validate().is_ok()
+            }
+        }
+    }
+    /// The largest signed encoding this statement may have.
+    fn max_bytes(&self) -> usize {
+        if self.reset().is_some() {
+            crate::MAX_RESET_BYTES
+        } else {
+            MAX_REVOCATION_BYTES
+        }
     }
     /// A cut in a root statement or identity-owned unlink, ordered without repeats, naming
     /// chains of identities or nodes the statement revokes; a recovery's
     /// may name any identity but the one it keeps, since it ends grants
-    /// its signer never saw.
+    /// its signer never saw; a reset's, any lane it does not keep.
     fn valid_cut(&self, authorized: bool) -> bool {
         (authorized || self.cut.is_empty())
             && self.cut.len() <= MAX_CUT_LANES
@@ -147,8 +211,11 @@ impl Revocation {
                 (self.identities.contains(&cut.identity)
                     || self.nodes.contains(&crate::PeerId::of(cut.lane))
                     || self
-                        .recovery
-                        .is_some_and(|recovery| recovery.keep != cut.identity))
+                        .grants()
+                        .is_some_and(|recovery| recovery.keep != cut.identity)
+                    || self
+                        .reset()
+                        .is_some_and(|reset| !reset.keep.contains(&crate::PeerId::of(cut.lane))))
                     && cut.statements.windows(2).all(|pair| pair[0] < pair[1])
             })
     }
@@ -164,7 +231,7 @@ pub struct SignedRevocation {
     attestation: Attestation,
     database: Option<crate::DatabaseContext>,
 }
-const SIGNED: &str = "rocky.revocation.v7";
+const SIGNED: &str = "rocky.revocation.v9";
 impl SignedRevocation {
     pub fn sign<'s>(
         statement: Revocation,
@@ -214,6 +281,7 @@ impl SignedRevocation {
             || statement.empty()
             || !statement.valid_cut(chain.0.is_empty() || Self::unlink_shape(&statement, chain))
             || !statement.valid_recovery(chain.0.is_empty())
+            || (statement.mode == RevocationMode::Compromised && !chain.0.is_empty())
         {
             return Err(denied("invalid revocation"));
         }
@@ -231,7 +299,7 @@ impl SignedRevocation {
             chain: chain.clone(),
             statement,
         };
-        if encode(&signed)?.len() > MAX_REVOCATION_BYTES {
+        if encode(&signed)?.len() > signed.statement.max_bytes() {
             return Err(denied("revocation exceeds its size limit"));
         }
         Ok(signed)
@@ -304,11 +372,12 @@ impl SignedRevocation {
             || statement.empty()
             || !statement.valid_cut(self.chain.0.is_empty() || unlink)
             || !statement.valid_recovery(self.chain.0.is_empty())
+            || (statement.mode == RevocationMode::Compromised && !self.root())
             || statement
-                .recovery
+                .grants()
                 .is_some_and(|recovery| recovery.keep == publisher)
             || statement.identities.contains(&publisher)
-            || encode(self)?.len() > MAX_REVOCATION_BYTES
+            || encode(self)?.len() > statement.max_bytes()
             || signer.ok() != Some(statement.issuer)
             || (!unlink && self.chain.0.is_empty() != self.attestation.certificate().is_none())
             || self
@@ -349,9 +418,11 @@ impl SignedRevocation {
     }
     /// Whether this statement ends a chain through `link`, a `protected`
     /// one (see `CredentialChain::protected`) only when the root signed
-    /// it. A root statement naming an identity also ends every link that
-    /// identity first enrolled; a recovery's, every trusted grant before
-    /// its own and what those first enrolled.
+    /// it. A compromised root statement also ends every link that identity
+    /// first enrolled; a recovery's, every trusted grant before
+    /// its own and what those first enrolled; a reset's, every node link it
+    /// does not keep. Alone, it cannot tell that a later reset keeps the
+    /// node: [`RevocationSet::revoking`] can.
     pub fn ends_at(&self, link: &SignedCapability, protected: bool) -> Result<bool, Error> {
         if protected && !self.root() && !self.identity_unlink() {
             return Ok(false);
@@ -359,18 +430,21 @@ impl SignedRevocation {
         let subject = &link.capability.subject;
         let extended = link.capability.extended()?;
         let capabilities = &self.statement.capabilities;
-        let recovery = self.statement.recovery.filter(|_| self.root());
+        let recovery = self.statement.grants().filter(|_| self.root());
+        let reset = self.statement.reset().filter(|_| self.root());
         Ok(self.statement.subjects().any(|key| key == subject)
             || (self.root()
                 && extended.origin.is_some_and(|origin| {
-                    self.statement.identities.contains(&origin.identity)
+                    (self.statement.mode == RevocationMode::Compromised
+                        && self.statement.identities.contains(&origin.identity))
                         || recovery.is_some_and(|r| r.ends(origin.since, &origin.identity))
                 }))
             || (extended.trusted.is_some()
                 && recovery.is_some_and(|r| r.ends(link.capability.not_before, subject)))
             || extended.node.is_some_and(|node| {
-                self.statement.nodes.contains(&node)
-                    && (!self.identity_unlink() || link.issuer == self.statement.issuer)
+                (self.statement.nodes.contains(&node)
+                    && (!self.identity_unlink() || link.issuer == self.statement.issuer))
+                    || reset.is_some_and(|reset| !reset.keep.contains(&node))
             })
             || capabilities.contains(&link.id()?)
             || extended
@@ -380,14 +454,18 @@ impl SignedRevocation {
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         encode(self)
     }
+    /// Decodes within the reset bound; verification applies the bound of
+    /// the statement's kind.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        decode_bounded(bytes, MAX_REVOCATION_BYTES)
+        decode_bounded(bytes, crate::MAX_RESET_BYTES)
     }
 }
 
 /// The statements a device verified. Merging is union; nothing is ever
 /// removed but statements past their expiry, which every holder drops by
 /// the same day-rounded cutoff. A digest identifies the live set.
+/// Conflicting modes remain in the union: Compromised dominates Lost,
+/// regardless of their timestamps or arrival order; revocation never weakens.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(into = "ReplicatedAuthority", try_from = "ReplicatedAuthority")]
 pub struct RevocationSet {
@@ -399,6 +477,8 @@ pub struct RevocationSet {
     capabilities: BTreeSet<Commitment>,
     /// What root statements name, which alone end protected links.
     root: Ended,
+    /// Origins ended by compromised root statements, independent of direct targets.
+    compromised: BTreeSet<PublicKey>,
     /// The heads root statements keep, by signing identity and lane.
     cuts: BTreeMap<(PublicKey, PublicKey), Heads>,
     /// The latest recovery: it ends every trusted grant an earlier one does.
@@ -411,6 +491,8 @@ pub struct RevocationSet {
 struct Derived {
     fork_ended: OnceLock<BTreeSet<(PublicKey, crate::PeerId)>>,
     fingerprint: OnceLock<Commitment>,
+    resets: OnceLock<crate::reset::Resets>,
+    unfenced: OnceLock<Box<RevocationSet>>,
 }
 impl PartialEq for Derived {
     fn eq(&self, _: &Self) -> bool {
@@ -447,7 +529,7 @@ struct ReplicatedAuthority {
 impl From<RevocationSet> for ReplicatedAuthority {
     fn from(set: RevocationSet) -> Self {
         Self {
-            format: 3,
+            format: 5,
             database: set.database.map(|database| *database),
             statements: set.statements.into_values().collect(),
             certificates: set.certificates.into_values().collect(),
@@ -457,7 +539,7 @@ impl From<RevocationSet> for ReplicatedAuthority {
 impl TryFrom<ReplicatedAuthority> for RevocationSet {
     type Error = Error;
     fn try_from(value: ReplicatedAuthority) -> Result<Self, Error> {
-        if value.format != 3 {
+        if value.format != 5 {
             return Err(denied("unsupported replicated authority format"));
         }
         let mut set = Self {
@@ -671,13 +753,17 @@ impl RevocationSet {
         self.capabilities
             .extend(signed.statement.capabilities.iter().copied());
         if signed.root() {
+            if signed.statement.mode == RevocationMode::Compromised {
+                self.compromised
+                    .extend(signed.statement.subjects().copied());
+            }
             let root = &mut self.root;
             root.subjects.extend(signed.statement.subjects().copied());
             root.references
                 .extend(signed.statement.nodes.iter().copied());
             root.capabilities
                 .extend(signed.statement.capabilities.iter().copied());
-            self.recovery = self.recovery.max(signed.statement.recovery);
+            self.recovery = self.recovery.max(signed.statement.grants());
         }
         let implicit = signed
             .chain
@@ -749,6 +835,17 @@ impl RevocationSet {
         self.check_size()
     }
     fn check_size(&self) -> Result<(), Error> {
+        let mut resets = 0;
+        for signed in self.statements.values() {
+            if signed.statement.reset().is_some() {
+                resets += encode(signed)?.len();
+            }
+        }
+        if resets > MAX_RESET_SET_BYTES {
+            return Err(denied(
+                "owner resets exceed their share of the revocation set",
+            ));
+        }
         if encode(self)?.len() > MAX_REVOCATION_SET_BYTES {
             return Err(denied("revocation set exceeds its size limit"));
         }
@@ -894,7 +991,7 @@ impl RevocationSet {
     }
     /// Whether some statement revokes `key` as a credential subject.
     pub fn revokes_reference(&self, node: &crate::PeerId) -> bool {
-        if self.references.contains(node) {
+        if self.references.contains(node) || self.reset_ends(node) {
             return true;
         }
         let mut known = self
@@ -916,19 +1013,22 @@ impl RevocationSet {
     pub fn revokes_capability(&self, id: &Commitment) -> bool {
         self.capabilities.contains(id)
     }
-    /// Whether a root statement revoked the trusted identity `origin`, and
-    /// with it every identity it first enrolled.
+    /// Whether a root statement explicitly revoked `identity`, in either mode.
+    pub fn revokes_trusted(&self, identity: &PublicKey) -> bool {
+        self.root.subjects.contains(identity)
+    }
+    /// Whether a compromised root statement ends what `origin` first enrolled.
     pub fn revokes_origin(&self, origin: &PublicKey) -> bool {
-        self.root.subjects.contains(origin)
+        self.compromised.contains(origin)
     }
     /// Whether a root statement ends what `origin` first enrolled: it
-    /// revoked the identity, or a recovery ended its grant.
+    /// marked the identity compromised, or a recovery ended its grant.
     pub fn ends_origin(&self, origin: &crate::Origin) -> bool {
         self.revokes_origin(&origin.identity) || self.recovery_ends(origin.since, &origin.identity)
     }
     /// Whether a root statement ends the trusted grant `grant`.
     pub fn ends_trusted(&self, grant: &crate::Capability) -> bool {
-        self.revokes_origin(&grant.subject) || self.recovery_ends(grant.not_before, &grant.subject)
+        self.revokes_trusted(&grant.subject) || self.recovery_ends(grant.not_before, &grant.subject)
     }
     /// Whether a recovery ends a trusted grant to `identity` valid from
     /// `since`.
@@ -947,7 +1047,7 @@ impl RevocationSet {
             .statements
             .values()
             .filter(|signed| signed.root())
-            .filter_map(|signed| signed.statement.recovery)
+            .filter_map(|signed| signed.statement.grants())
             .collect();
         recoveries.sort_unstable();
         recoveries.dedup();
@@ -978,7 +1078,8 @@ impl RevocationSet {
                 && self.recovery_ends(link.capability.not_before, &link.capability.subject))
             || extended
                 .origin
-                .is_some_and(|origin| self.ends_origin(&origin)))
+                .is_some_and(|origin| self.ends_origin(&origin))
+            || extended.node.is_some_and(|node| self.reset_ends(&node)))
     }
     /// Whether some statement ends the node certificate of `node`: names
     /// the node or its key. A `protected` one only a root statement ends.
@@ -1000,6 +1101,7 @@ impl RevocationSet {
         };
         subjects.contains(&node)
             || explicit.contains(&crate::PeerId::of(node))
+            || self.reset_ends(&crate::PeerId::of(node))
             || (known.peek().is_some()
                 && known.all(|certificate| self.ends_node_of(certificate.issuer, node, protected)))
     }
@@ -1012,6 +1114,7 @@ impl RevocationSet {
         };
         subjects.contains(&node)
             || references.contains(&crate::PeerId::of(node))
+            || self.reset_ends(&crate::PeerId::of(node))
             || self.identity_unlinks(identity, crate::PeerId::of(node))
             || self.fork_ends(identity, crate::PeerId::of(node))
     }
@@ -1052,14 +1155,82 @@ impl RevocationSet {
         chain: &CredentialChain,
         start: usize,
     ) -> Result<Option<&SignedRevocation>, Error> {
-        for signed in self.statements.values() {
+        for (id, signed) in &self.statements {
             for (index, link) in chain.0.iter().enumerate().skip(start) {
-                if signed.ends_at(link, chain.protected(index)?)? {
+                // A reset ends a node only while no later reset keeps it.
+                if signed.ends_at(link, chain.protected(index)?)?
+                    && (signed.statement.reset().is_none()
+                        || link.capability.extended()?.node.is_some_and(|node| {
+                            self.resets().ending(&node).any(|(ending, _)| ending == id)
+                        }))
+                {
                     return Ok(Some(signed));
                 }
             }
         }
         Ok(None)
+    }
+    fn resets(&self) -> &crate::reset::Resets {
+        self.derived.resets.get_or_init(|| {
+            crate::reset::Resets::new(
+                self.statements
+                    .iter()
+                    .filter(|(_, signed)| signed.root())
+                    .filter_map(|(id, signed)| Some((*id, signed.statement.reset()?.clone())))
+                    .collect(),
+            )
+        })
+    }
+    /// Whether a held owner reset ends `node`: one does not keep it and no
+    /// reset that follows that one does.
+    pub fn reset_ends(&self, node: &crate::PeerId) -> bool {
+        !self.resets().is_empty() && self.resets().ends(node)
+    }
+    /// The held resets that end `node`, by statement ID.
+    pub fn ending_resets(&self, node: &crate::PeerId) -> Vec<Commitment> {
+        self.resets().ending(node).map(|(id, _)| *id).collect()
+    }
+    /// How the held resets judge the operation at `position` of `writer`'s
+    /// log in `scope`. Every replica holding the same statements decides
+    /// alike: a writer some reset ends keeps only what every such reset's
+    /// fence keeps.
+    pub fn reset_standing(
+        &self,
+        scope: &rocky_core::ResourceScope,
+        writer: &PublicKey,
+        position: u64,
+    ) -> crate::ResetStanding {
+        self.resets().standing(scope, writer, position)
+    }
+    /// The held resets no held reset follows; a new reset follows them.
+    pub fn reset_heads(&self) -> BTreeSet<Commitment> {
+        self.resets().heads()
+    }
+    /// The nodes resets keep that no held reset ends.
+    pub fn reset_kept(&self) -> BTreeSet<crate::PeerId> {
+        self.resets().kept()
+    }
+    /// This set without its resets: the authority a fence-covered operation
+    /// of an ended writer is judged by. Every other statement still applies,
+    /// so a Lost or Compromised revocation refuses what a fence keeps.
+    pub fn unfenced(&self) -> &RevocationSet {
+        if self.resets().is_empty() {
+            return self;
+        }
+        self.derived.unfenced.get_or_init(|| {
+            let mut set = Self {
+                database: self.database.clone(),
+                certificates: self.certificates.clone(),
+                ..Self::default()
+            };
+            for signed in self.statements.values() {
+                if signed.statement.reset().is_none() {
+                    // Every held statement was inserted once already.
+                    let _ = set.insert(signed.clone());
+                }
+            }
+            Box::new(set)
+        })
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         encode(self)

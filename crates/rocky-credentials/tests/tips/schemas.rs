@@ -445,7 +445,7 @@ fn migration_descriptors_require_the_exact_opener_and_certified_initial_writer()
     .unwrap();
     let tip = opening.tip().unwrap();
     g.openings.push(opening.clone());
-    let writer = device_chain(chain.0[0].clone(), &identity, node.public_key(), 5).unwrap();
+    let writer = device_chain(chain.0[0].clone(), &identity, node.public_key()).unwrap();
     let mut statement = MigrationPublicationStatement {
         format: 1,
         scope: g.scope,

@@ -3,7 +3,7 @@ use super::*;
 use crate::KeptSeals;
 
 /// `replica`'s only identity author in `scope` and its live mark.
-async fn own_mark(replica: &Replica, scope: ResourceScope) -> (u32, u32) {
+async fn own_mark(replica: &Replica, scope: ResourceScope) -> (crate::writer::WriterId, u64) {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let records = crate::storage::collect_rows(
         inner
@@ -20,24 +20,24 @@ async fn own_mark(replica: &Replica, scope: ResourceScope) -> (u32, u32) {
     let [record] = records.as_slice() else {
         panic!("one identity author: {records:?}");
     };
-    let [SqlValue::Integer(author), SqlValue::Integer(sequence)] = record.as_slice() else {
+    let [SqlValue::Blob(author), SqlValue::Integer(sequence)] = record.as_slice() else {
         panic!("{record:?}");
     };
     (
-        u32::try_from(*author).unwrap(),
-        u32::try_from(*sequence).unwrap(),
+        crate::writer::stored_writer(author).unwrap(),
+        u64::try_from(*sequence).unwrap(),
     )
 }
 /// Corrupts the attacker's local allocation evidence so it can sign a reuse.
 /// Receivers keep their complete journal and all original refusal assertions.
-async fn rewind_mark(replica: &Replica, scope: ResourceScope, sequence: u32) {
+async fn rewind_mark(replica: &Replica, scope: ResourceScope, sequence: u64) {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     inner
         .conn
         .execute(
             "UPDATE secure_identity_marks SET sequence=? WHERE scope=?",
             crate::storage::bindings(vec![
-                SqlValue::Integer(sequence.into()),
+                SqlValue::Integer(sequence as i64),
                 SqlValue::Blob(encode(&scope).unwrap()),
             ]),
         )
@@ -48,7 +48,7 @@ async fn rewind_mark(replica: &Replica, scope: ResourceScope, sequence: u32) {
         .execute(
             "UPDATE secure_identity_own SET sequence=? WHERE scope=?",
             crate::storage::bindings(vec![
-                SqlValue::Integer(sequence.into()),
+                SqlValue::Integer(sequence as i64),
                 SqlValue::Blob(encode(&scope).unwrap()),
             ]),
         )
@@ -143,7 +143,7 @@ async fn import_all(
         import_checkpoint_report(lineage, server, target, key, lineage.scope("items")).await;
     (offered, report)
 }
-fn marks(signed: &crate::SignedCheckpoint) -> Vec<(u32, u32)> {
+fn marks(signed: &crate::SignedCheckpoint) -> Vec<(crate::writer::WriterId, u64)> {
     signed
         .statement
         .identities
@@ -312,18 +312,21 @@ async fn identified(replica: &Replica) -> Vec<Vec<SqlValue>> {
 }
 /// Commits `statements` in one transaction of `replica`; an insert takes
 /// `id` when given, else the next identity.
-async fn transaction(replica: &Replica, statements: &[(&str, Option<i64>)]) -> Result<(), Error> {
+async fn transaction(
+    replica: &Replica,
+    statements: &[(&str, Option<rocky_core::RowIdentity>)],
+) -> Result<(), Error> {
     let sql = session(replica).await;
     sql.run("BEGIN", vec![]).await?;
     for (statement, id) in statements {
         match id {
             Some(id) => {
-                sql.run(&statement.replace("?id", &id.to_string()), vec![])
+                sql.run(&statement.replace("?id", &format!("X'{id}'")), vec![])
                     .await?;
             }
             None if statement.contains("?id") => {
-                let id = sql.next_id("items").await?.integer();
-                sql.run(&statement.replace("?id", &id.to_string()), vec![])
+                let id = sql.next_id("items").await?;
+                sql.run(&statement.replace("?id", &format!("X'{id}'")), vec![])
                     .await?;
             }
             None => {
@@ -348,8 +351,8 @@ async fn births_of_one_frame_compare_with_the_marks_it_entered_with() {
     let (higher, lower) = {
         let sql = session(&a).await;
         sql.run("BEGIN", vec![]).await.unwrap();
-        let lower = sql.next_id("items").await.unwrap().integer();
-        let higher = sql.next_id("items").await.unwrap().integer();
+        let lower = sql.next_id("items").await.unwrap();
+        let higher = sql.next_id("items").await.unwrap();
         sql.run("ROLLBACK", vec![]).await.unwrap();
         (higher, lower)
     };

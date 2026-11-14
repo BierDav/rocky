@@ -45,11 +45,11 @@ impl<A: RowApplication> Inner<A> {
         ).await?).await?;
         for record in records {
             let [
-                SqlValue::Integer(author),
+                SqlValue::Blob(author),
                 SqlValue::Blob(signer),
                 SqlValue::Integer(sequence),
                 SqlValue::Blob(tip),
-                SqlValue::Integer(frame_author),
+                SqlValue::Blob(frame_author),
                 SqlValue::Integer(frame_sequence),
             ] = record.as_slice()
             else {
@@ -66,8 +66,7 @@ impl<A: RowApplication> Inner<A> {
                     }
                 };
                 if !path.admits(
-                    u32::try_from(*frame_author)
-                        .map_err(|_| Error::Corrupt("birth position frame author".into()))?,
+                    stored_writer(frame_author)?,
                     u64::try_from(*frame_sequence)
                         .map_err(|_| Error::Corrupt("birth position frame sequence".into()))?,
                 )? {
@@ -83,29 +82,28 @@ impl<A: RowApplication> Inner<A> {
                 }
             };
             ledger.merge(checkpoint::IdentityMark {
-                author: u32::try_from(*author)
-                    .map_err(|_| Error::Corrupt("birth position author".into()))?,
+                author: stored_writer(author)?,
                 signer,
-                sequence: u32::try_from(*sequence)
+                sequence: u64::try_from(*sequence)
                     .map_err(|_| Error::Corrupt("birth position sequence".into()))?,
             })?;
         }
         for record in collect_rows(self.conn.query(
             "SELECT b.author,b.signer,b.sequence,o.header,o.body FROM secure_birth_positions b JOIN secure_applied a ON a.position=b.position JOIN secure_operations o ON o.hash=a.hash WHERE b.scope=? AND b.position>? AND b.position<=? AND o.status='held'", [id,after,through],
         ).await?).await? {
-            let [SqlValue::Integer(author), SqlValue::Blob(signer), SqlValue::Integer(sequence), SqlValue::Blob(header), SqlValue::Blob(body)] = record.as_slice() else { return Err(Error::Corrupt("held birth position".into())) };
+            let [SqlValue::Blob(author), SqlValue::Blob(signer), SqlValue::Integer(sequence), SqlValue::Blob(header), SqlValue::Blob(body)] = record.as_slice() else { return Err(Error::Corrupt("held birth position".into())) };
             let frame = self.chained_frame(header.clone(), body.clone()).await?;
             let operation = frame.operation_ref()?;
             let e = &operation.header.extensions;
             let visible = match self.graphs.get(&scope.domain) {
-                Some(graph) => self.visible_frame(graph, e.tip, e.author.ok_or_else(|| Error::Corrupt("held frame author".into()))?, e.author_sequence, target)?,
+                Some(graph) => self.visible_frame(graph, e.tip, e.author(&operation.header.public_key).ok_or_else(|| Error::Corrupt("held frame author".into()))?, e.author_sequence, target)?,
                 None => true,
             };
             if !self.replay_eligible("held", operation, false)? || !visible { continue; }
             ledger.merge(checkpoint::IdentityMark {
-                author: u32::try_from(*author).map_err(|_| Error::Corrupt("birth position author".into()))?,
+                author: stored_writer(author)?,
                 signer: checkpoint::key_of(signer)?,
-                sequence: u32::try_from(*sequence).map_err(|_| Error::Corrupt("birth position sequence".into()))?,
+                sequence: u64::try_from(*sequence).map_err(|_| Error::Corrupt("birth position sequence".into()))?,
             })?;
         }
         self.tip_frontiers
@@ -160,9 +158,7 @@ impl<A: RowApplication> Inner<A> {
                 .row_identity(&write.change)
                 .map_err(|message| denied(&message))?;
             rows.insert(match identity {
-                Some(id) => {
-                    rocky_core::commitment("rocky.row-incarnation.v2", &id.integer().to_le_bytes())
-                }
+                Some(id) => identity::incarnation(id),
                 None => write.change.row,
             });
             if write.change.before.is_none()
@@ -170,7 +166,7 @@ impl<A: RowApplication> Inner<A> {
                 && let Some(identity) = identity
             {
                 births.push(checkpoint::IdentityMark {
-                    author: identity.author(),
+                    author: identity.writer(),
                     signer: frame.operation_ref()?.header.public_key,
                     sequence: identity.sequence(),
                 });
@@ -190,7 +186,7 @@ impl<A: RowApplication> Inner<A> {
         let operation = frame.operation_ref()?;
         let (positions, births) = self.frame_positions(frame, payload)?;
         for birth in births {
-            self.conn.execute("INSERT INTO secure_birth_positions SELECT ?,position,?,?,? FROM secure_applied WHERE hash=? ON CONFLICT(scope,position,author) DO UPDATE SET sequence=MAX(sequence,excluded.sequence)", bindings(vec![SqlValue::Integer(id), SqlValue::Integer(i64::from(birth.author)), SqlValue::Blob(birth.signer.as_bytes().to_vec()), SqlValue::Integer(i64::from(birth.sequence)), SqlValue::Blob(operation.hash.as_bytes().to_vec())])).await?;
+            self.conn.execute("INSERT INTO secure_birth_positions SELECT ?,position,?,?,? FROM secure_applied WHERE hash=? ON CONFLICT(scope,position,author) DO UPDATE SET sequence=MAX(sequence,excluded.sequence)", bindings(vec![SqlValue::Integer(id), writer_value(birth.author), SqlValue::Blob(birth.signer.as_bytes().to_vec()), SqlValue::Integer(birth.sequence as i64), SqlValue::Blob(operation.hash.as_bytes().to_vec())])).await?;
         }
 
         for row in positions {

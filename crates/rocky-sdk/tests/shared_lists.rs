@@ -6,17 +6,18 @@
 use rocky_sdk::{Database, Network, Open, Session, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
+use support::snapshot as snap;
 mod support;
 use support::secrets;
 
 const SCHEMA: &str = r#"{"format":6,"application":"lists","version":1,"tables":[
  {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
- {"name":"categories","class":"replayed","columns":[{"name":"list","type":"integer","not_null":true},{"name":"name","type":"text","not_null":true}],
+ {"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"name","type":"text","not_null":true}],
   "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
   "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"}]},
  {"name":"items","class":"replayed","columns":[
-   {"name":"list","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true},{"name":"category","type":"integer"}],
+   {"name":"list","type":"blob","not_null":true},{"name":"title","type":"text","not_null":true},{"name":"category","type":"blob"}],
   "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
   "indexes":[{"name":"index_items_list_title","unique":true,"columns":[{"name":"list","descending":false},{"name":"title","descending":false}]}],
   "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"},
@@ -28,18 +29,18 @@ const TABLES: [&str; 3] = ["lists", "categories", "items"];
 const ORDERED: &str = r#"{"format":6,"application":"lists","version":2,"tables":[
  {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
- {"name":"categories","class":"replayed","columns":[{"name":"list","type":"integer","not_null":true},{"name":"name","type":"text","not_null":true}],
+ {"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"name","type":"text","not_null":true}],
   "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
   "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"}]},
  {"name":"items","class":"replayed","columns":[
-   {"name":"list","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true},{"name":"category","type":"integer"},
+   {"name":"list","type":"blob","not_null":true},{"name":"title","type":"text","not_null":true},{"name":"category","type":"blob"},
    {"name":"position","type":"text","not_null":true,"default":""}],
   "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
   "indexes":[{"name":"index_items_list_title","unique":true,"columns":[{"name":"list","descending":false},{"name":"title","descending":false}]}],
   "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"},
    {"columns":["list","category"],"table":"categories","on_delete":"set_null"}]},
  {"name":"item_categories","granted_like":"items","class":"replayed","columns":[
-   {"name":"list","type":"integer","not_null":true},{"name":"item","type":"integer","not_null":true},{"name":"category","type":"integer","not_null":true}],
+   {"name":"list","type":"blob","not_null":true},{"name":"item","type":"blob","not_null":true},{"name":"category","type":"blob","not_null":true}],
   "primary_key":["list","item","category"],"partition_by":["list"],"partition_group":"list",
   "foreign_keys":[{"columns":["list","item"],"table":"items","on_delete":"cascade"},
    {"columns":["list","category"],"table":"categories","on_delete":"cascade"}]}
@@ -62,14 +63,12 @@ struct Peer {
     identity: Option<Arc<dyn rocky_sdk::IdentityProvider>>,
     database: Arc<Database>,
     session: Session,
-    scope: Value,
 }
 impl Peer {
     fn new(database: Arc<Database>) -> Result<Self, Failure> {
         Ok(Self {
             identity: None,
             session: database.session(),
-            scope: serde_json::from_str(&database.scope())?,
             database,
         })
     }
@@ -77,51 +76,58 @@ impl Peer {
         self.identity = Some(identity(directory));
         self
     }
-    async fn call(&self, request: Value) -> Result<Value, Failure> {
-        let request_text = json!({"version":1,"scope":self.scope,"request":request}).to_string();
-        let reply = match &self.identity {
+
+    async fn sync_once(&self) -> Result<rocky_sdk::ReconciliationReport, Failure> {
+        match &self.identity {
+            Some(identity) => self.session.sync_once_with_identity(identity.clone()).await,
+            None => self.session.sync_once().await,
+        }
+    }
+    async fn follow(&self, name: &str) -> Result<rocky_sdk::TipStatus, Failure> {
+        match &self.identity {
             Some(identity) => {
                 self.session
-                    .call_with_identity(request_text, identity.clone())
-                    .await?
+                    .follow_with_identity(name, identity.clone())
+                    .await
             }
-            None => self.session.call(request_text).await?,
-        };
-        let reply: Value = serde_json::from_str(&reply)?;
-        if reply["status"] == "ok" {
-            Ok(reply["value"].clone())
-        } else {
-            Err(format!("{request}: {}", reply["error"]).into())
+            None => self.session.follow(name).await,
         }
     }
-
     /// Inserts one row in one transaction; `id` reserves the next own id.
     async fn insert(&self, table: &str, list: Option<&str>, sql: &str) -> Result<String, Failure> {
-        self.call(json!({"type":"sql","sql":"BEGIN"})).await?;
-        let mut next = json!({"type":"next_id","table":table});
-        if let Some(list) = list {
-            next["partition_values"] = values(list);
+        snap::value(self.session.execute("BEGIN", Vec::new())).await?;
+        let id = match list {
+            Some(list) => self.session.next_partition_id(table, values(list)).await?,
+            None => self.session.next_id(table).await?,
         }
-        let id = self.call(next).await?["id"].clone();
-        self.call(json!({"type":"sql","sql":sql,"values":[{"type":"integer","value":id}]}))
-            .await?;
-        self.call(json!({"type":"sql","sql":"COMMIT"})).await?;
-        Ok(id.as_str().ok_or("id")?.to_owned())
+        .to_string();
+        snap::value(
+            self.session
+                .execute(&(snap::text(&(sql))), vec![snap::row_id(&(id))]),
+        )
+        .await?;
+        snap::value(self.session.execute("COMMIT", Vec::new())).await?;
+        Ok(id)
     }
     async fn column(&self, sql: &str) -> Result<Vec<Value>, Failure> {
-        let page = self
-            .call(json!({"type":"read","query":{"sql":sql,"values":[],"max_rows":64}}))
-            .await?;
+        let page = snap::value(self.session.read(rocky_sdk::ReadQuery {
+            sql: snap::text(&(sql)),
+            values: vec![],
+            max_rows: 64,
+            max_bytes: None,
+            cursor: None,
+        }))
+        .await?;
         Ok(page["rows"]
             .as_array()
             .ok_or("rows")?
             .iter()
-            .map(|row| row[0]["value"].clone())
+            .map(|row| snap::cell_value(&row[0]))
             .collect())
     }
 }
-fn values(list: &str) -> Value {
-    json!([{"type":"integer","value":list}])
+fn values(list: &str) -> Vec<rocky_sdk::SqlValue> {
+    vec![snap::row_id(&(list))]
 }
 fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     at(directory, hub, name, SCHEMA)
@@ -146,14 +152,9 @@ async fn checkpoint_writer(
     let mut options = open(&issuer_path, hub, "issuer");
     options.schema = schema;
     let issuer = Peer::new(Database::create(options, None)?.database)?;
-    for action in ["create", "follow"] {
-        issuer
-            .call(json!({"type":"tips","action":action,"name":"main"}))
-            .await?;
-    }
-    issuer
-        .call(json!({"type":"partition_next","table":"lists"}))
-        .await?;
+    issuer.session.create_bookmark("main", None).await?;
+    issuer.follow("main").await?;
+    snap::value(issuer.session.next_partition("lists")).await?;
     let base = issuer
         .insert(
             "lists",
@@ -161,30 +162,36 @@ async fn checkpoint_writer(
             "INSERT INTO lists(id,title) VALUES(?,'Base list')",
         )
         .await?;
-    issuer.call(json!({"type":"tips","action":"seal"})).await?;
-    issuer
-        .call(json!({"type":"tips","action":"compact"}))
-        .await?;
-    let invite = issuer
-        .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":TABLES}}))
-        .await?;
+    snap::value(issuer.session.seal(false)).await?;
+    snap::value(issuer.session.compact(0)).await?;
+    let invite = snap::value(
+        issuer.session.invite(
+            Some(rocky_sdk::GrantProfile::Writer {
+                scopes: (TABLES)
+                    .into_iter()
+                    .map(|scope| scope.to_string())
+                    .collect(),
+            }),
+            None,
+        ),
+    )
+    .await?;
     let writer_path = root.join("writer");
     let mut options = open(&writer_path, hub, "writer");
     options.schema = schema;
     let writer =
         Peer::new(Database::join(options, invite["uri"].as_str().ok_or("uri")?)?.database)?;
-    let writer_node = writer.call(json!({"type":"session"})).await?["node"].clone();
-    issuer.call(json!({"type":"partition_share","group":"list","values":values(&base),"recipients":[writer_node]})).await?;
-    writer.call(json!({"type":"sync"})).await?;
+    let writer_node = snap::value(writer.session.info()).await?["node"].clone();
+    snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&base)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([writer_node])).expect("typed fixture"), None)).await?;
+    snap::value(writer.sync_once()).await?;
     assert_eq!(
         writer.column("SELECT title FROM lists").await?,
         [json!("Base list")]
     );
-    writer
-        .call(json!({"type":"sql","sql":"BEGIN"}))
+    snap::value(writer.session.execute("BEGIN", Vec::new()))
         .await
         .map_err(|error| format!("before preparing a new partition: {error}"))?;
-    writer.call(json!({"type":"sql","sql":"ROLLBACK"})).await?;
+    snap::value(writer.session.execute("ROLLBACK", Vec::new())).await?;
     Ok((issuer, writer))
 }
 
@@ -199,14 +206,9 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
         )?
         .database,
     )?;
-    for action in ["create", "follow"] {
-        issuer
-            .call(json!({"type":"tips","action":action,"name":"main"}))
-            .await?;
-    }
-    issuer
-        .call(json!({"type":"partition_next","table":"lists"}))
-        .await?;
+    issuer.session.create_bookmark("main", None).await?;
+    issuer.follow("main").await?;
+    snap::value(issuer.session.next_partition("lists")).await?;
     let base = issuer
         .insert(
             "lists",
@@ -214,9 +216,18 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
             "INSERT INTO lists(id,title) VALUES(?,'Base list')",
         )
         .await?;
-    let invite = issuer
-        .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":TABLES}}))
-        .await?;
+    let invite = snap::value(
+        issuer.session.invite(
+            Some(rocky_sdk::GrantProfile::Writer {
+                scopes: (TABLES)
+                    .into_iter()
+                    .map(|scope| scope.to_string())
+                    .collect(),
+            }),
+            None,
+        ),
+    )
+    .await?;
     let writer = Peer::new(
         Database::join(
             at(&root.path().join("writer"), &hub, "writer", ORDERED),
@@ -224,19 +235,15 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
         )?
         .database,
     )?;
-    let node = writer.call(json!({"type":"session"})).await?["node"].clone();
-    issuer.call(json!({"type":"partition_share","group":"list","values":values(&base),"recipients":[node]})).await?;
-    writer.call(json!({"type":"sync"})).await?;
-    let prepared = writer
-        .call(json!({"type":"partition_next","table":"lists"}))
-        .await?;
-    issuer.call(json!({"type":"tips","action":"seal"})).await?;
-    issuer
-        .call(json!({"type":"tips","action":"compact"}))
-        .await?;
-    writer.call(json!({"type":"sync"})).await?;
+    let node = snap::value(writer.session.info()).await?["node"].clone();
+    snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&base)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None)).await?;
+    snap::value(writer.sync_once()).await?;
+    let prepared = snap::value(writer.session.next_partition("lists")).await?;
+    snap::value(issuer.session.seal(false)).await?;
+    snap::value(issuer.session.compact(0)).await?;
+    snap::value(writer.sync_once()).await?;
     // The unused partition is not unverified history.
-    let status = writer.call(json!({"type":"status"})).await?;
+    let status = snap::value(writer.session.status()).await?;
     assert!(
         status["data"]["blockers"]
             .as_array()
@@ -245,9 +252,7 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
             .all(|blocker| blocker["kind"]["type"] != "seal_rebootstrap"),
         "{status}"
     );
-    let again = writer
-        .call(json!({"type":"partition_next","table":"lists"}))
-        .await?;
+    let again = snap::value(writer.session.next_partition("lists")).await?;
     assert_eq!(again["id"], prepared["id"]);
     let list = writer
         .insert(
@@ -270,9 +275,7 @@ async fn preparing_an_own_id_does_not_claim_an_unrelated_group_members_state() -
     let mut schema: Value = serde_json::from_str(SCHEMA)?;
     schema["tables"][2]["foreign_keys"] = json!([]);
     let (issuer, writer) = checkpoint_writer(root.path(), &hub, &schema.to_string()).await?;
-    writer
-        .call(json!({"type":"partition_next","table":"lists"}))
-        .await?;
+    snap::value(writer.session.next_partition("lists")).await?;
     // The prepared list's own scope writes.
     let list = writer
         .insert(
@@ -283,7 +286,7 @@ async fn preparing_an_own_id_does_not_claim_an_unrelated_group_members_state() -
         .await?;
     // The unrelated member still needs a verified state: status names it,
     // with what clears it, and a write there is refused with it.
-    let status = writer.call(json!({"type":"status"})).await?;
+    let status = snap::value(writer.session.status()).await?;
     let rebootstraps: Vec<&Value> = status["data"]["blockers"]
         .as_array()
         .ok_or("blockers")?
@@ -295,7 +298,7 @@ async fn preparing_an_own_id_does_not_claim_an_unrelated_group_members_state() -
         .insert(
             "items",
             Some(&list),
-            &format!("INSERT INTO items(list,id,title) VALUES({list},?,'Refused')"),
+            &format!("INSERT INTO items(list,id,title) VALUES(X'{list}',?,'Refused')"),
         )
         .await
         .expect_err("the unrelated member still needs a verified state");
@@ -321,14 +324,18 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
     let hub = Arc::new(Hub::default());
     let (issuer, writer) = checkpoint_writer(root.path(), &hub, ORDERED).await?;
     assert!(
-        writer
-            .call(json!({"type":"partition_create","group":"list","values":values("123")}))
-            .await
-            .is_err()
+        snap::value(
+            writer
+                .session
+                .create_partition(rocky_sdk::PartitionTarget::Group {
+                    group: "list".to_owned(),
+                    values: values(&format!("{}{:016x}", "ab".repeat(32), 123))
+                })
+        )
+        .await
+        .is_err()
     );
-    let prepared = writer
-        .call(json!({"type":"partition_next","table":"lists"}))
-        .await?;
+    let prepared = snap::value(writer.session.next_partition("lists")).await?;
     // Preparation survives a restart before the first row commits.
     let Peer {
         database, session, ..
@@ -345,19 +352,28 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
         )
         .await?;
     assert_eq!(prepared["id"], list.as_str());
-    let issuer_node = issuer.call(json!({"type":"session"})).await?["node"].clone();
-    writer.call(json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[issuer_node]})).await?;
-    writer.call(json!({"type":"sync"})).await?;
-    issuer.call(json!({"type":"sync"})).await?;
+    let issuer_node = snap::value(issuer.session.info()).await?["node"].clone();
+    snap::value(writer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([issuer_node])).expect("typed fixture"), None)).await?;
+    snap::value(writer.sync_once()).await?;
+    snap::value(issuer.sync_once()).await?;
     assert_eq!(
         issuer
             .column("SELECT title FROM lists ORDER BY title")
             .await?,
         [json!("Base list"), json!("Member list")]
     );
-    let read_invite = issuer
-        .call(json!({"type": "invitation","profile":{"kind":"reader","scopes":TABLES}}))
-        .await?;
+    let read_invite = snap::value(
+        issuer.session.invite(
+            Some(rocky_sdk::GrantProfile::Reader {
+                scopes: (TABLES)
+                    .into_iter()
+                    .map(|scope| scope.to_string())
+                    .collect(),
+            }),
+            None,
+        ),
+    )
+    .await?;
     let reader = Peer::new(
         Database::join(
             open(&root.path().join("reader"), &hub, "reader"),
@@ -366,8 +382,7 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
         .database,
     )?;
     assert!(
-        reader
-            .call(json!({"type":"partition_next","table":"lists"}))
+        snap::value(reader.session.next_partition("lists"))
             .await
             .is_err()
     );
@@ -383,9 +398,18 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
     let hub = Arc::new(Hub::default());
     let issuer =
         Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
-    let invitation = issuer
-        .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":TABLES}}))
-        .await?["uri"]
+    let invitation = snap::value(
+        issuer.session.invite(
+            Some(rocky_sdk::GrantProfile::Writer {
+                scopes: (TABLES)
+                    .into_iter()
+                    .map(|scope| scope.to_string())
+                    .collect(),
+            }),
+            None,
+        ),
+    )
+    .await?["uri"]
         .as_str()
         .ok_or("uri")?
         .to_owned();
@@ -394,13 +418,10 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
     // Only the explicit syncs below exchange: a failed background attempt
     // would put the peer in backoff, which an explicit sync skips.
     for peer in [&issuer, &writer] {
-        peer.call(json!({"type":"sync_start","enabled":false}))
-            .await?;
+        snap::value(peer.session.set_automatic_sync(false)).await?;
     }
 
-    let prepared = issuer
-        .call(json!({"type":"partition_next","table":"lists"}))
-        .await?;
+    let prepared = snap::value(issuer.session.next_partition("lists")).await?;
     let list = issuer
         .insert(
             "lists",
@@ -413,7 +434,7 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
         .insert(
             "categories",
             Some(&list),
-            &format!("INSERT INTO categories(id,list,name) VALUES(?,{list},'Dairy')"),
+            &format!("INSERT INTO categories(id,list,name) VALUES(?,X'{list}','Dairy')"),
         )
         .await?;
     issuer
@@ -421,41 +442,46 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
             "items",
             Some(&list),
             &format!(
-                "INSERT INTO items(id,list,title,category) VALUES(?,{list},'Milk',{category})"
+                "INSERT INTO items(id,list,title,category) VALUES(?,X'{list}','Milk',X'{category}')"
             ),
         )
         .await?;
 
-    let node = writer.call(json!({"type":"session"})).await?["node"].clone();
-    issuer
-        .call(json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[node]}))
+    let node = snap::value(writer.session.info()).await?["node"].clone();
+    snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
         .await?;
     // One sync delivers the envelope; the join's own bootstrap finishes
     // although partitioned tables offer no checkpoint of their own scope,
     // and the list starts from one.
-    writer.call(json!({"type":"sync"})).await?;
+    snap::value(writer.sync_once()).await?;
     assert_eq!(
         writer
-            .column(&format!("SELECT title FROM lists WHERE id = {list}"))
+            .column(&format!("SELECT title FROM lists WHERE id = X'{list}'"))
             .await?,
         [json!("Groceries")]
     );
     assert_eq!(
         writer
-            .column(&format!("SELECT category FROM items WHERE list = {list}"))
+            .column(&format!(
+                "SELECT category FROM items WHERE list = X'{list}'"
+            ))
             .await?,
         [json!(category)]
     );
 
     // The writer deletes the category; the issuer's item keeps its list.
-    writer
-        .call(json!({"type":"sql","sql":format!("DELETE FROM categories WHERE list = {list} AND id = {category}")}))
-        .await?;
-    writer.call(json!({"type":"sync"})).await?;
+    snap::value(writer.session.execute(
+        &(snap::text(
+            &(format!("DELETE FROM categories WHERE list = X'{list}' AND id = X'{category}'")),
+        )),
+        Vec::new(),
+    ))
+    .await?;
+    snap::value(writer.sync_once()).await?;
     for peer in [&writer, &issuer] {
         assert_eq!(
             peer.column(&format!(
-                "SELECT category IS NULL FROM items WHERE list = {list}"
+                "SELECT category IS NULL FROM items WHERE list = X'{list}'"
             ))
             .await?,
             [json!("1")]
@@ -469,7 +495,7 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
 
 /// The scopes of the latest `scopes_refused` event, if any.
 async fn refused(peer: &Peer) -> Result<Option<Vec<Value>>, Failure> {
-    let activity = peer.call(json!({"type":"activity"})).await?;
+    let activity = snap::value(peer.session.activity(0)).await?;
     Ok(activity["events"]
         .as_array()
         .into_iter()
@@ -495,23 +521,27 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
     let hub = Arc::new(Hub::default());
     let issuer =
         Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
-    for action in ["create", "follow"] {
-        issuer
-            .call(json!({"type":"tips","action":action,"name":"main"}))
-            .await?;
-    }
-    let invitation = issuer
-        .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":TABLES}}))
-        .await?["uri"]
+    issuer.session.create_bookmark("main", None).await?;
+    issuer.follow("main").await?;
+    let invitation = snap::value(
+        issuer.session.invite(
+            Some(rocky_sdk::GrantProfile::Writer {
+                scopes: (TABLES)
+                    .into_iter()
+                    .map(|scope| scope.to_string())
+                    .collect(),
+            }),
+            None,
+        ),
+    )
+    .await?["uri"]
         .as_str()
         .ok_or("uri")?
         .to_owned();
     let writer =
         Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
-    writer.call(json!({"type":"sync"})).await?;
-    issuer
-        .call(json!({"type":"partition_next","table":"lists"}))
-        .await?;
+    snap::value(writer.sync_once()).await?;
+    snap::value(issuer.session.next_partition("lists")).await?;
     let list = issuer
         .insert(
             "lists",
@@ -519,33 +549,30 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
             "INSERT INTO lists(id,title) VALUES(?,'Groceries')",
         )
         .await?;
-    let node = writer.call(json!({"type":"session"})).await?["node"].clone();
+    let node = snap::value(writer.session.info()).await?["node"].clone();
     // The list's base sits at a seal; the writer imports it.
-    issuer.call(json!({"type":"tips","action":"seal"})).await?;
-    issuer
-        .call(json!({"type":"tips","action":"compact"}))
+    snap::value(issuer.session.seal(false)).await?;
+    snap::value(issuer.session.compact(0)).await?;
+    snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
         .await?;
-    issuer
-        .call(json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[node]}))
-        .await?;
-    writer.call(json!({"type":"sync"})).await?;
-    // Its numbered node credential lets the writer insert into the shared list.
+    snap::value(writer.sync_once()).await?;
+    // Its node credential lets the writer insert into the shared list.
     writer
         .insert(
             "items",
             Some(&list),
-            &format!("INSERT INTO items(id,list,title) VALUES(?,{list},'Milk')"),
+            &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Milk')"),
         )
         .await?;
-    writer.call(json!({"type":"sync"})).await?;
+    snap::value(writer.sync_once()).await?;
     assert_eq!(
         issuer
-            .column(&format!("SELECT title FROM items WHERE list = {list}"))
+            .column(&format!("SELECT title FROM items WHERE list = X'{list}'"))
             .await?,
         [json!("Milk")]
     );
 
-    let served = kinds(&issuer.call(json!({"type":"activity"})).await?);
+    let served = kinds(&snap::value(issuer.session.activity(0)).await?);
     for kind in [
         "invitation_created",
         "identity_admitted",
@@ -558,7 +585,7 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
             "issuer lacks {kind}: {served:?}"
         );
     }
-    let activity = writer.call(json!({"type":"activity"})).await?;
+    let activity = snap::value(writer.session.activity(0)).await?;
     let seen = kinds(&activity);
     for kind in [
         "peer_reconciliation_completed",
@@ -590,10 +617,10 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
     );
     // A caught-up observer waits for the next event.
     let token = activity["token"].clone();
-    let waiting = writer.call(json!({"type":"activity_next","after":token}));
+    let waiting = snap::value(writer.session.next_activity(snap::integer(&(token)) as u64));
     let (next, _) = tokio::join!(
         waiting,
-        writer.call(json!({"type":"networking_control","enabled":false}))
+        snap::value(writer.session.set_networking_enabled(false))
     );
     assert_eq!(kinds(&next?), ["networking_disabled"]);
     for peer in [writer, issuer] {
@@ -612,27 +639,33 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
     let hub = Arc::new(Hub::default());
     let issuer =
         Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
-    for action in ["create", "follow"] {
-        issuer
-            .call(json!({"type":"tips","action":action,"name":"main"}))
-            .await?;
-    }
-    let invitation = issuer
-        .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":TABLES}}))
-        .await?["uri"]
+    issuer.session.create_bookmark("main", None).await?;
+    issuer.follow("main").await?;
+    let invitation = snap::value(
+        issuer.session.invite(
+            Some(rocky_sdk::GrantProfile::Writer {
+                scopes: (TABLES)
+                    .into_iter()
+                    .map(|scope| scope.to_string())
+                    .collect(),
+            }),
+            None,
+        ),
+    )
+    .await?["uri"]
         .as_str()
         .ok_or("uri")?
         .to_owned();
     let writer =
         Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
-    writer.call(json!({"type":"sync"})).await?;
+    snap::value(writer.sync_once()).await?;
     let policy = json!({"required":[],"behind":[],"copies":1,"window":0});
-    issuer
-        .call(json!({"type":"retention","collection":"items","policy":policy}))
-        .await?;
-    issuer
-        .call(json!({"type":"partition_next","table":"lists"}))
-        .await?;
+    snap::value(issuer.session.set_retention(
+        "items",
+        serde_json::from_value::<rocky_sdk::RetentionPolicy>(json!(policy)).expect("typed fixture"),
+    ))
+    .await?;
+    snap::value(issuer.session.next_partition("lists")).await?;
     let list = issuer
         .insert(
             "lists",
@@ -640,32 +673,32 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
             "INSERT INTO lists(id,title) VALUES(?,'Groceries')",
         )
         .await?;
-    let node = writer.call(json!({"type":"session"})).await?["node"].clone();
-    issuer
-        .call(json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[node]}))
+    let node = snap::value(writer.session.info()).await?["node"].clone();
+    snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
         .await?;
     for title in ["Milk", "Eggs", "Flour"] {
         issuer
             .insert(
                 "items",
                 Some(&list),
-                &format!("INSERT INTO items(id,list,title) VALUES(?,{list},'{title}')"),
+                &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','{title}')"),
             )
             .await?;
     }
-    issuer
-        .call(json!({"type":"sql","sql":"DELETE FROM items WHERE title='Eggs'"}))
-        .await?;
-    writer.call(json!({"type":"sync"})).await?;
-    let titles = format!("SELECT title FROM items WHERE list = {list} ORDER BY title");
+    snap::value(
+        issuer
+            .session
+            .execute("DELETE FROM items WHERE title='Eggs'", Vec::new()),
+    )
+    .await?;
+    snap::value(writer.sync_once()).await?;
+    let titles = format!("SELECT title FROM items WHERE list = X'{list}' ORDER BY title");
     assert_eq!(
         writer.column(&titles).await?,
         [json!("Flour"), json!("Milk")]
     );
-    issuer.call(json!({"type":"tips","action":"seal"})).await?;
-    let compacted = issuer
-        .call(json!({"type":"tips","action":"compact","keep":0}))
-        .await?;
+    snap::value(issuer.session.seal(false)).await?;
+    let compacted = snap::value(issuer.session.compact(0)).await?;
     assert!(
         compacted["pruned"].as_u64() >= Some(4),
         "the list's items were not released: {compacted}"
@@ -690,20 +723,17 @@ async fn an_issuer_keeping_every_seal_migrates_its_lists() -> Result<(), Failure
     let a = root.path().join("a");
     let issuer =
         Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
-    for action in ["create", "follow"] {
-        issuer
-            .call(json!({"type":"tips","action":action,"name":"main"}))
-            .await?;
-    }
-    issuer
-        .call(json!({"type":"tips","action":"genesis_minimum","minimum_in_sync":1}))
-        .await?;
-    issuer
-        .call(json!({"type":"tips","action":"keep","kept":{"every":true}}))
-        .await?;
-    issuer
-        .call(json!({"type":"partition_next","table":"lists"}))
-        .await?;
+    issuer.session.create_bookmark("main", None).await?;
+    issuer.follow("main").await?;
+    snap::value(issuer.session.set_genesis_minimum(1)).await?;
+    snap::value(
+        issuer.session.set_kept_seals(
+            serde_json::from_value::<rocky_sdk::KeptSeals>(json!({"every":true}))
+                .expect("typed fixture"),
+        ),
+    )
+    .await?;
+    snap::value(issuer.session.next_partition("lists")).await?;
     let list = issuer
         .insert(
             "lists",
@@ -716,29 +746,25 @@ async fn an_issuer_keeping_every_seal_migrates_its_lists() -> Result<(), Failure
             .insert(
                 "items",
                 Some(&list),
-                &format!("INSERT INTO items(id,list,title) VALUES(?,{list},'{title}')"),
+                &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','{title}')"),
             )
             .await?;
     }
-    let kept = issuer.call(json!({"type":"tips","action":"seal"})).await?["tip"].clone();
-    issuer
-        .call(json!({"type":"tips","action":"compact","keep":1}))
-        .await?;
+    let kept = snap::value(issuer.session.seal(false)).await?["tip"].clone();
+    snap::value(issuer.session.compact(1)).await?;
     issuer.database.close().await?;
 
     let issuer = Peer::new(Database::open(at(&a, &hub, "a", ORDERED))?.database)?.with_identity(&a);
     assert_eq!(
         issuer
             .column(&format!(
-                "SELECT title FROM items WHERE list = {list} ORDER BY position"
+                "SELECT title FROM items WHERE list = X'{list}' ORDER BY position"
             ))
             .await?,
         [json!("Milk"), json!("Bread")]
     );
     // The seal stays kept across the migration.
-    let inspected = issuer
-        .call(json!({"type":"tips","action":"inspect"}))
-        .await?;
+    let inspected = snap::value(issuer.session.inspect_tips()).await?;
     let kept_seals = inspected["nodes"][0]["kept_seals"].clone();
     assert!(
         kept_seals
@@ -756,17 +782,24 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
     let hub = Arc::new(Hub::default());
     let issuer =
         Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
-    let invitation = issuer
-        .call(json!({"type": "invitation","profile":{"kind":"writer","scopes":TABLES}}))
-        .await?["uri"]
+    let invitation = snap::value(
+        issuer.session.invite(
+            Some(rocky_sdk::GrantProfile::Writer {
+                scopes: (TABLES)
+                    .into_iter()
+                    .map(|scope| scope.to_string())
+                    .collect(),
+            }),
+            None,
+        ),
+    )
+    .await?["uri"]
         .as_str()
         .ok_or("uri")?
         .to_owned();
     let writer =
         Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
-    issuer
-        .call(json!({"type":"partition_next","table":"lists"}))
-        .await?;
+    snap::value(issuer.session.next_partition("lists")).await?;
     let list = issuer
         .insert(
             "lists",
@@ -778,22 +811,21 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
         .insert(
             "items",
             Some(&list),
-            &format!("INSERT INTO items(id,list,title) VALUES(?,{list},'Milk')"),
+            &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Milk')"),
         )
         .await?;
-    let node = writer.call(json!({"type":"session"})).await?["node"].clone();
-    issuer
-        .call(json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[node]}))
+    let node = snap::value(writer.session.info()).await?["node"].clone();
+    snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
         .await?;
-    writer.call(json!({"type":"sync"})).await?;
+    snap::value(writer.sync_once()).await?;
     writer
         .insert(
             "items",
             Some(&list),
-            &format!("INSERT INTO items(id,list,title) VALUES(?,{list},'Eggs')"),
+            &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Eggs')"),
         )
         .await?;
-    let titles = format!("SELECT title FROM items WHERE list = {list} ORDER BY title");
+    let titles = format!("SELECT title FROM items WHERE list = X'{list}' ORDER BY title");
     assert_eq!(
         writer.column(&titles).await?,
         [json!("Eggs"), json!("Milk")]
@@ -819,7 +851,7 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
     let issuer = Peer::new(Database::open(open(&root.path().join("a"), &hub, "a"))?.database)?;
     assert_eq!(
         issuer
-            .column(&format!("SELECT title FROM items WHERE list = {list}"))
+            .column(&format!("SELECT title FROM items WHERE list = X'{list}'"))
             .await?,
         [json!("Milk")]
     );
@@ -835,8 +867,7 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let a = Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
-    a.call(json!({"type":"partition_next","table":"lists"}))
-        .await?;
+    snap::value(a.session.next_partition("lists")).await?;
     let list = a
         .insert(
             "lists",
@@ -844,33 +875,33 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
             "INSERT INTO lists(id,title) VALUES(?,'Own list')",
         )
         .await?;
-    let invitation = a
-        .call(json!({"type": "invitation","profile":{"kind":"issuer"}}))
-        .await?["uri"]
+    let invitation = snap::value(
+        a.session
+            .invite(Some(rocky_sdk::GrantProfile::Issuer), None),
+    )
+    .await?["uri"]
         .as_str()
         .ok_or("uri")?
         .to_owned();
     let b =
         Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
-    b.call(json!({"type":"sync"})).await?;
+    snap::value(b.sync_once()).await?;
     assert_eq!(
         b.column("SELECT title FROM lists").await?,
         [json!("Own list")]
     );
-    let node = a.call(json!({"type":"session"})).await?["node"].clone();
-    b.call(
-        json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[node]}),
-    )
+    let node = snap::value(a.session.info()).await?["node"].clone();
+    snap::value(b.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
     .await?;
-    a.call(json!({"type":"sync"})).await?;
-    let activity = a.call(json!({"type":"activity"})).await?;
+    snap::value(a.sync_once()).await?;
+    let activity = snap::value(a.session.activity(0)).await?;
     assert!(
         !kinds(&activity).contains(&"partition_bootstrap".to_owned()),
         "{activity}"
     );
     assert!(!root.path().join("a/bootstrap.json").exists());
     assert_eq!(
-        a.call(json!({"type":"status"})).await?["data"]["bootstrap_pending"],
+        snap::value(a.session.status()).await?["data"]["bootstrap_pending"],
         false
     );
     for peer in [b, a] {
@@ -884,9 +915,11 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
     let root = support::small_directory()?;
     let hub = Arc::new(Hub::default());
     let a = Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
-    let invitation = a
-        .call(json!({"type": "invitation","profile":{"kind":"issuer"}}))
-        .await?["uri"]
+    let invitation = snap::value(
+        a.session
+            .invite(Some(rocky_sdk::GrantProfile::Issuer), None),
+    )
+    .await?["uri"]
         .as_str()
         .ok_or("uri")?
         .to_owned();
@@ -894,23 +927,34 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
         Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
     let mut lists = Vec::new();
     for (peer, title) in [(&a, "From a"), (&b, "From b")] {
-        peer.call(json!({"type":"partition_next","table":"lists"}))
-            .await?;
+        snap::value(peer.session.next_partition("lists")).await?;
         let sql = format!("INSERT INTO lists(id,title) VALUES(?,'{title}')");
         lists.push(peer.insert("lists", None, &sql).await?);
     }
     // The first session may refuse an unknown tuple; the issuer exchange
     // installs it and retries within this sync. The peer learns ours on its sync.
     for peer in [&a, &b] {
-        peer.call(json!({"type":"sync"})).await?;
+        snap::value(peer.sync_once()).await?;
     }
     for (from, to, list) in [(&a, &b, &lists[0]), (&b, &a, &lists[1])] {
-        let node = to.call(json!({"type":"session"})).await?["node"].clone();
-        from.call(json!({"type":"partition_share","group":"list","values":values(list),"recipients":[node]}))
-            .await?;
+        let node = snap::value(to.session.info()).await?["node"].clone();
+        snap::value(
+            from.session.share_partition(
+                rocky_sdk::PartitionTarget::Group {
+                    group: "list".to_owned(),
+                    values: (values(list)).clone(),
+                },
+                serde_json::from_value::<
+                    std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>,
+                >(json!([node]))
+                .expect("typed fixture"),
+                None,
+            ),
+        )
+        .await?;
         // Whichever dials hands over or collects the envelope.
-        from.call(json!({"type":"sync"})).await?;
-        to.call(json!({"type":"sync"})).await?;
+        snap::value(from.sync_once()).await?;
+        snap::value(to.sync_once()).await?;
     }
     for peer in [&a, &b] {
         assert_eq!(
@@ -934,37 +978,41 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
     let (a, b) = (root.path().join("a"), root.path().join("b"));
     let issuer =
         Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
-    for action in ["create", "follow"] {
-        issuer
-            .call(json!({"type":"tips","action":action,"name":"main"}))
-            .await?;
-    }
+    issuer.session.create_bookmark("main", None).await?;
+    issuer.follow("main").await?;
     // An issuer's migration opening inherits the line's signed minimum.
-    issuer
-        .call(json!({"type":"tips","action":"genesis_minimum","minimum_in_sync":1}))
-        .await?;
+    snap::value(issuer.session.set_genesis_minimum(1)).await?;
     // Raw grants name the three tables, as the shopping app's device kinds do.
     let grants: Vec<Value> = TABLES
         .iter()
         .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
         .collect();
-    let invitation = issuer
-        .call(json!({"type": "invitation","profile":{"kind":"grants","grants":grants}}))
-        .await?["uri"]
+    let invitation = snap::value(
+        issuer.session.invite(
+            Some(rocky_sdk::GrantProfile::Grants {
+                grants: serde_json::from_value::<Vec<rocky_sdk::credentials::Grant>>(json!(grants))
+                    .expect("typed fixture"),
+            }),
+            None,
+        ),
+    )
+    .await?["uri"]
         .as_str()
         .ok_or("uri")?
         .to_owned();
     let writer =
         Peer::new(Database::join(open(&b, &hub, "b"), &invitation)?.database)?.with_identity(&b);
     // A partial replica holds only the lists shared with it.
-    writer
-        .call(
-            json!({"type":"partition_role","role":{"role":"Partial","full_nodes":[],"custody":0}}),
-        )
-        .await?;
-    issuer
-        .call(json!({"type":"partition_next","table":"lists"}))
-        .await?;
+    snap::value(
+        writer.session.set_replica_role(
+            serde_json::from_value::<rocky_sdk::ReplicaRoleConfig>(
+                json!({"role":"Partial","full_nodes":[],"custody":0}),
+            )
+            .expect("typed fixture"),
+        ),
+    )
+    .await?;
+    snap::value(issuer.session.next_partition("lists")).await?;
     let list = issuer
         .insert(
             "lists",
@@ -976,23 +1024,25 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         .insert(
             "categories",
             Some(&list),
-            &format!("INSERT INTO categories(id,list,name) VALUES(?,{list},'Dairy')"),
+            &format!("INSERT INTO categories(id,list,name) VALUES(?,X'{list}','Dairy')"),
         )
         .await?;
-    for (title, category) in [("Milk", dairy.as_str()), ("Bread", "NULL")] {
+    for (title, category) in [
+        ("Milk", format!("X'{dairy}'")),
+        ("Bread", "NULL".to_owned()),
+    ] {
         issuer
             .insert(
                 "items",
                 Some(&list),
-                &format!("INSERT INTO items(id,list,title,category) VALUES(?,{list},'{title}',{category})"),
+                &format!("INSERT INTO items(id,list,title,category) VALUES(?,X'{list}','{title}',{category})"),
             )
             .await?;
     }
-    let node = writer.call(json!({"type":"session"})).await?["node"].clone();
-    issuer
-        .call(json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[node]}))
+    let node = snap::value(writer.session.info()).await?["node"].clone();
+    snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
         .await?;
-    writer.call(json!({"type":"sync"})).await?;
+    snap::value(writer.sync_once()).await?;
     for peer in [writer, issuer] {
         peer.database.close().await?;
     }
@@ -1001,43 +1051,43 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
     assert_eq!(
         issuer
             .column(&format!(
-                "SELECT title FROM items WHERE list = {list} ORDER BY position"
+                "SELECT title FROM items WHERE list = X'{list}' ORDER BY position"
             ))
             .await?,
         [json!("Milk"), json!("Bread")]
     );
     let linked = format!(
-        "SELECT i.title FROM item_categories c JOIN items i ON i.list = c.list AND i.id = c.item WHERE c.list = {list} AND i.list = {list} AND c.category = {dairy} ORDER BY i.title"
+        "SELECT i.title FROM item_categories c JOIN items i ON i.list = c.list AND i.id = c.item WHERE c.list = X'{list}' AND i.list = X'{list}' AND c.category = X'{dairy}' ORDER BY i.title"
     );
     assert_eq!(issuer.column(&linked).await?, [json!("Milk")]);
     // Before updating, the writer's older application follows the migration
     // and adds an item, which reaches the issuer.
     let behind = Peer::new(Database::open(at(&b, &hub, "b", SCHEMA))?.database)?.with_identity(&b);
-    behind.call(json!({"type":"sync"})).await?;
+    snap::value(behind.sync_once()).await?;
     behind
         .insert(
             "items",
             Some(&list),
-            &format!("INSERT INTO items(id,list,title) VALUES(?,{list},'Jam')"),
+            &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Jam')"),
         )
         .await?;
-    behind.call(json!({"type":"sync"})).await?;
+    snap::value(behind.sync_once()).await?;
     assert_eq!(
         issuer
             .column(&format!(
-                "SELECT title FROM items WHERE list = {list} ORDER BY title"
+                "SELECT title FROM items WHERE list = X'{list}' ORDER BY title"
             ))
             .await?,
         [json!("Bread"), json!("Jam"), json!("Milk")]
     );
     behind.database.close().await?;
     let writer = Peer::new(Database::open(at(&b, &hub, "b", ORDERED))?.database)?.with_identity(&b);
-    writer.call(json!({"type":"sync"})).await?;
+    snap::value(writer.sync_once()).await?;
     assert_eq!(writer.column(&linked).await?, [json!("Milk")]);
     // The writer's grants never named `item_categories`; they follow `items`.
     let bread = writer
         .column(&format!(
-            "SELECT id FROM items WHERE list = {list} AND title = 'Bread'"
+            "SELECT id FROM items WHERE list = X'{list}' AND title = 'Bread'"
         ))
         .await?;
     let bread = bread.first().and_then(Value::as_str).ok_or("bread")?;
@@ -1045,10 +1095,10 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         .insert(
             "item_categories",
             Some(&list),
-            &format!("INSERT INTO item_categories(id,list,item,category) VALUES(?,{list},{bread},{dairy})"),
+            &format!("INSERT INTO item_categories(id,list,item,category) VALUES(?,X'{list}',X'{bread}',X'{dairy}')"),
         )
         .await?;
-    writer.call(json!({"type":"sync"})).await?;
+    snap::value(writer.sync_once()).await?;
     assert_eq!(
         issuer.column(&linked).await?,
         [json!("Bread"), json!("Milk")]
@@ -1066,31 +1116,31 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
     let (a, b) = (root.path().join("a"), root.path().join("b"));
     let issuer =
         Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
-    for action in ["create", "follow"] {
-        issuer
-            .call(json!({"type":"tips","action":action,"name":"main"}))
-            .await?;
-    }
+    issuer.session.create_bookmark("main", None).await?;
+    issuer.follow("main").await?;
     // An issuer's migration opening inherits the line's signed minimum.
-    issuer
-        .call(json!({"type":"tips","action":"genesis_minimum","minimum_in_sync":1}))
-        .await?;
+    snap::value(issuer.session.set_genesis_minimum(1)).await?;
     // Raw grants name the three tables, as the shopping app's device kinds do.
     let grants: Vec<Value> = TABLES
         .iter()
         .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
         .collect();
-    let invitation = issuer
-        .call(json!({"type": "invitation","profile":{"kind":"grants","grants":grants}}))
-        .await?["uri"]
+    let invitation = snap::value(
+        issuer.session.invite(
+            Some(rocky_sdk::GrantProfile::Grants {
+                grants: serde_json::from_value::<Vec<rocky_sdk::credentials::Grant>>(json!(grants))
+                    .expect("typed fixture"),
+            }),
+            None,
+        ),
+    )
+    .await?["uri"]
         .as_str()
         .ok_or("uri")?
         .to_owned();
     let writer =
         Peer::new(Database::join(open(&b, &hub, "b"), &invitation)?.database)?.with_identity(&b);
-    issuer
-        .call(json!({"type":"partition_next","table":"lists"}))
-        .await?;
+    snap::value(issuer.session.next_partition("lists")).await?;
     let list = issuer
         .insert(
             "lists",
@@ -1102,23 +1152,25 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         .insert(
             "categories",
             Some(&list),
-            &format!("INSERT INTO categories(id,list,name) VALUES(?,{list},'Dairy')"),
+            &format!("INSERT INTO categories(id,list,name) VALUES(?,X'{list}','Dairy')"),
         )
         .await?;
-    for (title, category) in [("Milk", dairy.as_str()), ("Bread", "NULL")] {
+    for (title, category) in [
+        ("Milk", format!("X'{dairy}'")),
+        ("Bread", "NULL".to_owned()),
+    ] {
         issuer
             .insert(
                 "items",
                 Some(&list),
-                &format!("INSERT INTO items(id,list,title,category) VALUES(?,{list},'{title}',{category})"),
+                &format!("INSERT INTO items(id,list,title,category) VALUES(?,X'{list}','{title}',{category})"),
             )
             .await?;
     }
-    let node = writer.call(json!({"type":"session"})).await?["node"].clone();
-    issuer
-        .call(json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[node]}))
+    let node = snap::value(writer.session.info()).await?["node"].clone();
+    snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
         .await?;
-    writer.call(json!({"type":"sync"})).await?;
+    snap::value(writer.sync_once()).await?;
     for peer in [writer, issuer] {
         peer.database.close().await?;
     }
@@ -1127,43 +1179,43 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
     assert_eq!(
         issuer
             .column(&format!(
-                "SELECT title FROM items WHERE list = {list} ORDER BY position"
+                "SELECT title FROM items WHERE list = X'{list}' ORDER BY position"
             ))
             .await?,
         [json!("Milk"), json!("Bread")]
     );
     let linked = format!(
-        "SELECT i.title FROM item_categories c JOIN items i ON i.list = c.list AND i.id = c.item WHERE c.list = {list} AND i.list = {list} AND c.category = {dairy} ORDER BY i.title"
+        "SELECT i.title FROM item_categories c JOIN items i ON i.list = c.list AND i.id = c.item WHERE c.list = X'{list}' AND i.list = X'{list}' AND c.category = X'{dairy}' ORDER BY i.title"
     );
     assert_eq!(issuer.column(&linked).await?, [json!("Milk")]);
     // Before updating, the writer's older application follows the migration
     // and adds an item, which reaches the issuer.
     let behind = Peer::new(Database::open(at(&b, &hub, "b", SCHEMA))?.database)?.with_identity(&b);
-    behind.call(json!({"type":"sync"})).await?;
+    snap::value(behind.sync_once()).await?;
     behind
         .insert(
             "items",
             Some(&list),
-            &format!("INSERT INTO items(id,list,title) VALUES(?,{list},'Jam')"),
+            &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Jam')"),
         )
         .await?;
-    behind.call(json!({"type":"sync"})).await?;
+    snap::value(behind.sync_once()).await?;
     assert_eq!(
         issuer
             .column(&format!(
-                "SELECT title FROM items WHERE list = {list} ORDER BY title"
+                "SELECT title FROM items WHERE list = X'{list}' ORDER BY title"
             ))
             .await?,
         [json!("Bread"), json!("Jam"), json!("Milk")]
     );
     behind.database.close().await?;
     let writer = Peer::new(Database::open(at(&b, &hub, "b", ORDERED))?.database)?.with_identity(&b);
-    writer.call(json!({"type":"sync"})).await?;
+    snap::value(writer.sync_once()).await?;
     assert_eq!(writer.column(&linked).await?, [json!("Milk")]);
     // The writer's grants never named `item_categories`; they follow `items`.
     let bread = writer
         .column(&format!(
-            "SELECT id FROM items WHERE list = {list} AND title = 'Bread'"
+            "SELECT id FROM items WHERE list = X'{list}' AND title = 'Bread'"
         ))
         .await?;
     let bread = bread.first().and_then(Value::as_str).ok_or("bread")?;
@@ -1171,10 +1223,10 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         .insert(
             "item_categories",
             Some(&list),
-            &format!("INSERT INTO item_categories(id,list,item,category) VALUES(?,{list},{bread},{dairy})"),
+            &format!("INSERT INTO item_categories(id,list,item,category) VALUES(?,X'{list}',X'{bread}',X'{dairy}')"),
         )
         .await?;
-    writer.call(json!({"type":"sync"})).await?;
+    snap::value(writer.sync_once()).await?;
     assert_eq!(
         issuer.column(&linked).await?,
         [json!("Bread"), json!("Milk")]

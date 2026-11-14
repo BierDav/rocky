@@ -49,7 +49,7 @@ async fn seed(database: &Database, keys: &[&str]) -> Result<(), Failure> {
             let id = tx.next_id(table, Vec::new()).await?;
             tx.execute(
                 &format!("INSERT INTO {table}(key,amount,id) VALUES(?,0,?)"),
-                vec![SqlValue::Text((*key).into()), SqlValue::Integer(id)],
+                vec![SqlValue::Text((*key).into()), id.sql()],
             )
             .await?;
         }

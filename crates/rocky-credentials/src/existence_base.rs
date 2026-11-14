@@ -8,7 +8,7 @@ use crate::{
 use rocky_core::{Commitment, ResourceScope, Scope};
 use serde::{Deserialize, Serialize};
 
-pub const EXISTENCE_BASE_FORMAT: u32 = 1;
+pub const EXISTENCE_BASE_FORMAT: u32 = 2;
 /// Most signer logs and identity marks one base carries.
 pub const MAX_EXISTENCE_BASE_LOGS: usize = 256;
 
@@ -26,12 +26,11 @@ pub struct ExistenceCut {
     pub logs: Vec<ExistenceLog>,
     pub state: Commitment,
 }
-/// Identity sequences survive existence-record pruning, per scope and author.
+/// Identity sequences survive existence-record pruning, per scope and writer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExistenceIdentity {
-    pub author: u32,
-    pub signer: PublicKey,
-    pub sequence: u32,
+    pub author: rocky_core::WriterId,
+    pub sequence: u64,
 }
 /// Compact existence state: rows still evidenced, by count and digest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

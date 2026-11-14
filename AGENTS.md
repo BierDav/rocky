@@ -31,9 +31,9 @@
 
 ## Implementation boundaries
 
-- Keep capability contracts language-neutral and extensible to qualified language,
-  ORM and transport adapters. Consumers must be able to define schemas/handlers
-  and start with packaged artifacts without Rust code or a Rust project.
+- Rocky's API is Rust-native and typed end to end; other languages wrap it in
+  their own bindings. Keep no stringly or JSON call surface inside the SDK.
+  Keep capability contracts extensible to ORM and transport adapters.
 - Keep networking optional; database/session shutdown must never close
   application-owned infrastructure.
 - Keep shared protocol types independent of storage, transport and UI. The
@@ -54,6 +54,8 @@
 
 ## Verification
 
+- Use `#[expect(lint, reason = "...")]` for lint exceptions; `allow` attributes
+  are forbidden.
 - During development, use `./scripts/check --unit`, `cargo test -p <package>` and
   targeted checks. Before finishing workspace changes, run `./scripts/lint` and
   `./scripts/check` from any directory; `./scripts/lint --fix` applies formatting.

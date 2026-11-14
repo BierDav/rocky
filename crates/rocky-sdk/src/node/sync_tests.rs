@@ -1,3 +1,5 @@
+use crate::test_snapshot as snap;
+mod coordination;
 mod state_advice;
 mod status;
 use super::*;
@@ -70,7 +72,7 @@ async fn node(
     root: &std::path::Path,
     settings: Settings,
     vault: Vault,
-    transport: Arc<dyn Transport>,
+    transport: impl Into<crate::transport::Connected>,
 ) -> Result<Arc<Node>, Failure> {
     let domain = settings.domain()?;
     let replica = EncryptedReplica::open(
@@ -92,7 +94,7 @@ async fn node(
         settings,
         root.join("identity.json"),
     ));
-    node.link(transport, true).await;
+    node.link(transport, true).await?;
     Ok(node)
 }
 async fn enrolled(
@@ -181,73 +183,107 @@ async fn enrolled_schema(
 }
 async fn enable(node: &Node) -> Result<(), Failure> {
     let mut statuses = node.sync_status.subscribe();
-    let before = statuses.borrow_and_update()["token"].clone();
+    let before = statuses.borrow_and_update().token;
     node.automatic.store(true, Ordering::SeqCst);
     node.wake_sync();
     statuses
-        .wait_for(|status| status["token"] != before && status["state"] == "connected")
+        .wait_for(|status| status.token != before && status.state == SyncState::Connected)
         .await?;
-    assert_eq!(statuses.borrow()["state"], "connected");
+    assert_eq!(statuses.borrow().state, SyncState::Connected);
     Ok(())
 }
 
 async fn add(node: &Node, handle: u8) -> Result<(), Failure> {
     let client = node.client(1)?;
-    node.dispatch(&client, &json!({"type":"sql","sql":"BEGIN"}))
-        .await?;
-    let id = node
-        .dispatch(&client, &json!({"type":"next_id","table":"items"}))
-        .await?["id"]
-        .clone();
-    node.dispatch(&client, &json!({"type":"sql","sql":"INSERT INTO items(key,title,id) VALUES(?,'Milk',?)","values":[{"type":"text","value":handle.to_string()},{"type":"integer","value":id}]})).await?;
-    node.dispatch(
+    snap::value(node.execute_sql(&client, "BEGIN", Vec::new(), None)).await?;
+    let id = snap::value(node.next_id(&client, "items", None)).await?["id"].clone();
+    snap::value(node.execute_sql(
         &client,
-        &json!({"type":"sql","sql":"COMMIT","handle":vec![handle;32]}),
-    )
+        "INSERT INTO items(key,title,id) VALUES(?,'Milk',?)",
+        vec![
+            rocky_sdk::SqlValue::Text(snap::text(&(handle.to_string()))),
+            snap::row_id(&(id)),
+        ],
+        None,
+    ))
     .await?;
+    snap::value(node.execute_sql(&client, "COMMIT", Vec::new(), Some([handle; 32]))).await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn idle_has_no_poll_and_a_commit_reaches_the_peer_without_time_advancing()
 -> Result<(), Failure> {
-    tokio::task::LocalSet::new().run_until(async {
-        let root = tempfile::tempdir()?;
-        let hub = Arc::new(Hub::default());
-        let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-        let b = enrolled(&root.path().join("b"), &hub, "b", Some((&a, Profile::Writer {scopes:["items".into()].into()}))).await?;
-        let contact = {
-            let link = b.network.read().await;
-            b.settings.lock().await.contact(&b.vault, &*link.as_ref().ok_or("link")?.transport).await?.0
-        };
-        a.configure(|settings| settings.add_peer(&a.vault, &contact)).await?;
-        enable(&a).await?;
-        enable(&b).await?;
-        assert_eq!(a.sync_status.borrow()["retry"], false);
-        assert_eq!(b.sync_status.borrow()["retry"], false);
-        while !a.current().is_some_and(|service| service.live.len() == 1)
-            || !b.current().is_some_and(|service| service.live.len() == 1)
-            || *a.worker_running.borrow()
-            || *b.worker_running.borrow()
-        {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((
+                    &a,
+                    Profile::Writer {
+                        scopes: ["items".into()].into(),
+                    },
+                )),
+            )
+            .await?;
+            let contact = {
+                let link = b.network.read().await;
+                b.settings
+                    .lock()
+                    .await
+                    .contact(&b.vault, &*link.as_ref().ok_or("link")?.transport)
+                    .await?
+                    .0
+            };
+            a.configure(|settings| settings.add_peer(&a.vault, &contact))
+                .await?;
+            enable(&a).await?;
+            enable(&b).await?;
+            assert!(!a.sync_status.borrow().retry);
+            assert!(!b.sync_status.borrow().retry);
+            while !a.current().is_some_and(|service| service.live.len() == 1)
+                || !b.current().is_some_and(|service| service.live.len() == 1)
+                || *a.worker_running.borrow()
+                || *b.worker_running.borrow()
+            {
+                tokio::task::yield_now().await;
+            }
+            let dials = hub.counts()[1];
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(86400)).await;
             tokio::task::yield_now().await;
-        }
-        let dials = hub.counts()[1];
-        tokio::time::pause();
-        tokio::time::advance(Duration::from_secs(86400)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(hub.counts()[1], dials, "successful idle service must not dial on a timer");
-        tokio::time::resume();
-        let mut revisions = b.replica.observe_revision();
-        add(&a, 1).await?;
-        tokio::time::timeout(Duration::from_secs(5), revisions.changed()).await??;
-        let client = b.client(1)?;
-        let page = b.dispatch(&client, &json!({"type":"read", "query":{"sql":"SELECT title FROM items", "max_rows":64}})).await?;
-        assert_eq!(page["rows"][0][0]["value"], "Milk");
-        a.detach(None).await;
-        b.detach(None).await;
-        Ok(())
-    }).await
+            assert_eq!(
+                hub.counts()[1],
+                dials,
+                "successful idle service must not dial on a timer"
+            );
+            tokio::time::resume();
+            let mut revisions = b.replica.observe_revision();
+            add(&a, 1).await?;
+            tokio::time::timeout(Duration::from_secs(5), revisions.changed()).await??;
+            let client = b.client(1)?;
+            let page = snap::value(b.read(
+                &client,
+                rocky_sdk::ReadQuery {
+                    sql: "SELECT title FROM items".to_owned(),
+                    values: Vec::new(),
+                    max_rows: 64,
+                    max_bytes: None,
+                    cursor: None,
+                },
+            ))
+            .await?;
+            assert_eq!(page["rows"][0][0]["value"], "Milk");
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        })
+        .await
 }
 
 /// Requests share a link that is not persistent: it closes when the last of
@@ -383,17 +419,17 @@ async fn incoming_keyless_custody_wakes_forwarding_and_connectivity_wakes_catch_
                 "custody cannot apply rows"
             );
             let mut statuses = relay.sync_status.subscribe();
-            let before = statuses.borrow_and_update()["token"].clone();
+            let before = statuses.borrow_and_update().token;
             hub.network_changed();
             tokio::time::timeout(
                 Duration::from_secs(5),
-                statuses
-                    .wait_for(|status| status["token"] != before && status["state"] == "connected"),
+                statuses.wait_for(|status| {
+                    status.token != before && status.state == SyncState::Connected
+                }),
             )
             .await??;
-            assert_eq!(
-                statuses.borrow()["retry"],
-                false,
+            assert!(
+                !statuses.borrow().retry,
                 "keyless custody owes no key retry"
             );
             for node in [&a, &relay, &b] {
@@ -439,8 +475,8 @@ async fn failed_work_retries_on_clock_and_connectivity_interrupts_backoff() -> R
             let mut status = a.sync_status.subscribe();
             a.automatic.store(true, Ordering::SeqCst);
             a.wake_sync();
-            status.wait_for(|status| status["retry"] == true).await?;
-            assert_eq!(status.borrow()["retry"], true);
+            status.wait_for(|status| status.retry).await?;
+            assert!(status.borrow().retry);
             let dials = hub.counts()[1];
             tokio::time::pause();
             tokio::time::advance(Duration::from_millis(500)).await;
@@ -452,16 +488,17 @@ async fn failed_work_retries_on_clock_and_connectivity_interrupts_backoff() -> R
             // Explicit connectivity wakes the retry now, despite its two-second deadline.
             tokio::time::resume();
             b.attach(Network::Owned(hub.connector("b"))).await?;
-            let before = status.borrow_and_update()["token"].clone();
+            let before = status.borrow_and_update().token;
             hub.network_changed();
             tokio::time::timeout(
                 Duration::from_secs(5),
-                status
-                    .wait_for(|status| status["token"] != before && status["state"] == "connected"),
+                status.wait_for(|status| {
+                    status.token != before && status.state == SyncState::Connected
+                }),
             )
             .await??;
-            assert_eq!(status.borrow()["state"], "connected");
-            assert_eq!(status.borrow()["retry"], false);
+            assert_eq!(status.borrow().state, SyncState::Connected);
+            assert!(!status.borrow().retry);
             a.detach(None).await;
             b.detach(None).await;
             Ok(())
@@ -470,7 +507,7 @@ async fn failed_work_retries_on_clock_and_connectivity_interrupts_backoff() -> R
 }
 
 #[tokio::test]
-async fn consumer_sql_allocates_string_ids_with_node_author() -> Result<(), Failure> {
+async fn consumer_sql_allocates_text_named_ids_of_its_writer() -> Result<(), Failure> {
     tokio::task::LocalSet::new().run_until(async {
     let root = tempfile::tempdir()?;
     let schema = Schema::parse(
@@ -487,18 +524,17 @@ async fn consumer_sql_allocates_string_ids_with_node_author() -> Result<(), Fail
         .await?;
     let node = node(root.path(), settings, vault, transport).await?;
     let client = node.client(1)?;
-    node.dispatch(&client, &json!({"type":"sql","sql":"BEGIN"}))
+    snap::value(node.execute_sql(&client, "BEGIN", Vec::new(), None))
         .await?;
-    let identity = node
-        .dispatch(&client, &json!({"type":"next_id","table":"items"}))
+    let identity = snap::value(node.next_id(&client, "items", None))
         .await?;
     let id = identity["id"].as_str().ok_or("id is not a string")?;
-    let rows = node.dispatch(&client, &json!({"type":"sql","sql":"INSERT INTO items(title,id) VALUES('first',?) RETURNING id", "values":[{"type":"integer","value":id}]})).await?;
-    assert_eq!(rows["rows"][0][0]["value"], id);
-    node.dispatch(&client, &json!({"type":"sql","sql":"COMMIT"}))
+    let rows = snap::value(node.execute_sql(&client, "INSERT INTO items(title,id) VALUES('first',?) RETURNING id", vec![snap::row_id(&(id))], None)).await?;
+    assert_eq!(snap::cell_id(&rows["rows"][0][0]).to_string(), id);
+    snap::value(node.execute_sql(&client, "COMMIT", Vec::new(), None))
         .await?;
-    let rows = node.dispatch(&client, &json!({"type":"read","query":{"sql":"SELECT id FROM items","max_rows":64}})).await?;
-    assert_eq!(rows["rows"][0][0]["value"], id);
+    let rows = snap::value(node.read(&client, rocky_sdk::ReadQuery { sql: "SELECT id FROM items".to_owned(), values: Vec::new(), max_rows: 64, max_bytes: None, cursor: None })).await?;
+    assert_eq!(snap::cell_id(&rows["rows"][0][0]).to_string(), id);
     node.detach(None).await;
     Ok(())
     }).await

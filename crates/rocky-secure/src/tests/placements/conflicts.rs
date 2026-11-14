@@ -122,7 +122,7 @@ async fn placement_fallback_finds_conflicts_after_equal_matches_and_checks_its_s
             .unwrap();
             let [
                 SqlValue::Blob(domain),
-                SqlValue::Integer(author),
+                SqlValue::Blob(author),
                 SqlValue::Integer(sequence),
                 SqlValue::Blob(a),
                 SqlValue::Blob(b),
@@ -135,7 +135,10 @@ async fn placement_fallback_finds_conflicts_after_equal_matches_and_checks_its_s
                 decode::<rocky_core::Scope>(domain).unwrap(),
                 pair.lineage.domain
             );
-            assert_eq!(*author as u32, first.extensions.author.unwrap());
+            assert_eq!(
+                crate::writer::stored_writer(author).unwrap(),
+                first.extensions.author(&first.public_key).unwrap()
+            );
             assert_eq!(*sequence as u64, first.extensions.author_sequence);
             let a = crate::wire::verified_header(a).unwrap();
             let b = crate::wire::verified_header(b).unwrap();
@@ -218,7 +221,7 @@ async fn placement_fallback_finds_conflicts_after_equal_matches_and_checks_its_s
             "INSERT INTO secure_placements VALUES(?,?,?,?,?,?)",
             bindings(vec![
                 SqlValue::Blob(encode(&pair.lineage.domain).unwrap()),
-                SqlValue::Integer(i64::from(first.extensions.author.unwrap())),
+                crate::writer::writer_value(first.extensions.author(&first.public_key).unwrap()),
                 SqlValue::Integer(first.extensions.author_sequence as i64),
                 SqlValue::Blob(encode(&first.extensions.scope).unwrap()),
                 SqlValue::Blob(first.hash().as_bytes().to_vec()),

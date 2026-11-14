@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Reject allow attributes, including inner and inactive conditional attributes."""
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+
+ROOT = Path(__file__).resolve().parent.parent
+GUIDANCE = '#[allow(...)] is forbidden; use #[expect(lint, reason = "...")] instead'
+TOKEN = re.compile(
+    r'//[^\n]*|/\*|(?P<raw>(?:br|cr|r)(?P<hashes>\#*)")'
+    r'|(?:b|c)?"(?:\\.|[^"\\])*"'
+    r"|b?'(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'"
+    r'|(?P<word>(?:r\#)?[a-zA-Z_]\w*)|[^\s]',
+    re.DOTALL,
+)
+
+
+def tokens(source):
+    """Keep token positions, ignoring Rust comments and literals."""
+    offset = 0
+    while match := TOKEN.search(source, offset):
+        value = match.group()
+        offset = match.end()
+        if value.startswith('//'):
+            continue
+        if value == '/*':
+            depth = 1
+            while depth and (part := re.search(r'/\*|\*/', source[offset:])):
+                depth += 1 if part.group() == '/*' else -1
+                offset += part.end()
+            if depth:
+                return
+            continue
+        if match.group('raw'):
+            end = source.find('"' + match.group('hashes'), offset)
+            offset = len(source) if end < 0 else end + 1 + len(match.group('hashes'))
+            continue
+        if not match.group('word') and ('"' in value or "'" in value and len(value) > 1):
+            continue
+        yield value.removeprefix('r#'), match.start()
+
+
+def arguments(parts):
+    start = depth = 0
+    for index, (value, _) in enumerate(parts):
+        if value in ('(', '[', '{'):
+            depth += 1
+        elif value in (')', ']', '}'):
+            depth -= 1
+        elif value == ',' and depth == 0:
+            yield parts[start:index]
+            start = index + 1
+    yield parts[start:]
+
+
+def forbidden(attribute):
+    if len(attribute) < 2 or attribute[1][0] != '(':
+        return
+    if attribute[0][0] == 'allow':
+        yield attribute[0][1]
+    elif attribute[0][0] == 'cfg_attr':
+        for child in list(arguments(attribute[2:-1]))[1:]:
+            yield from forbidden(child)
+
+
+def violations(source):
+    parts = list(tokens(source))
+    for index, (value, _) in enumerate(parts):
+        if value != '#':
+            continue
+        start = index + 1
+        if start < len(parts) and parts[start][0] == '!':
+            start += 1
+        if start >= len(parts) or parts[start][0] != '[':
+            continue
+        depth = 1
+        for end in range(start + 1, len(parts)):
+            if parts[end][0] == '[':
+                depth += 1
+            elif parts[end][0] == ']':
+                depth -= 1
+            if depth == 0:
+                for position in forbidden(parts[start + 1:end]):
+                    yield source.count('\n', 0, position) + 1
+                break
+
+
+def workspace_sources():
+    metadata = json.loads(subprocess.check_output(
+        ['cargo', 'metadata', '--offline', '--locked', '--no-deps', '--format-version', '1'], cwd=ROOT))
+    members = set(metadata['workspace_members'])
+    for package in metadata['packages']:
+        if package['id'] not in members:
+            continue
+        for directory, dirs, files in os.walk(Path(package['manifest_path']).parent):
+            dirs[:] = [d for d in dirs if d not in ('target', 'local', 'node_modules') and not d.startswith('.')]
+            for name in sorted(files):
+                if name.endswith('.rs'):
+                    yield Path(directory) / name
+
+
+def main():
+    failed = False
+    paths = map(Path, sys.argv[1:]) if len(sys.argv) > 1 else workspace_sources()
+    for path in sorted(paths):
+        for line in violations(path.read_text()):
+            print(f'{path}:{line}: error: {GUIDANCE}', file=sys.stderr)
+            failed = True
+    return int(failed)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

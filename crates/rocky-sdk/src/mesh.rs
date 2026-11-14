@@ -490,6 +490,7 @@ mod tests {
             identities: [PrivateKey::new().public_key()].into(),
             capabilities: BTreeSet::new(),
             cut: Default::default(),
+            mode: rocky_credentials::RevocationMode::Lost,
             recovery: None,
         };
         let signed = SignedRevocation::sign(

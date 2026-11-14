@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_snapshot as snap;
 use rocky_secure::network::{ContactHandler, ContactHint, ContactRequest, ContactResponse};
 
 async fn contact(from: &Node, to: &Node) -> Result<PublicKey, Failure> {
@@ -67,8 +68,9 @@ async fn one_contact_hands_over_a_second_and_answers_a_request_for_a_third() -> 
                     &*b_link.as_ref().ok_or("link")?.transport,
                     secure_node_id(d_key)
                 )
-                .await?["node"],
-                d_key.to_hex()
+                .await?
+                .map(|key| key.to_hex()),
+                Some(d_key.to_hex())
             );
             drop(b_link);
             assert_eq!(
@@ -110,19 +112,21 @@ async fn a_sufficient_local_peer_is_the_only_dial_and_reports_the_skipped_issuer
             let dials = hub.dials_to("a");
             assert_eq!(completed_peers(&pass(&b).await?), 1);
             assert_eq!(hub.dials_to("a"), dials);
-            let peers = b.peers().await;
+            let peers = b.observed_peers().await;
             assert_eq!(
                 peers
                     .iter()
-                    .find(|peer| peer["node"] == key.to_hex())
-                    .ok_or("local")?["choice"],
+                    .find(|peer| peer.node == key.to_hex())
+                    .ok_or("local")?
+                    .choice,
                 "selected_local"
             );
             assert_eq!(
                 peers
                     .iter()
-                    .find(|peer| peer["issuer"] == true)
-                    .ok_or("issuer")?["choice"],
+                    .find(|peer| peer.is_issuer)
+                    .ok_or("issuer")?
+                    .choice,
                 "covered"
             );
             assert!(!b.reached()?.get(&key).ok_or("reached")?.held.is_empty());
@@ -170,7 +174,7 @@ async fn an_unreachable_contact_costs_no_dial_during_its_backoff() -> Result<(),
             assert_eq!(completed_peers(&report), 0);
             assert_eq!(report["peers"][0]["skip"], "backoff");
             assert_eq!(hub.dials_to("gone"), dials);
-            assert_eq!(a.peers().await[0]["choice"], "backoff");
+            assert_eq!(a.observed_peers().await[0].choice, "backoff");
             a.detach(None).await;
             Ok(())
         })
@@ -226,7 +230,7 @@ async fn revoked_peers_receive_no_contact_or_discovery_material_and_are_unknown_
                 .as_ref()
                 .ok_or("link")?
                 .transport
-                .connect("a", Protocol::Link)
+                .connect("a", Protocol::Link, None)
                 .await?;
             let a_key = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
             assert!(
@@ -450,19 +454,18 @@ async fn a_needed_partition_reaches_its_keyless_custody_peer_within_two_passes()
         let b = enrolled_schema(&root.path().join("b"), &hub, "b", Some((&a, reader.clone())), &schema).await?;
         let c = enrolled_schema(&root.path().join("c"), &hub, "c", Some((&a, reader)), &schema).await?;
         let d = enrolled_schema(&root.path().join("d"), &hub, "d", Some((&a, Profile::Custody { scopes: ["items".into()].into() })), &schema).await?;
-        let values = json!([{"type":"text","value":"only-custody"}]);
-        let created = command(&a, json!({"type":"partition_create","table":"items","values":values})).await?;
+        let target = crate::PartitionTarget::Table { table: "items".into(), values: vec![SqlValue::Text("only-custody".into())] };
+        let created = a.create_partition(&target).await?;
         let b_key = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
-        let shared = command(&a, json!({"type":"partition_share","table":"items","values":values,"recipients":[b_key]})).await?;
-        command(&b, json!({"type":"partition_install","table":"items","values":values,"envelope":shared["envelopes"][0]["envelope"],"sender":shared["sender"]})).await?;
-        // A keyless custodian cannot name the partition itself; an
-        // entitled device hands it the name.
-        assert!(command(&d, json!({"type":"partition_register","table":"items","values":values})).await.is_err());
-        command(&d, json!({"type":"partition_register","table":"items","values":values,"name":created["name"]})).await?;
-        command(&a, json!({"type":"sql","sql":"BEGIN"})).await?;
-        let id = command(&a, json!({"type":"next_id","table":"items","partition_values":values})).await?["id"].clone();
-        command(&a, json!({"type":"sql","sql":"INSERT INTO items(list,key,title,id) VALUES('only-custody','k','custody row',?)","values":[{"type":"integer","value":id}]})).await?;
-        command(&a, json!({"type":"sql","sql":"COMMIT"})).await?;
+        let shared = a.share_partition(&target, [b_key].into(), None).await?;
+        b.install_partition(&target, &rocky_credentials::GroupSecretEnvelope::from_bytes(&shared.envelopes[0].envelope)?, shared.sender.as_ref().ok_or("sender")?).await?;
+        assert!(d.register_partition(&target, &crate::PartitionSelection::default()).await.is_err());
+        let name = data_encoding::HEXLOWER.decode(created.name.as_bytes())?.try_into().map_err(|_| "partition name")?;
+        d.register_partition(&target, &crate::PartitionSelection { name: Some(name), omit: Default::default() }).await?;
+        snap::value(Box::pin(a.execute_sql(&*a.client(1)?, "BEGIN", Vec::new(), None))).await?;
+        let id = snap::value(Box::pin(a.next_id(&*a.client(1)?, "items", Some(vec![SqlValue::Text("only-custody".into())])))).await?["id"].clone();
+        snap::value(Box::pin(a.execute_sql(&*a.client(1)?, "INSERT INTO items(list,key,title,id) VALUES('only-custody','k','custody row',?)", vec![snap::row_id(&(id))], None))).await?;
+        snap::value(Box::pin(a.execute_sql(&*a.client(1)?, "COMMIT", Vec::new(), None))).await?;
         pass(&d).await?;
         a.detach(None).await;
         let d_key = contact(&b, &d).await?;
@@ -478,16 +481,11 @@ async fn a_needed_partition_reaches_its_keyless_custody_peer_within_two_passes()
         assert!(b.scopes().iter().filter(|scope| !b.domain().partitioned_table(scope)).all(|scope| held.contains(scope)));
         assert!(hub.dials_to("d") > 0);
         }
-        let page = command(&b, json!({"type":"read","query":{"sql":"SELECT title FROM items","max_rows":8}})).await?;
+        let page = snap::value(Box::pin(b.read(&*b.client(1)?, rocky_sdk::ReadQuery { sql: "SELECT title FROM items".to_owned(), values: Vec::new(), max_rows: 8, max_bytes: None, cursor: None }))).await?;
         assert_eq!(page["rows"][0][0]["value"], "custody row");
         for node in [&a, &b, &c, &d] { node.detach(None).await; }
         Ok(())
     }).await
-}
-
-async fn command(node: &Node, request: Value) -> Result<Value, Failure> {
-    let client = node.client(1)?;
-    Box::pin(node.dispatch(&client, &request)).await
 }
 
 #[tokio::test(start_paused = true)]

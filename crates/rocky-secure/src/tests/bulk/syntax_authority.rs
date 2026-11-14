@@ -54,6 +54,7 @@ async fn warm_issuer_syntax_still_requires_current_time_and_unrevoked_writer() {
             identities: Default::default(),
             capabilities: Default::default(),
             cut: Default::default(),
+            mode: rocky_credentials::RevocationMode::Lost,
             recovery: None,
         },
         l.publisher(),

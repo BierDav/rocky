@@ -1,5 +1,5 @@
 use super::*;
-use crate::{AuthorRange, Authority, PrivateKey, Revocation};
+use crate::{Authority, PrivateKey, Revocation};
 use rocky_core::{AppId, DomainId, MeshId};
 use std::cell::Cell;
 
@@ -23,12 +23,7 @@ fn chain(
 ) -> Vec<SignedBookmarkMove> {
     let credentials = CredentialChain(vec![
         Authority::owner(owner)
-            .issue_trusted(
-                signer.public_key(),
-                graph.scope,
-                AuthorRange::new(5, 5).unwrap(),
-                100,
-            )
+            .issue_trusted(signer.public_key(), graph.scope, 100)
             .unwrap(),
     ]);
     let node = crate::testing::signer(signer, &credentials);
@@ -82,6 +77,7 @@ fn pruning_judges_only_the_lanes_a_cut_names_and_what_arrived_since() {
             }],
             acknowledgments: None,
         }],
+        mode: crate::RevocationMode::Lost,
         recovery: None,
     };
     let revocations =
@@ -125,23 +121,17 @@ fn a_trusted_identity_keeps_both_lanes_through_unlink_and_root_cuts() {
     let nodes = [PrivateKey::new(), PrivateKey::new()];
     let grant = CredentialChain(vec![
         Authority::owner(&root)
-            .issue_trusted(
-                identity.public_key(),
-                scope,
-                AuthorRange::new(10, 41).unwrap(),
-                100,
-            )
+            .issue_trusted(identity.public_key(), scope, 100)
             .unwrap(),
     ]);
     let first = grant
         .clone()
-        .certify(&identity, nodes[0].public_key(), 10)
+        .certify(&identity, nodes[0].public_key())
         .unwrap();
     let second = grant
         .certify_member(
             &identity,
             nodes[1].public_key(),
-            11,
             1,
             Some(first.certificate().unwrap().id().unwrap()),
         )
@@ -182,6 +172,7 @@ fn a_trusted_identity_keeps_both_lanes_through_unlink_and_root_cuts() {
                 .heads(&identity.public_key(), &nodes[0].public_key())
                 .unwrap(),
         ],
+        mode: crate::RevocationMode::Lost,
         recovery: None,
     };
     let unlink =
@@ -240,6 +231,7 @@ fn a_trusted_identity_keeps_both_lanes_through_unlink_and_root_cuts() {
             identities: [identity.public_key()].into(),
             capabilities: Default::default(),
             cut: root_cut,
+            mode: crate::RevocationMode::Lost,
             recovery: None,
         })
         .unwrap();
@@ -265,6 +257,7 @@ fn a_trusted_identity_keeps_both_lanes_through_unlink_and_root_cuts() {
                     .heads(&identity.public_key(), &nodes[1].public_key())
                     .unwrap(),
             ],
+            mode: crate::RevocationMode::Lost,
             recovery: None,
         },
         &identity,
@@ -307,15 +300,10 @@ fn implicit_empty_unlink_cut_matches_an_explicit_empty_lane() {
     let sibling = PrivateKey::new();
     let chain = CredentialChain(vec![
         Authority::owner(&root)
-            .issue_trusted(
-                identity.public_key(),
-                scope,
-                AuthorRange::new(10, 41).unwrap(),
-                100,
-            )
+            .issue_trusted(identity.public_key(), scope, 100)
             .unwrap(),
     ])
-    .certify(&identity, node.public_key(), 10)
+    .certify(&identity, node.public_key())
     .unwrap();
     let graph = TipGraph::new(scope, [4; 32]);
     let statement = Revocation {
@@ -326,6 +314,7 @@ fn implicit_empty_unlink_cut_matches_an_explicit_empty_lane() {
         identities: Default::default(),
         capabilities: Default::default(),
         cut: vec![],
+        mode: crate::RevocationMode::Lost,
         recovery: None,
     };
     let implicit = crate::SignedRevocation::sign(statement.clone(), &identity, &chain).unwrap();
@@ -379,7 +368,7 @@ fn seal_and_finality_lookups_use_the_index() {
             scope,
             tip: graph.genesis(),
             frontier: vec![crate::AuthorMark {
-                author: 1,
+                author: rocky_core::WriterId::from_bytes([1; 32]),
                 sequence,
             }],
             action: SealAction::Continue {

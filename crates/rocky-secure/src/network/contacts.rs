@@ -238,8 +238,12 @@ mod tests {
                         fields: rocky_core::FieldSelection::Only(Default::default()),
                     }],
                     vec![],
-                    (1, Some(rocky_credentials::AuthorRange::ALL)),
-                    (now().unwrap(), 3600, 5),
+                    rocky_credentials::DelegationTerms { delegations: 1 },
+                    rocky_credentials::Validity {
+                        issued_at: now().unwrap(),
+                        lifetime: std::time::Duration::from_secs(3600),
+                        clock_skew: std::time::Duration::from_secs(5),
+                    },
                 )
                 .unwrap();
             SecureConfig {
@@ -248,7 +252,7 @@ mod tests {
                 revocations: fixture.revocations.clone(),
                 node: node.clone(),
                 credentials: CredentialChain(vec![root])
-                    .complete(&user, node.public_key(), 1)
+                    .complete(&user, node.public_key())
                     .unwrap(),
                 keys: vec![],
             }

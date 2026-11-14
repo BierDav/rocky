@@ -1,5 +1,5 @@
 #!/bin/sh
-# Formatting and static lint checks that need no build; see docs/linting.md.
+# Formatting and static lint checks that need no build.
 # Each language or file kind is a module in scripts/lint.d.
 #
 #   scripts/lint [MODULE...]         check every module, or the named ones

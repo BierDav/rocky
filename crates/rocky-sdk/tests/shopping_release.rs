@@ -4,6 +4,8 @@
 //! nulls only its reference, and a moved item keeps an offline tick. See `docs/runtime/shopping-qualification.md`.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
+#[path = "support/snapshot.rs"]
+mod snap;
 use rocky_sdk::{Database, Network, Open, Session, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
@@ -11,12 +13,12 @@ use std::{path::Path, sync::Arc};
 const SCHEMA: &str = r#"{"format":6,"application":"shopping","version":3,"tables":[
  {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
- {"name":"categories","class":"replayed","columns":[{"name":"list","type":"integer","not_null":true},{"name":"name","type":"text","not_null":true}],
+ {"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"name","type":"text","not_null":true}],
   "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
   "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"}]},
  {"name":"items","class":"replayed","columns":[
-   {"name":"list","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true},
-   {"name":"completed","type":"integer","not_null":true},{"name":"category","type":"integer"}],
+   {"name":"list","type":"blob","not_null":true},{"name":"title","type":"text","not_null":true},
+   {"name":"completed","type":"integer","not_null":true},{"name":"category","type":"blob"}],
   "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
   "indexes":[{"name":"index_items_list_title","unique":true,"columns":[{"name":"list","descending":false},{"name":"title","descending":false}]}],
   "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"},
@@ -29,48 +31,42 @@ type Failure = Box<dyn std::error::Error + Send + Sync>;
 struct Peer {
     database: Arc<Database>,
     session: Session,
-    scope: Value,
 }
 impl Peer {
     fn new(database: Arc<Database>) -> Result<Self, Failure> {
         Ok(Self {
             session: database.session(),
-            scope: serde_json::from_str(&database.scope())?,
+
             database,
         })
     }
-    async fn call(&self, request: Value) -> Result<Value, Failure> {
-        let reply: Value = serde_json::from_str(
-            &self
-                .session
-                .call(json!({"version":1,"scope":self.scope,"request":request}).to_string())
-                .await?,
-        )?;
-        if reply["status"] == "ok" {
-            Ok(reply["value"].clone())
-        } else {
-            Err(format!("{request}: {}", reply["error"]).into())
-        }
-    }
+
     async fn invite(&self, profile: Value) -> Result<String, Failure> {
-        Ok(self
-            .call(json!({"type": "invitation","profile":profile}))
-            .await?["uri"]
+        Ok(snap::value(
+            self.session.invite(
+                Some(
+                    serde_json::from_value::<rocky_sdk::GrantProfile>(json!(profile))
+                        .expect("typed fixture"),
+                ),
+                None,
+            ),
+        )
+        .await?["uri"]
             .as_str()
             .ok_or("uri")?
             .to_owned())
     }
 
     async fn node(&self) -> Result<Value, Failure> {
-        Ok(self.call(json!({"type":"session"})).await?["node"].clone())
+        Ok(snap::value(self.session.info()).await?["node"].clone())
     }
     async fn online(&self, online: bool) -> Result<(), Failure> {
-        self.call(json!({"type":"networking_control","enabled":online}))
+        snap::value(self.session.set_networking_enabled(online))
             .await
             .map(drop)
     }
     async fn sync(&self) -> Result<(), Failure> {
-        let status = self.call(json!({"type":"sync"})).await?;
+        let status = snap::value(self.session.sync_once()).await?;
         if !status["peers"].as_array().is_some_and(|peers| {
             peers.iter().any(|peer| {
                 peer["attempts"].as_array().is_some_and(|attempts| {
@@ -86,20 +82,22 @@ impl Peer {
     }
     /// Inserts one row in one transaction; `?` is the next own id.
     async fn insert(&self, table: &str, list: Option<&str>, sql: &str) -> Result<String, Failure> {
-        self.call(json!({"type":"sql","sql":"BEGIN"})).await?;
-        let mut next = json!({"type":"next_id","table":table});
-        if let Some(list) = list {
-            next["partition_values"] = values(list);
+        snap::value(self.session.execute("BEGIN", Vec::new())).await?;
+        let id = match list {
+            Some(list) => self.session.next_partition_id(table, values(list)).await?,
+            None => self.session.next_id(table).await?,
         }
-        let id = self.call(next).await?["id"].clone();
-        self.call(json!({"type":"sql","sql":sql,"values":[{"type":"integer","value":id}]}))
-            .await?;
-        self.call(json!({"type":"sql","sql":"COMMIT"})).await?;
-        Ok(id.as_str().ok_or("id")?.to_owned())
+        .to_string();
+        snap::value(
+            self.session
+                .execute(&(snap::text(&(sql))), vec![snap::row_id(&(id))]),
+        )
+        .await?;
+        snap::value(self.session.execute("COMMIT", Vec::new())).await?;
+        Ok(id)
     }
     async fn create_list(&self, title: &str) -> Result<String, Failure> {
-        self.call(json!({"type":"partition_next","table":"lists"}))
-            .await?;
+        snap::value(self.session.next_partition("lists")).await?;
         self.insert(
             "lists",
             None,
@@ -113,12 +111,12 @@ impl Peer {
         title: &str,
         category: Option<&str>,
     ) -> Result<String, Failure> {
-        let category = category.unwrap_or("NULL");
+        let category = category.map_or("NULL".to_owned(), |id| format!("X'{id}'"));
         self.insert(
             "items",
             Some(list),
             &format!(
-                "INSERT INTO items(id,list,title,completed,category) VALUES(?,{list},'{title}',0,{category})"
+                "INSERT INTO items(id,list,title,completed,category) VALUES(?,X'{list}','{title}',0,{category})"
             ),
         )
         .await
@@ -126,32 +124,43 @@ impl Peer {
     /// Moves item `id` to list `to` in one transaction: a new row there
     /// with the values read here, and the old one deleted.
     async fn move_item(&self, from: &str, id: &str, to: &str) -> Result<String, Failure> {
-        self.call(json!({"type":"sql","sql":"BEGIN"})).await?;
-        let moved = self
-            .call(json!({"type":"next_id","table":"items","partition_values":values(to)}))
-            .await?["id"]
+        snap::value(self.session.execute("BEGIN", Vec::new())).await?;
+        let moved = snap::value(
+            self.session
+                .next_partition_id("items", (values(to)).clone()),
+        )
+        .await?["id"]
             .clone();
-        self.call(json!({"type":"sql","sql":format!("INSERT INTO items(id,list,title,completed) SELECT ?,{to},title,completed FROM items WHERE list={from} AND id={id}"),"values":[{"type":"integer","value":moved}]}))
+        snap::value(self.session.execute(&(snap::text(&(format!("INSERT INTO items(id,list,title,completed) SELECT ?,X'{to}',title,completed FROM items WHERE list=X'{from}' AND id=X'{id}'")))), vec![snap::row_id(&(moved))]))
             .await?;
-        self.execute(&format!("DELETE FROM items WHERE list={from} AND id={id}"))
-            .await?;
-        self.call(json!({"type":"sql","sql":"COMMIT"})).await?;
+        self.execute(&format!(
+            "DELETE FROM items WHERE list=X'{from}' AND id=X'{id}'"
+        ))
+        .await?;
+        snap::value(self.session.execute("COMMIT", Vec::new())).await?;
         Ok(moved.as_str().ok_or("id")?.to_owned())
     }
     async fn execute(&self, sql: &str) -> Result<(), Failure> {
-        self.call(json!({"type":"sql","sql":sql})).await.map(drop)
+        snap::value(self.session.execute(&(snap::text(&(sql))), Vec::new()))
+            .await
+            .map(drop)
     }
     async fn rows(&self, sql: &str) -> Result<Vec<Vec<Value>>, Failure> {
-        let page = self
-            .call(json!({"type":"read","query":{"sql":sql,"values":[],"max_rows":256}}))
-            .await?;
+        let page = snap::value(self.session.read(rocky_sdk::ReadQuery {
+            sql: snap::text(&(sql)),
+            values: vec![],
+            max_rows: 256,
+            max_bytes: None,
+            cursor: None,
+        }))
+        .await?;
         Ok(page["rows"]
             .as_array()
             .ok_or("rows")?
             .iter()
             .map(|row| {
                 row.as_array()
-                    .map(|cells| cells.iter().map(|cell| cell["value"].clone()).collect())
+                    .map(|cells| cells.iter().map(snap::cell_value).collect())
                     .unwrap_or_default()
             })
             .collect())
@@ -163,13 +172,25 @@ impl Peer {
     }
     /// Saves `list`'s envelope for `reader`; a later sync delivers it.
     async fn share(&self, list: &str, reader: &Peer) -> Result<(), Failure> {
-        self.call(json!({"type":"partition_share","group":"list","values":values(list),"recipients":[reader.node().await?]}))
-            .await
-            .map(drop)
+        snap::value(
+            self.session.share_partition(
+                rocky_sdk::PartitionTarget::Group {
+                    group: "list".to_owned(),
+                    values: (values(list)).clone(),
+                },
+                serde_json::from_value::<
+                    std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>,
+                >(json!([reader.node().await?]))
+                .expect("typed fixture"),
+                None,
+            ),
+        )
+        .await
+        .map(drop)
     }
 }
-fn values(list: &str) -> Value {
-    json!([{"type":"integer","value":list}])
+fn values(list: &str) -> Vec<rocky_sdk::SqlValue> {
+    vec![snap::row_id(&(list))]
 }
 fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
@@ -182,10 +203,18 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     }
 }
 async fn introduce(left: &Peer, right: &Peer) -> Result<(), Failure> {
-    let l = left.call(json!({"type":"contact"})).await?["uri"].clone();
-    let r = right.call(json!({"type":"contact"})).await?["uri"].clone();
-    left.call(json!({"type":"peer_add","contact":r})).await?;
-    right.call(json!({"type":"peer_add","contact":l})).await?;
+    let l = snap::value(left.session.contact_info()).await?["uri"].clone();
+    let r = snap::value(right.session.contact_info()).await?["uri"].clone();
+    snap::value(async {
+        let value = left.session.add_peer(&(snap::text(&(r)))).await?;
+        Ok(json!({"node":value}))
+    })
+    .await?;
+    snap::value(async {
+        let value = right.session.add_peer(&(snap::text(&(l)))).await?;
+        Ok(json!({"node":value}))
+    })
+    .await?;
     Ok(())
 }
 
@@ -251,7 +280,7 @@ async fn two_phones_never_online_together_pass_the_release_gate_through_custody(
         .insert(
             "categories",
             Some(&weekly),
-            &format!("INSERT INTO categories(id,list,name) VALUES(?,{weekly},'Dairy')"),
+            &format!("INSERT INTO categories(id,list,name) VALUES(?,X'{weekly}','Dairy')"),
         )
         .await?;
     let milk = a.add(&weekly, "Milk", Some(&dairy)).await?;
@@ -276,7 +305,7 @@ async fn two_phones_never_online_together_pass_the_release_gate_through_custody(
     // Offline from each other: B ticks Milk and adds Bread; A adds Bread too
     // and moves Milk to the weekend without having seen the tick.
     b.execute(&format!(
-        "UPDATE items SET completed = 1 WHERE list = {weekly} AND id = {milk}"
+        "UPDATE items SET completed = 1 WHERE list = X'{weekly}' AND id = X'{milk}'"
     ))
     .await?;
     b.add(&weekly, "Bread", None).await?;
@@ -299,10 +328,10 @@ async fn two_phones_never_online_together_pass_the_release_gate_through_custody(
     // Deleting the category nulls only the reference; deleting a list cascades.
     a.online(true).await?;
     a.execute(&format!(
-        "DELETE FROM categories WHERE list = {weekly} AND id = {dairy}"
+        "DELETE FROM categories WHERE list = X'{weekly}' AND id = X'{dairy}'"
     ))
     .await?;
-    a.execute(&format!("DELETE FROM lists WHERE id = {party}"))
+    a.execute(&format!("DELETE FROM lists WHERE id = X'{party}'"))
         .await?;
     relay(a, b).await?;
     let deleted = vec![

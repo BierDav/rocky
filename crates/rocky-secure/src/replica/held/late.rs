@@ -178,10 +178,7 @@ impl<A: RowApplication> Inner<A> {
                     .row_identity(&write.change)
                     .map_err(|error| denied(&error))?
                 {
-                    Some(id) => rocky_core::commitment(
-                        "rocky.row-incarnation.v2",
-                        &id.integer().to_le_bytes(),
-                    ),
+                    Some(id) => super::identity::incarnation(id),
                     None => write.change.row,
                 };
                 stored.rows.push(stored_row(write, row, &names));
@@ -472,7 +469,7 @@ impl<A: RowApplication> Inner<A> {
             let [
                 SqlValue::Blob(encoded_scope),
                 SqlValue::Blob(tip),
-                SqlValue::Integer(author),
+                SqlValue::Blob(author),
                 SqlValue::Integer(sequence),
             ] = &record[1..5]
             else {
@@ -485,7 +482,7 @@ impl<A: RowApplication> Inner<A> {
                         .try_into()
                         .map_err(|_| Error::Corrupt("closed source tip".into()))?,
                 );
-                let author = u32::try_from(*author)
+                let author = rocky_core::WriterId::from_slice(author)
                     .map_err(|_| Error::Corrupt("closed source author".into()))?;
                 let sequence = u64::try_from(*sequence)
                     .map_err(|_| Error::Corrupt("closed source sequence".into()))?;
@@ -601,8 +598,8 @@ impl<A: RowApplication> Inner<A> {
                     continue;
                 }
                 let author = extension
-                    .author
-                    .ok_or_else(|| denied("node author number missing"))?;
+                    .author(&operation.header.public_key)
+                    .ok_or_else(|| denied("node author missing"))?;
                 let path = match paths.entry(extension.tip) {
                     std::collections::btree_map::Entry::Occupied(path) => path.into_mut(),
                     std::collections::btree_map::Entry::Vacant(entry) => {

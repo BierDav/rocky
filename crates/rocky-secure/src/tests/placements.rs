@@ -491,7 +491,7 @@ async fn a_frame_at_a_placed_position_replaces_it_and_another_header_is_equivoca
         }
     };
     let header: p2panda_core::Header<crate::wire::Extensions> = decode(&placed).unwrap();
-    let author = header.extensions.author.unwrap();
+    let author = header.extensions.author(&header.public_key).unwrap();
     let next = {
         let inner = bob.1.inner.lock(crate::replica::Class::Background).await;
         let mut highest = 0;
@@ -515,7 +515,7 @@ async fn a_frame_at_a_placed_position_replaces_it_and_another_header_is_equivoca
                 "INSERT INTO secure_placements VALUES(?,?,?,?,?,?)",
                 crate::storage::bindings(vec![
                     rocky_core::SqlValue::Blob(encode(&lineage.domain).unwrap()),
-                    rocky_core::SqlValue::Integer(i64::from(author)),
+                    crate::writer::writer_value(author),
                     rocky_core::SqlValue::Integer(next as i64),
                     rocky_core::SqlValue::Blob(encode(&header.extensions.scope).unwrap()),
                     rocky_core::SqlValue::Blob(header.hash().as_bytes().to_vec()),
@@ -576,23 +576,6 @@ async fn sync_scope(
         }
     }
     let _ = lineage;
-}
-/// The author number `node` signs its frames held by `replica` with.
-async fn author_number(replica: &Replica, node: PublicKey) -> u32 {
-    let inner = replica.inner.lock(crate::replica::Class::Background).await;
-    let records = crate::storage::rows(&inner.conn, "SELECT header FROM secure_operations")
-        .await
-        .unwrap();
-    records
-        .iter()
-        .find_map(|record| {
-            let [rocky_core::SqlValue::Blob(bytes)] = record.as_slice() else {
-                return None;
-            };
-            let header: p2panda_core::Header<crate::wire::Extensions> = decode(bytes).ok()?;
-            (header.public_key == node).then_some(header.extensions.author?)
-        })
-        .expect("a frame of the node")
 }
 /// Revokes the identity behind a node `lineage.open` enrolled.
 fn revoking_node(lineage: &Lineage, node: PublicKey) -> RevocationSet {
@@ -686,8 +669,8 @@ async fn a_relay_omits_a_revoked_authors_placements_and_still_places_others() {
         .public_key();
     let requests = bob.wanted_placements().await.unwrap();
     let (alice_author, relay_author) = (
-        author_number(&alice, alice_node).await,
-        author_number(&relay, relay_node).await,
+        crate::writer::writer(&alice_node),
+        crate::writer::writer(&relay_node),
     );
     let alice_request = *requests
         .iter()

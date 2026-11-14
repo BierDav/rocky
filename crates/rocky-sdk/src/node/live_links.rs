@@ -20,8 +20,6 @@ struct ChangeHint {
 }
 struct Entry {
     opened_at: u64,
-    /// The transport's live path measurements, when it reports them.
-    paths: Option<Arc<dyn crate::transport::PathSource>>,
     id: u64,
     dialed: bool,
     persistent: bool,
@@ -275,35 +273,37 @@ impl Registry {
         );
         nodes
     }
-    pub fn status(&self, peer: PublicKey) -> Value {
+    pub fn status(&self, peer: PublicKey) -> crate::PeerLink {
         let source = {
             let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
             entries.get(&peer).map(|entry| {
                 (
                     entry.opened_at,
-                    entry.paths.clone(),
                     entry.close.borrow().is_some()
                         || entry.handle.is_closed()
                         || entry.authority.has_changed().unwrap_or(true),
                 )
             })
         };
-        if let Some((opened, source, closing)) = source {
-            // Measured now, outside the registry lock.
-            let paths = source.map(|source| source.paths()).unwrap_or_default();
-            let round_trip = paths
-                .iter()
-                .find(|path| path.selected)
-                .map(|path| path.rtt.as_millis().to_string());
-            return json!({
-                "state": if closing { "closing" } else { "open" },
-                "opened": opened.to_string(),
-                "round_trip_ms": round_trip,
-                "paths": paths.iter().map(path_json).collect::<Vec<_>>(),
-            });
+        if let Some((opened, closing)) = source {
+            return crate::PeerLink {
+                state: if closing {
+                    crate::LinkState::Closing
+                } else {
+                    crate::LinkState::Open
+                },
+                opened_at_epoch_seconds: Some(opened),
+            };
         }
         let opening = self.opening.lock().unwrap_or_else(PoisonError::into_inner);
-        json!({"state": if opening.contains_key(&peer) { "opening" } else { "closed" }, "opened": null, "round_trip_ms": null, "paths": []})
+        crate::PeerLink {
+            state: if opening.contains_key(&peer) {
+                crate::LinkState::Opening
+            } else {
+                crate::LinkState::Closed
+            },
+            opened_at_epoch_seconds: None,
+        }
     }
 
     pub async fn wait_inbound_short(&self, peer: PublicKey) -> Result<(), Failure> {
@@ -500,10 +500,11 @@ impl Node {
         };
         loop {
             if let Err(error) = self.signal_link(service, peer, id).await {
-                self.activity.record_changed(
-                    "link_signal_failed",
-                    json!({"peer":peer.to_hex(),"error":error.to_string()}),
-                );
+                self.activity
+                    .record_changed(crate::ActivityKind::LinkSignalFailed {
+                        peer: (peer).to_owned(),
+                        error: (error.to_string()).to_owned(),
+                    });
             }
             if !claim.rerun() {
                 return;
@@ -543,12 +544,13 @@ impl Node {
                         crate::AttemptStage::Dial,
                     );
                     let result = async {
-                        let stream = crate::enrollment::dial(
-                            &*service.transport,
-                            &contact.addresses(service.transport.kind()),
-                            Protocol::Link,
-                        )
-                        .await?;
+                        let stream = service
+                            .transport
+                            .session(
+                                &contact.addresses(service.transport.kind()),
+                                node.domain().scope,
+                            )
+                            .await?;
                         attempt.stage(crate::AttemptStage::Admission);
                         node.admit_link(service.clone(), stream, Some(peer), settings, None)
                             .await
@@ -573,10 +575,11 @@ impl Node {
                             node.wake_sync();
                         }
                         // Reconciliation retries the link; only busy refusal permits native sync.
-                        node.activity.record_changed(
-                            "link_attempt_failed",
-                            json!({"peer":peer.to_hex(),"error":error.to_string()}),
-                        );
+                        node.activity
+                            .record_changed(crate::ActivityKind::LinkAttemptFailed {
+                                peer: (peer).to_owned(),
+                                error: (error.to_string()).to_owned(),
+                            });
                     }
                 }
             })
@@ -601,35 +604,18 @@ impl Node {
         let mut authority = self.replica.observe_authority().await;
         let local = PrivateKey::from_bytes(&self.vault.get("node")?);
         let own = local.public_key();
-        let paths = stream.paths();
         let lanes = stream.take_lanes();
-        let opened = match expected {
-            Some(_) => Box::pin(link::Link::open(
-                stream,
-                &self.replica,
-                local,
-                settings.credentials.clone(),
-                expected,
-            ))
-            .await
-            .map(Some),
-            // An inbound stream may only resolve a pinned contact reference.
-            None => {
-                Box::pin(link::Link::accept_or_resolve(
-                    stream,
-                    &self.replica,
-                    local,
-                    settings.credentials.clone(),
-                ))
-                .await
-            }
-        };
+        let opened = Box::pin(link::Link::open(
+            stream,
+            &self.replica,
+            local,
+            settings.credentials.clone(),
+            expected,
+        ))
+        .await;
         let mut opened = match opened {
             Err(_) if expected.is_some_and(|peer| service.live.contains(peer)) => return Ok(()),
-            other => match other? {
-                Some(opened) => opened,
-                None => return Ok(()),
-            },
+            other => other?,
         };
         opened.attach_lanes(lanes)?;
         self.observe_peer_clock(opened.peer, opened.clock_offset);
@@ -750,7 +736,6 @@ impl Node {
                     peer,
                     Entry {
                         opened_at: now()?,
-                        paths: paths.clone(),
                         id,
                         dialed,
                         persistent,
@@ -769,10 +754,11 @@ impl Node {
                     },
                 ) {
                     old.close.send_replace(Some(CloseReason::Duplicate));
-                    self.activity.record(
-                        "link_closed",
-                        json!({"peer":peer.to_hex(),"reason":"duplicate","error":null}),
-                    );
+                    self.activity.record(crate::ActivityKind::LinkClosed {
+                        peer: (peer).to_owned(),
+                        reason: ("duplicate").to_owned(),
+                        error: None,
+                    });
                 }
                 true
             }
@@ -822,10 +808,10 @@ impl Node {
             last.error = None;
         }
         service.live.events.send_replace(());
-        self.activity.record(
-            "link_opened",
-            json!({"peer":peer.to_hex(),"reason": if dialed { "dialed" } else { "accepted" }}),
-        );
+        self.activity.record(crate::ActivityKind::LinkOpened {
+            peer: (peer).to_owned(),
+            reason: (if dialed { "dialed" } else { "accepted" }).to_owned(),
+        });
         self.link_status_changed();
         let node = self.clone();
         // The stage watch owns cancellation even for outbound links.
@@ -853,7 +839,11 @@ impl Node {
             };
             if removed {
                 service.live.events.send_replace(());
-                node.activity.record("link_closed", json!({"peer":peer.to_hex(),"reason":result.as_ref().copied().unwrap_or("error"),"error":result.as_ref().err().map(ToString::to_string)}));
+                node.activity.record(crate::ActivityKind::LinkClosed {
+                    peer: (peer).to_owned(),
+                    reason: (result.as_ref().copied().unwrap_or("error")).to_owned(),
+                    error: result.as_ref().err().map(ToString::to_string),
+                });
                 node.link_status_changed();
                 if result.is_ok() && !persistent && !dialed && node.automatic.load(Ordering::SeqCst)
                 {
@@ -1121,26 +1111,6 @@ fn acknowledge(
         }
     }
     cursor.logs.sort_by_key(|l| l.author);
-}
-
-/// One measured path in link status; integers are decimal strings.
-fn path_json(path: &crate::transport::NetworkPath) -> Value {
-    json!({
-        "selected": path.selected,
-        "kind": path.kind,
-        "remote": path.remote,
-        "local": path.local,
-        "rtt_us": path.rtt.as_micros().to_string(),
-        "mtu": path.mtu.to_string(),
-        "window": path.window.to_string(),
-        "sent_bytes": path.sent_bytes.to_string(),
-        "sent_datagrams": path.sent_datagrams.to_string(),
-        "received_bytes": path.received_bytes.to_string(),
-        "received_datagrams": path.received_datagrams.to_string(),
-        "lost_packets": path.lost_packets.to_string(),
-        "lost_bytes": path.lost_bytes.to_string(),
-        "congestion_events": path.congestion_events.to_string(),
-    })
 }
 
 #[cfg(test)]

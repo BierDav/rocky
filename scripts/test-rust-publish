@@ -123,9 +123,15 @@ class PublishTest(unittest.TestCase):
     def run_main(self, dry_run, existing=()):
         packages = [
             {"name": "rocky-sdk", "publish": ["crates-io"], "dependencies": [
-                {"name": "rocky-core", "kind": None}]},
+                {"name": "rocky-core", "kind": None},
+                {"name": "rocky-coordinator", "kind": None},
+                {"name": "rocky-voter", "kind": "dev"}]},
             {"name": "rocky-core", "publish": ["crates-io"], "dependencies": [
                 {"name": "rocky-sdk", "kind": "dev"}]},
+            {"name": "rocky-coordinator", "publish": ["crates-io"], "dependencies": [
+                {"name": "rocky-core", "kind": None}]},
+            {"name": "rocky-voter", "publish": [], "dependencies": [
+                {"name": "rocky-coordinator", "kind": None}]},
         ]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -145,13 +151,13 @@ class PublishTest(unittest.TestCase):
 
     def test_live_publish_orders_dependencies_and_ignores_dev_cycles(self):
         published, cargo = self.run_main(False)
-        self.assertEqual(published, ["rocky-core", "rocky-sdk"])
+        self.assertEqual(published, ["rocky-core", "rocky-coordinator", "rocky-sdk"])
         cargo.assert_not_called()
 
     def test_resume_skips_previously_published_packages(self):
         published, _ = self.run_main(False, existing=("rocky-core",))
-        self.assertEqual(published, ["rocky-sdk"])
-        published, cargo = self.run_main(True, existing=("rocky-core", "rocky-sdk"))
+        self.assertEqual(published, ["rocky-coordinator", "rocky-sdk"])
+        published, cargo = self.run_main(True, existing=("rocky-core", "rocky-coordinator", "rocky-sdk"))
         self.assertEqual(published, [])
         cargo.assert_not_called()
 
@@ -164,8 +170,9 @@ class PublishTest(unittest.TestCase):
     def test_dry_run_still_verifies_all_pending_packages_without_pacing(self):
         published, cargo = self.run_main(True)
         self.assertEqual(published, [])
-        self.assertEqual(cargo.call_args.args[0][-5:],
-                         ["--dry-run", "--package", "rocky-core", "--package", "rocky-sdk"])
+        self.assertEqual(cargo.call_args.args[0][-7:],
+                         ["--dry-run", "--package", "rocky-core", "--package", "rocky-coordinator",
+                          "--package", "rocky-sdk"])
         self.assertEqual(self.sleeps, [])
 
 

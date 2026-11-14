@@ -107,7 +107,9 @@ mod permissions;
 pub use permissions::*;
 
 mod row_identity;
-pub use row_identity::{RowIdentity, RowIdentityError};
+pub use row_identity::{
+    MAX_ROW_SEQUENCE, ROW_IDENTITY_BYTES, RowIdentity, RowIdentityError, WriterId,
+};
 
 mod typed_rows;
 pub use typed_rows::{TypedRows, TypedTable, default_value};

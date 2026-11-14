@@ -1,24 +1,15 @@
-//! The coordination service's client-facing types and its client, on every
-//! target. The voter (Raft, its file store and sockets) is native only.
+//! Client operations, replies and voter status.
 pub use crate::client::{NetworkCoordinator, Observer};
 pub use crate::machine::Usage;
 pub use crate::machine::{Operation, Outcome, Registration};
 use rocky_core::CoordinationError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-#[cfg(not(target_family = "wasm"))]
-pub use voter::{Backup, Fence, VoterService, backup, restore};
-
-#[cfg(not(target_family = "wasm"))]
-mod voter;
-
-/// How old committed authority time may be for a read to skip the log.
-pub const READ_STALENESS: u64 = 30;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct Reply {
-    pub(crate) leader: Option<u64>,
-    pub(crate) result: Result<Outcome, CoordinationError>,
+pub struct Reply {
+    pub leader: Option<u64>,
+    pub result: Result<Outcome, CoordinationError>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Status {

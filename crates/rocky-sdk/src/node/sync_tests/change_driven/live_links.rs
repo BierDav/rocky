@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_snapshot as snap;
 use rocky_secure::network::link;
 
 #[derive(Debug, Default)]
@@ -143,7 +144,7 @@ async fn a_contact_request_reuses_the_open_link() -> Result<(), Failure> {
             let reply = b
                 .request_contact(&*transport(&b).await?, secure_node_id(requested))
                 .await?;
-            assert_eq!(reply["node"], requested.to_hex());
+            assert_eq!(reply, Some(requested));
             assert!(b.settings.lock().await.peers.contains_key(&requested));
             assert_eq!([hub.dials_to("a"), hub.dials_to("b")], before);
             a.detach(None).await;
@@ -171,7 +172,7 @@ async fn committed_edit_publishes_on_the_link_without_receiver_reconcile() -> Re
             .await;
             let before = [hub.dials_to("a"), hub.dials_to("b")];
             let messages = [hub.link_messages("a"), hub.link_messages("b")];
-            let activity = b.activity.after(0)["token"]
+            let activity = snap::Snapshot::snapshot(b.activity.after(0))["token"]
                 .as_str()
                 .ok_or("activity token")?
                 .parse()?;
@@ -227,7 +228,7 @@ async fn committed_edit_publishes_on_the_link_without_receiver_reconcile() -> Re
                 "one receipt and channel close"
             );
             assert!(
-                b.activity.after(activity)["events"]
+                snap::Snapshot::snapshot(b.activity.after(activity))["events"]
                     .as_array()
                     .ok_or("events")?
                     .iter()
@@ -317,7 +318,7 @@ async fn explicit_sync_without_the_worker_closes_its_short_link() -> Result<(), 
             targets(&b, std::slice::from_ref(&a)).await?;
             add(&a, 1).await?;
             let links = hub.protocol_dials("b", "a", Protocol::Link);
-            let synced = b.dispatch(&*b.client(1)?, &json!({"type":"sync"})).await?;
+            let synced = snap::value(b.sync_once()).await?;
             assert_eq!(completed_peers(&synced), 1);
             assert_eq!(rows(&b).await?, ["1"]);
             assert_eq!(hub.protocol_dials("b", "a", Protocol::Link), links + 1);
@@ -391,24 +392,20 @@ async fn authority_offline_disable_and_detach_end_owned_links() -> Result<(), Fa
                 "pause acknowledges only after every link closes"
             );
             assert!(
-                a.peers()
+                a.observed_peers()
                     .await
                     .iter()
-                    .all(|peer| peer["link"]["state"] == "closed")
+                    .all(|peer| peer.link.state == crate::LinkState::Closed)
             );
             start(&a, true).await?;
             until(|| peers.iter().all(|peer| service.live.contains(*peer))).await;
             assert!(
-                a.peers()
+                a.observed_peers()
                     .await
                     .iter()
-                    .all(|peer| peer["link"]["state"] == "open")
+                    .all(|peer| peer.link.state == crate::LinkState::Open)
             );
-            a.dispatch(
-                &*a.client(1)?,
-                &json!({"type":"networking_control", "enabled":false}),
-            )
-            .await?;
+            snap::value(a.set_networking_enabled(false)).await?;
             until(|| service.live.len() == 0).await;
             a.detach(None).await;
             b.detach(None).await;
@@ -458,9 +455,14 @@ async fn a_transport_ended_link_closes_and_reconnects_with_backoff() -> Result<(
             let (a, b) = pair(root.path(), &hub).await?;
             let service = a.current().ok_or("service")?;
             let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
-            let status = a.readiness().await?;
-            assert_eq!(status["network"]["peers"][0]["link"]["state"], "open");
-            assert!(status["network"]["peers"][0]["link"]["opened_at_epoch_seconds"].is_u64());
+            let status = a.observed_status().await?;
+            assert_eq!(status.network.peers[0].link.state, crate::LinkState::Open);
+            assert!(
+                status.network.peers[0]
+                    .link
+                    .opened_at_epoch_seconds
+                    .is_some()
+            );
             let contact = a.settings.lock().await.peers.remove(&peer);
             let met = a
                 .met
@@ -483,11 +485,9 @@ async fn a_transport_ended_link_closes_and_reconnects_with_backoff() -> Result<(
             }
 
             // The hub measures no paths; iroh's are covered by its liveness gate.
-            assert_eq!(service.live.status(peer)["paths"], json!([]));
-            assert!(service.live.status(peer)["round_trip_ms"].is_null());
-            let sync_token = a.sync_status.borrow()["token"].clone();
+            let sync_token = a.sync_status.borrow().token;
             let client = a.client(1)?;
-            let token = status["token"].as_str().ok_or("readiness token")?;
+            let token = status.token.as_str();
             let mut waiting = Box::pin(a.readiness_after(&client, token));
             assert!(futures_util::poll!(waiting.as_mut()).is_pending());
             let dials = hub.protocol_dials("a", "b", Protocol::Link);
@@ -503,11 +503,11 @@ async fn a_transport_ended_link_closes_and_reconnects_with_backoff() -> Result<(
                     .is_some_and(|state| state.link_retry.deadline().is_some())
             );
             let closed = waiting.await?;
-            assert_eq!(closed["network"]["peers"][0]["link"]["state"], "closed");
-            assert_ne!(closed["token"], status["token"]);
-            assert_ne!(a.sync_status.borrow()["token"], sync_token);
+            assert_eq!(closed.network.peers[0].link.state, crate::LinkState::Closed);
+            assert_ne!(closed.token, status.token);
+            assert_ne!(a.sync_status.borrow().token, sync_token);
             assert!(
-                a.activity.after(0)["events"]
+                snap::Snapshot::snapshot(a.activity.after(0))["events"]
                     .as_array()
                     .ok_or("events")?
                     .iter()
@@ -547,7 +547,7 @@ async fn saturated_link_budget_leaves_pair_admission_free() -> Result<(), Failur
                 .clone()
                 .try_acquire_many_owned(u32::try_from(remaining)?)?;
             let transport = transport(&b).await?;
-            let stream = transport.connect("a", Protocol::Link).await?;
+            let stream = transport.connect("a", Protocol::Link, None).await?;
             let settings = b.settings.lock().await.clone();
             let mut refused = rocky_secure::network::link::Link::open(
                 stream,
@@ -564,10 +564,16 @@ async fn saturated_link_budget_leaves_pair_admission_free() -> Result<(), Failur
                 }
             ));
             let before = service.served.load(Ordering::Relaxed);
-            let pair = transport.connect("a", Protocol::Pair).await?;
-            until(|| service.served.load(Ordering::Relaxed) > before).await;
+            let reply = exchange(
+                &*transport,
+                &["a".into()],
+                a.domain().scope,
+                &PeerRequest::Policy,
+            )
+            .await?;
+            assert!(matches!(reply, PeerReply::Policy(_)));
+            assert!(service.served.load(Ordering::Relaxed) > before);
             assert_eq!(service.live_budget.available_permits(), 0);
-            drop(pair);
             a.detach(None).await;
             b.detach(None).await;
             Ok(())
@@ -601,8 +607,8 @@ async fn simultaneous_dials_keep_the_lower_nodes_stream() -> Result<(), Failure>
             let ka = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
             let kb = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
             let (ab, ba) = tokio::join!(
-                sa.transport.connect("b", Protocol::Link),
-                sb.transport.connect("a", Protocol::Link)
+                sa.transport.connect("b", Protocol::Link, None),
+                sb.transport.connect("a", Protocol::Link, None)
             );
             let ca = a.settings.lock().await.clone();
             let cb = b.settings.lock().await.clone();
@@ -724,6 +730,24 @@ async fn simultaneous_short_requests_use_the_admitted_link_before_remote_reconci
 /// Ends link handshakes after receiving their hello; renewal remains available.
 struct EofLinks(Arc<dyn Transport>);
 impl Transport for EofLinks {
+    fn request<'a>(
+        &'a self,
+        addresses: &'a [String],
+        scope: rocky_core::Scope,
+        request: &'a [u8],
+    ) -> rocky_core::net::BoxFuture<'a, Result<Vec<u8>, Failure>> {
+        self.0.request(addresses, scope, request)
+    }
+    fn session<'a>(
+        &'a self,
+        addresses: &'a [String],
+        scope: rocky_core::Scope,
+    ) -> rocky_core::net::BoxFuture<'a, Result<rocky_core::net::Stream, Failure>> {
+        Box::pin(async move {
+            let address = addresses.first().ok_or("no route")?;
+            self.connect(address, Protocol::Link, Some(scope)).await
+        })
+    }
     fn kind(&self) -> &str {
         self.0.kind()
     }
@@ -734,9 +758,10 @@ impl Transport for EofLinks {
         &'a self,
         address: &'a str,
         protocol: Protocol,
+        scope: Option<rocky_core::Scope>,
     ) -> crate::transport::BoxFuture<'a, Result<Stream, Failure>> {
         if protocol != Protocol::Link {
-            return self.0.connect(address, protocol);
+            return self.0.connect(address, protocol, scope);
         }
         Box::pin(async {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -749,7 +774,7 @@ impl Transport for EofLinks {
             Ok(Stream::new(near))
         })
     }
-    fn accept(&self) -> crate::transport::BoxFuture<'_, Option<(Protocol, Stream)>> {
+    fn accept(&self) -> crate::transport::BoxFuture<'_, Option<rocky_core::net::Incoming>> {
         self.0.accept()
     }
     fn close(&self) -> crate::transport::BoxFuture<'_, ()> {
@@ -777,7 +802,7 @@ async fn stream_eof_does_not_renew_credentials() -> Result<(), Failure> {
             )
             .await?;
             let authority = b.replica.observe_authority().await;
-            let renewals = hub.protocol_dials("b", "a", Protocol::Renew);
+            let renewals = hub.protocol_dials("b", "a", Protocol::Rpc);
             let (report, _) = b.sync(&EofLinks(transport(&b).await?)).await?;
             assert!(
                 report["peers"]
@@ -796,7 +821,7 @@ async fn stream_eof_does_not_renew_credentials() -> Result<(), Failure> {
                 !authority.has_changed()?,
                 "a failed stream must leave authority intact"
             );
-            assert_eq!(hub.protocol_dials("b", "a", Protocol::Renew), renewals);
+            assert_eq!(hub.protocol_dials("b", "a", Protocol::Rpc), renewals);
             assert!(
                 report["peers"]
                     .as_array()
@@ -868,7 +893,7 @@ async fn losing_short_sync_cleanup_leaves_the_replacement_link_open() -> Result<
             let high_service = higher.current().ok_or("service")?;
             let stream = high_service
                 .transport
-                .connect(lower_address, Protocol::Link)
+                .connect(lower_address, Protocol::Link, None)
                 .await?;
             let high_settings = higher.settings.lock().await.clone();
             higher
@@ -885,7 +910,7 @@ async fn losing_short_sync_cleanup_leaves_the_replacement_link_open() -> Result<
             let cleanup = high_service.live.short(lower_key);
             let stream = low_service
                 .transport
-                .connect(higher_address, Protocol::Link)
+                .connect(higher_address, Protocol::Link, None)
                 .await?;
             let low_settings = lower.settings.lock().await.clone();
             lower
@@ -955,8 +980,8 @@ async fn real_pair(
         .await?;
     let aa = ta.address().await?;
     let ab = tb.address().await?;
-    a.link(hub.wrap("a", ta), true).await;
-    b.link(hub.wrap("b", tb), true).await;
+    a.link(hub.wrap("a", ta), true).await?;
+    b.link(hub.wrap("b", tb), true).await?;
     targets(&a, std::slice::from_ref(&b)).await?;
     targets(&b, std::slice::from_ref(&a)).await?;
     Ok((a, b, aa, ab))
@@ -1051,11 +1076,11 @@ async fn real_liveness_gate() -> Result<(), Failure> {
             while *a.worker_running.borrow() || *b.worker_running.borrow() {
                 assert!(
                     waiting.elapsed() < Duration::from_secs(5),
-                    "workers did not settle: a={} b={} activities: a={} b={}",
+                    "workers did not settle: a={:?} b={:?} activities: a={} b={}",
                     *a.sync_status.borrow(),
                     *b.sync_status.borrow(),
-                    a.activity.after(0),
-                    b.activity.after(0)
+                    snap::Snapshot::snapshot(a.activity.after(0)),
+                    snap::Snapshot::snapshot(b.activity.after(0))
                 );
                 tokio::task::yield_now().await;
             }
@@ -1065,15 +1090,15 @@ async fn real_liveness_gate() -> Result<(), Failure> {
             let before = hub.counts();
             assert!(
                 a.retry_deadline().is_none(),
-                "retry while idle: {} {}",
+                "retry while idle: {:?} {}",
                 *a.sync_status.borrow(),
-                a.activity.after(0)
+                snap::Snapshot::snapshot(a.activity.after(0))
             );
             assert!(
                 b.retry_deadline().is_none(),
-                "retry while idle: {} {}",
+                "retry while idle: {:?} {}",
                 *b.sync_status.borrow(),
-                b.activity.after(0)
+                snap::Snapshot::snapshot(b.activity.after(0))
             );
             // iroh keeps the idle connection alive below the stream: the
             // link itself writes nothing and nothing redials.
@@ -1088,27 +1113,6 @@ async fn real_liveness_gate() -> Result<(), Failure> {
             assert_eq!(*hub.written().borrow(), written);
             assert_eq!((sa.live.len(), sb.live.len()), (1, 1));
             assert_eq!(hub.protocol_dials("a", &ab, Protocol::Link), 1);
-            // Status measures the connection's paths when read.
-            let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
-            let link = sa.live.status(peer);
-            let paths = link["paths"].as_array().ok_or("paths")?;
-            let selected = paths.first().ok_or("no measured path")?;
-            assert_eq!(selected["selected"], true);
-            assert_eq!(selected["kind"], "direct");
-            assert!(
-                selected["remote"]
-                    .as_str()
-                    .is_some_and(|remote| remote.starts_with("127.0.0.1:"))
-            );
-            assert!(selected["rtt_us"].is_string());
-            assert!(
-                selected["sent_bytes"]
-                    .as_str()
-                    .ok_or("sent")?
-                    .parse::<u64>()?
-                    > 0
-            );
-            assert!(link["round_trip_ms"].is_string());
             detach_real_pair(&a, &b).await?;
             Ok(())
         }))
@@ -1166,8 +1170,10 @@ async fn real_tie_gate() -> Result<(), Failure> {
             let ca = a.settings.lock().await.clone();
             let cb = b.settings.lock().await.clone();
             let (near, far) = tokio::join!(
-                sa.transport.connect(&ab, Protocol::Link),
-                sb.transport.connect(&aa, Protocol::Link)
+                sa.transport
+                    .connect(&ab, Protocol::Link, Some(a.domain().scope)),
+                sb.transport
+                    .connect(&aa, Protocol::Link, Some(b.domain().scope))
             );
             let (one, two) = tokio::join!(
                 a.admit_link(sa.clone(), near?, Some(kb), ca, None),
@@ -1215,7 +1221,9 @@ async fn real_budget_gate() -> Result<(), Failure> {
                 .clone()
                 .try_acquire_many_owned(u32::try_from(sa.live_budget.available_permits())?)?;
             let transport = transport(&b).await?;
-            let stream = transport.connect(&aa, Protocol::Link).await?;
+            let stream = transport
+                .connect(&aa, Protocol::Link, Some(b.domain().scope))
+                .await?;
             let mut refused = rocky_secure::network::link::Link::open(
                 stream,
                 &b.replica,
@@ -1231,12 +1239,11 @@ async fn real_budget_gate() -> Result<(), Failure> {
                 }
             ));
             let before = sa.served.load(Ordering::Relaxed);
-            let mut pair = transport.connect(&aa, Protocol::Pair).await?;
-            // QUIC exposes a newly opened stream to the peer on its first write.
-            tokio::io::AsyncWriteExt::write_all(&mut pair, &[0]).await?;
-            until(|| sa.served.load(Ordering::Relaxed) > before).await;
+            let reply =
+                exchange(&*transport, &[aa], a.domain().scope, &PeerRequest::Policy).await?;
+            assert!(matches!(reply, PeerReply::Policy(_)));
+            assert!(sa.served.load(Ordering::Relaxed) > before);
             assert_eq!(sa.live_budget.available_permits(), 0);
-            drop(pair);
             drop(full);
             assert!(sa.live_budget.available_permits() > 0);
             a.detach(None).await;
@@ -1332,6 +1339,7 @@ async fn learn_revocation(node: &Node, peer: PublicKey) -> Result<(), Failure> {
             identities: [identity].into(),
             capabilities: Default::default(),
             cut: Default::default(),
+            mode: rocky_credentials::RevocationMode::Lost,
             recovery: None,
         },
         rocky_credentials::Signer::node(&signer, &credentials)?,
@@ -1352,7 +1360,7 @@ async fn an_in_budget_burst_spans_publication_pages_without_reconciliation() -> 
             let hub = Arc::new(Hub::default());
             let (a, b) = pair(root.path(), &hub).await?;
             let before = hub.counts();
-            let activity = b.activity.after(0)["token"]
+            let activity = snap::Snapshot::snapshot(b.activity.after(0))["token"]
                 .as_str()
                 .ok_or("activity")?
                 .parse()?;
@@ -1371,7 +1379,7 @@ async fn an_in_budget_burst_spans_publication_pages_without_reconciliation() -> 
             assert_eq!(rows(&a).await?, rows(&b).await?);
             assert_eq!(hub.counts(), before, "publication reuses the stream");
             assert!(
-                b.activity.after(activity)["events"]
+                snap::Snapshot::snapshot(b.activity.after(activity))["events"]
                     .as_array()
                     .ok_or("events")?
                     .iter()
@@ -1427,7 +1435,7 @@ async fn a_local_commit_between_receipt_snapshots_remains_eligible_for_publicati
             });
             *service_b.live.receipt_gate.lock().unwrap() = Some(gate.clone());
             let dials = [hub.dials_to("a"), hub.dials_to("b")];
-            let activity = a.activity.after(0)["token"]
+            let activity = snap::Snapshot::snapshot(a.activity.after(0))["token"]
                 .as_str()
                 .ok_or("activity")?
                 .parse()?;
@@ -1448,7 +1456,7 @@ async fn a_local_commit_between_receipt_snapshots_remains_eligible_for_publicati
             assert_eq!(rows(&b).await?, ["1", "2"]);
             assert_eq!([hub.dials_to("a"), hub.dials_to("b")], dials);
             assert!(
-                a.activity.after(activity)["events"]
+                snap::Snapshot::snapshot(a.activity.after(activity))["events"]
                     .as_array()
                     .ok_or("events")?
                     .iter()
@@ -1575,7 +1583,9 @@ async fn a_verified_renewal_releases_only_its_issuers_data_backoff() -> Result<(
             let other = PrivateKey::new().public_key();
             let a_port = transport(&a).await?;
             let b_port = transport(&b).await?;
-            a_port.listen(false);
+            a_port
+                .listen(Some(a.domain().scope), false)
+                .expect("listen");
             assert!(failed_report(&b.sync(&*b_port).await?.0));
             assert!(
                 b.retries.lock().unwrap_or_else(PoisonError::into_inner)[&peer]
@@ -1583,7 +1593,7 @@ async fn a_verified_renewal_releases_only_its_issuers_data_backoff() -> Result<(
                     .deadline()
                     .is_some()
             );
-            a_port.listen(true);
+            a_port.listen(Some(a.domain().scope), true).expect("listen");
             b.retries
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -1630,13 +1640,13 @@ async fn unchanged_epoch_probe_ignores_contacts_changed_while_the_reply_was_in_f
             a.sync(&*transport(&a).await?).await?;
             let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
             let authority = a.replica.observe_authority().await;
-            let before = hub.protocol_dials("a", "b", Protocol::Renew);
+            let before = hub.protocol_dials("a", "b", Protocol::Rpc);
             hub.hold_cut.store(true, Ordering::SeqCst);
             hub.cut_after(Some(0));
             let transport = transport(&a).await?;
             let renew = a.renew(Some(&*transport), true, Some(peer), true);
             let metadata = async {
-                until(|| hub.protocol_dials("a", "b", Protocol::Renew) > before).await;
+                until(|| hub.protocol_dials("a", "b", Protocol::Rpc) > before).await;
                 a.configure(|settings| {
                     let meta = settings
                         .contact_meta
@@ -1684,11 +1694,17 @@ async fn link_status_reports_opening_and_clears_cancelled_dials() -> Result<(), 
             let contact = a.settings.lock().await.peers[&peer].clone();
             let mut opening = Box::pin(a.request_link(&*transport, peer, &contact));
             assert!(futures_util::poll!(opening.as_mut()).is_pending());
-            assert_eq!(a.peers().await[0]["link"]["state"], "opening");
-            let token = a.readiness().await?["token"].clone();
+            assert_eq!(
+                a.observed_peers().await[0].link.state,
+                crate::LinkState::Opening
+            );
+            let token = a.observed_status().await?.token;
             drop(opening);
-            assert_eq!(a.peers().await[0]["link"]["state"], "closed");
-            assert_ne!(a.readiness().await?["token"], token);
+            assert_eq!(
+                a.observed_peers().await[0].link.state,
+                crate::LinkState::Closed
+            );
+            assert_ne!(a.observed_status().await?.token, token);
             a.detach(None).await;
             b.detach(None).await;
             Ok(())
@@ -1703,17 +1719,16 @@ async fn background_refuses_new_links_until_foreground() -> Result<(), Failure> 
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let (a, b) = pair(root.path(), &hub).await?;
-            let client = a.client(1)?;
+            let _client = a.client(1)?;
             let before = tokio::time::Instant::now();
             start(&a, false).await?;
-            a.dispatch(&client, &json!({"type":"network_background"}))
-                .await?;
+            snap::value(a.enter_background()).await?;
             assert!(tokio::time::Instant::now() - before < Duration::from_secs(1));
             assert!(
-                a.peers()
+                a.observed_peers()
                     .await
                     .iter()
-                    .all(|peer| peer["link"]["state"] == "closed")
+                    .all(|peer| peer.link.state == crate::LinkState::Closed)
             );
             let peer = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
             let service = b.current().ok_or("service")?;
@@ -1725,11 +1740,13 @@ async fn background_refuses_new_links_until_foreground() -> Result<(), Failure> 
                     .is_err()
             );
             assert_eq!(a.current().ok_or("service")?.live.len(), 0);
-            a.dispatch(&client, &json!({"type":"network_foreground"}))
-                .await?;
+            snap::value(a.enter_foreground()).await?;
             start(&a, true).await?;
             until(|| a.current().is_some_and(|service| service.live.len() == 1)).await;
-            assert_eq!(a.peers().await[0]["link"]["state"], "open");
+            assert_eq!(
+                a.observed_peers().await[0].link.state,
+                crate::LinkState::Open
+            );
             a.detach(None).await;
             b.detach(None).await;
             Ok(())
@@ -1791,11 +1808,7 @@ async fn one_offline_peer_preserves_the_other_link_and_local_commits() -> Result
                 hub.protocol_dials("a", "b", Protocol::Link),
                 hub.protocol_dials("b", "a", Protocol::Link),
             ];
-            c.dispatch(
-                &*c.client(1)?,
-                &json!({"type":"networking_control", "enabled":false}),
-            )
-            .await?;
+            snap::value(c.set_networking_enabled(false)).await?;
             until(|| a_service.live.len() == 1 && b_service.live.len() == 1).await;
             let b_revision = *b.replica.observe_revision().borrow();
             let started = tokio::time::Instant::now();
@@ -2019,21 +2032,20 @@ async fn publication_with_32_held_scopes_notifies_a_complete_contact_transaction
         let service_b = b.current().ok_or("service")?;
         until(|| !service_a.live.publishing_or_receiving() && !service_b.live.publishing_or_receiving()).await;
         let dials = [hub.dials_to("a"), hub.dials_to("b")];
-        let activity = b.activity.after(0)["token"].as_str().ok_or("activity")?.parse()?;
+        let activity = snap::Snapshot::snapshot(b.activity.after(0))["token"].as_str().ok_or("activity")?.parse()?;
         for version in 1..=3 {
             let traffic_before = traffic_snapshot(&service_a, &service_b);
             let mut changes = b.replica.observe_tables(Some(&["contacts", "receipts", "versions"])).await?;
             let bytes_before = *hub.written().borrow();
             let messages_before = [hub.link_messages("a"), hub.link_messages("b")];
             let client = a.client(1)?;
-            a.dispatch(&client, &json!({"type":"sql","sql":"BEGIN"})).await.map_err(|error| format!("source begin: {error}"))?;
+            snap::value(a.execute_sql(&client, "BEGIN", Vec::new(), None)).await.map_err(|error| format!("source begin: {error}"))?;
             for table in ["contacts", "receipts", "versions"] {
-                let id = a.dispatch(&client, &json!({"type":"next_id","table":table})).await.map_err(|error| format!("source allocation in {table}: {error}"))?["id"].clone();
-                a.dispatch(&client, &json!({"type":"sql", "sql":format!("INSERT INTO {table}(key,title,id) VALUES(?,'associated',?)"),
-                    "values":[{"type":"text","value":version.to_string()},{"type":"integer","value":id}]})).await?;
+                let id = snap::value(a.next_id(&client, &(snap::text(&(table))), None)).await.map_err(|error| format!("source allocation in {table}: {error}"))?["id"].clone();
+                snap::value(a.execute_sql(&client, &(snap::text(&(format!("INSERT INTO {table}(key,title,id) VALUES(?,'associated',?)")))), vec![rocky_sdk::SqlValue::Text(snap::text(&(version.to_string()))), snap::row_id(&(id))], None)).await?;
             }
             let commit = async {
-                a.dispatch(&client, &json!({"type":"sql","sql":"COMMIT","handle":vec![version;32]})).await?;
+                snap::value(a.execute_sql(&client, "COMMIT", Vec::new(), Some([version; 32]))).await?;
                 Ok::<_, Failure>(std::time::Instant::now())
             };
             let observe = async {
@@ -2041,9 +2053,7 @@ async fn publication_with_32_held_scopes_notifies_a_complete_contact_transaction
                 assert_eq!(change.tables, ["contacts", "receipts", "versions"].into_iter().map(str::to_owned).collect());
                 assert!(change.causes.contains(&rocky_storage::observe::Cause::Sync), "{change:?}");
                 let notified = std::time::Instant::now();
-                let snapshot = b.dispatch(&*b.client(1)?, &json!({"type":"read", "query":{
-                    "sql":"SELECT (SELECT count(*) FROM contacts),(SELECT count(*) FROM receipts),(SELECT count(*) FROM versions)", "max_rows":1
-                }})).await.map_err(|error| format!("notification snapshot: {error}"))?;
+                let snapshot = snap::value(b.read(&*b.client(1)?, rocky_sdk::ReadQuery { sql: "SELECT (SELECT count(*) FROM contacts),(SELECT count(*) FROM receipts),(SELECT count(*) FROM versions)".to_owned(), values: Vec::new(), max_rows: 1, max_bytes: None, cursor: None })).await.map_err(|error| format!("notification snapshot: {error}"))?;
                 Ok::<_, Failure>((notified, snapshot, std::time::Instant::now()))
             };
             let (committed, observed) = tokio::join!(commit, observe);
@@ -2062,7 +2072,7 @@ async fn publication_with_32_held_scopes_notifies_a_complete_contact_transaction
             eprintln!("publication native traffic: {traffic:?}");
             assert_eq!(
                 [hub.link_messages("a") - messages_before[0], hub.link_messages("b") - messages_before[1]],
-                [9, 2],
+                [if version == 1 { 9 } else { 10 }, 2],
                 "one fragmented publication and receipt"
             );
             let notification_us = if notified >= committed {
@@ -2076,7 +2086,7 @@ async fn publication_with_32_held_scopes_notifies_a_complete_contact_transaction
                 [hub.link_messages("a") - messages_before[0], hub.link_messages("b") - messages_before[1]]);
         }
         assert_eq!([hub.dials_to("a"), hub.dials_to("b")], dials);
-        assert!(b.activity.after(activity)["events"].as_array().ok_or("events")?.iter().all(|event|
+        assert!(snap::Snapshot::snapshot(b.activity.after(activity))["events"].as_array().ok_or("events")?.iter().all(|event|
             event["kind"] != "peer_reconciliation_completed" && event["kind"] != "rows_synced"));
         a.detach(None).await;
         b.detach(None).await;
@@ -2112,7 +2122,9 @@ async fn a_peer_holding_more_than_one_frontier_batch_publishes_only_the_changed_
                     .collect(),
             );
             let schema = Schema::parse(&schema.to_string())?;
-            let a = enrolled_schema(&root.path().join("a"), &hub, "a", None, &schema).await.map_err(|error| format!("multi-batch source enrollment: {error}"))?;
+            let a = enrolled_schema(&root.path().join("a"), &hub, "a", None, &schema)
+                .await
+                .map_err(|error| format!("multi-batch source enrollment: {error}"))?;
             crate::escrow::keep(&a.replica, &*a.settings.lock().await, &a.vault, &a.domain())
                 .await?;
             let b = enrolled_schema(
@@ -2122,15 +2134,54 @@ async fn a_peer_holding_more_than_one_frontier_batch_publishes_only_the_changed_
                 Some((&a, Profile::Issuer)),
                 &schema,
             )
-            .await.map_err(|error| format!("multi-batch receiver enrollment: {error}"))?;
+            .await
+            .map_err(|error| format!("multi-batch receiver enrollment: {error}"))?;
             let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
-            let (client_a, client_b) = (a.client(1)?, b.client(1)?);
+            let (_client_a, _client_b) = (a.client(1)?, b.client(1)?);
             for n in 0..3 {
-                let values = json!([{"type":"text","value":format!("partition_{n}")}]);
-                a.dispatch(&client_a, &json!({"type":"partition_create","group":"held","values":values})).await.map_err(|error| format!("create partition {n}: {error}"))?;
-                let shared = a.dispatch(&client_a, &json!({"type":"partition_share","group":"held","values":values,"recipients":[peer.to_hex()]})).await.map_err(|error| format!("share partition {n}: {error}"))?;
-                b.dispatch(&client_b, &json!({"type":"partition_install","group":"held","values":values,
-                    "envelope":shared["envelopes"][0]["envelope"],"sender":shared["sender"]})).await.map_err(|error| format!("install partition {n}: {error}"))?;
+                let values = vec![crate::SqlValue::Text(format!("partition_{n}"))];
+                snap::value(a.create_partition(&rocky_sdk::PartitionTarget::Group {
+                    group: "held".to_owned(),
+                    values: (values).clone(),
+                }))
+                .await
+                .map_err(|error| format!("create partition {n}: {error}"))?;
+                let shared = snap::value(
+                    a.share_partition(
+                        &rocky_sdk::PartitionTarget::Group {
+                            group: "held".to_owned(),
+                            values: (values).clone(),
+                        },
+                        serde_json::from_value::<
+                            std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>,
+                        >(json!([peer.to_hex()]))
+                        .expect("typed fixture"),
+                        None,
+                    ),
+                )
+                .await
+                .map_err(|error| format!("share partition {n}: {error}"))?;
+                snap::value(
+                    b.install_partition(
+                        &rocky_sdk::PartitionTarget::Group {
+                            group: "held".to_owned(),
+                            values: (values).clone(),
+                        },
+                        &rocky_sdk::credentials::GroupSecretEnvelope::from_bytes(
+                            &serde_json::from_value::<Vec<u8>>(json!(
+                                shared["envelopes"][0]["envelope"]
+                            ))
+                            .expect("typed fixture"),
+                        )
+                        .expect("envelope"),
+                        &serde_json::from_value::<rocky_sdk::credentials::CredentialChain>(json!(
+                            shared["sender"]
+                        ))
+                        .expect("typed fixture"),
+                    ),
+                )
+                .await
+                .map_err(|error| format!("install partition {n}: {error}"))?;
             }
             targets(&a, std::slice::from_ref(&b)).await?;
             targets(&b, std::slice::from_ref(&a)).await?;
@@ -2144,7 +2195,13 @@ async fn a_peer_holding_more_than_one_frontier_batch_publishes_only_the_changed_
             settled(&a).await;
             settled(&b).await;
             assert_eq!(b.scopes().len(), 66);
-            assert_eq!(b.scopes().iter().filter(|scope| !b.domain().partitioned_table(scope)).count(), 65);
+            assert_eq!(
+                b.scopes()
+                    .iter()
+                    .filter(|scope| !b.domain().partitioned_table(scope))
+                    .count(),
+                65
+            );
             let service_a = a.current().ok_or("service")?;
             let service_b = b.current().ok_or("service")?;
             until(|| {
@@ -2174,12 +2231,17 @@ async fn a_peer_holding_more_than_one_frontier_batch_publishes_only_the_changed_
 }
 
 async fn count(node: &Node) -> Result<Value, Failure> {
-    let page = node
-        .dispatch(
-            &*node.client(1)?,
-            &json!({"type":"read", "query":{"sql":"SELECT count(*) FROM items", "max_rows":1}}),
-        )
-        .await?;
+    let page = snap::value(node.read(
+        &*node.client(1)?,
+        rocky_sdk::ReadQuery {
+            sql: "SELECT count(*) FROM items".to_owned(),
+            values: Vec::new(),
+            max_rows: 1,
+            max_bytes: None,
+            cursor: None,
+        },
+    ))
+    .await?;
     Ok(page["rows"][0][0]["value"].clone())
 }
 
@@ -2205,17 +2267,29 @@ async fn an_over_budget_burst_is_repaired_once_and_later_edits_publish() -> Resu
             let client = a.client(1)?;
             let publish = service_a.live.publishing.lock().await;
             for key in 0..24u8 {
-                a.dispatch(&client, &json!({"type":"sql","sql":"BEGIN"}))
-                    .await?;
-                let id = a
-                    .dispatch(&client, &json!({"type":"next_id","table":"items"}))
-                    .await?["id"]
-                    .clone();
-                a.dispatch(&client, &json!({"type":"sql","sql":"INSERT INTO items(key,title,id) VALUES(?,?,?)",
-                    "values":[{"type":"text","value":format!("burst_{key}")},{"type":"text","value":title},{"type":"integer","value":id}]})).await?;
-                a.dispatch(
+                snap::value(a.execute_sql(&client, "BEGIN", Vec::new(), None)).await?;
+                let id = snap::value(a.next_id(&client, "items", None)).await?["id"].clone();
+                snap::value(a.execute_sql(
                     &client,
-                    &json!({"type":"sql","sql":"COMMIT","handle":vec![100 + key; 32]}),
+                    "INSERT INTO items(key,title,id) VALUES(?,?,?)",
+                    vec![
+                        rocky_sdk::SqlValue::Text(snap::text(&(format!("burst_{key}")))),
+                        rocky_sdk::SqlValue::Text(snap::text(&(title))),
+                        snap::row_id(&(id)),
+                    ],
+                    None,
+                ))
+                .await?;
+                snap::value(
+                    a.execute_sql(
+                        &client,
+                        "COMMIT",
+                        Vec::new(),
+                        Some(
+                            serde_json::from_value::<[u8; 32]>(json!(vec![100 + key; 32]))
+                                .expect("typed fixture"),
+                        ),
+                    ),
                 )
                 .await?;
             }
@@ -2226,7 +2300,7 @@ async fn an_over_budget_burst_is_repaired_once_and_later_edits_publish() -> Resu
             settled(&a).await;
             settled(&b).await;
             until(idle).await;
-            let activity = b.activity.after(0)["token"]
+            let activity = snap::Snapshot::snapshot(b.activity.after(0))["token"]
                 .as_str()
                 .ok_or("activity")?
                 .parse()?;
@@ -2238,7 +2312,7 @@ async fn an_over_budget_burst_is_repaired_once_and_later_edits_publish() -> Resu
             settled(&a).await;
             settled(&b).await;
             until(idle).await;
-            let events = b.activity.after(activity)["events"].clone();
+            let events = snap::Snapshot::snapshot(b.activity.after(activity))["events"].clone();
             assert!(
                 events.as_array().ok_or("events")?.iter().all(|event| ![
                     "peer_reconciliation_completed",

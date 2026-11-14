@@ -1,5 +1,4 @@
 //! Devices of one todo domain over an in-process link.
-#![allow(dead_code)]
 use rocky_sdk::{Failure, Network, transport::memory::Hub};
 use std::{path::Path, sync::Arc};
 use todo_app::{Role, Todos, configuration, roles};
@@ -33,7 +32,7 @@ impl World {
     }
     /// Joins a device invited by the first and meshes it with every other.
     pub async fn join(&mut self, name: &str, role: Role) -> Result<Todos, Failure> {
-        let code = self.devices[0].invite(role).await?;
+        let code = self.trusted().invite(role).await?;
         let joined = roles::join(
             &Self::config(self.root.path(), &self.hub, name)?,
             &code,
@@ -77,7 +76,7 @@ pub async fn sync(devices: &[&Todos]) -> Result<(), Failure> {
     Ok(())
 }
 
-pub async fn titles(device: &Todos, list: i64) -> Result<Vec<String>, Failure> {
+pub async fn titles(device: &Todos, list: rocky_sdk::RowIdentity) -> Result<Vec<String>, Failure> {
     Ok(device
         .todos(list)
         .await?

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stamp and publish the Rust SDK and its workspace dependencies to crates.io."""
+"""Stamp and publish registry-enabled workspace libraries to crates.io."""
 import argparse
 from email.utils import parsedate_to_datetime
 from graphlib import TopologicalSorter

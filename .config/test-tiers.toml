@@ -15,7 +15,8 @@ kind(test)
     | (package(rocky-secure) & test(/^network::budgets::/))
     | (package(rocky-runtime) & !test(/^(read|checkpoint)::tests::/))
     | (package(rocky-runtime) & test(=read::tests::pages_through_null_ordering_values_cover_the_result_once))
-    | (package(rocky-coordinator) & test(/^(client::tests|raft_store::tests|machine::(public_tests|coordinated_tests|tip_tests))::/))
+    | (package(rocky-coordinator) & test(/^(client::tests|native_tests|machine::(public_tests|coordinated_tests|tip_tests))::/))
+    | (package(rocky-voter) & test(/^raft_store::tests::/))
     | (package(rocky-sdk) & test(/^(database|enrollment|mesh|node|simulation)::/))
     | (package(rocky-storage) & test(/^(cursor|database|sqlite)::tests::/))
     | (package(rocky-credentials) & (test(/^keys::tests::/) | test(=revocation::tests::every_interleaving_of_merges_yields_one_digest)))
@@ -27,19 +28,19 @@ kind(test)
 filter = '''
 (package(rocky-secure) & test(/^tests::partitions::replayed::convergence::(every_schedule_of_five|seeded_schedule_sweep)/))
     | (package(rocky-secure) & test(/^tests::replayed_constraints::convergence::/))
-    | (binary_id(rocky-coordinator::coordinated_log) & test(=coordinated_log_survives_leader_change_and_deadline_without_double_commit))
+    | (binary_id(rocky-voter::coordinated_log) & test(=coordinated_log_survives_leader_change_and_deadline_without_double_commit))
     | (package(rocky-sdk) & test(/^node::delivery_tests::(a_crash_|a_mailbox_refuses_at_both_bounds)/))
     | test(/::soak_/)
     | (package(rocky-sdk) & test(/^simulation::tests::sweep_/))
-    | (binary_id(rocky-coordinator) & (
+    | (binary_id(rocky-voter) & (
           test(=raft_store::tests::openraft_storage_contract)
     ))
-    | (binary_id(rocky-coordinator::cluster) & (
+    | (binary_id(rocky-voter::cluster) & (
           test(=three_persistent_voters_keep_controls_and_logs_across_restarts)
         | test(=crashes_at_log_commit_apply_reply_and_snapshot_boundaries)
         | test(=three_persistent_voters_fence_recover_and_verify_offline)
     ))
-    | (binary_id(rocky-coordinator::public) & (
+    | (binary_id(rocky-voter::public) & (
           test(=a_completely_restored_service_stays_fenced)
         | test(=outages_and_restarts_keep_state_and_restore_is_fenced)
     ))
@@ -81,6 +82,7 @@ filter = '''
     ))
     | (binary_id(rocky-sdk::issuers) & (
           test(=a_second_issuer_carries_the_domain_after_the_creator_is_lost)
+        | test(=a_compromised_creator_ends_its_early_enrollee_by_cascade)
     ))
     | (binary_id(rocky-sdk::registry) & (
           test(=a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer)
@@ -88,6 +90,8 @@ filter = '''
     | (binary_id(rocky-sdk::revocations) & (
           test(=partitioned_issuers_revocations_merge_when_a_syncs_first)
         | test(=partitioned_issuers_revocations_merge_when_b_syncs_first)
+        | test(=conflicting_root_modes_merge_when_lost_syncs_first)
+        | test(=conflicting_root_modes_merge_when_compromised_syncs_first)
     ))
     | (binary_id(rocky-sdk::service) & (
           test(=a_registered_service_domain_commits_ordinary_rows_and_closes)

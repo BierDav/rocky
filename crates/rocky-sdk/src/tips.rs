@@ -1,5 +1,4 @@
-//! The JSON contract of seals, tips and bookmarks. Digests and tips are
-//! lowercase hex; see `docs/runtime/tips-and-bookmarks.md`.
+//! Seals, tips and bookmark observations.
 use serde::{Deserialize, Serialize};
 
 /// The followed bookmark and tip, progress since the last seal and each
@@ -27,10 +26,10 @@ pub struct TipDevice {
     pub tip: Option<String>,
     pub frontiers: Vec<TipScopeFrontier>,
 }
-/// One resource scope, as its JSON encoding, and per-author log positions.
+/// A resource scope and its per-author log positions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipScopeFrontier {
-    pub scope: String,
+    pub scope: rocky_core::ResourceScope,
     pub logs: Vec<TipFrontierLog>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,10 +38,10 @@ pub struct TipFrontierLog {
     pub held: u64,
     pub applied: u64,
 }
-/// The last included global position of one author number.
+/// The last included global position of one writer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipAuthorMark {
-    pub author: u32,
+    pub author: crate::WriterId,
     pub sequence: u64,
 }
 /// The coordinated log positions the owner's recovery seal retains and
@@ -100,7 +99,7 @@ pub struct KeptSeals {
 pub struct TipCheckpoint {
     /// The listing record's digest.
     pub id: String,
-    pub scope: String,
+    pub scope: rocky_core::ResourceScope,
     pub checkpoint: String,
     /// The node that signed the checkpoint.
     pub signer: String,
@@ -163,8 +162,7 @@ pub struct TrustGrant {
 /// The domain's complete graph, for developers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipInspection {
-    /// The domain scope, as its JSON encoding.
-    pub scope: String,
+    pub scope: rocky_core::Scope,
     pub genesis: String,
     /// The genesis tip's schema digest.
     pub schema: String,
@@ -195,9 +193,9 @@ pub struct TipCompaction {
     /// What stopped releasing a scope's operations in this call.
     pub blocked: Vec<TipPruneBlock>,
 }
-/// One resource scope, as its JSON encoding, and why it kept operations.
+/// A resource scope and why it kept operations.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipPruneBlock {
-    pub scope: String,
+    pub scope: rocky_core::ResourceScope,
     pub reason: String,
 }

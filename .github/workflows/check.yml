@@ -101,7 +101,9 @@ jobs:
       - name: Run formatting and lint checks
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
-        run: ./scripts/lint
+        run: |
+          cargo fetch --locked
+          ./scripts/lint
 
       - name: Verify Cargo cache invalidation
         if: steps.passed.outputs.cache-hit != 'true'
@@ -364,7 +366,7 @@ jobs:
           job: check
           tree: ${{ steps.source.outputs.tree }}
           workspace-archive: true
-          # The SDK without iroh: the build job compiled it, e2e runs it.
+          # The standalone SDK: the build job compiled it, e2e runs it.
           sdk-archive: false
           dependencies: fallback
 
@@ -380,12 +382,12 @@ jobs:
             ./scripts/check --no-clippy
           fi
 
-      - name: Check the packaged coordinator relay
+      - name: Check the packaged voter
         if: steps.reuse.outputs.passed != 'true'
         working-directory: source
         run: |
-          cargo clippy --locked -p rocky-coordinator --features relay-server --bin rocky-voter --tests -- -D warnings
-          cargo test --locked -p rocky-coordinator --features relay-server --bin rocky-voter
+          ./scripts/clippy --locked -p rocky-voter --bin rocky-voter --tests -- -D warnings
+          cargo test --locked -p rocky-voter --bin rocky-voter
 
       - uses: ./source/.github/actions/record-pass
         if: steps.reuse.outputs.passed != 'true'
@@ -395,7 +397,7 @@ jobs:
 
   e2e:
     # The end-to-end tier, soak tests included, and every tier of the SDK
-    # built without iroh; it runs only in CI. On pushes to the default
+    # built without workspace feature unification; it runs only in CI. On pushes to the default
     # branch; releases do not wait for it.
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

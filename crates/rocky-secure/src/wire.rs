@@ -32,17 +32,27 @@ pub(crate) struct Extensions {
     pub generation: rocky_core::KeyEpoch,
     /// The digest of the author's credential chain; see `Chain`.
     pub chain: Commitment,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub author: Option<u32>,
+    /// Whether a node certificate's writer signed this frame as a table
+    /// author: its header key is then the writer of its stamps and births.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub authored: bool,
     /// Domain-wide position of this node, independent of its per-scope log.
     pub author_sequence: u64,
     pub row_format: u8,
     pub births: Vec<serde_bytes::ByteArray<32>>,
 }
 
+impl Extensions {
+    /// The table author of a frame `signer` signed: its writer identity.
+    pub(crate) fn author(&self, signer: &PublicKey) -> Option<rocky_core::WriterId> {
+        self.authored.then(|| crate::writer::writer(signer))
+    }
+}
+
 /// Source-schema ordinals and frame-bound birth statements, without
 /// existence counts; a partition's tuple only inside the sealed body.
-pub(crate) const ROW_FORMAT: u8 = 16;
+/// Writers are full node keys.
+pub(crate) const ROW_FORMAT: u8 = 17;
 /// The refusal of a frame whose credential chain the receiver lacks.
 pub(crate) const INCOMPLETE_FRAME: &str = "incomplete frame: its credential chain is unknown";
 
@@ -297,13 +307,6 @@ fn check_header(header: &Header<Extensions>) -> Result<(), Error> {
         if header.extensions.row_format != ROW_FORMAT {
             return Err(denied("unsupported row frame format"));
         }
-        let extension = &header.extensions;
-        if extension
-            .author
-            .is_some_and(|author| !(1..=0x7fff_ffff).contains(&author))
-        {
-            return Err(denied("invalid authenticated author"));
-        }
         if header.extensions.births.len() > 32
             || header.previous.len() > 64
             || header.seq_num > i64::MAX as u64
@@ -367,17 +370,26 @@ impl Opened {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn author(
-    key: &PrivateKey,
-    extensions: Extensions,
-    chain: Chain,
-    encryption_key: &[u8; 32],
-    log: (u64, Option<Hash>, u64),
-    previous: Vec<Hash>,
-    partition: Option<&rocky_core::PartitionTuple>,
-    plaintext: &[u8],
-) -> Result<EncryptedFrame, Error> {
+pub(crate) struct FrameDraft<'a> {
+    pub extensions: Extensions,
+    pub chain: Chain,
+    pub encryption_key: &'a [u8; 32],
+    pub log: (u64, Option<Hash>, u64),
+    pub previous: Vec<Hash>,
+    pub partition: Option<&'a rocky_core::PartitionTuple>,
+    pub plaintext: &'a [u8],
+}
+
+pub(crate) fn author(key: &PrivateKey, draft: FrameDraft<'_>) -> Result<EncryptedFrame, Error> {
+    let FrameDraft {
+        extensions,
+        chain,
+        encryption_key,
+        log,
+        previous,
+        partition,
+        plaintext,
+    } = draft;
     if extensions.chain != chain.digest() {
         return Err(denied(INCOMPLETE_FRAME));
     }

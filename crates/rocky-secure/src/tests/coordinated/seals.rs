@@ -32,12 +32,14 @@ pub(super) fn bookmark(
 }
 /// A `continue` seal of `tip` at the frontier of `tip`'s frames `node` holds.
 pub(super) async fn seal(lineage: &Lineage, node: &Replica, tip: TipId) -> SignedSeal {
-    let mut authors = BTreeMap::<u32, u64>::new();
+    let mut authors = BTreeMap::<rocky_core::WriterId, u64>::new();
     for frame in stored_frames(node, "SELECT header,body FROM secure_operations").await {
         let operation = frame.operation().unwrap();
         let extensions = &operation.header.extensions;
         if extensions.tip == tip {
-            let sequence = authors.entry(extensions.author.unwrap()).or_default();
+            let sequence = authors
+                .entry(extensions.author(&operation.header.public_key).unwrap())
+                .or_default();
             *sequence = (*sequence).max(extensions.author_sequence);
         }
     }

@@ -359,14 +359,12 @@ fn counter_name_count_and_byte_budgets_fail_closed() {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn trusted_siblings_claim_until_their_identity_unlinks_them() {
-    use rocky_credentials::{
-        AuthorRange, Authority, CredentialChain, Revocation, SignedRevocation,
-    };
+    use rocky_credentials::{Authority, CredentialChain, Revocation, SignedRevocation};
     let mut f = Fixture::new(1, Limits::default());
     let identity = f.nodes[0].clone();
     let grant = CredentialChain(vec![
         Authority::owner(&f.owner)
-            .issue_trusted(identity.public_key(), f.scope, AuthorRange::ALL, T)
+            .issue_trusted(identity.public_key(), f.scope, T)
             .unwrap(),
     ]);
     let nodes = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
@@ -377,13 +375,7 @@ fn trusted_siblings_claim_until_their_identity_unlinks_them() {
         .map(|(index, node)| {
             let chain = grant
                 .clone()
-                .certify_member(
-                    &identity,
-                    node.public_key(),
-                    index as u32 + 1,
-                    index as u64,
-                    previous,
-                )
+                .certify_member(&identity, node.public_key(), index as u64, previous)
                 .unwrap();
             previous = Some(chain.certificate().unwrap().id().unwrap());
             chain
@@ -421,6 +413,7 @@ fn trusted_siblings_claim_until_their_identity_unlinks_them() {
             identities: Default::default(),
             capabilities: Default::default(),
             cut: Default::default(),
+            mode: rocky_credentials::RevocationMode::Lost,
             recovery: None,
         },
         &identity,
@@ -438,7 +431,7 @@ fn trusted_siblings_claim_until_their_identity_unlinks_them() {
         [10; 32],
         Operation::Revoke {
             scope: f.scope,
-            revocations: authority,
+            revocations: Box::new(authority),
         },
         &f.owner,
         T,

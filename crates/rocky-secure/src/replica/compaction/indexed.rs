@@ -75,7 +75,7 @@ impl<A: RowApplication> Inner<A> {
         for run in runs {
             let [
                 SqlValue::Blob(tip),
-                SqlValue::Integer(author),
+                SqlValue::Blob(author),
                 SqlValue::Integer(start),
                 SqlValue::Integer(end),
             ] = run.as_slice()
@@ -84,12 +84,11 @@ impl<A: RowApplication> Inner<A> {
             };
             let source = TipId(checkpoint::row_of(tip)?);
             let path = Self::frame_path(graph, source, seal.statement.tip)?;
-            let author_number = u32::try_from(*author)
-                .map_err(|_| Error::Corrupt("seal position author".into()))?;
+            let writer = stored_writer(author)?;
             if *start < 0 || end < start {
                 return Err(Error::Corrupt("seal position run bounds".into()));
             }
-            let admits = |sequence: i64| path.admits(author_number, sequence as u64);
+            let admits = |sequence: i64| path.admits(writer, sequence as u64);
             let cut = if !admits(*start)? {
                 start - 1
             } else if admits(*end)? {
@@ -110,7 +109,7 @@ impl<A: RowApplication> Inner<A> {
             let params = vec![
                 SqlValue::Blob(blob.clone()),
                 SqlValue::Blob(tip.clone()),
-                SqlValue::Integer(*author),
+                SqlValue::Blob(author.clone()),
                 SqlValue::Integer(cut),
                 SqlValue::Integer(id),
                 SqlValue::Integer(bound),

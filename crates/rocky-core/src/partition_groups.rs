@@ -145,7 +145,7 @@ mod tests {
     fn definition() -> SchemaDefinition {
         serde_json::from_value(serde_json::json!({"format":6,"publisher":"11".repeat(32),"application":"groups","tables":[
             {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text"}],"primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
-            {"name":"items","class":"replayed","columns":[{"name":"list","type":"integer","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}
+            {"name":"items","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}
         ]})).unwrap()
     }
     fn domain() -> Scope {
@@ -161,16 +161,16 @@ mod tests {
         schema.supported_on(Profile::Secure).unwrap();
         crate::TypedRows::new(schema.clone(), Vec::new()).unwrap();
         let a = schema
-            .group_address(domain(), "lists", &[SqlValue::Integer(42)])
+            .group_address(domain(), "lists", &[SqlValue::Blob(vec![42; 40])])
             .unwrap();
         let b = schema
-            .group_address(domain(), "items", &[SqlValue::Integer(42)])
+            .group_address(domain(), "items", &[SqlValue::Blob(vec![42; 40])])
             .unwrap();
         assert_eq!(a, b);
         assert_ne!(
             a,
             schema
-                .group_address(domain(), "items", &[SqlValue::Integer(43)])
+                .group_address(domain(), "items", &[SqlValue::Blob(vec![43; 40])])
                 .unwrap()
         );
         assert_ne!(
@@ -182,7 +182,7 @@ mod tests {
                         ..domain()
                     },
                     "items",
-                    &[SqlValue::Integer(42)]
+                    &[SqlValue::Blob(vec![42; 40])]
                 )
                 .unwrap()
         );
@@ -205,7 +205,7 @@ mod tests {
             renamed
                 .build()
                 .unwrap()
-                .group_address(domain(), "lists", &[SqlValue::Integer(42)])
+                .group_address(domain(), "lists", &[SqlValue::Blob(vec![42; 40])])
                 .unwrap()
         );
     }

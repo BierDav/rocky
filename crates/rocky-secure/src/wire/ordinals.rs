@@ -13,7 +13,7 @@ struct Write(
 
 #[derive(Serialize, Deserialize)]
 struct Carry {
-    proof: (usize, i64, serde_bytes::ByteArray<32>),
+    proof: (usize, rocky_core::RowIdentity, serde_bytes::ByteArray<32>),
     stamps: BTreeMap<u32, crate::replica::Stamp>,
     #[serde(with = "serde_bytes")]
     moved_from: Option<Vec<u8>>,
@@ -23,7 +23,7 @@ struct Carry {
 struct Bundle {
     version: u8,
     carried: BTreeMap<serde_bytes::ByteArray<32>, Carry>,
-    authors: BTreeMap<u32, PublicKey>,
+    authors: BTreeMap<rocky_core::WriterId, PublicKey>,
     origins: Vec<serde_bytes::ByteBuf>,
     headers: BTreeMap<serde_bytes::ByteArray<32>, serde_bytes::ByteBuf>,
     bindings: BTreeMap<serde_bytes::ByteArray<32>, serde_bytes::ByteBuf>,

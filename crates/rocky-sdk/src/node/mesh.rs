@@ -67,7 +67,7 @@ impl Node {
         &self,
         transport: &dyn Transport,
         id: rocky_core::NodeId,
-    ) -> Result<Value, Failure> {
+    ) -> Result<Option<PublicKey>, Failure> {
         let settings = self.settings.lock().await.clone();
         for (peer, contact) in self.dialed(&settings, true) {
             if self
@@ -111,10 +111,10 @@ impl Node {
                 })
                 .await?;
                 self.wake_sync();
-                return Ok(json!({"node": node.to_hex()}));
+                return Ok(Some(node));
             }
         }
-        Ok(json!({"node": null}))
+        Ok(None)
     }
 }
 
@@ -182,7 +182,7 @@ impl Node {
                 .await
             {
                 Ok(value) => {
-                    if value["node"].is_null() {
+                    if value.is_none() {
                         attempt.finish_empty();
                     } else {
                         attempt.finish(None);

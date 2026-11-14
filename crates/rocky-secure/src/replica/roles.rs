@@ -842,13 +842,12 @@ impl<A: RowApplication> Inner<A> {
                 }
 
                 // Every frame of a revoked author is refused, so none is
-                // sent.
+                // sent; a reset's fence keeps what it covers.
                 let operation = frame.operation_ref()?;
                 if !self.visible_in_workspace(operation)?
                     || !self.offered(&operation.header).await?
                     || self
-                        .config
-                        .revocations
+                        .header_revocations(&operation.header)
                         .revoking(frame.chain()?.credentials())
                         .map_err(credential)?
                         .is_some()

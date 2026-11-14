@@ -3,7 +3,7 @@ use super::*;
 
 pub(crate) struct ProofParts {
     pub(crate) origin: Vec<u8>,
-    pub(crate) identity: i64,
+    pub(crate) identity: rocky_core::RowIdentity,
     pub(crate) provenance: Commitment,
     pub(crate) bindings: Vec<u8>,
     pub(crate) header: Vec<u8>,
@@ -13,7 +13,7 @@ impl CreationProof {
     pub(crate) fn wire_parts(&self) -> Result<ProofParts, Error> {
         Ok(ProofParts {
             origin: encode(&self.stored()?.origin())?,
-            identity: self.id.integer(),
+            identity: self.id,
             provenance: self.provenance,
             bindings: encode(&self.bindings)?,
             header: self.header.clone(),
@@ -25,7 +25,7 @@ impl CreationProof {
     }
     pub(crate) fn from_wire_parts(
         origin: &[u8],
-        identity: i64,
+        identity: rocky_core::RowIdentity,
         provenance: Commitment,
         bindings: &[u8],
         header: &[u8],
@@ -38,8 +38,7 @@ impl CreationProof {
             version: origin.version,
             manifest: origin.manifest,
             table: origin.table,
-            id: rocky_core::RowIdentity::from_integer(identity)
-                .map_err(|error| denied(&error.to_string()))?,
+            id: identity,
             provenance,
             stamp: origin.stamp,
             bindings: decode(bindings)?,
@@ -79,14 +78,14 @@ impl Origin {
         }
         let signed = header.signed();
         Ok(Self {
-            version: 2,
+            version: PROOF_VERSION,
             manifest: manifest.into_array(),
             table: signed.extensions.scope.table,
             stamp: Stamp {
                 clock: signed.timestamp,
                 author: signed
                     .extensions
-                    .author
+                    .author(&signed.public_key)
                     .ok_or_else(|| denied("checkpoint birth lacks an author"))?,
                 sequence: signed.extensions.author_sequence,
             },

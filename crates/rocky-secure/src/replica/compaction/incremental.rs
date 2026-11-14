@@ -125,15 +125,18 @@ impl<A: RowApplication> Inner<A> {
         for (depth, end) in bounds {
             while let Some(last) = self
                 .replay(
-                    scope,
-                    id,
-                    Overlay::Scratch,
-                    self.workspace.tip,
-                    (cursor, end),
-                    STEP_OPERATIONS,
+                    checkpoint::ReplayRequest {
+                        scope,
+                        id,
+                        overlay: Overlay::Scratch,
+                        target: self.workspace.tip,
+                        after: cursor,
+                        through: end,
+                        limit: STEP_OPERATIONS,
+                        mode: checkpoint::ReplayMode::Rows,
+                    },
                     &mut sets,
                     &mut ledger,
-                    checkpoint::ReplayMode::Rows,
                 )
                 .await?
             {
@@ -213,15 +216,18 @@ impl<A: RowApplication> Inner<A> {
         let mut cursor = through;
         while let Some(last) = self
             .replay(
-                scope,
-                id,
-                Overlay::Scratch,
-                self.workspace.tip,
-                (cursor, i64::MAX),
-                STEP_OPERATIONS,
+                checkpoint::ReplayRequest {
+                    scope,
+                    id,
+                    overlay: Overlay::Scratch,
+                    target: self.workspace.tip,
+                    after: cursor,
+                    through: i64::MAX,
+                    limit: STEP_OPERATIONS,
+                    mode: checkpoint::ReplayMode::Rows,
+                },
                 &mut sets,
                 &mut ledger,
-                checkpoint::ReplayMode::Rows,
             )
             .await?
         {

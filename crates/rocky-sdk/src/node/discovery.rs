@@ -18,7 +18,8 @@ impl Node {
     /// before an admitted session handed over the root, and none once this
     /// device knows it is revoked or logged out.
     pub(super) async fn discovery_topics(&self) -> Vec<[u8; 32]> {
-        if self.ended.lock().await.is_some() || self.replica.private_schema().await.unwrap_or(true)
+        if self.lifecycle.lock().await.is_logged_out()
+            || self.replica.private_schema().await.unwrap_or(true)
         {
             return Vec::new();
         }
@@ -119,7 +120,7 @@ impl Node {
             .send_modify(|event| *event = event.wrapping_add(1));
     }
     /// Each discovery path as on, off or unavailable with its reason.
-    pub(super) fn discovery_status(&self) -> Value {
+    pub(super) fn discovery_status(&self) -> crate::DiscoveryStatus {
         let link = self.current();
         let paths = match link.as_ref().map(|link| (link, &link.discovery)) {
             None => [LOCAL_PATH, TOPIC_PATH]
@@ -134,23 +135,25 @@ impl Node {
                 .to_vec(),
             Some((_, Some(discovery))) => discovery.paths(),
         };
-        let paths: serde_json::Map<String, Value> = paths
-            .into_iter()
-            .map(|(path, state)| {
-                let state = match state {
-                    PathState::On => json!({"state": "on"}),
-                    PathState::Off => json!({"state": "off"}),
-                    PathState::Unavailable(reason) => {
-                        json!({"state": "unavailable", "reason": reason})
-                    }
-                };
-                (path, state)
-            })
-            .collect();
-        json!({
-            "announcing": link.is_some() && self.announcing.load(Ordering::SeqCst),
-            "paths": paths,
-        })
+        let path = |name| {
+            let (state, reason) = match paths
+                .iter()
+                .find(|(path, _)| path == name)
+                .map(|(_, state)| state)
+            {
+                Some(PathState::On) => (crate::DiscoveryPathState::On, None),
+                Some(PathState::Off) | None => (crate::DiscoveryPathState::Off, None),
+                Some(PathState::Unavailable(reason)) => {
+                    (crate::DiscoveryPathState::Unavailable, Some(reason.clone()))
+                }
+            };
+            crate::DiscoveryPath { state, reason }
+        };
+        crate::DiscoveryStatus {
+            announcing: link.is_some() && self.announcing.load(Ordering::SeqCst),
+            local: path(LOCAL_PATH),
+            topic: path(TOPIC_PATH),
+        }
     }
     /// Stops or resumes the paths that need the application in front.
     pub(super) async fn discovery_foreground(&self, foreground: bool) {

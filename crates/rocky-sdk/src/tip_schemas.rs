@@ -3,7 +3,6 @@ use crate::{Failure, domain::Domain, enrollment::Settings, schema::Schema};
 use rocky_core::{Commitment, TipId};
 use serde::{Deserialize, Serialize};
 
-pub(crate) const PROTOCOL: &[u8] = b"rocky.sdk.tip-schema.v1\n";
 const FORMAT: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -48,11 +47,6 @@ impl<'de> Deserialize<'de> for Record {
 #[serde(deny_unknown_fields)]
 pub struct Pending {
     pub tip: TipId,
-    pub manifest: Commitment,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Request {
     pub manifest: Commitment,
 }
 impl Record {

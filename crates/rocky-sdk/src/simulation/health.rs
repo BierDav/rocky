@@ -84,19 +84,26 @@ async fn a_trusted_node_sees_a_partial_devices_alert_and_blocker_clear() -> Resu
     ]);
     steps.extend(relink);
     steps.extend([Sync(1), WokenMesh(0), Mesh(0)]);
+    let observed = run(3, steps, &[" mesh ", " ahead b"]).await?;
+    assert_eq!(observed.len(), 7);
     assert_eq!(
-        run(3, steps, &[" mesh ", " ahead b"]).await?,
+        &observed[..5],
         [
             r#"mesh ["b: alerts []", "c: alerts []"]"#,
             "1 ahead, 0 keys",
             r#"mesh ["b: alerts [\"c ahead 60 min\"], clock_ahead 1", "c: alerts []"]"#,
             "0 ahead, 2 keys",
             r#"mesh ["b: alerts [\"c ahead 60 min\"], clock_ahead 1, silent", "c: alerts [], silent"]"#,
-            // Heard again once its link opens, then its report arrives.
-            r#"mesh ["b: alerts [\"c ahead 60 min\"], clock_ahead 1", "c: alerts [], silent"]"#,
-            r#"mesh ["b: alerts []", "c: alerts [], silent"]"#,
         ]
     );
+    let cleared = r#"mesh ["b: alerts []", "c: alerts [], silent"]"#;
+    // A report may clear the alert in the wake that first removes silence.
+    let heard = r#"mesh ["b: alerts [\"c ahead 60 min\"], clock_ahead 1", "c: alerts [], silent"]"#;
+    assert!(
+        observed[5] == heard || observed[5] == cleared,
+        "{observed:?}"
+    );
+    assert_eq!(observed[6], cleared);
     Ok(())
 }
 

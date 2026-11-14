@@ -4,8 +4,8 @@
 //! seeded faults of [`LinkFaults`].
 mod faults;
 use super::{
-    BoxFuture, Connector, Discovery, Failure, Found, LOCAL_PATH, PathState, Protocol, Stream,
-    TOPIC_PATH, Transport,
+    BoxFuture, Connected, Connector, Discovery, Failure, Found, Incoming, LOCAL_PATH, PathState,
+    Protocol, Stream, TOPIC_PATH, Transport,
 };
 pub use faults::{Draws, LinkFaults};
 use std::{
@@ -25,9 +25,34 @@ use tokio::{
 /// Inbound streams a node has not taken yet; further dials are refused.
 pub const PENDING: usize = 8;
 
-type Inbound = (Protocol, Stream);
+type Inbound = Incoming;
 /// A node's queue and whether a service takes from it.
-type Listener = (mpsc::Sender<Inbound>, Arc<AtomicBool>);
+#[derive(Clone)]
+struct Listener {
+    sender: mpsc::Sender<Inbound>,
+    listening: Arc<AtomicBool>,
+    scope: Arc<Mutex<Option<rocky_core::Scope>>>,
+    rpc: Arc<tokio::sync::Semaphore>,
+    refused: Arc<AtomicUsize>,
+    closed: tokio::sync::watch::Sender<bool>,
+}
+const RPC_INBOUND: usize = 32;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RpcAdmission {
+    pub active: usize,
+    pub limit: usize,
+    pub refused: usize,
+}
+struct RpcSlot {
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    changed: tokio::sync::watch::Sender<()>,
+}
+impl Drop for RpcSlot {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        self.changed.send_replace(());
+    }
+}
 /// The network: who listens, every start, dial and close so far, and the
 /// faults to inject.
 pub struct Hub {
@@ -52,6 +77,7 @@ pub struct Hub {
     /// At the cut, hold the stream instead of disconnecting it.
     pub hold_cut: AtomicBool,
     connectivity: tokio::sync::watch::Sender<()>,
+    admissions: tokio::sync::watch::Sender<()>,
     /// What every stream of a recorded node carried, both ways.
     transcripts: Mutex<HashMap<String, Tap>>,
     /// Whether nodes started from now on can discover.
@@ -97,6 +123,7 @@ impl Default for Hub {
             written: tokio::sync::watch::channel(0).0,
             hold_cut: AtomicBool::new(false),
             connectivity: tokio::sync::watch::channel(()).0,
+            admissions: tokio::sync::watch::channel(()).0,
             transcripts: Mutex::default(),
             discovery: AtomicBool::new(false),
             announced: Mutex::default(),
@@ -202,12 +229,16 @@ impl Hub {
         })
     }
     /// Applies hub faults and counters to a real transport for qualification.
-    pub fn wrap(self: &Arc<Self>, name: &str, transport: Arc<dyn Transport>) -> Arc<dyn Transport> {
-        Arc::new(Wrapped {
-            hub: self.clone(),
-            name: name.into(),
-            transport,
-        })
+    pub fn wrap(self: &Arc<Self>, name: &str, transport: Connected) -> Connected {
+        Connected {
+            discovery: transport.discovery,
+            changes: transport.changes,
+            transport: Arc::new(Wrapped {
+                hub: self.clone(),
+                name: name.into(),
+                transport: transport.transport,
+            }),
+        }
     }
     /// Records the bytes of every later stream `name` dials or accepts.
     pub fn record(&self, name: &str) {
@@ -320,6 +351,18 @@ impl Hub {
         self.listeners
             .lock()
             .is_ok_and(|listeners| listeners.contains_key(name))
+    }
+    pub fn rpc_admission(&self, name: &str) -> Option<RpcAdmission> {
+        let listeners = self.listeners.lock().ok()?;
+        let listener = listeners.get(name)?;
+        Some(RpcAdmission {
+            active: RPC_INBOUND - listener.rpc.available_permits(),
+            limit: RPC_INBOUND,
+            refused: listener.refused.load(Ordering::SeqCst),
+        })
+    }
+    pub fn admission_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.admissions.subscribe()
     }
     /// Starts, dials and closes so far.
     pub fn counts(&self) -> [usize; 3] {
@@ -571,7 +614,8 @@ struct Node {
     name: String,
     inbound: tokio::sync::Mutex<mpsc::Receiver<Inbound>>,
     listening: Arc<AtomicBool>,
-    finder: Option<Arc<Finder>>,
+    scope: Arc<Mutex<Option<rocky_core::Scope>>>,
+    closed: tokio::sync::watch::Sender<bool>,
 }
 /// The hub's discovery: every node announcing under a shared topic is
 /// found at once, as on a local network.
@@ -640,16 +684,28 @@ impl Connector for Memory {
         &self,
         _accepts: bool,
         _secret: [u8; 32],
-    ) -> BoxFuture<'_, Result<Arc<dyn Transport>, Failure>> {
+    ) -> BoxFuture<'_, Result<Connected, Failure>> {
         Box::pin(async move {
             self.hub.starts.fetch_add(1, Ordering::SeqCst);
             let (sender, receiver) = mpsc::channel(PENDING);
             let listening = Arc::new(AtomicBool::new(false));
+            let scope = Arc::new(Mutex::new(None));
+            let closed = tokio::sync::watch::channel(false).0;
             self.hub
                 .listeners
                 .lock()
                 .map_err(|_| "hub poisoned")?
-                .insert(self.name.clone(), (sender, listening.clone()));
+                .insert(
+                    self.name.clone(),
+                    Listener {
+                        sender,
+                        listening: listening.clone(),
+                        scope: scope.clone(),
+                        rpc: Arc::new(tokio::sync::Semaphore::new(RPC_INBOUND)),
+                        refused: Arc::new(AtomicUsize::new(0)),
+                        closed: closed.clone(),
+                    },
+                );
             let finder = self.hub.discovery.load(Ordering::SeqCst).then(|| {
                 let (sender, found) = mpsc::channel(64);
                 Arc::new(Finder {
@@ -659,24 +715,39 @@ impl Connector for Memory {
                     found: tokio::sync::Mutex::new(found),
                 })
             });
-            Ok(Arc::new(Node {
-                hub: self.hub.clone(),
-                name: self.name.clone(),
-                inbound: tokio::sync::Mutex::new(receiver),
-                listening,
-                finder,
-            }) as Arc<dyn Transport>)
+            let discovery = finder.clone().map(|finder| finder as Arc<dyn Discovery>);
+            Ok(Connected {
+                transport: Arc::new(Node {
+                    hub: self.hub.clone(),
+                    name: self.name.clone(),
+                    inbound: tokio::sync::Mutex::new(receiver),
+                    listening,
+                    scope,
+                    closed,
+                }),
+                discovery,
+                changes: Some(self.hub.connectivity.subscribe()),
+            })
         })
     }
 }
 impl Transport for Node {
-    fn connectivity(&self) -> Option<tokio::sync::watch::Receiver<()>> {
-        Some(self.hub.connectivity.subscribe())
+    fn request<'a>(
+        &'a self,
+        addresses: &'a [String],
+        scope: rocky_core::Scope,
+        request: &'a [u8],
+    ) -> BoxFuture<'a, Result<Vec<u8>, Failure>> {
+        Box::pin(request_routes(self, addresses, scope, request))
     }
-    fn discovery(&self) -> Option<Arc<dyn Discovery>> {
-        let finder: Arc<dyn Discovery> = self.finder.clone()?;
-        Some(finder)
+    fn session<'a>(
+        &'a self,
+        addresses: &'a [String],
+        scope: rocky_core::Scope,
+    ) -> BoxFuture<'a, Result<Stream, Failure>> {
+        Box::pin(dial_routes(self, addresses, Protocol::Link, scope))
     }
+
     fn kind(&self) -> &str {
         "memory"
     }
@@ -687,8 +758,12 @@ impl Transport for Node {
         &'a self,
         address: &'a str,
         protocol: Protocol,
+        scope: Option<rocky_core::Scope>,
     ) -> BoxFuture<'a, Result<Stream, Failure>> {
         Box::pin(async move {
+            if *self.closed.borrow() {
+                return Err("memory transport is closed".into());
+            }
             self.hub.dials.fetch_add(1, Ordering::SeqCst);
             *self
                 .hub
@@ -737,7 +812,7 @@ impl Transport for Node {
             let budget = draws
                 .chance(faults.cuts)
                 .then(|| draws.below(faults.cut_within as u64) as usize + 1);
-            let (listener, listening) = self
+            let listener = self
                 .hub
                 .listeners
                 .lock()
@@ -745,9 +820,26 @@ impl Transport for Node {
                 .get(address)
                 .cloned()
                 .ok_or("unreachable")?;
-            if !listening.load(Ordering::SeqCst) {
+            if scope.is_some() && *listener.scope.lock().map_err(|_| "scope poisoned")? != scope {
+                return Err(rocky_core::net::ScopeRefusal::UnknownScope.into());
+            }
+            if !listener.listening.load(Ordering::SeqCst) {
                 return Err("no service listens there".into());
             }
+            let rpc_slot = if protocol == Protocol::Rpc {
+                let permit = listener.rpc.clone().try_acquire_owned().map_err(|_| {
+                    listener.refused.fetch_add(1, Ordering::SeqCst);
+                    self.hub.admissions.send_replace(());
+                    "RPC admission budget"
+                })?;
+                self.hub.admissions.send_replace(());
+                Some(RpcSlot {
+                    permit: Some(permit),
+                    changed: self.hub.admissions.clone(),
+                })
+            } else {
+                None
+            };
             let (near, far) = tokio::io::duplex(self.hub.capacity.load(Ordering::SeqCst).max(1));
             let taps = self.hub.taps([&self.name, address]);
             *self
@@ -778,9 +870,21 @@ impl Transport for Node {
                 paced: false,
             };
             let (near, far) = (pipe(near, &self.name), pipe(far, address));
-            listener
-                .try_send((protocol, Stream::new(far)))
-                .map_err(|_| "unreachable or busy")?;
+            if protocol == Protocol::Rpc {
+                rocky_platform::task::spawn(async move {
+                    let _slot = rpc_slot;
+                    let mut closed = listener.closed.subscribe();
+                    tokio::select! {
+                        _ = rocky_platform::time::timeout(std::time::Duration::from_secs(30), rocky_core::net::framing::serve(Stream::new(far), &listener.sender)) => {},
+                        _ = closed.wait_for(|closed| *closed) => {},
+                    }
+                });
+            } else {
+                listener
+                    .sender
+                    .try_send(Incoming::Stream(protocol, Stream::new(far)))
+                    .map_err(|_| "unreachable or busy")?;
+            }
             self.hub.event(match budget {
                 Some(bytes) => format!("open {label} cut at {bytes}"),
                 None => format!("open {label}"),
@@ -789,13 +893,33 @@ impl Transport for Node {
         })
     }
     fn accept(&self) -> BoxFuture<'_, Option<Inbound>> {
-        Box::pin(async { self.inbound.lock().await.recv().await })
+        Box::pin(async {
+            let mut closed = self.closed.subscribe();
+            let mut inbound = tokio::select! {
+                biased;
+                _ = closed.wait_for(|closed| *closed) => return None,
+                inbound = self.inbound.lock() => inbound,
+            };
+            tokio::select! {
+                biased;
+                _ = closed.wait_for(|closed| *closed) => None,
+                incoming = inbound.recv() => incoming,
+            }
+        })
     }
-    fn listen(&self, listening: bool) {
+    fn listen(&self, scope: Option<rocky_core::Scope>, listening: bool) -> Result<(), Failure> {
+        if listening && *self.closed.borrow() {
+            return Err("memory transport is closed".into());
+        }
+        *self.scope.lock().map_err(|_| "scope poisoned")? = scope;
         self.listening.store(listening, Ordering::SeqCst);
+        Ok(())
     }
     fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {
+            self.closed.send_replace(true);
+            self.hub
+                .sever(|nodes, _| nodes.iter().any(|node| node == &self.name));
             self.hub.closes.fetch_add(1, Ordering::SeqCst);
             if let Ok(mut listeners) = self.hub.listeners.lock() {
                 listeners.remove(&self.name);
@@ -814,8 +938,8 @@ struct Wrapped {
     transport: Arc<dyn Transport>,
 }
 impl Wrapped {
-    fn pipe(&self, stream: Stream, protocol: Protocol) -> Stream {
-        let paths = stream.paths();
+    fn pipe(&self, mut stream: Stream, protocol: Protocol) -> Stream {
+        let lanes = stream.take_lanes();
         let pipe = Pipe {
             messages: Default::default(),
             severed: Default::default(),
@@ -830,13 +954,26 @@ impl Wrapped {
             delay: None,
             paced: false,
         };
-        match paths {
-            Some(paths) => Stream::with_paths(pipe, paths),
-            None => Stream::new(pipe),
-        }
+        Stream::new(pipe).with_lanes(lanes)
     }
 }
 impl Transport for Wrapped {
+    fn request<'a>(
+        &'a self,
+        addresses: &'a [String],
+        scope: rocky_core::Scope,
+        request: &'a [u8],
+    ) -> BoxFuture<'a, Result<Vec<u8>, Failure>> {
+        Box::pin(request_routes(self, addresses, scope, request))
+    }
+    fn session<'a>(
+        &'a self,
+        addresses: &'a [String],
+        scope: rocky_core::Scope,
+    ) -> BoxFuture<'a, Result<Stream, Failure>> {
+        Box::pin(dial_routes(self, addresses, Protocol::Link, scope))
+    }
+
     fn kind(&self) -> &str {
         self.transport.kind()
     }
@@ -847,6 +984,7 @@ impl Transport for Wrapped {
         &'a self,
         address: &'a str,
         protocol: Protocol,
+        scope: Option<rocky_core::Scope>,
     ) -> BoxFuture<'a, Result<Stream, Failure>> {
         Box::pin(async move {
             self.hub.dials.fetch_add(1, Ordering::SeqCst);
@@ -868,7 +1006,7 @@ impl Transport for Wrapped {
             {
                 std::future::pending::<()>().await;
             }
-            let stream = self.transport.connect(address, protocol).await?;
+            let stream = self.transport.connect(address, protocol, scope).await?;
             *self
                 .hub
                 .protocol_dials
@@ -884,14 +1022,16 @@ impl Transport for Wrapped {
             self.transport
                 .accept()
                 .await
-                .map(|(protocol, stream)| (protocol, self.pipe(stream, protocol)))
+                .map(|incoming| match incoming {
+                    Incoming::Stream(protocol, stream) => {
+                        Incoming::Stream(protocol, self.pipe(stream, protocol))
+                    }
+                    other => other,
+                })
         })
     }
-    fn listen(&self, listening: bool) {
-        self.transport.listen(listening);
-    }
-    fn connectivity(&self) -> Option<tokio::sync::watch::Receiver<()>> {
-        Some(self.hub.connectivity.subscribe())
+    fn listen(&self, scope: Option<rocky_core::Scope>, listening: bool) -> Result<(), Failure> {
+        self.transport.listen(scope, listening)
     }
     fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {
@@ -899,10 +1039,217 @@ impl Transport for Wrapped {
             self.transport.close().await;
         })
     }
-    fn forget(&self, address: &str) {
-        self.transport.forget(address);
+}
+
+async fn request_routes(
+    transport: &dyn Transport,
+    addresses: &[String],
+    scope: rocky_core::Scope,
+    request: &[u8],
+) -> Result<Vec<u8>, Failure> {
+    let mut failure: Failure = "no route".into();
+    for address in addresses {
+        let result = rocky_platform::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut stream = transport
+                .connect(address, Protocol::Rpc, Some(scope))
+                .await?;
+            rocky_core::net::framing::write(&mut stream, request).await?;
+            let reply = rocky_core::net::framing::read(&mut stream).await?;
+            let _ = tokio::io::AsyncWriteExt::shutdown(&mut stream).await;
+            Ok::<_, Failure>(reply)
+        })
+        .await;
+        match result {
+            Ok(Ok(reply)) => return Ok(reply),
+            Ok(Err(error)) => failure = error,
+            Err(error) => failure = error.into(),
+        }
     }
-    fn foreground(&self) -> BoxFuture<'_, Result<(), Failure>> {
-        self.transport.foreground()
+    Err(failure)
+}
+
+async fn dial_routes(
+    transport: &dyn Transport,
+    addresses: &[String],
+    protocol: Protocol,
+    scope: rocky_core::Scope,
+) -> Result<Stream, Failure> {
+    let mut failure: Failure = "no route".into();
+    for address in addresses {
+        match rocky_platform::time::timeout(
+            std::time::Duration::from_secs(15),
+            transport.connect(address, protocol, Some(scope)),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(error)) => failure = error,
+            Err(error) => failure = error.into(),
+        }
+    }
+    Err(failure)
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn close_cancels_a_partial_rpc_and_pending_accept() -> Result<(), Failure> {
+        let hub = Arc::new(Hub::default());
+        let server = hub.connector("server").start(true, [1; 32]).await?;
+        let caller = hub.connector("caller").start(false, [2; 32]).await?;
+        server.listen(None, true)?;
+        let _partial = caller.connect("server", Protocol::Rpc, None).await?;
+        let accept = server.accept();
+        tokio::pin!(accept);
+        tokio::select! {
+            biased;
+            _ = &mut accept => return Err("partial RPC reached dispatch".into()),
+            () = tokio::task::yield_now() => {},
+        }
+        let ((), incoming) =
+            rocky_platform::time::timeout(std::time::Duration::from_secs(30), async {
+                tokio::join!(server.close(), &mut accept)
+            })
+            .await?;
+        assert!(incoming.is_none());
+        assert!(server.listen(None, true).is_err());
+        caller.close().await;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rpc_falls_back_after_each_stalled_route_deadline() -> Result<(), Failure> {
+        let hub = Arc::new(Hub::default());
+        let server = hub.connector("third").start(true, [1; 32]).await?;
+        let caller = hub.connector("caller").start(false, [2; 32]).await?;
+        let scope = rocky_core::Scope {
+            mesh: rocky_core::MeshId([1; 16]),
+            app: rocky_core::AppId([2; 16]),
+            domain: rocky_core::DomainId([3; 16]),
+        };
+        server.listen(Some(scope), true)?;
+        hub.stall_peer("first", true);
+        hub.stall_peer("second", true);
+        let routes = ["first".into(), "second".into(), "third".into()];
+        let answer = async {
+            let Some(Incoming::Request(request)) = server.accept().await else {
+                return Err("request expected".into());
+            };
+            assert_eq!(request.bytes, b"request");
+            request.respond(b"answer".to_vec()).await
+        };
+        let (reply, ()) = tokio::try_join!(caller.request(&routes, scope, b"request"), answer)?;
+        assert_eq!(reply, b"answer");
+        assert_eq!(hub.counts()[1], 3);
+        tokio::join!(caller.close(), server.close());
+        Ok(())
+    }
+    #[tokio::test(start_paused = true)]
+    async fn session_falls_back_after_a_stalled_route() -> Result<(), Failure> {
+        let hub = Arc::new(Hub::default());
+        let server = hub.connector("server").start(true, [1; 32]).await?;
+        let caller = hub.connector("caller").start(false, [2; 32]).await?;
+        let scope = rocky_core::Scope {
+            mesh: rocky_core::MeshId([1; 16]),
+            app: rocky_core::AppId([2; 16]),
+            domain: rocky_core::DomainId([3; 16]),
+        };
+        server.listen(Some(scope), true)?;
+        hub.stall_peer("stalled", true);
+        let _stream = caller
+            .session(&["stalled".into(), "server".into()], scope)
+            .await?;
+        assert!(matches!(
+            server.accept().await,
+            Some(Incoming::Stream(Protocol::Link, _))
+        ));
+        tokio::join!(caller.close(), server.close());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scoped_requests_and_sessions_refuse_another_database() -> Result<(), Failure> {
+        let hub = Arc::new(Hub::default());
+        let server = hub.connector("server").start(true, [1; 32]).await?;
+        let caller = hub.connector("caller").start(false, [2; 32]).await?;
+        let caller = hub.wrap("wrapped", caller);
+        let scope = rocky_core::Scope {
+            mesh: rocky_core::MeshId([1; 16]),
+            app: rocky_core::AppId([2; 16]),
+            domain: rocky_core::DomainId([3; 16]),
+        };
+        server.listen(Some(scope), true)?;
+        let wrong = rocky_core::Scope {
+            domain: rocky_core::DomainId([4; 16]),
+            ..scope
+        };
+        let routes = ["server".into()];
+        let error = caller
+            .request(&routes, wrong, b"request")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<rocky_core::net::ScopeRefusal>(),
+            Some(&rocky_core::net::ScopeRefusal::UnknownScope)
+        );
+        let error = caller
+            .session(&routes, wrong)
+            .await
+            .err()
+            .ok_or("wrong scope accepted")?;
+        assert_eq!(
+            error.downcast_ref::<rocky_core::net::ScopeRefusal>(),
+            Some(&rocky_core::net::ScopeRefusal::UnknownScope)
+        );
+        let answer = async {
+            let Some(Incoming::Request(request)) = server.accept().await else {
+                return Err("request expected".into());
+            };
+            assert_eq!(request.bytes, b"request");
+            request.respond(b"answer".to_vec()).await
+        };
+        let (reply, ()) = tokio::try_join!(caller.request(&routes, scope, b"request"), answer)?;
+        assert_eq!(reply, b"answer");
+        let _stream = caller.session(&routes, scope).await?;
+        assert!(matches!(
+            server.accept().await,
+            Some(Incoming::Stream(Protocol::Link, _))
+        ));
+        tokio::join!(caller.close(), server.close());
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rpc_falls_back_when_the_first_route_never_replies() -> Result<(), Failure> {
+        let hub = Arc::new(Hub::default());
+        let silent = hub.connector("silent").start(true, [1; 32]).await?;
+        let server = hub.connector("server").start(true, [2; 32]).await?;
+        let caller = hub.connector("caller").start(false, [3; 32]).await?;
+        let scope = rocky_core::Scope {
+            mesh: rocky_core::MeshId([1; 16]),
+            app: rocky_core::AppId([2; 16]),
+            domain: rocky_core::DomainId([3; 16]),
+        };
+        silent.listen(Some(scope), true)?;
+        server.listen(Some(scope), true)?;
+        let answer = async {
+            let Some(Incoming::Request(held)) = silent.accept().await else {
+                return Err("first request expected".into());
+            };
+            let Some(Incoming::Request(request)) = server.accept().await else {
+                return Err("second request expected".into());
+            };
+            assert_eq!(request.bytes, held.bytes);
+            let result = request.respond(b"answer".to_vec()).await;
+            drop(held);
+            result
+        };
+        let routes = ["silent".into(), "server".into()];
+        let (reply, ()) = tokio::try_join!(caller.request(&routes, scope, b"request"), answer)?;
+        assert_eq!(reply, b"answer");
+        tokio::join!(caller.close(), silent.close(), server.close());
+        Ok(())
     }
 }

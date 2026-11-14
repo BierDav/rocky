@@ -504,7 +504,11 @@ pub(super) async fn last_operation(replica: &Replica, scope: ResourceScope) -> H
     Hash::from_bytes(hash.as_slice().try_into().unwrap())
 }
 /// `replica`'s live identity mark of `author` in `scope`.
-pub(super) async fn live_mark(replica: &Replica, scope: ResourceScope, author: u32) -> u32 {
+pub(super) async fn live_mark(
+    replica: &Replica,
+    scope: ResourceScope,
+    author: crate::writer::WriterId,
+) -> u64 {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let records = crate::storage::collect_rows(
         inner
@@ -513,7 +517,7 @@ pub(super) async fn live_mark(replica: &Replica, scope: ResourceScope, author: u
                 "SELECT sequence FROM secure_identity_marks WHERE scope=? AND author=?",
                 crate::storage::bindings(vec![
                     SqlValue::Blob(encode(&scope).unwrap()),
-                    SqlValue::Integer(author.into()),
+                    crate::writer::writer_value(author),
                 ]),
             )
             .await
@@ -522,7 +526,7 @@ pub(super) async fn live_mark(replica: &Replica, scope: ResourceScope, author: u
     .await
     .unwrap();
     match records.first().map(Vec::as_slice) {
-        Some([SqlValue::Integer(sequence)]) => u32::try_from(*sequence).unwrap(),
+        Some([SqlValue::Integer(sequence)]) => u64::try_from(*sequence).unwrap(),
         None => 0,
         other => panic!("{other:?}"),
     }

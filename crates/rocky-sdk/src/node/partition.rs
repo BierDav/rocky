@@ -2,7 +2,7 @@
 //! vault, derived table keys, sharing and the holding rule.
 use super::*;
 use crate::groups::{GroupPartition, record_key, secret_role};
-use rocky_core::{PartitionTuple, TableClass};
+use rocky_core::TableClass;
 use rocky_credentials::{GroupSecretEnvelope, PartitionGrant};
 use std::collections::BTreeSet;
 /// How a request names a group partition's scopes.
@@ -18,21 +18,18 @@ pub(super) enum Naming {
 impl Node {
     async fn group_partition(
         &self,
-        request: &Value,
+        target: &crate::PartitionTarget,
         naming: Naming,
     ) -> Result<GroupPartition, Failure> {
-        let values: Vec<Cell> = serde_json::from_value(request["values"].clone())?;
+        let (group, table, values) = target.parts();
         let known = self.settings.lock().await.groups.clone();
         let naming_key = crate::groups::naming_key(&self.vault)?;
         let issuer = self.vault.find(crate::groups::NAMING_ROLE)?.is_some();
         GroupPartition::resolve(
             &self.domain(),
-            request["group"].as_str(),
-            request["table"].as_str(),
-            values
-                .into_iter()
-                .map(Cell::sql)
-                .collect::<Result<_, _>>()?,
+            group,
+            table,
+            values.to_vec(),
             |address| match known.get(&record_key(address)) {
                 Some(record) => Ok(record.name),
                 None if let Naming::Sealed(name) = naming => Ok(name),
@@ -48,18 +45,15 @@ impl Node {
     }
     /// A requested partition this device does not know; its scopes stay
     /// unnamed and must not be used.
-    async fn unknown_partition(&self, request: &Value) -> Result<Option<GroupPartition>, Failure> {
-        let values: Vec<Cell> = serde_json::from_value(request["values"].clone())?;
-        let unnamed = GroupPartition::resolve(
-            &self.domain(),
-            request["group"].as_str(),
-            request["table"].as_str(),
-            values
-                .into_iter()
-                .map(Cell::sql)
-                .collect::<Result<_, _>>()?,
-            |_| Ok([0; 32]),
-        )?;
+    async fn unknown_partition(
+        &self,
+        target: &crate::PartitionTarget,
+    ) -> Result<Option<GroupPartition>, Failure> {
+        let (group, table, values) = target.parts();
+        let unnamed =
+            GroupPartition::resolve(&self.domain(), group, table, values.to_vec(), |_| {
+                Ok([0; 32])
+            })?;
         let known = self
             .settings
             .lock()
@@ -90,24 +84,31 @@ impl Node {
     }
     pub(super) async fn partition_address(
         &self,
-        request: &Value,
-    ) -> Result<(ResourceScope, PartitionTuple), Failure> {
-        let name = request["table"]
-            .as_str()
-            .ok_or("partition table must be a string")?;
+        table: &str,
+        values: Vec<SqlValue>,
+    ) -> Result<crate::PartitionAddress, Failure> {
         self.domain()
             .logical()
-            .table(name)
+            .table(table)
             .filter(|table| table.class == TableClass::Replayed && !table.partition_by.is_empty())
             .ok_or("table is not partitioned")?;
         let partition = self
             .group_partition(
-                &json!({"table": name, "values": request["values"]}),
+                &crate::PartitionTarget::Table {
+                    table: table.into(),
+                    values,
+                },
                 Naming::Known,
             )
             .await?;
-        let member = partition.member(name).ok_or("table is not partitioned")?;
-        Ok((member.scope, member.tuple.clone()))
+        let member = partition.member(table).ok_or("table is not partitioned")?;
+        Ok(crate::PartitionAddress {
+            scope: member.scope,
+            tuple: member.tuple.clone(),
+            group: partition.record.group.clone(),
+            address: record_key(&partition.record.address),
+            name: partition.record.name,
+        })
     }
     /// Verifies whole-partition read on every member, as a group secret
     /// reveals every member's key.
@@ -178,13 +179,20 @@ impl Node {
         })
         .await
     }
-    async fn issue_partitions(&self, kind: &str, request: &Value) -> Result<Value, Failure> {
-        let device: crate::NodeKeys = serde_json::from_value(request["device"].clone())?;
-        let grants: Vec<PartitionGrant> = serde_json::from_value(request["partitions"].clone())?;
+    pub(super) async fn issue_partitions(
+        &self,
+        device: crate::NodeKeys,
+        grants: Vec<PartitionGrant>,
+        delegations: u8,
+        delegate: bool,
+    ) -> Result<crate::Supplied, Failure> {
         let registry = self.registry().await?;
         let settings = self.settings.lock().await.clone();
-        let delegations: u8 = request["delegations"].as_u64().unwrap_or(1).try_into()?;
-        let validity = (now()?, settings.ttl, 300);
+        let validity = rocky_credentials::Validity {
+            issued_at: now()?,
+            lifetime: std::time::Duration::from_secs(settings.ttl),
+            clock_skew: std::time::Duration::from_secs(300),
+        };
         let grants = self.domain().families.compact_partitions(&grants);
         if settings.revoked_node(&device, &registry) {
             return Err(refused("the device was revoked"));
@@ -194,13 +202,12 @@ impl Node {
         }
         let chain = self
             .configure(|settings| {
-                if kind != "partition_delegate" && !settings.issuer() {
+                if !delegate && !settings.issuer() {
                     return Err("partition grant requires an issuer".into());
                 }
-                let authors = settings.reserve_authors(device.identity, Some(&registry), None)?;
-                let terms = (delegations, Some(authors));
+                let terms = rocky_credentials::DelegationTerms { delegations };
                 let node = Settings::node_key(&self.vault)?;
-                if kind == "partition_delegate" && !settings.issuer() {
+                if delegate && !settings.issuer() {
                     let families = if self.domain().families.is_empty() {
                         rocky_credentials::GrantFamilies::default()
                     } else {
@@ -208,12 +215,14 @@ impl Node {
                     };
                     Ok(settings.credentials.delegable().delegate_with_families(
                         rocky_credentials::Signer::node(&node, &settings.credentials)?,
-                        device.identity,
-                        rocky_core::PrincipalKind::User,
-                        vec![],
-                        grants.clone(),
-                        terms,
-                        validity,
+                        rocky_credentials::Delegation {
+                            subject: device.identity,
+                            kind: rocky_core::PrincipalKind::User,
+                            grants: vec![],
+                            partitions: grants.clone(),
+                            terms,
+                            validity,
+                        },
                         &families,
                     )?)
                 } else {
@@ -252,11 +261,14 @@ impl Node {
             keys: vec![],
             issuers: vec![],
         };
-        Ok(json!({"supplied":supplied}))
+        Ok(supplied)
     }
     /// Prepares the group secret after issuer or own-id insert authorization: the current epoch of a known
     /// partition, otherwise the first.
-    async fn create_group(&self, partition: GroupPartition) -> Result<Value, Failure> {
+    async fn create_group(
+        &self,
+        partition: GroupPartition,
+    ) -> Result<crate::PreparedPartition, Failure> {
         let mut settings = self.settings.lock().await;
         self.reads_group(&settings, &partition)?;
         let key = record_key(&partition.record.address);
@@ -300,11 +312,11 @@ impl Node {
             .await?;
         // Sessions name the partition only once the replica grants it.
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = granted;
-        Ok(json!({
-            "address": record_key(&record.address),
-            "epoch": epoch,
-            "name": data_encoding::HEXLOWER.encode(&record.name),
-        }))
+        Ok(crate::PreparedPartition {
+            address: record_key(&record.address),
+            epoch,
+            name: data_encoding::HEXLOWER.encode(&record.name),
+        })
     }
     /// Accepts one group envelope after it opens and the device reads every
     /// member in whole; only then is anything registered or stored. Returns
@@ -413,7 +425,12 @@ impl Node {
     }
     /// Seals the current epoch's group secret to each recipient and saves
     /// the deliveries before any network call; sync delivers them.
-    async fn share(&self, partition: GroupPartition, request: &Value) -> Result<Value, Failure> {
+    async fn share(
+        &self,
+        partition: GroupPartition,
+        recipients: BTreeSet<PublicKey>,
+        epoch: Option<rocky_core::KeyEpoch>,
+    ) -> Result<crate::PartitionShare, Failure> {
         let registry = self.registry().await?;
         let membership = self.membership().await?;
         let mut settings = self.settings.lock().await;
@@ -432,19 +449,12 @@ impl Node {
             .cloned()
             .ok_or_else(|| refused("no group secret is held here; create or install it first"))?;
         let current = record.current().ok_or("no group secret epoch")?;
-        let epoch = request
-            .get("epoch")
-            .filter(|value| !value.is_null())
-            .map(|value| serde_json::from_value(value.clone()))
-            .transpose()?
-            .unwrap_or(current);
+        let epoch = epoch.unwrap_or(current);
         if epoch != current {
             return Err(refused(format!(
                 "only the current epoch {current:?} of a group secret is shared"
             )));
         }
-        let recipients: BTreeSet<PublicKey> =
-            serde_json::from_value(request["recipients"].clone())?;
         if recipients.len() > 256 {
             return Err(refused("share with at most 256 recipients at once"));
         }
@@ -477,17 +487,19 @@ impl Node {
         for recipient in &recipients {
             let envelope = GroupSecretEnvelope::seal_recorded(
                 &signer,
-                record.address,
-                epoch.generation,
-                secret,
-                record.name,
+                rocky_credentials::GroupSecrets {
+                    group: record.address,
+                    epoch: epoch.generation,
+                    secret,
+                    name: record.name,
+                },
                 *recipient,
                 statements.clone(),
             )?;
-            envelopes.push(json!({
-                "recipient": envelope.recipient().to_hex(),
-                "envelope": envelope.to_bytes()?,
-            }));
+            envelopes.push(crate::PartitionEnvelope {
+                recipient: envelope.recipient(),
+                envelope: envelope.to_bytes()?,
+            });
             let delivery = crate::delivery::Contents::seal(
                 *recipient,
                 crate::delivery::Reason::Share,
@@ -499,14 +511,17 @@ impl Node {
         }
         draft.save(&self.path)?;
         *settings = draft;
-        Ok(json!({
-            "epoch": epoch,
-            "recipients": recipients.iter().map(PublicKey::to_hex).collect::<Vec<_>>(),
-            "envelopes": envelopes,
-            "sender": sender,
-        }))
+        Ok(crate::PartitionShare {
+            epoch,
+            recipients,
+            envelopes,
+            sender,
+        })
     }
-    async fn group_status(&self, partition: GroupPartition) -> Result<Value, Failure> {
+    async fn group_status(
+        &self,
+        partition: GroupPartition,
+    ) -> Result<crate::PartitionStatus, Failure> {
         let address = record_key(&partition.record.address);
         let membership = if self.settings.lock().await.issuer() {
             Some(self.membership().await?)
@@ -515,20 +530,23 @@ impl Node {
         };
         let (epochs, recipients) = {
             let settings = self.settings.lock().await;
-            // Only the sharer holds its deliveries: no other device sees them.
-            let recipients: Vec<Value> = settings
+            let recipients = settings
                 .deliveries
                 .values()
                 .filter(|pending| pending.address == address)
-                .map(|pending| {
-                    json!({
-                        "node": settings.delivery_nodes.values().chain(settings.peers.keys()).chain(membership.iter().flat_map(|membership| membership.all().map(|(_, linked)| &linked.node)))
-                            .find(|node| rocky_credentials::PeerId::of(**node) == pending.recipient)
-                            .map(PublicKey::to_hex),
-                        "reference": pending.recipient.to_hex(),
-                        "epoch": pending.epoch,
-                        "state": pending.state(),
-                    })
+                .map(|pending| crate::PartitionDelivery {
+                    node: settings
+                        .delivery_nodes
+                        .values()
+                        .chain(settings.peers.keys())
+                        .chain(membership.iter().flat_map(|membership| {
+                            membership.all().map(|(_, linked)| &linked.node)
+                        }))
+                        .find(|node| rocky_credentials::PeerId::of(**node) == pending.recipient)
+                        .copied(),
+                    reference: pending.recipient,
+                    epoch: pending.epoch,
+                    state: pending.state(),
                 })
                 .collect();
             let epochs = settings
@@ -542,246 +560,273 @@ impl Node {
             self.replica.subscriptions().await?.into_iter().collect();
         let mut tables = Vec::new();
         for member in &partition.members {
-            tables.push(json!({
-                "table": member.table,
-                "scope": member.scope,
-                // As activity events name the partition.
-                "partition": data_encoding::HEXLOWER.encode(&member.scope.encryption),
-                "epochs": self.replica.key_epochs(member.scope).await,
-                "current": self.replica.key_epochs(member.scope).await.into_iter().max(),
-                "holding": holding
-                    .get(&member.scope)
-                    .map(|state| format!("{state:?}").to_lowercase()),
-            }));
-        }
-        Ok(json!({
-            "group": partition.record.group,
-            "address": record_key(&partition.record.address),
-            "current": epochs.iter().max(),
-            "epochs": epochs,
-            "tables": tables,
-            "recipients": recipients,
-        }))
-    }
-    pub(super) async fn partition_call(
-        &self,
-        kind: &str,
-        request: &Value,
-    ) -> Result<Value, Failure> {
-        match kind {
-            "partition_role" => {
-                let role: rocky_secure::RoleConfig =
-                    serde_json::from_value(request["role"].clone())?;
-                let partial = role.role == rocky_secure::ReplicaRole::Partial;
-                self.replica.set_role(role).await?;
-                // Partial concerns partitions: every whole unpartitioned table read here stays held.
-                if partial {
-                    let settings = self.settings.lock().await.clone();
-                    for (_, scope) in self.domain().scopes() {
-                        if !self.domain().partitioned_table(&scope)
-                            && settings.reads_whole(&self.domain(), &scope)
-                        {
-                            self.replica.subscribe(scope).await?;
-                        }
-                    }
-                }
-                self.activity
-                    .record("role_changed", json!({"partial": partial}));
-                self.forget_readers().await;
-                self.wake_sync();
-                return Ok(json!({}));
-            }
-            "partition_grant" | "partition_delegate" => {
-                return self.issue_partitions(kind, request).await;
-            }
-            "partition_address" => {
-                let (scope, tuple) = self.partition_address(request).await?;
-                let partition = self.group_partition(request, Naming::Known).await?;
-                return Ok(json!({
-                    "scope": scope,
-                    "tuple": tuple,
-                    "group": partition.record.group,
-                    "address": record_key(&partition.record.address),
-                    "name": data_encoding::HEXLOWER.encode(&partition.record.name),
-                }));
-            }
-            "partition_complete" => {
-                let name = request["table"]
-                    .as_str()
-                    .ok_or("partition table must be a string")?;
-                let logical = self.domain().logical().clone();
-                let table = logical
-                    .table(name)
-                    .filter(|table| !table.partition_by.is_empty())
-                    .ok_or("table is not partitioned")?;
-                let id = logical.table_id(table);
-                return Ok(json!({"complete": self.replica.table_complete(id).await?}));
-            }
-            "partition_next" => {
-                let table = request["table"]
-                    .as_str()
-                    .ok_or("partition table must be a string")?;
-                let identity = self
-                    .replica
-                    .next_partition_identity(table, &crate::groups::naming_key(&self.vault)?)
-                    .await?;
-                let partition = self
-                    .group_partition(
-                        &json!({
-                            "table": table,
-                            "values": [{"type": "integer", "value": identity.to_string()}],
-                        }),
-                        Naming::Create,
-                    )
-                    .await?;
-                let (scope, _) = partition
-                    .member(table)
-                    .map(|member| (member.scope, ()))
-                    .ok_or("table is not partitioned")?;
-                let mut created = self.create_group(partition).await?;
-                created["id"] = identity.to_string().into();
-                created["scope"] = json!(scope);
-                self.activity.record(
-                    "partition_created",
-                    json!({"table": table, "id": identity.to_string()}),
-                );
-                self.forget_readers().await;
-                self.wake_sync();
-                return Ok(created);
-            }
-            _ => {}
-        }
-        let naming = match kind {
-            "partition_create" => Naming::Create,
-            "partition_install" => {
-                let bytes: Vec<u8> = serde_json::from_value(request["envelope"].clone())?;
-                let sender: CredentialChain = serde_json::from_value(request["sender"].clone())
-                    .map_err(|_| refused("an envelope installs with its sender's chain"))?;
-                let envelope = GroupSecretEnvelope::from_bytes(&bytes)?;
-                Naming::Sealed(self.envelope_name(&envelope, Some(&sender)).await?)
-            }
-            // An entitled device may hand a keyless custodian the name.
-            _ => match request["name"].as_str() {
-                Some(name) => Naming::Sealed(
-                    data_encoding::HEXLOWER
-                        .decode(name.as_bytes())?
-                        .try_into()
-                        .map_err(|_| refused("a partition name is 32 bytes"))?,
-                ),
-                None => Naming::Known,
-            },
-        };
-        if matches!(
-            kind,
-            "partition_status" | "partition_evict" | "partition_unsubscribe"
-        ) && let Some(unknown) = self.unknown_partition(request).await?
-        {
-            // Nothing of a partition this device cannot name is held here.
-            return Ok(match kind {
-                "partition_status" => json!({
-                    "group": unknown.record.group,
-                    "address": record_key(&unknown.record.address),
-                    "current": null,
-                    "epochs": [],
-                    "tables": unknown
-                        .members
-                        .iter()
-                        .map(|member| json!({
-                            "table": member.table,
-                            "epochs": [],
-                            "current": null,
-                            "holding": null,
-                        }))
-                        .collect::<Vec<_>>(),
-                    "recipients": [],
-                }),
-                "partition_evict" => json!({"rows": 0, "operations": 0}),
-                _ => json!({}),
+            let epochs = self.replica.key_epochs(member.scope).await;
+            tables.push(crate::PartitionTableStatus {
+                table: member.table.clone(),
+                scope: Some(member.scope),
+                current: epochs.iter().copied().max(),
+                epochs,
+                holding: holding.get(&member.scope).copied(),
             });
         }
-        let partition = self.group_partition(request, naming).await?;
-        let named = json!({"group": request["group"], "values": request["values"]});
-        let omit: BTreeSet<String> = match &request["omit"] {
-            Value::Null => BTreeSet::new(),
-            omit => serde_json::from_value(omit.clone())?,
-        };
-        let result = match kind {
-            "partition_create" => {
-                if !self.settings.lock().await.issuer() {
-                    return Err(refused("explicit partition creation requires an issuer"));
+        Ok(crate::PartitionStatus {
+            group: partition.record.group,
+            address,
+            current: epochs.iter().copied().max(),
+            epochs,
+            tables,
+            recipients,
+        })
+    }
+    pub(super) async fn set_replica_role(
+        &self,
+        role: rocky_secure::RoleConfig,
+    ) -> Result<(), Failure> {
+        let partial = role.role == rocky_secure::ReplicaRole::Partial;
+        self.replica.set_role(role).await?;
+        if partial {
+            let settings = self.settings.lock().await.clone();
+            for (_, scope) in self.domain().scopes() {
+                if !self.domain().partitioned_table(&scope)
+                    && settings.reads_whole(&self.domain(), &scope)
+                {
+                    self.replica.subscribe(scope).await?;
                 }
-                self.create_group(partition).await?
             }
-            "partition_install" => {
-                let bytes: Vec<u8> = serde_json::from_value(request["envelope"].clone())?;
-                let envelope = GroupSecretEnvelope::from_bytes(&bytes)?;
-                // The sharer's chain proves it reads the whole group.
-                let sender: CredentialChain = serde_json::from_value(request["sender"].clone())
-                    .map_err(|_| refused("an envelope installs with its sender's chain"))?;
-                let address = record_key(&partition.record.address);
-                let epoch = envelope.epoch();
-                self.install_envelope(partition, &envelope, Some(&sender), false)
-                    .await?;
-                json!({"address": address, "epoch": epoch})
-            }
-            "partition_share" => {
-                let shared = self.share(partition, request).await?;
-                let mut event = named.clone();
-                event["recipients"] = json!(shared["recipients"].as_array().map_or(0, Vec::len));
-                self.activity.record("partition_shared", event);
-                self.wake_sync();
-                return Ok(shared);
-            }
-            "partition_status" => return self.group_status(partition).await,
-            "partition_register" => {
-                for member in partition.covered(&omit).map_err(refused)? {
-                    self.replica
-                        .register_partition(
-                            member.scope,
-                            member.tuple.clone(),
-                            partition.record.name,
-                        )
-                        .await?;
-                }
-                self.know(&partition).await?;
-                json!({})
-            }
-            "partition_subscribe" | "partition_bootstrap" => {
-                self.hold(&partition, &omit, kind == "partition_bootstrap")
-                    .await?
-            }
-            "partition_unsubscribe" => {
-                for member in partition.released(&omit).map_err(refused)? {
-                    self.replica.unsubscribe(member.scope).await?;
-                }
-                json!({})
-            }
-            "partition_evict" => {
-                let (mut rows, mut operations) = (0u64, 0u64);
-                for member in partition.released(&omit).map_err(refused)? {
-                    let report = self.replica.evict(member.scope).await?;
-                    rows += report.rows as u64;
-                    operations += report.operations as u64;
-                }
-                json!({"rows": rows, "operations": operations})
-            }
-            _ => return Err(refused("unsupported partition request")),
-        };
-        let event = match kind {
-            "partition_create" => Some("partition_created"),
-            "partition_install" => Some("partition_key_installed"),
-            "partition_bootstrap" => Some("partition_bootstrap"),
-            "partition_subscribe" => Some("partition_subscribed"),
-            "partition_unsubscribe" => Some("partition_unsubscribed"),
-            "partition_evict" => Some("partition_evicted"),
-            _ => None,
-        };
-        if let Some(event) = event {
-            self.activity.record(event, named);
         }
+        self.activity
+            .record(crate::ActivityKind::RoleChanged { partial });
         self.forget_readers().await;
         self.wake_sync();
-        Ok(result)
+        Ok(())
+    }
+    pub(super) async fn next_partition(
+        &self,
+        table: &str,
+    ) -> Result<crate::CreatedPartition, Failure> {
+        let id = self
+            .replica
+            .next_partition_identity(table, &crate::groups::naming_key(&self.vault)?)
+            .await?;
+        let target = crate::PartitionTarget::Table {
+            table: table.into(),
+            values: vec![id.sql()],
+        };
+        let partition = self.group_partition(&target, Naming::Create).await?;
+        let scope = partition
+            .member(table)
+            .ok_or("table is not partitioned")?
+            .scope;
+        let partition = self.create_group(partition).await?;
+        self.activity.record(crate::ActivityKind::PartitionCreated {
+            target: target.clone(),
+            id: Some(id),
+        });
+        self.forget_readers().await;
+        self.wake_sync();
+        Ok(crate::CreatedPartition {
+            id,
+            scope,
+            partition,
+        })
+    }
+    pub(super) async fn partition_recipients(
+        &self,
+        target: &crate::PartitionTarget,
+    ) -> Result<Vec<PublicKey>, Failure> {
+        if self.unknown_partition(target).await?.is_some() {
+            return Ok(Vec::new());
+        }
+        let partition = self.group_partition(target, Naming::Known).await?;
+        let address = record_key(&partition.record.address);
+        let membership = if self.settings.lock().await.issuer() {
+            Some(self.membership().await?)
+        } else {
+            None
+        };
+        let settings = self.settings.lock().await;
+        Ok(settings
+            .deliveries
+            .values()
+            .filter(|pending| pending.address == address)
+            .filter_map(|pending| {
+                settings
+                    .delivery_nodes
+                    .values()
+                    .chain(settings.peers.keys())
+                    .chain(
+                        membership.iter().flat_map(|membership| {
+                            membership.all().map(|(_, linked)| &linked.node)
+                        }),
+                    )
+                    .find(|node| rocky_credentials::PeerId::of(**node) == pending.recipient)
+                    .copied()
+            })
+            .collect())
+    }
+    pub(super) async fn share_partition(
+        &self,
+        target: &crate::PartitionTarget,
+        recipients: BTreeSet<PublicKey>,
+        epoch: Option<rocky_core::KeyEpoch>,
+    ) -> Result<crate::PartitionShare, Failure> {
+        let partition = self.group_partition(target, Naming::Known).await?;
+        let shared = self.share(partition, recipients, epoch).await?;
+        self.activity.record(crate::ActivityKind::PartitionShared {
+            target: target.clone(),
+            recipients: shared.recipients.len(),
+        });
+        self.wake_sync();
+        Ok(shared)
+    }
+    pub(super) async fn partition_complete(&self, name: &str) -> Result<bool, Failure> {
+        let logical = self.domain().logical().clone();
+        let table = logical
+            .table(name)
+            .filter(|table| !table.partition_by.is_empty())
+            .ok_or("table is not partitioned")?;
+        Ok(self.replica.table_complete(logical.table_id(table)).await?)
+    }
+    async fn partition_changed(&self) {
+        self.forget_readers().await;
+        self.wake_sync();
+    }
+    pub(super) async fn create_partition(
+        &self,
+        target: &crate::PartitionTarget,
+    ) -> Result<crate::PreparedPartition, Failure> {
+        if !self.settings.lock().await.issuer() {
+            return Err(refused("explicit partition creation requires an issuer"));
+        }
+        let partition = self.group_partition(target, Naming::Create).await?;
+        let prepared = self.create_group(partition).await?;
+        self.activity.record(crate::ActivityKind::PartitionCreated {
+            target: target.clone(),
+            id: None,
+        });
+        self.partition_changed().await;
+        Ok(prepared)
+    }
+    pub(super) async fn install_partition(
+        &self,
+        target: &crate::PartitionTarget,
+        envelope: &GroupSecretEnvelope,
+        sender: &CredentialChain,
+    ) -> Result<(), Failure> {
+        let name = self.envelope_name(envelope, Some(sender)).await?;
+        let partition = self.group_partition(target, Naming::Sealed(name)).await?;
+        self.install_envelope(partition, envelope, Some(sender), false)
+            .await?;
+        self.activity
+            .record(crate::ActivityKind::PartitionKeyInstalled {
+                target: target.clone(),
+            });
+        self.partition_changed().await;
+        Ok(())
+    }
+    pub(super) async fn partition_status(
+        &self,
+        target: &crate::PartitionTarget,
+    ) -> Result<crate::PartitionStatus, Failure> {
+        if let Some(unknown) = self.unknown_partition(target).await? {
+            return Ok(crate::PartitionStatus {
+                group: unknown.record.group,
+                address: record_key(&unknown.record.address),
+                current: None,
+                epochs: Vec::new(),
+                tables: unknown
+                    .members
+                    .into_iter()
+                    .map(|member| crate::PartitionTableStatus {
+                        table: member.table,
+                        scope: None,
+                        epochs: Vec::new(),
+                        current: None,
+                        holding: None,
+                    })
+                    .collect(),
+                recipients: Vec::new(),
+            });
+        }
+        self.group_status(self.group_partition(target, Naming::Known).await?)
+            .await
+    }
+    pub(super) async fn register_partition(
+        &self,
+        target: &crate::PartitionTarget,
+        selection: &crate::PartitionSelection,
+    ) -> Result<(), Failure> {
+        let partition = self
+            .group_partition(target, selection.name.map_or(Naming::Known, Naming::Sealed))
+            .await?;
+        for member in partition.covered(&selection.omit).map_err(refused)? {
+            self.replica
+                .register_partition(member.scope, member.tuple.clone(), partition.record.name)
+                .await?;
+        }
+        self.know(&partition).await?;
+        self.partition_changed().await;
+        Ok(())
+    }
+    pub(super) async fn hold_partition(
+        &self,
+        target: &crate::PartitionTarget,
+        selection: &crate::PartitionSelection,
+        bootstrap: bool,
+    ) -> Result<(), Failure> {
+        let partition = self
+            .group_partition(target, selection.name.map_or(Naming::Known, Naming::Sealed))
+            .await?;
+        self.hold(&partition, &selection.omit, bootstrap).await?;
+        self.activity.record(if bootstrap {
+            crate::ActivityKind::PartitionBootstrap {
+                target: target.clone(),
+            }
+        } else {
+            crate::ActivityKind::PartitionSubscribed {
+                target: target.clone(),
+            }
+        });
+        self.partition_changed().await;
+        Ok(())
+    }
+    pub(super) async fn release_partition(
+        &self,
+        target: &crate::PartitionTarget,
+        omit: &BTreeSet<String>,
+    ) -> Result<(), Failure> {
+        if self.unknown_partition(target).await?.is_none() {
+            let partition = self.group_partition(target, Naming::Known).await?;
+            for member in partition.released(omit).map_err(refused)? {
+                self.replica.unsubscribe(member.scope).await?;
+            }
+            self.activity
+                .record(crate::ActivityKind::PartitionUnsubscribed {
+                    target: target.clone(),
+                });
+            self.partition_changed().await;
+        }
+        Ok(())
+    }
+    pub(super) async fn evict_partition(
+        &self,
+        target: &crate::PartitionTarget,
+        omit: &BTreeSet<String>,
+    ) -> Result<crate::PartitionEviction, Failure> {
+        let mut evicted = crate::PartitionEviction::default();
+        if self.unknown_partition(target).await?.is_none() {
+            let partition = self.group_partition(target, Naming::Known).await?;
+            for member in partition.released(omit).map_err(refused)? {
+                let report = self.replica.evict(member.scope).await?;
+                evicted.rows += report.rows as u64;
+                evicted.operations += report.operations as u64;
+            }
+            self.activity.record(crate::ActivityKind::PartitionEvicted {
+                target: target.clone(),
+            });
+            self.partition_changed().await;
+        }
+        Ok(evicted)
     }
     /// Holds the group partition but the tables left out; with `bootstrap`
     /// it starts from a peer's checkpoint at the next sync.
@@ -790,7 +835,7 @@ impl Node {
         partition: &GroupPartition,
         omit: &BTreeSet<String>,
         bootstrap: bool,
-    ) -> Result<Value, Failure> {
+    ) -> Result<(), Failure> {
         let covered = partition.covered(omit).map_err(refused)?;
         for member in &covered {
             self.replica
@@ -811,15 +856,12 @@ impl Node {
         if bootstrap {
             self.bootstrap_partition(&covered).await
         } else {
-            Ok(json!({}))
+            Ok(())
         }
     }
     /// Saves a checkpoint-first intent for the covered members this device
     /// reads; the next sync imports them before catching up.
-    async fn bootstrap_partition(
-        &self,
-        covered: &[&crate::groups::Member],
-    ) -> Result<Value, Failure> {
+    async fn bootstrap_partition(&self, covered: &[&crate::groups::Member]) -> Result<(), Failure> {
         let domain = self.domain();
         let added: Vec<ResourceScope> = {
             let settings = self.settings.lock().await;
@@ -831,7 +873,7 @@ impl Node {
         };
         self.save_bootstrap(added)
     }
-    fn save_bootstrap(&self, added: Vec<ResourceScope>) -> Result<Value, Failure> {
+    fn save_bootstrap(&self, added: Vec<ResourceScope>) -> Result<(), Failure> {
         let marker = self.path.with_file_name("bootstrap.json");
         // A pending intent waits for a peer that offers checkpoints, which a
         // keyless custody peer never does: later partitions join it.
@@ -842,7 +884,7 @@ impl Node {
         };
         let Some(pending) = intent.get_mut("pending").and_then(Value::as_array_mut) else {
             // An intent without a scope list covers every granted scope.
-            return Ok(json!({"pending": added.len()}));
+            return Ok(());
         };
         for scope in &added {
             let scope = serde_json::to_value(scope)?;
@@ -850,8 +892,7 @@ impl Node {
                 pending.push(scope);
             }
         }
-        let count = pending.len();
         rocky_credentials::write_private(&marker, &serde_json::to_vec(&intent)?)?;
-        Ok(json!({"pending": count}))
+        Ok(())
     }
 }

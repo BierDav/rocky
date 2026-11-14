@@ -38,8 +38,11 @@ fn issuer_at(publisher: &PrivateKey, time: u64) -> (PrivateKey, CredentialChain)
     .unwrap()
     .issue_issuer(
         key.public_key(),
-        Some(crate::AuthorRange::ALL),
-        (time - 5 * DAY, 300 * DAY, DAY),
+        crate::Validity {
+            issued_at: time - 5 * DAY,
+            lifetime: std::time::Duration::from_secs(300 * DAY),
+            clock_skew: std::time::Duration::from_secs(DAY),
+        },
     )
     .unwrap();
     (key, CredentialChain(vec![link]))
@@ -56,6 +59,7 @@ fn statement(issuer: &PrivateKey, time: u64, node: PublicKey) -> Revocation {
         identities: [node, PrivateKey::new().public_key()].into(),
         capabilities: [[time as u8; 32]].into(),
         cut: Default::default(),
+        mode: crate::RevocationMode::Lost,
         recovery: None,
     }
 }
@@ -67,7 +71,7 @@ fn single(signed: &SignedRevocation) -> RevocationSet {
 fn every_interleaving_of_merges_yields_one_digest() {
     let publisher = PrivateKey::new();
     let issuers = [issuer(&publisher), issuer(&publisher)];
-    let statements: Vec<SignedRevocation> = (0..5)
+    let mut statements: Vec<SignedRevocation> = (0..3)
         .map(|index| {
             let issuer = &issuers[index % 2];
             signed(
@@ -80,6 +84,21 @@ fn every_interleaving_of_merges_yields_one_digest() {
             )
         })
         .collect();
+    let target = PrivateKey::new().public_key();
+    // Conflicting root decisions about one identity remain in the union.
+    // The later Lost statement cannot undo the earlier Compromised one.
+    for (mode, time) in [
+        (RevocationMode::Lost, NOW),
+        (RevocationMode::Compromised, NOW - DAY),
+    ] {
+        let body = Revocation {
+            identities: [target].into(),
+            mode,
+            ..statement(&publisher, time, target)
+        };
+        statements
+            .push(SignedRevocation::sign(body, &publisher, &CredentialChain::default()).unwrap());
+    }
     let mut digests = BTreeSet::new();
     let mut order: Vec<usize> = (0..statements.len()).collect();
     // Heap's algorithm: every order of single-statement merges.
@@ -104,6 +123,11 @@ fn every_interleaving_of_merges_yields_one_digest() {
         // Merging a set again, or a subset, adds nothing.
         let again = set.clone();
         assert!(set.merge(&again, anchor, APP, NOW).unwrap().is_empty());
+        assert!(set.revokes(&target));
+        assert!(set.revokes_origin(&target));
+        let decoded = RevocationSet::from_bytes(&set.to_bytes().unwrap()).unwrap();
+        assert_eq!(decoded, set);
+        assert!(decoded.revokes_origin(&target));
         digests.insert(set.digest(NOW).unwrap());
     };
     let count = order.len();
@@ -123,6 +147,72 @@ fn every_interleaving_of_merges_yields_one_digest() {
     assert_ne!(
         digests.first().copied(),
         Some(RevocationSet::new().digest(NOW).unwrap())
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn the_mode_is_required_signed_and_only_the_root_may_cascade() {
+    let publisher = PrivateKey::new();
+    let target = PrivateKey::new().public_key();
+    let body = statement(&publisher, NOW, target);
+    let lost =
+        SignedRevocation::sign(body.clone(), &publisher, &CredentialChain::default()).unwrap();
+    let mut tampered = lost.clone();
+    tampered.statement.mode = RevocationMode::Compromised;
+    assert_ne!(lost.id().unwrap(), tampered.id().unwrap());
+    assert!(tampered.verify(publisher.public_key(), APP).is_err());
+    let compromised =
+        SignedRevocation::sign(tampered.statement, &publisher, &CredentialChain::default())
+            .unwrap();
+    compromised.verify(publisher.public_key(), APP).unwrap();
+
+    let recovery = Revocation {
+        recovery: Some(RootDecision::Grants(RootRecovery {
+            since: NOW,
+            keep: target,
+        })),
+        ..body
+    };
+    assert!(
+        SignedRevocation::sign(recovery.clone(), &publisher, &CredentialChain::default()).is_err()
+    );
+    SignedRevocation::sign(
+        Revocation {
+            mode: RevocationMode::Compromised,
+            ..recovery
+        },
+        &publisher,
+        &CredentialChain::default(),
+    )
+    .unwrap()
+    .verify(publisher.public_key(), APP)
+    .unwrap();
+
+    let issuing = issuer(&publisher);
+    let mut body = statement(&issuing.0, NOW, target);
+    body.mode = RevocationMode::Compromised;
+    assert!(
+        SignedRevocation::sign(
+            body,
+            crate::testing::signer(&issuing.0, &issuing.1),
+            &issuing.1
+        )
+        .is_err()
+    );
+    let mut forged = signed(statement(&issuing.0, NOW, target), &issuing);
+    forged.statement.mode = RevocationMode::Compromised;
+    assert!(forged.verify(publisher.public_key(), APP).is_err());
+
+    let mut old = serde_json::to_value(&lost).unwrap();
+    old["statement"].as_object_mut().unwrap().remove("mode");
+    assert!(serde_json::from_value::<SignedRevocation>(old).is_err());
+    let current = single(&lost);
+    let mut old = ReplicatedAuthority::from(current.clone());
+    old.format = 3;
+    assert!(RevocationSet::from_bytes(&encode(&old).unwrap()).is_err());
+    assert_eq!(
+        RevocationSet::from_bytes(&current.to_bytes().unwrap()).unwrap(),
+        current
     );
 }
 
@@ -217,8 +307,12 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
                     rights: [rocky_core::Right::Read].into(),
                     fields: rocky_core::FieldSelection::Only(BTreeSet::new()),
                 }],
-                (2, None),
-                (NOW, DAY, 0),
+                crate::DelegationTerms { delegations: 2 },
+                crate::Validity {
+                    issued_at: NOW,
+                    lifetime: std::time::Duration::from_secs(DAY),
+                    clock_skew: std::time::Duration::from_secs(0),
+                },
             )
             .unwrap();
         signed(
@@ -318,8 +412,11 @@ fn only_the_root_ends_its_links_and_issuers_below_revoke_each_other() {
         let link = crate::testing::authority(&parent.0, &parent.1)
             .issue_issuer(
                 key.public_key(),
-                Some(crate::AuthorRange::ALL),
-                (NOW - 5 * DAY, 300 * DAY, DAY),
+                crate::Validity {
+                    issued_at: NOW - 5 * DAY,
+                    lifetime: std::time::Duration::from_secs(300 * DAY),
+                    clock_skew: std::time::Duration::from_secs(DAY),
+                },
             )
             .unwrap();
         let mut chain = parent.1.clone();
@@ -411,7 +508,7 @@ fn forked_links() -> (PrivateKey, Vec<SignedCapability>) {
     };
     let grant = CredentialChain(vec![
         Authority::owner(&root)
-            .issue_trusted(identity.public_key(), scope, crate::AuthorRange::ALL, NOW)
+            .issue_trusted(identity.public_key(), scope, NOW)
             .unwrap(),
     ]);
     let certify = |sequence: u32, previous: Option<Commitment>| {
@@ -420,7 +517,6 @@ fn forked_links() -> (PrivateKey, Vec<SignedCapability>) {
             .certify_member(
                 &identity,
                 PrivateKey::new().public_key(),
-                crate::AuthorRange::ALL.first + sequence,
                 u64::from(sequence),
                 previous,
             )

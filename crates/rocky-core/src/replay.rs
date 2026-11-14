@@ -56,7 +56,7 @@ mod values {
 /// The last sequence of one author the intent's author had applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BaseMark {
-    pub author: u32,
+    pub author: crate::WriterId,
     pub sequence: u64,
 }
 
@@ -174,11 +174,14 @@ impl OutcomeRecord {
 mod tests {
     use super::*;
 
-    fn frame(statements: usize, base: &[(u32, u64)]) -> Intent {
+    fn frame(statements: usize, base: &[(u8, u64)]) -> Intent {
         Intent {
             base: base
                 .iter()
-                .map(|&(author, sequence)| BaseMark { author, sequence })
+                .map(|&(author, sequence)| BaseMark {
+                    author: crate::WriterId::from_bytes([author; 32]),
+                    sequence,
+                })
                 .collect(),
             statements: (0..statements)
                 .map(|_| IntentStatement {

@@ -56,7 +56,7 @@ async fn a_seal_its_log_ended_becomes_final_and_beats_a_later_owner_seal() {
         .map(|sequence| {
             let mut statement = committed.statement.clone();
             statement.frontier.push(AuthorMark {
-                author: rocky_credentials::MAX_AUTHOR,
+                author: rocky_core::WriterId::from_bytes([0xff; 32]),
                 sequence,
             });
             SignedSeal::sign(statement, fixture.lineage.publisher()).unwrap()
@@ -221,6 +221,7 @@ async fn a_held_cut_strips_a_revoked_nodes_acknowledgments_and_the_seal_stays_fi
             acknowledgments: None,
             ..heads
         }],
+        mode: rocky_credentials::RevocationMode::Lost,
         recovery: None,
     };
     let revoked = RevocationSet::try_from(vec![

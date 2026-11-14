@@ -15,8 +15,13 @@ targets = ["wasm32-unknown-unknown"]
 
 # Upstream code: SQLite's C ABI needs `unsafe`, so the workspace lints do not
 # apply; `src/locks.rs`, Rocky's addition, is safe Rust.
+[lints.rust]
+unfulfilled_lint_expectations = "deny"
+
 [lints.clippy]
 all = { level = "deny", priority = -1 }
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
 
 [dependencies]
 js-sys = "0.3.81"

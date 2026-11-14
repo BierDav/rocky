@@ -3,9 +3,10 @@
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 mod common;
+use common::identity::snapshot as snap;
 use common::{Device, Failure, SCHEMA, introduce};
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
-use serde_json::Value;
+use serde_json::json;
 use std::{path::Path, sync::Arc};
 
 fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
@@ -45,13 +46,12 @@ async fn a_backup_restores_into_a_fresh_identity_without_forking_or_resending()
     let archive = root.path().join("b.backup");
     let (first, second) = tokio::join!(b.database.backup(&archive), b.database.backup(&archive));
     assert_ne!(first.is_ok(), second.is_ok(), "one archive writer wins");
-    let inventory: Value = serde_json::from_str(&first.or(second)?)?;
-    assert_eq!(inventory["node"].as_str(), Some(lost.as_str()));
-    let names: Vec<&str> = inventory["files"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|file| file["name"].as_str())
+    let inventory = first.or(second)?;
+    assert_eq!(inventory.node.to_hex(), lost);
+    let names: Vec<&str> = inventory
+        .files
+        .iter()
+        .map(|file| file.name.as_str())
         .collect();
     assert_eq!(names, ["identity.json", "rocky.sqlite"]);
     assert!(
@@ -110,7 +110,20 @@ async fn a_backup_restores_into_a_fresh_identity_without_forking_or_resending()
     assert_ne!(c.node().await, lost, "a fresh signing identity");
     assert_eq!(c.titles().await, ["apples", "bread"]);
     // The lost device's handle still names its one operation.
-    let replayed = c.ok(serde_json::json!({"type":"mutate","handle":vec![2;32],"fixture_author":lost,"payload":serde_json::json!({"type":"create","collection":"items","values":{"title":"bread","completed":false}}).to_string().into_bytes(),"entity":null,"baseline":null})).await;
+    let replayed = snap::ok(snap::mutate(
+        &c.session,
+        vec![2; 32],
+        snap::Action::Create {
+            table: "items".to_owned(),
+            values: vec![
+                ("title".to_owned(), snap::field(json!("bread"))),
+                ("completed".to_owned(), snap::field(json!(false))),
+            ],
+        },
+        None,
+        Some(snap::text(&(lost))),
+    ))
+    .await;
     assert_eq!(replayed["replayed"], true);
     assert_eq!(c.titles().await, ["apples", "bread"]);
     // Its unsent edit is delivered as the lost device signed it; new edits

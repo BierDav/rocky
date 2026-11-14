@@ -177,7 +177,7 @@ async fn an_unknown_rival_terminal_never_certifies_the_private_candidate() {
     let candidate = close(&fixture).await;
     let mut statement = candidate.statement.clone();
     statement.frontier.push(rocky_credentials::AuthorMark {
-        author: rocky_credentials::MAX_AUTHOR,
+        author: rocky_core::WriterId::from_bytes([0xff; 32]),
         sequence: 1,
     });
     let rival = SignedSeal::sign(statement, fixture.lineage.publisher()).unwrap();

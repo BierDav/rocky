@@ -1,4 +1,5 @@
 use super::{fixture::*, inspection::*, *};
+use crate::snap;
 #[path = "rollback/diagnostics.rs"]
 mod diagnostics;
 #[path = "rollback/evidence.rs"]
@@ -76,7 +77,7 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
     );
     let earlier = step!(
         "setup.earlier.seal",
-        a.tips("seal", json!({})).await,
+        snap::value(a.session.seal(false)).await,
         &[("m", &m), ("a", &a), ("t", &t)]
     )["tip"]
         .clone();
@@ -125,7 +126,7 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
     );
     let latest = step!(
         "setup.latest.seal",
-        a.tips("seal", json!({})).await,
+        snap::value(a.session.seal(false)).await,
         &[("m", &m), ("a", &a), ("t", &t)]
     )["tip"]
         .clone();
@@ -143,13 +144,13 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
         ));
         let graph = step!(
             "setup.latest.member_frontier.inspect",
-            m.tips("inspect", json!({})).await,
+            snap::value(m.session.inspect_tips()).await,
             &[("m", &m), ("a", &a), ("t", &t)]
         );
         if seal(&graph, &latest)["final"] == true
             && step!(
                 "setup.latest.member_frontier.status",
-                m.tips("status", json!({})).await,
+                snap::value(m.session.tip_status()).await,
                 &[("m", &m), ("a", &a), ("t", &t)]
             )["tip"]
                 == latest
@@ -168,14 +169,13 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
                 "compaction[{}]",
                 if std::ptr::eq(peer, &m) { "m" } else { "t" }
             ),
-            peer.tips("compaction", json!({})).await,
+            snap::value(peer.session.compaction()).await,
             &[("m", &m), ("a", &a), ("t", &t)]
         );
         assert_eq!(compacted["compacted"], latest, "{compacted}");
         let retention = step!(
             "compaction.retention",
-            peer.call(json!({"type":"retention", "collection":"counts"}))
-                .await,
+            snap::value(peer.session.retention("counts")).await,
             &[("m", &m), ("a", &a), ("t", &t)]
         );
         assert!(
@@ -188,7 +188,7 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
             seal(
                 &step!(
                     "compaction.inspect",
-                    peer.tips("inspect", json!({})).await,
+                    snap::value(peer.session.inspect_tips()).await,
                     &[("m", &m), ("a", &a), ("t", &t)]
                 ),
                 &earlier
@@ -200,7 +200,7 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
     // T carries only the graph of main's rollback; its own bookmark stays here.
     step!(
         "park.create",
-        a.tips("create", json!({"name":"park"})).await,
+        snap::value(a.session.create_bookmark("park", None)).await,
         &[("m", &m), ("a", &a), ("t", &t)]
     );
     step!(
@@ -210,7 +210,7 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
     );
     step!(
         "park.follow",
-        t.tips("follow", json!({"name":"park"})).await,
+        snap::value(t.follow("park")).await,
         &[("m", &m), ("a", &a), ("t", &t)]
     );
     step!(
@@ -230,15 +230,18 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
     );
     let back = step!(
         "rollback.open",
-        a.tips("open", json!({"seal":earlier,"minimum_in_sync":1}))
-            .await,
+        snap::value(async {
+            let value = a.session.open_tip(&(snap::text(&(earlier))), 1).await?;
+            Ok(json!({"tip":value}))
+        })
+        .await,
         &[("m", &m), ("a", &a), ("t", &t)]
     )["tip"]
         .clone();
     eprintln!("rollback: opened earlier seal, moving main");
     step!(
         "rollback.move",
-        a.tips("move", json!({"name":"main","tip":back})).await,
+        snap::value(a.move_bookmark("main", &(snap::text(&(back))))).await,
         &[("m", &m), ("a", &a), ("t", &t)]
     );
     step!(
@@ -250,7 +253,7 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
         seal(
             &step!(
                 "rollback.owner.inspect",
-                a.tips("inspect", json!({})).await,
+                snap::value(a.session.inspect_tips()).await,
                 &[("m", &m), ("a", &a), ("t", &t)]
             ),
             &earlier
@@ -372,12 +375,12 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
         }
         if tokio::time::Instant::now() >= deadline {
             eprintln!("rollback automatic failure: wanted={count}, read={read:?}");
-            eprintln!("member status={}", m.call(json!({"type":"status"})).await?);
+            eprintln!("member status={}", snap::value(m.session.status()).await?);
             eprintln!(
                 "member compaction={}",
-                m.tips("compaction", json!({})).await?
+                snap::value(m.session.compaction()).await?
             );
-            eprintln!("owner status={}", a.call(json!({"type":"status"})).await?);
+            eprintln!("owner status={}", snap::value(a.session.status()).await?);
             trace.retain();
             return Err("rollback state was not acquired automatically".into());
         }
@@ -387,14 +390,14 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
     assert_eq!(
         step!(
             "restored.status",
-            m.tips("status", json!({})).await,
+            snap::value(m.session.tip_status()).await,
             &[("m", &m), ("a", &a), ("t", &t)]
         )["tip"],
         back
     );
     let held = step!(
         "restored.held",
-        m.call(json!({"type":"held_changes"})).await,
+        snap::value(m.session.held_changes()).await,
         &[("m", &m), ("a", &a), ("t", &t)]
     );
     // The write past the rolled-back seal is an intent of the abandoned
@@ -435,7 +438,7 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
     assert_eq!(
         step!(
             "reopen.member.status",
-            m.tips("status", json!({})).await,
+            snap::value(m.session.tip_status()).await,
             &[("m", &m), ("a", &a), ("t", &t)]
         )["tip"],
         back

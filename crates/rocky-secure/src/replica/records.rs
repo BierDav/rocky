@@ -76,7 +76,7 @@ pub(super) struct Record<C = u32>(
     Vec<Stamp>,
     bool,
     C,
-    Option<i64>,
+    Option<rocky_core::RowIdentity>,
     Option<serde_bytes::ByteArray<32>>,
     Option<usize>,
     i64,
@@ -92,10 +92,6 @@ impl<A> Inner<A> {
             .author_sets
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Default::default();
-        self.stamp_authors
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
     }
     fn dictionary(&self) -> std::sync::MutexGuard<'_, Dictionary> {
         self.record_dictionary
@@ -482,7 +478,7 @@ impl<C> Record<C> {
     ) -> Result<Self, Error> {
         let proof = match &row.proof {
             Some(proof) => {
-                if Some(proof.identity().integer()) != row.identity {
+                if Some(proof.identity()) != row.identity {
                     return Err(Error::Corrupt(
                         "record identity differs from its origin".into(),
                     ));
@@ -595,10 +591,7 @@ impl<C> Record<C> {
         }
         let proof = match proof {
             Some((_, provenance)) => {
-                let id = rocky_core::RowIdentity::from_integer(
-                    identity.ok_or_else(|| denied("compact birth lacks its identity"))?,
-                )
-                .map_err(|error| denied(&error.to_string()))?;
+                let id = identity.ok_or_else(|| denied("compact birth lacks its identity"))?;
                 let proof = moves::StoredProof::from_origin(
                     origin.ok_or_else(|| denied("compact record lacks its origin"))?,
                     id,
@@ -637,20 +630,15 @@ impl<C> Record<C> {
 
 #[cfg(test)]
 impl<A: RowApplication> Inner<A> {
-    pub(crate) async fn fixed_row_digest(
-        &self,
-        domain: rocky_core::Scope,
-        rows: u64,
-    ) -> Result<Commitment, Error> {
+    pub(crate) async fn fixed_row_digest(&self, rows: u64) -> Result<Commitment, Error> {
         let field = self.definition.fields[0].id;
         let signer = self.config.node.public_key();
-        self.keep_stamp_author(domain, 1, signer).await?;
         let mut sets = checkpoint::Sets::new();
         for index in 0..rows {
             let row = rocky_core::commitment("rocky.phase9.fixture-row", &index.to_le_bytes());
             let stamp = Stamp {
                 clock: 1_700_000_000_000_000 + index,
-                author: 1,
+                author: writer(&signer),
                 sequence: index + 1,
             };
             let record = Materialized {
@@ -658,7 +646,7 @@ impl<A: RowApplication> Inner<A> {
                 moved_from: None,
                 fields: BTreeMap::from([(field, format!("item {index:06}").into_bytes())]),
                 stamps: BTreeMap::from([(field, stamp.clone())]),
-                authors: BTreeMap::from([(1, signer)]),
+                authors: BTreeMap::from([(writer(&signer), signer)]),
                 deleted: false,
                 creation: Hash::new(b"rocky.phase9.fixture-creation"),
                 identity: None,

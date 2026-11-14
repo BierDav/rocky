@@ -77,7 +77,7 @@ struct Lease<A: RowApplication> {
 }
 
 /// Each table scope's author and the last sequence a transaction reserved.
-type Reserved = BTreeMap<ResourceScope, (u32, u32)>;
+type Reserved = BTreeMap<ResourceScope, (WriterId, u64)>;
 
 /// A SQL connection of a `SecureSession`. It may read the typed tables of
 /// the session's readable scopes and every local table, and write the
@@ -287,14 +287,12 @@ impl<A: RowApplication> SecureSql<A> {
             .is_some_and(|logical| logical.partition_by == ["id"]);
         let own_values = if own_id && partition_values.is_none() {
             let highest = match lease.identities.get(&table.scope) {
-                Some((number, sequence)) if *number == author.number => *sequence,
-                _ => inner.highest_identity(table.scope, author.number).await?,
+                Some((number, sequence)) if *number == author.writer => *sequence,
+                _ => inner.highest_identity(table.scope, author.writer).await?,
             };
-            Some([SqlValue::Integer(
-                rocky_core::RowIdentity::next(author.number, highest)
-                    .map_err(|error| denied(&error.to_string()))?
-                    .integer(),
-            )])
+            Some([rocky_core::RowIdentity::next(author.writer, highest)
+                .map_err(|error| denied(&error.to_string()))?
+                .sql()])
         } else {
             None
         };
@@ -360,7 +358,7 @@ impl<A: RowApplication> SecureSql<A> {
         }
         // Later reservations of this transaction continue the first, whose
         // author it verified; the commit verifies every inserted id again.
-        let number = author.number;
+        let number = author.writer;
         let allocation = inner.identity_allocation_scope(scope);
         if let Some(&(reserved, sequence)) = lease.identities.get(&allocation)
             && reserved == number
@@ -382,7 +380,7 @@ impl<A: RowApplication> SecureSql<A> {
                     inner.grant_families(),
                 )
                 .map_err(credential)?
-                .partition_author(author.key.public_key(), author.number, scope, tuple, now()?)
+                .partition_author(author.key.public_key(), scope, tuple, now()?)
                 .map_err(credential)?,
             None => author
                 .credentials
@@ -393,12 +391,7 @@ impl<A: RowApplication> SecureSql<A> {
                     inner.grant_families(),
                 )
                 .map_err(credential)?
-                .author(
-                    author.key.public_key(),
-                    author.number,
-                    table.scope.table,
-                    now()?,
-                )
+                .author(author.key.public_key(), table.scope.table, now()?)
                 .map_err(credential)?,
         };
         if !grants
@@ -407,8 +400,8 @@ impl<A: RowApplication> SecureSql<A> {
         {
             return Err(denied("identity allocation requires an insert grant"));
         }
-        let highest = inner.highest_identity(allocation, author.number).await?;
-        let identity = rocky_core::RowIdentity::next(author.number, highest)
+        let highest = inner.highest_identity(allocation, author.writer).await?;
+        let identity = rocky_core::RowIdentity::next(author.writer, highest)
             .map_err(|error| denied(&error.to_string()))?;
         lease
             .identities
@@ -1116,7 +1109,7 @@ impl<A: RowApplication> SecureSql<A> {
                     "row/field transition denied; the replayed effects are not granted",
                 ));
             }
-            let author = inner.node_author.as_ref().map(|author| author.number);
+            let author = inner.node_author.as_ref().map(|author| author.writer);
             let birth = match inner.replayed_birth(&change, author) {
                 Err(_) if unchecked => None,
                 birth => birth?,
@@ -1132,7 +1125,7 @@ impl<A: RowApplication> SecureSql<A> {
                     .entry(change.scope)
                     .or_default()
                     .push(super::checkpoint::IdentityMark {
-                        author: identity.author(),
+                        author: identity.writer(),
                         signer,
                         sequence: identity.sequence(),
                     });
@@ -1147,8 +1140,8 @@ impl<A: RowApplication> SecureSql<A> {
         }
         // Receivers refuse only a reused id; the author's own ids continue
         // its creation log in each allocation scope.
-        let mut allocated = BTreeMap::<ResourceScope, Vec<u32>>::new();
-        let own = inner.node_author.as_ref().map(|author| author.number);
+        let mut allocated = BTreeMap::<ResourceScope, Vec<u64>>::new();
+        let own = inner.node_author.as_ref().map(|author| author.writer);
         for (scope, marks) in &births {
             for mark in marks.iter().filter(|mark| Some(mark.author) == own) {
                 allocated

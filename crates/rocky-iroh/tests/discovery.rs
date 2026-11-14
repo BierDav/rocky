@@ -3,7 +3,7 @@
 //! Discovery between two endpoints of one host: over mDNS, and over the
 //! rendezvous record on a local lookup server. See
 //! `docs/decisions/0057-discovery.md`.
-use rocky_core::net::{Failure, Found, LOCAL_PATH, PathState, TOPIC_PATH, Transport};
+use rocky_core::net::{Failure, Found, LOCAL_PATH, PathState, TOPIC_PATH};
 use rocky_iroh::{Attachment, Discover, Options, Topic, iroh::EndpointAddr, testing::LookupServer};
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ fn options(lookup: Option<&LookupServer>, local: bool) -> Options {
         ..Options::isolated(if local { "0.0.0.0:0" } else { "127.0.0.1:0" })
     }
 }
-async fn found(transport: &dyn Transport, node: [u8; 32]) -> Result<Found, Failure> {
+async fn found(transport: &Attachment, node: [u8; 32]) -> Result<Found, Failure> {
     let discovery = transport.discovery().ok_or("discovery")?;
     tokio::time::timeout(WAIT, async {
         loop {
@@ -38,18 +38,18 @@ async fn members_of_a_topic_find_each_other_over_mdns_and_others_do_not() -> Res
     let b = options(None, true).start([2; 32]).await?;
     let outsider = options(None, true).start([3; 32]).await?;
     let (a_port, b_port, c_port) = (a.transport(), b.transport(), outsider.transport());
-    let discovery = |port: &dyn Transport| port.discovery().ok_or("discovery");
+    let discovery = |port: &Attachment| port.discovery().ok_or("discovery");
     assert_eq!(
-        discovery(&*a_port)?.paths(),
+        discovery(&a)?.paths(),
         [
             (LOCAL_PATH.to_owned(), PathState::On),
             (TOPIC_PATH.to_owned(), PathState::Off)
         ]
     );
-    discovery(&*a_port)?.announce([11; 32], &[topic]).await?;
-    discovery(&*b_port)?.announce([12; 32], &[topic]).await?;
-    discovery(&*c_port)?.announce([13; 32], &[other]).await?;
-    let (at_a, at_b) = tokio::try_join!(found(&*a_port, [12; 32]), found(&*b_port, [11; 32]))?;
+    discovery(&a)?.announce([11; 32], &[topic]).await?;
+    discovery(&b)?.announce([12; 32], &[topic]).await?;
+    discovery(&outsider)?.announce([13; 32], &[other]).await?;
+    let (at_a, at_b) = tokio::try_join!(found(&a, [12; 32]), found(&b, [11; 32]))?;
     assert!(at_a.local && at_b.local);
     assert_eq!(at_a.path, LOCAL_PATH);
     // The found address is dialable as it is.
@@ -59,22 +59,22 @@ async fn members_of_a_topic_find_each_other_over_mdns_and_others_do_not() -> Res
     // An endpoint of another topic hears of neither and is heard by neither.
     let silence = Duration::from_secs(2);
     assert!(
-        tokio::time::timeout(silence, discovery(&*c_port)?.found())
+        tokio::time::timeout(silence, discovery(&outsider)?.found())
             .await
             .is_err()
     );
     while let Ok(heard) =
-        tokio::time::timeout(Duration::from_millis(10), discovery(&*a_port)?.found()).await
+        tokio::time::timeout(Duration::from_millis(10), discovery(&a)?.found()).await
     {
         assert_eq!(heard.ok_or("closed")?.node, [12; 32]);
     }
     // The background stops the path; the foreground resumes it.
-    discovery(&*a_port)?.foreground(false);
-    assert_eq!(discovery(&*a_port)?.paths()[0].1, PathState::Off);
-    discovery(&*a_port)?.foreground(true);
-    assert_eq!(discovery(&*a_port)?.paths()[0].1, PathState::On);
+    discovery(&a)?.foreground(false);
+    assert_eq!(discovery(&a)?.paths()[0].1, PathState::Off);
+    discovery(&a)?.foreground(true);
+    assert_eq!(discovery(&a)?.paths()[0].1, PathState::On);
     tokio::join!(a_port.close(), b_port.close(), c_port.close());
-    assert!(discovery(&*a_port)?.found().await.is_none());
+    assert!(discovery(&a)?.found().await.is_none());
     Ok(())
 }
 
@@ -86,8 +86,8 @@ async fn members_of_a_topic_find_each_other_through_the_rendezvous_record() -> R
     let b = options(Some(&server), false).start([5; 32]).await?;
     let (a_port, b_port) = (a.transport(), b.transport());
     let (a_finder, b_finder) = (
-        a_port.discovery().ok_or("discovery")?,
-        b_port.discovery().ok_or("discovery")?,
+        a.discovery().ok_or("discovery")?,
+        b.discovery().ok_or("discovery")?,
     );
     assert_eq!(a_finder.paths()[1], (TOPIC_PATH.to_owned(), PathState::On));
     // A answers its previous topic too; B knows only that one.
@@ -99,7 +99,7 @@ async fn members_of_a_topic_find_each_other_through_the_rendezvous_record() -> R
     })
     .await?;
     b_finder.announce([15; 32], &[previous]).await?;
-    let at_b = found(&*b_port, [14; 32]).await?;
+    let at_b = found(&b, [14; 32]).await?;
     assert!(!at_b.local);
     assert_eq!(at_b.path, TOPIC_PATH);
     let address: EndpointAddr = serde_json::from_str(&at_b.address)?;
@@ -134,12 +134,7 @@ async fn an_attached_endpoint_keeps_its_lookup_services_and_discovers_only_when_
     let services = endpoint.address_lookup()?.len();
     assert!(services > 0);
     // Without being asked, an attachment has no discovery.
-    assert!(
-        Attachment::new(endpoint.clone())
-            .transport()
-            .discovery()
-            .is_none()
-    );
+    assert!(Attachment::new(endpoint.clone()).discovery().is_none());
     let attachment = Attachment::discovering(
         endpoint.clone(),
         Discover {
@@ -148,7 +143,7 @@ async fn an_attached_endpoint_keeps_its_lookup_services_and_discovers_only_when_
         },
     );
     let port = attachment.transport();
-    let discovery = port.discovery().ok_or("discovery")?;
+    let discovery = attachment.discovery().ok_or("discovery")?;
     discovery.announce([16; 32], &[[61; 32]]).await?;
     tokio::time::timeout(WAIT, async {
         while server.contacts(&[61; 32]) == 0 {

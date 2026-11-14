@@ -141,7 +141,7 @@ pub enum Operation {
     /// now on. Statements verify themselves, so any node may push them.
     Revoke {
         scope: Scope,
-        revocations: RevocationSet,
+        revocations: Box<RevocationSet>,
     },
 }
 /// What a tenant presents to register a domain.
@@ -189,7 +189,7 @@ pub(crate) fn self_certificate_in(
     key: &p2panda_core::PrivateKey,
     database: rocky_credentials::DatabaseContext,
 ) -> rocky_credentials::SignedCapability {
-    use rocky_credentials::{AuthorRange, Capability, Extended, Extension, PeerId};
+    use rocky_credentials::{Capability, Extended, Extension, PeerId};
     let capability = Capability {
         subject: key.public_key(),
         kind: rocky_core::PrincipalKind::Node,
@@ -199,7 +199,6 @@ pub(crate) fn self_certificate_in(
         delegations: 0,
         extension: Extension::new(Extended {
             node: Some(PeerId::of(key.public_key())),
-            authors: Some(AuthorRange::new(1, 1).expect("author range")),
             database: Some(database),
             sequence: Some(0),
             ..Extended::default()
@@ -232,12 +231,6 @@ pub(crate) fn self_certified(
         (key, Some(self_certificate(key))),
         time,
     )
-}
-/// A Raft log entry: the leader-proposed authority time and a client request.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Proposal {
-    pub time: u64,
-    pub request: Request,
 }
 impl Request {
     pub fn sign(
@@ -454,14 +447,13 @@ impl Metadata {
     pub fn retry_records(&self) -> usize {
         self.retained.len()
     }
-    #[cfg(test)]
     pub fn preflight(&self, request: &Request) -> Result<(), CoordinationError> {
         request.authenticate(self.genesis.id()?)?;
         request.fresh()?;
         self.authorize(request)
     }
     /// `preflight` of a request already authenticated and fresh.
-    pub(crate) fn authorize(&self, request: &Request) -> Result<(), CoordinationError> {
+    pub fn authorize(&self, request: &Request) -> Result<(), CoordinationError> {
         if self
             .retained
             .iter()
@@ -516,7 +508,6 @@ impl Metadata {
                 .map(|_| ()),
         }
     }
-    #[cfg(test)]
     /// Advances authority time to the leader-proposed `time`, clamping a
     /// backward clock, then applies `request` deterministically.
     pub fn apply_at(&mut self, time: u64, request: &Request) -> Result<Outcome, CoordinationError> {
@@ -528,7 +519,7 @@ impl Metadata {
     }
     /// `apply_at` with the request's signature checked beforehand against
     /// this genesis, as a caller does outside its state lock.
-    pub(crate) fn apply_authenticated(
+    pub fn apply_authenticated(
         &mut self,
         time: u64,
         request: &Request,
@@ -591,17 +582,13 @@ impl Metadata {
         }
         result
     }
-    #[cfg(test)]
     /// Answers a read-only request from applied state at its authority time.
     pub fn read(&self, request: &Request) -> Result<Outcome, CoordinationError> {
         request.authenticate(self.genesis.id()?)?;
         self.read_authenticated(request)
     }
     /// `read` of a request already authenticated.
-    pub(crate) fn read_authenticated(
-        &self,
-        request: &Request,
-    ) -> Result<Outcome, CoordinationError> {
+    pub fn read_authenticated(&self, request: &Request) -> Result<Outcome, CoordinationError> {
         let time = self.state.time;
         match &request.operation {
             Operation::Coordinated {
@@ -848,7 +835,7 @@ impl Metadata {
         self.tenant(certificate.issuer).ok().map(|t| t.key)
     }
     /// After authorization, unknown accounts still share the unregistered lane.
-    pub(crate) fn tenant_lane(&self, request: &Request) -> Option<PublicKey> {
+    pub fn tenant_lane(&self, request: &Request) -> Option<PublicKey> {
         self.tenant(self.retry_tenant(request)?).ok().map(|t| t.key)
     }
     fn certificate_bytes(certificate: &ControlCertificate) -> Result<usize, CoordinationError> {
@@ -871,7 +858,7 @@ impl Metadata {
         Ok(used)
     }
     /// Accounted bytes of every control, session and tenant.
-    pub(crate) fn total_used(&self) -> Result<usize, CoordinationError> {
+    pub fn total_used(&self) -> Result<usize, CoordinationError> {
         let mut used = self.state.bytes() + self.tenants.len() * TENANT_BYTES;
         for certificate in &self.controls {
             used += Self::certificate_bytes(certificate)?;
@@ -1233,7 +1220,7 @@ impl Metadata {
         }
         Ok(())
     }
-    pub(crate) fn pending_logs(&self) -> Vec<(TipLog, crate::coordinated::Pending)> {
+    pub fn pending_logs(&self) -> Vec<(TipLog, crate::coordinated::Pending)> {
         self.state
             .domains
             .iter()
@@ -1249,10 +1236,7 @@ impl Metadata {
             })
             .collect()
     }
-    pub(crate) fn log_head(
-        &self,
-        log: TipLog,
-    ) -> Result<crate::coordinated::Head, CoordinationError> {
+    pub fn log_head(&self, log: TipLog) -> Result<crate::coordinated::Head, CoordinationError> {
         let domain = self.state.find(log.scope)?;
         let mut head = domain.coordinated.head(log.tip);
         head.closed = !domain.open();

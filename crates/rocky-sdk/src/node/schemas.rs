@@ -1,6 +1,6 @@
 //! Bounded exact catalog acquisition, independent of the provider's followed tip.
 use super::*;
-use crate::tip_schemas::{Record, Request};
+use crate::tip_schemas::Record;
 use rocky_core::Commitment;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -99,18 +99,14 @@ impl Node {
             {
                 continue;
             }
-            let request = [
-                crate::tip_schemas::PROTOCOL,
-                &serde_json::to_vec(&Request {
-                    manifest: *manifest,
-                })?,
-            ]
-            .concat();
+            let request = PeerRequest::TipSchema {
+                manifest: *manifest,
+            };
             let addresses = contact.addresses(transport.kind());
             let response = tokio::select! {
                 biased;
                 _ = authority.changed() => None,
-                response = rocky_platform::time::timeout_at(deadline, exchange(transport, &addresses, Protocol::Renew, &request)) => response.ok().and_then(Result::ok),
+                response = rocky_platform::time::timeout_at(deadline, exchange(transport, &addresses, self.domain().scope, &request)) => response.ok().and_then(Result::ok),
             };
             // Authority changes cancel an in-flight request. Its bytes grant nothing.
             if !self
@@ -124,12 +120,9 @@ impl Node {
                 continue;
             }
             let result = async {
-                let Some(bytes) = response else {
+                let Some(PeerReply::TipSchema(Some(bytes))) = response else {
                     return Err("tip schema provider unavailable".into());
                 };
-                if bytes == b"null" {
-                    return Err("tip schema absent".into());
-                }
                 let record = Record::parse(&bytes)?;
                 let settings = self.settings.lock().await.clone();
                 let domain = record.domain(&settings, *manifest)?;
@@ -160,7 +153,12 @@ impl Node {
                 }
                 Err(error) => {
                     state.pairs.entry(pair).or_default().failed();
-                    self.activity.record("tip_schema_unavailable", json!({"manifest": HEXLOWER.encode(manifest), "peer": peer.to_hex(), "error": error.to_string()}));
+                    self.activity
+                        .record(crate::ActivityKind::TipSchemaUnavailable {
+                            manifest: *manifest,
+                            peer: (peer).to_owned(),
+                            error: (error.to_string()).to_owned(),
+                        });
                 }
             }
         }
@@ -207,8 +205,7 @@ impl Node {
                 _ => None,
             })
             .ok_or("staged schema has no closing seal")?;
-        let bytes = close.to_bytes()?;
-        let request = [b"rocky.sdk.staged-close.v1\n".as_slice(), bytes.as_slice()].concat();
+        let request = PeerRequest::StagedClose(close.clone());
         let deadline = rocky_platform::time::Instant::now() + Duration::from_secs(30);
         let mut authority = self.replica.observe_authority().await;
         let providers = self.settings.lock().await.targets();
@@ -223,17 +220,15 @@ impl Node {
             let response = tokio::select! {
                 biased;
                 _ = authority.changed() => None,
-                reply = rocky_platform::time::timeout_at(deadline, exchange(transport, &addresses, Protocol::Renew, &request)) => reply.ok().and_then(Result::ok),
+                reply = rocky_platform::time::timeout_at(deadline, exchange(transport, &addresses, self.domain().scope, &request)) => reply.ok().and_then(Result::ok),
             };
-            let Some(response) = response else { continue };
+            let Some(PeerReply::StagedClose(outcome)) = response else {
+                continue;
+            };
             let settings = self.settings.lock().await.clone();
             if !settings.targets().iter().any(|(node, _)| *node == peer) {
                 continue;
             }
-            let Ok(outcome) = serde_json::from_slice::<rocky_secure::StagedCloseStatus>(&response)
-            else {
-                continue;
-            };
             match outcome {
                 rocky_secure::StagedCloseStatus::Finality(proof) => {
                     if proof.seal != close.id()? {
@@ -284,7 +279,11 @@ impl Node {
                         )
                         .is_ok()
                     {
-                        self.activity.record("schema_publication_conflict", json!({"publication": HEXLOWER.encode(&stage.publication), "terminal": HEXLOWER.encode(&finality.seal)}));
+                        self.activity
+                            .record(crate::ActivityKind::SchemaPublicationConflict {
+                                publication: stage.publication,
+                                terminal: finality.seal,
+                            });
                     }
                 }
                 rocky_secure::StagedCloseStatus::Pending => {}
@@ -348,7 +347,9 @@ impl Node {
         drop(settings);
         if let Err(error) = self.refresh_tip_node().await {
             self.activity
-                .record_changed("line_node_failed", json!({"error": error.to_string()}));
+                .record_changed(crate::ActivityKind::LineNodeFailed {
+                    error: (error.to_string()).to_owned(),
+                });
         }
         self.observations.touch();
         self.wake_sync();

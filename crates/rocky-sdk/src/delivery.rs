@@ -109,12 +109,18 @@ pub struct Pending {
     /// The mailboxes that stored it.
     pub mailboxes: Vec<rocky_credentials::PeerId>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum State {
+    Delivered,
+    Deposited,
+    Pending,
+}
 impl Pending {
-    pub fn state(&self) -> &'static str {
+    pub fn state(&self) -> State {
         match (&self.delivery, self.mailboxes.is_empty()) {
-            (None, _) => "delivered",
-            (Some(_), false) => "deposited",
-            (Some(_), true) => "pending",
+            (None, _) => State::Delivered,
+            (Some(_), false) => State::Deposited,
+            (Some(_), true) => State::Pending,
         }
     }
     pub fn sealed(&self) -> Result<Option<SealedDelivery>, Failure> {
@@ -251,10 +257,12 @@ impl Settings {
                 }
                 let envelope = GroupSecretEnvelope::seal_recorded(
                     &signer,
-                    record.address,
-                    epoch.generation,
-                    secret,
-                    record.name,
+                    rocky_credentials::GroupSecrets {
+                        group: record.address,
+                        epoch: epoch.generation,
+                        secret,
+                        name: record.name,
+                    },
                     **node,
                     statements.clone(),
                 )?;

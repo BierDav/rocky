@@ -81,14 +81,19 @@ impl SecureDemo {
             // Different permissions belong to different identities.
             let identity = PrivateKey::from_bytes(&[index ^ 0x80; 32]);
             let node = PrivateKey::from_bytes(&[index; 32]);
-            let range =
-                rocky_secure::credentials::AuthorRange::new(u32::from(index), u32::from(index))
-                    .map_err(signing)?;
             let root = rocky_secure::credentials::Authority::owner(&publisher)
-                .issue(identity.public_key(), grants, range, (time, 300 * DAY, DAY))
+                .issue(
+                    identity.public_key(),
+                    grants,
+                    rocky_secure::credentials::Validity {
+                        issued_at: time,
+                        lifetime: std::time::Duration::from_secs(300 * DAY),
+                        clock_skew: std::time::Duration::from_secs(DAY),
+                    },
+                )
                 .map_err(signing)?;
             let credentials = CredentialChain(vec![root])
-                .certify(&identity, node.public_key(), u32::from(index))
+                .certify(&identity, node.public_key())
                 .map_err(signing)?;
             Ok(SecureConfig {
                 publisher: publisher.public_key(),

@@ -1,17 +1,19 @@
 //! The database owner and the handles composed on it: sessions and an
 //! optional network service. See `docs/runtime/sdk-composition.md`.
+#[cfg(test)]
+#[cfg(test)]
+#[cfg(test)]
+use crate::test_snapshot as snap;
 use crate::{
     Failure,
     connection::{self, ConnectionOptions, Page, SqlFailure, TableEvents},
     enrollment::{DEFAULT_TTL, NodeKeys, Settings, Supplied, now},
-    node::{self, Client, Node},
+    node::{self, Node},
     schema::Schema,
     secrets::{FileSecretStore, SecretStore},
     service::{Network, ServiceError},
-    transport::Transport,
 };
 use rocky_secure::EncryptedReplica;
-use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -32,15 +34,8 @@ pub struct Open<'a> {
     /// The identity signer for this installation call; opening needs no signer.
     pub identity: Option<Arc<dyn crate::IdentityProvider>>,
     pub network: Option<Network>,
-    /// Optional metadata log or coordination service.
-    pub coordination: Option<Coordination>,
-}
-/// Optional coordination, independent of database and network ownership.
-#[derive(Clone)]
-pub enum Coordination {
-    Composed(Arc<dyn rocky_core::DomainLog>),
-    #[cfg(feature = "iroh")]
-    Service(Box<crate::TrustBundle>),
+    /// Application-owned coordinator; local storage works without one.
+    pub coordination: Option<Arc<dyn rocky_credentials::Coordinator>>,
 }
 /// An open database and the network service it opened with, if any.
 pub struct Opened {
@@ -63,7 +58,10 @@ pub struct Opened {
 
 // The blocking constructors make the other installs; a browser has create,
 // join, restore, recover and open (`Configuration`).
-#[cfg_attr(target_family = "wasm", allow(dead_code))]
+#[cfg_attr(
+    target_family = "wasm",
+    expect(dead_code, reason = "blocking installation variants are native only")
+)]
 pub(crate) enum Install {
     Create {
         ttl: u64,
@@ -107,28 +105,23 @@ struct Setup {
     secrets: Arc<dyn SecretStore>,
     identity: Option<Arc<dyn crate::IdentityProvider>>,
     install: Install,
-    coordination: Option<Coordination>,
+    coordination: Option<Arc<dyn rocky_credentials::Coordinator>>,
     confirmation: Option<String>,
     /// Where a hosted database hands out its node.
     #[cfg(test)]
     expose: Option<std::sync::mpsc::Sender<std::sync::Weak<Node>>>,
 }
 enum Command {
+    Request {
+        session: u64,
+        ending: Arc<AtomicBool>,
+        request: Box<crate::request::Request>,
+    },
     #[cfg(all(test, feature = "qualification"))]
     BlockReactor(
         oneshot::Sender<()>,
         std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
     ),
-    Call {
-        session: u64,
-        bytes: Vec<u8>,
-        ending: Arc<AtomicBool>,
-        /// The root signer of a root-only call, dropped when it ends.
-        root: Option<Arc<dyn crate::IdentityProvider>>,
-        /// The identity the call signs with, dropped when it ends.
-        identity: Option<Arc<dyn crate::IdentityProvider>>,
-        reply: oneshot::Sender<Vec<u8>>,
-    },
     End(u64, oneshot::Sender<()>),
     /// A backup archive, as bytes.
     Export(oneshot::Sender<Result<Vec<u8>, Failure>>),
@@ -155,7 +148,10 @@ enum Command {
         queued: web_time::Instant,
         reply: oneshot::Sender<()>,
     },
-    Coordinate(Option<Arc<dyn rocky_core::DomainLog>>, oneshot::Sender<()>),
+    Coordinate(
+        Option<Arc<dyn rocky_credentials::Coordinator>>,
+        oneshot::Sender<Result<(), Failure>>,
+    ),
     #[cfg(feature = "qualification")]
     LockMeasurements(oneshot::Sender<rocky_secure::LockMeasurements>),
     #[cfg(feature = "qualification")]
@@ -169,13 +165,13 @@ enum Command {
         oneshot::Sender<Result<Option<rocky_core::replay::TransactionOutcome>, Failure>>,
     ),
     Flush(oneshot::Sender<Result<(), Failure>>),
-    #[cfg(feature = "iroh")]
+
     Claim(
         crate::counters::Name,
         crate::counters::Claim,
         oneshot::Sender<Result<u64, Failure>>,
     ),
-    #[cfg(feature = "iroh")]
+
     Counter(
         crate::counters::Name,
         Option<crate::counters::Claim>,
@@ -185,7 +181,11 @@ enum Command {
 type Greeting = Result<Ready, Failure>;
 /// The scope and the network service a database opened with, and the
 /// identities its recovery revoked.
-type Ready = (String, Option<u64>, Vec<rocky_credentials::PublicKey>);
+type Ready = (
+    rocky_core::Scope,
+    Option<u64>,
+    Vec<rocky_credentials::PublicKey>,
+);
 /// Where `run` reports how opening went: to the opener blocked on the
 /// database's thread, or to an opener that awaits it.
 enum Hello {
@@ -237,7 +237,7 @@ impl Shared {
 /// reactor thread that serves its sessions. It owns no network.
 pub struct Database {
     shared: Arc<Shared>,
-    scope: String,
+    scope: rocky_core::Scope,
     worker: Mutex<Option<Worker>>,
 }
 /// What serves a database: its own thread natively, or a task on the
@@ -500,25 +500,14 @@ impl Database {
             archived: std::sync::Mutex::new(None),
         }
     }
-    /// Writes a signed backup archive of this database to `target`; see
-    /// `restore`. It returns the archive's inventory as JSON.
-    pub async fn backup(&self, target: &Path) -> Result<String, Failure> {
+    /// Writes a signed, consistent archive and returns its inventory.
+    pub async fn backup(&self, target: &Path) -> Result<crate::BackupInventory, Failure> {
         let session = self.session();
-        let call = json!({
-            "version": 1,
-            "scope": serde_json::from_str::<Value>(&self.scope)?,
-            "request": {"type": "backup", "path": target.to_str().ok_or("the backup path is not UTF-8")?},
-        });
-        let reply: Value = serde_json::from_str(&session.call(call.to_string()).await?)?;
+        let result = session
+            .send(|reply| crate::request::Request::Backup(target.to_path_buf(), reply))
+            .await;
         session.close().await;
-        if reply["status"] != "ok" {
-            return Err(reply["error"]["message"]
-                .as_str()
-                .unwrap_or("backup failed")
-                .to_string()
-                .into());
-        }
-        Ok(reply["value"].to_string())
+        result
     }
     /// A signed backup archive of this database as bytes, for the app to
     /// save or a browser to download; `backup` writes the same archive to
@@ -693,16 +682,15 @@ impl Database {
             }),
         }
     }
-    /// The domain's scope as the call contract spells it.
-    pub fn scope(&self) -> String {
-        self.scope.clone()
+    /// The database domain.
+    pub fn scope(&self) -> rocky_core::Scope {
+        self.scope
     }
     /// A session on this database. Sessions are independent: each has its
     /// own subscriptions, and closing one leaves the others open.
     pub fn session(&self) -> Session {
         Session {
             shared: self.shared.clone(),
-            scope: self.scope.clone(),
             id: self.shared.sessions.fetch_add(1, Ordering::Relaxed),
             closed: Arc::new(AtomicBool::new(false)),
         }
@@ -719,15 +707,15 @@ impl Database {
     /// Makes this device a trusted node of its domain's coordinated logs,
     /// which it ends with seals and whose terminal entries it acknowledges;
     /// `None` ends that. The log is the application's and
-    /// is never closed by Rocky. A database composed with a coordination
-    /// service uses that service's log.
+    /// is never closed by Rocky. The coordinator also handles claims and
+    /// revocation push.
     pub async fn coordinate(
         &self,
-        log: Option<Arc<dyn rocky_core::DomainLog>>,
+        log: Option<Arc<dyn rocky_credentials::Coordinator>>,
     ) -> Result<(), Failure> {
         self.shared
             .request(|reply| Command::Coordinate(log, reply))
-            .await?;
+            .await??;
         Ok(())
     }
     /// The value `claim` takes from the domain's `counter` on the composed
@@ -745,7 +733,6 @@ impl Database {
     /// `CLAIM_RECORDS` claims; beyond that it is refused with `Expired` and
     /// never takes a second value. The domain's trusted nodes claim, and so
     /// do holders of a claim right (`grant_claims`) for that counter.
-    #[cfg(feature = "iroh")]
     pub async fn claim(
         &self,
         counter: crate::counters::Name,
@@ -757,7 +744,6 @@ impl Database {
     }
     /// `counter`'s last claimed value and, for `claim`, what it took: a
     /// linearizable read for reconciliation after a restart.
-    #[cfg(feature = "iroh")]
     pub async fn counter(
         &self,
         counter: crate::counters::Name,
@@ -1027,348 +1013,355 @@ impl Drop for Connection {
     }
 }
 
-/// One caller's view of a shared database: the JSON calls of the native ABI.
+/// One caller's independent waits and requests on a shared database.
 pub struct Session {
     shared: Arc<Shared>,
-    scope: String,
     id: u64,
     closed: Arc<AtomicBool>,
 }
 impl Session {
-    pub(crate) async fn request(&self, request: Value) -> Result<Value, Failure> {
-        self.request_with_root(request, None).await
-    }
-    pub(crate) async fn request_with_root(
+    pub(crate) async fn send<T>(
         &self,
-        request: Value,
-        root: Option<Arc<dyn crate::IdentityProvider>>,
-    ) -> Result<Value, Failure> {
-        self.request_signed(request, root, None).await
-    }
-    pub(crate) async fn request_with_identity(
-        &self,
-        request: Value,
-        identity: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<Value, Failure> {
-        self.request_signed(request, None, Some(identity)).await
-    }
-    async fn request_signed(
-        &self,
-        request: Value,
-        root: Option<Arc<dyn crate::IdentityProvider>>,
-        identity: Option<Arc<dyn crate::IdentityProvider>>,
-    ) -> Result<Value, Failure> {
-        let call = json!({"version":1,"scope":serde_json::from_str::<Value>(&self.scope)?,"request":request});
-        let response: Value =
-            serde_json::from_str(&self.call_supplied(call.to_string(), root, identity).await?)?;
-        if response["status"] != "ok" {
-            return Err(Box::new(crate::CallFailure {
-                code: response["error"]["code"]
-                    .as_str()
-                    .ok_or("missing failure code")?
-                    .into(),
-                retryable: response["error"]["retryable"]
-                    .as_bool()
-                    .ok_or("missing retryability")?,
-                detail: response["error"]["message"]
-                    .as_str()
-                    .ok_or("missing failure detail")?
-                    .into(),
-            }));
-        }
-        Ok(response["value"].clone())
-    }
-    pub async fn network(&self) -> Result<crate::NetworkStatus, Failure> {
-        Ok(serde_json::from_value(
-            self.request(json!({"type":"network"})).await?,
-        )?)
-    }
-    pub async fn peers(&self) -> Result<Vec<crate::Peer>, Failure> {
-        let response = self.request(json!({"type":"peers"})).await?;
-        Ok(serde_json::from_value(response["peers"].clone())?)
-    }
-    pub async fn discovery(&self) -> Result<crate::DiscoveryStatus, Failure> {
-        Ok(self.network().await?.discovery)
-    }
-    /// Observes owned runtime facts without dialing or starting a worker.
-    pub async fn status(&self) -> Result<crate::DatabaseStatus, Failure> {
-        Ok(serde_json::from_value(
-            self.request(json!({"type":"status"})).await?,
-        )?)
-    }
-    /// Waits for a changed snapshot; closing this session ends only its waits.
-    pub async fn status_after(&self, token: String) -> Result<crate::DatabaseStatus, Failure> {
-        Ok(serde_json::from_value(
-            self.request(json!({"type":"status_next","after":token}))
-                .await?,
-        )?)
-    }
-    /// Reconciles selected peers and preserves each attempt's outcome.
-    pub async fn sync_once(&self) -> Result<crate::ReconciliationReport, Failure> {
-        Ok(serde_json::from_value(
-            self.request(json!({"type":"sync"})).await?,
-        )?)
-    }
-    pub async fn set_networking_enabled(&self, enabled: bool) -> Result<(), Failure> {
-        self.request(json!({"type":"networking_control","enabled":enabled}))
-            .await
-            .map(drop)
-    }
-    pub async fn set_automatic_sync(&self, enabled: bool) -> Result<(), Failure> {
-        self.request(json!({"type":"sync_start","enabled":enabled}))
-            .await
-            .map(drop)
-    }
-    async fn tips<T: serde::de::DeserializeOwned>(&self, request: Value) -> Result<T, Failure> {
-        self.tips_with_root(request, None).await
-    }
-    async fn tips_with_root<T: serde::de::DeserializeOwned>(
-        &self,
-        mut request: Value,
-        root: Option<Arc<dyn crate::IdentityProvider>>,
+        request: impl FnOnce(oneshot::Sender<Result<T, Failure>>) -> crate::request::Request,
     ) -> Result<T, Failure> {
-        request["type"] = json!("tips");
-        Ok(serde_json::from_value(
-            self.request_with_root(request, root).await?,
-        )?)
+        self.send_signed(None, request).await
     }
-    /// The followed bookmark and tip; see `docs/runtime/tips-and-bookmarks.md`.
-    pub async fn tip_status(&self) -> Result<crate::TipStatus, Failure> {
-        self.tips(json!({"action":"status"})).await
-    }
-    /// The domain's graph and what each node follows or keeps.
-    pub async fn inspect_tips(&self) -> Result<crate::TipInspection, Failure> {
-        self.tips(json!({"action":"inspect"})).await
-    }
-    /// Seals the followed tip: `continue` moves its bookmark to the
-    /// successor, `close` leaves the bookmark read-only.
-    pub async fn seal(&self, close: bool) -> Result<crate::TipStatus, Failure> {
-        self.tips(json!({"action":"seal","close":close})).await
-    }
-    /// The root recovers the followed tip when no ordinary seal can end its
-    /// coordinated log: one `continue` seal replacing the log's exact head.
-    /// Without the root it fails with `publisher_required`.
-    pub async fn recover(
+    pub(crate) async fn send_signed<T>(
         &self,
-        root: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<crate::TipStatus, Failure> {
-        self.tips_with_root(json!({"action":"recover"}), Some(root))
-            .await
-    }
-    /// A trusted node signs the minimum of trusted acknowledgments that
-    /// makes a seal on the genesis line final. It only raises the largest
-    /// trusted minimum, and none once the root signed one.
-    pub async fn set_genesis_minimum(
-        &self,
-        minimum_in_sync: u32,
-    ) -> Result<crate::TipStatus, Failure> {
-        self.tips(json!({"action":"genesis_minimum","minimum_in_sync":minimum_in_sync}))
-            .await
-    }
-    /// The root signs the genesis line's minimum, which then governs over
-    /// trusted nodes' minimums, raised or lowered, without revoking anyone.
-    pub async fn set_root_genesis_minimum(
-        &self,
-        root: Arc<dyn crate::IdentityProvider>,
-        minimum_in_sync: u32,
-    ) -> Result<crate::TipStatus, Failure> {
-        self.tips_with_root(
-            json!({"action":"genesis_minimum","minimum_in_sync":minimum_in_sync}),
-            Some(root),
-        )
-        .await
-    }
-    /// Finalizes ready seals of the followed path and compacts at the newest
-    /// one that is final or has `keep` seals after it.
-    pub async fn compact(&self, keep: usize) -> Result<crate::TipCompaction, Failure> {
-        self.tips(json!({"action":"compact","keep":keep})).await
-    }
-    /// Where this device's compaction of the followed path stands.
-    pub async fn compaction(&self) -> Result<crate::TipCompaction, Failure> {
-        self.tips(json!({"action":"compaction"})).await
-    }
-    /// Opens a tip on `seal` and returns it.
-    pub async fn open_tip(&self, seal: &str, minimum_in_sync: u32) -> Result<String, Failure> {
-        let opened: Value = self
-            .tips(json!({"action":"open","seal":seal,"minimum_in_sync":minimum_in_sync}))
-            .await?;
-        Ok(opened["tip"].as_str().ok_or("missing opened tip")?.into())
-    }
-    /// Creates `name` on `tip`, by default the followed tip.
-    pub async fn create_bookmark(
-        &self,
-        name: &str,
-        tip: Option<&str>,
-    ) -> Result<crate::TipStatus, Failure> {
-        self.tips(json!({"action":"create","name":name,"tip":tip}))
-            .await
-    }
-    pub async fn move_bookmark(&self, name: &str, tip: &str) -> Result<crate::TipStatus, Failure> {
-        self.tips(json!({"action":"move","name":name,"tip":tip}))
-            .await
-    }
-    pub async fn delete_bookmark(&self, name: &str) -> Result<crate::TipStatus, Failure> {
-        self.tips(json!({"action":"delete","name":name})).await
-    }
-    /// Follows `name`: writes go to its tip from now on.
-    pub async fn follow(&self, name: &str) -> Result<crate::TipStatus, Failure> {
-        self.tips(json!({"action":"follow","name":name})).await
-    }
-    /// The root makes `identity`, an issuer identity, a trusted identity of
-    /// this domain: its nodes are trusted nodes, which renew, revoke and
-    /// seal, open tips and move bookmarks backward or sideways. The grant
-    /// never expires; only `revoke_trusted` ends it. Every trusted node
-    /// learns it from the registry. Without the root it fails with
-    /// `publisher_required`.
-    pub async fn trust(
-        &self,
-        identity: &str,
-        root: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<crate::TrustGrant, Failure> {
-        self.tips_with_root(json!({"action":"trust","identity":identity}), Some(root))
-            .await
-    }
-    /// The root revokes the trusted identity `identity`, every node of it
-    /// and every identity it first enrolled, wherever those renewed since;
-    /// all keys rotate. Their devices see why and enroll again with an
-    /// honest trusted node. Without the root it fails with
-    /// `publisher_required`; no trusted node revokes another. The statement
-    /// keeps the tip statements its nodes signed up to the latest heads this
-    /// node holds; later ones raise `AlertKind::TipStatementsPastCut`.
-    pub async fn revoke_trusted(
-        &self,
-        identity: &str,
-        root: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<Value, Failure> {
-        self.request_with_root(json!({"type":"revoke","identity":identity}), Some(root))
-            .await
-    }
-    /// Installs a trusted grant the root issued to this device's identity.
-    pub async fn install_trust(&self, grant: &str) -> Result<crate::TipStatus, Failure> {
-        self.tips(json!({"action":"install_trust","grant":grant}))
-            .await
-    }
-    /// Grants `identity` the right to claim and read `counters` of this
-    /// domain on its coordination service, or every counter when `None`,
-    /// without being one of the control's trusted identities. An issuer
-    /// grants it and records it in the issuer registry, so every issuer
-    /// renews it; a holder of a right granted with `delegations` above 1
-    /// delegates within its own. The right reaches only counters: never
-    /// the coordinated log, seals or the control. It lives on a link of at
-    /// most `credentials::CLAIM_LIFETIME`, which the holder's node renews
-    /// with any reachable issuer as it claims. An issuer granting an
-    /// identity again replaces its right and revokes the previous grant's
-    /// links. A delegated right is not recorded: only its delegator renews
-    /// it, by granting it again.
-    pub async fn grant_claims(
-        &self,
-        identity: &str,
-        counters: Option<&[&[u8]]>,
-        delegations: u8,
-    ) -> Result<crate::ClaimGrant, Failure> {
-        let counters = counters.map(|names| {
-            names
-                .iter()
-                .map(|name| data_encoding::HEXLOWER.encode(name))
-                .collect::<Vec<_>>()
-        });
-        Ok(serde_json::from_value(
-            self.request(json!({"type":"claims","action":"grant","identity":identity,
-                "counters":counters,"delegations":delegations}))
-                .await?,
-        )?)
-    }
-    /// Installs a claim right granted to this device's identity. A member
-    /// also receives one from an issuer at a renewal, as `claim` asks.
-    pub async fn install_claims(&self, grant: &crate::ClaimGrant) -> Result<(), Failure> {
-        self.request(json!({"type":"claims","action":"install","grant":grant}))
-            .await?;
-        Ok(())
-    }
-    /// This identity's claim right as last installed or renewed: its link's
-    /// expiry and the issuer node it asks first. `None` without one.
-    pub async fn held_claims(&self) -> Result<Option<crate::ClaimGrant>, Failure> {
-        Ok(serde_json::from_value(
-            self.request(json!({"type":"claims","action":"held"}))
-                .await?,
-        )?)
-    }
-    /// Ends the claim right an issuer granted `identity`: no issuer renews
-    /// it any more and a revocation names its grant, which ends every live
-    /// link of it. The coordination service refuses them once the
-    /// revocation reaches it (see `Database::claim`) and in any case once
-    /// a link expires (`credentials::CLAIM_LIFETIME`).
-    pub async fn revoke_claims(&self, identity: &str) -> Result<(), Failure> {
-        self.request(json!({"type":"claims","action":"revoke","identity":identity}))
-            .await?;
-        Ok(())
-    }
-    /// Drops the local frames of a tip this device no longer follows.
-    pub async fn drop_tip(&self, tip: &str) -> Result<crate::TipStatus, Failure> {
-        self.tips(json!({"action":"drop","tip":tip})).await
-    }
-
-    pub async fn call(&self, request: String) -> Result<String, Failure> {
-        self.call_with_root(request, None).await
-    }
-    /// As `call`, with the root signer a root-only request needs: granting
-    /// or revoking trust and recovery. It signs inside this call and is
-    /// dropped when the call ends; a request may instead carry
-    /// `"root": {"phrase": ...}` or `{"secret": ...}`.
-    pub async fn call_with_root(
-        &self,
-        request: String,
-        root: Option<Arc<dyn crate::IdentityProvider>>,
-    ) -> Result<String, Failure> {
-        self.call_supplied(request, root, None).await
-    }
-    /// As `call`, with the identity this database's node belongs to, for a
-    /// call that signs as it. It must be the identity the database was
-    /// installed under; it signs inside this call and is dropped when the
-    /// call ends. A request may instead carry `"identity": {"phrase": ...}`
-    /// or `{"secret": ...}`.
-    pub async fn call_with_identity(
-        &self,
-        request: String,
-        identity: Arc<dyn crate::IdentityProvider>,
-    ) -> Result<String, Failure> {
-        self.call_supplied(request, None, Some(identity)).await
-    }
-    async fn call_supplied(
-        &self,
-        request: String,
-        root: Option<Arc<dyn crate::IdentityProvider>>,
         identity: Option<Arc<dyn crate::IdentityProvider>>,
-    ) -> Result<String, Failure> {
+        request: impl FnOnce(oneshot::Sender<Result<T, Failure>>) -> crate::request::Request,
+    ) -> Result<T, Failure> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(ServiceError::Closed("session").into());
         }
         if self.shared.closed.load(Ordering::SeqCst) {
             return Err(ServiceError::Closed("database").into());
         }
-        if request.len() > rocky_runtime::MAX_FRAME_BYTES {
-            return Err("call frame quota".into());
-        }
         let _permit = self
             .shared
             .budget
             .try_acquire()
             .map_err(|_| "pending call quota")?;
-        let session = self.id;
-        let bytes = request.into_bytes();
-        let reply = self
-            .shared
-            .request(|reply| Command::Call {
-                session,
-                bytes,
+        self.shared
+            .request(|reply| Command::Request {
+                session: self.id,
                 ending: self.closed.clone(),
-                root,
-                identity,
-                reply,
+                request: Box::new(match identity {
+                    Some(identity) => {
+                        crate::request::Request::WithIdentity(identity, Box::new(request(reply)))
+                    }
+                    None => request(reply),
+                }),
             })
-            .await?;
-        Ok(String::from_utf8(reply)?)
+            .await?
+            .map_err(crate::CallFailure::boxed)
     }
+    pub async fn network(&self) -> Result<crate::NetworkStatus, Failure> {
+        self.send(crate::request::Request::Network).await
+    }
+    pub async fn peers(&self) -> Result<Vec<crate::Peer>, Failure> {
+        self.send(crate::request::Request::Peers).await
+    }
+    pub async fn discovery(&self) -> Result<crate::DiscoveryStatus, Failure> {
+        Ok(self.network().await?.discovery)
+    }
+    /// Observes owned runtime facts without dialing or starting a worker.
+    pub async fn status(&self) -> Result<crate::DatabaseStatus, Failure> {
+        self.send(crate::request::Request::Status).await
+    }
+    /// Waits for a changed snapshot; closing this session ends only its waits.
+    pub async fn status_after(&self, token: String) -> Result<crate::DatabaseStatus, Failure> {
+        self.send(|reply| crate::request::Request::StatusAfter(token, reply))
+            .await
+    }
+    /// Reconciles selected peers and preserves each attempt's outcome.
+    pub async fn sync_once(&self) -> Result<crate::ReconciliationReport, Failure> {
+        self.send(crate::request::Request::Sync).await
+    }
+    /// Supplies the identity only for this sync, including certification after a tip change.
+    pub async fn sync_once_with_identity(
+        &self,
+        identity: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<crate::ReconciliationReport, Failure> {
+        self.send_signed(Some(identity), crate::request::Request::Sync)
+            .await
+    }
+    pub async fn set_networking_enabled(&self, enabled: bool) -> Result<(), Failure> {
+        self.send(|reply| crate::request::Request::NetworkingEnabled(enabled, reply))
+            .await
+    }
+    pub async fn set_automatic_sync(&self, enabled: bool) -> Result<(), Failure> {
+        self.send(|reply| crate::request::Request::AutomaticSync(enabled, reply))
+            .await
+    }
+    /// Resumes networking after the application enters the foreground.
+    pub async fn enter_foreground(&self) -> Result<(), Failure> {
+        self.send(crate::request::Request::Foreground).await
+    }
+    /// Suspends background networking and drains its live links.
+    pub async fn enter_background(&self) -> Result<(), Failure> {
+        self.send(crate::request::Request::Background).await
+    }
+    /// Ends this device's authority, optionally removing its local data at close.
+    pub async fn logout(&self, purge_on_close: bool) -> Result<(), Failure> {
+        self.send(|reply| crate::request::Request::Logout(purge_on_close, reply))
+            .await
+    }
+    async fn change_tip(
+        &self,
+        change: crate::request::TipChange,
+        root: Option<Arc<dyn crate::IdentityProvider>>,
+    ) -> Result<crate::TipStatus, Failure> {
+        self.send(|reply| crate::request::Request::ChangeTip(change, node::Root(root), reply))
+            .await
+    }
+    /// The followed bookmark, tip, and peer progress.
+    pub async fn tip_status(&self) -> Result<crate::TipStatus, Failure> {
+        self.change_tip(crate::request::TipChange::Status, None)
+            .await
+    }
+    pub async fn inspect_tips(&self) -> Result<crate::TipInspection, Failure> {
+        self.send(crate::request::Request::InspectTips).await
+    }
+    pub async fn seal(&self, close: bool) -> Result<crate::TipStatus, Failure> {
+        self.change_tip(crate::request::TipChange::Seal { close }, None)
+            .await
+    }
+    /// The root recovers the followed tip's stuck coordinated log.
+    pub async fn recover(
+        &self,
+        root: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<crate::TipStatus, Failure> {
+        self.change_tip(crate::request::TipChange::Recover, Some(root))
+            .await
+    }
+    pub async fn set_genesis_minimum(
+        &self,
+        minimum_in_sync: u32,
+    ) -> Result<crate::TipStatus, Failure> {
+        self.change_tip(
+            crate::request::TipChange::GenesisMinimum { minimum_in_sync },
+            None,
+        )
+        .await
+    }
+    pub async fn set_root_genesis_minimum(
+        &self,
+        root: Arc<dyn crate::IdentityProvider>,
+        minimum_in_sync: u32,
+    ) -> Result<crate::TipStatus, Failure> {
+        self.change_tip(
+            crate::request::TipChange::GenesisMinimum { minimum_in_sync },
+            Some(root),
+        )
+        .await
+    }
+    pub async fn compact(&self, keep: usize) -> Result<crate::TipCompaction, Failure> {
+        self.send(|reply| crate::request::Request::Compact(keep, reply))
+            .await
+    }
+    pub async fn compaction(&self) -> Result<crate::TipCompaction, Failure> {
+        self.send(crate::request::Request::Compaction).await
+    }
+    pub async fn kept_seals(&self) -> Result<crate::KeptSeals, Failure> {
+        self.send(crate::request::Request::KeptSeals).await
+    }
+    pub async fn set_kept_seals(
+        &self,
+        kept: crate::KeptSeals,
+    ) -> Result<crate::KeptSeals, Failure> {
+        self.send(|reply| crate::request::Request::SetKeptSeals(kept, reply))
+            .await
+    }
+    pub async fn pull_seal(&self, seal: &str) -> Result<crate::TipStatus, Failure> {
+        self.change_tip(crate::request::TipChange::Pull { seal: seal.into() }, None)
+            .await
+    }
+    pub async fn open_tip(&self, seal: &str, minimum_in_sync: u32) -> Result<String, Failure> {
+        self.open_tip_signed(seal, minimum_in_sync, None).await
+    }
+    /// Supplies the identity when opening starts another local writer chain.
+    pub async fn open_tip_with_identity(
+        &self,
+        seal: &str,
+        minimum_in_sync: u32,
+        identity: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<String, Failure> {
+        self.open_tip_signed(seal, minimum_in_sync, Some(identity))
+            .await
+    }
+    async fn open_tip_signed(
+        &self,
+        seal: &str,
+        minimum_in_sync: u32,
+        identity: Option<Arc<dyn crate::IdentityProvider>>,
+    ) -> Result<String, Failure> {
+        let seal = data_encoding::HEXLOWER
+            .decode(seal.as_bytes())?
+            .try_into()
+            .map_err(|_| "expected a seal digest")?;
+        self.send_signed(identity, |reply| {
+            crate::request::Request::OpenTip(seal, minimum_in_sync, reply)
+        })
+        .await
+    }
+    pub async fn create_bookmark(
+        &self,
+        name: &str,
+        tip: Option<&str>,
+    ) -> Result<crate::TipStatus, Failure> {
+        self.change_tip(
+            crate::request::TipChange::Create {
+                name: name.into(),
+                tip: tip.map(str::to_owned),
+            },
+            None,
+        )
+        .await
+    }
+    pub async fn move_bookmark(&self, name: &str, tip: &str) -> Result<crate::TipStatus, Failure> {
+        self.change_tip(
+            crate::request::TipChange::Move {
+                name: name.into(),
+                tip: tip.into(),
+            },
+            None,
+        )
+        .await
+    }
+    pub async fn delete_bookmark(&self, name: &str) -> Result<crate::TipStatus, Failure> {
+        self.change_tip(
+            crate::request::TipChange::Delete { name: name.into() },
+            None,
+        )
+        .await
+    }
+    pub async fn follow(&self, name: &str) -> Result<crate::TipStatus, Failure> {
+        self.change_tip(
+            crate::request::TipChange::Follow { name: name.into() },
+            None,
+        )
+        .await
+    }
+    pub async fn follow_when_ready(&self, name: &str) -> Result<crate::TipStatus, Failure> {
+        self.change_tip(
+            crate::request::TipChange::FollowWhenReady { name: name.into() },
+            None,
+        )
+        .await
+    }
+    /// The root grants trust to an issuer identity.
+    pub async fn trust(
+        &self,
+        identity: &str,
+        root: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<crate::TrustGrant, Failure> {
+        let identity = identity.parse()?;
+        self.send(|reply| crate::request::Request::Trust(identity, node::Root(Some(root)), reply))
+            .await
+    }
+    /// Ends a trusted identity. Lost lets its first enrollees renew elsewhere;
+    /// Compromised ends them too. A merged compromise cannot be undone by loss.
+    pub async fn revoke_trusted(
+        &self,
+        identity: &str,
+        mode: rocky_credentials::RevocationMode,
+        root: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<crate::RevocationResult, Failure> {
+        self.revoke_identity_with_root(identity, mode, Some(root), true)
+            .await
+    }
+    /// "This is everything: sign out everywhere else." The root ends every
+    /// node except this one and `custodians`, including nodes this store
+    /// never saw, and keeps their operations only up to what this replica
+    /// applied: anything not on this device now is discarded on every
+    /// replica. A later reset follows this one; resets signed concurrently
+    /// end each other's devices. Fails on a device a reset already ended.
+    pub async fn sign_out_everywhere_else(
+        &self,
+        root: Arc<dyn crate::IdentityProvider>,
+        custodians: &[rocky_credentials::PeerId],
+    ) -> Result<crate::ResetReceipt, Failure> {
+        let custodians = custodians.iter().copied().collect();
+        self.send(|reply| {
+            crate::request::Request::SignOutEverywhereElse(
+                node::Root(Some(root)),
+                custodians,
+                reply,
+            )
+        })
+        .await
+    }
+    /// Whether an owner reset fenced this device's view.
+    pub async fn freshness(&self) -> Result<crate::Freshness, Failure> {
+        self.send(crate::request::Request::Freshness).await
+    }
+    pub async fn revoke_identity(
+        &self,
+        identity: &str,
+    ) -> Result<crate::RevocationResult, Failure> {
+        self.revoke_identity_with_root(
+            identity,
+            rocky_credentials::RevocationMode::Lost,
+            None,
+            true,
+        )
+        .await
+    }
+    /// Root revocations optionally retain tip statements through the local heads.
+    pub async fn revoke_identity_with_root(
+        &self,
+        identity: &str,
+        mode: rocky_credentials::RevocationMode,
+        root: Option<Arc<dyn crate::IdentityProvider>>,
+        keep: bool,
+    ) -> Result<crate::RevocationResult, Failure> {
+        let identity = identity.parse()?;
+        self.send(|reply| {
+            crate::request::Request::RevokeIdentity(identity, mode, node::Root(root), keep, reply)
+        })
+        .await
+    }
+    pub async fn install_trust(&self, grant: &str) -> Result<crate::TipStatus, Failure> {
+        self.change_tip(
+            crate::request::TipChange::InstallTrust {
+                grant: grant.into(),
+            },
+            None,
+        )
+        .await
+    }
+    /// Grants counter claim rights; `None` covers every counter.
+    pub async fn grant_claims(
+        &self,
+        identity: &str,
+        counters: Option<&[&[u8]]>,
+        delegations: u8,
+    ) -> Result<crate::ClaimGrant, Failure> {
+        let identity = identity.parse()?;
+        let counters = counters.map(|names| names.iter().map(|name| name.to_vec()).collect());
+        self.send(|reply| {
+            crate::request::Request::GrantClaims(identity, counters, delegations, reply)
+        })
+        .await
+    }
+    pub async fn install_claims(&self, grant: &crate::ClaimGrant) -> Result<(), Failure> {
+        self.send(|reply| crate::request::Request::InstallClaims(grant.clone(), reply))
+            .await
+    }
+    pub async fn held_claims(&self) -> Result<Option<crate::ClaimGrant>, Failure> {
+        self.send(crate::request::Request::HeldClaims).await
+    }
+    pub async fn revoke_claims(&self, identity: &str) -> Result<(), Failure> {
+        let identity = identity.parse()?;
+        self.send(|reply| crate::request::Request::RevokeClaims(identity, reply))
+            .await
+    }
+    pub async fn drop_tip(&self, tip: &str) -> Result<crate::TipStatus, Failure> {
+        self.change_tip(crate::request::TipChange::Drop { tip: tip.into() }, None)
+            .await
+    }
+
     /// Ends this session: its waits stop and its subscriptions are
     /// released. The database and its other sessions stay open.
     pub async fn close(&self) {
@@ -1420,7 +1413,7 @@ impl NetworkService {
     }
 }
 
-type Link = (Arc<dyn Transport>, bool);
+type Link = (crate::transport::Connected, bool);
 
 /// The installation of the data directory, created, joined or loaded, and
 /// the started transport of `network`.
@@ -1752,7 +1745,7 @@ pub(crate) async fn insert_rows(
             sql.next_id_partition(table, &values).await?
         };
         values.extend(row);
-        values.push(rocky_core::SqlValue::Integer(id.integer()));
+        values.push(id.sql());
         pending += 1;
         if pending == batch || index + 1 == total {
             sql.run(&insert(pending), std::mem::take(&mut values))
@@ -2103,34 +2096,24 @@ async fn run_inner(
             .await?;
         settings.bootstrap = None;
         retain(&replica, &settings, &domain).await?;
-        #[cfg_attr(not(feature = "iroh"), allow(unused_mut))]
-        let mut service: Option<crate::owner::Service> = None;
-        let log: Option<Arc<dyn rocky_core::DomainLog>> = match &setup.coordination {
-            None => None,
-            Some(Coordination::Composed(log)) => Some(log.clone()),
-            #[cfg(feature = "iroh")]
-            Some(Coordination::Service(bundle)) => {
-                let transport = link
-                    .as_ref()
-                    .map(|(transport, _)| transport.clone())
-                    .ok_or("a coordination service needs the database's network")?;
+        let coordinator = setup
+            .coordination
+            .as_ref()
+            .map(|client| {
                 let key = rocky_credentials::PrivateKey::from_bytes(&vault.get("node")?);
-                let client = Arc::new(rocky_coordinator::service::NetworkCoordinator::connect(
-                    bundle, key, transport,
-                )?);
-                let composed =
-                    crate::owner::Service::new((**bundle).clone(), directory.to_path_buf())
-                        .with_client(client.clone());
-                composed.certify(&settings.credentials);
-                service = Some(composed);
-                Some(client)
-            }
-        };
+                let certificate = settings
+                    .credentials
+                    .certificate()
+                    .ok_or("missing node certificate")?
+                    .clone();
+                client.bind(key, certificate).map_err(Failure::from)
+            })
+            .transpose()?;
         settings.save(&path)?;
-        Ok::<_, Failure>((domain, replica, service, log))
+        Ok::<_, Failure>((domain, replica, coordinator))
     }
     .await;
-    let (domain, replica, service, log) = match opened {
+    let (domain, replica, coordinator) = match opened {
         Ok(opened) => opened,
         Err(error) => {
             if let Some((transport, true)) = &link {
@@ -2144,17 +2127,16 @@ async fn run_inner(
             return Err(error);
         }
     };
-    let scope = serde_json::to_string(&domain.scope)?;
+    let scope = domain.scope;
     let node = Arc::new(
         Node::new(replica.clone(), domain, vault, settings, path.clone())
-            .with_service(service)
             .with_declared(setup.schema.clone()),
     );
     #[cfg(test)]
     if let Some(expose) = &setup.expose {
         let _ = expose.send(Arc::downgrade(&node));
     }
-    node.coordinate(log);
+    node.coordinate_bound(coordinator);
     let started = async {
         crate::identities::supplying(startup_identity, async {
             node.restore_line_signers().await?;
@@ -2198,7 +2180,7 @@ async fn run_inner(
         });
     }
     let network = match link {
-        Some((transport, owned)) => Some(node.link(transport, owned).await),
+        Some((transport, owned)) => Some(node.link(transport, owned).await?),
         None => None,
     };
     // Recovery is for lost trusted nodes: the root revokes them before
@@ -2270,46 +2252,26 @@ async fn run_inner(
                     let _ = resume.lock().unwrap().recv();
                 });
             }
-            Command::Call {
+            Command::Request {
                 session,
-                bytes,
                 ending,
-                root,
-                identity,
-                mut reply,
+                request,
             } => {
                 let Ok(permit) = budget.clone().try_acquire_owned() else {
-                    let _ = reply.send(json!({
-                        "version": 1, "status": "error",
-                        "error": {"code": "quota", "retryable": true, "message": "active call quota"},
-                    }).to_string().into_bytes());
+                    request.fail("active call quota".into());
                     continue;
                 };
-                // Only a subscription's wait stops when its caller goes
-                // away; admitted mutations run to completion.
-                let waits = serde_json::from_slice::<Value>(&bytes).is_ok_and(|call| {
-                    ["next", "status_next", "activity_next"]
-                        .contains(&call["request"]["type"].as_str().unwrap_or(""))
-                });
-                let client = if waits && ending.load(Ordering::SeqCst) {
+                let client = if request.waits() && ending.load(Ordering::SeqCst) {
                     Err(ServiceError::Closed("session").into())
                 } else {
                     node.client(session)
                 };
-                crate::reactor::spawn_in(&mut tasks, "call", async move {
+                crate::reactor::spawn_in(&mut tasks, "request", async move {
                     let _permit = permit;
-                    let response = if waits {
-                        tokio::select! {
-                            response = dispatch(&bytes, client, &node, (None, None)) => response,
-                            () = reply.closed() => return,
-                        }
-                    } else {
-                        dispatch(&bytes, client, &node, (root, identity)).await
-                    };
+                    node.request(*request, client).await;
                     if ending.load(Ordering::SeqCst) {
                         node.end_sessions(Some(session));
                     }
-                    let _ = reply.send(response);
                 });
             }
             Command::End(session, reply) => {
@@ -2416,8 +2378,7 @@ async fn run_inner(
                 let _ = reply.send(());
             }
             Command::Coordinate(log, reply) => {
-                node.coordinate(log);
-                let _ = reply.send(());
+                let _ = reply.send(node.coordinate(log).await);
             }
             #[cfg(feature = "qualification")]
             Command::LockMeasurements(reply) => {
@@ -2446,13 +2407,13 @@ async fn run_inner(
                     let _ = reply.send(flushed);
                 });
             }
-            #[cfg(feature = "iroh")]
+
             Command::Claim(counter, claim, reply) => {
                 crate::reactor::spawn_in(&mut tasks, "claim", async move {
                     let _ = reply.send(node.claim(counter, claim).await);
                 });
             }
-            #[cfg(feature = "iroh")]
+
             Command::Counter(counter, claim, reply) => {
                 crate::reactor::spawn_in(&mut tasks, "counter", async move {
                     let _ = reply.send(node.counter(counter, claim).await);
@@ -2481,7 +2442,7 @@ async fn run_inner(
     node.detach(None).await;
     while tasks.join_next().await.is_some() {}
     node.detach(None).await;
-    let purge = *node.ended.lock().await == Some(true);
+    let purge = node.lifecycle.lock().await.purge_on_close();
     drop(node);
     settling.abort();
     let _ = settling.await;
@@ -2593,35 +2554,6 @@ async fn discard(
     let created = matches!(install, Install::Create { .. }).then_some((&vault, roles));
     unwind(directory, created, error)
 }
-type CallProviders = (
-    Option<Arc<dyn crate::IdentityProvider>>,
-    Option<Arc<dyn crate::IdentityProvider>>,
-);
-async fn dispatch(
-    bytes: &[u8],
-    client: Result<Arc<Client>, Failure>,
-    node: &Node,
-    (root, identity): CallProviders,
-) -> Vec<u8> {
-    let result: Result<Value, Failure> = async {
-        let call: Value = serde_json::from_slice(bytes)?;
-        if call["version"] != 1 || call["scope"] != serde_json::to_value(node.domain().scope)? {
-            return Err("foreign scope or SDK version".into());
-        }
-        let root = node::Root::of(&call["request"], root)?;
-        let identity = node::call_identity(&call["request"], identity)?;
-        let client = client?;
-        let call = node.dispatch_with(&client, &call["request"], &root);
-        Box::pin(crate::identities::supplying(identity, call)).await
-    }
-    .await;
-    let response = match result {
-        Ok(value) => json!({"version": 1, "status": "ok", "value": value}),
-        Err(error) => json!({"version": 1, "status": "error", "error": node::error(&error)}),
-    };
-    response.to_string().into_bytes()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2860,13 +2792,16 @@ mod tests {
         let identity: Arc<dyn crate::IdentityProvider> = Arc::new(crate::IdentityKey::generate());
         let device = Database::node_keys_of(&directory, None, Some(identity.clone()))?;
         let session = issuer.session();
-        let call = json!({"version": 1,
-            "scope": serde_json::from_str::<Value>(&issuer.scope())?,
-            "request": {"type": "grant", "device": device,
-                "profile": {"kind": "reader", "scopes": ["notes"]}}});
-        let reply: Value = serde_json::from_str(&session.call(call.to_string()).await?)?;
+        let supplied = session
+            .grant(
+                device,
+                crate::GrantProfile::Reader {
+                    scopes: ["notes".into()].into(),
+                },
+                crate::GrantTerms::default(),
+            )
+            .await?;
         session.close().await;
-        let supplied = reply["value"]["supplied"].clone();
         let schema = serde_json::to_string(&schema)?;
         let install = || {
             Database::install(
@@ -2878,7 +2813,7 @@ mod tests {
                     network: None,
                     coordination: None,
                 },
-                serde_json::from_value(supplied.clone())?,
+                supplied.clone(),
             )
         };
         stop_once_started(&directory)?;
@@ -2952,23 +2887,9 @@ mod tests {
     // Needs threads, which a browser Worker lacks.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
-    async fn populated_numeric_consumer_continues_node_author_after_reopen() -> Result<(), Failure>
+    async fn populated_consumer_continues_its_writer_sequence_after_reopen() -> Result<(), Failure>
     {
         const SCHEMA: &str = r#"{"format":6,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
-        async fn call(
-            database: &Database,
-            session: &Session,
-            request: Value,
-        ) -> Result<Value, Failure> {
-            let reply: Value = serde_json::from_str(&session.call(json!({
-                "version": 1, "scope": serde_json::from_str::<Value>(&database.scope())?,
-                "request": request,
-            }).to_string()).await?)?;
-            if reply["status"] != "ok" {
-                return Err(format!("consumer request refused: {reply}").into());
-            }
-            Ok(reply["value"].clone())
-        }
         let directory = rocky_platform::fs::Scratch::new().await;
         let options = || Open {
             identity: None,
@@ -2980,51 +2901,56 @@ mod tests {
         };
         let database = Database::create(options(), None)?.database;
         let session = database.session();
-        call(&database, &session, json!({"type":"sql","sql":"BEGIN"})).await?;
-        let first = call(
-            &database,
-            &session,
-            json!({"type":"next_id","table":"items"}),
-        )
-        .await?["id"]
+        snap::value(session.execute("BEGIN", Vec::new())).await?;
+        let first = snap::value(session.next_id("items")).await?["id"]
             .as_str()
             .ok_or("missing id")?
             .to_owned();
-        call(&database, &session, json!({"type":"sql","sql":"INSERT INTO items(id,title) VALUES(?,'first')","values":[{"type":"integer","value":first}]})).await?;
-        call(&database, &session, json!({"type":"sql","sql":"COMMIT"})).await?;
+        snap::value(session.execute(
+            "INSERT INTO items(id,title) VALUES(?,'first')",
+            vec![snap::row_id(&(first))],
+        ))
+        .await?;
+        snap::value(session.execute("COMMIT", Vec::new())).await?;
         session.close().await;
         database.close().await?;
 
         let database = Database::open(options())?.database;
         let session = database.session();
-        let rows = call(
-            &database,
-            &session,
-            json!({"type":"read","query":{"sql":"SELECT id FROM items","max_rows":8}}),
-        )
+        let rows = snap::value(session.read(rocky_sdk::ReadQuery {
+            sql: "SELECT id FROM items".to_owned(),
+            values: Vec::new(),
+            max_rows: 8,
+            max_bytes: None,
+            cursor: None,
+        }))
         .await?;
-        assert_eq!(rows["rows"][0][0]["value"], first);
-        call(&database, &session, json!({"type":"sql","sql":"BEGIN"})).await?;
-        let second = call(
-            &database,
-            &session,
-            json!({"type":"next_id","table":"items"}),
-        )
-        .await?["id"]
+        assert_eq!(snap::cell_id(&rows["rows"][0][0]).to_string(), first);
+        snap::value(session.execute("BEGIN", Vec::new())).await?;
+        let second = snap::value(session.next_id("items")).await?["id"]
             .as_str()
             .ok_or("missing id")?
             .to_owned();
-        assert_eq!(second.parse::<i64>()?, first.parse::<i64>()? + 1);
-        call(&database, &session, json!({"type":"sql","sql":"INSERT INTO items(id,title) VALUES(?,'second')","values":[{"type":"integer","value":second}]})).await?;
-        call(&database, &session, json!({"type":"sql","sql":"COMMIT"})).await?;
-        let rows = call(
-            &database,
-            &session,
-            json!({"type":"read","query":{"sql":"SELECT id FROM items ORDER BY id","max_rows":8}}),
-        )
+        let (first_id, second_id): (rocky_sdk::RowIdentity, rocky_sdk::RowIdentity) =
+            (first.parse()?, second.parse()?);
+        assert_eq!(second_id.writer(), first_id.writer());
+        assert_eq!(second_id.sequence(), first_id.sequence() + 1);
+        snap::value(session.execute(
+            "INSERT INTO items(id,title) VALUES(?,'second')",
+            vec![snap::row_id(&(second))],
+        ))
+        .await?;
+        snap::value(session.execute("COMMIT", Vec::new())).await?;
+        let rows = snap::value(session.read(rocky_sdk::ReadQuery {
+            sql: "SELECT id FROM items ORDER BY id".to_owned(),
+            values: Vec::new(),
+            max_rows: 8,
+            max_bytes: None,
+            cursor: None,
+        }))
         .await?;
         assert_eq!(rows["rows"].as_array().ok_or("missing rows")?.len(), 2);
-        assert_eq!(rows["rows"][1][0]["value"], second);
+        assert_eq!(snap::cell_id(&rows["rows"][1][0]).to_string(), second);
         session.close().await;
         database.close().await?;
         Ok(())
@@ -3048,23 +2974,7 @@ mod tests {
         )?;
         let database = opened.database;
         let session = database.session();
-        let scope: Value = serde_json::from_str(&database.scope())?;
-        let status: Value = serde_json::from_str(
-            &session
-                .call(
-                    json!({
-                        "version": 1, "scope": scope, "request": {"type": "status"},
-                    })
-                    .to_string(),
-                )
-                .await?,
-        )?;
-        let bytes = json!({
-            "version": 1, "scope": scope,
-            "request": {"type": "status_next", "after": status["value"]["token"]},
-        })
-        .to_string()
-        .into_bytes();
+        let status = session.status().await?;
         let mut replies = Vec::new();
         // Queue every wait before End, without sleeps or scheduler assumptions.
         for _ in 0..129 {
@@ -3072,13 +2982,13 @@ mod tests {
             database
                 .shared
                 .input
-                .send(Command::Call {
+                .send(Command::Request {
                     session: session.id,
-                    bytes: bytes.clone(),
                     ending: session.closed.clone(),
-                    root: None,
-                    identity: None,
-                    reply,
+                    request: Box::new(crate::request::Request::StatusAfter(
+                        status.token.clone(),
+                        reply,
+                    )),
                 })
                 .await?;
             replies.push(receiver);

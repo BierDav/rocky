@@ -212,7 +212,6 @@ impl Settings {
     }
     /// The claim chain this node presents: its certificate under the held
     /// claim link, while that link is current.
-    #[cfg(feature = "iroh")]
     pub(crate) fn claim_chain(&self, _vault: &Vault) -> Result<Option<CredentialChain>, Failure> {
         let Some(held) = &self.claims else {
             return Ok(None);
@@ -229,7 +228,6 @@ impl Settings {
     }
     /// Whether a member should ask its issuer for a claim link: it holds
     /// none, or one past half its lifetime.
-    #[cfg(feature = "iroh")]
     pub(crate) fn claims_due(&self, time: u64) -> bool {
         !self.issuer()
             && self

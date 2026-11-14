@@ -4,6 +4,7 @@
 //! `docs/decisions/0048-replicated-issuer-registry.md`.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
+use common::identity::snapshot as snap;
 use common::{Device, Failure, introduce};
 use rocky_sdk::{
     Database, Network, Open,
@@ -68,7 +69,7 @@ fn issuer() -> Value {
 /// Every other identity an issuer's registry lists, by identity key,
 /// without the nodes this issuer knows of it.
 async fn identities(issuer: &Device) -> BTreeMap<String, Value> {
-    issuer.ok(json!({"type": "identities"})).await["identities"]
+    snap::ok(issuer.session.identities()).await["identities"]
         .as_array()
         .into_iter()
         .flatten()
@@ -86,18 +87,14 @@ async fn identities(issuer: &Device) -> BTreeMap<String, Value> {
 /// Waits, by status events and without sleeping, until a device's
 /// automatic first sync has finished.
 async fn settle(device: &Device) -> Value {
-    let mut status = device.ok(json!({"type": "status"})).await;
+    let mut status = snap::ok(device.session.status()).await;
     while status["data"]["bootstrap_pending"] == true {
-        status = device
-            .ok(json!({"type": "status_next", "after": status["token"]}))
-            .await;
+        status = snap::ok(device.session.status_after(snap::text(&(status["token"])))).await;
     }
     status
 }
 async fn online(device: &Device, online: bool) {
-    device
-        .ok(json!({"type": "networking_control", "enabled": online}))
-        .await;
+    snap::ok(device.session.set_networking_enabled(online)).await;
 }
 async fn synced(device: &Device) -> Result<Value, Failure> {
     device
@@ -140,34 +137,57 @@ async fn invitation_availability_survives_reopen_and_tracks_replacement_and_use(
     let a = create(&path, memory(&hub, "issuer"))?;
     let first = a.invite().await;
     assert_eq!(
-        a.ok(json!({"type":"invitation_open", "uri":first})).await["open"],
+        snap::ok(async {
+            let state = a.session.invitation_state(&(snap::text(&(first)))).await?;
+            Ok(json!({"open":state.open}))
+        })
+        .await["open"],
         true
     );
     let second = a.invite().await;
     assert_eq!(
-        a.ok(json!({"type":"invitation_open", "uri":first})).await["open"],
+        snap::ok(async {
+            let state = a.session.invitation_state(&(snap::text(&(first)))).await?;
+            Ok(json!({"open":state.open}))
+        })
+        .await["open"],
         false
     );
     a.close().await;
     let a = Device::new(Database::open(open(&path, Some(memory(&hub, "issuer"))))?)?;
     assert_eq!(
-        a.ok(json!({"type":"invitation_open", "uri":second})).await["open"],
+        snap::ok(async {
+            let state = a.session.invitation_state(&(snap::text(&(second)))).await?;
+            Ok(json!({"open":state.open}))
+        })
+        .await["open"],
         true
     );
     let b = join(&root.path().join("member"), memory(&hub, "member"), &second)?;
     assert_eq!(
-        a.ok(json!({"type":"invitation_open", "uri":second})).await["open"],
+        snap::ok(async {
+            let state = a.session.invitation_state(&(snap::text(&(second)))).await?;
+            Ok(json!({"open":state.open}))
+        })
+        .await["open"],
         false
     );
     assert!(
-        b.call(json!({"type":"invitation_open", "uri":second}))
-            .await
-            .is_err()
+        snap::observe(async {
+            let state = b.session.invitation_state(&(snap::text(&(second)))).await?;
+            Ok(json!({"open":state.open}))
+        })
+        .await
+        .is_err()
     );
     a.close().await;
     let a = Device::new(Database::open(open(&path, None))?)?;
     assert_eq!(
-        a.ok(json!({"type":"invitation_open", "uri":second})).await["open"],
+        snap::ok(async {
+            let state = a.session.invitation_state(&(snap::text(&(second)))).await?;
+            Ok(json!({"open":state.open}))
+        })
+        .await["open"],
         false
     );
     b.close().await;
@@ -193,16 +213,31 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
     let m = join(&root.join("m"), memory(&hub, "m"), &a.invite().await)?;
     settle(&m).await;
     let (m_node, m_identity) = (m.node().await, m.identity().await);
-    let address = a
-        .ok(json!({"type": "partition_address", "table": "parts", "values": [{"type": "text", "value": "L"}]}))
-        .await;
+    let address = snap::ok(
+        a.session
+            .partition_address("parts", vec![rocky_sdk::SqlValue::Text("L".to_owned())]),
+    )
+    .await;
     let part = &address["tuple"][0];
-    let grant = json!({"domain": serde_json::from_str::<Value>(&a.database.scope())?, "table": address["scope"]["table"],
+    let grant = json!({"domain": serde_json::to_value(a.database.scope())?, "table": address["scope"]["table"],
         "selector": [[part[0], {"Only": [part[1]]}]], "rows": "All", "rights": ["Read"], "fields": []});
-    a.ok(json!({"type": "partition_grant", "device": {"identity": m_identity, "node": m_node}, "partitions": [grant], "delegations": 2}))
-        .await;
-    a.ok(json!({"type": "identity_label", "identity": m_identity, "label": [7, 8, 9]}))
-        .await;
+    snap::ok(
+        a.session.grant_partitions(
+            serde_json::from_value::<rocky_sdk::NodeKeys>(
+                json!({"identity": m_identity, "node": m_node}),
+            )
+            .expect("typed fixture"),
+            serde_json::from_value::<Vec<rocky_sdk::credentials::PartitionGrant>>(json!([grant]))
+                .expect("typed fixture"),
+            2,
+        ),
+    )
+    .await;
+    snap::ok(a.session.set_identity_label(
+        snap::key(&(m_identity)),
+        serde_json::from_value::<Vec<u8>>(json!([7, 8, 9])).expect("typed fixture"),
+    ))
+    .await;
 
     let at_a = identities(&a).await[&m_identity].clone();
     assert_eq!(
@@ -213,7 +248,7 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
     assert_eq!(at_a["partitions"][0]["delegations"], 2);
     assert_eq!(at_a["label"], json!([7, 8, 9]));
     // The recorded partition capability can outlive the original enrollment.
-    let enrolled_expiry = m.ok(json!({"type": "session"})).await["expires"]
+    let enrolled_expiry = snap::ok(m.session.info()).await["expires"]
         .as_str()
         .ok_or("enrollment expiry")?
         .parse::<u64>()?;
@@ -265,12 +300,16 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
     online(&b, true).await;
     assert!(!identities(&b).await.contains_key(&m_identity));
 
-    m.ok(json!({"type": "renew"})).await;
-    let after = m.ok(json!({"type": "session"})).await;
+    snap::ok(async {
+        m.session.renew().await?;
+        m.session.info().await
+    })
+    .await;
+    let after = snap::ok(m.session.info()).await;
     // Renewed through B's chain, it expires no later than B does.
     assert_eq!(
         after["expires"],
-        b.ok(json!({"type": "session"})).await["expires"]
+        snap::ok(b.session.info()).await["expires"]
     );
     let record = identities(&b).await[&m_identity].clone();
     assert_eq!(record["kind"], "renewed");
@@ -280,11 +319,13 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
     );
     assert_eq!(record["expires"], after["expires"]);
 
-    m.ok(json!({"type": "peer_remove", "node": a_node})).await;
+    snap::ok(m.session.remove_peer(&(snap::text(&(a_node))))).await;
     assert!(
-        !m.ok(json!({"type": "peers"})).await["renewal_routes"]
-            .as_array()
-            .ok_or("routes")?
+        !m.session
+            .status()
+            .await?
+            .authority
+            .renewal_routes
             .is_empty()
     );
     m.add(1, "Milk").await;
@@ -293,7 +334,7 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
         common::identity::completed_peers(&report),
         1,
         "{report}; activity: {}",
-        m.ok(json!({"type":"activity", "after":"0"})).await
+        snap::ok(m.session.activity(0_u64)).await
     );
     assert_eq!(b.titles().await, ["Milk"]);
     for device in [&b, &m] {
@@ -330,13 +371,22 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
     synced(&w).await?;
     // The two issuers meet only through the custody peer from now on.
     let (a_node, b_node) = (a.node().await, b.node().await);
-    a.ok(json!({"type": "peer_remove", "node": b_node})).await;
-    b.ok(json!({"type": "peer_remove", "node": a_node})).await;
+    snap::ok(a.session.remove_peer(&(snap::text(&(b_node))))).await;
+    snap::ok(b.session.remove_peer(&(snap::text(&(a_node))))).await;
     introduce(&a, &c).await;
     introduce(&b, &c).await;
     let keys = common::node_keys(&root.join("d"), None)?;
-    a.ok(json!({"type": "grant", "device": keys, "profile": {"kind": "writer", "scopes": ["items"]}}))
-        .await;
+    snap::ok(a.session.grant(
+        keys,
+        rocky_sdk::GrantProfile::Writer {
+            scopes: ["items".to_owned()].into_iter().collect(),
+        },
+        rocky_sdk::GrantTerms {
+            ttl: None,
+            delegations: None,
+        },
+    ))
+    .await;
     synced(&a).await?;
     synced(&b).await?;
     assert!(identities(&b).await.contains_key(&keys.identity.to_hex()));
@@ -361,19 +411,30 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
         assert_eq!(tables, 0, "{name}");
     }
     for device in [&c, &r, &w] {
-        assert!(device.call(json!({"type": "identities"})).await.is_err());
-        let query = json!({"sql": "SELECT * FROM issuer_registry", "values": [], "max_rows": 8});
+        assert!(snap::observe(device.session.identities()).await.is_err());
+        let query = rocky_sdk::ReadQuery {
+            sql: "SELECT * FROM issuer_registry".to_owned(),
+            values: vec![],
+            max_rows: 8,
+            max_bytes: None,
+            cursor: None,
+        };
         assert!(
-            device
-                .call(json!({"type": "read", "query": query}))
+            snap::observe(device.session.read((query).clone()))
                 .await
                 .is_err()
         );
     }
     // Neither do an issuer's application sessions open it.
-    let query = json!({"sql": "SELECT * FROM issuer_registry", "values": [], "max_rows": 8});
+    let query = rocky_sdk::ReadQuery {
+        sql: "SELECT * FROM issuer_registry".to_owned(),
+        values: vec![],
+        max_rows: 8,
+        max_bytes: None,
+        cursor: None,
+    };
     assert!(
-        a.call(json!({"type": "read", "query": query}))
+        snap::observe(a.session.read((query).clone()))
             .await
             .is_err()
     );
@@ -411,19 +472,16 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     // relays a record that the steps below expect to stay apart.
     settle(&x).await;
     settle(&y).await;
-    let mut ranges: Vec<(u64, u64)> = Vec::new();
-    for name in ["a", "b", "x", "y"] {
-        let range = identity(&root.join(name))?["minting"]["range"].clone();
-        ranges.push((
-            range["first"].as_u64().ok_or("first")?,
-            range["last"].as_u64().ok_or("last")?,
-        ));
+    // Each issuer writes under its own node key.
+    let mut writers = std::collections::BTreeSet::new();
+    for device in [&a, &b, &x, &y] {
+        writers.insert(
+            snap::ok(device.session.info()).await["writer"]
+                .clone()
+                .to_string(),
+        );
     }
-    ranges.sort_unstable();
-    assert!(
-        ranges.windows(2).all(|pair| pair[0].1 < pair[1].0),
-        "{ranges:?}"
-    );
+    assert_eq!(writers.len(), 4, "{writers:?}");
     synced(&a).await?;
     let (x_identity, y_identity) = (x.identity().await, y.identity().await);
     for issuer in [&a, &b] {
@@ -433,26 +491,30 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
 
     // Two issuers renew one device before either hears of the other.
     for issuer in [&a, &b] {
-        issuer
-            .ok(json!({"type": "sync_start", "enabled": false}))
-            .await;
+        snap::ok(issuer.session.set_automatic_sync(false)).await;
     }
-    // The extra issuers above tested range allocation; keep them from
+    // The extra issuers above tested concurrent enrollment; keep them from
     // answering the renewal intended for b when a is offline.
     online(&x, false).await;
     online(&y, false).await;
     online(&b, false).await;
     let m = join(&root.join("m"), memory(&hub, "m"), &a.invite().await)?;
     settle(&m).await;
-    m.ok(json!({"type": "sync_start", "enabled": false})).await;
+    snap::ok(m.session.set_automatic_sync(false)).await;
     let m_identity = m.identity().await;
-    m.ok(json!({"type": "renew"})).await;
-    a.ok(json!({"type": "networking_control", "enabled": false}))
-        .await;
+    snap::ok(async {
+        m.session.renew().await?;
+        m.session.info().await
+    })
+    .await;
+    snap::ok(a.session.set_networking_enabled(false)).await;
     online(&b, true).await;
-    m.ok(json!({"type": "renew"})).await;
-    a.ok(json!({"type": "networking_control", "enabled": true}))
-        .await;
+    snap::ok(async {
+        m.session.renew().await?;
+        m.session.info().await
+    })
+    .await;
+    snap::ok(a.session.set_networking_enabled(true)).await;
     assert_eq!(identities(&b).await[&m_identity]["kind"], "renewed");
     synced(&a).await?;
     let (at_a, at_b) = (identities(&a).await, identities(&b).await);
@@ -462,7 +524,7 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     let expires =
         |value: &Value| -> Result<u64, Failure> { Ok(value.as_str().ok_or("expires")?.parse()?) };
     assert!(
-        expires(&m.ok(json!({"type": "session"})).await["expires"])?
+        expires(&snap::ok(m.session.info()).await["expires"])?
             <= expires(&at_a[&m_identity]["expires"])?
     );
     // One visible identity entry per identity in either file.
@@ -511,13 +573,17 @@ impl Connector for Faulty {
         &self,
         accepts: bool,
         secret: [u8; 32],
-    ) -> BoxFuture<'_, Result<Arc<dyn Transport>, Failure>> {
+    ) -> BoxFuture<'_, Result<rocky_sdk::transport::Connected, Failure>> {
         Box::pin(async move {
             let inner = self.inner.start(accepts, secret).await?;
-            Ok(Arc::new(FaultyTransport {
-                inner,
-                faults: self.faults.clone(),
-            }) as Arc<dyn Transport>)
+            Ok(rocky_sdk::transport::Connected {
+                discovery: inner.discovery,
+                changes: inner.changes,
+                transport: Arc::new(FaultyTransport {
+                    inner: inner.transport,
+                    faults: self.faults.clone(),
+                }),
+            })
         })
     }
 }
@@ -526,6 +592,47 @@ struct FaultyTransport {
     faults: Arc<Faults>,
 }
 impl Transport for FaultyTransport {
+    fn request<'a>(
+        &'a self,
+        addresses: &'a [String],
+        scope: rocky_core::Scope,
+        request: &'a [u8],
+    ) -> BoxFuture<'a, Result<Vec<u8>, Failure>> {
+        Box::pin(async move {
+            let mut failure: Failure = "no route".into();
+            for address in addresses {
+                let result =
+                    rocky_platform::time::timeout(std::time::Duration::from_secs(30), async {
+                        let mut stream = self.connect(address, Protocol::Rpc, Some(scope)).await?;
+                        rocky_core::net::framing::write(&mut stream, request).await?;
+                        let reply = rocky_core::net::framing::read(&mut stream).await?;
+                        let _ = tokio::io::AsyncWriteExt::shutdown(&mut stream).await;
+                        Ok::<_, Failure>(reply)
+                    })
+                    .await;
+                match result {
+                    Ok(Ok(reply)) => return Ok(reply),
+                    Ok(Err(error)) => failure = error,
+                    Err(error) => failure = error.into(),
+                }
+            }
+            Err(failure)
+        })
+    }
+    fn session<'a>(
+        &'a self,
+        addresses: &'a [String],
+        scope: rocky_core::Scope,
+    ) -> BoxFuture<'a, Result<Stream, Failure>> {
+        Box::pin(async move {
+            let stream = self.inner.session(addresses, scope).await?;
+            Ok(if Faults::take(&self.faults.receipt, Protocol::Link) {
+                Stream::new(Unread(stream))
+            } else {
+                stream
+            })
+        })
+    }
     fn kind(&self) -> &str {
         self.inner.kind()
     }
@@ -536,9 +643,10 @@ impl Transport for FaultyTransport {
         &'a self,
         address: &'a str,
         protocol: Protocol,
+        scope: Option<rocky_core::Scope>,
     ) -> BoxFuture<'a, Result<Stream, Failure>> {
         Box::pin(async move {
-            let stream = self.inner.connect(address, protocol).await?;
+            let stream = self.inner.connect(address, protocol, scope).await?;
             Ok(if Faults::take(&self.faults.receipt, protocol) {
                 Stream::new(Unread(stream))
             } else {
@@ -546,18 +654,33 @@ impl Transport for FaultyTransport {
             })
         })
     }
-    fn accept(&self) -> BoxFuture<'_, Option<(Protocol, Stream)>> {
+    fn accept(&self) -> BoxFuture<'_, Option<rocky_core::net::Incoming>> {
         Box::pin(async move {
-            let (protocol, stream) = self.inner.accept().await?;
+            let incoming = self.inner.accept().await?;
+            let protocol = incoming.protocol();
             Some(if Faults::take(&self.faults.answer, protocol) {
-                (protocol, Stream::new(Mute(stream)))
+                match incoming {
+                    rocky_core::net::Incoming::Stream(protocol, stream) => {
+                        rocky_core::net::Incoming::Stream(protocol, Stream::new(Mute(stream)))
+                    }
+                    rocky_core::net::Incoming::Request(original) => {
+                        let (request, answer, delivered) =
+                            rocky_core::net::Request::channel(original.bytes.clone());
+                        rocky_platform::task::spawn(async move {
+                            let _ = answer.await;
+                            drop(original);
+                            drop(delivered);
+                        });
+                        rocky_core::net::Incoming::Request(request)
+                    }
+                }
             } else {
-                (protocol, stream)
+                incoming
             })
         })
     }
-    fn listen(&self, listening: bool) {
-        self.inner.listen(listening);
+    fn listen(&self, scope: Option<rocky_core::Scope>, listening: bool) -> Result<(), Failure> {
+        self.inner.listen(scope, listening)
     }
     fn close(&self) -> BoxFuture<'_, ()> {
         self.inner.close()
@@ -682,9 +805,9 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
             a.invite().await
         };
         if issuer_side {
-            *issuing.answer.lock().unwrap() = Some(Protocol::Pair);
+            *issuing.answer.lock().unwrap() = Some(Protocol::Rpc);
         } else {
-            *requesting.receipt.lock().unwrap() = Some(Protocol::Pair);
+            *requesting.receipt.lock().unwrap() = Some(Protocol::Rpc);
         }
         assert!(join(&directory, faulty(&hub, name, &requesting), &invitation).is_err());
         let recorded = identities(&a).await;
@@ -713,11 +836,21 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
     let mut granted = Vec::new();
     for name in ["g", "h"] {
         let keys = common::node_keys(&root.join(name), None)?;
-        let grant = json!({"type": "grant", "device": keys, "profile": profile, "ttl": 60});
-        a.ok(grant.clone()).await;
+        let grant = || {
+            a.session.grant(
+                keys,
+                serde_json::from_value::<rocky_sdk::GrantProfile>(json!(profile))
+                    .expect("typed fixture"),
+                rocky_sdk::GrantTerms {
+                    ttl: Some(60),
+                    delegations: None,
+                },
+            )
+        };
+        snap::ok(grant()).await;
         let recorded = identities(&a).await;
         assert!(recorded.contains_key(&keys.identity.to_hex()));
-        let supplied = a.ok(grant).await["supplied"].clone();
+        let supplied = snap::ok(grant()).await["supplied"].clone();
         let requesting = Arc::new(Faults::default());
         let device = Device::new(Database::install(
             open(&root.join(name), Some(faulty(&hub, name, &requesting))),
@@ -737,11 +870,18 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
         let directory = root.join(["g", "h"][index]);
         let held = chain_capability(&directory)?;
         if index == 0 {
-            *issuing.answer.lock().unwrap() = Some(Protocol::Renew);
+            *issuing.answer.lock().unwrap() = Some(Protocol::Rpc);
         } else {
-            *requesting.receipt.lock().unwrap() = Some(Protocol::Renew);
+            *requesting.receipt.lock().unwrap() = Some(Protocol::Rpc);
         }
-        assert!(device.call(json!({"type": "renew"})).await.is_err());
+        assert!(
+            snap::observe(async {
+                device.session.renew().await?;
+                device.session.info().await
+            })
+            .await
+            .is_err()
+        );
         let record = identities(&a).await[identity].clone();
         assert_ne!(
             record["capability"],
@@ -749,7 +889,11 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
             "a newer capability is recorded"
         );
         assert_eq!(chain_capability(&directory)?, held, "no chain was stored");
-        device.ok(json!({"type": "renew"})).await;
+        snap::ok(async {
+            device.session.renew().await?;
+            device.session.info().await
+        })
+        .await;
         assert_eq!(
             identities(&a).await[identity]["capability"],
             json!(chain_capability(&directory)?)
@@ -789,8 +933,19 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
     let invitation = a.invite_as(reader.clone()).await;
     let filled = Instant::now();
     for _ in 0..253 {
-        a.ok(json!({"type": "grant", "device": random_device(), "profile": reader}))
-            .await;
+        snap::ok(
+            a.session.grant(
+                serde_json::from_value::<rocky_sdk::NodeKeys>(json!(random_device()))
+                    .expect("typed fixture"),
+                serde_json::from_value::<rocky_sdk::GrantProfile>(json!(reader))
+                    .expect("typed fixture"),
+                rocky_sdk::GrantTerms {
+                    ttl: None,
+                    delegations: None,
+                },
+            ),
+        )
+        .await;
     }
     let filled = filled.elapsed();
     let joined = join(&root.join("j"), memory(&hub, "j"), &invitation)?;
@@ -801,17 +956,34 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
         std::fs::read(root.join("a/identity.json"))?,
         registry_rows(&root.join("a"), "%")?,
     );
-    let refused = a
-        .call(json!({"type": "grant", "device": random_device(), "profile": reader}))
-        .await
-        .err()
-        .ok_or("granted a 257th device")?;
+    let refused = snap::observe(
+        a.session.grant(
+            serde_json::from_value::<rocky_sdk::NodeKeys>(json!(random_device()))
+                .expect("typed fixture"),
+            serde_json::from_value::<rocky_sdk::GrantProfile>(json!(reader))
+                .expect("typed fixture"),
+            rocky_sdk::GrantTerms {
+                ttl: None,
+                delegations: None,
+            },
+        ),
+    )
+    .await
+    .err()
+    .ok_or("granted a 257th device")?;
     assert_eq!(refused["code"], "registry_full", "{refused}");
-    let refused = a
-        .call(json!({"type": "invitation", "profile": reader}))
-        .await
-        .err()
-        .ok_or("invited a 257th device")?;
+    let refused = snap::observe(
+        a.session.invite(
+            Some(
+                serde_json::from_value::<rocky_sdk::GrantProfile>(json!(reader))
+                    .expect("typed fixture"),
+            ),
+            None,
+        ),
+    )
+    .await
+    .err()
+    .ok_or("invited a 257th device")?;
     assert_eq!(refused["code"], "registry_full", "{refused}");
     let after = (
         std::fs::read(root.join("a/identity.json"))?,
@@ -854,7 +1026,7 @@ async fn a_newer_invitation_supersedes_an_interrupted_join() -> Result<(), Failu
     let directory = root.join("m");
     let requesting = Arc::new(Faults::default());
     let spent = a.invite().await;
-    *requesting.receipt.lock().unwrap() = Some(Protocol::Pair);
+    *requesting.receipt.lock().unwrap() = Some(Protocol::Rpc);
     assert!(join(&directory, faulty(&hub, "m", &requesting), &spent).is_err());
     let ghosts = identities(&a).await;
     let Err(unfinished) = Database::open(open(&directory, None)) else {
@@ -885,9 +1057,16 @@ async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Resul
     let path = root.path().join("issuer");
     let owner = create(&path, memory(&hub, "issuer"))?;
     let label = b"application-defined label";
-    let invitation = owner
-        .ok(json!({"type": "invitation", "profile":issuer(), "label":label}))
-        .await;
+    let invitation = snap::ok(
+        owner.session.invite(
+            Some(
+                serde_json::from_value::<rocky_sdk::GrantProfile>(json!(issuer()))
+                    .expect("typed fixture"),
+            ),
+            Some(serde_json::from_value::<Vec<u8>>(json!(label)).expect("typed fixture")),
+        ),
+    )
+    .await;
     let member = join(
         &root.path().join("member"),
         memory(&hub, "member"),
@@ -898,9 +1077,16 @@ async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Resul
     assert_eq!(record["invitation"], invitation["id"]);
     assert_eq!(record["label"], json!(label));
     // The next invitation cannot erase the association of the earlier enrollment.
-    owner
-        .ok(json!({"type": "invitation", "profile":issuer()}))
-        .await;
+    snap::ok(
+        owner.session.invite(
+            Some(
+                serde_json::from_value::<rocky_sdk::GrantProfile>(json!(issuer()))
+                    .expect("typed fixture"),
+            ),
+            None,
+        ),
+    )
+    .await;
     member.database.close().await?;
     owner.database.close().await?;
     let reopened = Device::new(Database::open(open(&path, None))?)?;
@@ -945,7 +1131,7 @@ async fn a_revoked_identity_cannot_retry_an_admitted_join_after_a_lost_answer()
             label: None,
         })
         .await?;
-    *faults.receipt.lock().unwrap() = Some(Protocol::Pair);
+    *faults.receipt.lock().unwrap() = Some(Protocol::Rpc);
     assert!(
         join(
             &directory,
@@ -957,9 +1143,7 @@ async fn a_revoked_identity_cannot_retry_an_admitted_join_after_a_lost_answer()
     let records = identities(&issuer).await;
     assert_eq!(records.len(), 1);
     let identity = records.keys().next().ok_or("missing admitted identity")?;
-    issuer
-        .ok(json!({"type": "revoke", "identity": identity}))
-        .await;
+    snap::ok(issuer.session.revoke_identity(&(snap::text(&(identity))))).await;
     let error = join(
         &directory,
         faulty(&hub, "joining", &faults),

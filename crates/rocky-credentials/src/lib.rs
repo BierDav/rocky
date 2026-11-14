@@ -7,6 +7,9 @@ mod author_binding;
 mod checkpoint_record;
 mod claims;
 mod coordination;
+mod coordinator;
+pub mod counters;
+pub use coordinator::{CoordinationObserver, Coordinator};
 mod delivery;
 mod discovery;
 mod enroll;
@@ -18,6 +21,7 @@ mod finality;
 mod group;
 mod identity;
 mod identity_key;
+mod issuance;
 mod issue;
 mod keys;
 mod membership;
@@ -26,7 +30,9 @@ pub use membership::{MAX_MEMBERSHIP_NODES, MembershipLink, MembershipSet};
 pub use migration::{MAX_MIGRATION_DESCRIPTOR_BYTES, SignedMigrationPublication};
 mod partition;
 mod peer;
+mod peer_rpc;
 mod phrase_key;
+mod reset;
 mod revocation;
 mod root;
 mod signed;
@@ -54,30 +60,39 @@ pub use existence_base::{
     EXISTENCE_BASE_FORMAT, ExistenceBase, ExistenceBaseStatement, ExistenceCut, ExistenceIdentity,
     ExistenceLog, MAX_EXISTENCE_BASE_LOGS, SignedExistenceBase,
 };
-pub use extension::{
-    AuthorRange, DatabaseContext, Extended, Extension, MAX_AUTHOR, Origin, RECOVERY_FIRST,
-    RECOVERY_SLOT, RECOVERY_SLOTS,
-};
+pub use extension::{DatabaseContext, Extended, Extension, Origin};
 pub use families::GrantFamilies;
 pub use finality::{
     MAX_FINALITY_ACKS, MAX_FINALITY_BYTES, MAX_TERMINAL_ACK_BYTES, SEAL_FINALITY_FORMAT,
     SealFinality, TERMINAL_ACK_FORMAT, TerminalAck, TerminalAckStatement,
 };
-pub use group::{GROUP_SECRET_LEN, GroupSecretEnvelope, derive_table_key};
+pub use group::{GROUP_SECRET_LEN, GroupSecretEnvelope, GroupSecrets, derive_table_key};
 pub use identity::{
     CoordinatorControl, ExternalLogin, FileIdentityProvider, Identity, IdentityProvider,
     LoginProvider, Publisher, Purpose, ReaderScope, SigningDevice, TransportEndpoint,
 };
 pub use identity_key::IdentityKey;
+pub use issuance::{Delegation, DelegationTerms, Validity};
 pub use issue::{Authority, Grant, MAX_GRANTS, NEVER, Profile, Resource, device_chain};
 pub use keys::{FileKeyProvider, KeyProvider, ProviderError, Vault, write_private};
 pub use p2panda_core::{Hash, PrivateKey, PublicKey, Signature};
-pub use partition::PartitionGrant;
+pub use partition::{PartitionContext, PartitionGrant};
 pub use peer::PeerId;
+pub use peer_rpc::{
+    EpochRequest, IdentityEnrollmentRequest, IdentityReply, MAX_MESSAGE as MAX_PEER_RPC_MESSAGE,
+    PeerAdmission, PeerError, PeerReply, PeerReplyFrame, PeerRequest, PeerRequestFrame,
+    PeerResolutionProof, PeerResolutionRequest, PeerTrust, StagedCloseStatus,
+    VERSION as PEER_RPC_VERSION,
+};
+pub use reset::{
+    FenceLog, FenceScope, MAX_FENCE_LOGS, MAX_RESET_BYTES, MAX_RESET_FOLLOWS, MAX_RESET_KEEP,
+    Reset, ResetStanding,
+};
 pub use revocation::{
     Cut, DAY, Head, Heads, LIFETIME_SKEW, MAX_CHAIN_LIFETIME, MAX_CUT_HEADS, MAX_CUT_LANES,
-    MAX_LIVE_REVOCATIONS, MAX_REVOCATION_BYTES, MAX_REVOCATION_SET_BYTES, REVOCATION_SET_FULL,
-    Revocation, RevocationSet, RootRecovery, SIGNATURE_OVERHEAD, SignedRevocation,
+    MAX_LIVE_REVOCATIONS, MAX_RESET_SET_BYTES, MAX_REVOCATION_BYTES, MAX_REVOCATION_SET_BYTES,
+    REVOCATION_SET_FULL, Revocation, RevocationMode, RevocationSet, RootDecision, RootRecovery,
+    SIGNATURE_OVERHEAD, SignedRevocation,
 };
 pub use root::RootKey;
 pub use signed::{
@@ -152,27 +167,23 @@ pub fn signing_bytes<T: Serialize>(label: &str, value: &T) -> Result<Vec<u8>, Er
 }
 
 /// Test support for this and other crates' tests; not a supported API.
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod testing {
     use crate::{
-        AuthorRange, Authority, Capability, CredentialChain, Extended, Extension, IdentityProvider,
-        PrivateKey, SignedCapability, Signer,
+        Authority, Capability, CredentialChain, Extended, Extension, IdentityProvider, PrivateKey,
+        SignedCapability, Signer,
     };
 
-    /// A fresh node of `identity`, certified under `chain` with the first
-    /// number of its range, and its chain.
+    /// A fresh node of `identity`, certified under `chain`, and its chain.
     pub fn node(
         identity: &dyn IdentityProvider,
         chain: &CredentialChain,
     ) -> (PrivateKey, CredentialChain) {
         let node = PrivateKey::new();
-        let author = chain
-            .authors()
-            .expect("an author range")
-            .map_or(1, |range| range.first);
         let chain = chain
             .clone()
-            .certify(identity, node.public_key(), author)
+            .certify(identity, node.public_key())
             .expect("a node certificate");
         (node, chain)
     }
@@ -270,7 +281,6 @@ pub mod testing {
                 delegations: 0,
                 extension: Extension::new(Extended {
                     node: Some(crate::PeerId::of(node.public_key())),
-                    authors: Some(AuthorRange::new(1, 1).expect("a range")),
                     sequence: Some(0),
                     database: Some(database.unwrap_or(crate::DatabaseContext {
                         publisher: identity.public_key().expect("a publisher"),

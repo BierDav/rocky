@@ -1,6 +1,7 @@
 //! The Phase 7 hub, registry and group-key fixtures.
 use super::{Device, Failure};
 use crate::common;
+use crate::snap;
 use rocky_sdk::{Database, Network, Open, SecretStore, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{
@@ -75,11 +76,9 @@ pub(super) async fn sync(device: &Device) -> Result<(), Failure> {
     Ok(())
 }
 pub(super) async fn settle(device: &Device) {
-    let mut status = device.ok(json!({"type":"status"})).await;
+    let mut status = snap::ok(device.session.status()).await;
     while status["data"]["bootstrap_pending"] == true {
-        status = device
-            .ok(json!({"type":"status_next","after":status["token"]}))
-            .await;
+        status = snap::ok(device.session.status_after(snap::text(&(status["token"])))).await;
     }
 }
 pub(super) async fn join(
@@ -95,7 +94,7 @@ pub(super) async fn join(
     Ok(device)
 }
 pub(super) async fn listed(device: &Device, identity: &str) -> Value {
-    device.ok(json!({"type":"identities"})).await["identities"]
+    snap::ok(device.session.identities()).await["identities"]
         .as_array()
         .into_iter()
         .flatten()
@@ -103,13 +102,19 @@ pub(super) async fn listed(device: &Device, identity: &str) -> Value {
         .cloned()
         .unwrap_or_default()
 }
-pub(super) fn values(list: &str) -> Value {
-    json!([{"type":"text","value":list}])
+pub(super) fn values(list: &str) -> Vec<rocky_sdk::SqlValue> {
+    vec![rocky_sdk::SqlValue::Text(snap::text(&(list)))]
 }
 pub(super) async fn epoch(device: &Device, list: &str) -> Value {
-    let status = device
-        .ok(json!({"type":"partition_status","group":"list","values":values(list)}))
-        .await;
+    let status = snap::ok(
+        device
+            .session
+            .partition_status(rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values(list)).clone(),
+            }),
+    )
+    .await;
     for table in status["tables"].as_array().into_iter().flatten() {
         assert_eq!(table["epochs"], status["epochs"], "{status}");
     }
@@ -123,9 +128,12 @@ pub(super) async fn epoch(device: &Device, list: &str) -> Value {
     )
 }
 pub(super) async fn grant(device: &Device, list: &str) -> Value {
-    let address = device
-        .ok(json!({"type":"partition_address","table":"parts","values":values(list)}))
-        .await;
+    let address = snap::ok(
+        device
+            .session
+            .partition_address("parts", (values(list)).clone()),
+    )
+    .await;
     let part = &address["tuple"][0];
     json!({"domain":address["scope"]["domain"],"table":address["scope"]["table"],
         "selector":[[part[0],{"Only":[part[1]]}]],"rows":"All","rights":["Read"],"fields":[]})
@@ -140,9 +148,28 @@ impl Domain {
         a.follow_main().await;
         let b = join(root, hub, "b", &a, json!({"kind":"issuer"})).await?;
         for list in ["L", "M"] {
-            a.ok(json!({"type":"partition_create","group":"list","values":values(list)}))
-                .await;
-            a.ok(json!({"type":"partition_share","group":"list","values":values(list),"recipients":[b.node().await]})).await;
+            snap::ok(
+                a.session
+                    .create_partition(rocky_sdk::PartitionTarget::Group {
+                        group: "list".to_owned(),
+                        values: (values(list)).clone(),
+                    }),
+            )
+            .await;
+            snap::ok(
+                a.session.share_partition(
+                    rocky_sdk::PartitionTarget::Group {
+                        group: "list".to_owned(),
+                        values: (values(list)).clone(),
+                    },
+                    serde_json::from_value::<
+                        std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>,
+                    >(json!([b.node().await]))
+                    .expect("typed fixture"),
+                    None,
+                ),
+            )
+            .await;
         }
         // B collects both envelopes from A.
         sync(&b).await?;

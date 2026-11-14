@@ -19,6 +19,7 @@ rocky-runtime = { path = "crates/rocky-runtime", version = "=0.1.0" }
 rocky-secure = { path = "crates/rocky-secure", version = "=0.1.0" }
 rocky-storage = { path = "crates/rocky-storage", version = "=0.1.0" }
 rocky-coordinator = { path = "crates/rocky-coordinator", version = "=0.1.0" }
+rocky-voter = { path = "crates/rocky-voter" }
 rocky-iroh = { path = "crates/rocky-iroh", version = "=0.1.0" }
 rocky-platform = { path = "crates/rocky-platform", version = "=0.1.0" }
 rocky-sqlite = { path = "vendor/rocky-sqlite", version = "=0.1.0" }
@@ -32,11 +33,14 @@ tracing-subscriber = { version = "0.3.22", default-features = false, features = 
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+unfulfilled_lint_expectations = "deny"
 # The simulation seeds tokio's own randomness when built with it.
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
 dbg_macro = "deny"
 todo = "deny"
 

@@ -1,7 +1,8 @@
 //! Fractional indexes: a todo's place is a base-62 string between its
 //! neighbours', so a move rewrites one row. Each key ends with its todo's
-//! own tag, so two devices placing todos into one gap never collide and
-//! every list has one total order.
+//! own row identity as a tag, so two devices placing todos into one gap
+//! never collide and every list has one total order.
+use rocky_sdk::RowIdentity;
 
 /// Digits in ascending byte order, so SQLite's binary collation and Rust's
 /// `str` ordering agree with digit order.
@@ -14,15 +15,12 @@ pub enum PositionError {
     Unordered,
     /// A stored key holds a non-digit or ends with the zero digit.
     Invalid(String),
-    /// Tags come from positive todo ids.
-    InvalidTag(i64),
 }
 impl std::fmt::Display for PositionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unordered => write!(f, "neighbouring positions are out of order"),
             Self::Invalid(key) => write!(f, "invalid position {key:?}"),
-            Self::InvalidTag(id) => write!(f, "todo id {id} cannot tag a position"),
         }
     }
 }
@@ -52,11 +50,8 @@ fn digits(key: &str) -> Result<Vec<u8>, PositionError> {
 pub fn between(
     before: Option<&str>,
     after: Option<&str>,
-    tag: i64,
+    tag: RowIdentity,
 ) -> Result<String, PositionError> {
-    if tag <= 0 {
-        return Err(PositionError::InvalidTag(tag));
-    }
     let low = before.map(digits).transpose()?.unwrap_or_default();
     let high = after.map(digits).transpose()?;
     if let (Some(before), Some(after)) = (before, after)
@@ -65,16 +60,28 @@ pub fn between(
         return Err(PositionError::Unordered);
     }
     let mut key = middle(&low, high.as_deref());
-    // Least significant digit first: the last digit is non-zero.
-    let mut tag = tag as u64;
-    while tag > 0 {
-        key.push((tag % u64::from(BASE)) as u8);
-        tag /= u64::from(BASE);
-    }
+    key.extend(tag_digits(&tag.to_bytes()));
     Ok(key
         .into_iter()
         .map(|digit| DIGITS[digit as usize] as char)
         .collect())
+}
+
+/// The base-62 digits of the big-endian number `tag`, least significant
+/// first: a non-zero tag's last digit is non-zero.
+fn tag_digits(tag: &[u8]) -> Vec<u8> {
+    let mut number = tag.to_vec();
+    let mut digits = Vec::new();
+    while number.iter().any(|byte| *byte != 0) {
+        let mut remainder = 0_u16;
+        for byte in &mut number {
+            let value = (remainder << 8) | u16::from(*byte);
+            *byte = (value / u16::from(BASE)) as u8;
+            remainder = value % u16::from(BASE);
+        }
+        digits.push(remainder as u8);
+    }
+    digits
 }
 
 /// Digits strictly between `low` and `high` that are not a prefix of
@@ -102,29 +109,34 @@ fn middle(low: &[u8], high: Option<&[u8]>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rocky_sdk::WriterId;
+
+    fn tag(sequence: u64) -> RowIdentity {
+        RowIdentity::new(WriterId::from_bytes([7; 32]), sequence).unwrap()
+    }
 
     #[test]
     fn keys_sort_between_their_neighbours() {
-        let first = between(None, None, 1).unwrap();
-        let last = between(Some(&first), None, 2).unwrap();
-        let start = between(None, Some(&first), 3).unwrap();
+        let first = between(None, None, tag(1)).unwrap();
+        let last = between(Some(&first), None, tag(2)).unwrap();
+        let start = between(None, Some(&first), tag(3)).unwrap();
         let mut keys = vec![start.clone(), first.clone(), last.clone()];
         // Repeatedly split the narrowest gaps on both sides.
         let mut low = first.clone();
         let mut high = last.clone();
-        for tag in 4..200 {
-            let key = between(Some(&low), Some(&high), tag).unwrap();
+        for sequence in 4..200 {
+            let key = between(Some(&low), Some(&high), tag(sequence)).unwrap();
             assert!(low < key && key < high, "{low} < {key} < {high}");
             keys.push(key.clone());
-            if tag % 2 == 0 {
+            if sequence % 2 == 0 {
                 low = key;
             } else {
                 high = key;
             }
         }
         let mut below = start;
-        for tag in 200..260 {
-            let key = between(None, Some(&below), tag).unwrap();
+        for sequence in 200..260 {
+            let key = between(None, Some(&below), tag(sequence)).unwrap();
             assert!(key < below);
             below = key;
         }
@@ -135,10 +147,10 @@ mod tests {
 
     #[test]
     fn concurrent_placements_into_one_gap_stay_distinct_and_ordered() {
-        let low = between(None, None, 7).unwrap();
-        let high = between(Some(&low), None, 8).unwrap();
-        let left = between(Some(&low), Some(&high), 1_000_001).unwrap();
-        let right = between(Some(&low), Some(&high), 2_000_002).unwrap();
+        let low = between(None, None, tag(7)).unwrap();
+        let high = between(Some(&low), None, tag(8)).unwrap();
+        let left = between(Some(&low), Some(&high), tag(1_000_001)).unwrap();
+        let right = between(Some(&low), Some(&high), tag(2_000_002)).unwrap();
         assert_ne!(left, right);
         for key in [&left, &right] {
             assert!(low < *key && *key < high);
@@ -149,28 +161,27 @@ mod tests {
         } else {
             (&right, &left)
         };
-        let inner = between(Some(a), Some(b), 9).unwrap();
+        let inner = between(Some(a), Some(b), tag(9)).unwrap();
         assert!(*a < inner && inner < *b);
     }
 
     #[test]
     fn refuses_invalid_input() {
         assert_eq!(
-            between(Some("b"), Some("a"), 1),
+            between(Some("b"), Some("a"), tag(1)),
             Err(PositionError::Unordered)
         );
         assert_eq!(
-            between(Some("a"), Some("a"), 1),
+            between(Some("a"), Some("a"), tag(1)),
             Err(PositionError::Unordered)
         );
         assert_eq!(
-            between(None, Some("a0"), 1),
+            between(None, Some("a0"), tag(1)),
             Err(PositionError::Invalid("a0".into()))
         );
         assert_eq!(
-            between(None, Some("a-"), 1),
+            between(None, Some("a-"), tag(1)),
             Err(PositionError::Invalid("a-".into()))
         );
-        assert_eq!(between(None, None, 0), Err(PositionError::InvalidTag(0)));
     }
 }

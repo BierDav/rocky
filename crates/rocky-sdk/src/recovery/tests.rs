@@ -49,28 +49,26 @@ async fn grant(database: &crate::Database, directory: &Path) -> Result<(), Failu
         Some(std::sync::Arc::new(crate::IdentityKey::generate())),
     )?;
     let session = database.session();
-    let call = serde_json::json!({"version": 1,
-        "scope": serde_json::from_str::<Value>(&database.scope())?,
-        "request": {"type": "grant", "device": device,
-            "profile": {"kind": "reader", "scopes": ["notes"]}}});
-    let reply: Value = serde_json::from_str(&session.call(call.to_string()).await?)?;
+    session
+        .grant(
+            device,
+            crate::GrantProfile::Reader {
+                scopes: ["notes".into()].into(),
+            },
+            crate::GrantTerms::default(),
+        )
+        .await?;
     session.close().await;
-    if reply["status"] != "ok" {
-        return Err(reply.to_string().into());
-    }
     Ok(())
 }
-/// The recovered identity and its author numbers.
-fn slot(directory: &Path) -> Result<Option<(Value, Value)>, Failure> {
+/// The recovered identity.
+fn slot(directory: &Path) -> Result<Option<Value>, Failure> {
     let path = directory.join("identity.json");
     if !rocky_platform::fs::exists(&path) {
         return Ok(None);
     }
     let saved: Value = serde_json::from_slice(&rocky_platform::fs::read(path)?)?;
-    Ok(Some((
-        saved["identity"].clone(),
-        saved["minting"]["range"].clone(),
-    )))
+    Ok(Some(saved["identity"].clone()))
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -87,7 +85,7 @@ async fn a_recovery_stopped_at_any_step_finishes_when_recovered_again_in_one_slo
     let archive = root.path().join("creator.backup");
     created.database.backup(&archive).await?;
     created.database.close().await?;
-    let (lost, _) = slot(&creator)?.ok_or("no creator")?;
+    let lost = slot(&creator)?.ok_or("no creator")?;
     rocky_platform::fs::remove_dir_all(&creator)?;
 
     for stage in [
@@ -178,7 +176,7 @@ async fn a_backup_exported_as_bytes_recovers_the_domain() -> Result<(), Failure>
             .collect())
     };
     assert_eq!(files(&creator)?, Vec::<String>::new());
-    let (lost, _) = slot(&creator)?.ok_or("no creator")?;
+    let lost = slot(&creator)?.ok_or("no creator")?;
     rocky_platform::fs::remove_dir_all(&creator)?;
 
     let directory = root.path().join("recovered");

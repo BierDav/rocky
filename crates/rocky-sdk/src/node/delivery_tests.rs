@@ -1,6 +1,7 @@
 //! Envelope delivery between an issuer, a keyless custody mailbox and
 //! members: directly, through mailboxes, at their bounds, across crashes and
 //! after a revocation. See `docs/decisions/0054-envelope-delivery.md`.
+use crate::test_snapshot as snap;
 use crate::{
     Database, Open, SecretStore, Session,
     delivery::{Mailbox, fault},
@@ -54,7 +55,7 @@ fn keys(directory: &Path) -> Arc<dyn SecretStore> {
 struct Device {
     database: Arc<Database>,
     session: Session,
-    scope: Value,
+
     directory: PathBuf,
     name: String,
     hub: Arc<Hub>,
@@ -73,47 +74,28 @@ impl Device {
     fn new(database: Arc<Database>, directory: PathBuf, name: &str, hub: &Arc<Hub>) -> Self {
         Self {
             session: database.session(),
-            scope: serde_json::from_str(&database.scope()).unwrap_or_default(),
+
             database,
             directory,
             name: name.into(),
             hub: hub.clone(),
         }
     }
-    async fn reply(&self, request: Value) -> Result<Value, String> {
-        let reply: Value = serde_json::from_str(
-            &self
-                .session
-                .call(json!({"version":1,"scope":self.scope,"request":request}).to_string())
-                .await
-                .map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
-        match reply["status"] == "ok" {
-            true => Ok(reply["value"].clone()),
-            false => Err(reply["error"].to_string()),
-        }
-    }
-    async fn ok(&self, request: Value) -> Result<Value, Failure> {
-        Ok(self
-            .reply(request.clone())
-            .await
-            .map_err(|error| format!("{request}: {error}"))?)
-    }
+
     async fn node(&self) -> Result<String, Failure> {
-        Ok(self.ok(json!({"type":"session"})).await?["node"]
+        Ok(snap::value(self.session.info()).await?["node"]
             .as_str()
             .ok_or("node")?
             .to_owned())
     }
     async fn identity(&self) -> Result<String, Failure> {
-        Ok(self.ok(json!({"type":"session"})).await?["principal"]
+        Ok(snap::value(self.session.info()).await?["principal"]
             .as_str()
             .ok_or("principal")?
             .to_owned())
     }
     async fn online(&self, online: bool) -> Result<(), Failure> {
-        self.ok(json!({"type":"networking_control","enabled":online}))
+        snap::value(self.session.set_networking_enabled(online))
             .await
             .map(drop)
     }
@@ -133,18 +115,18 @@ impl Device {
         let database = Database::open(open(&directory, &hub, &name))?.database;
         Ok(Self::new(database, directory, &name, &hub))
     }
-    async fn invite(&self, profile: Value) -> Result<String, Failure> {
-        Ok(self
-            .ok(json!({"type": "invitation","profile":profile}))
-            .await?["uri"]
-            .as_str()
-            .ok_or("uri")?
-            .to_owned())
+    async fn invite(&self, profile: crate::GrantProfile) -> Result<String, Failure> {
+        Ok(self.session.invite(Some(profile), None).await?.uri)
     }
     async fn epochs(&self) -> Result<Vec<Value>, Failure> {
-        Ok(self
-            .ok(json!({"type":"partition_status","group":"list","values":values()}))
-            .await?["epochs"]
+        Ok(snap::value(
+            self.session
+                .partition_status(rocky_sdk::PartitionTarget::Group {
+                    group: "list".to_owned(),
+                    values: (values()).clone(),
+                }),
+        )
+        .await?["epochs"]
             .as_array()
             .ok_or("epochs")?
             .iter()
@@ -153,9 +135,13 @@ impl Device {
     }
     /// How this sharer sees `node`'s latest envelope.
     async fn state(&self, node: &str) -> Result<Value, Failure> {
-        let status = self
-            .ok(json!({"type":"partition_status","group":"list","values":values()}))
-            .await?;
+        let status = snap::value(self.session.partition_status(
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values()).clone(),
+            },
+        ))
+        .await?;
         Ok(status["recipients"]
             .as_array()
             .ok_or("recipients")?
@@ -166,7 +152,7 @@ impl Device {
             .unwrap_or_default())
     }
     async fn events(&self, kind: &str) -> Result<Vec<Value>, Failure> {
-        Ok(self.ok(json!({"type":"activity"})).await?["events"]
+        Ok(snap::value(self.session.activity(0)).await?["events"]
             .as_array()
             .ok_or("events")?
             .iter()
@@ -182,14 +168,20 @@ impl Device {
         self.database.close().await
     }
 }
-fn values() -> Value {
-    json!([{"type":"text","value":LIST}])
+fn values() -> Vec<rocky_sdk::SqlValue> {
+    vec![rocky_sdk::SqlValue::Text(snap::text(&(LIST)))]
 }
 async fn introduce(left: &Device, right: &Device) -> Result<(), Failure> {
     for (from, to) in [(left, right), (right, left)] {
-        let contact = to.ok(json!({"type":"contact"})).await?;
-        from.ok(json!({"type":"peer_add","contact":contact["uri"]}))
-            .await?;
+        let contact = snap::value(to.session.contact_info()).await?;
+        snap::value(async {
+            let value = from
+                .session
+                .add_peer(&(snap::text(&(contact["uri"]))))
+                .await?;
+            Ok(json!({"node":value}))
+        })
+        .await?;
     }
     Ok(())
 }
@@ -220,7 +212,9 @@ impl Mesh {
             &hub,
             &a,
             "custody",
-            json!({"kind":"custody","scopes":TABLES}),
+            crate::GrantProfile::Custody {
+                scopes: TABLES.map(String::from).into(),
+            },
         )
         .await?;
         let b = join(
@@ -228,13 +222,21 @@ impl Mesh {
             &hub,
             &a,
             "b",
-            json!({"kind":"writer","scopes":TABLES}),
+            crate::GrantProfile::Writer {
+                scopes: TABLES.map(String::from).into(),
+            },
         )
         .await?;
         introduce(&a, &custody).await?;
         introduce(&b, &custody).await?;
-        a.ok(json!({"type":"partition_create","group":"list","values":values()}))
-            .await?;
+        snap::value(
+            a.session
+                .create_partition(rocky_sdk::PartitionTarget::Group {
+                    group: "list".to_owned(),
+                    values: (values()).clone(),
+                }),
+        )
+        .await?;
         Ok(Self {
             root,
             hub,
@@ -250,7 +252,15 @@ impl Mesh {
             &self.hub,
             &self.a,
             name,
-            json!({"kind":"grants","grants": TABLES.map(|scope| json!({"scope":scope,"rights":["read"]}))}),
+            crate::GrantProfile::Grants {
+                grants: TABLES
+                    .map(|scope| rocky_credentials::Grant {
+                        scope: scope.into(),
+                        rights: [rocky_core::Right::Read].into(),
+                        columns: None,
+                    })
+                    .into(),
+            },
         )
         .await?;
         introduce(&device, &self.custody).await?;
@@ -268,7 +278,7 @@ async fn join(
     hub: &Arc<Hub>,
     issuer: &Device,
     name: &str,
-    profile: Value,
+    profile: crate::GrantProfile,
 ) -> Result<Device, Failure> {
     let directory = root.path().join(name);
     let invitation = issuer.invite(profile).await?;
@@ -280,11 +290,9 @@ async fn join(
     );
     // The join's own first sync runs in the background: let it finish, so
     // that no pass still in flight meets a later share.
-    let mut status = device.ok(json!({"type":"status"})).await?;
+    let mut status = snap::value(device.session.status()).await?;
     while status["data"]["bootstrap_pending"] == true {
-        status = device
-            .ok(json!({"type":"status_next","after":status["token"]}))
-            .await?;
+        status = snap::value(device.session.status_after(snap::text(&(status["token"])))).await?;
     }
     Ok(device)
 }
@@ -292,10 +300,24 @@ async fn join(
 async fn relay(from: &Device, to: &Device) -> Result<Value, String> {
     to.online(false).await.map_err(|error| error.to_string())?;
     from.online(true).await.map_err(|error| error.to_string())?;
-    from.reply(json!({"type":"sync"})).await
+    snap::observe(from.session.sync_once())
+        .await
+        .map_err(|error| error.to_string())
 }
-fn share(recipients: &[&str]) -> Value {
-    json!({"type":"partition_share","group":"list","values":values(),"recipients":recipients})
+async fn share(device: &Device, recipients: &[&str]) -> Result<Value, Failure> {
+    let recipients = recipients
+        .iter()
+        .map(|key| key.parse())
+        .collect::<Result<_, _>>()?;
+    snap::value(device.session.share_partition(
+        crate::PartitionTarget::Group {
+            group: "list".into(),
+            values: values(),
+        },
+        recipients,
+        None,
+    ))
+    .await
 }
 /// The sum of one count over every round of delivery.
 async fn delivered(device: &Device, count: &str) -> Result<u64, Failure> {
@@ -322,10 +344,12 @@ async fn a_share_and_a_rotation_reach_an_offline_recipient_through_custody_alone
     b.online(false).await?;
     // Shared while B is offline; then a reader's revocation rotates the list.
     let removed_node = removed.node().await?;
-    a.ok(share(&[&node, &third.node().await?, &removed_node]))
-        .await?;
-    a.ok(json!({"type":"revoke","identity":removed.identity().await?}))
-        .await?;
+    share(a, &[&node, &third.node().await?, &removed_node]).await?;
+    snap::value(
+        a.session
+            .revoke_identity(&(snap::text(&(removed.identity().await?)))),
+    )
+    .await?;
     assert_eq!(a.state(&node).await?, "pending");
     relay(a, b).await?;
     assert_eq!(a.state(&node).await?, "deposited");
@@ -336,9 +360,14 @@ async fn a_share_and_a_rotation_reach_an_offline_recipient_through_custody_alone
     );
     // The mailbox stores recipients' node keys and nothing naming the list.
     let held = std::fs::read(custody.directory.join("mailbox.json"))?;
-    let address = a
-        .ok(json!({"type":"partition_status","group":"list","values":values()}))
-        .await?["address"]
+    let address = snap::value(
+        a.session
+            .partition_status(rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values()).clone(),
+            }),
+    )
+    .await?["address"]
         .as_str()
         .ok_or("address")?
         .to_owned();
@@ -351,7 +380,7 @@ async fn a_share_and_a_rotation_reach_an_offline_recipient_through_custody_alone
     // B meets only custody: both envelopes arrive and install.
     relay(b, a).await?;
     assert_eq!(b.epochs().await?, [json!(1), json!(2)]);
-    third.ok(json!({"type":"sync"})).await?;
+    snap::value(third.session.sync_once()).await?;
     // The sender learns of the delivery from custody, which then forgets it.
     relay(a, b).await?;
     assert_eq!(a.state(&node).await?, "delivered");
@@ -378,27 +407,29 @@ async fn an_envelope_delivered_directly_and_through_two_mailboxes_installs_once(
         &mesh.hub,
         a,
         "second",
-        json!({"kind":"custody","scopes":TABLES}),
+        crate::GrantProfile::Custody {
+            scopes: TABLES.map(String::from).into(),
+        },
     )
     .await?;
     introduce(a, &second).await?;
     introduce(b, &second).await?;
     let node = b.node().await?;
     b.online(false).await?;
-    a.ok(share(&[&node])).await?;
+    share(a, &[&node]).await?;
     relay(a, b).await?;
     assert_eq!(custody.mailbox()?.len(), 1);
     assert_eq!(second.mailbox()?.len(), 1);
     // B meets A and both mailboxes in one sync.
     introduce(a, b).await?;
     b.online(true).await?;
-    b.ok(json!({"type":"sync"})).await?;
+    snap::value(b.session.sync_once()).await?;
     assert_eq!(delivered(b, "received").await?, 3);
     assert_eq!(b.events("partition_key_installed").await?.len(), 1);
     assert_eq!(b.epochs().await?, [json!(1)]);
     assert_eq!(a.state(&node).await?, "delivered");
     // Both mailboxes keep only B's receipt until A takes it.
-    a.ok(json!({"type":"sync"})).await?;
+    snap::value(a.session.sync_once()).await?;
     assert_eq!(custody.mailbox()?.len() + second.mailbox()?.len(), 0);
     second.close().await?;
     mesh.close().await
@@ -417,7 +448,22 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
     let mesh_member = |name: &'static str| {
         let (root, hub, a, custody) = (&root, &hub, &a, &custody);
         async move {
-            let device = join(root, hub, a, name, json!({"kind":"grants","grants": TABLES.map(|scope| json!({"scope":scope,"rights":["read"]}))})).await?;
+            let device = join(
+                root,
+                hub,
+                a,
+                name,
+                crate::GrantProfile::Grants {
+                    grants: TABLES
+                        .map(|scope| rocky_credentials::Grant {
+                            scope: scope.into(),
+                            rights: [rocky_core::Right::Read].into(),
+                            columns: None,
+                        })
+                        .into(),
+                },
+            )
+            .await?;
             introduce(&device, custody).await?;
             Ok::<_, Failure>(device)
         }
@@ -426,13 +472,13 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
     let removed = mesh_member("removed").await?;
     // Only the issuer's explicit syncs deliver: a failed background attempt
     // would put custody in backoff, which an explicit sync skips.
-    a.ok(json!({"type":"sync_start","enabled":false})).await?;
+    snap::value(a.session.set_automatic_sync(false)).await?;
     let node = b.node().await?;
     b.online(false).await?;
-    a.ok(share(&[&node])).await?;
+    share(&a, &[&node]).await?;
     relay(&a, &b).await?;
     // Another member collects nothing of B's.
-    other.ok(json!({"type":"sync"})).await?;
+    snap::value(other.session.sync_once()).await?;
     assert_eq!(delivered(&other, "received").await?, 0);
     assert_eq!(custody.mailbox()?.len(), 1);
 
@@ -449,11 +495,14 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
         })
         .await?;
     let before = a.events("envelopes_delivered").await?.len();
-    a.ok(json!({"type":"revoke","identity":removed.identity().await?}))
-        .await?;
+    snap::value(
+        a.session
+            .revoke_identity(&(snap::text(&(removed.identity().await?)))),
+    )
+    .await?;
     // Every round refuses the rotation alike while custody is full.
     relay(&a, &b).await?;
-    a.ok(json!({"type":"sync"})).await?;
+    snap::value(a.session.sync_once()).await?;
     let mailbox = custody.node().await?;
     let mut rounds = a.events("envelopes_delivered").await?.split_off(before);
     rounds.retain(|round| round["peer"] == mailbox.as_str());
@@ -461,9 +510,14 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
     for round in &rounds {
         assert_eq!(round["refused"], 1, "no room for B's rotation: {round}");
     }
-    let status = a
-        .ok(json!({"type":"partition_status","group":"list","values":values()}))
-        .await?;
+    let status = snap::value(
+        a.session
+            .partition_status(rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values()).clone(),
+            }),
+    )
+    .await?;
     let rotated: Vec<&Value> = status["recipients"]
         .as_array()
         .ok_or("recipients")?
@@ -529,17 +583,20 @@ async fn a_recipient_revoked_after_the_deposit_gets_nothing_and_the_deposit_is_r
     } = Mesh::new().await?;
     let node = b.node().await?;
     b.online(false).await?;
-    a.ok(share(&[&node])).await?;
+    share(&a, &[&node]).await?;
     relay(&a, &b).await?;
     assert_eq!(custody.mailbox()?.len(), 1);
     // A restarted mailbox keeps the deposit.
     let custody = custody.restart_with(|_| Ok(())).await?;
     assert_eq!(custody.mailbox()?.len(), 1);
-    a.ok(json!({"type":"revoke","identity":b.identity().await?}))
-        .await?;
+    snap::value(
+        a.session
+            .revoke_identity(&(snap::text(&(b.identity().await?)))),
+    )
+    .await?;
     assert_eq!(a.state(&node).await?, Value::Null, "the sender dropped it");
     // Custody learns the statement from A and removes B's deposit.
-    a.ok(json!({"type":"sync"})).await?;
+    snap::value(a.session.sync_once()).await?;
     assert_eq!(custody.mailbox()?.len(), 0);
     let _ = relay(&b, &a).await;
     assert_eq!(b.epochs().await?, Vec::<Value>::new(), "B received nothing");
@@ -603,7 +660,7 @@ async fn sweep(direct: bool, at: At, stage: fault::Stage) -> Result<(), Failure>
         At::Recipient => node.parse()?,
     };
     b.online(direct).await?;
-    a.ok(json!({"type":"partition_share","group":"list","values":values(),"recipients":[node]}))
+    snap::value(a.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values()).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
         .await?;
     let pending = || -> Result<bool, Failure> {
         Ok(fault::STOPS
@@ -632,7 +689,7 @@ async fn sweep(direct: bool, at: At, stage: fault::Stage) -> Result<(), Failure>
                 receiver.online(false).await?;
             }
             sender.online(true).await?;
-            let _ = sender.reply(json!({"type":"sync"})).await;
+            let _ = snap::observe(sender.session.sync_once()).await;
             if !restarted && !pending()? {
                 restarted = true;
                 let device = devices[index].take().ok_or("stopped device")?;
@@ -712,20 +769,20 @@ async fn a_member_deposits_its_share_with_custody_for_an_offline_recipient() -> 
     let mesh = Mesh::with_root(super::sync_tests::small_directory()?).await?;
     let member = mesh.member("sharer").await?;
     let recipient = mesh.b.node().await?;
-    mesh.a.ok(share(&[&member.node().await?])).await?;
+    share(&mesh.a, &[&member.node().await?]).await?;
     introduce(&mesh.a, &member).await?;
-    member.ok(json!({"type":"sync"})).await?;
+    snap::value(member.session.sync_once()).await?;
     mesh.a.online(false).await?;
     mesh.b.online(false).await?;
-    member.ok(share(&[&recipient])).await?;
-    member.ok(json!({"type":"sync"})).await?;
+    share(&member, &[&recipient]).await?;
+    snap::value(member.session.sync_once()).await?;
     assert_eq!(member.state(&recipient).await?, "deposited");
     member.online(false).await?;
     mesh.b.online(true).await?;
-    mesh.b.ok(json!({"type":"sync"})).await?;
+    snap::value(mesh.b.session.sync_once()).await?;
     assert_eq!(mesh.b.epochs().await?, [json!(1)]);
     member.online(true).await?;
-    member.ok(json!({"type":"sync"})).await?;
+    snap::value(member.session.sync_once()).await?;
     assert_eq!(member.state(&recipient).await?, "delivered");
     member.close().await?;
     mesh.close().await
@@ -746,7 +803,13 @@ async fn a_custody_grant_on_an_unrelated_scope_is_enough_to_hold_deliveries() ->
         &mesh.hub,
         &mesh.a,
         "raw-custody",
-        json!({"kind":"grants","grants":[{"scope":"notes","rights":["custody"]}]}),
+        crate::GrantProfile::Grants {
+            grants: vec![rocky_credentials::Grant {
+                scope: "notes".into(),
+                rights: [rocky_core::Right::Custody].into(),
+                columns: None,
+            }],
+        },
     )
     .await?;
     introduce(&mesh.a, &mailbox).await?;
@@ -754,22 +817,20 @@ async fn a_custody_grant_on_an_unrelated_scope_is_enough_to_hold_deliveries() ->
     // Only the explicit syncs below exchange: a failed background attempt
     // would put the mailbox in backoff, which an explicit sync skips.
     for device in [&mesh.a, &mesh.b, &mailbox] {
-        device
-            .ok(json!({"type":"sync_start","enabled":false}))
-            .await?;
+        snap::value(device.session.set_automatic_sync(false)).await?;
     }
     mesh.custody.online(false).await?;
     let recipient = mesh.b.node().await?;
     mesh.b.online(false).await?;
-    mesh.a.ok(share(&[&recipient])).await?;
+    share(&mesh.a, &[&recipient]).await?;
     // The delivery round succeeds independently of row sync: this mailbox
     // has no grant on the list, so the later row exchange may be refused.
-    let _ = mesh.a.reply(json!({"type":"sync"})).await;
+    let _ = snap::observe(mesh.a.session.sync_once()).await;
     assert_eq!(mesh.a.state(&recipient).await?, "deposited");
     assert_eq!(mailbox.mailbox()?.len(), 1);
     mesh.a.online(false).await?;
     mesh.b.online(true).await?;
-    let _ = mesh.b.reply(json!({"type":"sync"})).await;
+    let _ = snap::observe(mesh.b.session.sync_once()).await;
     assert_eq!(mesh.b.epochs().await?, [json!(1)]);
     mailbox.close().await?;
     mesh.close().await

@@ -22,17 +22,9 @@ async fn keyed(
     f: &Fixture,
     path: &Path,
     node: [u8; 32],
-    number: u32,
     grant: PartitionGrant,
 ) -> EncryptedReplica<TypedRows> {
-    let replica = f
-        .open(
-            path,
-            PrivateKey::from_bytes(&node),
-            grant,
-            Some((PrivateKey::new(), number)),
-        )
-        .await;
+    let replica = f.open(path, PrivateKey::from_bytes(&node), grant).await;
     f.key(&replica, "A", [1; 32]).await;
     f.key(&replica, "B", [2; 32]).await;
     replica
@@ -47,7 +39,6 @@ async fn a_revoked_authors_unheld_partition_header_is_omitted() {
             &root.path().join("writer"),
             PrivateKey::new(),
             f.grant(None, &all()),
-            Some((PrivateKey::new(), 1)),
         )
         .await;
     let other = f
@@ -55,7 +46,6 @@ async fn a_revoked_authors_unheld_partition_header_is_omitted() {
             &root.path().join("other"),
             PrivateKey::new(),
             f.grant(None, &all()),
-            Some((PrivateKey::new(), 2)),
         )
         .await;
     let reader_key = PrivateKey::new();
@@ -64,7 +54,6 @@ async fn a_revoked_authors_unheld_partition_header_is_omitted() {
             &root.path().join("reader"),
             reader_key.clone(),
             f.grant(Some(&["A"]), &[Right::Read]),
-            None,
         )
         .await;
     for replica in [&writer, &other] {
@@ -96,31 +85,16 @@ async fn a_revoked_authors_unheld_partition_header_is_omitted() {
         .config
         .credentials
         .clone();
-    let mut requests = reader.wanted_placements().await.unwrap();
-    requests.sort_by_key(|request| request.author);
-    let [eligible_request, revoked_request] = requests.as_slice() else {
-        panic!("{requests:?}")
+    let requests = reader.wanted_placements().await.unwrap();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    let of = |frame: &EncryptedFrame| {
+        let author = crate::writer::writer(&frame.operation().unwrap().header.public_key);
+        requests
+            .iter()
+            .find(|request| request.author == author)
+            .expect("a placement request of the frame's writer")
     };
-    assert_eq!(
-        revoked_request.author,
-        hidden
-            .operation()
-            .unwrap()
-            .header
-            .extensions
-            .author
-            .unwrap()
-    );
-    assert_eq!(
-        eligible_request.author,
-        eligible
-            .operation()
-            .unwrap()
-            .header
-            .extensions
-            .author
-            .unwrap()
-    );
+    let (eligible_request, revoked_request) = (of(&eligible), of(&hidden));
     let page = |request| {
         let (writer, credentials) = (writer.clone(), credentials.clone());
         let reader = reader_key.public_key();

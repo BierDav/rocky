@@ -359,8 +359,9 @@ mod tests {
             let error = Schema::parse(&input).unwrap_err().to_string();
             assert!(error.contains("unsupported schema"), "{error}");
         }
-        assert_eq!(descriptor.format, rocky_core::LOGICAL_SCHEMA_FORMAT);
-        for format in [0, 1, 2, 3, 4, 5, 7] {
+        let current = rocky_core::LOGICAL_SCHEMA_FORMAT;
+        assert_eq!(descriptor.format, current);
+        for format in (0..current).chain([current + 1]) {
             let mut old = descriptor.clone();
             old.format = format;
             let error = rocky_core::TypedRows::new(old, vec![])
@@ -409,9 +410,9 @@ mod tests {
     fn identity_references_share_readers_but_keep_table_resources() -> Result<(), Failure> {
         let schema = Schema::parse(
             r#"{"format":6,"application":"references","version":1,"tables":[
-            {"name":"parents","class":"replayed","columns":[{"name":"next","type":"integer"}],"primary_key":["id"],
+            {"name":"parents","class":"replayed","columns":[{"name":"next","type":"blob"}],"primary_key":["id"],
              "foreign_keys":[{"columns":["next"],"table":"children","on_delete":"set_null"}]},
-            {"name":"children","class":"replayed","columns":[{"name":"parent","type":"integer"}],"primary_key":["id"],
+            {"name":"children","class":"replayed","columns":[{"name":"parent","type":"blob"}],"primary_key":["id"],
              "foreign_keys":[{"columns":["parent"],"table":"parents","on_delete":"cascade"}]},
             {"name":"other","class":"replayed","columns":[{"name":"title","type":"text"}],"primary_key":["id"]}
         ]}"#,

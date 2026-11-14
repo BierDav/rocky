@@ -144,13 +144,13 @@ impl<A: RowApplication> Inner<A> {
     /// `secure_kept_outcomes`, keeping what a base decided for a member,
     /// and keeps only the newest `KEPT_OUTCOMES`.
     async fn keep_outcomes(&self, id: i64) -> Result<(), Error> {
-        let Some(author) = self.node_author.as_ref().map(|author| author.number) else {
+        let Some(author) = self.node_author.as_ref().map(|author| author.writer) else {
             return Ok(());
         };
         self.conn
             .execute(
                 "INSERT INTO secure_kept_outcomes SELECT hash,txn,scope,clock,sequence,dropped,sealed,violated,0 FROM secure_replayed WHERE scope=? AND author=? ON CONFLICT(hash) DO UPDATE SET dropped=excluded.dropped,sealed=excluded.sealed,violated=excluded.violated WHERE secure_kept_outcomes.based=0",
-                [id, i64::from(author)],
+                bindings(vec![SqlValue::Integer(id), writer_value(author)]),
             )
             .await?;
         self.prune_kept_outcomes(KEPT_OUTCOMES).await
@@ -577,8 +577,8 @@ impl<A: RowApplication> Inner<A> {
                     false => start = self.older_start(*id, &path, &start).await?,
                 }
             };
-            members.extend(scanned.0);
-            covered_members.insert(*id, (start.floor, scanned.1));
+            members.extend(scanned.members);
+            covered_members.insert(*id, (start.floor, scanned.kept));
             based.insert(*id, std::mem::take(&mut start.based));
             if let Some((tip, rows)) = start.rows {
                 restored.push((*scope, tip, rows));
@@ -791,7 +791,6 @@ impl<A: RowApplication> Inner<A> {
     /// The members of scope `id` after `start` that the path shows, in
     /// replay order, and those the start's seal covers; none when a
     /// covered member has no record.
-    #[allow(clippy::type_complexity)]
     async fn scan_members(
         &self,
         id: i64,
@@ -799,7 +798,7 @@ impl<A: RowApplication> Inner<A> {
         covered: &[(i64, i64)],
         recorded: &BTreeSet<Hash>,
         open: i64,
-    ) -> Result<Option<(Vec<Member>, BTreeSet<Hash>)>, Error> {
+    ) -> Result<Option<ScannedMembers>, Error> {
         let corrupt = || Error::Corrupt("replayed history".into());
         let mut members = Vec::new();
         let mut kept = BTreeSet::new();
@@ -831,7 +830,7 @@ impl<A: RowApplication> Inner<A> {
             };
             if let Some((_, seal)) = &start.seal {
                 let extension = &operation.header.extensions;
-                let author = extension.author.ok_or_else(corrupt)?;
+                let author = extension.author(&operation.header.public_key).ok_or_else(corrupt)?;
                 if Self::covers_exact(
                     self.graph_for(extension.scope.domain)?,
                     extension.tip,
@@ -857,12 +856,17 @@ impl<A: RowApplication> Inner<A> {
                 (hash, membership.index),
             ));
         }
-        Ok(Some((members, kept)))
+        Ok(Some(ScannedMembers { members, kept }))
     }
 }
 
 /// A member to replay: its order, scope, transaction and `(frame, index)`.
 type Member = (Order, i64, Commitment, (Hash, u16));
+
+struct ScannedMembers {
+    members: Vec<Member>,
+    kept: BTreeSet<Hash>,
+}
 
 /// Where a replayed scope's rebuild starts: rows at a seal of the path and
 /// the last applied position below which nothing replays.

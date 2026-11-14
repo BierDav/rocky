@@ -214,20 +214,14 @@ impl<A: RowApplication> Inner<A> {
     }
     /// `replay`, applying what finalizing a seal changed once the replay
     /// passes the last position the seal includes.
-    // The scope, its base, the view and target replayed, and the bounds.
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn replay_sealed(
         &self,
-        scope: ResourceScope,
-        id: i64,
-        overlay: Overlay,
-        target: TipId,
-        (after, through): (i64, i64),
-        limit: usize,
+        request: checkpoint::ReplayRequest,
         sets: &mut Sets,
         ledger: &mut identity::IdentityLedger,
-        mode: checkpoint::ReplayMode,
     ) -> Result<Option<i64>, Error> {
+        let (id, overlay, after, through) =
+            (request.id, request.overlay, request.after, request.through);
         let bounds = self.seal_bounds(id).await?;
         let end = bounds
             .iter()
@@ -237,15 +231,12 @@ impl<A: RowApplication> Inner<A> {
             .unwrap_or(through);
         let last = self
             .replay(
-                scope,
-                id,
-                overlay,
-                target,
-                (after, end),
-                limit,
+                checkpoint::ReplayRequest {
+                    through: end,
+                    ..request
+                },
                 sets,
                 ledger,
-                mode,
             )
             .await?;
         if last == Some(end) {
@@ -327,8 +318,8 @@ impl<A: RowApplication> Inner<A> {
         scopes: &[(ResourceScope, Option<i64>)],
         held_scopes: &BTreeSet<ResourceScope>,
     ) -> Result<Positions, Error> {
-        let mut held = BTreeMap::<u32, BTreeSet<u64>>::new();
-        let mut last = BTreeMap::<(ResourceScope, u32), u64>::new();
+        let mut held = BTreeMap::<WriterId, BTreeSet<u64>>::new();
+        let mut last = BTreeMap::<(ResourceScope, WriterId), u64>::new();
         let ready: BTreeSet<ResourceScope> = scopes.iter().map(|(scope, _)| *scope).collect();
         // A pending frame of a scope this replica does not hold, one whose
         // key it lacks, still places its signed position in that scope; so
@@ -564,7 +555,9 @@ impl<A: RowApplication> Inner<A> {
                     };
                     let header: p2panda_core::Header<Extensions> = decode(header)?;
                     let e = &header.extensions;
-                    let author = e.author.ok_or_else(|| denied("node author missing"))?;
+                    let author = e
+                        .author(&header.public_key)
+                        .ok_or_else(|| denied("node author missing"))?;
                     if self.visible_frame(
                         graph,
                         e.tip,
@@ -621,20 +614,20 @@ fn offset(path: &[SignedSeal], finalized: &[Finalized]) -> Option<usize> {
 /// per node, and per open scope's last frame.
 #[cfg(test)]
 type Positions = (
-    BTreeMap<u32, BTreeSet<u64>>,
-    BTreeMap<(ResourceScope, u32), u64>,
+    BTreeMap<WriterId, BTreeSet<u64>>,
+    BTreeMap<(ResourceScope, WriterId), u64>,
 );
 /// Up to `limit` positions of `seal`'s frontier at each author's start that keep it
 /// from being finalized: missing from `held`, and at or after some open
 /// scope's last frame of the node, so they may be that scope's.
 pub(super) fn blocking_gaps(
     seal: &SignedSeal,
-    starts: &BTreeMap<u32, u64>,
+    starts: &BTreeMap<WriterId, u64>,
     scopes: &[(ResourceScope, Option<i64>)],
-    held: &BTreeMap<u32, positions::Runs>,
-    last: &BTreeMap<(ResourceScope, u32), u64>,
+    held: &BTreeMap<WriterId, positions::Runs>,
+    last: &BTreeMap<(ResourceScope, WriterId), u64>,
     limit: usize,
-) -> Vec<(u32, u64)> {
+) -> Vec<(WriterId, u64)> {
     let mut gaps = Vec::new();
     if scopes.is_empty() {
         return gaps;
@@ -1848,15 +1841,18 @@ impl<A: RowApplication> Inner<A> {
         )?;
         while let Some(last) = self
             .replay_sealed(
-                scope,
-                id,
-                Overlay::Build,
-                target_tip,
-                (cursor, through),
-                STEP_OPERATIONS,
+                checkpoint::ReplayRequest {
+                    scope,
+                    id,
+                    overlay: Overlay::Build,
+                    target: target_tip,
+                    after: cursor,
+                    through,
+                    limit: STEP_OPERATIONS,
+                    mode: checkpoint::ReplayMode::Mint,
+                },
                 &mut sets,
                 &mut ledger,
-                checkpoint::ReplayMode::Mint,
             )
             .await?
         {
@@ -2466,7 +2462,7 @@ mod tests {
                 scope: domain,
                 tip: TipId([6; 32]),
                 frontier: vec![AuthorMark {
-                    author: 1,
+                    author: WriterId::from_bytes([1; 32]),
                     sequence: 1,
                 }],
                 action: SealAction::Continue { schema: [7; 32] },
@@ -2479,13 +2475,13 @@ mod tests {
         assert_eq!(
             blocking_gaps(
                 &seal,
-                &BTreeMap::from([(1, u64::MAX)]),
+                &BTreeMap::from([(WriterId::from_bytes([1; 32]), u64::MAX)]),
                 &[(scope, None)],
                 &BTreeMap::new(),
                 &BTreeMap::new(),
                 32
             ),
-            vec![(1, u64::MAX)]
+            vec![(WriterId::from_bytes([1; 32]), u64::MAX)]
         );
     }
 }

@@ -684,9 +684,9 @@ impl Sink {
             && let Some(id) = plan.tables[index].identity
         {
             for image in old.iter().chain(&new) {
-                if !matches!(image.get(id), Some(Value::Integer(id)) if rocky_core::RowIdentity::from_integer(*id).is_ok())
+                if !matches!(image.get(id), Some(Value::Blob(id)) if rocky_core::RowIdentity::from_bytes(id).is_ok())
                 {
-                    self.fail("application rows require a positive id");
+                    self.fail("application rows require a 40-byte row identity id");
                     return;
                 }
             }

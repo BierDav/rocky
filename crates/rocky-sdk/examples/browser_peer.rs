@@ -18,17 +18,15 @@ async fn main() -> Result<(), rocky_sdk::Failure> {
 #[cfg(not(target_family = "wasm"))]
 mod native {
     use iroh_relay::server::{RelayConfig, Server, ServerConfig};
-    use rocky_coordinator::{
-        certified::*,
-        service::{NetworkCoordinator, VoterService},
-    };
+    use rocky_coordinator::{certified::*, service::NetworkCoordinator};
     use rocky_core::{MeshId, net::Protocol};
+    use rocky_iroh as iroh;
     use rocky_sdk::{
-        Affinity, Column, Configuration, Coordination, Database, Failure, GrantProfile, Network,
-        Schema, Table, counters, credentials::PrivateKey, iroh, params,
-        transport::TransportOptions,
+        Affinity, Column, Configuration, Database, Failure, GrantProfile, Network, Schema, Table,
+        counters, credentials::PrivateKey, params,
     };
-    use serde_json::{Value, json};
+    use rocky_voter::VoterService;
+    use serde_json::json;
     use std::{collections::BTreeSet, net::Ipv4Addr, path::Path, sync::Arc, time::Duration};
 
     pub async fn main() -> Result<(), Failure> {
@@ -50,21 +48,32 @@ mod native {
                     .column(Column::new("number", Affinity::Integer).required()),
             )
             .build()?;
-        let network = TransportOptions::Iroh {
+        let network = rocky_iroh::Options {
             relay: Some(url.clone()),
             lookup: Some("disabled".into()),
             topic: false,
             local: false,
             bind: None,
         };
+        let coordinator_transport = network
+            .start(*PrivateKey::new().as_bytes())
+            .await?
+            .transport();
+        let coordinator =
+            rocky_coordinator::Client::connect(&bundle, coordinator_transport.clone())?;
+        let control = rocky_coordinator::control::ControlClient::new(
+            bundle.clone(),
+            coordinator_transport.clone(),
+            directory.path().join("owner"),
+        );
         let created = Configuration::new(directory.path().join("owner"), &schema)?
             .network(Network::Owned(Arc::new(network)))
-            .coordination(Coordination::Service(Box::new(bundle.clone())))
+            .coordination(coordinator)
             .create()
             .await?;
         let root = created.root.ok_or("a created domain returns its root")?;
         let db = created.database;
-        register(&db, &root.phrase()).await?;
+        register(&db, &root.phrase(), &control).await?;
         let mut tx = db.transaction().await?;
         let id = tx.next_id("notes", vec![]).await?;
         tx.execute(
@@ -96,6 +105,7 @@ mod native {
         }
         let checked = check(&db).await;
         db.close().await?;
+        coordinator_transport.close().await;
         checked?;
         eprintln!("browser-peer: the browser's write and claims arrived over the relay");
         Ok(())
@@ -104,16 +114,35 @@ mod native {
     /// Registers the domain with the owner's identity as its one trusted
     /// one; no later control revision trusts another. Registering without
     /// a coordination grant needs the root.
-    async fn register(db: &Database, root: &str) -> Result<(), Failure> {
+    async fn register(
+        db: &Database,
+        root: &str,
+        control: &rocky_coordinator::control::ControlClient,
+    ) -> Result<(), Failure> {
         let tenant = PrivateKey::new();
-        let principal = call(db, json!({"type": "session"})).await?["principal"].clone();
-        call(
-            db,
-            json!({"type": "coordination_register", "tenant": tenant.to_hex(),
-                "registration": vec![1u8; 32], "trusted": [principal], "lifetime": 3600,
-                "root": {"phrase": root}}),
-        )
-        .await?;
+        let session = db.session();
+        let principal = session.info().await?.principal;
+        control
+            .publish(
+                rocky_coordinator::control::Domain {
+                    scope: db.scope(),
+                    application: "browser_sync".into(),
+                    publisher: rocky_sdk::RootKey::from_phrase(root)?.public_key(),
+                },
+                rocky_coordinator::control::ControlRequest {
+                    tenant,
+                    trusted: vec![principal],
+                    lifetime: 3600,
+                    id: [1; 32],
+                    revision: rocky_coordinator::control::ControlRevision::Register {
+                        grant: None,
+                        admission: None,
+                    },
+                },
+                Some(Arc::new(rocky_sdk::RootKey::from_phrase(root)?)),
+            )
+            .await?;
+        session.close().await;
         Ok(())
     }
 
@@ -192,20 +221,6 @@ mod native {
             return Err(format!("the native claim took {next}").into());
         }
         Ok(())
-    }
-
-    async fn call(db: &Database, request: Value) -> Result<Value, Failure> {
-        let scope: Value = serde_json::from_str(&db.scope())?;
-        let reply: Value = serde_json::from_str(
-            &db.session()
-                .call(json!({"version": 1, "scope": scope, "request": request}).to_string())
-                .await?,
-        )?;
-        if reply["status"] == "ok" {
-            Ok(reply["value"].clone())
-        } else {
-            Err(format!("{} failed: {}", request["type"], reply["error"]).into())
-        }
     }
 
     /// Three voters of a public service with open admission, whose client

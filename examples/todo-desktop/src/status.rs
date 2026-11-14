@@ -104,13 +104,12 @@ pub(crate) fn Sync(todos: Shared, members: Vec<Member>) -> Element {
             }
             if !network.peers.is_empty() {
                 table { class: "peers small",
-                    thead { tr { th { "Peer" } th { "Link" } th { "Round trip" } th { "Last exchange" } } }
+                    thead { tr { th { "Peer" } th { "Link" } th { "Last exchange" } } }
                     tbody {
                         for peer in network.peers.iter() {
                             tr {
                                 td { "{name(&peer.node)}" }
                                 td { {format!("{:?}", peer.link.state).to_lowercase()} }
-                                td { {peer.link.round_trip_millis.map_or("—".into(), |millis| format!("{millis} ms"))} }
                                 td { {peer.last_authenticated_exchange_at_epoch_seconds.map_or("never".into(), ago)} }
                             }
                         }

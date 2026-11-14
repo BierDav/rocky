@@ -25,9 +25,7 @@ const SETTLE: Duration = Duration::from_secs(1);
 const VERSION: u32 = 3;
 
 /// Coordination failures that stand, from every call to the service.
-/// Without iroh no service is composed, so none arises.
 #[derive(Default)]
-#[cfg_attr(not(feature = "iroh"), allow(dead_code))]
 struct Standing {
     skew: Option<Alert>,
     /// When the current run of unanswered calls began.
@@ -39,7 +37,6 @@ struct Standing {
     failure: Option<CoordinationFailure>,
 }
 /// What the coordination service's answers show; shared with its client.
-#[cfg_attr(not(feature = "iroh"), allow(dead_code))]
 pub(crate) struct Coordination {
     state: std::sync::Mutex<Standing>,
     observations: crate::status::Observations,
@@ -52,8 +49,7 @@ impl Coordination {
         }
     }
     /// The client's observer of every call's outcome.
-    #[cfg(feature = "iroh")]
-    pub(crate) fn observer(self: &Arc<Self>) -> rocky_coordinator::service::Observer {
+    pub(crate) fn observer(self: &Arc<Self>) -> rocky_credentials::CoordinationObserver {
         let coordination = Arc::downgrade(self);
         Arc::new(move |result| {
             if let (Some(coordination), Ok(time)) = (coordination.upgrade(), now()) {
@@ -65,7 +61,6 @@ impl Coordination {
     /// clock check clears it.
     /// Unanswered calls raise one once they last `STANDING_FAILURE`; any
     /// answer clears it. Logs only transitions.
-    #[cfg_attr(not(feature = "iroh"), allow(dead_code))]
     pub(crate) fn observe(&self, result: Result<(), &CoordinationError>, time: u64) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let mut changed = false;
@@ -128,7 +123,6 @@ impl Coordination {
     /// A failed push of held revocations raises its alert once failures
     /// last `STANDING_FAILURE`; an acknowledged one, or none left to push,
     /// clears it.
-    #[cfg_attr(not(feature = "iroh"), allow(dead_code))]
     pub(crate) fn observe_push(&self, pushed: bool, time: u64) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let mut changed = false;
@@ -432,7 +426,6 @@ impl Node {
             .map(|ended| AlertKind::RecoveriesMet {
                 kept: latest.keep.to_hex(),
                 ended: ended.keep.to_hex(),
-                shared_slot: ended.slot == latest.slot,
             });
         // Recovered identities are reported as recoveries that met; this
         // device's own end as its revocation reason.
@@ -617,7 +610,7 @@ impl Node {
     }
     /// Sets how long another trusted identity may stay unheard before this
     /// trusted node flags it.
-    pub(super) async fn set_trusted_stale_after(&self, seconds: u64) -> Result<Value, Failure> {
+    pub(super) async fn set_trusted_stale_after(&self, seconds: u64) -> Result<(), Failure> {
         if !(60..=10 * 366 * 24 * 60 * 60).contains(&seconds) {
             return Err(Box::new(crate::node::Refused(
                 "stale_after must be a minute to ten years".into(),
@@ -641,7 +634,7 @@ impl Node {
         }
         self.refresh_trusted_watch().await?;
         self.observations.touch();
-        Ok(json!({"stale_after": seconds}))
+        Ok(())
     }
     /// The next time, after `time`, another trusted identity turns stale.
     pub(super) fn stale_deadline(&self, time: u64) -> Option<u64> {

@@ -5,6 +5,7 @@
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 mod common;
+use common::identity::snapshot as snap;
 use rocky_sdk::{
     Database, Network, NodeKeys, Open, SecretStore, Session, credentials::ProviderError,
     transport::memory::Hub,
@@ -78,7 +79,7 @@ impl SecretStore for Store {
 struct Peer {
     database: Arc<Database>,
     session: Session,
-    scope: Value,
+    scope: rocky_sdk::Scope,
     store: Arc<Store>,
     hub: Arc<Hub>,
 }
@@ -109,7 +110,7 @@ impl Peer {
     fn new(database: Arc<Database>, store: Arc<Store>, hub: Arc<Hub>) -> Self {
         Self {
             session: database.session(),
-            scope: serde_json::from_str(&database.scope()).unwrap(),
+            scope: database.scope(),
             database,
             store,
             hub,
@@ -128,30 +129,16 @@ impl Peer {
             .database;
         Self::new(database, store, hub)
     }
-    async fn reply(&self, request: Value) -> Result<Value, String> {
-        let reply: Value = serde_json::from_str(
-            &self
-                .session
-                .call(json!({"version":1,"scope":self.scope,"request":request}).to_string())
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        if reply["status"] == "ok" {
-            Ok(reply["value"].clone())
-        } else {
-            Err(reply["error"].to_string())
-        }
-    }
-    async fn ok(&self, request: Value) -> Value {
-        match self.reply(request.clone()).await {
-            Ok(value) => value,
-            Err(error) => panic!("{request} failed: {error}"),
-        }
-    }
+
     async fn status(&self, list: &str) -> Value {
-        self.ok(json!({"type":"partition_status","group":"list","values":values(list)}))
-            .await
+        snap::ok(
+            self.session
+                .partition_status(rocky_sdk::PartitionTarget::Group {
+                    group: "list".to_owned(),
+                    values: (values(list)).clone(),
+                }),
+        )
+        .await
     }
     /// The held secret epochs and each table's installed key epochs.
     async fn epochs(&self, list: &str) -> (Value, BTreeMap<String, Value>) {
@@ -190,30 +177,60 @@ impl Peer {
     async fn grants(&self, list: &str, tables: &[&str], rights: &[&str]) -> Value {
         let mut grants = Vec::new();
         for table in tables {
-            let address = self
-                .ok(json!({"type":"partition_address","table":table,"values":values(list)}))
-                .await;
+            let address = snap::ok(
+                self.session
+                    .partition_address(&(snap::text(&(table))), (values(list)).clone()),
+            )
+            .await;
             let part = &address["tuple"][0];
             grants.push(json!({"domain":self.scope,"table":address["scope"]["table"],"selector":[[part[0],{"Only":[part[1]]}]],"rows":"All","rights":rights,"fields":[]}));
         }
         grants.into()
     }
     async fn grant(&self, device: &NodeKeys, grants: Value) -> Result<Value, String> {
-        self.reply(json!({"type":"partition_grant","device":device,"partitions":grants}))
-            .await
-            .map(|granted| granted["supplied"].clone())
+        snap::string(
+            self.session.grant_partitions(
+                serde_json::from_value::<rocky_sdk::NodeKeys>(json!(device))
+                    .expect("typed fixture"),
+                serde_json::from_value::<Vec<rocky_sdk::credentials::PartitionGrant>>(json!(
+                    grants
+                ))
+                .expect("typed fixture"),
+                1,
+            ),
+        )
+        .await
+        .map(|granted| granted["supplied"].clone())
     }
     async fn share(&self, list: &str, recipients: &[&NodeKeys]) -> Result<Value, String> {
         let recipients: Vec<_> = recipients.iter().map(|device| device.node).collect();
-        self.reply(json!({"type":"partition_share","group":"list","values":values(list),"recipients":recipients}))
-            .await
+        snap::string(
+            self.session.share_partition(
+                rocky_sdk::PartitionTarget::Group {
+                    group: "list".to_owned(),
+                    values: (values(list)).clone(),
+                },
+                serde_json::from_value::<
+                    std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>,
+                >(json!(recipients))
+                .expect("typed fixture"),
+                None,
+            ),
+        )
+        .await
     }
     /// Syncs with `from`, which hands over what it holds for this peer.
     async fn fetch(&self, from: &Peer) -> Result<Value, String> {
-        let contact = from.ok(json!({"type":"contact"})).await;
-        self.reply(json!({"type":"peer_add","contact":contact["uri"]}))
-            .await?;
-        self.reply(json!({"type":"sync"})).await
+        let contact = snap::ok(from.session.contact_info()).await;
+        snap::string(async {
+            let value = self
+                .session
+                .add_peer(&(snap::text(&(contact["uri"]))))
+                .await?;
+            Ok(json!({"node":value}))
+        })
+        .await?;
+        snap::string(self.session.sync_once()).await
     }
     /// How the sharer sees each recipient of list `list`'s latest epoch
     /// sent to it, by node.
@@ -235,7 +252,7 @@ impl Peer {
     }
     /// Every activity event of `kind`.
     async fn events(&self, kind: &str) -> Vec<Value> {
-        self.ok(json!({"type":"activity"})).await["events"]
+        snap::ok(self.session.activity(0)).await["events"]
             .as_array()
             .unwrap()
             .iter()
@@ -244,8 +261,8 @@ impl Peer {
             .collect()
     }
 }
-fn values(list: &str) -> Value {
-    json!([{"type":"text","value":list}])
+fn values(list: &str) -> Vec<rocky_sdk::SqlValue> {
+    vec![rocky_sdk::SqlValue::Text(snap::text(&(list)))]
 }
 fn uniform(tables: &BTreeMap<String, Value>, epochs: Value) -> bool {
     tables.len() == TABLES.len() && tables.values().all(|held| *held == epochs)
@@ -283,15 +300,27 @@ async fn granted(
 async fn one_envelope_shares_a_group_and_installs_only_with_read_on_every_table() {
     let root = tempfile::tempdir().unwrap();
     let issuer = Peer::create(&root.path().join("issuer"));
-    let created = issuer
-        .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
-        .await;
+    let created = snap::ok(
+        issuer
+            .session
+            .create_partition(rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values("A")).clone(),
+            }),
+    )
+    .await;
     assert_eq!(created["epoch"]["generation"], 1);
     // Creating again is idempotent: the same secret and epoch.
     assert_eq!(
-        issuer
-            .ok(json!({"type":"partition_create","table":"items","values":values("A")}))
-            .await,
+        snap::ok(
+            issuer
+                .session
+                .create_partition(rocky_sdk::PartitionTarget::Table {
+                    table: "items".to_owned(),
+                    values: (values("A")).clone()
+                })
+        )
+        .await,
         created
     );
     assert_eq!(issuer.store.group_secrets(), 1);
@@ -380,9 +409,15 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
     let root = support::small_directory().unwrap();
     let issuer = Peer::create(&root.path().join("issuer"));
     for list in ["A", "B"] {
-        issuer
-            .ok(json!({"type":"partition_create","group":"list","values":values(list)}))
-            .await;
+        snap::ok(
+            issuer
+                .session
+                .create_partition(rocky_sdk::PartitionTarget::Group {
+                    group: "list".to_owned(),
+                    values: (values(list)).clone(),
+                }),
+        )
+        .await;
     }
     let (removed, removed_device) = granted(
         &issuer,
@@ -409,9 +444,12 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
     }
 
     // The issuer knows the removed device only through its partition grant.
-    let revoked = issuer
-        .ok(json!({"type":"revoke","identity":removed_device.identity.to_string()}))
-        .await;
+    let revoked = snap::ok(
+        issuer
+            .session
+            .revoke_identity(&(snap::text(&(removed_device.identity.to_string())))),
+    )
+    .await;
     assert_eq!(revoked["revocations"]["statements"], 1);
     for (list, expected) in [("A", json!([1, 2])), ("B", json!([1]))] {
         let (secrets, tables) = issuer.epochs(list).await;
@@ -421,16 +459,37 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
     assert_eq!(issuer.store.group_secrets(), 3);
     // A partition created after the rotation starts at the first epoch:
     // key epochs follow each scope, not the revocations.
-    let created = issuer
-        .ok(json!({"type":"partition_create","group":"list","values":values("C")}))
-        .await;
+    let created = snap::ok(
+        issuer
+            .session
+            .create_partition(rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values("C")).clone(),
+            }),
+    )
+    .await;
     assert_eq!(created["epoch"]["generation"], 1);
 
     // Sharing refuses the revoked device and any epoch but the current.
     let refused = issuer.share("A", &[&removed_device]).await.unwrap_err();
     assert!(refused.contains("revoked"), "{refused}");
-    let refused = issuer
-        .reply(json!({"type":"partition_share","group":"list","values":values("A"),"recipients":[remaining_device.node],"epoch":created["epoch"]}))
+    let refused =
+        snap::string(
+            issuer.session.share_partition(
+                rocky_sdk::PartitionTarget::Group {
+                    group: "list".to_owned(),
+                    values: (values("A")).clone(),
+                },
+                serde_json::from_value::<
+                    std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>,
+                >(json!([remaining_device.node]))
+                .expect("typed fixture"),
+                Some(
+                    serde_json::from_value::<rocky_core::KeyEpoch>(json!(created["epoch"]))
+                        .expect("typed fixture"),
+                ),
+            ),
+        )
         .await
         .unwrap_err();
     assert!(refused.contains("current epoch"), "{refused}");
@@ -483,22 +542,39 @@ async fn a_partition_granted_after_enrollment_rotates_with_its_device() {
     let root = tempfile::tempdir().unwrap();
     let issuer = Peer::create(&root.path().join("issuer"));
     for list in ["A", "B"] {
-        issuer
-            .ok(json!({"type":"partition_create","group":"list","values":values(list)}))
-            .await;
+        snap::ok(
+            issuer
+                .session
+                .create_partition(rocky_sdk::PartitionTarget::Group {
+                    group: "list".to_owned(),
+                    values: (values(list)).clone(),
+                }),
+        )
+        .await;
     }
     // Enrolled to read only `notes`, then granted list A of the group.
     let (_, device) = prepare(&root.path().join("device"));
-    issuer
-        .ok(json!({"type":"grant","device":device,"profile":{"kind":"reader","scopes":["notes"]}}))
-        .await;
+    snap::ok(issuer.session.grant(
+        device,
+        rocky_sdk::GrantProfile::Reader {
+            scopes: ["notes".to_owned()].into_iter().collect(),
+        },
+        rocky_sdk::GrantTerms {
+            ttl: None,
+            delegations: None,
+        },
+    ))
+    .await;
     issuer
         .grant(&device, issuer.grants("A", &TABLES, &["Read"]).await)
         .await
         .unwrap();
-    issuer
-        .ok(json!({"type":"revoke","identity":device.identity.to_string()}))
-        .await;
+    snap::ok(
+        issuer
+            .session
+            .revoke_identity(&(snap::text(&(device.identity.to_string())))),
+    )
+    .await;
     let (secrets, tables) = issuer.epochs("A").await;
     assert_eq!(secrets, json!([1, 2]), "the granted partition rotates");
     assert!(uniform(&tables, json!([1, 2])));
@@ -526,18 +602,27 @@ async fn an_interrupted_rotation_resumes_to_one_epoch_across_the_group() {
     for budget in 0.. {
         let directory = root.path().join(format!("issuer{budget}"));
         let issuer = Peer::create(&directory);
-        issuer
-            .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
-            .await;
+        snap::ok(
+            issuer
+                .session
+                .create_partition(rocky_sdk::PartitionTarget::Group {
+                    group: "list".to_owned(),
+                    values: (values("A")).clone(),
+                }),
+        )
+        .await;
         let (_, device) = prepare(&root.path().join(format!("device{budget}")));
         issuer
             .grant(&device, issuer.grants("A", &TABLES, &["Read"]).await)
             .await
             .unwrap();
         issuer.store.limit(Some(budget));
-        let revoked = issuer
-            .reply(json!({"type":"revoke","identity":device.identity.to_string()}))
-            .await;
+        let revoked = snap::string(
+            issuer
+                .session
+                .revoke_identity(&(snap::text(&(device.identity.to_string())))),
+        )
+        .await;
         issuer.store.limit(None);
         let (store, hub) = (issuer.store.clone(), issuer.hub.clone());
         issuer.database.close().await.unwrap();
@@ -579,14 +664,21 @@ async fn a_table_joining_the_group_later_derives_its_key_from_the_held_secret() 
         store,
         hub,
     );
-    for action in ["create", "follow"] {
-        issuer
-            .ok(json!({"type":"tips","action":action,"name":"main"}))
-            .await;
-    }
     issuer
-        .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
-        .await;
+        .session
+        .create_bookmark("main", None)
+        .await
+        .expect("bookmark");
+    issuer.session.follow("main").await.expect("follow");
+    snap::ok(
+        issuer
+            .session
+            .create_partition(rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values("A")).clone(),
+            }),
+    )
+    .await;
     assert_eq!(
         issuer.status("A").await["tables"].as_array().unwrap().len(),
         2
@@ -600,15 +692,27 @@ async fn a_table_joining_the_group_later_derives_its_key_from_the_held_secret() 
     assert!(uniform(&tables, json!([1])), "{tables:?}");
     assert_eq!(issuer.store.group_secrets(), 1, "no new secret or envelope");
     // The derived key seals and opens a row of the new table.
-    issuer.ok(json!({"type":"sql","sql":"BEGIN"})).await;
-    let id = issuer
-        .ok(json!({"type":"next_id","table":"attachments","partition_values":values("A")}))
-        .await;
-    issuer.ok(json!({"type":"sql","sql":"INSERT INTO attachments(list,key,id) VALUES('A','photo',?)","values":[{"type":"integer","value":id["id"]}]})).await;
-    issuer.ok(json!({"type":"sql","sql":"COMMIT"})).await;
-    let rows = issuer
-        .ok(json!({"type":"read","query":{"sql":"SELECT key FROM attachments WHERE list='A'","values":[],"max_rows":4}}))
-        .await;
+    snap::ok(issuer.session.execute("BEGIN", Vec::new())).await;
+    let id = snap::ok(
+        issuer
+            .session
+            .next_partition_id("attachments", (values("A")).clone()),
+    )
+    .await;
+    snap::ok(issuer.session.execute(
+        "INSERT INTO attachments(list,key,id) VALUES('A','photo',?)",
+        vec![snap::row_id(&(id["id"]))],
+    ))
+    .await;
+    snap::ok(issuer.session.execute("COMMIT", Vec::new())).await;
+    let rows = snap::ok(issuer.session.read(rocky_sdk::ReadQuery {
+        sql: "SELECT key FROM attachments WHERE list='A'".to_owned(),
+        values: vec![],
+        max_rows: 4,
+        max_bytes: None,
+        cursor: None,
+    }))
+    .await;
     assert_eq!(rows["rows"][0][0]["value"], "photo");
     issuer.database.close().await.unwrap();
 }
@@ -617,28 +721,66 @@ async fn a_table_joining_the_group_later_derives_its_key_from_the_held_secret() 
 async fn a_phone_holds_a_list_and_its_items_while_leaving_out_attachments() {
     let root = tempfile::tempdir().unwrap();
     let issuer = Peer::create(&root.path().join("issuer"));
-    issuer
-        .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
-        .await;
+    snap::ok(
+        issuer
+            .session
+            .create_partition(rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values("A")).clone(),
+            }),
+    )
+    .await;
     let (phone, device) =
         granted(&issuer, &root.path().join("phone"), "A", &TABLES, &["Read"]).await;
     issuer.share("A", &[&device]).await.unwrap();
-    phone
-        .ok(json!({"type":"partition_role","role":{"role":"Partial","full_nodes":[],"custody":0}}))
-        .await;
+    snap::ok(
+        phone.session.set_replica_role(
+            serde_json::from_value::<rocky_sdk::ReplicaRoleConfig>(
+                json!({"role":"Partial","full_nodes":[],"custody":0}),
+            )
+            .expect("typed fixture"),
+        ),
+    )
+    .await;
     phone.fetch(&issuer).await.unwrap();
     for omit in [json!(["photos"]), json!(TABLES)] {
         assert!(
-            phone
-                .reply(json!({"type":"partition_subscribe","group":"list","values":values("A"),"omit":omit}))
-                .await
-                .is_err(),
+            snap::string(
+                phone.session.subscribe_partition(
+                    rocky_sdk::PartitionTarget::Group {
+                        group: "list".to_owned(),
+                        values: (values("A")).clone()
+                    },
+                    rocky_sdk::PartitionSelection {
+                        name: None,
+                        omit: serde_json::from_value::<std::collections::BTreeSet<String>>(json!(
+                            omit
+                        ))
+                        .expect("typed fixture")
+                    }
+                )
+            )
+            .await
+            .is_err(),
             "{omit}"
         );
     }
-    phone
-        .ok(json!({"type":"partition_subscribe","group":"list","values":values("A"),"omit":["attachments"]}))
-        .await;
+    snap::ok(
+        phone.session.subscribe_partition(
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values("A")).clone(),
+            },
+            rocky_sdk::PartitionSelection {
+                name: None,
+                omit: serde_json::from_value::<std::collections::BTreeSet<String>>(json!([
+                    "attachments"
+                ]))
+                .expect("typed fixture"),
+            },
+        ),
+    )
+    .await;
     let holding: BTreeMap<String, Value> = phone.status("A").await["tables"]
         .as_array()
         .unwrap()
@@ -654,9 +796,17 @@ async fn a_phone_holds_a_list_and_its_items_while_leaving_out_attachments() {
     assert_eq!(holding["items"], "held");
     assert_eq!(holding["attachments"], "left");
     // The whole group partition is released together.
-    phone
-        .ok(json!({"type":"partition_unsubscribe","group":"list","values":values("A")}))
-        .await;
+    snap::ok(
+        phone.session.unsubscribe_partition(
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values("A")).clone(),
+            },
+            serde_json::from_value::<std::collections::BTreeSet<String>>(json!([]))
+                .expect("typed fixture"),
+        ),
+    )
+    .await;
     let status = phone.status("A").await;
     assert!(
         status["tables"]
@@ -672,35 +822,51 @@ async fn a_phone_holds_a_list_and_its_items_while_leaving_out_attachments() {
 
 /// Writes one row of list A.
 async fn write(peer: &Peer, table: &str, key: &str) {
-    peer.ok(json!({"type":"sql","sql":"BEGIN"})).await;
+    snap::ok(peer.session.execute("BEGIN", Vec::new())).await;
     if table == "lists" && key != "before" {
         // One row per list: a later write updates it.
-        peer.ok(
-            json!({"type":"sql","sql":format!("UPDATE lists SET title='{key}' WHERE name='A'")}),
-        )
+        snap::ok(peer.session.execute(
+            &(snap::text(&(format!("UPDATE lists SET title='{key}' WHERE name='A'")))),
+            Vec::new(),
+        ))
         .await;
-        peer.ok(json!({"type":"sql","sql":"COMMIT"})).await;
+        snap::ok(peer.session.execute("COMMIT", Vec::new())).await;
         return;
     }
-    let id = peer
-        .ok(json!({"type":"next_id","table":table,"partition_values":values("A")}))
-        .await;
+    let id = snap::ok(
+        peer.session
+            .next_partition_id(&(snap::text(&(table))), (values("A")).clone()),
+    )
+    .await;
     let sql = match table {
         "lists" => format!("INSERT INTO lists(name,title,id) VALUES('A','{key}',?)"),
         _ => format!("INSERT INTO {table}(list,key,id) VALUES('A','{key}',?)"),
     };
-    peer.ok(json!({"type":"sql","sql":sql,"values":[{"type":"integer","value":id["id"]}]}))
-        .await;
-    peer.ok(json!({"type":"sql","sql":"COMMIT"})).await;
+    snap::ok(
+        peer.session
+            .execute(&(snap::text(&(sql))), vec![snap::row_id(&(id["id"]))]),
+    )
+    .await;
+    snap::ok(peer.session.execute("COMMIT", Vec::new())).await;
 }
 /// The keys of list A's rows in every table of the group, in table order.
 async fn rows(peer: &Peer) -> Vec<Vec<String>> {
     let mut all = Vec::new();
     for (table, column) in [("lists", "title"), ("items", "key"), ("attachments", "key")] {
         let column = if table == "lists" { column } else { "key" };
-        let read = peer
-            .ok(json!({"type":"read","query":{"sql":format!("SELECT {column} FROM {table} WHERE {} = 'A' ORDER BY {column}", if table == "lists" { "name" } else { "list" }),"values":[],"max_rows":64}}))
-            .await;
+        let read = snap::ok(peer.session.read(rocky_sdk::ReadQuery {
+            sql: snap::text(
+                &(format!(
+                    "SELECT {column} FROM {table} WHERE {} = 'A' ORDER BY {column}",
+                    if table == "lists" { "name" } else { "list" }
+                )),
+            ),
+            values: vec![],
+            max_rows: 64,
+            max_bytes: None,
+            cursor: None,
+        }))
+        .await;
         all.push(
             read["rows"]
                 .as_array()
@@ -714,9 +880,15 @@ async fn rows(peer: &Peer) -> Vec<Vec<String>> {
 }
 async fn introduce(left: &Peer, right: &Peer) {
     for (from, to) in [(left, right), (right, left)] {
-        let contact = to.ok(json!({"type":"contact"})).await;
-        from.ok(json!({"type":"peer_add","contact":contact["uri"]}))
-            .await;
+        let contact = snap::ok(to.session.contact_info()).await;
+        snap::ok(async {
+            let value = from
+                .session
+                .add_peer(&(snap::text(&(contact["uri"]))))
+                .await?;
+            Ok(json!({"node":value}))
+        })
+        .await;
     }
 }
 
@@ -724,9 +896,15 @@ async fn introduce(left: &Peer, right: &Peer) {
 async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_later_rows() {
     let root = support::small_directory().unwrap();
     let issuer = Peer::create(&root.path().join("issuer"));
-    issuer
-        .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
-        .await;
+    snap::ok(
+        issuer
+            .session
+            .create_partition(rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values("A")).clone(),
+            }),
+    )
+    .await;
     for table in TABLES {
         write(&issuer, table, "before").await;
     }
@@ -747,27 +925,30 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
     assert_eq!(shared["recipients"].as_array().unwrap().len(), 2);
     for (reader, _) in &readers {
         // One sync delivers the envelope and then the list's rows.
-        reader.ok(json!({"type":"sync"})).await;
+        snap::ok(reader.session.sync_once()).await;
         assert_eq!(rows(reader).await, vec![vec!["before".to_owned()]; 3]);
     }
 
     let (removed, removed_device) = &readers[0];
     let (remaining, _) = &readers[1];
-    issuer
-        .ok(json!({"type":"revoke","identity":removed_device.identity.to_string()}))
-        .await;
+    snap::ok(
+        issuer
+            .session
+            .revoke_identity(&(snap::text(&(removed_device.identity.to_string())))),
+    )
+    .await;
     for table in TABLES {
         write(&issuer, table, "after").await;
     }
     // The rotation's envelope reaches the remaining reader by sync alone.
-    remaining.ok(json!({"type":"sync"})).await;
+    snap::ok(remaining.session.sync_once()).await;
     let both = vec!["after".to_owned(), "before".to_owned()];
     assert_eq!(
         rows(remaining).await,
         [vec!["after".to_owned()], both.clone(), both]
     );
     // The removed reader is refused and holds no key of the new epoch.
-    let _ = removed.reply(json!({"type":"sync"})).await;
+    let _ = snap::string(removed.session.sync_once()).await;
     assert_eq!(rows(removed).await, vec![vec!["before".to_owned()]; 3]);
     let (secrets, tables) = removed.epochs("A").await;
     assert_eq!(secrets, json!([1]));
@@ -784,9 +965,15 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
 async fn an_identity_file_older_than_the_replica_recovers_its_groups() {
     let root = tempfile::tempdir().unwrap();
     let issuer = Peer::create(&root.path().join("issuer"));
-    issuer
-        .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
-        .await;
+    snap::ok(
+        issuer
+            .session
+            .create_partition(rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values("A")).clone(),
+            }),
+    )
+    .await;
     for table in TABLES {
         write(&issuer, table, "before").await;
     }
@@ -800,7 +987,7 @@ async fn an_identity_file_older_than_the_replica_recovers_its_groups() {
     introduce(&issuer, &reader).await;
     let older = std::fs::read(directory.join("identity.json")).unwrap();
     issuer.share("A", &[&device]).await.unwrap();
-    reader.ok(json!({"type":"sync"})).await;
+    snap::ok(reader.session.sync_once()).await;
     let expected = vec![vec!["before".to_owned()]; 3];
     assert_eq!(rows(&reader).await, expected);
     reader.database.close().await.unwrap();
@@ -816,9 +1003,15 @@ async fn an_identity_file_older_than_the_replica_recovers_its_groups() {
 async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants() {
     let root = tempfile::tempdir().unwrap();
     let issuer = Peer::create(&root.path().join("issuer"));
-    issuer
-        .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
-        .await;
+    snap::ok(
+        issuer
+            .session
+            .create_partition(rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values("A")).clone(),
+            }),
+    )
+    .await;
     for table in TABLES {
         write(&issuer, table, "before").await;
     }
@@ -846,20 +1039,22 @@ async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants(
     introduce(&issuer, &writer).await;
     issuer.share("A", &[&device]).await.unwrap();
     // The sync that delivers the envelope also obtains an author per table.
-    writer.ok(json!({"type":"sync"})).await;
-    writer.ok(json!({"type":"sync"})).await;
-    writer.ok(json!({"type":"sql","sql":"BEGIN"})).await;
-    let id = writer
-        .ok(json!({"type":"next_id","table":"items","partition_values":values("A")}))
-        .await;
-    writer
-        .ok(
-            json!({"type":"sql","sql":"INSERT INTO items(list,key,id) VALUES('A','writer',?)",
-        "values":[{"type":"integer","value":id["id"]}]}),
-        )
-        .await;
-    writer.ok(json!({"type":"sql","sql":"COMMIT"})).await;
-    writer.ok(json!({"type":"sync"})).await;
+    snap::ok(writer.session.sync_once()).await;
+    snap::ok(writer.session.sync_once()).await;
+    snap::ok(writer.session.execute("BEGIN", Vec::new())).await;
+    let id = snap::ok(
+        writer
+            .session
+            .next_partition_id("items", (values("A")).clone()),
+    )
+    .await;
+    snap::ok(writer.session.execute(
+        "INSERT INTO items(list,key,id) VALUES('A','writer',?)",
+        vec![snap::row_id(&(id["id"]))],
+    ))
+    .await;
+    snap::ok(writer.session.execute("COMMIT", Vec::new())).await;
+    snap::ok(writer.session.sync_once()).await;
     assert_eq!(
         rows(&issuer).await,
         [vec!["before"], vec!["before", "writer"], vec!["before"]]
@@ -872,14 +1067,26 @@ async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants(
 async fn a_member_with_a_delegated_grant_shares_without_issuer_authority() {
     let root = support::small_directory().unwrap();
     let issuer = Peer::create(&root.path().join("issuer"));
-    issuer
-        .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
-        .await;
+    snap::ok(
+        issuer
+            .session
+            .create_partition(rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values("A")).clone(),
+            }),
+    )
+    .await;
     let (store, device) = prepare(&root.path().join("member"));
     let grants = issuer.grants("A", &TABLES, &["Read"]).await;
-    let supplied = issuer
-        .ok(json!({"type":"partition_grant","device":device,"partitions":grants,"delegations":2}))
-        .await;
+    let supplied = snap::ok(
+        issuer.session.grant_partitions(
+            device,
+            serde_json::from_value::<Vec<rocky_sdk::credentials::PartitionGrant>>(json!(grants))
+                .expect("typed fixture"),
+            2,
+        ),
+    )
+    .await;
     let member = install(
         &root.path().join("member"),
         store,
@@ -890,9 +1097,15 @@ async fn a_member_with_a_delegated_grant_shares_without_issuer_authority() {
     member.fetch(&issuer).await.unwrap();
     let (store, recipient) = prepare(&root.path().join("recipient"));
     let grants = member.grants("A", &TABLES, &["Read"]).await;
-    let supplied = member
-        .ok(json!({"type":"partition_delegate","device":recipient,"partitions":grants}))
-        .await;
+    let supplied = snap::ok(
+        member.session.delegate_partitions(
+            recipient,
+            serde_json::from_value::<Vec<rocky_sdk::credentials::PartitionGrant>>(json!(grants))
+                .expect("typed fixture"),
+            1,
+        ),
+    )
+    .await;
     let delegated = install(
         &root.path().join("recipient"),
         store,
@@ -927,9 +1140,15 @@ async fn a_member_with_a_delegated_grant_shares_without_issuer_authority() {
 async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
     let root = support::small_directory().unwrap();
     let issuer = Peer::create(&root.path().join("issuer"));
-    issuer
-        .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
-        .await;
+    snap::ok(
+        issuer
+            .session
+            .create_partition(rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: (values("A")).clone(),
+            }),
+    )
+    .await;
     for table in TABLES {
         write(&issuer, table, "before").await;
     }
@@ -960,11 +1179,11 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
     );
     introduce(&issuer, &first).await;
     issuer.share("A", &[&keys]).await.unwrap();
-    first.ok(json!({"type":"sync"})).await;
+    snap::ok(first.session.sync_once()).await;
     assert_eq!(rows(&first).await, vec![vec!["before".to_owned()]; 3]);
 
     // The identity links a second node from the first; no issuer acts.
-    let contact = first.ok(json!({"type":"contact"})).await["uri"]
+    let contact = snap::ok(first.session.contact_info()).await["uri"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -987,14 +1206,14 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
         issuer.hub.clone(),
     );
     introduce(&issuer, &second).await;
-    second.ok(json!({"type":"sync"})).await;
+    snap::ok(second.session.sync_once()).await;
     assert_eq!(rows(&second).await, vec![vec!["before".to_owned()]; 3]);
-    let session = second.ok(json!({"type":"session"})).await;
+    let session = snap::ok(second.session.info()).await;
     assert_eq!(session["principal"], json!(keys.identity));
     assert_ne!(session["node"], json!(keys.node));
 
     // One record, by identity, holds the grant for every node of it.
-    let listed = issuer.ok(json!({"type":"identities"})).await;
+    let listed = snap::ok(issuer.session.identities()).await;
     let record = listed["identities"]
         .as_array()
         .unwrap()
@@ -1020,14 +1239,14 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
         .unlink(session["node"].as_str().unwrap(), person)
         .await
         .unwrap();
-    first.ok(json!({"type":"sync"})).await;
-    issuer.ok(json!({"type":"sync"})).await;
+    snap::ok(first.session.sync_once()).await;
+    snap::ok(issuer.session.sync_once()).await;
     let (epochs, tables) = issuer.epochs("A").await;
     assert_ne!(epochs, before);
     assert!(uniform(&tables, epochs));
-    first.ok(json!({"type":"sync"})).await;
+    snap::ok(first.session.sync_once()).await;
     assert_eq!(rows(&first).await, vec![vec!["before".to_owned()]; 3]);
-    assert!(second.reply(json!({"type":"sync"})).await.is_err());
+    assert!(snap::string(second.session.sync_once()).await.is_err());
     for peer in [first, second, issuer] {
         peer.database.close().await.unwrap();
     }

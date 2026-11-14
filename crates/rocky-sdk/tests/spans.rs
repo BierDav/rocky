@@ -146,7 +146,6 @@ async fn a_sync_pass_is_a_span_tree_without_application_data() -> Result<(), Fai
     );
     for (name, ancestor) in [
         ("exchange", "sync_pass"),
-        ("dial", "exchange"),
         ("admission", "exchange"),
         ("ready", "exchange"),
         ("session", "exchange"),

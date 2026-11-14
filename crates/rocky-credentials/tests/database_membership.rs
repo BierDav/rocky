@@ -15,12 +15,7 @@ fn context(root: &PrivateKey, namespace: u8) -> DatabaseContext {
         },
     }
 }
-fn chain(
-    root: &PrivateKey,
-    identity: &PrivateKey,
-    database: DatabaseContext,
-    first: u32,
-) -> CredentialChain {
+fn chain(root: &PrivateKey, identity: &PrivateKey, database: DatabaseContext) -> CredentialChain {
     let grants = vec![ResourceGrant {
         scope: ResourceScope {
             domain: database.scope,
@@ -37,12 +32,15 @@ fn chain(
             .issue(
                 identity.public_key(),
                 grants,
-                AuthorRange::new(first, first + 99).unwrap(),
-                (NOW, DAY, 0),
+                rocky_credentials::Validity {
+                    issued_at: NOW,
+                    lifetime: std::time::Duration::from_secs(DAY),
+                    clock_skew: std::time::Duration::from_secs(0),
+                },
             )
             .unwrap(),
     ])
-    .certify(identity, PrivateKey::new().public_key(), first)
+    .certify(identity, PrivateKey::new().public_key())
     .unwrap()
 }
 
@@ -58,7 +56,7 @@ fn one_identity_has_independent_membership_under_distinct_roots_and_namespaces()
     let chains: Vec<_> = contexts
         .iter()
         .enumerate()
-        .map(|(i, database)| chain(&roots[usize::from(i == 1)], &identity, *database, 100))
+        .map(|(i, database)| chain(&roots[usize::from(i == 1)], &identity, *database))
         .collect();
     let mut sets = Vec::new();
     for (database, chain) in contexts.iter().zip(&chains) {
@@ -132,7 +130,6 @@ fn one_identity_has_independent_membership_under_distinct_roots_and_namespaces()
             .certify_member(
                 &identity,
                 PrivateKey::new().public_key(),
-                100 + sequence as u32,
                 sequence,
                 membership
                     .head(identity.public_key())

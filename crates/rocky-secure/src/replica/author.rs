@@ -100,7 +100,7 @@ impl<A: RowApplication> Inner<A> {
         let credentials = signer.map_or(&self.config.credentials, |author| &author.credentials);
         let chain = signer.map_or(&self.chain, |author| &author.chain).clone();
         let grants = match signer {
-            Some(author) if partition.is_some() => credentials
+            Some(_) if partition.is_some() => credentials
                 .verified_with_families(
                     self.config.publisher,
                     &self.config.revocations,
@@ -110,7 +110,6 @@ impl<A: RowApplication> Inner<A> {
                 .map_err(credential)?
                 .partition_author(
                     signing_key.public_key(),
-                    author.number,
                     scope,
                     partition
                         .as_ref()
@@ -118,7 +117,7 @@ impl<A: RowApplication> Inner<A> {
                     time,
                 )
                 .map_err(credential)?,
-            Some(author) => credentials
+            Some(_) => credentials
                 .verified_with_families(
                     self.config.publisher,
                     &self.config.revocations,
@@ -126,7 +125,7 @@ impl<A: RowApplication> Inner<A> {
                     self.grant_families(),
                 )
                 .map_err(credential)?
-                .author(signing_key.public_key(), author.number, scope.table, time)
+                .author(signing_key.public_key(), scope.table, time)
                 .map_err(credential)?,
             None => self.local_grants(time)?.to_vec(),
         };
@@ -158,10 +157,10 @@ impl<A: RowApplication> Inner<A> {
                 .collect();
             inserted.sort();
             let mut highest = self
-                .highest_identity(self.identity_allocation_scope(scope), author.number)
+                .highest_identity(self.identity_allocation_scope(scope), author.writer)
                 .await?;
             for identity in inserted.into_iter().filter(|_| !allocated) {
-                let expected = rocky_core::RowIdentity::next(author.number, highest)
+                let expected = rocky_core::RowIdentity::next(author.writer, highest)
                     .map_err(|error| denied(&error.to_string()))?;
                 if identity != expected {
                     return Err(denied(
@@ -253,7 +252,7 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         let stamp = Stamp {
             clock,
-            author: signer.map_or(0, |author| author.number),
+            author: writer(&signing_key.public_key()),
             sequence: author_sequence,
         };
         let mut proofs = BTreeMap::new();
@@ -279,32 +278,34 @@ impl<A: RowApplication> Inner<A> {
         }
         let frame = author(
             signing_key,
-            Extensions {
-                author: signer.map(|author| author.number),
-                author_sequence,
-                row_format: ROW_FORMAT,
-                births: proofs
-                    .values()
-                    .map(|proof| proof.provenance().map(Into::into))
-                    .collect::<Result<_, _>>()?,
-                tip: self.workspace.tip,
-                scope,
-                generation: key.generation,
-                chain: chain.digest(),
-            },
-            chain,
-            &key.key,
-            (sequence, backlink, clock),
-            previous.into_iter().collect(),
-            partition.as_ref(),
-            &RowPayload::compact(
-                &RowPayload::witness(
-                    RowPayload::stamp_body(&payload(sequence)?, proofs, carried.clone())?,
-                    witnesses.into_iter().collect(),
+            crate::wire::FrameDraft {
+                extensions: Extensions {
+                    authored: signer.is_some(),
+                    author_sequence,
+                    row_format: ROW_FORMAT,
+                    births: proofs
+                        .values()
+                        .map(|proof| proof.provenance().map(Into::into))
+                        .collect::<Result<_, _>>()?,
+                    tip: self.workspace.tip,
+                    scope,
+                    generation: key.generation,
+                    chain: chain.digest(),
+                },
+                chain,
+                encryption_key: &key.key,
+                log: (sequence, backlink, clock),
+                previous: previous.into_iter().collect(),
+                partition: partition.as_ref(),
+                plaintext: &RowPayload::compact(
+                    &RowPayload::witness(
+                        RowPayload::stamp_body(&payload(sequence)?, proofs, carried.clone())?,
+                        witnesses.into_iter().collect(),
+                    )?,
+                    &self.definition,
+                    scope,
                 )?,
-                &self.definition,
-                scope,
-            )?,
+            },
         )?;
         self.verify_frame(&frame, time)?;
         let operation = frame.operation_ref()?;

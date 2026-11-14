@@ -1,11 +1,12 @@
 #![doc = include_str!("../README.md")]
-#![allow(non_upper_case_globals)]
-#![allow(non_camel_case_types)]
-#![allow(non_snake_case)]
 
 mod locks;
 
 /// Origin Private File System (OPFS) VFS implementation using `SyncAccessHandle`.
+#[expect(
+    non_snake_case,
+    reason = "VFS callbacks retain SQLite's C ABI names and parameter names."
+)]
 pub mod sahpool;
 
 #[cfg(all(test, target_arch = "wasm32"))]

@@ -25,21 +25,19 @@ pub(super) fn stage(directory: &Path) -> Result<(rocky_secure::SchemaStage, Stri
 pub(super) async fn head(
     bundle: &TrustBundle,
     directory: &Path,
-    scope: &Value,
+    scope: &rocky_core::Scope,
     tip: &Value,
 ) -> Result<rocky_coordinator::coordinated::Head, Failure> {
-    use rocky_sdk::{
-        credentials::{CredentialChain, Vault},
-        transport::Connector,
-    };
+    use rocky_sdk::credentials::{CredentialChain, Vault};
     let settings: Value = serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)?;
     let vault = Vault::new(
         Arc::new(rocky_sdk::FileSecretStore::new(directory.join("secrets"))),
         settings["installation"].as_str().ok_or("installation")?,
     );
     let transport = starter()
-        .start(false, *PrivateKey::new().as_bytes())
-        .await?;
+        .start(*PrivateKey::new().as_bytes())
+        .await?
+        .transport();
     let client = NetworkCoordinator::connect(
         bundle,
         PrivateKey::from_bytes(&vault.get("node")?),
@@ -53,7 +51,7 @@ pub(super) async fn head(
         .map_err(|_| "tip length")?;
     let result = client
         .coordinated_head(rocky_core::TipLog {
-            scope: serde_json::from_value(scope.clone())?,
+            scope: *scope,
             tip: rocky_core::TipId(tip),
         })
         .await;

@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
-    AuthorRange, Authority, CredentialChain, Extended, Extension, Revocation, RevocationSet,
-    SignedCapability, SignedRevocation,
+    Authority, CredentialChain, Extended, Extension, Revocation, RevocationSet, SignedCapability,
+    SignedRevocation,
 };
 use crate::{PrivateKey, decode_bounded, encode};
 use rocky_core::{
@@ -9,7 +9,11 @@ use rocky_core::{
     PartitionValue, PrincipalKind, ResourceScope, RowChange, RowWrite, SqlValue,
 };
 const NOW: u64 = 100;
-const VALIDITY: (u64, u64, u64) = (NOW, 1000, 0);
+const VALIDITY: crate::Validity = crate::Validity {
+    issued_at: NOW,
+    lifetime: std::time::Duration::from_secs(1000),
+    clock_skew: std::time::Duration::from_secs(0),
+};
 fn domain() -> Scope {
     Scope {
         mesh: MeshId([1; 16]),
@@ -65,6 +69,7 @@ fn revoking(publisher: &PrivateKey, key: PublicKey) -> RevocationSet {
         identities: [key].into(),
         capabilities: BTreeSet::new(),
         cut: Default::default(),
+        mode: crate::RevocationMode::Lost,
         recovery: None,
     };
     RevocationSet::try_from(vec![
@@ -100,7 +105,7 @@ fn selector_fixture() -> SelectorFixture {
             user.public_key(),
             vec![],
             vec![held.clone()],
-            (2, Some(AuthorRange::ALL)),
+            crate::DelegationTerms { delegations: 2 },
             VALIDITY,
         )
         .unwrap();
@@ -114,17 +119,19 @@ fn selector_fixture() -> SelectorFixture {
     let delegated = prefix
         .delegate_partitions(
             &user,
-            delegate.public_key(),
-            PrincipalKind::Deployment,
-            vec![],
-            vec![narrower.clone()],
-            (1, Some(AuthorRange::ALL)),
-            VALIDITY,
+            crate::Delegation {
+                subject: delegate.public_key(),
+                kind: PrincipalKind::Deployment,
+                grants: vec![],
+                partitions: vec![narrower.clone()],
+                terms: crate::DelegationTerms { delegations: 1 },
+                validity: VALIDITY,
+            },
         )
         .unwrap();
     let chain = delegated
         .clone()
-        .complete(&delegate, node.public_key(), 1)
+        .complete(&delegate, node.public_key())
         .unwrap();
     let t = tuple("customer-x", "warehouse-y");
     let scope = t.scope(domain(), [3; 32], &[4; 32]).unwrap();
@@ -235,19 +242,20 @@ fn refuses_wider_partition_grant(wide: PartitionGrant) {
         prefix
             .delegate_partitions(
                 &user,
-                delegate.public_key(),
-                PrincipalKind::User,
-                vec![],
-                vec![wide.clone()],
-                (1, Some(AuthorRange::ALL)),
-                VALIDITY
+                crate::Delegation {
+                    subject: delegate.public_key(),
+                    kind: PrincipalKind::User,
+                    grants: vec![],
+                    partitions: vec![wide.clone()],
+                    terms: crate::DelegationTerms { delegations: 1 },
+                    validity: VALIDITY
+                }
             )
             .is_err()
     );
     // A malicious holder signs the expanded grant without using issuance APIs.
     let mut leaf = delegated.0[1].capability.clone();
     leaf.extension = Extension::new(Extended {
-        authors: Some(AuthorRange::ALL),
         partitions: vec![wide],
         ..Extended::default()
     })
@@ -256,7 +264,7 @@ fn refuses_wider_partition_grant(wide: PartitionGrant) {
         prefix.0[0].clone(),
         SignedCapability::sign(leaf, &user).unwrap(),
     ])
-    .complete(&delegate, node.public_key(), 1)
+    .complete(&delegate, node.public_key())
     .unwrap();
     assert!(
         forged
@@ -396,14 +404,14 @@ fn node_fixture() -> NodeFixture {
             holder.public_key(),
             vec![],
             vec![a.clone(), b.clone()],
-            (2, Some(AuthorRange::new(11, 20).unwrap())),
+            crate::DelegationTerms { delegations: 2 },
             VALIDITY,
         )
         .unwrap();
     let prefix = CredentialChain(vec![root]);
     let chain = prefix
         .clone()
-        .complete(&holder, node_signer.public_key(), 11)
+        .complete(&holder, node_signer.public_key())
         .unwrap();
     let t = tuple("x", "w");
     let scope = t.scope(domain(), [3; 32], &[4; 32]).unwrap();
@@ -431,11 +439,10 @@ fn paired_grants_and_partition_nodes_never_expand_authority() {
     let cross = grant(Some("x"), None, &[Right::Insert, Right::Update], &[1, 2]);
     let mut chain = prefix
         .clone()
-        .complete(&holder, node_signer.public_key(), 11)
+        .complete(&holder, node_signer.public_key())
         .unwrap();
     let mut leaf = chain.0.pop().unwrap().capability;
     leaf.extension = Extension::new(Extended {
-        authors: Some(AuthorRange::new(11, 11).unwrap()),
         node: Some(crate::PeerId::of(node_signer.public_key())),
         partitions: vec![cross],
         families: false,
@@ -450,9 +457,10 @@ fn paired_grants_and_partition_nodes_never_expand_authority() {
     .unwrap();
     // A node certificate holds no partitions of its own.
     assert!(SignedCapability::sign(leaf, &holder).is_err());
+    // A later membership sequence names its predecessor.
     assert!(
         prefix
-            .complete(&holder, node_signer.public_key(), 21)
+            .certify_member(&holder, node_signer.public_key(), 1, None)
             .is_err()
     );
     assert!(!a.rights.is_empty());
@@ -472,9 +480,7 @@ fn partition_node_signer_rows_keep_their_granted_fields() {
         .verify_partition_author(
             publisher.public_key(),
             node_signer.public_key(),
-            11,
-            scope,
-            &t,
+            crate::PartitionContext { scope, tuple: &t },
             &policy(),
             NOW,
         )
@@ -494,10 +500,9 @@ fn partition_node_signer_rows_keep_their_granted_fields() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn partition_nodes_bind_the_author_and_sequence() {
+fn partition_nodes_bind_their_signing_key() {
     let NodeFixture {
         publisher,
-        node_signer,
         chain,
         t,
         scope,
@@ -507,23 +512,8 @@ fn partition_nodes_bind_the_author_and_sequence() {
         chain
             .verify_partition_author(
                 publisher.public_key(),
-                node_signer.public_key(),
-                12,
-                scope,
-                &t,
-                &policy(),
-                NOW
-            )
-            .is_err()
-    );
-    assert!(
-        chain
-            .verify_partition_author(
-                publisher.public_key(),
                 PrivateKey::new().public_key(),
-                11,
-                scope,
-                &t,
+                crate::PartitionContext { scope, tuple: &t },
                 &policy(),
                 NOW
             )
@@ -545,9 +535,10 @@ fn partition_nodes_cannot_discard_their_selector() {
             .verify_partition_author(
                 publisher.public_key(),
                 node_signer.public_key(),
-                11,
-                other.scope(domain(), [3; 32], &[4; 32]).unwrap(),
-                &other,
+                crate::PartitionContext {
+                    scope: other.scope(domain(), [3; 32], &[4; 32]).unwrap(),
+                    tuple: &other
+                },
                 &policy(),
                 NOW
             )
@@ -579,9 +570,7 @@ fn partition_node_signer_credentials_verify_after_round_trip() {
         .verify_partition_author(
             publisher.public_key(),
             node_signer.public_key(),
-            11,
-            scope,
-            &t,
+            crate::PartitionContext { scope, tuple: &t },
             &policy(),
             NOW,
         )
@@ -593,9 +582,7 @@ fn partition_node_signer_credentials_verify_after_round_trip() {
             .verify_partition_author(
                 publisher.public_key(),
                 node_signer.public_key(),
-                11,
-                scope,
-                &t,
+                crate::PartitionContext { scope, tuple: &t },
                 &policy(),
                 NOW
             )
@@ -615,12 +602,12 @@ fn partition_selectors_cannot_be_dropped() {
             user.public_key(),
             vec![],
             partitions,
-            (1, Some(AuthorRange::ALL)),
+            crate::DelegationTerms { delegations: 1 },
             VALIDITY,
         )
         .unwrap();
     let chain = CredentialChain(vec![root])
-        .complete(&user, node.public_key(), 1)
+        .complete(&user, node.public_key())
         .unwrap();
     let mut leaf = chain.0[1].capability.clone();
     leaf.extension = crate::Extension::new(crate::Extended::default()).unwrap();
@@ -646,4 +633,49 @@ fn partition_selectors_cannot_be_dropped() {
             )
             .is_err()
     );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn partition_delegation_backdates_and_expires_within_its_parent() {
+    use std::time::Duration;
+    let fixture = selector_fixture();
+    for (lifetime, clock_skew, not_before, expires) in
+        [(200, 20, NOW + 30, NOW + 250), (2000, 200, NOW, NOW + 1000)]
+    {
+        let chain = fixture
+            .prefix
+            .delegate_partitions(
+                &fixture.user,
+                crate::Delegation {
+                    subject: fixture.delegate.public_key(),
+                    kind: PrincipalKind::Deployment,
+                    grants: vec![],
+                    partitions: vec![fixture.held.clone()],
+                    terms: crate::DelegationTerms { delegations: 1 },
+                    validity: crate::Validity {
+                        issued_at: NOW + 50,
+                        lifetime: Duration::from_secs(lifetime),
+                        clock_skew: Duration::from_secs(clock_skew),
+                    },
+                },
+            )
+            .unwrap();
+        let leaf = &chain.0.last().unwrap().capability;
+        assert_eq!((leaf.not_before, leaf.expires), (not_before, expires));
+        let node = chain
+            .certify(&fixture.delegate, fixture.node.public_key())
+            .unwrap();
+        assert!(
+            node.verified(fixture.publisher.public_key(), &policy(), not_before - 1)
+                .is_err()
+        );
+        assert!(
+            node.verified(fixture.publisher.public_key(), &policy(), not_before)
+                .is_ok()
+        );
+        assert!(
+            node.verified(fixture.publisher.public_key(), &policy(), expires)
+                .is_err()
+        );
+    }
 }

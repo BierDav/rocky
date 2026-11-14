@@ -1,6 +1,10 @@
 //! One device of the peer, fault and iroh suites: a database, a session
 //! and the calls the suites repeat.
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "shared fixture helpers vary between integration suites"
+)]
+use identity::snapshot as snap;
 use rocky_sdk::{Database, Network, NetworkService, Open, Opened, Session};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
@@ -35,8 +39,8 @@ pub fn node_keys(
 pub struct Device {
     pub database: Arc<Database>,
     pub network: Option<NetworkService>,
-    session: Session,
-    scope: Value,
+    pub session: Session,
+    scope: rocky_sdk::Scope,
     /// The creating device's root, which root-only calls name.
     root: Option<String>,
     signer: Option<Arc<dyn rocky_sdk::IdentityProvider>>,
@@ -56,7 +60,7 @@ impl Device {
     pub fn new(opened: Opened) -> Result<Self, Failure> {
         Ok(Self {
             session: opened.database.session(),
-            scope: serde_json::from_str(&opened.database.scope())?,
+            scope: opened.database.scope(),
             root: opened.root.as_ref().map(rocky_sdk::RootKey::phrase),
             signer: opened
                 .root
@@ -86,80 +90,115 @@ impl Device {
         self.signer = Some(signer);
         self
     }
-    /// The root this device created the domain with, as a call names it.
-    pub fn root(&self) -> Value {
-        self.root
-            .as_ref()
-            .map_or(Value::Null, |phrase| json!({ "phrase": phrase }))
+    /// The creating device's root signer.
+    pub fn root(&self) -> Arc<dyn rocky_sdk::IdentityProvider> {
+        self.root_signer().expect("fixture root")
     }
-    /// The domain scope calls name.
-    pub fn scope(&self) -> &Value {
+    /// The database domain.
+    pub fn scope(&self) -> &rocky_sdk::Scope {
         &self.scope
     }
-    /// The value of a successful call, or its error object.
-    pub async fn call(&self, request: Value) -> Result<Value, Value> {
-        identity::call(&self.scope, request, |request| self.raw_call(request)).await
+    pub fn session(&self) -> &Session {
+        &self.session
     }
-    async fn raw_call(&self, request: Value) -> Result<Value, Value> {
-        let identity = self.signer.clone();
-        let call = json!({"version": 1, "scope": self.scope, "request": request}).to_string();
-        let reply = match identity {
-            Some(identity) => self.session.call_with_identity(call, identity).await,
-            None => self.session.call(call).await,
-        }
-        .map_err(|error| json!(error.to_string()))?;
-        let reply: Value =
-            serde_json::from_str(&reply).map_err(|error| json!(error.to_string()))?;
-        if reply["status"] == "ok" {
-            Ok(reply["value"].clone())
-        } else {
-            Err(reply["error"].clone())
-        }
+    pub fn root_signer(&self) -> Result<Arc<dyn rocky_sdk::IdentityProvider>, Failure> {
+        Ok(Arc::new(rocky_sdk::RootKey::from_phrase(
+            self.root.as_deref().ok_or("no root")?,
+        )?))
     }
-    pub async fn ok(&self, request: Value) -> Value {
-        match self.call(request.clone()).await {
-            Ok(value) => value,
-            Err(error) => panic!("{request} failed: {error}"),
-        }
+    async fn handle(&self, handle: u8) -> rocky_core::Commitment {
+        let mut bytes = self
+            .session
+            .info()
+            .await
+            .expect("session")
+            .node
+            .to_hex()
+            .into_bytes();
+        bytes.extend(serde_json::to_vec(&vec![handle; 32]).expect("handle"));
+        rocky_core::commitment("fixture.sql.handle", &bytes)
     }
     pub async fn add(&self, handle: u8, title: &str) -> String {
-        let reply = self
-            .ok(json!({
-                "type": "mutate",
-                "handle": vec![handle; 32],
-                "payload": json!({"type": "create", "collection": "items", "values": {"title": title, "completed": false}}).to_string().into_bytes(),
-                "entity": null,
-                "baseline": null,
-            }))
-            .await;
-        reply["id"].as_str().unwrap_or_default().to_owned()
+        let handle = self.handle(handle).await;
+        let key = data_encoding::HEXLOWER.encode(&handle);
+        if !self
+            .session
+            .mutation_committed(handle)
+            .await
+            .expect("committed")
+        {
+            self.session
+                .execute("BEGIN", Vec::new())
+                .await
+                .expect("begin");
+            let id = self.session.next_id("items").await.expect("id");
+            self.session
+                .execute(
+                    "INSERT INTO items(key,id,title,completed) VALUES(?,?,?,0)",
+                    vec![
+                        rocky_sdk::SqlValue::Text(key.clone()),
+                        id.sql(),
+                        rocky_sdk::SqlValue::Text(title.into()),
+                    ],
+                )
+                .await
+                .expect("insert");
+            self.session.commit(handle).await.expect("commit");
+        }
+        key
     }
     pub async fn set(&self, handle: u8, id: &str, field: &str, value: Value) {
-        self.ok(json!({
-            "type": "mutate",
-            "handle": vec![handle; 32],
-            "payload": json!({"type": "set", "collection": "items", "field": field, "value": value}).to_string().into_bytes(),
-            "entity": {"id": id},
-            "baseline": null,
-        }))
-        .await;
+        use rocky_sdk::SqlValue;
+        assert!(
+            field
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        );
+        let handle = self.handle(handle).await;
+        if self
+            .session
+            .mutation_committed(handle)
+            .await
+            .expect("committed")
+        {
+            return;
+        }
+        let value = match value {
+            Value::Null => SqlValue::Null,
+            Value::Bool(value) => SqlValue::Integer(i64::from(value)),
+            Value::Number(value) => SqlValue::Integer(value.as_i64().expect("integer")),
+            Value::String(value) => SqlValue::Text(value),
+            _ => panic!("unsupported fixture value"),
+        };
+        self.session
+            .execute("BEGIN", Vec::new())
+            .await
+            .expect("begin");
+        self.session
+            .execute(
+                &format!("UPDATE items SET \"{field}\"=? WHERE key=?"),
+                vec![value, SqlValue::Text(id.into())],
+            )
+            .await
+            .expect("update");
+        self.session.commit(handle).await.expect("commit");
     }
-    /// Every item as `title/completed`, sorted. Both fields are written
-    /// by one transaction, so neither is ever missing.
     pub async fn items(&self) -> Vec<String> {
         let page = self
-            .ok(json!({"type": "read", "query": {"sql": "SELECT title, completed FROM items ORDER BY title", "values": [], "max_rows": 1024}}))
-            .await;
-        page["rows"]
-            .as_array()
+            .session
+            .read(rocky_sdk::ReadQuery::new(
+                "SELECT title, completed FROM items ORDER BY title",
+                1024,
+            ))
+            .await
+            .expect("read");
+        page.rows
             .into_iter()
-            .flatten()
             .map(|row| {
-                let text = |cell: &Value| cell["value"].as_str().map(String::from);
                 format!(
                     "{}/{}",
-                    text(&row[0]).expect("title"),
-                    text(&row[1]).expect("completed")
+                    row[0].to_text().expect("title"),
+                    row[1].to_text().expect("completed")
                 )
             })
             .collect()
@@ -171,10 +210,54 @@ impl Device {
             .filter_map(|item| item.split('/').next().map(String::from))
             .collect()
     }
+    pub async fn sync_once(&self) -> Result<rocky_sdk::ReconciliationReport, Failure> {
+        match self.signer.clone() {
+            Some(identity) => self.session.sync_once_with_identity(identity).await,
+            None => self.session.sync_once().await,
+        }
+    }
+    pub async fn follow(&self, name: &str) -> Result<rocky_sdk::TipStatus, Failure> {
+        match self.signer.clone() {
+            Some(identity) => self.session.follow_with_identity(name, identity).await,
+            None => self.session.follow(name).await,
+        }
+    }
+    pub async fn open_tip(&self, seal: &str, minimum_in_sync: u32) -> Result<String, Failure> {
+        match self.signer.clone() {
+            Some(identity) => {
+                self.session
+                    .open_tip_with_identity(seal, minimum_in_sync, identity)
+                    .await
+            }
+            None => self.session.open_tip(seal, minimum_in_sync).await,
+        }
+    }
+    pub async fn move_bookmark(
+        &self,
+        name: &str,
+        tip: &str,
+    ) -> Result<rocky_sdk::TipStatus, Failure> {
+        match self.signer.clone() {
+            Some(identity) => {
+                self.session
+                    .move_bookmark_with_identity(name, tip, identity)
+                    .await
+            }
+            None => self.session.move_bookmark(name, tip).await,
+        }
+    }
+    pub async fn follow_when_ready(&self, name: &str) -> Result<rocky_sdk::TipStatus, Failure> {
+        match self.signer.clone() {
+            Some(identity) => {
+                self.session
+                    .follow_when_ready_with_identity(name, identity)
+                    .await
+            }
+            None => self.session.follow_when_ready(name).await,
+        }
+    }
     pub async fn sync(&self) -> Result<Value, Value> {
-        let result = self.call(json!({"type": "sync"})).await?;
-
-        Ok(result)
+        snap::observe(self.sync_once()).await
     }
     /// An invitation for a writer of the schema's one collection.
     pub async fn invite(&self) -> String {
@@ -182,35 +265,40 @@ impl Device {
             .await
     }
     pub async fn invite_as(&self, profile: Value) -> String {
-        self.ok(json!({"type": "invitation", "profile": profile}))
-            .await["uri"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned()
+        self.session
+            .invitation_with(serde_json::from_value(profile).expect("profile"))
+            .await
+            .expect("invitation")
+            .uri
     }
     pub async fn contact(&self) -> String {
-        self.text("contact", "uri").await
+        self.session.contact().await.expect("contact")
     }
     pub async fn node(&self) -> String {
-        self.text("session", "node").await
+        self.session.info().await.expect("session").node.to_hex()
     }
-    /// The identity this device's node belongs to.
     pub async fn identity(&self) -> String {
-        self.text("session", "principal").await
-    }
-    async fn text(&self, request: &str, field: &str) -> String {
-        self.ok(json!({"type": request})).await[field]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned()
+        self.session
+            .info()
+            .await
+            .expect("session")
+            .principal
+            .to_hex()
     }
     pub async fn add_peer(&self, contact: &str) -> Result<Value, Value> {
-        self.call(json!({"type": "peer_add", "contact": contact}))
-            .await
+        snap::observe(async {
+            let value = self.session.add_peer(&(snap::text(&(contact)))).await?;
+            Ok(json!({"node":value}))
+        })
+        .await
     }
     /// The state the last sync left for the peer `node`.
     pub async fn peer(&self, node: &str) -> Value {
-        let peers = self.ok(json!({"type": "peers"})).await;
+        let peers = snap::ok(async {
+            let network = self.session.network().await?;
+            Ok(json!({"peers":network.peers,"discovery":network.discovery}))
+        })
+        .await;
         peers["peers"]
             .as_array()
             .into_iter()
@@ -225,23 +313,19 @@ impl Device {
     /// The owner's application creates and follows `main` once; Rocky
     /// defines no bookmark.
     pub async fn follow_main(&self) {
-        self.ok(json!({"type": "tips", "action": "create", "name": "main"}))
-            .await;
-        self.ok(json!({"type": "tips", "action": "follow", "name": "main"}))
-            .await;
+        self.session
+            .create_bookmark("main", None)
+            .await
+            .expect("bookmark");
+        self.follow("main").await.expect("follow");
     }
-    /// `follow_main` with the genesis line's signed minimum, which an
-    /// issuer's migration opening inherits.
     pub async fn follow_main_migrating(&self) {
         self.follow_main().await;
-        self.ok(json!({"type": "tips", "action": "genesis_minimum", "minimum_in_sync": 1}))
-            .await;
+        self.session.set_genesis_minimum(1).await.expect("minimum");
     }
-    /// Seals the followed tip and compacts at the seal: the base a joining
-    /// or pruned peer imports.
     pub async fn seal_and_compact(&self) -> Value {
-        self.ok(json!({"type": "tips", "action": "seal"})).await;
-        self.ok(json!({"type": "tips", "action": "compact"})).await
+        self.session.seal(false).await.expect("seal");
+        serde_json::to_value(self.session.compact(0).await.expect("compact")).expect("report")
     }
 }
 /// Configures each device as the other's peer.
@@ -253,7 +337,6 @@ pub async fn introduce(left: &Device, right: &Device) {
 pub fn reconciled(report: &Value) -> bool {
     identity::reconciled(report)
 }
-#[allow(dead_code)]
 pub fn exchange_failed(result: &Result<Value, Value>) -> bool {
     match result {
         Err(_) => true,

@@ -64,8 +64,8 @@ impl<A: RowApplication> Inner<A> {
         .await?;
         rows.iter()
             .map(|row| match row.as_slice() {
-                [SqlValue::Integer(author), SqlValue::Integer(sequence)] => Ok(BaseMark {
-                    author: *author as u32,
+                [SqlValue::Blob(author), SqlValue::Integer(sequence)] => Ok(BaseMark {
+                    author: stored_writer(author)?,
                     sequence: *sequence as u64,
                 }),
                 _ => Err(Error::Corrupt("replayed prefix".into())),

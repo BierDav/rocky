@@ -125,15 +125,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             &inner.config.revocations,
             now()?,
         )?;
-        if credentials.author_number().map_err(credential)?
-            != inner
-                .config
-                .credentials
-                .author_number()
-                .map_err(credential)?
-        {
-            return Err(denied("a node cannot change its author number"));
-        }
+        identity::check_node_chain(&credentials)?;
         inner.chain = Chain::new(credentials.clone())?;
         inner.config.credentials = credentials;
         // The renewed chain is the original node's; a line node of another

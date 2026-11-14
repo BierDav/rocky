@@ -1,6 +1,7 @@
 //! Migrations of replayed tables publish their program: each partition's
 //! copy replays on every member as its own transaction.
 use super::*;
+use crate::snap;
 
 /// Replayed items, unpartitioned.
 const ITEMS: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[
@@ -12,15 +13,14 @@ const POSITIONED_ITEMS: &str = r#"{"application":"shopping","version":2,"format"
   {"insert":"items","select":"SELECT 'copy-' || key AS key, 1 AS completed, title FROM items"}]}]}"#;
 
 async fn insert(device: &Device, key: &str, title: &str) {
-    device.ok(json!({"type": "sql", "sql": "BEGIN"})).await;
-    let id = device
-        .ok(json!({"type": "next_id", "table": "items"}))
-        .await["id"]
-        .clone();
-    device
-        .ok(json!({"type": "sql", "sql": "INSERT INTO items(key,completed,title,id) VALUES(?,0,?,?)", "values": [text(key), text(title), {"type": "integer", "value": id}]}))
-        .await;
-    device.ok(json!({"type": "sql", "sql": "COMMIT"})).await;
+    snap::ok(device.session.execute("BEGIN", Vec::new())).await;
+    let id = snap::ok(device.session.next_id("items")).await["id"].clone();
+    snap::ok(device.session.execute(
+        "INSERT INTO items(key,completed,title,id) VALUES(?,0,?,?)",
+        vec![text(key), text(title), snap::row_id(&(id))],
+    ))
+    .await;
+    snap::ok(device.session.execute("COMMIT", Vec::new())).await;
 }
 
 const STATE: &str = "SELECT id, key, completed, position, title FROM items ORDER BY id";
@@ -63,10 +63,26 @@ async fn a_member_replays_the_issuers_program() -> Result<(), Failure> {
     assert_eq!(
         rows(&b, "SELECT key, title, position FROM items ORDER BY key").await,
         json!([
-            [text("copy-k1"), text("apples"), text("")],
-            [text("copy-k2"), text("bread"), text("")],
-            [text("k1"), text("apples"), text("apples")],
-            [text("k2"), text("bread"), text("bread")]
+            [
+                snap::cell(text("copy-k1")),
+                snap::cell(text("apples")),
+                snap::cell(text(""))
+            ],
+            [
+                snap::cell(text("copy-k2")),
+                snap::cell(text("bread")),
+                snap::cell(text(""))
+            ],
+            [
+                snap::cell(text("k1")),
+                snap::cell(text("apples")),
+                snap::cell(text("apples"))
+            ],
+            [
+                snap::cell(text("k2")),
+                snap::cell(text("bread")),
+                snap::cell(text("bread"))
+            ]
         ])
     );
     a.close().await;
@@ -102,8 +118,8 @@ fn listed(schema: &str, rows: usize, lists: usize) -> String {
         .replace("100000", &rows.to_string())
         .replace("LISTS", &lists.to_string())
 }
-fn list(index: usize) -> Value {
-    json!([{"type": "text", "value": format!("l{index:03}")}])
+fn list(index: usize) -> Vec<rocky_sdk::SqlValue> {
+    vec![rocky_sdk::SqlValue::Text(format!("l{index:03}"))]
 }
 
 /// An issuer and a member holding every partition, closed after the
@@ -143,10 +159,28 @@ impl Listed {
         introduce(&a, &b).await;
         let node = b.node().await;
         for index in 0..lists {
-            a.ok(json!({"type": "partition_create", "table": "items", "values": list(index)}))
-                .await;
-            a.ok(json!({"type": "partition_share", "table": "items", "values": list(index), "recipients": [node]}))
-                .await;
+            snap::ok(
+                a.session
+                    .create_partition(rocky_sdk::PartitionTarget::Table {
+                        table: "items".to_owned(),
+                        values: (list(index)).clone(),
+                    }),
+            )
+            .await;
+            snap::ok(
+                a.session.share_partition(
+                    rocky_sdk::PartitionTarget::Table {
+                        table: "items".to_owned(),
+                        values: (list(index)).clone(),
+                    },
+                    serde_json::from_value::<
+                        std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>,
+                    >(json!([node]))
+                    .expect("typed fixture"),
+                    None,
+                ),
+            )
+            .await;
         }
         sync(&b).await;
         a.close().await;
@@ -189,11 +223,16 @@ impl Listed {
         let b = self.open("b", &schema)?;
         let expected = json!([[{"type": "integer", "value": rows.to_string()}, {"type": "integer", "value": rows.to_string()}]]);
         let mut syncs = 0;
-        while b
-            .call(json!({"type": "read", "query": {"sql": FILLED_COUNT, "values": [], "max_rows": 1}}))
-            .await
-            .ok()
-            .map(|page| page["rows"].clone())
+        while snap::observe(b.session.read(rocky_sdk::ReadQuery {
+            sql: snap::text(&(FILLED_COUNT)),
+            values: vec![],
+            max_rows: 1,
+            max_bytes: None,
+            cursor: None,
+        }))
+        .await
+        .ok()
+        .map(|page| page["rows"].clone())
             != Some(expected.clone())
         {
             syncs += 1;

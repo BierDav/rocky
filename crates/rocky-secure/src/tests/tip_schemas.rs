@@ -459,17 +459,12 @@ async fn a_withdrawn_stage_leaves_the_live_chain_signed_meanwhile_accepted_elsew
     let trusted = PrivateKey::new();
     let chain = CredentialChain(vec![
         rocky_credentials::Authority::owner(lineage.publisher())
-            .issue_trusted(
-                trusted.public_key(),
-                lineage.domain,
-                rocky_credentials::AuthorRange::ALL,
-                now().unwrap(),
-            )
+            .issue_trusted(trusted.public_key(), lineage.domain, now().unwrap())
             .unwrap(),
     ]);
     let node_chain = chain
         .clone()
-        .certify(&trusted, trusted.public_key(), 1)
+        .certify(&trusted, trusted.public_key())
         .unwrap();
     let signer = || rocky_credentials::Signer::node(&trusted, &node_chain).unwrap();
     let lane = trusted.public_key();

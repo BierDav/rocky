@@ -2,20 +2,12 @@
 //! through the replicated log, so values are unique and strictly increasing
 //! across every voter. Claims are pure coordination: the application uses a
 //! value in its own ordinary writes, and numbering policy stays its own.
-use crate::retention::DAY;
-use rocky_core::{Commitment, CoordinationError, MAX_COUNTER};
+use rocky_core::{CoordinationError, MAX_COUNTER};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-/// Longest counter name, in bytes.
-pub const MAX_NAME: usize = 64;
 /// Counters one domain holds.
 pub const MAX_COUNTERS: usize = 64;
-/// Seconds after its issue time that a claim's value answers retries.
-pub const CLAIM_WINDOW: u64 = 7 * DAY;
-/// Latest claims one counter keeps for retries; older ones are evicted
-/// before the window ends.
-pub const CLAIM_RECORDS: usize = 1024;
 /// How far a claim's issue time may lead authority time, as request
 /// signing times may.
 pub const ISSUE_SKEW: u64 = 30;
@@ -23,69 +15,9 @@ pub const ISSUE_SKEW: u64 = 30;
 const COUNTER_BYTES: usize = 128;
 const CLAIM_BYTES: usize = 64;
 
-/// An opaque counter name of 1 through `MAX_NAME` bytes, such as one per
-/// company and series.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "Vec<u8>", into = "Vec<u8>")]
-pub struct Name(Vec<u8>);
-impl Name {
-    pub fn new(name: impl Into<Vec<u8>>) -> Result<Self, CoordinationError> {
-        let name = name.into();
-        if name.is_empty() || name.len() > MAX_NAME {
-            return Err(CoordinationError::Configuration);
-        }
-        Ok(Self(name))
-    }
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
-impl TryFrom<Vec<u8>> for Name {
-    type Error = CoordinationError;
-    fn try_from(name: Vec<u8>) -> Result<Self, Self::Error> {
-        Self::new(name)
-    }
-}
-impl From<Name> for Vec<u8> {
-    fn from(name: Name) -> Self {
-        name.0
-    }
-}
-/// A claim's stable identity. The application stores both fields before
-/// its first attempt and repeats them on every retry; `issued` bounds how
-/// long the value answers retries.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Claim {
-    pub id: Commitment,
-    /// Unix seconds when the application created the claim.
-    pub issued: u64,
-}
-impl Claim {
-    /// A new claim with a random identity, issued now.
-    pub fn fresh() -> Result<Self, CoordinationError> {
-        Ok(Self {
-            id: crate::transport::nonce(),
-            issued: crate::certified::now()?,
-        })
-    }
-}
-/// A counter's last claimed value, 0 before the first claim.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Reading {
-    pub value: u64,
-    /// What the claim asked about was given, when one was.
-    pub claim: Option<Lookup>,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Lookup {
-    /// The claim took this value.
-    Claimed(u64),
-    /// The claim took no value; claiming it now takes the next one.
-    Unclaimed,
-    /// Outside the window: claiming it is refused with `Expired`, whether
-    /// or not it took a value.
-    Expired,
-}
+pub use rocky_credentials::counters::{
+    CLAIM_RECORDS, CLAIM_WINDOW, Claim, Lookup, MAX_NAME, Name, Reading,
+};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Record {
     claim: Claim,
@@ -111,7 +43,7 @@ impl Counter {
         }
     }
     fn bytes(&self) -> usize {
-        COUNTER_BYTES + self.name.0.len() + self.records.len() * CLAIM_BYTES
+        COUNTER_BYTES + self.name.as_bytes().len() + self.records.len() * CLAIM_BYTES
     }
     fn evict(&mut self, time: u64) {
         let floor = &mut self.floor;
@@ -193,7 +125,7 @@ impl Counters {
         }
         let mut growth = CLAIM_BYTES;
         if counter.value == 0 {
-            growth += COUNTER_BYTES + counter.name.0.len();
+            growth += COUNTER_BYTES + counter.name.as_bytes().len();
         } else if counter.records.len() >= CLAIM_RECORDS {
             growth = 0;
         }

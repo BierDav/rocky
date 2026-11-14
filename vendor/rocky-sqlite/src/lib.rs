@@ -4,14 +4,16 @@
 //!
 //! The preupdate hook lives here because rusqlite's `preupdate_hook` feature
 //! runs bindgen against a system `sqlite3.h`, which a browser build lacks.
-#![allow(clippy::missing_safety_doc)]
 #![cfg_attr(target_feature = "atomics", feature(stdarch_wasm_atomic_wait))]
 
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
 extern crate alloc;
 
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "The upstream C shim retains C type names."
+)]
 mod shim;
 
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]

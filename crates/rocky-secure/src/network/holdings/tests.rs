@@ -27,7 +27,6 @@ async fn open(f: &Fixture, dir: &std::path::Path, name: &str, rights: &[Right]) 
         &dir.join(name),
         PrivateKey::new(),
         f.grants(None, rights),
-        None,
         vec![],
     )
     .await
@@ -411,7 +410,6 @@ async fn custody_tuple_offers_relay_only_with_both_grants() {
             &root.path().join("writer.db"),
             PrivateKey::new(),
             f.grants(None, &[Right::Read, Right::Insert]),
-            Some((PrivateKey::new(), 1)),
             vec![],
         )
         .await;
@@ -421,7 +419,6 @@ async fn custody_tuple_offers_relay_only_with_both_grants() {
             &root.path().join("stranger.db"),
             PrivateKey::new(),
             f.grants(Some(&[2]), &[Right::Custody]),
-            None,
             vec![],
         )
         .await;
@@ -511,7 +508,6 @@ async fn frontier_acknowledgments_require_proved_custody() {
             &root.path().join("writer.db"),
             PrivateKey::new(),
             f.grants(None, &[Right::Read, Right::Insert]),
-            Some((PrivateKey::new(), 1)),
             vec![],
         )
         .await;
@@ -545,92 +541,6 @@ async fn frontier_acknowledgments_require_proved_custody() {
         member.frontier(scope).await.unwrap(),
         writer.frontier(scope).await.unwrap()
     );
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn saved_peer_resolution_proves_the_pinned_reference_without_opening_a_session() {
-    let f = Fixture::new(1);
-    let root = rocky_platform::fs::Scratch::new().await;
-    let server = open(&f, root.path(), "resolver", &[Right::Read]).await;
-    let (node, credentials) = {
-        let inner = server.inner.lock(crate::replica::Class::Background).await;
-        (inner.config.node.clone(), inner.config.credentials.clone())
-    };
-    for expected in [node.public_key(), PrivateKey::new().public_key()] {
-        let (client_stream, server_stream) = tokio::io::duplex(4096);
-        let (resolved, accepted) = tokio::join!(
-            NativeSession::resolve_peer(
-                rocky_core::net::Stream::new(client_stream),
-                rocky_credentials::PeerId::of(expected)
-            ),
-            super::link::Link::accept_or_resolve(
-                server_stream,
-                &server,
-                node.clone(),
-                credentials.clone(),
-            )
-        );
-        assert!(accepted.unwrap().is_none());
-        if expected == node.public_key() {
-            assert_eq!(resolved.unwrap(), expected);
-        } else {
-            assert!(resolved.is_err());
-        }
-    }
-}
-
-/// The resolver's connection may close once its reply is delivered, so the
-/// dialer's own close fails; the verified reply still resolves the peer.
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn saved_peer_resolution_survives_the_resolver_closing_first() {
-    struct ClosedByPeer(tokio::io::DuplexStream);
-    impl tokio::io::AsyncRead for ClosedByPeer {
-        fn poll_read(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-            buf: &mut tokio::io::ReadBuf<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
-        }
-    }
-    impl tokio::io::AsyncWrite for ClosedByPeer {
-        fn poll_write(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-            buf: &[u8],
-        ) -> std::task::Poll<std::io::Result<usize>> {
-            std::pin::Pin::new(&mut self.0).poll_write(cx, buf)
-        }
-        fn poll_flush(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::pin::Pin::new(&mut self.0).poll_flush(cx)
-        }
-        fn poll_shutdown(
-            self: std::pin::Pin<&mut Self>,
-            _: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Err(std::io::ErrorKind::ConnectionAborted.into()))
-        }
-    }
-    let f = Fixture::new(1);
-    let root = rocky_platform::fs::Scratch::new().await;
-    let server = open(&f, root.path(), "resolver", &[Right::Read]).await;
-    let (node, credentials) = {
-        let inner = server.inner.lock(crate::replica::Class::Background).await;
-        (inner.config.node.clone(), inner.config.credentials.clone())
-    };
-    let (client_stream, server_stream) = tokio::io::duplex(4096);
-    let (resolved, accepted) = tokio::join!(
-        NativeSession::resolve_peer(
-            rocky_core::net::Stream::new(ClosedByPeer(client_stream)),
-            rocky_credentials::PeerId::of(node.public_key())
-        ),
-        super::link::Link::accept_or_resolve(server_stream, &server, node.clone(), credentials)
-    );
-    assert!(accepted.unwrap().is_none());
-    assert_eq!(resolved.unwrap(), node.public_key());
 }
 
 /// A no-frames base of a concrete partition moves to a custodian that

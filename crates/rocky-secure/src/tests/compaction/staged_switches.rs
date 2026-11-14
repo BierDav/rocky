@@ -588,7 +588,7 @@ async fn a_revoked_target_withdraws_the_staged_switch() {
             },
         )
         .unwrap()
-        .issue_issuer(issuer.public_key(), None, crate::tests::validity())
+        .issue_issuer(issuer.public_key(), crate::tests::validity())
         .unwrap(),
     ]);
     let seal = SignedSeal::endorse(

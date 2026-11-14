@@ -1868,13 +1868,13 @@ async fn an_unpartitioned_checkpoint_preserves_other_tables_selector_grants() {
                 rights: [Right::Read].into(),
                 fields: [fixture.app().field("salary")].into_iter().collect(),
             }],
-            (1, Some(crate::credentials::AuthorRange::new(1, 2).unwrap())),
+            rocky_credentials::DelegationTerms { delegations: 1 },
             crate::tests::validity(),
         )
         .unwrap();
     let mut config = fixture.config(&node, fixture.full(), &[fixture.public]);
     config.credentials = CredentialChain(vec![root])
-        .complete(&principal, node.public_key(), 1)
+        .complete(&principal, node.public_key())
         .unwrap();
     let replica =
         EncryptedReplica::open(directory.path().join("mixed.sqlite"), fixture.app(), config)

@@ -9,11 +9,8 @@ repository.workspace = true
 license-file.workspace = true
 
 [features]
-qualification = ["rocky-core/qualification", "rocky-secure/qualification", "rocky-iroh?/qualification"]
-default = ["iroh"]
-# The iroh transport: handlers for an application's endpoint and the starter's
-# own, and the client of a coordination service reached over it.
-iroh = ["dep:rocky-iroh", "dep:rocky-coordinator"]
+qualification = ["rocky-core/qualification", "rocky-secure/qualification"]
+default = []
 
 [dependencies]
 tracing.workspace = true
@@ -33,14 +30,15 @@ web-time = "1"
 data-encoding = "2"
 futures-util = "0.3"
 sha2 = "0.10"
-rocky-iroh = { workspace = true, optional = true }
-rocky-coordinator = { workspace = true, optional = true }
 
 # A database's own thread, its network workers and the peer binary's signals.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "signal"] }
 
 [dev-dependencies]
+rocky-coordinator.workspace = true
+# Browser fixtures supply their own transport as applications do.
+rocky-iroh.workspace = true
 p2panda-core = "=0.5.2"
 rocky-platform = { workspace = true, features = ["test-support", "simulation"] }
 sqlparser = { version = "0.63", default-features = false, features = ["std", "visitor"] }
@@ -56,7 +54,7 @@ wasm-bindgen-test = "0.3"
 rocky-iroh = { path = "../rocky-iroh", features = ["test-utils"] }
 # A plain-HTTP relay a browser reaches (examples/browser_peer.rs).
 iroh-relay = { version = "1.3", features = ["server"] }
-rocky-coordinator = { path = "../rocky-coordinator" }
+rocky-voter.workspace = true
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 
@@ -69,7 +67,6 @@ test = false
 # Runs a coordination service and claims through it.
 [[example]]
 name = "browser_peer"
-required-features = ["iroh"]
 
 [lints]
 workspace = true

@@ -9,7 +9,11 @@ use rocky_credentials::*;
 use std::collections::BTreeSet;
 
 const NOW: u64 = 1_800_000_000;
-const VALIDITY: (u64, u64, u64) = (NOW, 30 * DAY, 300);
+const VALIDITY: rocky_credentials::Validity = rocky_credentials::Validity {
+    issued_at: NOW,
+    lifetime: std::time::Duration::from_secs(30 * DAY),
+    clock_skew: std::time::Duration::from_secs(300),
+};
 
 struct Domain {
     publisher: PrivateKey,
@@ -86,6 +90,7 @@ impl Domain {
             identities: subjects.iter().copied().collect(),
             capabilities: BTreeSet::new(),
             cut: Default::default(),
+            mode: rocky_credentials::RevocationMode::Lost,
             recovery: None,
         };
         let signed = self.authority().revoke(statement).expect("revocation");
@@ -102,11 +107,10 @@ impl Domain {
             .issue(
                 user.public_key(),
                 profile.grants(&self.resources).expect("grants"),
-                rocky_credentials::AuthorRange::ALL,
                 VALIDITY,
             )
             .expect("capability");
-        let chain = device_chain(root, &user, node.public_key(), 1).expect("chain");
+        let chain = device_chain(root, &user, node.public_key()).expect("chain");
         (user, node, chain)
     }
     fn verify(
@@ -226,7 +230,6 @@ fn chains_keep_publisher_revocations_expiry_attenuation_and_paired_rights() {
         SignedCapability::sign(long, &domain.publisher).expect("signed"),
         &user,
         node.public_key(),
-        1,
     )
     .expect("chain");
     assert!(domain.verify(&long, &node, &policy, NOW).is_err());
@@ -236,8 +239,11 @@ fn chains_keep_publisher_revocations_expiry_attenuation_and_paired_rights() {
             .issue(
                 user.public_key(),
                 chain.0[0].capability.grants.clone(),
-                rocky_credentials::AuthorRange::ALL,
-                (NOW, MAX_CHAIN_LIFETIME + 1, 300)
+                rocky_credentials::Validity {
+                    issued_at: NOW,
+                    lifetime: std::time::Duration::from_secs(MAX_CHAIN_LIFETIME + 1),
+                    clock_skew: std::time::Duration::from_secs(300)
+                }
             )
             .is_err()
     );
@@ -268,14 +274,9 @@ fn a_login_principal_alone_grants_nothing() {
     let (user, node) = (PrivateKey::new(), PrivateKey::new());
     let grants = Profile::Issuer.grants(&domain.resources).expect("grants");
     let claimed = Authority::owner(&user)
-        .issue(
-            user.public_key(),
-            grants,
-            rocky_credentials::AuthorRange::ALL,
-            VALIDITY,
-        )
+        .issue(user.public_key(), grants, VALIDITY)
         .expect("self-signed");
-    let chain = device_chain(claimed, &user, node.public_key(), 1).expect("chain");
+    let chain = device_chain(claimed, &user, node.public_key()).expect("chain");
     assert!(domain.verify(&chain, &node, &policy, NOW).is_err());
     assert!(
         chain
@@ -473,7 +474,7 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
         chain.0[0].capability.grants
     );
     let renewed =
-        device_chain(renewal.capability.clone(), &user, node.public_key(), 1).expect("chain");
+        device_chain(renewal.capability.clone(), &user, node.public_key()).expect("chain");
     assert_eq!(
         rights(
             &domain
@@ -530,7 +531,11 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
         &late,
         prior,
         next.clone(),
-        (later, 30 * DAY, 300),
+        rocky_credentials::Validity {
+            issued_at: later,
+            lifetime: std::time::Duration::from_secs(30 * DAY),
+            clock_skew: std::time::Duration::from_secs(300),
+        },
         b"",
     )
     .expect("renewal");
@@ -556,11 +561,10 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
             .issue(
                 user.public_key(),
                 chain.0[0].capability.grants.clone(),
-                rocky_credentials::AuthorRange::ALL,
                 VALIDITY,
             )
             .expect("capability");
-        let chain = device_chain(reissued, &user, node.public_key(), 1).expect("chain");
+        let chain = device_chain(reissued, &user, node.public_key()).expect("chain");
         assert!(domain.verify(&chain, &node, &revoked, NOW).is_err());
     }
 }
@@ -649,15 +653,9 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
     let (holder, holder_node) = (PrivateKey::new(), PrivateKey::new());
     let root = domain
         .authority()
-        .issue_delegable(
-            holder.public_key(),
-            grants.clone(),
-            2,
-            rocky_credentials::AuthorRange::ALL,
-            VALIDITY,
-        )
+        .issue_delegable(holder.public_key(), grants.clone(), 2, VALIDITY)
         .expect("root");
-    let own = device_chain(root.clone(), &holder, holder_node.public_key(), 1).expect("own");
+    let own = device_chain(root.clone(), &holder, holder_node.public_key()).expect("own");
     assert_eq!(own.delegable().0.len(), 1);
     let (delegate, node) = (PrivateKey::new(), PrivateKey::new());
     let mut narrow = grants[0].clone();
@@ -666,19 +664,25 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
         .delegable()
         .delegate(
             &holder,
-            delegate.public_key(),
-            PrincipalKind::User,
-            vec![narrow.clone()],
-            1,
-            Some(AuthorRange::ALL),
-            (NOW, 90 * DAY, 300),
+            rocky_credentials::Delegation {
+                subject: delegate.public_key(),
+                kind: PrincipalKind::User,
+                grants: vec![narrow.clone()],
+                partitions: Vec::new(),
+                terms: rocky_credentials::DelegationTerms { delegations: 1 },
+                validity: rocky_credentials::Validity {
+                    issued_at: NOW,
+                    lifetime: std::time::Duration::from_secs(90 * DAY),
+                    clock_skew: std::time::Duration::from_secs(300),
+                },
+            },
         )
         .expect("delegated");
     // The delegation ends with its parent, however long it was asked for.
     assert_eq!(link.expires(), NOW + 30 * DAY);
     let chain = link
         .clone()
-        .complete(&delegate, node.public_key(), 1)
+        .complete(&delegate, node.public_key())
         .expect("chain");
     assert_eq!(chain.0.len(), 3);
     assert_eq!(
@@ -699,12 +703,14 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
     let delegate_with = |holder: &PrivateKey, grants: Vec<ResourceGrant>, depth: u8| {
         own.delegable().delegate(
             holder,
-            delegate.public_key(),
-            PrincipalKind::User,
-            grants,
-            depth,
-            None,
-            VALIDITY,
+            rocky_credentials::Delegation {
+                subject: delegate.public_key(),
+                kind: PrincipalKind::User,
+                grants,
+                partitions: Vec::new(),
+                terms: rocky_credentials::DelegationTerms { delegations: depth },
+                validity: VALIDITY,
+            },
         )
     };
     let mut beyond = grants[0].clone();
@@ -726,12 +732,14 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
     assert!(
         link.delegate(
             &delegate,
-            PrivateKey::new().public_key(),
-            PrincipalKind::User,
-            vec![narrow],
-            1,
-            None,
-            VALIDITY
+            rocky_credentials::Delegation {
+                subject: PrivateKey::new().public_key(),
+                kind: PrincipalKind::User,
+                grants: vec![narrow],
+                partitions: Vec::new(),
+                terms: rocky_credentials::DelegationTerms { delegations: 1 },
+                validity: VALIDITY
+            }
         )
         .is_err()
     );
@@ -749,7 +757,7 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn node_leaves_bind_one_number_inside_the_principal_range() {
+fn node_leaves_are_writers_named_by_their_own_keys() {
     let domain = Domain::new();
     let identity = PrivateKey::new();
     let nodes = [PrivateKey::new(), PrivateKey::new()];
@@ -759,34 +767,31 @@ fn node_leaves_bind_one_number_inside_the_principal_range() {
         .issue_terms(
             identity.public_key(),
             grants.clone(),
-            (1, Some(AuthorRange::new(100, 199).unwrap())),
+            rocky_credentials::DelegationTerms { delegations: 1 },
             VALIDITY,
         )
         .unwrap();
     let prefix = CredentialChain(vec![root]);
     let first = prefix
         .clone()
-        .certify(&identity, nodes[0].public_key(), 100)
+        .certify(&identity, nodes[0].public_key())
         .unwrap();
     let second = prefix
         .clone()
         .certify_member(
             &identity,
             nodes[1].public_key(),
-            101,
             1,
             Some(first.certificate().unwrap().id().unwrap()),
         )
         .unwrap();
     let chains = [first, second];
     for (index, chain) in chains.iter().enumerate() {
-        let number = 100 + index as u32;
         for resource in &domain.resources {
             let verified = chain
                 .verify_author(
                     domain.publisher.public_key(),
                     nodes[index].public_key(),
-                    number,
                     resource.scope.table,
                     &domain.policy(),
                     NOW,
@@ -805,13 +810,12 @@ fn node_leaves_bind_one_number_inside_the_principal_range() {
         }
         let bytes = encode(chain).unwrap();
         let decoded: CredentialChain = decode_bounded(&bytes, MAX_CREDENTIAL_BYTES).unwrap();
-        assert_eq!(decoded.author_number().unwrap(), number);
+        // Another node's key never writes under this certificate.
         assert!(
             decoded
                 .verify_author(
                     domain.publisher.public_key(),
-                    nodes[index].public_key(),
-                    number + 1,
+                    nodes[1 - index].public_key(),
                     domain.resources[0].scope.table,
                     &domain.policy(),
                     NOW
@@ -819,45 +823,28 @@ fn node_leaves_bind_one_number_inside_the_principal_range() {
                 .is_err()
         );
     }
+    // Independent nodes name distinct identities from their own keys.
+    let writer =
+        |node: &PrivateKey| rocky_core::WriterId::from_bytes(*node.public_key().as_bytes());
     assert_ne!(
-        rocky_core::RowIdentity::next(100, 0).unwrap(),
-        rocky_core::RowIdentity::next(101, 0).unwrap()
+        rocky_core::RowIdentity::next(writer(&nodes[0]), 0).unwrap(),
+        rocky_core::RowIdentity::next(writer(&nodes[1]), 0).unwrap()
     );
-    for outside in [0, 99, 200, MAX_AUTHOR + 1] {
-        assert!(
-            prefix
-                .clone()
-                .complete(&identity, nodes[0].public_key(), outside)
-                .is_err()
-        );
-    }
+    // A leaf naming another node than its subject is refused.
     let mut forged = chains[0].clone();
     let mut leaf = forged.0.pop().unwrap().capability;
     leaf.extension = Extension::new(Extended {
         database: leaf.extended().unwrap().database,
-        authors: Some(AuthorRange::new(200, 200).unwrap()),
-        node: Some(rocky_credentials::PeerId::of(nodes[0].public_key())),
+        node: Some(rocky_credentials::PeerId::of(nodes[1].public_key())),
         sequence: Some(0),
         ..Default::default()
     })
     .unwrap();
-    forged
-        .0
-        .push(SignedCapability::sign(leaf, &identity).unwrap());
-    assert!(
-        forged
-            .verify(
-                domain.publisher.public_key(),
-                nodes[0].public_key(),
-                &domain.policy(),
-                NOW
-            )
-            .is_err()
-    );
+    assert!(SignedCapability::sign(leaf, &identity).is_err());
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
+fn delegations_narrow_and_unknown_extension_versions_are_refused() {
     let domain = Domain::new();
     let policy = domain.policy();
     let grants = Profile::Writer {
@@ -866,36 +853,36 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
     .grants(&domain.resources)
     .expect("grants");
     let holder = PrivateKey::new();
-    let range = AuthorRange::new(10, 20).expect("range");
     let root = domain
         .authority()
         .issue_terms(
             holder.public_key(),
             grants.clone(),
-            (2, Some(range)),
+            rocky_credentials::DelegationTerms { delegations: 2 },
             VALIDITY,
         )
         .expect("root");
-    assert_eq!(root.capability.authors().expect("authors"), Some(range));
     let prefix = CredentialChain(vec![root.clone()]);
     let delegate = PrivateKey::new();
-    let delegate_with = |authors| {
+    let delegate_with = |delegations| {
         prefix.delegate(
             &holder,
-            delegate.public_key(),
-            PrincipalKind::User,
-            grants.clone(),
-            1,
-            Some(authors),
-            VALIDITY,
+            rocky_credentials::Delegation {
+                subject: delegate.public_key(),
+                kind: PrincipalKind::User,
+                grants: grants.clone(),
+                partitions: Vec::new(),
+                terms: rocky_credentials::DelegationTerms { delegations },
+                validity: VALIDITY,
+            },
         )
     };
-    let narrowed = delegate_with(AuthorRange::new(12, 15).expect("range")).expect("narrowed");
-    assert!(delegate_with(AuthorRange::new(15, 25).expect("range")).is_err());
+    let narrowed = delegate_with(1).expect("narrowed");
+    assert!(delegate_with(2).is_err());
     let node = PrivateKey::new();
     let chain = narrowed
         .clone()
-        .complete(&delegate, node.public_key(), 12)
+        .complete(&delegate, node.public_key())
         .expect("chain");
     let verify = |chain: &CredentialChain| {
         chain.verify(
@@ -906,27 +893,18 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
         )
     };
     assert!(verify(&chain).is_ok());
-    // A delegate that signs itself a wider range is refused on verification.
+    // A delegate that signs itself issuer authority is refused on verification.
     let mut wide = narrowed.0[1].capability.clone();
     wide.extension = Extension::new(Extended {
-        partitions: Vec::new(),
-        families: false,
-        authors: Some(AuthorRange::new(5, 15).expect("range")),
-        node: None,
-        issues: false,
-        trusted: None,
-        claims: None,
-        origin: None,
-        sequence: None,
-        previous: None,
-        database: None,
+        issues: true,
+        ..Extended::default()
     })
     .expect("extension");
     let widened = CredentialChain(vec![
         root.clone(),
         SignedCapability::sign(wide, &holder).expect("signed"),
     ])
-    .complete(&delegate, node.public_key(), 5)
+    .complete(&delegate, node.public_key())
     .expect("chain");
     assert!(verify(&widened).is_err());
     // A node link cannot carry a user extension.
@@ -937,12 +915,10 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
     #[derive(serde::Serialize)]
     struct Later {
         version: u32,
-        authors: AuthorRange,
         rotation: u64,
     }
     let bytes = rocky_credentials::encode(&Later {
-        version: 12,
-        authors: range,
+        version: 13,
         rotation: 9,
     })
     .expect("bytes");

@@ -7,10 +7,7 @@ pub mod secure_demo;
 mod status;
 
 use dioxus::prelude::*;
-use rocky_sdk::{
-    Configuration, Failure, Network, TransactionToken,
-    transport::{TransportOptions, memory::Hub},
-};
+use rocky_sdk::{Configuration, Failure, Network, TransactionToken, transport::memory::Hub};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -24,7 +21,7 @@ pub enum Link {
     /// One in-process hub for every panel.
     Demo(Arc<Hub>),
     /// iroh with these options.
-    Iroh(TransportOptions),
+    Iroh(rocky_iroh::Options),
 }
 
 /// The window's installations: each lives in `root/<name>`.
@@ -97,7 +94,7 @@ impl Workspace {
 pub struct Launch {
     pub root: PathBuf,
     pub demo: bool,
-    pub transport: TransportOptions,
+    pub transport: rocky_iroh::Options,
 }
 impl Launch {
     fn workspace(&self) -> Workspace {
@@ -373,11 +370,11 @@ struct View {
     role: Option<Role>,
     members: Vec<Member>,
     lists: Vec<List>,
-    list: Option<i64>,
+    list: Option<rocky_sdk::RowIdentity>,
     todos: Vec<Todo>,
     shared: BTreeSet<String>,
 }
-async fn load(todos: &Todos, chosen: Option<i64>) -> Result<View, Failure> {
+async fn load(todos: &Todos, chosen: Option<rocky_sdk::RowIdentity>) -> Result<View, Failure> {
     let node = todos.node().await?;
     let members = todos.members().await?;
     let role = members
@@ -457,7 +454,7 @@ fn Device(name: String, todos: Shared, closing: bool) -> Element {
     let own = use_signal(BTreeSet::<TransactionToken>::new);
     let mut notices = use_signal(Vec::<String>::new);
     let mut revision = use_signal(|| 0_u64);
-    let mut selected = use_signal(|| None::<i64>);
+    let mut selected = use_signal(|| None::<rocky_sdk::RowIdentity>);
     let mut share_to = use_signal(|| None::<String>);
 
     let observed = todos.clone();

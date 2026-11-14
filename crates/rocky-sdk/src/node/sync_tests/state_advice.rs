@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_snapshot as snap;
 
 #[tokio::test]
 async fn ordinary_sync_waits_for_the_shared_import_slot_without_a_bootstrap_marker()
@@ -8,8 +9,21 @@ async fn ordinary_sync_waits_for_the_shared_import_slot_without_a_bootstrap_mark
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-            a.tips(&json!({"action":"create", "name":"main"})).await?;
-            a.tips(&json!({"action":"follow", "name":"main"})).await?;
+            a.change_tip(
+                crate::request::TipChange::Create {
+                    name: "main".into(),
+                    tip: None,
+                },
+                &Root::default(),
+            )
+            .await?;
+            a.change_tip(
+                crate::request::TipChange::Follow {
+                    name: "main".into(),
+                },
+                &Root::default(),
+            )
+            .await?;
             for row in 1..=4 {
                 add(&a, row).await?;
             }
@@ -77,13 +91,30 @@ async fn three_failed_advised_imports_fall_back_only_for_that_scope_and_checkpoi
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-            a.tips(&json!({"action":"create", "name":"main"})).await?;
-            a.tips(&json!({"action":"follow", "name":"main"})).await?;
+            a.change_tip(
+                crate::request::TipChange::Create {
+                    name: "main".into(),
+                    tip: None,
+                },
+                &Root::default(),
+            )
+            .await?;
+            a.change_tip(
+                crate::request::TipChange::Follow {
+                    name: "main".into(),
+                },
+                &Root::default(),
+            )
+            .await?;
             for handle in 1..=64 {
                 add(&a, handle).await?;
             }
-            a.tips(&json!({"action":"seal"})).await?;
-            a.tips(&json!({"action":"compact"})).await?;
+            a.change_tip(
+                crate::request::TipChange::Seal { close: false },
+                &Root::default(),
+            )
+            .await?;
+            a.compact_tips(0).await?;
             let profile = Profile::Writer {
                 scopes: ["items".into()].into(),
             };
@@ -317,17 +348,28 @@ async fn many_changed_scopes_reconcile_with_a_channel_left_for_publication() -> 
             .await?;
             let client = a.client(1)?;
             for (index, name) in names.iter().enumerate() {
-                a.dispatch(&client, &json!({"type":"sql","sql":"BEGIN"}))
-                    .await?;
-                let id = a
-                    .dispatch(&client, &json!({"type":"next_id","table":name}))
-                    .await?["id"]
+                snap::value(a.execute_sql(&client, "BEGIN", Vec::new(), None)).await?;
+                let id = snap::value(a.next_id(&client, &(snap::text(&(name))), None)).await?["id"]
                     .clone();
-                a.dispatch(&client, &json!({"type":"sql","sql":format!("INSERT INTO {name}(key,title,id) VALUES('1','Milk',?)"),
-                    "values":[{"type":"integer","value":id}]})).await?;
-                a.dispatch(
+                snap::value(a.execute_sql(
                     &client,
-                    &json!({"type":"sql","sql":"COMMIT","handle":vec![index as u8 + 1; 32]}),
+                    &(snap::text(
+                        &(format!("INSERT INTO {name}(key,title,id) VALUES('1','Milk',?)")),
+                    )),
+                    vec![snap::row_id(&(id))],
+                    None,
+                ))
+                .await?;
+                snap::value(
+                    a.execute_sql(
+                        &client,
+                        "COMMIT",
+                        Vec::new(),
+                        Some(
+                            serde_json::from_value::<[u8; 32]>(json!(vec![index as u8 + 1; 32]))
+                                .expect("typed fixture"),
+                        ),
+                    ),
                 )
                 .await?;
             }
@@ -354,7 +396,8 @@ async fn many_changed_scopes_reconcile_with_a_channel_left_for_publication() -> 
             };
             let scopes = b.app_scopes();
             assert_eq!(scopes.len(), names.len());
-            let (_, transfer) = sync::reconcile(&b.replica, &upstream, &scopes, |_| {}, None).await?;
+            let (_, transfer) =
+                sync::reconcile(&b.replica, &upstream, &scopes, |_| {}, None).await?;
             assert!(transfer.failed.is_empty(), "{:?}", transfer.failed);
             for scope in &scopes {
                 assert!(

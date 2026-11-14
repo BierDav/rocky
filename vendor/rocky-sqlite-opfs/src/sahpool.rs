@@ -203,14 +203,16 @@ impl OpfsSAHPool {
         Ok(())
     }
 
-    #[allow(clippy::await_holding_refcell_ref)]
     async fn reduce_capacity(&self, n: u32) -> Result<u32> {
-        let mut available_files = self.available_files.borrow_mut();
-        let available_length = available_files.len();
-        let max_reduce = available_length.min(n as usize);
-        let files = available_files.split_off(available_length - max_reduce);
-        // The `RefMut` from `name2file` is explicitly dropped here to avoid holding the borrow across an `.await` point.
-        drop(available_files);
+        let (files, max_reduce) = {
+            let mut available_files = self.available_files.borrow_mut();
+            let available_length = available_files.len();
+            let max_reduce = available_length.min(n as usize);
+            (
+                available_files.split_off(available_length - max_reduce),
+                max_reduce,
+            )
+        };
 
         for file in files {
             file.handle.close();

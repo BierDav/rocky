@@ -56,8 +56,8 @@ pub struct Admitted {
     /// The issuer identity that wrote the record first.
     pub issuer: PublicKey,
     /// The trusted identity that first enrolled this identity, as its
-    /// capability names it; the root's revocation of that identity revokes
-    /// this one too. `None` for a trusted identity.
+    /// capability names it; a compromised root revocation of that identity
+    /// revokes this one too. `None` for a trusted identity.
     pub origin: Option<PublicKey>,
     pub enrolled: u64,
     /// Stable invitation digest; retained independently of later invitations.
@@ -69,7 +69,6 @@ pub struct Admitted {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capability {
-    pub authors: rocky_credentials::AuthorRange,
     #[serde(with = "hex32")]
     pub id: Commitment,
     pub expires: u64,
@@ -146,12 +145,6 @@ impl Registry {
     pub fn get(&self, identity: &PublicKey) -> Option<&IdentityRecord> {
         self.records.get(identity)
     }
-    /// The range already granted to `identity`, if it is recorded.
-    pub fn authors(&self, identity: PublicKey) -> Option<rocky_credentials::AuthorRange> {
-        self.get(&identity)
-            .and_then(IdentityRecord::capability)
-            .map(|capability| capability.authors)
-    }
     /// Records holding an `identity` entry: what the bound counts.
     pub fn identities(&self) -> usize {
         self.records
@@ -168,7 +161,7 @@ impl Registry {
         self.get(identity).is_some_and(|record| record.revoked)
     }
     /// The identities the trusted identity `origin` first enrolled, itself
-    /// or through issuers below it: what the root's revocation of `origin`
+    /// or through issuers below it: what a compromised root revocation of `origin`
     /// ends, wherever they renewed since. A trusted identity is the root's
     /// own enrollment, whoever enrolled it first.
     pub fn enrolled_by(&self, origin: PublicKey) -> std::collections::BTreeSet<PublicKey> {
@@ -507,7 +500,7 @@ pub async fn write(
                     let mut values = key;
                     values.extend([
                         SqlValue::Text(change.value.clone()),
-                        SqlValue::Integer(id.integer()),
+                        id.sql(),
                     ]);
                     // Replay may meet another issuer's concurrent insert of
                     // the entry: it keeps or replaces it rather than dropping
@@ -539,7 +532,7 @@ pub async fn write(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rocky_credentials::{AuthorRange, Authority, DatabaseContext, PrivateKey, RevocationSet};
+    use rocky_credentials::{Authority, DatabaseContext, PrivateKey, RevocationSet};
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn foreign_or_misnamed_root_grants_cannot_make_registry_identities_trusted() {
@@ -558,7 +551,6 @@ mod tests {
                 .issue_trusted(
                     identity,
                     database.scope,
-                    AuthorRange::ALL,
                     100 + rocky_credentials::LIFETIME_SKEW,
                 )
                 .unwrap(),

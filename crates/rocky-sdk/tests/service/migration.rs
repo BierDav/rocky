@@ -1,4 +1,5 @@
 use super::{fixture::*, inspection::*, *};
+use crate::snap;
 
 const MIGRATING: &str = r#"{"application":"counter","version":2,"format":6,"tables":[{"name":"counts","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"value","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""}],"primary_key":["key"]}],"migrations":[{"version":2,"statements":["UPDATE counts SET position=key"]}]}"#;
 
@@ -10,7 +11,7 @@ async fn real_voters_release_a_private_migration_without_reopening_the_publisher
     let (a, t) = household(root.path(), &bundle).await?;
     t.write("included", 41).await?;
     a.sync().await?;
-    let latest = a.tips("seal", json!({})).await?["tip"].clone();
+    let latest = snap::value(a.session.seal(false)).await?["tip"].clone();
     final_on_both(&a, &t, &latest).await?;
     a.close().await?;
     t.write("before close but unknown", 42).await?;
@@ -19,10 +20,10 @@ async fn real_voters_release_a_private_migration_without_reopening_the_publisher
     a.session.set_networking_enabled(false).await?;
     assert_eq!(a.sync().await?["skip"], "networking_disabled");
     assert_eq!(
-        a.call(json!({"type":"coordinated"})).await?["trusted"],
+        snap::value(a.session.coordinated_status()).await?["trusted"],
         true
     );
-    let graph = a.tips("inspect", json!({})).await?;
+    let graph = snap::value(a.session.inspect_tips()).await?;
     let close = graph["seals"]
         .as_array()
         .ok_or("seals")?
@@ -30,11 +31,11 @@ async fn real_voters_release_a_private_migration_without_reopening_the_publisher
         .find(|seal| seal["tip"] == latest && seal["action"] == "close")
         .ok_or("private close")?
         .clone();
-    let target = a.tips("status", json!({})).await?["tip"].clone();
+    let target = snap::value(a.session.tip_status()).await?["tip"].clone();
     let (staged, state) = stage(&a_dir)?;
     assert!(staged.coordinated);
     assert_eq!(state, "committed");
-    assert_eq!(serde_json::to_value(staged.scope)?, a.scope);
+    assert_eq!(staged.scope, a.scope);
     assert_eq!(data_encoding::HEXLOWER.encode(&staged.source.0), latest);
     assert_eq!(data_encoding::HEXLOWER.encode(&staged.target.0), target);
     assert!(staged.statements.iter().any(|statement| matches!(statement, rocky_secure::TipStatement::Seal(sealed) if sealed.id().is_ok_and(|id| data_encoding::HEXLOWER.encode(&id) == close["id"]))));
@@ -54,7 +55,7 @@ async fn real_voters_release_a_private_migration_without_reopening_the_publisher
     assert!(still_staged.coordinated);
     assert_eq!(rocky_sdk::credentials::encode(&still_staged)?, staged_bytes);
     let t = Peer::start(&root.path().join("t"), SCHEMA, Some(&bundle), None, false).await?;
-    let before = t.tips("inspect", json!({})).await?;
+    let before = snap::value(t.session.inspect_tips()).await?;
     assert!(
         !before["openings"]
             .as_array()
@@ -67,9 +68,9 @@ async fn real_voters_release_a_private_migration_without_reopening_the_publisher
     t.session.set_automatic_sync(true).await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
-        let generation = t.call(json!({"type":"generation"})).await?;
-        let a_graph = a.tips("inspect", json!({})).await?;
-        let t_graph = t.tips("inspect", json!({})).await?;
+        let generation = snap::value(t.session.generation()).await?;
+        let a_graph = snap::value(a.session.inspect_tips()).await?;
+        let t_graph = snap::value(t.session.inspect_tips()).await?;
         if generation["current"]["schema"] == 2
             && seal(&a_graph, &close["id"])["final"] == true
             && seal(&t_graph, &close["id"])["final"] == true
@@ -102,8 +103,15 @@ async fn real_voters_release_a_private_migration_without_reopening_the_publisher
     loop {
         let mut complete = true;
         for peer in [&a, &t] {
-            assert_eq!(peer.tips("status", json!({})).await?["tip"], target);
-            let rows = peer.call(json!({"type":"read","query":{"sql":"SELECT key,position FROM counts ORDER BY key","values":[],"max_rows":10}})).await?;
+            assert_eq!(snap::value(peer.session.tip_status()).await?["tip"], target);
+            let rows = snap::value(peer.session.read(rocky_sdk::ReadQuery {
+                sql: "SELECT key,position FROM counts ORDER BY key".to_owned(),
+                values: vec![],
+                max_rows: 10,
+                max_bytes: None,
+                cursor: None,
+            }))
+            .await?;
             // The replayed migration fills the row written before it; the
             // later one keeps the default.
             let text = |value: &str| json!({"type":"text","value":value});

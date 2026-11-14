@@ -46,7 +46,7 @@ impl<A: RowApplication> Inner<A> {
         let Some(frontier) = self.verified_scope_frontier(scope, id).await? else {
             return Ok(());
         };
-        let mut merged: BTreeMap<u32, u64> = self
+        let mut merged: BTreeMap<WriterId, u64> = self
             .seal_anchor(id)
             .await?
             .into_iter()
@@ -131,7 +131,7 @@ impl<A: RowApplication> Inner<A> {
         &self,
         id: Option<i64>,
         previous: Option<&SignedSeal>,
-    ) -> Result<BTreeMap<u32, u64>, Error> {
+    ) -> Result<BTreeMap<WriterId, u64>, Error> {
         let mut starts = BTreeMap::new();
         for mark in previous
             .into_iter()

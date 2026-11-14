@@ -29,7 +29,6 @@ fn delegated(
             claims: None,
             origin: None,
             partitions: Vec::new(),
-            authors: Some(rocky_credentials::AuthorRange::new(10, 20).unwrap()),
             node: None,
             issues: false,
             ..rocky_credentials::Extended::default()
@@ -43,7 +42,6 @@ fn delegated(
         ..root.clone()
     };
     middle.extension = rocky_credentials::Extension::new(rocky_credentials::Extended {
-        authors: Some(rocky_credentials::AuthorRange::new(12, 20).unwrap()),
         ..rocky_credentials::Extended::default()
     })
     .unwrap();
@@ -57,7 +55,6 @@ fn delegated(
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
             trusted: None,
             claims: None,
-            authors: Some(rocky_credentials::AuthorRange::new(12, 12).unwrap()),
             node: Some(rocky_credentials::PeerId::of(node.public_key())),
             database: Some(rocky_credentials::DatabaseContext {
                 publisher: f.publisher.public_key(),
@@ -89,7 +86,7 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
         &[Right::Read, Right::Insert, Right::Update, Right::Custody],
         &[f.app().field("display_name")],
     )];
-    let widenings: [&Widen; 7] = [
+    let widenings: [&Widen; 6] = [
         &|link, _| {
             link.grants[0].rights.insert(Right::Delete);
         },
@@ -102,19 +99,6 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
         &|link, _| link.expires += 1,
         &|link, _| link.not_before -= 1,
         &|link, _| link.delegations = 2,
-        &|link, _| {
-            link.extension = rocky_credentials::Extension::new(rocky_credentials::Extended {
-                trusted: None,
-                claims: None,
-                origin: None,
-                partitions: Vec::new(),
-                authors: Some(rocky_credentials::AuthorRange::new(10, 21).unwrap()),
-                node: None,
-                issues: false,
-                ..rocky_credentials::Extended::default()
-            })
-            .unwrap()
-        },
     ];
     // The narrowing chain is admitted everywhere below.
     let narrow = delegated(&f, &writer, &held, &|_, _| {});
@@ -174,22 +158,24 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
         // A frame its node signed under it.
         let forged = author(
             &writer,
-            Extensions {
-                author: Some(12),
-                author_sequence: 0,
-                row_format: crate::wire::ROW_FORMAT,
-                births: Vec::new(),
-                tip: rocky_credentials::genesis_tip(f.app().definition().hash()),
-                scope: f.public,
-                generation: rocky_core::KeyEpoch::new(1, &[11; 32]),
-                chain: crate::wire::Chain::new(chain.clone()).unwrap().digest(),
+            crate::wire::FrameDraft {
+                extensions: Extensions {
+                    authored: true,
+                    author_sequence: 0,
+                    row_format: crate::wire::ROW_FORMAT,
+                    births: Vec::new(),
+                    tip: rocky_credentials::genesis_tip(f.app().definition().hash()),
+                    scope: f.public,
+                    generation: rocky_core::KeyEpoch::new(1, &[11; 32]),
+                    chain: crate::wire::Chain::new(chain.clone()).unwrap().digest(),
+                },
+                chain: crate::wire::Chain::new(chain.clone()).unwrap(),
+                encryption_key: &[11; 32],
+                log: (0, None, 1),
+                previous: Vec::new(),
+                partition: None,
+                plaintext: b"rows",
             },
-            crate::wire::Chain::new(chain.clone()).unwrap(),
-            &[11; 32],
-            (0, None, 1),
-            Vec::new(),
-            None,
-            b"rows",
         )
         .unwrap();
         assert!(

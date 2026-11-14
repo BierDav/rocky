@@ -1,9 +1,9 @@
 //! Issuance: raw grants, the grant profiles built on them and what an
 //! identity with issuer authority signs.
 use crate::{
-    AuthorRange, Capability, CredentialChain, Endorsement, Error, Extended, Extension,
-    IdentityProvider, MAX_CHAIN_LIFETIME, MAX_CREDENTIAL_DEPTH, PartitionGrant, PeerId, PrivateKey,
-    PublicKey, Revocation, RevocationSet, SignedCapability, SignedRevocation, Signer, denied,
+    Capability, CredentialChain, Endorsement, Error, Extended, Extension, IdentityProvider,
+    MAX_CHAIN_LIFETIME, MAX_CREDENTIAL_DEPTH, PartitionGrant, PeerId, PrivateKey, PublicKey,
+    Revocation, RevocationSet, SignedCapability, SignedRevocation, Signer, denied,
 };
 use rocky_core::{
     AppId, Commitment, FieldSelection, PrincipalKind, ResourceGrant, ResourceScope, Right,
@@ -381,10 +381,9 @@ impl<'a> Authority<'a> {
         &self,
         subject: PublicKey,
         grants: Vec<ResourceGrant>,
-        authors: AuthorRange,
-        validity: (u64, u64, u64),
+        validity: crate::Validity,
     ) -> Result<SignedCapability, Error> {
-        self.issue_delegable(subject, grants, 1, authors, validity)
+        self.issue_delegable(subject, grants, 1, validity)
     }
     /// As `issue`, with `delegations` links allowed below it: 1 reaches
     /// the subject's own node certificates, 2 one further delegate.
@@ -393,25 +392,27 @@ impl<'a> Authority<'a> {
         subject: PublicKey,
         grants: Vec<ResourceGrant>,
         delegations: u8,
-        authors: AuthorRange,
-        validity: (u64, u64, u64),
+        validity: crate::Validity,
     ) -> Result<SignedCapability, Error> {
-        self.issue_terms(subject, grants, (delegations, Some(authors)), validity)
+        self.issue_terms(
+            subject,
+            grants,
+            crate::DelegationTerms { delegations },
+            validity,
+        )
     }
-    /// As `issue_delegable`, granting the subject the author numbers
-    /// `authors` for its nodes.
+    /// As `issue_delegable`, with the delegation terms.
     pub fn issue_terms(
         &self,
         subject: PublicKey,
         grants: Vec<ResourceGrant>,
-        (delegations, authors): (u8, Option<AuthorRange>),
-        validity: (u64, u64, u64),
+        crate::DelegationTerms { delegations }: crate::DelegationTerms,
+        validity: crate::Validity,
     ) -> Result<SignedCapability, Error> {
         self.sign_link(
             subject,
             grants,
             Extended {
-                authors,
                 origin: self.origin()?,
                 ..Extended::default()
             },
@@ -419,13 +420,11 @@ impl<'a> Authority<'a> {
             validity,
         )
     }
-    /// Issuer authority for `subject`, one level below this authority,
-    /// with the author numbers `authors` to hand out.
+    /// Issuer authority for `subject`, one level below this authority.
     pub fn issue_issuer(
         &self,
         subject: PublicKey,
-        authors: Option<AuthorRange>,
-        validity: (u64, u64, u64),
+        validity: crate::Validity,
     ) -> Result<SignedCapability, Error> {
         let delegations = self
             .delegations()?
@@ -436,7 +435,6 @@ impl<'a> Authority<'a> {
             subject,
             Vec::new(),
             Extended {
-                authors,
                 issues: true,
                 origin: self.origin()?,
                 ..Extended::default()
@@ -446,14 +444,13 @@ impl<'a> Authority<'a> {
         )
     }
     /// The root's trusted grant: whole-domain tip and bookmark control
-    /// with issuer authority over `authors`, valid from `time` and never
+    /// with issuer authority, valid from `time` and never
     /// expiring; only a root-signed revocation ends it. Only the root signs
     /// one, and no trusted grant is delegated.
     pub fn issue_trusted(
         &self,
         subject: PublicKey,
         scope: rocky_core::Scope,
-        authors: AuthorRange,
         time: u64,
     ) -> Result<SignedCapability, Error> {
         if !self.chain.0.is_empty() {
@@ -468,7 +465,6 @@ impl<'a> Authority<'a> {
                 expires: NEVER,
                 delegations: (MAX_CREDENTIAL_DEPTH - 1) as u8,
                 extension: Extension::new(Extended {
-                    authors: Some(authors),
                     issues: true,
                     trusted: Some(scope),
                     database: Some(crate::DatabaseContext {
@@ -489,15 +485,15 @@ impl<'a> Authority<'a> {
         &self,
         grants: Vec<ResourceGrant>,
         partitions: Vec<PartitionGrant>,
-        (time, ttl, skew): (u64, u64, u64),
+        validity: crate::Validity,
     ) -> Result<SignedCapability, Error> {
-        self.hold_terms(grants, partitions, (time, ttl, skew), false)
+        self.hold_terms(grants, partitions, validity, false)
     }
     pub fn hold_families(
         &self,
         grants: Vec<ResourceGrant>,
         partitions: Vec<PartitionGrant>,
-        validity: (u64, u64, u64),
+        validity: crate::Validity,
     ) -> Result<SignedCapability, Error> {
         self.hold_terms(grants, partitions, validity, true)
     }
@@ -505,9 +501,16 @@ impl<'a> Authority<'a> {
         &self,
         grants: Vec<ResourceGrant>,
         partitions: Vec<PartitionGrant>,
-        (time, ttl, skew): (u64, u64, u64),
+        validity: crate::Validity,
         families: bool,
     ) -> Result<SignedCapability, Error> {
+        let crate::Validity {
+            issued_at: time,
+            lifetime,
+            clock_skew,
+        } = validity;
+        let ttl = lifetime.as_secs();
+        let skew = clock_skew.as_secs();
         let parent = &self
             .chain
             .0
@@ -539,7 +542,6 @@ impl<'a> Authority<'a> {
                 expires,
                 delegations: 1,
                 extension: Extension::new(Extended {
-                    authors: held.authors,
                     partitions,
                     families,
                     origin: self.origin()?,
@@ -579,8 +581,15 @@ impl<'a> Authority<'a> {
         grants: Vec<ResourceGrant>,
         mut extended: Extended,
         delegations: u8,
-        (time, ttl, skew): (u64, u64, u64),
+        validity: crate::Validity,
     ) -> Result<SignedCapability, Error> {
+        let crate::Validity {
+            issued_at: time,
+            lifetime,
+            clock_skew,
+        } = validity;
+        let ttl = lifetime.as_secs();
+        let skew = clock_skew.as_secs();
         let database = self
             .database
             .or(extended.database)
@@ -660,14 +669,14 @@ impl<'a> Authority<'a> {
         Ok(signed)
     }
     /// The capability `prior` renewed: the same subject, grants,
-    /// delegations, author range and authority, never more. A subject
+    /// delegations and authority, never more. A subject
     /// `revocations` revokes is refused, as is one this authority sits
     /// below: it is renewed by an issuer above it.
     pub fn renew(
         &self,
         prior: &Capability,
         revocations: &RevocationSet,
-        validity: (u64, u64, u64),
+        validity: crate::Validity,
     ) -> Result<SignedCapability, Error> {
         let extended = prior.extended()?;
         if prior.kind != PrincipalKind::User
@@ -688,7 +697,6 @@ impl<'a> Authority<'a> {
             prior.subject,
             prior.grants.clone(),
             Extended {
-                authors: extended.authors,
                 partitions: extended.partitions,
                 families: extended.families,
                 issues: extended.issues,
@@ -728,33 +736,22 @@ pub fn device_chain(
     root: SignedCapability,
     identity: &dyn IdentityProvider,
     node: PublicKey,
-    author: u32,
 ) -> Result<CredentialChain, Error> {
-    CredentialChain(vec![root]).complete(identity, node, author)
+    CredentialChain(vec![root]).complete(identity, node)
 }
 
 impl CredentialChain {
     /// Completes a chain that ends at `holder` with a certificate for its
     /// node key: the same grants and validity, delegating nothing further.
-    pub fn complete(
-        self,
-        holder: &dyn IdentityProvider,
-        node: PublicKey,
-        author: u32,
-    ) -> Result<Self, Error> {
-        self.certify(holder, node, author)
+    pub fn complete(self, holder: &dyn IdentityProvider, node: PublicKey) -> Result<Self, Error> {
+        self.certify(holder, node)
     }
-    /// The identity `holder` signs a certificate for `node` with one
-    /// `author` number of its range. It holds no grants and never expires:
+    /// The identity `holder` signs a certificate for `node`, whose key is
+    /// its writer identity. It holds no grants and never expires:
     /// the node acts with whatever its identity's link grants, while it
     /// does. A renewal of that link needs no new certificate.
-    pub fn certify(
-        self,
-        holder: &dyn IdentityProvider,
-        node: PublicKey,
-        author: u32,
-    ) -> Result<Self, Error> {
-        self.certify_member(holder, node, author, 0, None)
+    pub fn certify(self, holder: &dyn IdentityProvider, node: PublicKey) -> Result<Self, Error> {
+        self.certify_member(holder, node, 0, None)
     }
     /// Signs a node certificate at an explicit identity membership sequence.
     /// Sequence zero has no predecessor; later links must name the previous
@@ -763,7 +760,6 @@ impl CredentialChain {
         mut self,
         holder: &dyn IdentityProvider,
         node: PublicKey,
-        author: u32,
         sequence: u64,
         previous: Option<rocky_core::Commitment>,
     ) -> Result<Self, Error> {
@@ -777,18 +773,6 @@ impl CredentialChain {
                 .issuer,
         )?;
         let last = self.holder(holder)?;
-        let authors = AuthorRange::new(author, author)?;
-        if !last.extended()?.authors.is_some_and(|held| {
-            held.includes(&authors)
-                && u32::try_from(sequence)
-                    .ok()
-                    .and_then(|sequence| held.first.checked_add(sequence))
-                    == Some(author)
-        }) {
-            return Err(denied(
-                "node number is outside the principal's range or signer differs from node",
-            ));
-        }
         let leaf = Capability {
             subject: node,
             kind: PrincipalKind::Node,
@@ -798,7 +782,6 @@ impl CredentialChain {
             expires: NEVER,
             extension: Extension::new(Extended {
                 node: Some(crate::PeerId::of(node)),
-                authors: Some(authors),
                 sequence: Some(sequence),
                 previous,
                 database: Some(database),
@@ -832,6 +815,7 @@ impl CredentialChain {
                 identities: BTreeSet::new(),
                 capabilities: BTreeSet::new(),
                 cut: Vec::new(),
+                mode: crate::RevocationMode::Lost,
                 recovery: None,
             },
             holder,
@@ -840,54 +824,45 @@ impl CredentialChain {
     }
     /// Delegates from the last link, which `holder` holds, to `subject`:
     /// a user or deployment link with `delegations` fewer than the
-    /// holder's, `grants` it holds, validity inside its own and `authors`
-    /// inside its range. Widening any of them is refused here and by every
+    /// holder's, `grants` it holds and validity inside its own. Widening any of them is refused here and by every
     /// verifier. An issuer grants through its `Authority` instead.
-    #[allow(clippy::too_many_arguments)]
     pub fn delegate<'s>(
         &self,
         holder: impl Into<Signer<'s>>,
-        subject: PublicKey,
-        kind: PrincipalKind,
-        grants: Vec<ResourceGrant>,
-        delegations: u8,
-        authors: Option<AuthorRange>,
-        (time, ttl, skew): (u64, u64, u64),
+        request: crate::Delegation,
     ) -> Result<Self, Error> {
-        self.delegate_with_families(
-            holder,
-            subject,
-            kind,
-            grants,
-            Vec::new(),
-            (delegations, authors),
-            (time, ttl, skew),
-            &crate::GrantFamilies::default(),
-        )
+        self.delegate_with_families(holder, request, &crate::GrantFamilies::default())
     }
     /// Delegates resolved authority, including selector grants, under an
     /// authenticated schema. Both issuance and receipt check attenuation.
-    #[allow(clippy::too_many_arguments)]
     pub fn delegate_with_families<'s>(
         &self,
         holder: impl Into<Signer<'s>>,
-        subject: PublicKey,
-        kind: PrincipalKind,
-        grants: Vec<ResourceGrant>,
-        partitions: Vec<PartitionGrant>,
-        (delegations, authors): (u8, Option<AuthorRange>),
-        (time, ttl, skew): (u64, u64, u64),
+        request: crate::Delegation,
         families: &crate::GrantFamilies,
     ) -> Result<Self, Error> {
+        let crate::Delegation {
+            subject,
+            kind,
+            grants,
+            partitions,
+            terms,
+            validity,
+        } = request;
+        let crate::DelegationTerms { delegations } = terms;
+        let crate::Validity {
+            issued_at: time,
+            lifetime,
+            clock_skew,
+        } = validity;
+        let ttl = lifetime.as_secs();
+        let skew = clock_skew.as_secs();
         let holder = holder.into();
         let parent = self.holder_key(holder.principal()?)?;
         let held = parent.extended()?;
         let parent_families = families.enabled(held.families);
         if held.issues {
             return Err(denied("an issuer grants through its authority"));
-        }
-        if authors.is_some_and(|range| !held.authors.is_some_and(|held| held.includes(&range))) {
-            return Err(denied("delegation expands authority"));
         }
         if !matches!(kind, PrincipalKind::User | PrincipalKind::Deployment)
             || delegations == 0
@@ -918,7 +893,6 @@ impl CredentialChain {
             expires: time.saturating_add(ttl).min(parent.expires),
             delegations,
             extension: Extension::new(Extended {
-                authors,
                 partitions,
                 origin: held.origin,
                 families: families.authenticated(),
@@ -932,12 +906,6 @@ impl CredentialChain {
         chain.0.push(SignedCapability::sign(link, holder)?);
         chain.links_with_families(chain.0[0].issuer, None, families)?;
         Ok(chain)
-    }
-    /// The author range of the last link: what its holder assigns.
-    pub fn authors(&self) -> Result<Option<AuthorRange>, Error> {
-        self.0
-            .last()
-            .map_or(Ok(None), |last| last.capability.authors())
     }
     /// The last link, which `holder` must hold and which may delegate.
     fn holder(&self, holder: &dyn IdentityProvider) -> Result<&Capability, Error> {

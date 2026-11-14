@@ -4,15 +4,18 @@
 //! involved. Both devices confirm the request code before the bundle is sent.
 use crate::{
     Failure,
-    enrollment::{IDENTITY, Intent, Settings, exchange, now},
+    enrollment::{Intent, Settings, exchange, now},
     groups::GroupRecord,
+    peer::{PeerReply, PeerRequest},
     secrets::Vault,
     service::ServiceError,
-    transport::{Protocol, Transport},
+    transport::Transport,
 };
 use data_encoding::HEXLOWER;
 use rocky_core::{Commitment, DomainId, MeshId};
-use rocky_credentials::{IdentityAnswer, IdentityProvider, IdentityRequest, Profile};
+use rocky_credentials::{
+    IdentityAnswer, IdentityProvider, IdentityReply, IdentityRequest, Profile,
+};
 use rocky_secure::{CredentialChain, PrivateKey, RevocationSet};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
@@ -81,12 +84,7 @@ impl std::fmt::Display for AwaitingLink {
 }
 impl std::error::Error for AwaitingLink {}
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct LinkRequest {
-    pub request: Vec<u8>,
-    pub code: Option<String>,
-}
+pub(crate) use rocky_credentials::IdentityEnrollmentRequest as LinkRequest;
 
 pub(crate) struct PendingLink {
     pub request: Vec<u8>,
@@ -240,22 +238,28 @@ impl Settings {
             .ok_or("missing link request")?;
         let request = &linking.request;
         let wire = LinkRequest {
-            request: request.to_bytes()?,
+            request: request.clone(),
             code: confirmed.as_ref().map(|pending| pending.code.clone()),
         };
         let reply = exchange(
             transport,
             &addresses,
-            Protocol::Renew,
-            &[IDENTITY, &serde_json::to_vec(&wire)?].concat(),
+            record.database.scope,
+            &PeerRequest::Identity(wire),
         )
         .await?;
         if confirmed.is_none() {
-            if reply != b"confirmation required" {
+            if !matches!(
+                reply,
+                PeerReply::Identity(IdentityReply::ConfirmationRequired)
+            ) {
                 return Err("unexpected link challenge".into());
             }
             return Err(Box::new(pending.ok_or("missing link continuation")?));
         }
+        let PeerReply::Identity(IdentityReply::Enrolled(reply)) = reply else {
+            return Err("identity reply kind".into());
+        };
         let secret = &linking.secret;
         let bundle: Bundle =
             serde_json::from_slice(&IdentityAnswer::from_bytes(&reply)?.open(request, secret)?)?;
@@ -341,12 +345,13 @@ impl Settings {
         let reply = exchange(
             transport,
             &addresses,
-            Protocol::Renew,
-            &[crate::enrollment::LINK, &serde_json::to_vec(certificate)?].concat(),
+            record.database.scope,
+            &PeerRequest::LinkEnroll(Box::new(certificate.clone())),
         )
         .await?;
-        let accepted = RevocationSet::from_bytes(&reply)
-            .map_err(|error| format!("link acknowledgment: {error}"))?;
+        let PeerReply::LinkEnroll(accepted) = reply else {
+            return Err("link reply kind".into());
+        };
         settings.learn_revocations(&accepted)?;
         let linked = settings
             .credentials

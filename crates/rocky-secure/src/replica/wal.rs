@@ -128,8 +128,13 @@ impl Passive {
         }
     }
     #[cfg(test)]
-    // Pause hooks of native-only tests.
-    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    #[cfg_attr(
+        target_family = "wasm",
+        expect(
+            dead_code,
+            reason = "Flush pause hooks are exercised only by native thread tests."
+        )
+    )]
     pub(crate) fn pause(
         &self,
         started: tokio::sync::oneshot::Sender<()>,
@@ -141,8 +146,13 @@ impl Passive {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((started, resume));
     }
     #[cfg(test)]
-    // Pause hooks of native-only tests.
-    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    #[cfg_attr(
+        target_family = "wasm",
+        expect(
+            dead_code,
+            reason = "Flush pause hooks are exercised only by native thread tests."
+        )
+    )]
     pub(crate) fn completed(&self) -> usize {
         self.completed.load(Ordering::Relaxed)
     }

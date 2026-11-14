@@ -35,7 +35,7 @@ async fn a_write_to_a_removed_table_applies_once_its_path_returns() {
     assert_eq!(frames.len(), 1);
     let frame = &frames[0];
     let op = frame.operation().unwrap();
-    let author = op.header.extensions.author.unwrap();
+    let author = op.header.extensions.author(&op.header.public_key).unwrap();
     assert_eq!(
         (op.header.seq_num, op.header.extensions.author_sequence),
         (0, 0)

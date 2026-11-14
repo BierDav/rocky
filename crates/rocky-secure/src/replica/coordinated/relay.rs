@@ -20,16 +20,7 @@ pub(in crate::replica) fn public_finality(
     Ok(None)
 }
 
-/// Only verified finality establishes the outcome of a private candidate.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum StagedCloseStatus {
-    Pending,
-    Finality(SealFinality),
-    Conflict {
-        seal: Box<SignedSeal>,
-        finality: SealFinality,
-    },
-}
+pub use rocky_credentials::StagedCloseStatus;
 
 impl<A: RowApplication> Inner<A> {
     /// Reconstructs the exported graph, without any private staged records.

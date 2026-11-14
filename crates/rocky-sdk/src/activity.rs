@@ -1,23 +1,275 @@
-//! What a node did in the background, newest last, for an application to
-//! show: sync transfers, checkpoints, enrollment, renewal, author
-//! and group key changes. Bounded and in memory only; see
-//! `docs/runtime/activity.md`.
-use serde_json::{Value, json};
+//! Bounded in-memory observations of background work.
+use rocky_credentials::PublicKey;
 use std::collections::VecDeque;
 use tokio::sync::watch;
 
-/// Events kept; an observer further behind misses the oldest.
-const KEPT: usize = 512;
-/// Events one call returns.
-const PAGE: usize = 128;
-
-#[derive(Default)]
-struct Log {
-    /// The sequence of the next event, from 1.
-    next: u64,
-    events: VecDeque<Value>,
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActivityScope {
+    pub table: Option<String>,
+    pub partition: Option<rocky_core::Commitment>,
 }
-
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActivityTransfer {
+    pub scope: ActivityScope,
+    pub pulled: u64,
+    pub pushed: u64,
+    pub bytes: u64,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub enum ActivityKind {
+    LinkAdmissionFailed {
+        error: String,
+    },
+    InvitationCreated {
+        profile: Option<crate::GrantProfile>,
+        expires: u64,
+    },
+    PeerAdded {
+        peer: PublicKey,
+    },
+    PeerRemoved {
+        peer: PublicKey,
+    },
+    Renewed {
+        revocations: crate::RevocationStatus,
+        expires: u64,
+        keys: usize,
+    },
+    IdentityRevoked {
+        identity: PublicKey,
+    },
+    NodeUnlinked {
+        identity: PublicKey,
+        node: PublicKey,
+    },
+    /// An owner reset that does not keep this node ended it.
+    NodeReset {
+        node: PublicKey,
+        reset: rocky_core::Commitment,
+    },
+    RevocationCutDroppedStages {
+        identity: Option<PublicKey>,
+        count: usize,
+        heads: Vec<crate::DroppedStage>,
+    },
+    RevocationsUnpushed {
+        error: String,
+        retry: Option<u64>,
+    },
+    RevocationSealFailed {
+        error: String,
+    },
+    LineNodeFailed {
+        error: String,
+    },
+    RegistryFailed {
+        error: String,
+    },
+    PeerAttemptFailed {
+        peer: PublicKey,
+        error: String,
+    },
+    PeerReconciliationCompleted {
+        peer: PublicKey,
+    },
+    ScopesRefused {
+        peer: PublicKey,
+        scopes: Vec<ActivityScope>,
+    },
+    ScopesWaiting {
+        peer: PublicKey,
+        scopes: Vec<ActivityScope>,
+    },
+    Synced {
+        peer: PublicKey,
+        pulled: u64,
+        pushed: u64,
+        scopes: Vec<ActivityTransfer>,
+    },
+    CheckpointImported {
+        scope: ActivityScope,
+        peer: PublicKey,
+        checkpoint: rocky_core::Commitment,
+        superseded: u64,
+    },
+    RenewalFailed {
+        error: String,
+    },
+    EpochDeliveryFailed {
+        peer: PublicKey,
+        error: String,
+    },
+    BootstrapStarted {
+        peer: PublicKey,
+        scopes: usize,
+    },
+    BootstrapFinished {
+        peer: PublicKey,
+    },
+    ClaimsGranted {
+        identity: PublicKey,
+        counters: Option<Vec<String>>,
+    },
+    ClaimsRevoked {
+        identity: PublicKey,
+        grant: rocky_core::Commitment,
+    },
+    RevocationsPushed {
+        digest: rocky_core::Commitment,
+    },
+    ClaimsRenewalFailed {
+        error: String,
+    },
+    IdentityAdmitted {
+        identity: PublicKey,
+        profile: crate::GrantProfile,
+    },
+    NodeLinked {
+        identity: PublicKey,
+        node: PublicKey,
+    },
+    MemberSealFailed {
+        error: String,
+    },
+    ReplayedAwaitingOutcomes {
+        transactions: usize,
+    },
+    RoutineSealFailed {
+        error: String,
+    },
+    LocalRecoveryFailed {
+        error: String,
+    },
+    RoleChanged {
+        partial: bool,
+    },
+    PartitionCreated {
+        target: crate::PartitionTarget,
+        id: Option<rocky_core::RowIdentity>,
+    },
+    PartitionShared {
+        target: crate::PartitionTarget,
+        recipients: usize,
+    },
+    EnvelopesDelivered {
+        peer: PublicKey,
+        handed: u64,
+        deposited: u64,
+        refused: u64,
+        received: u64,
+        receipts: u64,
+    },
+    EnvelopeRefused {
+        peer: PublicKey,
+        error: String,
+    },
+    PartitionKeyInstalled {
+        target: crate::PartitionTarget,
+    },
+    PartitionBootstrap {
+        target: crate::PartitionTarget,
+    },
+    PartitionSubscribed {
+        target: crate::PartitionTarget,
+    },
+    PartitionUnsubscribed {
+        target: crate::PartitionTarget,
+    },
+    PartitionEvicted {
+        target: crate::PartitionTarget,
+    },
+    UnlinkUnpushed {
+        error: String,
+    },
+    MembershipLinkRecorded {
+        identity: PublicKey,
+        node: rocky_credentials::PeerId,
+        sequence: u64,
+    },
+    NetworkingEnabled,
+    NetworkingDisabled,
+    LinkSignalFailed {
+        peer: PublicKey,
+        error: String,
+    },
+    LinkAttemptFailed {
+        peer: PublicKey,
+        error: String,
+    },
+    LinkClosed {
+        peer: PublicKey,
+        reason: String,
+        error: Option<String>,
+    },
+    LinkOpened {
+        peer: PublicKey,
+        reason: String,
+    },
+    BookmarkFollowFailed {
+        name: String,
+        reason: String,
+    },
+    FinalizationFailed {
+        error: String,
+    },
+    TerminalCredentialsFailed {
+        error: String,
+    },
+    SealSettlementFailed {
+        error: String,
+    },
+    FinalityFailed {
+        error: String,
+    },
+    FinalCompactionFailed {
+        error: String,
+    },
+    TipSchemaUnavailable {
+        manifest: rocky_core::Commitment,
+        peer: PublicKey,
+        error: String,
+    },
+    SchemaPublicationConflict {
+        publication: rocky_core::Commitment,
+        terminal: rocky_core::Commitment,
+    },
+    JoinRequested {
+        request: crate::JoinRequest,
+    },
+    JoinRequestDropped {
+        request: crate::JoinRequest,
+        reason: crate::JoinRequestDropReason,
+        admitted: bool,
+    },
+    JoinAdmitted {
+        request: crate::JoinRequest,
+    },
+    JoinRefused {
+        request: crate::JoinRequest,
+    },
+}
+impl ActivityKind {
+    fn same_kind(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActivityEvent {
+    pub sequence: u64,
+    pub at_epoch_millis: u64,
+    pub detail: ActivityKind,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActivityPage {
+    pub events: Vec<ActivityEvent>,
+    pub token: u64,
+}
+const KEPT: usize = 512;
+const PAGE: usize = 128;
+struct Log {
+    next: u64,
+    events: VecDeque<ActivityEvent>,
+}
 pub(crate) struct Activity(watch::Sender<Log>);
 impl Activity {
     pub fn new() -> Self {
@@ -29,124 +281,114 @@ impl Activity {
             .0,
         )
     }
-    /// Appends `kind` with `detail`'s fields, a sequence and a time.
-    pub fn record(&self, kind: &str, detail: Value) -> u64 {
-        let at = rocky_platform::time::since_epoch()
+    pub fn record(&self, detail: ActivityKind) -> u64 {
+        let at_epoch_millis = rocky_platform::time::since_epoch()
             .map(|elapsed| elapsed.as_millis() as u64)
             .unwrap_or_default();
         let mut sequence = 0;
         self.0.send_modify(|log| {
             sequence = log.next;
-            let mut event =
-                json!({"sequence": log.next.to_string(), "at": at.to_string(), "kind": kind});
-            if let (Some(event), Value::Object(fields)) = (event.as_object_mut(), detail) {
-                event.extend(fields);
-            }
+            log.events.push_back(ActivityEvent {
+                sequence,
+                at_epoch_millis,
+                detail,
+            });
             log.next += 1;
-            log.events.push_back(event);
             if log.events.len() > KEPT {
                 log.events.pop_front();
             }
         });
         sequence
     }
-    /// Records like [`Self::record`] unless the latest event of `kind` had
-    /// the same detail, as a retried pass would repeat it.
-    pub fn record_changed(&self, kind: &str, detail: Value) {
+    pub fn record_changed(&self, detail: ActivityKind) {
         let repeated = self
             .0
             .borrow()
             .events
             .iter()
             .rev()
-            .find(|event| event["kind"] == kind)
-            .is_some_and(|event| {
-                detail
-                    .as_object()
-                    .is_some_and(|fields| fields.iter().all(|(name, value)| &event[name] == value))
-            });
+            .find(|event| event.detail.same_kind(&detail))
+            .is_some_and(|event| event.detail == detail);
         if !repeated {
-            self.record(kind, detail);
+            self.record(detail);
         }
     }
-    /// The events after sequence `after`, at most a page, and the token to
-    /// pass next.
-    pub fn after(&self, after: u64) -> Value {
+    pub fn after(&self, after: u64) -> ActivityPage {
         let log = self.0.borrow();
-        let events: Vec<&Value> = log
+        let events: Vec<_> = log
             .events
             .iter()
-            .filter(|event| sequence(event) > after)
+            .filter(|event| event.sequence > after)
             .take(PAGE)
+            .cloned()
             .collect();
         let token = events
             .last()
-            .map_or(after.max(log.next - 1), |event| sequence(event));
-        json!({"events": events, "token": token.to_string()})
+            .map_or(after.max(log.next - 1), |event| event.sequence);
+        ActivityPage { events, token }
     }
-    /// Waits until an event after `after` exists, or `closing` turns true.
-    pub async fn next(&self, after: u64, closing: &mut watch::Receiver<bool>) -> Option<Value> {
+    pub async fn next(
+        &self,
+        after: u64,
+        closing: &mut watch::Receiver<bool>,
+    ) -> Option<ActivityPage> {
         let mut log = self.0.subscribe();
         loop {
             if log.borrow_and_update().next - 1 > after {
                 return Some(self.after(after));
             }
-            tokio::select! {
-                changed = log.changed() => changed.ok()?,
-                _ = closing.wait_for(|closing| *closing) => return None,
-            }
+            tokio::select! { changed = log.changed() => changed.ok()?, _ = closing.wait_for(|closing| *closing) => return None, }
         }
     }
 }
-
-fn sequence(event: &Value) -> u64 {
-    event["sequence"]
-        .as_str()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn pages_are_ordered_bounded_and_resume_after_the_token() {
         let activity = Activity::new();
-        for index in 0..(KEPT + 10) {
-            activity.record("synced", json!({"index": index}));
+        for transactions in 0..(KEPT + 10) {
+            activity.record(ActivityKind::ReplayedAwaitingOutcomes { transactions });
         }
         let first = activity.after(0);
-        let events = first["events"].as_array().unwrap();
-        assert_eq!(events.len(), PAGE);
-        // The ten oldest were dropped.
-        assert_eq!(events[0]["index"], 10);
-        assert_eq!(events[0]["kind"], "synced");
-        let token: u64 = first["token"].as_str().unwrap().parse().unwrap();
-        assert_eq!(activity.after(token)["events"][0]["index"], 10 + PAGE);
+        assert_eq!(first.events.len(), PAGE);
+        assert_eq!(
+            first.events[0].detail,
+            ActivityKind::ReplayedAwaitingOutcomes { transactions: 10 }
+        );
+        assert_eq!(
+            activity.after(first.token).events[0].detail,
+            ActivityKind::ReplayedAwaitingOutcomes {
+                transactions: 10 + PAGE
+            }
+        );
         let (_, mut closing) = watch::channel(false);
         let last = (KEPT + 10) as u64;
         let waiting = activity.next(last, &mut closing);
-        activity.record("online", json!({}));
+        activity.record(ActivityKind::NetworkingEnabled);
         let next = waiting.await.unwrap();
-        assert_eq!(next["events"][0]["kind"], "online");
-        assert_eq!(next["token"], (last + 1).to_string());
+        assert_eq!(next.events[0].detail, ActivityKind::NetworkingEnabled);
+        assert_eq!(next.token, last + 1);
     }
-
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_repeated_event_is_kept_once() {
         let activity = Activity::new();
-        activity.record_changed("bootstrap_started", json!({"peer": "a", "scopes": 2}));
-        activity.record_changed("bootstrap_started", json!({"peer": "a", "scopes": 2}));
-        activity.record_changed("bootstrap_started", json!({"peer": "a", "scopes": 1}));
-        assert_eq!(activity.after(0)["events"].as_array().unwrap().len(), 2);
+        activity.record_changed(ActivityKind::ReplayedAwaitingOutcomes { transactions: 2 });
+        activity.record_changed(ActivityKind::ReplayedAwaitingOutcomes { transactions: 2 });
+        activity.record_changed(ActivityKind::ReplayedAwaitingOutcomes { transactions: 1 });
+        assert_eq!(activity.after(0).events.len(), 2);
     }
-
-    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-    async fn an_empty_log_answers_its_current_token() {
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn an_empty_log_answers_its_current_token() {
         let activity = Activity::new();
-        assert_eq!(activity.after(0), json!({"events": [], "token": "0"}));
-        activity.record("online", json!({}));
-        assert_eq!(activity.after(5)["token"], "5");
+        assert_eq!(
+            activity.after(0),
+            ActivityPage {
+                events: Vec::new(),
+                token: 0
+            }
+        );
+        activity.record(ActivityKind::NetworkingEnabled);
+        assert_eq!(activity.after(5).token, 5);
     }
 }

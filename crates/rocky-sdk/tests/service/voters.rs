@@ -1,7 +1,7 @@
 use super::*;
 
-pub(super) fn starter() -> TransportOptions {
-    TransportOptions::Iroh {
+pub(super) fn starter() -> rocky_iroh::Options {
+    rocky_iroh::Options {
         relay: Some("disabled".into()),
         lookup: Some("disabled".into()),
         topic: false,
@@ -25,6 +25,21 @@ struct Gate {
     open: Arc<std::sync::atomic::AtomicBool>,
 }
 impl rocky_core::net::Transport for Gate {
+    fn request<'a>(
+        &'a self,
+        addresses: &'a [String],
+        scope: rocky_core::Scope,
+        request: &'a [u8],
+    ) -> rocky_core::net::BoxFuture<'a, Result<Vec<u8>, Failure>> {
+        self.inner.request(addresses, scope, request)
+    }
+    fn session<'a>(
+        &'a self,
+        addresses: &'a [String],
+        scope: rocky_core::Scope,
+    ) -> rocky_core::net::BoxFuture<'a, Result<rocky_core::net::Stream, Failure>> {
+        self.inner.session(addresses, scope)
+    }
     fn kind(&self) -> &str {
         self.inner.kind()
     }
@@ -35,13 +50,12 @@ impl rocky_core::net::Transport for Gate {
         &'a self,
         address: &'a str,
         protocol: Protocol,
+        scope: Option<rocky_core::Scope>,
     ) -> rocky_core::net::BoxFuture<'a, Result<rocky_core::net::Stream, rocky_core::net::Failure>>
     {
-        self.inner.connect(address, protocol)
+        self.inner.connect(address, protocol, scope)
     }
-    fn accept(
-        &self,
-    ) -> rocky_core::net::BoxFuture<'_, Option<(Protocol, rocky_core::net::Stream)>> {
+    fn accept(&self) -> rocky_core::net::BoxFuture<'_, Option<rocky_core::net::Incoming>> {
         Box::pin(async move {
             loop {
                 let next = self.inner.accept().await?;
@@ -51,8 +65,8 @@ impl rocky_core::net::Transport for Gate {
             }
         })
     }
-    fn listen(&self, listening: bool) {
-        self.inner.listen(listening);
+    fn listen(&self, scope: Option<rocky_core::Scope>, listening: bool) -> Result<(), Failure> {
+        self.inner.listen(scope, listening)
     }
     fn close(&self) -> rocky_core::net::BoxFuture<'_, ()> {
         self.inner.close()
@@ -88,8 +102,8 @@ pub(super) async fn gated_service(
             address: tcp.to_string(),
             key: key.public_key(),
         });
-        let address = rocky_sdk::iroh::iroh::EndpointAddr::new(
-            rocky_sdk::iroh::iroh::SecretKey::from_bytes(&secrets[index]).public(),
+        let address = rocky_iroh::iroh::EndpointAddr::new(
+            rocky_iroh::iroh::SecretKey::from_bytes(&secrets[index]).public(),
         )
         .with_ip_addr(udp);
         endpoints.push(ClientEndpoint {
@@ -133,7 +147,7 @@ pub(super) async fn gated_service(
             true,
         )
         .await?;
-        let lane = rocky_sdk::iroh::Options {
+        let lane = rocky_iroh::Options {
             relay: Some("disabled".into()),
             lookup: Some("disabled".into()),
             topic: false,

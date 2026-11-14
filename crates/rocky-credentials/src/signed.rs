@@ -1,7 +1,7 @@
 //! Signed manifests, capabilities and credential chains, and the
 //! endorsement by which the owner or an issuer signs a domain statement.
 use crate::{
-    AuthorRange, Error, Extended, Extension, IdentityProvider, LIFETIME_SKEW, MAX_CHAIN_LIFETIME,
+    Error, Extended, Extension, IdentityProvider, LIFETIME_SKEW, MAX_CHAIN_LIFETIME,
     MAX_CREDENTIAL_BYTES, MAX_CREDENTIAL_DEPTH, MAX_REVOCATION_SET_BYTES, PrivateKey, PublicKey,
     Purpose, RevocationSet, decode_bounded, denied, encode, signing_bytes,
 };
@@ -49,8 +49,8 @@ impl Certificate {
         self.capability.subject
     }
 }
-/// What every node certificate is: one author number, its own node
-/// reference, no grants, no authority and no expiry.
+/// What every node certificate is: its own node reference, whose key is
+/// its writer identity, no grants, no authority and no expiry.
 fn node_shape(capability: &Capability) -> Result<(), Error> {
     let extended = capability.extended()?;
     if capability.kind != PrincipalKind::Node
@@ -59,9 +59,6 @@ fn node_shape(capability: &Capability) -> Result<(), Error> {
         || capability.expires != crate::NEVER
         || !extended.partitions.is_empty()
         || extended.node != Some(crate::PeerId::of(capability.subject))
-        || !extended
-            .authors
-            .is_some_and(|range| range.single().is_some())
         || extended.issues
         || extended.families
         || extended.trusted.is_some()
@@ -446,17 +443,13 @@ pub struct Capability {
     pub not_before: u64,
     pub expires: u64,
     pub delegations: u8,
-    /// Author ranges, node numbers and partition selectors.
+    /// Node references, authority and partition selectors.
     pub extension: Extension,
 }
 impl Capability {
     /// The versioned authority fields of this capability.
     pub fn extended(&self) -> Result<Extended, Error> {
         self.extension.read()
-    }
-    /// The author numbers this link assigns, or a node holds.
-    pub fn authors(&self) -> Result<Option<AuthorRange>, Error> {
-        Ok(self.extended()?.authors)
     }
 }
 /// The signing label of the current capability format; others are refused.
@@ -540,13 +533,7 @@ impl SignedCapability {
         {
             return Err(denied("not a current certificate of this node"));
         }
-        let author = self
-            .capability
-            .authors()?
-            .and_then(|range| range.single())
-            .ok_or_else(|| denied("node certificate requires one author"))?;
-        self.author_binding
-            .verify_node_issuer(self.issuer, node, author)?;
+        self.author_binding.verify_node_issuer(self.issuer, node)?;
         Ok(self.issuer)
     }
 
@@ -634,16 +621,13 @@ impl VerifiedChain {
     pub fn author(
         &self,
         subject: PublicKey,
-        author: u32,
         table: Commitment,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
         self.valid_node(subject, time)?;
         let (grants, partitions) = self.grants_for(table)?;
-        if self.leaf.authors()?.and_then(|range| range.single()) != Some(author)
-            || partitions.iter().any(|grant| grant.table == table)
-        {
-            return Err(denied("author number mismatch or partition tuple required"));
+        if partitions.iter().any(|grant| grant.table == table) {
+            return Err(denied("partition tuple required"));
         }
         let grants: Vec<_> = grants
             .into_iter()
@@ -891,13 +875,12 @@ impl CredentialChain {
     }
     /// Checks every link and returns the leaf: each is signed by its
     /// parent's subject or a node it certified, the first by the publisher,
-    /// narrows it in grants, validity, depth and author range, lives at
+    /// narrows it in grants, validity and depth, lives at
     /// most `MAX_CHAIN_LIFETIME` and, with `current`, is valid at its time
-    /// and ended by no statement of its set, nor is the node that signed it.
-    /// A link with issuer authority may delegate any grant and author
-    /// range. A node certificate narrows nothing but the author range: it
-    /// never expires, holds no grants and lasts while its identity's link
-    /// does.
+    /// and ended by no statement of its set, nor is the node that signed it
+    /// by any but a reset. A link with issuer authority may delegate any grant. A node
+    /// certificate narrows nothing: it never expires, holds no grants and
+    /// lasts while its identity's link does.
     pub(crate) fn links(
         &self,
         publisher: PublicKey,
@@ -956,8 +939,10 @@ impl CredentialChain {
                     capability.not_before > time
                         || capability.expires <= time
                         || revocations.ends_at(signed, self.protected(index)?)?
+                        // A reset ends nodes, not the links they signed:
+                        // every node such a link admits is ended unless kept.
                         || signed.attestation.node_ended(
-                            (revocations, time),
+                            (revocations.unfenced(), time),
                             self.protected_signer(index)?,
                             signed.issuer,
                         )
@@ -989,7 +974,6 @@ impl CredentialChain {
                 || held > crate::MAX_GRANTS
                 || (extended.claims.is_some()
                     && (held != 0
-                        || extended.authors.is_some()
                         || extended.issues
                         || extended.trusted.is_some()
                         || capability.expires - capability.not_before
@@ -1006,7 +990,7 @@ impl CredentialChain {
                 // Issuer authority grants anything; other links narrow.
                 let authority = parent_extended.issues;
                 // An issuer can grant anything; a grant-free node certificate
-                // narrows only identity, lifetime and author numbers.
+                // narrows only identity and lifetime.
                 let compare = !authority && !node;
                 let parent_families = families.enabled(compare && parent_extended.families);
                 let child_families = families.enabled(compare && extended.families);
@@ -1031,9 +1015,9 @@ impl CredentialChain {
                     || extended.trusted.is_some()
                     || (extended.issues && !authority)
                     || (!authority
-                        && requested.iter().any(|grant| {
-                            !allowed.iter().any(|allowed| allowed.includes(grant))
-                        }))
+                        && requested
+                            .iter()
+                            .any(|grant| !allowed.iter().any(|allowed| allowed.includes(grant))))
                     || (!authority
                         && requested_partitions.iter().any(|grant| {
                             !allowed_partitions
@@ -1047,25 +1031,8 @@ impl CredentialChain {
                                 .as_ref()
                                 .is_some_and(|held| held.includes(right))
                         }))
-                    // A node under a claim link writes nothing under it.
-                    || (!authority
-                        && parent_extended.claims.is_none()
-                        && extended.authors.is_some_and(|range| {
-                            !parent_extended
-                                .authors
-                                .is_some_and(|parent| parent.includes(&range))
-                        }))
                 {
                     return Err(denied("delegation expands authority"));
-                }
-                if node && let Some(range) = parent_extended.authors {
-                    let expected = extended
-                        .sequence
-                        .and_then(|sequence| u32::try_from(sequence).ok())
-                        .and_then(|sequence| range.first.checked_add(sequence));
-                    if expected != extended.authors.and_then(|authors| authors.single()) {
-                        return Err(denied("node author differs from its membership sequence"));
-                    }
                 }
                 // An origin naming the signer, or the signer's origin, has
                 // that grant's time: a recovery judges the origin by it.
@@ -1151,19 +1118,19 @@ impl CredentialChain {
             Err(denied("invalid credential extension for its principal"))
         }
     }
-    /// Verifies a node's number and returns its concrete grants for this table.
+    /// Verifies the node `signer`, whose key is its writer identity, and
+    /// returns its concrete grants for this table.
     pub fn verify_author(
         &self,
         publisher: PublicKey,
         signer: PublicKey,
-        author: u32,
         table: Commitment,
         revocations: &RevocationSet,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
         let (grants, partitions) = self.verify_selectors(publisher, signer, revocations, time)?;
-        if self.author_number()? != author || partitions.iter().any(|grant| grant.table == table) {
-            return Err(denied("author number mismatch or partition tuple required"));
+        if partitions.iter().any(|grant| grant.table == table) {
+            return Err(denied("partition tuple required"));
         }
         let grants: Vec<_> = grants
             .into_iter()
@@ -1173,20 +1140,6 @@ impl CredentialChain {
             return Err(denied("node has no grants for this table"));
         }
         Ok(grants)
-    }
-    /// The number certified for this node. Verification checks its granting range.
-    pub fn author_number(&self) -> Result<u32, Error> {
-        let leaf = self
-            .0
-            .last()
-            .ok_or_else(|| denied("missing node credential"))?;
-        if leaf.capability.kind != PrincipalKind::Node {
-            return Err(denied("node credential required"));
-        }
-        leaf.capability
-            .authors()?
-            .and_then(|range| range.single())
-            .ok_or_else(|| denied("node requires exactly one author number"))
     }
     /// Verifies the node key bound to a credential reference.
     pub fn verify_node_alias(
@@ -1364,11 +1317,14 @@ mod tests {
             .issue(
                 user.public_key(),
                 vec![grant],
-                crate::AuthorRange::ALL,
-                (100, 1000, 0),
+                crate::Validity {
+                    issued_at: 100,
+                    lifetime: std::time::Duration::from_secs(1000),
+                    clock_skew: std::time::Duration::from_secs(0),
+                },
             )
             .unwrap();
-        let chain = crate::device_chain(root.clone(), &user, node.public_key(), 1).unwrap();
+        let chain = crate::device_chain(root.clone(), &user, node.public_key()).unwrap();
         let revocations = RevocationSet::new();
         assert!(
             chain
@@ -1378,7 +1334,7 @@ mod tests {
         let mut earlier = root;
         earlier.attestation.signature =
             publisher.sign(&signing_bytes("rocky.capability.v2", &earlier.capability).unwrap());
-        let earlier = crate::device_chain(earlier, &user, node.public_key(), 1).unwrap();
+        let earlier = crate::device_chain(earlier, &user, node.public_key()).unwrap();
         assert!(
             earlier
                 .verify(publisher.public_key(), node.public_key(), &revocations, 200)

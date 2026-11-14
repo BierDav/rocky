@@ -6,7 +6,7 @@
 use rocky_sdk::{
     Database, Engine, Network, NetworkService, Open, Opened, ServiceError, Session,
     transport::{
-        Connector, Transport,
+        Connector,
         memory::{Hub, Memory},
     },
 };
@@ -15,6 +15,7 @@ use std::{
     path::Path,
     sync::{Arc, atomic::Ordering},
 };
+use support::snapshot as snap;
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
 mod support;
@@ -38,56 +39,39 @@ fn service(error: &Failure) -> Option<&ServiceError> {
 /// One session and the scope its calls name.
 struct Client {
     session: Session,
-    scope: Value,
 }
 impl Client {
     fn new(database: &Arc<Database>) -> Result<Self, Failure> {
         Ok(Self {
             session: database.session(),
-            scope: serde_json::from_str(&database.scope())?,
         })
     }
-    fn frame(&self, request: Value) -> String {
-        json!({"version": 1, "scope": self.scope, "request": request}).to_string()
-    }
-    /// The value of a successful call, or its error object.
-    async fn call(&self, request: Value) -> Result<Value, Value> {
-        support::call(&self.scope, request, |request| self.raw_call(request)).await
-    }
-    async fn raw_call(&self, request: Value) -> Result<Value, Value> {
-        let reply = self
-            .session
-            .call(self.frame(request))
-            .await
-            .map_err(|error| json!(error.to_string()))?;
-        let reply: Value =
-            serde_json::from_str(&reply).map_err(|error| json!(error.to_string()))?;
-        if reply["status"] == "ok" {
-            Ok(reply["value"].clone())
-        } else {
-            Err(reply["error"].clone())
-        }
-    }
-    async fn ok(&self, request: Value) -> Value {
-        match self.call(request.clone()).await {
-            Ok(value) => value,
-            Err(error) => panic!("{request} failed: {error}"),
-        }
-    }
+
     async fn add(&self, handle: u8, title: &str) {
-        self.ok(json!({
-            "type": "mutate",
-            "handle": vec![handle; 32],
-            "payload": json!({"type": "create", "collection": "items", "values": {"title": title, "completed": false}}).to_string().into_bytes(),
-            "entity": null,
-            "baseline": null,
-        }))
+        snap::ok(snap::mutate(
+            &self.session,
+            vec![handle; 32],
+            snap::Action::Create {
+                table: "items".to_owned(),
+                values: vec![
+                    ("title".to_owned(), snap::field(json!(title))),
+                    ("completed".to_owned(), snap::field(json!(false))),
+                ],
+            },
+            None,
+            None,
+        ))
         .await;
     }
     async fn titles(&self) -> Vec<String> {
-        let page = self
-            .ok(json!({"type": "read", "query": {"sql": "SELECT title FROM items ORDER BY title", "values": [], "max_rows": 64}}))
-            .await;
+        let page = snap::ok(self.session.read(rocky_sdk::ReadQuery {
+            sql: "SELECT title FROM items ORDER BY title".to_owned(),
+            values: vec![],
+            max_rows: 64,
+            max_bytes: None,
+            cursor: None,
+        }))
+        .await;
         page["rows"]
             .as_array()
             .into_iter()
@@ -96,7 +80,7 @@ impl Client {
             .collect()
     }
     async fn sync(&self) -> Result<Value, Value> {
-        self.call(json!({"type": "sync"})).await
+        snap::observe(self.session.sync_once()).await
     }
 }
 
@@ -118,7 +102,7 @@ async fn status_observation_does_not_block_commits_or_shutdown() -> Result<(), F
         };
         let observations = async {
             for _ in 0..8 {
-                observer.ok(json!({"type": "status"})).await;
+                snap::ok(observer.session.status()).await;
             }
         };
         tokio::join!(writes, observations);
@@ -138,19 +122,29 @@ async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result
     } = Database::create(open(&directory, None), None)?;
     assert!(network.is_none());
     let client = Client::new(&database)?;
-    let domain = client.ok(json!({"type": "domain"})).await;
+    let domain = snap::ok(client.session.domain()).await;
     assert_eq!(domain["issuer"], json!(true));
     assert_eq!(domain["transport"], "");
     client.add(1, "Milk").await;
     assert_eq!(client.titles().await, ["Milk"]);
     // The creator issues its own credentials; nothing else works offline.
-    client.ok(json!({"type": "renew"})).await;
-    let writer = json!({"kind": "writer", "scopes": ["items"]});
-    for request in [
-        json!({"type": "sync"}),
-        json!({"type": "invitation", "profile": writer}),
+    snap::ok(async {
+        client.session.renew().await?;
+        client.session.info().await
+    })
+    .await;
+    for result in [
+        snap::observe(client.session.sync_once()).await,
+        snap::observe(
+            client
+                .session
+                .invitation_with(rocky_sdk::GrantProfile::Writer {
+                    scopes: ["items".into()].into(),
+                }),
+        )
+        .await,
     ] {
-        let error = client.call(request).await.err().ok_or("needs a network")?;
+        let error = result.err().ok_or("needs a network")?;
         assert_eq!(error["code"], "network_required", "{error}");
         assert_eq!(error["retryable"], json!(false));
     }
@@ -181,33 +175,37 @@ async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result
 async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let engine = |directory: &str, mode: Value, name| -> Result<Arc<Engine>, Failure> {
-        let mut options = mode;
-        options["directory"] = json!(root.path().join(directory));
-        let network = Network::Owned(memory(&hub, name));
-        Engine::open_with(&options.to_string(), SCHEMA, None, Some(network))
-    };
-    let call = async |engine: &Engine, request: Value| -> Result<Value, Failure> {
-        let scope: Value = serde_json::from_str(&engine.scope())?;
-        let call = json!({"version": 1, "scope": scope, "request": request});
-        Ok(serde_json::from_str(&engine.call(call.to_string()).await?)?)
-    };
-    let creator = engine("a", json!({"mode": "create"}), "a")?;
-    let invitation = call(
-        &creator,
-        json!({"type": "invitation", "profile": {"kind": "writer", "scopes": ["items"]}}),
-    )
-    .await?["value"]["uri"]
-        .as_str()
-        .ok_or("invitation")?
-        .to_owned();
-    let member = engine("b", json!({"mode": "join", "invitation": invitation}), "b")?;
-    // Finish checkpoint-first enrollment before measuring network-free reopen.
-    assert_eq!(
-        call(&member, json!({"type": "sync"})).await?["status"],
-        "ok"
-    );
-
+    let engine =
+        |directory: &str, mode: rocky_sdk::EngineMode, name| -> Result<Arc<Engine>, Failure> {
+            let options = rocky_sdk::EngineOptions {
+                directory: root.path().join(directory),
+                transport: Arc::new(rocky_iroh::Options::default()),
+                mode,
+            };
+            Engine::open_with(
+                options,
+                &rocky_sdk::Schema::parse(SCHEMA)?,
+                None,
+                Some(Network::Owned(memory(&hub, name))),
+            )
+        };
+    let creator = engine(
+        "a",
+        rocky_sdk::EngineMode::Create {
+            credential_ttl: None,
+            root: None,
+        },
+        "a",
+    )?;
+    let invitation = creator
+        .session()
+        .invitation_with(rocky_sdk::GrantProfile::Writer {
+            scopes: ["items".into()].into(),
+        })
+        .await?
+        .uri;
+    let member = engine("b", rocky_sdk::EngineMode::Join { invitation }, "b")?;
+    member.session().sync_once().await?;
     member.close().await?;
     creator.close().await?;
     let enrolled = hub.counts();
@@ -225,7 +223,7 @@ async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<()
             assert!(network.is_none());
             let client = Client::new(&database)?;
             // No network is attached, and the domain is bound to none.
-            assert_eq!(client.ok(json!({"type": "domain"})).await["transport"], "");
+            assert_eq!(snap::ok(client.session.domain()).await["transport"], "");
             client
                 .add(handle + 10 * round, &format!("{handle}.{round}"))
                 .await;
@@ -266,16 +264,21 @@ async fn sessions_share_a_database_and_close_independently() -> Result<(), Failu
     let root = tempfile::tempdir()?;
     let Opened { database, .. } = Database::create(open(root.path(), None), None)?;
     let (first, second) = (Client::new(&database)?, Client::new(&database)?);
-    let query =
-        json!({"sql": "SELECT title FROM items ORDER BY title", "values": [], "max_rows": 8});
+    let query = rocky_sdk::ReadQuery {
+        sql: "SELECT title FROM items ORDER BY title".to_owned(),
+        values: vec![],
+        max_rows: 8,
+        max_bytes: None,
+        cursor: None,
+    };
     let subscribe = async |client: &Client| {
-        let token = client
-            .ok(json!({"type": "subscribe", "query": query}))
-            .await["subscription"]
+        let token = snap::ok(async {
+            let id = client.session.subscribe((query).clone()).await?;
+            Ok(json!({"subscription":id.to_string()}))
+        })
+        .await["subscription"]
             .clone();
-        client
-            .ok(json!({"type": "next", "subscription": token}))
-            .await;
+        snap::ok(client.session.next(snap::integer(&(token)) as u64)).await;
         token
     };
     let (first_token, second_token) = (subscribe(&first).await, subscribe(&second).await);
@@ -286,9 +289,7 @@ async fn sessions_share_a_database_and_close_independently() -> Result<(), Failu
         let first = first.clone();
         let token = first_token.clone();
         tokio::spawn(async move {
-            first
-                .call(json!({"type": "next", "subscription": token}))
-                .await
+            snap::observe(first.session.next(snap::integer(&(token)) as u64)).await
         })
     };
     tokio::task::yield_now().await;
@@ -299,18 +300,11 @@ async fn sessions_share_a_database_and_close_independently() -> Result<(), Failu
     first.session.close().await;
     let ended = waiting.await?.err().ok_or("the wait ends")?;
     assert_eq!(ended["code"], "closed", "{ended}");
-    let error = first
-        .session
-        .call(first.frame(json!({"type": "domain"})))
-        .await
-        .err()
-        .ok_or("closed session")?;
+    let error = first.session.domain().await.err().ok_or("closed session")?;
     assert_eq!(service(&error), Some(&ServiceError::Closed("session")));
 
     second.add(1, "Milk").await;
-    let page = second
-        .ok(json!({"type": "next", "subscription": second_token}))
-        .await;
+    let page = snap::ok(second.session.next(snap::integer(&(second_token)) as u64)).await;
     assert_eq!(page["rows"][0][0]["value"], "Milk");
     let third = Client::new(&database)?;
     assert_eq!(third.titles().await, ["Milk"]);
@@ -319,7 +313,7 @@ async fn sessions_share_a_database_and_close_independently() -> Result<(), Failu
     database.close().await?;
     let error = second
         .session
-        .call(second.frame(json!({"type": "domain"})))
+        .domain()
         .await
         .err()
         .ok_or("closed database")?;
@@ -333,28 +327,32 @@ async fn borrowed_networks_outlive_their_service_and_owned_ones_are_released() -
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     // The application starts and keeps these two.
-    let listening: Arc<dyn Transport> = memory(&hub, "a").start(true, [0; 32]).await?;
-    let dialing: Arc<dyn Transport> = memory(&hub, "b").start(false, [0; 32]).await?;
+    let listening = memory(&hub, "a").start(true, [0; 32]).await?;
+    let dialing = memory(&hub, "b").start(false, [0; 32]).await?;
 
     let Opened {
         database: creator, ..
     } = Database::create(open(&root.path().join("a"), None), None)?;
     let creator_client = Client::new(&creator)?;
-    let serving = creator.attach(Network::Borrowed(listening.clone())).await?;
+    let serving = creator.attach(Network::Attached(listening.clone())).await?;
     let error = creator
-        .attach(Network::Borrowed(listening.clone()))
+        .attach(Network::Attached(listening.clone()))
         .await
         .err()
         .ok_or("one network at a time")?;
     assert_eq!(service(&error), Some(&ServiceError::NetworkAttached));
     // The status names the attached network's kind.
     assert_eq!(
-        creator_client.ok(json!({"type": "domain"})).await["transport"],
+        snap::ok(creator_client.session.domain()).await["transport"],
         "memory"
     );
-    let invitation = creator_client
-        .ok(json!({"type": "invitation", "profile": {"kind": "writer", "scopes": ["items"]}}))
-        .await["uri"]
+    let invitation = snap::ok(creator_client.session.invite(
+        Some(rocky_sdk::GrantProfile::Writer {
+            scopes: ["items".to_owned()].into_iter().collect(),
+        }),
+        None,
+    ))
+    .await["uri"]
         .as_str()
         .ok_or("invitation")?
         .to_owned();
@@ -365,7 +363,7 @@ async fn borrowed_networks_outlive_their_service_and_owned_ones_are_released() -
         network,
         ..
     } = Database::join(
-        open(&member_directory, Some(Network::Borrowed(dialing.clone()))),
+        open(&member_directory, Some(Network::Attached(dialing.clone()))),
         &invitation,
     )?;
     let syncing: NetworkService = network.ok_or("the joining network stays attached")?;
@@ -388,8 +386,8 @@ async fn borrowed_networks_outlive_their_service_and_owned_ones_are_released() -
     creator_client.add(3, "Jam").await;
 
     // The same transports serve again once attached again.
-    let serving = creator.attach(Network::Borrowed(listening.clone())).await?;
-    let syncing = member.attach(Network::Borrowed(dialing.clone())).await?;
+    let serving = creator.attach(Network::Attached(listening.clone())).await?;
+    let syncing = member.attach(Network::Attached(dialing.clone())).await?;
     member_client.sync().await.map_err(|e| e.to_string())?;
     assert_eq!(member_client.titles().await, ["Eggs", "Jam", "Milk"]);
     assert_eq!(creator_client.titles().await, member_client.titles().await);
@@ -438,9 +436,13 @@ async fn a_closing_service_cancels_work_that_outlasts_its_drain() -> Result<(), 
         None,
     )?;
     let creator_client = Client::new(&creator)?;
-    let invitation = creator_client
-        .ok(json!({"type": "invitation", "profile": {"kind": "writer", "scopes": ["items"]}}))
-        .await["uri"]
+    let invitation = snap::ok(creator_client.session.invite(
+        Some(rocky_sdk::GrantProfile::Writer {
+            scopes: ["items".to_owned()].into_iter().collect(),
+        }),
+        None,
+    ))
+    .await["uri"]
         .as_str()
         .ok_or("invitation")?
         .to_owned();

@@ -3,6 +3,7 @@
 //! `docs/runtime/sdk-enrollment.md` and `docs/runtime/sdk-transports.md`.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
+use common::identity::snapshot as snap;
 use common::{Device, Failure, introduce};
 use data_encoding::BASE64URL_NOPAD;
 use rocky_sdk::{
@@ -17,10 +18,8 @@ mod common;
 fn memory(hub: &Arc<Hub>, name: &str) -> Network {
     Network::Owned(hub.connector(name))
 }
-#[cfg(feature = "iroh")]
 fn iroh() -> Network {
-    use rocky_sdk::transport::TransportOptions;
-    Network::Owned(Arc::new(TransportOptions::isolated_iroh("127.0.0.1:0")))
+    Network::Owned(Arc::new(rocky_iroh::Options::isolated("127.0.0.1:0")))
 }
 /// A creator and members named `b`, `c`, … enrolled over `hub`.
 async fn enroll(root: &Path, hub: &Arc<Hub>, members: &[&str]) -> Result<Vec<Device>, Failure> {
@@ -71,8 +70,12 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
             .iter()
             .any(|attempt| attempt["outcome"] == "completed")
     );
-    let creator = c.ok(json!({"type": "session"})).await;
-    let creators: Vec<Value> = c.ok(json!({"type": "peers"})).await["peers"]
+    let creator = snap::ok(c.session.info()).await;
+    let creators: Vec<Value> = snap::ok(async {
+        let network = c.session.network().await?;
+        Ok(json!({"peers":network.peers,"discovery":network.discovery}))
+    })
+    .await["peers"]
         .as_array()
         .into_iter()
         .flatten()
@@ -88,15 +91,14 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
             .any(|attempt| attempt["outcome"] == "failed")
     );
     assert_ne!(creators[0]["node"], creator["node"]);
-    let network = c.ok(json!({"type": "network"})).await;
+    let network = snap::ok(c.session.network()).await;
     assert_eq!(network["attachment"], "attached");
     assert_eq!(network["kind"], "memory");
     assert_eq!(network["inbound"]["limit"], 32);
 
     assert_eq!(c.peer(&b.node().await).await["is_configured"], true);
     // A removed contact is no longer dialed; it is still served.
-    b.ok(json!({"type": "peer_remove", "node": c.node().await}))
-        .await;
+    snap::ok(b.session.remove_peer(&(snap::text(&(c.node().await))))).await;
     b.add(4, "Tea").await;
     assert!(common::exchange_failed(&b.sync().await));
     assert_eq!(c.titles().await, ["Eggs", "Milk"]);
@@ -106,21 +108,24 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
     // member then lists no known renewal candidates.
     let creator_node = creators[0]["node"].clone();
     assert!(
-        !b.ok(json!({"type": "peers"})).await["renewal_routes"]
-            .as_array()
-            .ok_or("routes")?
+        !b.session
+            .status()
+            .await?
+            .authority
+            .renewal_routes
             .is_empty()
     );
-    b.ok(json!({"type": "peer_remove", "node": creator_node}))
-        .await;
+    snap::ok(b.session.remove_peer(&(snap::text(&(creator_node))))).await;
     assert!(
-        b.ok(json!({"type": "peers"})).await["renewal_routes"]
-            .as_array()
-            .ok_or("routes")?
+        b.session
+            .status()
+            .await?
+            .authority
+            .renewal_routes
             .is_empty()
     );
     assert!(
-        b.ok(json!({"type": "status"})).await["authority"]["renewal_routes"]
+        snap::ok(b.session.status()).await["authority"]["renewal_routes"]
             .as_array()
             .expect("routes")
             .is_empty()
@@ -152,13 +157,15 @@ async fn edits_relayed_in_any_order_and_repeated_converge() -> Result<(), Failur
     c.set(3, &milk, "completed", json!(true)).await;
     d.add(4, "Eggs").await;
     let eggs = c.add(5, "Jam").await;
-    c.ok(json!({
-        "type": "mutate",
-        "handle": vec![6u8; 32],
-        "payload": json!({"type": "delete", "collection": "items"}).to_string().into_bytes(),
-        "entity": {"id": eggs},
-        "baseline": null,
-    }))
+    snap::ok(snap::mutate(
+        &c.session,
+        vec![6u8; 32],
+        snap::Action::Delete {
+            table: "items".to_owned(),
+        },
+        Some(snap::text(&(eggs))),
+        None,
+    ))
     .await;
     // The later edit reaches a device before the earlier one, and again.
     for order in [[d, b, c], [c, d, b], [b, b, d], [c, c, c], [d, b, c]] {
@@ -187,15 +194,18 @@ async fn a_revoked_peer_stays_denied_without_the_creator() -> Result<(), Failure
     a.add_peer(&c.contact().await)
         .await
         .map_err(|e| e.to_string())?;
-    a.ok(json!({"type": "revoke", "identity": c.identity().await}))
-        .await;
+    snap::ok(
+        a.session
+            .revoke_identity(&(snap::text(&(c.identity().await)))),
+    )
+    .await;
     // Revoking forgets the device's contact and refuses it again.
     assert_eq!(a.peer(&c.node().await).await, Value::Null);
     assert!(a.add_peer(&c.contact().await).await.is_err());
     // The other member learns the revocation from the creator.
     b.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(
-        b.ok(json!({"type": "session"})).await["revocations"]["statements"],
+        snap::ok(b.session.info()).await["revocations"]["statements"],
         1
     );
     a.close().await;
@@ -212,7 +222,6 @@ async fn a_revoked_peer_stays_denied_without_the_creator() -> Result<(), Failure
     Ok(())
 }
 
-#[cfg(feature = "iroh")]
 #[tokio::test]
 async fn a_domain_survives_a_change_of_routes_and_transport_kind() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -224,7 +233,7 @@ async fn a_domain_survives_a_change_of_routes_and_transport_kind() -> Result<(),
     a.add(1, "Milk").await;
     b.sync().await.map_err(|error| error.to_string())?;
     let identity = async |device: &Device| {
-        let session = device.ok(json!({"type": "session"})).await;
+        let session = snap::ok(device.session.info()).await;
         (session["node"].clone(), session["principal"].clone())
     };
     let (before_a, before_b) = (identity(a).await, identity(b).await);
@@ -241,7 +250,7 @@ async fn a_domain_survives_a_change_of_routes_and_transport_kind() -> Result<(),
         (identity(&a).await, identity(&b).await),
         (before_a, before_b)
     );
-    assert_eq!(a.ok(json!({"type": "domain"})).await["transport"], "iroh");
+    assert_eq!(snap::ok(a.session.domain()).await["transport"], "iroh");
     assert_eq!(b.titles().await, ["Milk"]);
     b.add(2, "Eggs").await;
     // The member only knows the creator's old route.
@@ -338,8 +347,8 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
         Ok(snapshot)
     }
     let mut errors = Vec::new();
-    assert_eq!(serde_json::from_slice::<Value>(&original)?["version"], 32);
-    for version in (0..32).chain([33, u32::MAX]) {
+    assert_eq!(serde_json::from_slice::<Value>(&original)?["version"], 33);
+    for version in (0..33).chain([34, u32::MAX]) {
         let mut identity: Value = serde_json::from_slice(&original)?;
         identity["version"] = json!(version);
         let bytes = serde_json::to_vec(&identity)?;
@@ -390,10 +399,10 @@ async fn a_started_connector_is_a_borrowed_network() -> Result<(), Failure> {
             Device::open(&root.path().join("a"), None)?
         };
         a.database
-            .attach(Network::Borrowed(transport.clone()))
+            .attach(Network::Attached(transport.clone()))
             .await?;
         assert_eq!(
-            a.ok(json!({"type": "network"})).await["ownership"],
+            snap::ok(a.session.network()).await["ownership"],
             json!("application")
         );
         a.close().await;

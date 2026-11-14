@@ -117,7 +117,7 @@ pub(super) async fn staged_tags(n: usize, labels: usize) -> Staged {
         .unwrap();
     let writer = PrivateKey::new();
     let credentials = l.certified(3, l.publisher(), &writer);
-    let author = credentials.author_number().unwrap();
+    let author = crate::writer::writer(&writer.public_key());
     replica
         .register_line_node(LineNode {
             key: writer,
@@ -144,7 +144,7 @@ pub(super) async fn staged_tags(n: usize, labels: usize) -> Staged {
             vec![
                 SqlValue::Text(format!("k{i}")),
                 SqlValue::Text(format!("item{i}")),
-                SqlValue::Integer(RowIdentity::new(author, (i + 1) as u32).unwrap().integer()),
+                RowIdentity::new(author, (i + 1) as u64).unwrap().sql(),
             ],
         )
         .await
@@ -155,11 +155,7 @@ pub(super) async fn staged_tags(n: usize, labels: usize) -> Staged {
             "INSERT INTO tags(label,key,id) VALUES(?,'tag',?)",
             vec![
                 SqlValue::Text(format!("t{label}")),
-                SqlValue::Integer(
-                    RowIdentity::new(author, (label + 1) as u32)
-                        .unwrap()
-                        .integer(),
-                ),
+                RowIdentity::new(author, (label + 1) as u64).unwrap().sql(),
             ],
         )
         .await

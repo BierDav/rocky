@@ -29,9 +29,6 @@ async fn resigned_clock_scope_signer_and_unconnected_backlinks_never_complete() 
     let mut source = original.clone();
     source.extensions.tip = rocky_core::TipId([99; 32]);
     source.sign(&f.key);
-    let mut author_number = original.clone();
-    author_number.extensions.author = Some(original.extensions.author.unwrap() + 1);
-    author_number.sign(&f.key);
     let mut bad_signature = original.clone();
     bad_signature.sign(&current_line);
     let mut partition = original.clone();
@@ -43,7 +40,6 @@ async fn resigned_clock_scope_signer_and_unconnected_backlinks_never_complete() 
         (clock, true),
         (source, true),
         (partition, true),
-        (author_number, true),
         (bad_signature, true),
         (fork, false),
         (other_scope, true),

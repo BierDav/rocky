@@ -274,7 +274,9 @@ async fn a_complete_signed_header_placement_prefix_is_not_retained_payload() {
                 "INSERT OR REPLACE INTO secure_placements VALUES(?,?,?,?,?,?)",
                 bindings(vec![
                     SqlValue::Blob(crate::encode(&scope.domain).unwrap()),
-                    SqlValue::Integer(header.extensions.author.unwrap().into()),
+                    crate::writer::writer_value(
+                        header.extensions.author(&header.public_key).unwrap(),
+                    ),
                     SqlValue::Integer(header.extensions.author_sequence as i64),
                     SqlValue::Blob(crate::encode(&scope).unwrap()),
                     SqlValue::Blob(frame.id().unwrap().as_bytes().to_vec()),

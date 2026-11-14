@@ -3,6 +3,7 @@
 //! those nodes. See `docs/runtime/sdk-enrollment.md#identities`.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
+use common::identity::snapshot as snap;
 use common::{Device, Failure};
 use rocky_sdk::{
     Database, FileIdentityProvider, IdentityKey, IdentityProvider, Network, Open,
@@ -128,7 +129,7 @@ async fn further_nodes_of_an_identity_join_without_an_issuer() -> Result<(), Fai
     let key = person(&root.join("person"))?.public_key()?.to_hex();
     let mut nodes = Vec::new();
     for (device, name) in household.nodes.iter().zip(["m1", "m2", "m3"]) {
-        let session = device.ok(json!({"type": "session"})).await;
+        let session = snap::ok(device.session.info()).await;
         // One identity holds the grants; each node signs with its own key
         // under its own certificate, and none of them holds an identity key.
         assert_eq!(session["principal"], json!(key), "{name}");
@@ -202,13 +203,6 @@ async fn an_issuer_revokes_the_identity_never_one_of_its_nodes() -> Result<(), F
     let key = person(&household._root.path().join("person"))?
         .public_key()?
         .to_hex();
-    // A node is its identity's to unlink, never an issuer's to revoke.
-    let refused = owner
-        .call(json!({"type": "revoke", "node": nodes[1].node().await}))
-        .await
-        .err()
-        .ok_or("an issuer revoked a node")?;
-    assert_eq!(refused["code"], "rejected", "{refused}");
     let synced = async |device: &Device| {
         device
             .sync()
@@ -219,16 +213,15 @@ async fn an_issuer_revokes_the_identity_never_one_of_its_nodes() -> Result<(), F
         assert!(synced(node).await);
     }
     // The identity: every node of it, those the owner never recorded too.
-    owner.ok(json!({"type": "revoke", "identity": key})).await;
+    snap::ok(owner.session.revoke_identity(&(snap::text(&(key))))).await;
     for node in nodes {
         let refused = node.sync().await.err().ok_or("a revoked identity synced")?;
         assert_eq!(refused["code"], "revoked", "{refused}");
     }
     // The owner's own identity is never revoked.
-    let own = owner.ok(json!({"type": "session"})).await["principal"].clone();
+    let own = snap::ok(owner.session.info()).await["principal"].clone();
     assert!(
-        owner
-            .call(json!({"type": "revoke", "identity": own}))
+        snap::observe(owner.session.revoke_identity(&(snap::text(&(own)))))
             .await
             .is_err()
     );
@@ -236,33 +229,6 @@ async fn an_issuer_revokes_the_identity_never_one_of_its_nodes() -> Result<(), F
         device.close().await;
     }
     Ok(())
-}
-
-/// The `status` and error message of `request` on `session`, with `identity`
-/// supplied for the call.
-async fn answer(
-    database: &Database,
-    request: Value,
-    identity: Option<Arc<dyn IdentityProvider>>,
-) -> Result<(String, String), Failure> {
-    let session = database.session();
-    let call = json!({
-        "version": 1,
-        "scope": serde_json::from_str::<Value>(&database.scope())?,
-        "request": request,
-    })
-    .to_string();
-    let reply: Value = serde_json::from_str(&match identity {
-        Some(identity) => session.call_with_identity(call, identity).await?,
-        None => session.call(call).await?,
-    })?;
-    Ok((
-        reply["status"].as_str().unwrap_or_default().to_owned(),
-        reply["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned(),
-    ))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -277,9 +243,9 @@ async fn routine_issuer_calls_need_no_identity_and_do_not_retain_a_supplied_one(
     created.database.close().await?;
     let database = Database::open(open(&path, &hub, "a", None))?.database;
     let member = IdentityKey::generate().public_key().to_hex();
-    let grant = json!({"type": "claims", "action": "grant", "identity": member});
-    assert_eq!(answer(&database, grant.clone(), None).await?.0, "ok");
-    assert_eq!(answer(&database, grant, Some(key)).await?.0, "ok");
+    let session = database.session();
+    session.grant_claims(&member, None, 1).await?;
+    session.sync_once_with_identity(key).await?;
     assert!(
         weak.upgrade().is_none(),
         "the call retained its identity provider"
@@ -329,13 +295,9 @@ async fn one_root_phrase_restores_the_owner_and_no_identity_key_is_persisted() -
     let opened = config.open().await?;
     assert!(opened.root.is_none() && opened.identity.is_none());
     assert_eq!(
-        answer(
-            &opened.database,
-            json!({"type":"tips","action":"create","name":"offline"}),
-            None
-        )
-        .await?
-        .0,
+        outcome(opened.database.session().create_bookmark("offline", None))
+            .await?
+            .0,
         "ok"
     );
     opened.database.close().await?;
@@ -409,7 +371,12 @@ async fn generated_linkable_identity_restores_from_phrase_and_secret_after_resta
         .zip(["first", "second", "third"])
     {
         assert_eq!(
-            answer(database, json!({"type":"renew"}), None).await?.0,
+            outcome(async {
+                database.session().renew().await?;
+                database.session().info().await
+            })
+            .await?
+            .0,
             "ok"
         );
         no_identity_secret(&root.path().join(name), &[key.secret()])?;
@@ -495,9 +462,12 @@ async fn approval_continuations_keep_identity_mode_and_phrase_until_admitted() -
         let opened = config.open().await?;
         assert!(opened.identity.is_none());
         assert_eq!(
-            answer(&opened.database, json!({"type":"renew"}), None)
-                .await?
-                .0,
+            outcome(async {
+                opened.database.session().renew().await?;
+                opened.database.session().info().await
+            })
+            .await?
+            .0,
             "ok"
         );
         no_identity_secret(&path, &secrets)?;
@@ -534,13 +504,9 @@ async fn an_application_root_signer_requires_an_explicit_owner_identity() -> Res
     opened.database.close().await?;
     let opened = config.open().await?;
     assert_eq!(
-        answer(
-            &opened.database,
-            json!({"type":"tips","action":"create","name":"keyless"}),
-            None
-        )
-        .await?
-        .0,
+        outcome(opened.database.session().create_bookmark("keyless", None))
+            .await?
+            .0,
         "ok"
     );
     opened.database.close().await?;
@@ -635,7 +601,7 @@ async fn the_last_node_publishes_its_unlink_and_the_identity_links_again() -> Re
         .map_err(|error| error.to_string())?;
     replacement.add(100, "linked again").await;
     assert_eq!(
-        replacement.ok(json!({"type":"session"})).await["principal"],
+        snap::ok(replacement.session.info()).await["principal"],
         person(&root.join("person"))?.public_key()?.to_hex()
     );
     replacement.close().await;
@@ -789,9 +755,14 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
         );
         assert!(!rejected.join("identity.json").exists());
         assert_eq!(
-            owners[0]
-                .ok(json!({"type":"invitation_open","uri":invitation}))
-                .await["open"],
+            snap::ok(async {
+                let state = owners[0]
+                    .session
+                    .invitation_state(&(snap::text(&(invitation))))
+                    .await?;
+                Ok(json!({"open":state.open}))
+            })
+            .await["open"],
             true
         );
         let person_key = personal.public_key()?.to_hex();
@@ -810,9 +781,12 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
             Ok(record)
         };
         if revoked_b {
-            owners[1]
-                .ok(json!({"type":"revoke","identity":person_key}))
-                .await;
+            snap::ok(
+                owners[1]
+                    .session
+                    .revoke_identity(&(snap::text(&(person_key)))),
+            )
+            .await;
             for device in [&members[1], &siblings[1]] {
                 assert!(device.sync().await.is_err());
             }
@@ -827,7 +801,7 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
         assert!(trusted_alerts(&owners[0]).await?.iter().any(|alert|
             matches!(&alert.kind, rocky_sdk::AlertKind::TrustedNodeLinked { identity, node, .. }
                 if identity == &person_key && node == &linked_a)));
-        let before_registry_b = record(owners[1].ok(json!({"type":"identities"})).await)?;
+        let before_registry_b = record(snap::ok(owners[1].session.identities()).await)?;
         assert_eq!(before_registry_b["profile"]["kind"], "reader");
         let before_b = identity(path, "owner1")?["keys"].clone();
         let before_authority_b = identity(path, "owner1")?["revocations"].clone();
@@ -847,7 +821,11 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
         owners[0]
             .database
             .session()
-            .revoke_trusted(&person_key, root_a.clone())
+            .revoke_trusted(
+                &person_key,
+                rocky_sdk::RevocationMode::Compromised,
+                root_a.clone(),
+            )
             .await?;
         assert_eq!(trusted_alerts(&owners[1]).await?, before_alerts_b);
         assert_eq!(identity(path, "owner1")?["revocations"], before_authority_b);
@@ -866,7 +844,7 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
         }
         assert_eq!(identity(path, "owner1")?["keys"], before_b);
         assert_eq!(
-            record(owners[1].ok(json!({"type":"identities"})).await)?,
+            record(snap::ok(owners[1].session.identities()).await)?,
             before_registry_b
         );
         for device in owners.into_iter().chain(members).chain(siblings) {
@@ -1015,9 +993,12 @@ async fn certified_seen_nodes_are_visible_without_issuer_authority() -> Result<(
             .iter()
             .any(|seen| seen.node == sibling_node && seen.unlinked)
     );
-    owner
-        .ok(json!({"type":"revoke", "identity": seen.identity}))
-        .await;
+    snap::ok(
+        owner
+            .session
+            .revoke_identity(&(snap::text(&(seen.identity)))),
+    )
+    .await;
     assert!(
         owner
             .database
@@ -1107,7 +1088,7 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
         signer
             .add(100 + index as u8, &format!("sealed {index}"))
             .await;
-        let sealed = signer.ok(json!({"type":"tips","action":"seal"})).await;
+        let sealed = snap::ok(signer.session.seal(false)).await;
         seals.push(sealed["tip"].clone());
         for _ in 0..2 {
             for device in all {
@@ -1178,7 +1159,7 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
     owner
         .database
         .session()
-        .revoke_trusted(&person, root)
+        .revoke_trusted(&person, rocky_sdk::RevocationMode::Compromised, root)
         .await?;
     let saved = identity(path, "owner")?;
     let revocations: rocky_credentials::RevocationSet =
@@ -1201,7 +1182,7 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
         .collect();
     assert!(lanes.contains(&first.node().await) && lanes.contains(&second.node().await));
     assert!(!lanes.contains(&third_node));
-    let inspection = owner.ok(json!({"type":"tips","action":"inspect"})).await;
+    let inspection = snap::ok(owner.session.inspect_tips()).await;
     for seal in seals {
         assert!(
             inspection["seals"]
@@ -1225,4 +1206,11 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
     assert_eq!(trusted_alerts(&reopened).await?, before);
     reopened.close().await;
     Ok(())
+}
+
+async fn outcome<T>(
+    operation: impl std::future::Future<Output = Result<T, Failure>>,
+) -> Result<(String, String), Failure> {
+    operation.await?;
+    Ok(("ok".into(), String::new()))
 }

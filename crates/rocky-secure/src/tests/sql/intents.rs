@@ -115,7 +115,7 @@ async fn replayed_writes_commit_as_intents() {
     assert_eq!(
         next.unwrap().base,
         vec![rocky_core::replay::BaseMark {
-            author: first.extensions.author.unwrap(),
+            author: first.extensions.author(&first.public_key).unwrap(),
             sequence: first.extensions.author_sequence,
         }]
     );
@@ -447,11 +447,11 @@ fn transaction(t: &Typed, frame: &EncryptedFrame) -> rocky_core::Commitment {
     .transaction
 }
 
-fn replay_stamp(frame: &EncryptedFrame) -> (u64, u32, u64) {
+fn replay_stamp(frame: &EncryptedFrame) -> (u64, rocky_core::WriterId, u64) {
     let header = &frame.operation_ref().unwrap().header;
     (
         header.timestamp,
-        header.extensions.author.unwrap(),
+        header.extensions.author(&header.public_key).unwrap(),
         header.extensions.author_sequence,
     )
 }
@@ -887,10 +887,9 @@ async fn replayed_inserts_take_their_authors_own_identities() {
     }
     // An id of another author's number is refused at commit, and a
     // replica drops it when the author skips that check.
-    let alices = rocky_core::RowIdentity::next(crate::tests::node_number(a.public_key()), 100)
-        .unwrap()
-        .integer();
-    let forged = format!("INSERT INTO salaries(key,amount,id) VALUES('cy',1,{alices})");
+    let alices =
+        rocky_core::RowIdentity::next(crate::writer::writer(&a.public_key()), 100).unwrap();
+    let forged = format!("INSERT INTO salaries(key,amount,id) VALUES('cy',1,X'{alices}')");
     assert!(matches!(
         session.run(&forged, vec![]).await,
         Err(Error::Rejected(_))

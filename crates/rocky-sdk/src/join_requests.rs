@@ -3,10 +3,9 @@
 //! refuses them. They belong to the current invitation and end with it.
 use crate::{Failure, registry::MAX_LABEL};
 use data_encoding::HEXLOWER;
-use rocky_credentials::{AuthorRange, PairRequest, Profile};
+use rocky_credentials::{PairRequest, Profile};
 use rocky_secure::PublicKey;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 
 /// Unanswered requests one issuer node holds; the oldest is evicted past it.
 pub const MAX_PENDING: usize = 32;
@@ -53,8 +52,6 @@ pub enum State {
     Admitted {
         profile: Profile,
         label: Option<Vec<u8>>,
-        /// Carved at the first answer and kept for the retries after it.
-        authors: Option<AuthorRange>,
     },
     Refused,
 }
@@ -68,15 +65,6 @@ pub enum Dropped {
     /// A newer invitation replaced its own.
     Replaced,
 }
-impl Dropped {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Evicted => "evicted",
-            Self::Expired => "expired",
-            Self::Replaced => "replaced",
-        }
-    }
-}
 /// What the issuer's application learns from a change of its requests.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Note {
@@ -87,34 +75,37 @@ pub enum Note {
     Enrolled { node: PublicKey, profile: Profile },
 }
 impl Note {
-    /// The activity event that surfaces it.
-    pub fn event(&self, expires: u64) -> Option<(&'static str, Value)> {
+    pub fn event(&self, expires: u64) -> Option<crate::ActivityKind> {
         Some(match self {
-            Self::Requested(request) => ("join_requested", request.view(expires)),
-            Self::Dropped(request, why) => {
-                let mut view = request.view(expires);
-                view["reason"] = why.name().into();
-                view["admitted"] = matches!(request.state, State::Admitted { .. }).into();
-                ("join_request_dropped", view)
-            }
-            Self::Admitted(request) => ("join_admitted", request.view(expires)),
-            Self::Refused(request) => ("join_refused", request.view(expires)),
+            Self::Requested(request) => crate::ActivityKind::JoinRequested {
+                request: request.view(expires),
+            },
+            Self::Dropped(request, reason) => crate::ActivityKind::JoinRequestDropped {
+                request: request.view(expires),
+                reason: *reason,
+                admitted: matches!(request.state, State::Admitted { .. }),
+            },
+            Self::Admitted(request) => crate::ActivityKind::JoinAdmitted {
+                request: request.view(expires),
+            },
+            Self::Refused(request) => crate::ActivityKind::JoinRefused {
+                request: request.view(expires),
+            },
             Self::Enrolled { .. } => return None,
         })
     }
 }
 impl Request {
-    /// The request as `discovered` lists it; `expires` is its invitation's.
-    pub fn view(&self, expires: u64) -> Value {
-        json!({
-            "node": self.node.to_hex(),
-            "nonce": self.nonce,
-            "invitation": self.invitation,
-            "name": self.name,
-            "received": self.received.to_string(),
-            "expires": expires.to_string(),
-            "code": self.code,
-        })
+    pub fn view(&self, expires: u64) -> crate::JoinRequest {
+        crate::JoinRequest {
+            node: self.node.to_hex(),
+            nonce: self.nonce.clone(),
+            invitation: self.invitation.clone(),
+            name: self.name.clone(),
+            received_epoch_seconds: self.received,
+            expires_epoch_seconds: expires,
+            code: self.code.clone(),
+        }
     }
 }
 
@@ -205,11 +196,7 @@ impl Requests {
         if request.code != code {
             return Err("the admission code differs from the requesting device's".into());
         }
-        request.state = State::Admitted {
-            profile,
-            label,
-            authors: None,
-        };
+        request.state = State::Admitted { profile, label };
         let admitted = request.clone();
         Ok(self.answered(Note::Admitted(admitted)))
     }

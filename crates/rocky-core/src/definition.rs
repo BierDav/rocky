@@ -309,10 +309,10 @@ impl TableDefinition {
                 class,
             });
         }
-        parts.push(format!("{} INTEGER NOT NULL", quoted("id")));
+        parts.push(format!("{} BLOB NOT NULL", quoted("id")));
         columns.push(LogicalColumn {
             sql_name: "id".into(),
-            affinity: Affinity::Integer,
+            affinity: Affinity::Blob,
             not_null: true,
             default: None,
             collation: Collation::Binary,
@@ -483,7 +483,7 @@ mod tests {
         let notes = schema.table("notes").unwrap();
         assert_eq!(
             notes.create_sql,
-            "CREATE TABLE \"notes\" (\"key\" TEXT NOT NULL, \"folder\" TEXT NOT NULL DEFAULT 'inbox' COLLATE NOCASE, \"body\" TEXT, \"pinned\" INTEGER NOT NULL DEFAULT 0, \"id\" INTEGER NOT NULL, PRIMARY KEY(\"key\"))"
+            "CREATE TABLE \"notes\" (\"key\" TEXT NOT NULL, \"folder\" TEXT NOT NULL DEFAULT 'inbox' COLLATE NOCASE, \"body\" TEXT, \"pinned\" INTEGER NOT NULL DEFAULT 0, \"id\" BLOB NOT NULL, PRIMARY KEY(\"key\"))"
         );
         assert_eq!(notes.column("folder").unwrap().collation, Collation::Nocase);
         assert_eq!(
@@ -514,7 +514,7 @@ mod tests {
                 SchemaError::Invalid("unsupported schema definition format".into()).to_string()
             );
         }
-        for format in [0, 1, 2, 3, 4, 5, 7] {
+        for format in [0, 1, 2, 3, 4, 5, 6, 8] {
             let mut descriptor = SchemaDefinition::parse(DEFINITION.as_bytes())
                 .unwrap()
                 .build()
@@ -557,7 +557,7 @@ mod identity_tests {
         let schema = definition.build().unwrap();
         assert_eq!(schema.format, crate::LOGICAL_SCHEMA_FORMAT);
         for table in &schema.tables {
-            assert_eq!(table.column("id").unwrap().affinity, Affinity::Integer);
+            assert_eq!(table.column("id").unwrap().affinity, Affinity::Blob);
             assert!(
                 table
                     .indexes
@@ -653,7 +653,7 @@ mod partition_tests {
         };
         let items = |extra: &str| {
             format!(
-                r#"{{"format":6,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{{"name":"lists","class":"replayed","columns":[{{"name":"title","type":"text"}}],"primary_key":["id"]}},{{"name":"items","class":"replayed","columns":[{{"name":"list","type":"text","not_null":true}},{{"name":"key","type":"text","not_null":true}},{{"name":"code","type":"text"}},{{"name":"parent","type":"integer"}}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"{extra}}}]}}"#
+                r#"{{"format":6,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{{"name":"lists","class":"replayed","columns":[{{"name":"title","type":"text"}}],"primary_key":["id"]}},{{"name":"items","class":"replayed","columns":[{{"name":"list","type":"text","not_null":true}},{{"name":"key","type":"text","not_null":true}},{{"name":"code","type":"text"}},{{"name":"parent","type":"blob"}}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"{extra}}}]}}"#
             )
         };
         assert_eq!(
@@ -678,7 +678,7 @@ mod partition_tests {
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_set_null_reference_with_a_partition_column_nulls_only_its_nullable_columns() {
-        let json = r#"{"format":6,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"shop","tables":[{"name":"categories","class":"replayed","columns":[{"name":"list","type":"integer","not_null":true}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list"},{"name":"items","class":"replayed","columns":[{"name":"list","type":"integer","not_null":true},{"name":"category","type":"integer"}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list","foreign_keys":[{"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}]}"#;
+        let json = r#"{"format":6,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"shop","tables":[{"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list"},{"name":"items","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"category","type":"blob"}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list","foreign_keys":[{"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}]}"#;
         let schema = SchemaDefinition::parse(json.as_bytes())
             .unwrap()
             .build()
@@ -751,7 +751,7 @@ mod replayed_tests {
                  "primary_key": ["org", "id"], "partition_by": ["org"], "partition_group": "org"},
                 {"name": "members", "class": "replayed",
                  "columns": [{"name": "org", "type": "text", "not_null": true},
-                             {"name": "team", "type": "integer", "not_null": true},
+                             {"name": "team", "type": "blob", "not_null": true},
                              {"name": "email", "type": "text", "not_null": true}],
                  "primary_key": ["org", "id"], "partition_by": ["org"], "partition_group": "org",
                  "indexes": [{"name": "members_email", "unique": true,
@@ -795,7 +795,7 @@ mod replayed_tests {
         assert!(
             teams
                 .create_sql
-                .contains("\"id\" INTEGER NOT NULL, CHECK (cap BETWEEN 1 AND 10), PRIMARY KEY")
+                .contains("\"id\" BLOB NOT NULL, CHECK (cap BETWEEN 1 AND 10), PRIMARY KEY")
         );
         let members = schema.table("members").unwrap();
         assert!(members.create_sql.ends_with(

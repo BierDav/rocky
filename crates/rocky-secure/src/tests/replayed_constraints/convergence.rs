@@ -136,8 +136,8 @@ fn graph() -> Constrained {
                 "memberships",
                 serde_json::json!([
                     tenant,
-                    {"name": "team", "type": "integer", "not_null": true},
-                    {"name": "person", "type": "integer", "not_null": true},
+                    {"name": "team", "type": "blob", "not_null": true},
+                    {"name": "person", "type": "blob", "not_null": true},
                     {"name": "role", "type": "text", "not_null": true},
                     {"name": "active", "type": "integer", "not_null": true},
                     {"name": "seats", "type": "integer", "not_null": true}
@@ -210,9 +210,9 @@ async fn graph_history(root: &Path) -> History {
     let row = |sql: &'static str| {
         let session = &session;
         async move {
-            match session.run(sql, vec![]).await.unwrap().rows[0][0] {
-                SqlValue::Integer(id) => id,
-                ref other => panic!("{other:?}"),
+            match &session.run(sql, vec![]).await.unwrap().rows[0][0] {
+                SqlValue::Blob(id) => super::Id(rocky_core::RowIdentity::from_bytes(id).unwrap()),
+                other => panic!("{other:?}"),
             }
         }
     };
@@ -319,7 +319,7 @@ fn checked_orders() -> Constrained {
             ),
             replayed(
                 "lines",
-                serde_json::json!([integer("parent"), integer("amount")]),
+                serde_json::json!([{"name": "parent", "type": "blob", "not_null": true}, integer("amount")]),
                 serde_json::json!({
                     "checks": ["amount > 0"],
                     "foreign_keys": [{"columns": ["parent"], "table": "orders", "on_delete": "cascade"}]

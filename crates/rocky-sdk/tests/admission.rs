@@ -3,15 +3,15 @@
 //! `docs/decisions/0051-roster-free-admission.md`.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
+use common::identity::snapshot as snap;
 use common::{Device, Failure};
 use rocky_sdk::{Network, transport::memory::Hub};
-use serde_json::json;
 use std::sync::Arc;
 
 mod common;
 
 async fn statements(device: &Device) -> serde_json::Value {
-    device.ok(json!({"type": "session"})).await["revocations"]["statements"].clone()
+    snap::ok(device.session.info()).await["revocations"]["statements"].clone()
 }
 
 /// C admits B, which it has no contact for, and refuses D in the round in
@@ -60,8 +60,11 @@ async fn a_member_admits_a_peer_without_a_contact_and_refuses_one_revoked_this_r
     );
 
     // A revokes D while D is away and tells C, then is gone.
-    a.ok(json!({"type": "revoke", "identity": d.identity().await}))
-        .await;
+    snap::ok(
+        a.session
+            .revoke_identity(&(snap::text(&(d.identity().await)))),
+    )
+    .await;
     a.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(statements(c).await, 1);
     a.close().await;
@@ -70,7 +73,7 @@ async fn a_member_admits_a_peer_without_a_contact_and_refuses_one_revoked_this_r
     d.add(2, "Jam").await;
     let refused = d.sync().await.err().ok_or("a revoked device synced")?;
     assert_eq!(refused["code"], "revoked", "{refused}");
-    assert!(!d.ok(json!({"type": "status"})).await["authority"]["verified_revocation"].is_null());
+    assert!(!snap::ok(d.session.status()).await["authority"]["verified_revocation"].is_null());
     assert_eq!(c.titles().await, ["Milk"]);
     assert_eq!(c.peer(&d_node).await, serde_json::Value::Null);
     // D stops syncing: it is refused before it dials.

@@ -95,7 +95,7 @@ impl<A: RowApplication> Inner<A> {
         {
             let [
                 SqlValue::Integer(clock),
-                SqlValue::Integer(author),
+                SqlValue::Blob(author),
                 SqlValue::Integer(sequence),
                 SqlValue::Blob(txn),
                 SqlValue::Text(reason),
@@ -106,7 +106,7 @@ impl<A: RowApplication> Inner<A> {
             };
             let stamp = Stamp {
                 clock: stored_clock(*clock)?,
-                author: *author as u32,
+                author: stored_writer(author)?,
                 sequence: *sequence as u64,
             };
             let outcome = SealedOutcome::Dropped {
@@ -147,7 +147,7 @@ impl<A: RowApplication> Inner<A> {
         outcomes: &SealedOutcomes,
     ) -> Result<(), Error> {
         let corrupt = || Error::Corrupt("replayed member".into());
-        let Some(author) = self.node_author.as_ref().map(|author| author.number) else {
+        let Some(author) = self.node_author.as_ref().map(|author| author.writer) else {
             return Ok(());
         };
         let rows = collect_rows(
@@ -157,7 +157,7 @@ impl<A: RowApplication> Inner<A> {
                     bindings(vec![
                         SqlValue::Blob(hash.to_vec()),
                         SqlValue::Integer(id),
-                        SqlValue::Integer(i64::from(author)),
+                        writer_value(author),
                     ]),
                 )
                 .await?,
@@ -228,7 +228,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<(), Error> {
         let corrupt = || Error::Corrupt("kept outcome".into());
         let (Some(author), Some(seal)) = (
-            self.node_author.as_ref().map(|author| author.number),
+            self.node_author.as_ref().map(|author| author.writer),
             statement.seal,
         ) else {
             return Ok(());

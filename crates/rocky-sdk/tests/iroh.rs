@@ -2,20 +2,17 @@
 //! application's own protocol. Loopback only: no relay, no address lookup.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
-#![cfg(feature = "iroh")]
+use common::identity::snapshot as snap;
 use common::{Device, Failure};
-use rocky_sdk::{
-    Network,
+use rocky_iroh::{
+    Attachment, Options,
     iroh::{
-        Attachment, Options,
-        iroh::{
-            Endpoint, EndpointAddr,
-            endpoint::Connection,
-            protocol::{AcceptError, ProtocolHandler, Router},
-        },
+        Endpoint, EndpointAddr,
+        endpoint::Connection,
+        protocol::{AcceptError, ProtocolHandler, Router},
     },
-    transport::TransportOptions,
 };
+use rocky_sdk::Network;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -72,7 +69,7 @@ async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Resu
         Some(Network::Borrowed(attachment.transport())),
     )?;
     // The member uses the starter, which owns its endpoint.
-    let starter = Network::Owned(Arc::new(TransportOptions::Iroh {
+    let starter = Network::Owned(Arc::new(rocky_iroh::Options {
         relay: Some("disabled".into()),
         lookup: Some("disabled".into()),
         topic: false,
@@ -85,7 +82,7 @@ async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Resu
     b.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(a.titles().await, ["Eggs", "Milk"]);
     assert_eq!(echo(&caller, endpoint.addr()).await?, b"hello");
-    let status = a.ok(json!({"type": "network"})).await;
+    let status = snap::ok(a.session.network()).await;
     assert_eq!(
         (&status["kind"], &status["ownership"]),
         (&json!("iroh"), &json!("application"))
@@ -101,8 +98,7 @@ async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Resu
         .attach(Network::Borrowed(attachment.transport()))
         .await?;
     // The application signals renewed reachability; explicit passes respect backoff.
-    b.ok(json!({"type": "networking_control", "enabled": true}))
-        .await;
+    snap::ok(b.session.set_networking_enabled(true)).await;
     b.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(b.titles().await, ["Eggs", "Jam", "Milk"]);
 
@@ -121,5 +117,79 @@ async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Resu
     let ((), shutdown, ()) = tokio::join!(b.close(), router.shutdown(), caller.close());
     shutdown?;
     assert!(endpoint.is_closed());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_databases_share_each_endpoint_and_detach_independently() -> Result<(), Failure> {
+    use rocky_core::net::{ScopeRefusal, Transport};
+    let root = tempfile::tempdir()?;
+    let left = local().bind([71; 32]).await?;
+    let right = local().bind([72; 32]).await?;
+    let left_harness = Attachment::new(left.clone());
+    let right_harness = Attachment::new(right.clone());
+    let left_router = left_harness
+        .register(Router::builder(left.clone()).accept(ECHO, Echo))
+        .spawn();
+    let right_router = right_harness
+        .register(Router::builder(right.clone()))
+        .spawn();
+    let a = Device::create(
+        &root.path().join("a"),
+        Some(Network::Borrowed(left_harness.transport())),
+    )?;
+    let b = Device::create(
+        &root.path().join("b"),
+        Some(Network::Borrowed(left_harness.transport())),
+    )?;
+    assert_ne!(a.scope(), b.scope());
+    let a_member = Device::join(
+        &root.path().join("a-member"),
+        &a.invite().await,
+        Network::Borrowed(right_harness.transport()),
+    )?;
+    let b_member = Device::join(
+        &root.path().join("b-member"),
+        &b.invite().await,
+        Network::Borrowed(right_harness.transport()),
+    )?;
+    a.add(1, "Only A").await;
+    b.add(1, "Only B").await;
+    a_member.sync().await.map_err(|error| error.to_string())?;
+    b_member.sync().await.map_err(|error| error.to_string())?;
+    assert_eq!(a_member.titles().await, ["Only A"]);
+    assert_eq!(b_member.titles().await, ["Only B"]);
+
+    let mut missing = *a.scope();
+    missing.domain = rocky_core::DomainId([255; 16]);
+    let routes = [left_harness.address().await?];
+    let refusal = right_harness
+        .request(&routes, missing, b"never dispatched")
+        .await
+        .err()
+        .ok_or("unknown RPC scope accepted")?;
+    assert_eq!(
+        refusal.downcast_ref::<ScopeRefusal>(),
+        Some(&ScopeRefusal::UnknownScope)
+    );
+    let refusal = right_harness
+        .session(&routes, missing)
+        .await
+        .err()
+        .ok_or("unknown link scope accepted")?;
+    assert_eq!(
+        refusal.downcast_ref::<ScopeRefusal>(),
+        Some(&ScopeRefusal::UnknownScope)
+    );
+
+    a.network.as_ref().ok_or("a network")?.close().await;
+    b.add(2, "B after A detached").await;
+    b_member.sync().await.map_err(|error| error.to_string())?;
+    assert_eq!(b_member.titles().await, ["B after A detached", "Only B"]);
+    assert_eq!(echo(&right, left.addr()).await?, b"hello");
+    assert!(!left.is_closed());
+    tokio::join!(a.close(), b.close(), a_member.close(), b_member.close());
+    left_router.shutdown().await?;
+    right_router.shutdown().await?;
     Ok(())
 }

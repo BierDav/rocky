@@ -158,6 +158,15 @@ impl Body {
         Ok(())
     }
 }
+/// The epoch and partition secrets delivered together by an envelope.
+#[derive(Clone)]
+pub struct GroupSecrets {
+    pub group: Commitment,
+    pub epoch: u64,
+    pub secret: [u8; GROUP_SECRET_LEN],
+    pub name: rocky_core::PartitionName,
+}
+
 impl GroupSecretEnvelope {
     /// Wraps one group epoch to each distinct recipient; refuses an empty set.
     pub fn seal_many(
@@ -184,18 +193,30 @@ impl GroupSecretEnvelope {
         name: rocky_core::PartitionName,
         recipient: PublicKey,
     ) -> Result<Self, Error> {
-        Self::seal_recorded(issuer, group, epoch, secret, name, recipient, Vec::new())
+        Self::seal_recorded(
+            issuer,
+            GroupSecrets {
+                group,
+                epoch,
+                secret,
+                name,
+            },
+            recipient,
+            Vec::new(),
+        )
     }
-    #[allow(clippy::too_many_arguments)]
     pub fn seal_recorded(
         issuer: &PrivateKey,
-        group: Commitment,
-        epoch: u64,
-        secret: [u8; GROUP_SECRET_LEN],
-        name: rocky_core::PartitionName,
+        secrets: GroupSecrets,
         recipient: PublicKey,
         statements: Vec<Commitment>,
     ) -> Result<Self, Error> {
+        let GroupSecrets {
+            group,
+            epoch,
+            secret,
+            name,
+        } = secrets;
         let (ephemeral, shared) = agree(recipient)?;
         let mut body = Body {
             version: ENVELOPE_VERSION,

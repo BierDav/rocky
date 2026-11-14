@@ -4,11 +4,13 @@ use serde::{Deserialize, Serialize};
 
 mod compact;
 
+/// The current creation proof and statement version; others are refused.
+const PROOF_VERSION: u8 = 3;
+
 struct VerifiedBindings<'a> {
     chain: &'a [rocky_credentials::AuthorBinding],
     publisher: PublicKey,
     table: Commitment,
-    author: u32,
     signer: PublicKey,
 }
 
@@ -16,6 +18,15 @@ struct VerifiedBindings<'a> {
 #[derive(Default)]
 pub(super) struct FrameBindings<'a> {
     last: Option<VerifiedBindings<'a>>,
+}
+
+pub(super) struct CreationClaim<'a> {
+    pub publisher: PublicKey,
+    pub manifest: Commitment,
+    pub table: Commitment,
+    pub id: rocky_core::RowIdentity,
+    pub ceiling: &'a Stamp,
+    pub families: &'a rocky_credentials::GrantFamilies,
 }
 
 /// The digest a stored proof names an encoded set of author bindings by.
@@ -131,7 +142,7 @@ fn provenance(
     stamp: &Stamp,
     bindings: Commitment,
 ) -> Result<Commitment, Error> {
-    if version != 2 {
+    if version != PROOF_VERSION {
         return Err(denied("unsupported creation statement version"));
     }
     Ok(
@@ -172,7 +183,7 @@ impl CreationProof {
             .map(|link| link.author_binding.clone())
             .collect();
         let provenance = provenance(
-            2,
+            PROOF_VERSION,
             manifest,
             table,
             id,
@@ -180,7 +191,7 @@ impl CreationProof {
             bindings_digest(&encode(&bindings)?),
         )?;
         Ok(Self {
-            version: 2,
+            version: PROOF_VERSION,
             manifest,
             table,
             id,
@@ -202,7 +213,7 @@ impl CreationProof {
             clock: header.timestamp,
             author: header
                 .extensions
-                .author
+                .author(&header.public_key)
                 .ok_or_else(|| denied("numeric birth requires an author"))?,
             sequence: header.extensions.author_sequence,
         };
@@ -214,7 +225,7 @@ impl CreationProof {
             .map(|link| link.author_binding.clone())
             .collect();
         let provenance = provenance(
-            2,
+            PROOF_VERSION,
             manifest,
             table,
             id,
@@ -222,7 +233,7 @@ impl CreationProof {
             bindings_digest(&encode(&bindings)?),
         )?;
         Ok(Self {
-            version: 2,
+            version: PROOF_VERSION,
             manifest,
             table,
             id,
@@ -256,7 +267,7 @@ impl CreationProof {
         };
         header.public_key.as_bytes() == &self.signer.0
             && header.timestamp == self.stamp.clock
-            && header.extensions.author == Some(self.stamp.author)
+            && header.extensions.author(&header.public_key) == Some(self.stamp.author)
             && header.extensions.author_sequence == self.stamp.sequence
             && header.extensions.scope.table == self.table
             && self.provenance().is_ok_and(|provenance| {
@@ -276,36 +287,51 @@ impl CreationProof {
         ceiling: &Stamp,
         families: &rocky_credentials::GrantFamilies,
     ) -> Result<(), Error> {
-        self.verify_with_bindings(publisher, manifest, table, id, ceiling, None, families)
+        self.verify_with_bindings(
+            CreationClaim {
+                publisher,
+                manifest,
+                table,
+                id,
+                ceiling,
+                families,
+            },
+            None,
+        )
     }
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn verify_with_bindings<'a>(
         &'a self,
-        publisher: PublicKey,
-        manifest: Commitment,
-        table: Commitment,
-        id: rocky_core::RowIdentity,
-        ceiling: &Stamp,
+        claim: CreationClaim<'_>,
         mut memo: Option<&mut FrameBindings<'a>>,
-        families: &rocky_credentials::GrantFamilies,
     ) -> Result<(), Error> {
-        if self.version != 2
+        let CreationClaim {
+            publisher,
+            manifest,
+            table,
+            id,
+            ceiling,
+            families,
+        } = claim;
+        if self.version != PROOF_VERSION
             || self.manifest != manifest
             || self.table != table
             || self.id != id
-            || self.stamp.author != id.author()
+            || self.stamp.author != id.writer()
             || self.stamp > *ceiling
             || !self.authentic()
         {
             return Err(denied("invalid signed row creation proof"));
         }
         let signer = self.signer()?;
-        let author = id.author();
+        if writer(&signer) != id.writer() {
+            return Err(denied(
+                "a creation proof's signer is not its identity's writer",
+            ));
+        }
         if let Some(memo) = memo.as_mut()
             && memo.last.as_ref().is_some_and(|old| {
                 old.publisher == publisher
                     && old.table == table
-                    && old.author == author
                     && old.signer == signer
                     && old.chain == self.bindings.as_slice()
             })
@@ -316,7 +342,6 @@ impl CreationProof {
             &self.bindings,
             publisher,
             table,
-            author,
             signer,
             families,
         )
@@ -326,7 +351,6 @@ impl CreationProof {
                 chain: &self.bindings,
                 publisher,
                 table,
-                author,
                 signer,
             });
         }
@@ -409,7 +433,7 @@ struct FollowRow {
     key: (Vec<u8>, Vec<u8>),
     destination: ResourceScope,
     record: Materialized,
-    identity: i64,
+    identity: rocky_core::RowIdentity,
     proof: CreationProof,
     signer: PublicKey,
     link: Option<MoveSource>,
@@ -435,9 +459,8 @@ impl<A: RowApplication> Inner<A> {
         header: &crypto::CreationHeader,
     ) -> Result<(), Error> {
         let signed = header.signed();
-        if let Some(author) = signed.extensions.author {
-            self.keep_stamp_author(signed.extensions.scope.domain, author, signed.public_key)
-                .await?;
+        if let Some(author) = signed.extensions.author(&signed.public_key) {
+            self.keep_stamp_author(author, signed.public_key)?;
         }
         self.conn
             .execute(
@@ -620,7 +643,7 @@ impl<A: RowApplication> Inner<A> {
     fn open_move_source(
         &self,
         destination: ResourceScope,
-        identity: i64,
+        identity: rocky_core::RowIdentity,
         sealed: &[u8],
     ) -> Result<Option<MoveSource>, Error> {
         let aad = encode(&(destination, identity))?;
@@ -838,14 +861,13 @@ impl<A: RowApplication> Inner<A> {
                     .app
                     .row_identity(&write.change)
                     .map_err(|error| denied(&error))?
-                    .map(|id| id.integer())
                     != Some(current.identity)
             {
                 continue;
             }
             let default_stamp = Stamp {
                 clock: operation.header.timestamp,
-                author: operation.header.extensions.author.unwrap_or(0),
+                author: writer(&operation.header.public_key),
                 sequence: operation.header.extensions.author_sequence,
             };
             for field in write.published_fields() {
@@ -861,7 +883,11 @@ impl<A: RowApplication> Inner<A> {
                     .carried(&write.change.row)
                     .and_then(|carried| carried.stamps.get(&field))
                     .unwrap_or(&default_stamp);
-                if Some(stamp.author) != operation.header.extensions.author
+                if Some(stamp.author)
+                    != operation
+                        .header
+                        .extensions
+                        .author(&operation.header.public_key)
                     || current
                         .record
                         .stamps
@@ -946,7 +972,7 @@ impl<A: RowApplication> Inner<A> {
                 self.grant_families(),
             )
             .map_err(credential)?
-            .partition_author(signer, author.number, destination, tuple, time);
+            .partition_author(signer, destination, tuple, time);
         let Ok(grants) = grants else {
             return Ok(());
         };
@@ -957,7 +983,7 @@ impl<A: RowApplication> Inner<A> {
             (destination, write.change.row),
             Carried {
                 proof,
-                authors: self.carried_authors(destination.domain, &stamps).await?,
+                authors: self.carried_authors(&stamps)?,
                 stamps,
                 moved_from: None,
             },

@@ -43,8 +43,6 @@ fn main() {
 /// The toolchain's `llvm-ar` (rustup component `llvm-tools`). A host `ar`
 /// such as Apple's writes no symbol index for wasm objects, and rust-lld then
 /// finds no SQLite symbols. `AR_wasm32_unknown_unknown` still overrides it.
-// The host runs build scripts; wasm32's clippy configuration does not apply.
-#[allow(clippy::disallowed_methods)]
 fn toolchain_archiver() -> Option<std::path::PathBuf> {
     if std::env::var_os("AR_wasm32_unknown_unknown").is_some() {
         return None;
@@ -56,11 +54,12 @@ fn toolchain_archiver() -> Option<std::path::PathBuf> {
         .ok()?;
     let sysroot = String::from_utf8(output.stdout).ok()?;
     let host = std::env::var("HOST").ok()?;
-    let archiver = std::path::Path::new(sysroot.trim())
-        .join("lib/rustlib")
-        .join(host)
-        .join("bin/llvm-ar");
-    archiver.exists().then_some(archiver)
+    Some(
+        std::path::Path::new(sysroot.trim())
+            .join("lib/rustlib")
+            .join(host)
+            .join("bin/llvm-ar"),
+    )
 }
 
 fn compile() {

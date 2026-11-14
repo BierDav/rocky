@@ -3,8 +3,8 @@
 //! The coordinator verifies them from the publisher alone; it never holds
 //! the domain's data, keys or registry.
 use crate::{
-    AuthorRange, Authority, CredentialChain, Error, Extended, IdentityProvider, PublicKey,
-    RevocationSet, SignedCapability, denied,
+    Authority, CredentialChain, Error, Extended, IdentityProvider, PublicKey, RevocationSet,
+    SignedCapability, denied,
 };
 use crate::{Capability, Extension, PeerId};
 use rocky_core::{Commitment, PrincipalKind, Scope};
@@ -88,7 +88,11 @@ impl Authority<'_> {
                 ..Extended::default()
             },
             delegations,
-            (time, ttl, 60),
+            crate::Validity {
+                issued_at: time,
+                lifetime: std::time::Duration::from_secs(ttl),
+                clock_skew: std::time::Duration::from_secs(60),
+            },
         )
     }
 }
@@ -146,7 +150,6 @@ impl CredentialChain {
         mut self,
         holder: &dyn IdentityProvider,
         node: PublicKey,
-        author: u32,
     ) -> Result<Self, Error> {
         let key = holder.public_key()?;
         let parent = match self.0.last() {
@@ -165,7 +168,6 @@ impl CredentialChain {
             grants: Vec::new(),
             extension: Extension::new(Extended {
                 node: Some(PeerId::of(node)),
-                authors: Some(AuthorRange::new(author, author)?),
                 sequence: Some(0),
                 database: Some(self.database_context(self.0[0].issuer)?),
                 ..Extended::default()

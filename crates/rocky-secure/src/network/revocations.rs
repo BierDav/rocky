@@ -8,7 +8,8 @@ use std::collections::BTreeSet;
 /// Statement IDs per page: 32 KiB, which the session's array encoding of
 /// message bytes doubles, well inside one frame.
 const IDS_PAGE: usize = 1024;
-/// Statements per page: each holds at most 2,048 bytes.
+/// Statements or certificates per page; statement pages are bounded by
+/// encoded size too, as one reset alone may fill most of a frame.
 const STATEMENTS_PAGE: usize = 32;
 /// IDs a peer may name: two partitioned issuers near the live bound may
 /// together exceed it, so the merge, not this, bounds the set.
@@ -37,7 +38,7 @@ pub(super) enum RevocationMessage {
         last: bool,
     },
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub(super) struct Statement(#[serde(with = "serde_bytes")] Vec<u8>);
 
 impl NativeSession {
@@ -158,12 +159,12 @@ impl NativeSession {
             }
             received |= last;
         }
-        let lacking: Vec<Vec<u8>> = held
+        let lacking: Vec<Statement> = held
             .statements()
             .filter(|signed| signed.live(time))
             .zip(&ours)
             .filter(|(_, id)| !named.contains(*id))
-            .map(|(signed, _)| signed.to_bytes())
+            .map(|(signed, _)| signed.to_bytes().map(Statement))
             .collect::<Result<_, _>>()
             .map_err(credential)?;
         let mut wanted: BTreeSet<Commitment> = named
@@ -171,16 +172,17 @@ impl NativeSession {
             .filter(|id| held.get(id).is_none())
             .collect();
         let mut learned = Vec::new();
-        let mut pages = lacking.chunks(STATEMENTS_PAGE);
+        let mut rest = lacking.as_slice();
         let (mut sent, mut received) = (false, false);
         while !(sent && received) {
-            let page = pages.next().unwrap_or_default();
-            sent = pages.len() == 0;
+            let (page, after) = rest.split_at(page_len(rest, STATEMENTS_PAGE)?);
+            rest = after;
+            sent = rest.is_empty();
             let RevocationMessage::Statements { statements, last } = self
                 .swap(
                     initiator,
                     RevocationMessage::Statements {
-                        statements: page.iter().cloned().map(Statement).collect(),
+                        statements: page.to_vec(),
                         last: sent,
                     },
                 )

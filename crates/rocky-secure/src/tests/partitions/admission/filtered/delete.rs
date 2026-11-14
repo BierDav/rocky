@@ -27,7 +27,7 @@ async fn insert(
         vec![
             SqlValue::Text(partition.into()),
             SqlValue::Text(title.into()),
-            SqlValue::Integer(id.integer()),
+            id.sql(),
         ],
     )
     .await
@@ -78,8 +78,8 @@ async fn an_additive_sql_delete_covers_both_live_ids_and_preserves_the_other_par
     // transactions replay under the new schema too.
     let mut grant = f.grant(None, &all());
     grant.fields = rocky_core::FieldSelection::All;
-    let a = keyed(&f, &dir.path().join("a"), [211; 32], 1, grant.clone()).await;
-    let b = keyed(&f, &dir.path().join("b"), [212; 32], 2, grant).await;
+    let a = keyed(&f, &dir.path().join("a"), [211; 32], grant.clone()).await;
+    let b = keyed(&f, &dir.path().join("b"), [212; 32], grant).await;
     insert(&a, &f, "A", "first", 149).await;
     insert(&a, &f, "B", "unrelated partition", 150).await;
     let concurrent = insert(&b, &f, "A", "second", 151).await;

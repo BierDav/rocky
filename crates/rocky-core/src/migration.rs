@@ -2,7 +2,7 @@
 use crate::{Commitment, NodeKey, Scope, TipId, commitment};
 use serde::{Deserialize, Serialize};
 
-pub const MIGRATION_PUBLICATION_FORMAT: u32 = 1;
+pub const MIGRATION_PUBLICATION_FORMAT: u32 = 2;
 pub const MIGRATION_PROOF_FORMAT: u32 = 1;
 pub const MAX_MIGRATION_PROOF_DEPTH: usize = 64;
 
@@ -15,8 +15,8 @@ pub struct MigrationPublicationStatement {
     pub parent: Commitment,
     pub schema: Commitment,
     pub publication: Commitment,
+    /// The node that authors the run; its key is its writer identity.
     pub writer: NodeKey,
-    pub author: u32,
     pub frames: u64,
     pub bytes: u64,
     pub root: Commitment,
@@ -59,9 +59,7 @@ impl MigrationPublicationStatement {
         if self.format != MIGRATION_PUBLICATION_FORMAT {
             return Err(MigrationError("unsupported migration descriptor format"));
         }
-        if self.author == 0
-            || self.author > 0x7fff_ffff
-            || self.publication != commitment("rocky.sdk.migration.v3", &self.tip.0)
+        if self.publication != commitment("rocky.sdk.migration.v3", &self.tip.0)
             || (self.frames == 0) != (self.bytes == 0)
             || self.bytes < self.frames
         {
@@ -89,7 +87,6 @@ impl MigrationPublicationStatement {
         ] {
             bytes.extend(value);
         }
-        bytes.extend(self.author.to_le_bytes());
         bytes.extend(self.frames.to_le_bytes());
         bytes.extend(self.bytes.to_le_bytes());
         commitment("rocky.migration.context.v1", &bytes)
@@ -207,7 +204,7 @@ mod tests {
     fn statement(frames: u64) -> MigrationPublicationStatement {
         let tip = TipId([3; 32]);
         MigrationPublicationStatement {
-            format: 1,
+            format: MIGRATION_PUBLICATION_FORMAT,
             scope: Scope {
                 mesh: crate::MeshId([1; 16]),
                 app: crate::AppId([2; 16]),
@@ -219,7 +216,6 @@ mod tests {
             schema: [6; 32],
             publication: commitment("rocky.sdk.migration.v3", &tip.0),
             writer: [7; 32],
-            author: 1,
             frames,
             bytes: frames * 10,
             root: [0; 32],

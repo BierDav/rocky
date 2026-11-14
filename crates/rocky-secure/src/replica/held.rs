@@ -316,8 +316,8 @@ impl<A: RowApplication> Inner<A> {
         for frame in &frames {
             let extension = &frame.header.extensions;
             let author = extension
-                .author
-                .ok_or_else(|| denied("node author number missing"))?;
+                .author(&frame.header.public_key)
+                .ok_or_else(|| denied("node author missing"))?;
             if extension.scope.domain != scope
                 || !self.visible_frame(
                     graph,

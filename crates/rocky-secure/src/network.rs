@@ -82,7 +82,6 @@ impl std::error::Error for Revoked {}
 /// Every failed proof of the peer's key, another handshake version included.
 const AUTHENTICATION_FAILED: &str = "link authentication failed";
 /// The version of a pinned contact reference's proof.
-const RESOLUTION_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize)]
 struct Hello {
@@ -304,92 +303,7 @@ pub struct NativeSession {
     /// Set while this side answers a request.
     serving: bool,
 }
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ResolvePeer {
-    version: u32,
-    challenge: Commitment,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ResolvedPeer {
-    version: u32,
-    challenge: Commitment,
-    node: PublicKey,
-    signature: Signature,
-}
-/// A challenge for the node behind a pinned contact reference, and the
-/// request carrying it. The answer proves the key without opening a session.
-fn peer_resolution_request() -> Result<(Vec<u8>, Commitment), Error> {
-    let mut challenge = [0; 32];
-    rocky_platform::entropy::fill(&mut challenge);
-    let request = encode(&ResolvePeer {
-        version: RESOLUTION_VERSION,
-        challenge,
-    })?;
-    Ok((request, challenge))
-}
-/// The node key a resolution answer proves for `expected`.
-fn resolved_peer(
-    reply: &[u8],
-    challenge: Commitment,
-    expected: rocky_credentials::PeerId,
-) -> Result<PublicKey, Error> {
-    let proof: ResolvedPeer = decode(reply)?;
-    let bytes = signing_bytes(
-        "rocky.peer-resolution.v1",
-        &(proof.version, proof.challenge, proof.node),
-    )?;
-    if proof.version != RESOLUTION_VERSION
-        || proof.challenge != challenge
-        || rocky_credentials::PeerId::of(proof.node) != expected
-        || !proof.node.verify(&bytes, &proof.signature)
-    {
-        return Err(denied(
-            "peer resolution does not prove the pinned reference",
-        ));
-    }
-    Ok(proof.node)
-}
 impl NativeSession {
-    /// Proves which node answers `stream`, a link dialed to a pinned contact
-    /// reference, without opening the link or revealing credentials.
-    pub async fn resolve_peer(
-        mut stream: rocky_core::net::Stream,
-        expected: rocky_credentials::PeerId,
-    ) -> Result<PublicKey, Error> {
-        let (request, challenge) = peer_resolution_request()?;
-        write_frame(&mut stream, &request).await?;
-        let node = resolved_peer(&read_frame(&mut stream).await?, challenge, expected)?;
-        // The verified reply is the answer. The responder may close its
-        // connection once the reply is delivered, so a failed close of ours
-        // does not undo it.
-        let _ = stream.shutdown().await;
-        Ok(node)
-    }
-    /// Answers a node-reference challenge without opening a session or revealing credentials.
-    pub fn peer_resolution_reply(
-        bytes: &[u8],
-        local: &PrivateKey,
-    ) -> Result<Option<Vec<u8>>, Error> {
-        let Ok(request) = decode::<ResolvePeer>(bytes) else {
-            return Ok(None);
-        };
-        if request.version != RESOLUTION_VERSION {
-            return Err(denied("unsupported peer resolution version"));
-        }
-        let node = local.public_key();
-        let bytes = signing_bytes(
-            "rocky.peer-resolution.v1",
-            &(request.version, request.challenge, node),
-        )?;
-        Ok(Some(encode(&ResolvedPeer {
-            version: request.version,
-            challenge: request.challenge,
-            node,
-            signature: local.sign(&bytes),
-        })?))
-    }
     /// The initiator's hello, then the acceptor's once it verified the
     /// initiator's chain, then both signatures; the initiator then verifies
     /// the acceptor's chain. Both exchange the revocation statements the
@@ -401,8 +315,8 @@ impl NativeSession {
         (local, credentials): (PrivateKey, CredentialChain),
         (side, expected): (Side, Option<PublicKey>),
         byte_budget: usize,
-        (version, resolve): (u32, bool),
-    ) -> Result<Option<(Self, i64)>, Error> {
+        version: u32,
+    ) -> Result<(Self, i64), Error> {
         if replica.private_schema().await? {
             return Err(denied("schema publication is private"));
         }
@@ -431,14 +345,6 @@ impl NativeSession {
             Side::Acceptor => read_frame(&mut stream).await?,
         };
         let received = micros()?;
-        if side == Side::Acceptor
-            && resolve
-            && let Some(proof) = Self::peer_resolution_reply(&peer_bytes, &local)?
-        {
-            write_frame(&mut stream, &proof).await?;
-            stream.shutdown().await.map_err(Error::Io)?;
-            return Ok(None);
-        }
         let peer: Hello = decode(&peer_bytes).map_err(|_| denied(AUTHENTICATION_FAILED))?;
         if peer.version != version {
             return Err(denied(AUTHENTICATION_FAILED));
@@ -533,7 +439,7 @@ impl NativeSession {
         session
             .exchange_tips(replica, side == Side::Initiator)
             .await?;
-        Ok(Some((session, offset)))
+        Ok((session, offset))
     }
     pub fn peer(&self) -> PublicKey {
         self.peer

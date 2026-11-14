@@ -4,6 +4,7 @@
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 mod common;
+use common::identity::snapshot as snap;
 use common::{Device, Failure, introduce};
 use rocky_coordinator::coordinated::MemoryLog;
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
@@ -21,11 +22,11 @@ fn open<'a>(directory: &'a std::path::Path, network: Option<Network>) -> Open<'a
     }
 }
 fn domain(device: &Device) -> rocky_core::Scope {
-    serde_json::from_str(&device.database.scope()).expect("scope")
+    device.database.scope()
 }
 /// The log of the tip `device` follows.
 async fn tip_log(device: &Device) -> rocky_core::TipLog {
-    let status = device.ok(json!({"type": "coordinated"})).await;
+    let status = snap::ok(device.session.coordinated_status()).await;
     let tip: [u8; 32] = data_encoding::HEXLOWER
         .decode(status["tip"].as_str().expect("tip").as_bytes())
         .expect("tip hex")
@@ -47,42 +48,38 @@ async fn node_key(device: &Device) -> rocky_sdk::credentials::PublicKey {
 }
 /// Writes the next numbered invoice as an ordinary transaction.
 async fn invoice(device: &Device, handle: u8) {
-    device.ok(json!({"type": "sql", "sql": "BEGIN"})).await;
-    let count = device
-        .ok(json!({"type": "sql", "sql": "SELECT COUNT(*) FROM items"}))
-        .await["rows"][0][0]["value"]
+    snap::ok(device.session.execute("BEGIN", Vec::new())).await;
+    let count = snap::ok(
+        device
+            .session
+            .execute("SELECT COUNT(*) FROM items", Vec::new()),
+    )
+    .await["rows"][0][0]["value"]
         .as_str()
         .expect("count")
         .parse::<u64>()
         .expect("count");
-    let id = device
-        .ok(json!({"type": "next_id", "table": "items"}))
-        .await["id"]
-        .clone();
-    device
-        .ok(json!({
-            "type": "sql",
-            "sql": "INSERT INTO items(key,completed,title,id) VALUES(?,0,?,?)",
-            "values": [
-                {"type": "text", "value": format!("{:04}", count + 1)},
-                {"type": "text", "value": format!("invoice {}", count + 1)},
-                {"type": "integer", "value": id},
-            ],
-        }))
-        .await;
-    device
-        .ok(json!({"type": "sql", "sql": "COMMIT", "handle": vec![handle; 32]}))
-        .await;
+    let id = snap::ok(device.session.next_id("items")).await["id"].clone();
+    snap::ok(device.session.execute(
+        "INSERT INTO items(key,completed,title,id) VALUES(?,0,?,?)",
+        vec![
+            rocky_sdk::SqlValue::Text(snap::text(&(format!("{:04}", count + 1)))),
+            rocky_sdk::SqlValue::Text(snap::text(&(format!("invoice {}", count + 1)))),
+            snap::row_id(&(id)),
+        ],
+    ))
+    .await;
+    snap::ok(device.session.commit([handle; 32])).await;
 }
 /// The invoice numbers once every frame they depend on arrived by sync.
 async fn keys(device: &Device) -> Vec<String> {
-    let query = json!({"type": "read", "query": {"sql": "SELECT key FROM items ORDER BY key", "values": [], "max_rows": 1024}});
-    let mut page = device.call(query.clone()).await;
+    let query = rocky_sdk::ReadQuery::new("SELECT key FROM items ORDER BY key", 1024);
+    let mut page = snap::observe(device.session.read(query.clone())).await;
     for _ in 0..200 {
         match &page {
             Err(error) if error["retryable"] == true => {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                page = device.call(query.clone()).await;
+                page = snap::observe(device.session.read(query.clone())).await;
             }
             _ => break,
         }
@@ -113,7 +110,7 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
     a.follow_main_migrating().await;
     let log = MemoryLog::new();
     log.configure(domain(&a), 1)?;
-    let owner = a.ok(json!({"type": "session"})).await["principal"]
+    let owner = snap::ok(a.session.info()).await["principal"]
         .as_str()
         .expect("owner")
         .to_owned();
@@ -131,12 +128,13 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
     )?)?
     .with_identity(common::external_identity(&c_dir));
     introduce(&a, &c).await;
-    let principal = c.ok(json!({"type":"session"})).await["principal"].clone();
-    let grant = a
-        .ok(json!({"type":"tips","action":"trust","identity":principal,"root":a.root()}))
-        .await;
-    c.ok(json!({"type":"tips","action":"install_trust","grant":grant["grant"]}))
-        .await;
+    let principal = snap::ok(c.session.info()).await["principal"].clone();
+    let grant = snap::ok(
+        a.session
+            .trust(&(snap::text(&(principal))), (a.root()).clone()),
+    )
+    .await;
+    snap::ok(c.session.install_trust(&(snap::text(&(grant["grant"]))))).await;
     c.sync().await.expect("trusted sync");
     let a_node = node_key(&a).await;
     for device in [&a, &c] {
@@ -155,13 +153,11 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
     // Offline, the owner stages its close, opening and move and migrates.
     let a = Device::new(Database::open(Open {
         schema: POSITIONED,
-        coordination: Some(rocky_sdk::Coordination::Composed(Arc::new(
-            log.client(a_node),
-        ))),
+        coordination: Some(Arc::new(log.client(a_node))),
         ..open(&a_dir, None)
     })?)?
     .with_identity(common::external_identity(&a_dir));
-    let status = a.ok(json!({"type": "generation"})).await;
+    let status = snap::ok(a.session.generation()).await;
     assert_eq!(status["current"]["schema"], 2, "{status}");
     // Nothing of the stage left the device: the source log is open.
     assert!(log.head(source)?.terminal.is_none());
@@ -176,9 +172,7 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
     // log with it and acknowledges, and the owner releases.
     let a = Device::new(Database::open(Open {
         schema: POSITIONED,
-        coordination: Some(rocky_sdk::Coordination::Composed(Arc::new(
-            log.client(a_node),
-        ))),
+        coordination: Some(Arc::new(log.client(a_node))),
         ..open(&a_dir, network("a"))
     })?)?
     .with_identity(common::external_identity(&a_dir));
@@ -188,7 +182,7 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
         let _ = c.sync().await;
     }
     let head = log.head(source)?;
-    let inspected = a.ok(json!({"type": "tips", "action": "inspect"})).await;
+    let inspected = snap::ok(a.session.inspect_tips()).await;
     let close = inspected["seals"]
         .as_array()
         .into_iter()
@@ -203,14 +197,19 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
     // The trusted node follows `main` to the migration's tip. Its writes
     // past the close are late: they replay there in stamp order, so the
     // replayed migration fills invoice 2 and later rows keep the default.
-    let status = c.ok(json!({"type": "generation"})).await;
+    let status = snap::ok(c.session.generation()).await;
     assert_eq!(status["current"]["schema"], 2, "{status}");
     assert_eq!(status["held"], 0, "{status}");
     let text = |value: &str| json!({"type": "text", "value": value});
     for device in [&a, &c] {
-        let rows = device
-            .ok(json!({"type": "read", "query": {"sql": "SELECT title, position FROM items ORDER BY title", "values": [], "max_rows": 8}}))
-            .await["rows"]
+        let rows = snap::ok(device.session.read(rocky_sdk::ReadQuery {
+            sql: "SELECT title, position FROM items ORDER BY title".to_owned(),
+            values: vec![],
+            max_rows: 8,
+            max_bytes: None,
+            cursor: None,
+        }))
+        .await["rows"]
             .clone();
         assert_eq!(
             rows,

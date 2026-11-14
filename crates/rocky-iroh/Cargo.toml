@@ -17,6 +17,7 @@ test-utils = ["iroh/test-utils"]
 [dependencies]
 tracing.workspace = true
 rocky-core.workspace = true
+rocky-credentials.workspace = true
 iroh = "1.3"
 iroh-dns = "1.3"
 n0-error = "1"

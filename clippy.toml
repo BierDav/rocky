@@ -1,0 +1,3 @@
+# Shared Clippy settings for native and wasm32. scripts/clippy appends the
+# browser-only restrictions from scripts/clippy-wasm/clippy.toml for wasm32;
+# put every other setting here so both targets use it.

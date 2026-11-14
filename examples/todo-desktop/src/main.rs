@@ -3,7 +3,6 @@ use dioxus::desktop::{
     Config, WindowCloseBehaviour,
     tao::{dpi::LogicalSize, window::WindowBuilder},
 };
-use rocky_sdk::transport::TransportOptions;
 use std::path::PathBuf;
 use todo_desktop::{App, Launch};
 
@@ -18,14 +17,14 @@ installations in the window.";
 fn launch() -> Result<Launch, String> {
     let mut root = None;
     let mut demo = true;
-    let mut transport = TransportOptions::default();
+    let mut transport = rocky_iroh::Options::default();
     let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--data-dir" => root = Some(PathBuf::from(args.next().ok_or(USAGE)?)),
             "--device" => demo = false,
             "--lan" => {
-                transport = TransportOptions::Iroh {
+                transport = rocky_iroh::Options {
                     relay: Some("disabled".into()),
                     lookup: Some("disabled".into()),
                     topic: false,

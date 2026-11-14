@@ -59,10 +59,13 @@ impl NativeSession {
         if fresh.is_empty() {
             return Ok(());
         }
-        #[cfg_attr(not(test), allow(unused_mut))]
-        let mut records = replica.escrow_of(&fresh).await?;
+        let records = replica.escrow_of(&fresh).await?;
         #[cfg(test)]
-        records.splice(0..0, std::mem::take(&mut self.escrow.forged));
+        let records = {
+            let mut records = records;
+            records.splice(0..0, std::mem::take(&mut self.escrow.forged));
+            records
+        };
         if !records.is_empty() {
             self.carry_credentials(
                 records

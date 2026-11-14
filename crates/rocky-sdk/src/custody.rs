@@ -2,40 +2,33 @@
 use crate::{
     Database, Failure, Network, Open, Opened,
     enrollment::{Invite, Settings},
-    transport::TransportOptions,
 };
 use rocky_core::Right;
 use rocky_credentials::Profile;
-use serde::Deserialize;
-use serde_json::{Value, json};
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Configuration {
-    directory: String,
-    schema: Value,
-    transport: TransportOptions,
-    #[serde(default)]
-    invitation: Option<String>,
-    #[serde(default)]
-    peers: Vec<String>,
-    #[serde(default)]
-    enrollment_upstream: Option<String>,
+#[derive(Clone)]
+pub struct CustodyConfiguration {
+    pub directory: PathBuf,
+    pub schema: crate::Schema,
+    pub transport: Arc<dyn rocky_core::net::Connector>,
+    pub coordination: Option<Arc<dyn rocky_credentials::Coordinator>>,
+    pub invitation: Option<String>,
+    pub peers: Vec<String>,
+    pub enrollment_upstream: Option<String>,
 }
 
-/// A keyless, non-issuing replica, opened entirely from JSON configuration.
+/// A keyless, non-issuing replica, opened from typed configuration.
 pub struct CustodyPeer {
     database: Arc<Database>,
 }
 impl CustodyPeer {
     /// Enrolls once, then resumes the persisted custody identity. Refuses
     /// reader/writer/issuer identities before opening their runtime.
-    pub fn open(configuration: &str) -> Result<Self, Failure> {
-        if configuration.len() > 256 * 1024 {
-            return Err("custody configuration quota".into());
-        }
-        let config: Configuration = serde_json::from_str(configuration)?;
+    pub fn open(config: CustodyConfiguration) -> Result<Self, Failure> {
         if config.peers.len() > crate::enrollment::MAX_CONTACTS {
             return Err("custody peer quota".into());
         }
@@ -69,14 +62,14 @@ impl CustodyPeer {
                 return Err("custody enrollment requires a custody invitation".into());
             }
         }
-        let schema = config.schema.to_string();
+        let schema = serde_json::to_string(&config.schema)?;
         let open = Open {
             identity: None,
             directory,
             schema: &schema,
             secrets: None,
-            network: Some(Network::Owned(Arc::new(config.transport))),
-            coordination: None,
+            network: Some(Network::Owned(config.transport)),
+            coordination: config.coordination,
         };
         let Opened { database, .. } = if existing {
             Database::open(open)?
@@ -93,14 +86,14 @@ impl CustodyPeer {
             .build()?;
         let configured = runtime.block_on(async {
             for contact in config.peers {
-                peer.call(json!({"type": "peer_add", "contact": contact}))
-                    .await?;
+                peer.database.session().add_peer(&contact).await?;
             }
-            peer.call(
-                json!({"type": "enrollment_upstream", "contact": config.enrollment_upstream}),
-            )
-            .await?;
-            peer.call(json!({"type": "sync_start"})).await?;
+            let session = peer.database.session();
+            session
+                .set_enrollment_upstream(config.enrollment_upstream.as_deref())
+                .await?;
+            session.set_automatic_sync(true).await?;
+            session.close().await;
             Ok::<_, Failure>(())
         });
         if let Err(error) = configured {
@@ -109,31 +102,15 @@ impl CustodyPeer {
         }
         Ok(peer)
     }
-    async fn call(&self, request: Value) -> Result<Value, Failure> {
-        let session = self.database.session();
-        let response = session.call(json!({"version": 1,
-            "scope": serde_json::from_str::<Value>(&self.database.scope())?, "request": request
-        }).to_string()).await;
-        session.close().await;
-        let response: Value = serde_json::from_str(&response?)?;
-        if response["status"] != "ok" {
-            return Err(response["error"]["message"]
-                .as_str()
-                .unwrap_or("custody call failed")
-                .to_owned()
-                .into());
-        }
-        Ok(response["value"].clone())
-    }
     /// The contact to configure on devices. This grants no authority.
     pub async fn contact(&self) -> Result<String, Failure> {
-        Ok(self.call(json!({"type": "contact"})).await?["uri"]
-            .as_str()
-            .ok_or("missing contact")?
-            .to_owned())
+        let session = self.database.session();
+        let contact = session.contact().await;
+        session.close().await;
+        contact
     }
     /// Creates the SDK's consistent backup archive without reader keys.
-    pub async fn backup(&self, target: &Path) -> Result<String, Failure> {
+    pub async fn backup(&self, target: &Path) -> Result<crate::BackupInventory, Failure> {
         self.database.backup(target).await
     }
     /// Drains networking, flushes custody and closes the database.

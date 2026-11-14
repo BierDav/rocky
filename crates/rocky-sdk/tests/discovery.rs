@@ -6,19 +6,14 @@
 //! `docs/runtime/sdk-transports.md#qualification`.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
-#![cfg(feature = "iroh")]
+use common::identity::snapshot as snap;
 use common::{Device, Failure};
-use rocky_sdk::{
-    Database, Network, Open,
-    iroh::{
-        Attachment, Options,
-        iroh::{
-            Endpoint, RelayMode, SecretKey, endpoint::presets, protocol::Router, tls::CaTlsConfig,
-        },
-        testing::{LookupServer, run_relay_server},
-    },
-    transport::TransportOptions,
+use rocky_iroh::{
+    Attachment, Options,
+    iroh::{Endpoint, RelayMode, SecretKey, endpoint::presets, protocol::Router, tls::CaTlsConfig},
+    testing::{LookupServer, run_relay_server},
 };
+use rocky_sdk::{Database, Network, Open};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, time::Duration};
 
@@ -27,7 +22,7 @@ mod common;
 const WAIT: Duration = Duration::from_secs(60);
 
 fn starter(lookup: Option<&str>, local: bool) -> Network {
-    Network::Owned(Arc::new(TransportOptions::Iroh {
+    Network::Owned(Arc::new(rocky_iroh::Options {
         relay: Some("disabled".into()),
         lookup: Some(lookup.unwrap_or("disabled").into()),
         topic: lookup.is_some(),
@@ -36,7 +31,11 @@ fn starter(lookup: Option<&str>, local: bool) -> Network {
     }))
 }
 async fn discovered(device: &Device) -> Option<Value> {
-    let peers = device.ok(json!({"type": "peers"})).await;
+    let peers = snap::ok(async {
+        let network = device.session.network().await?;
+        Ok(json!({"peers":network.peers,"discovery":network.discovery}))
+    })
+    .await;
     peers["peers"]
         .as_array()?
         .iter()
@@ -64,10 +63,12 @@ async fn enrolled(root: &Path) -> Result<(), Failure> {
     assert!(b.titles().await.is_empty());
     let node = issuer.node().await;
     for member in [&a, &b] {
-        member
-            .ok(json!({"type": "peer_remove", "node": node}))
-            .await;
-        let peers = member.ok(json!({"type": "peers"})).await;
+        snap::ok(member.session.remove_peer(&(snap::text(&(node))))).await;
+        let peers = snap::ok(async {
+            let network = member.session.network().await?;
+            Ok(json!({"peers":network.peers,"discovery":network.discovery}))
+        })
+        .await;
         assert!(
             peers["peers"]
                 .as_array()
@@ -121,7 +122,7 @@ async fn member_process() -> Result<(), Failure> {
     })
     .await?;
     b.sync().await.map_err(|error| error.to_string())?;
-    let status = b.ok(json!({"type": "status"})).await;
+    let status = snap::ok(b.session.status()).await;
     std::fs::write(
         report,
         json!({
@@ -164,12 +165,16 @@ async fn simulator_peer() -> Result<(), Failure> {
         },
         invitation.trim(),
     )?)?;
-    host.call(json!({"type": "sync"}))
+    snap::observe(host.sync_once())
         .await
         .map_err(|error| error.to_string())?;
     let found = tokio::time::timeout(WAIT, async {
         loop {
-            let peers = host.ok(json!({"type": "peers"})).await;
+            let peers = snap::ok(async {
+                let network = host.session.network().await?;
+                Ok(json!({"peers":network.peers,"discovery":network.discovery}))
+            })
+            .await;
             let local = peers["peers"]
                 .as_array()
                 .and_then(|peers| peers.iter().find(|peer| peer["is_local"] == true).cloned());
@@ -221,7 +226,7 @@ async fn two_processes_find_each_other_through_the_rendezvous_record_and_converg
         &root.path().join("a"),
         Some(starter(Some(&server.url), false)),
     )?;
-    let topics = a.ok(json!({"type": "discovery_topics"})).await;
+    let topics = snap::ok(a.session.discovery_topics()).await;
     let topic: [u8; 32] = data_encoding::HEXLOWER
         .decode(topics["current"].as_str().ok_or("topic")?.as_bytes())?
         .try_into()
@@ -265,9 +270,9 @@ async fn an_attached_endpoint_has_the_same_lookup_services_after_a_database_deta
         .spawn();
     let a = Device::create(
         &root.path().join("a"),
-        Some(Network::Borrowed(attachment.transport())),
+        Some(Network::Attached(attachment.connected())),
     )?;
-    let topics = a.ok(json!({"type": "discovery_topics"})).await;
+    let topics = snap::ok(a.session.discovery_topics()).await;
     let topic: [u8; 32] = data_encoding::HEXLOWER
         .decode(topics["current"].as_str().ok_or("topic")?.as_bytes())?
         .try_into()
@@ -278,14 +283,14 @@ async fn an_attached_endpoint_has_the_same_lookup_services_after_a_database_deta
         }
     })
     .await?;
-    let discovery = a.ok(json!({"type": "network"})).await["discovery"].clone();
+    let discovery = snap::ok(a.session.network()).await["discovery"].clone();
     assert_eq!(discovery["announcing"], true);
     assert_eq!(discovery["topic"]["state"], "on");
     assert_eq!(discovery["local"]["state"], "off");
     assert_eq!(endpoint.address_lookup()?.len(), services);
     a.network.as_ref().ok_or("attached")?.close().await;
     assert_eq!(endpoint.address_lookup()?.len(), services);
-    let discovery = a.ok(json!({"type": "network"})).await["discovery"].clone();
+    let discovery = snap::ok(a.session.network()).await["discovery"].clone();
     assert_eq!(discovery["announcing"], false);
     a.close().await;
     assert!(!endpoint.is_closed());
@@ -297,7 +302,7 @@ async fn an_attached_endpoint_has_the_same_lookup_services_after_a_database_deta
         &root.path().join("a"),
         Some(Network::Borrowed(plain.transport())),
     )?;
-    let discovery = a.ok(json!({"type": "network"})).await["discovery"].clone();
+    let discovery = snap::ok(a.session.network()).await["discovery"].clone();
     assert_eq!(discovery["announcing"], false);
     for path in ["local", "topic"] {
         assert_eq!(discovery[path]["state"], "unavailable");
@@ -313,7 +318,7 @@ async fn an_attached_endpoint_has_the_same_lookup_services_after_a_database_deta
 }
 
 /// An application-owned endpoint that reaches others through `relay` only.
-async fn relayed(secret: u8, relay: &rocky_sdk::iroh::iroh::RelayMap) -> Result<Endpoint, Failure> {
+async fn relayed(secret: u8, relay: &rocky_iroh::iroh::RelayMap) -> Result<Endpoint, Failure> {
     let endpoint = Endpoint::builder(presets::Minimal)
         .secret_key(SecretKey::from_bytes(&[secret; 32]))
         .relay_mode(RelayMode::Custom(relay.clone()))
@@ -348,7 +353,7 @@ async fn two_endpoints_without_a_direct_path_converge_through_a_relay() -> Resul
     )?;
     a.add(1, "Milk").await;
     b.add(2, "Eggs").await;
-    let pass = b.call(json!({"type": "sync"})).await;
+    let pass = snap::observe(b.sync_once()).await;
     assert_eq!(
         common::identity::completed_peers(&pass.map_err(|error| error.to_string())?),
         1

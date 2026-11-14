@@ -98,7 +98,6 @@ async fn replay() -> Result<(), Failure> {
 
 /// How many seeds the e2e sweep runs, and where it starts; the shards
 /// split them.
-#[cfg(feature = "iroh")]
 fn sweep_range() -> std::ops::Range<u64> {
     let read = |name: &str, default: u64| {
         std::env::var(name)
@@ -112,12 +111,11 @@ fn sweep_range() -> std::ops::Range<u64> {
     let first = read("ROCKY_SIM_FIRST", 10_000);
     first..first + read("ROCKY_SIM_SEEDS", 8)
 }
-#[cfg(feature = "iroh")]
+
 const SHARDS: u64 = 16;
 /// One shard of the sweep: fails on any safety violation and on a seed
 /// whose healing result differs from `KNOWN_LIVENESS`, listing each with
 /// what blocks it.
-#[cfg(feature = "iroh")]
 async fn shard(shard: u64) -> Result<(), Failure> {
     let mut unsafe_seeds = Vec::new();
     let mut stuck = std::collections::BTreeMap::<Vec<String>, Vec<u64>>::new();
@@ -152,7 +150,7 @@ macro_rules! shards {
     ($($name:ident = $shard:expr),* $(,)?) => {$(
         // Once, in the workspace build: the build without iroh runs the
         // same simulation.
-        #[cfg(feature = "iroh")]
+
         #[tokio::test(start_paused = true)]
         #[ignore = "the e2e sweep"]
         async fn $name() -> Result<(), Failure> {
@@ -206,9 +204,9 @@ async fn hub_transcript(seed: u64) -> Result<(Vec<u8>, Vec<String>), Failure> {
     );
     let x = hub.connector("x").start(false, [1; 32]).await?;
     let y = hub.connector("y").start(true, [2; 32]).await?;
-    y.listen(true);
+    y.listen(None, true).expect("listen");
     let echo = tokio::task::spawn_local(async move {
-        while let Some((_, mut stream)) = y.accept().await {
+        while let Some(rocky_core::net::Incoming::Stream(_, mut stream)) = y.accept().await {
             tokio::task::spawn_local(async move {
                 let mut buffer = [0; 1024];
                 while let Ok(read) = stream.read(&mut buffer).await {
@@ -222,11 +220,11 @@ async fn hub_transcript(seed: u64) -> Result<(Vec<u8>, Vec<String>), Failure> {
     for stream in 0..12u8 {
         if stream == 6 {
             hub.set_down("x", "y", true);
-            assert!(x.connect("y", Protocol::Link).await.is_err());
+            assert!(x.connect("y", Protocol::Link, None).await.is_err());
             tokio::time::sleep(Duration::from_secs(1)).await;
             hub.set_down("x", "y", false);
         }
-        let Ok(link) = x.connect("y", Protocol::Link).await else {
+        let Ok(link) = x.connect("y", Protocol::Link, None).await else {
             continue;
         };
         let (mut reader, mut writer) = tokio::io::split(link);

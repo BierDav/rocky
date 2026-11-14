@@ -12,16 +12,17 @@ use crate::{
     groups::{GroupPartition, GroupRecord, Member, secret_role},
     join_requests::{Dropped, Note, State},
     membership::Membership,
+    peer::{PeerReply, PeerRequest, ReplyFrame},
     registry::{self, Changes, Registry, RegistryFull},
     schema::Schema,
     secrets::{Vault, write_private},
     service::ServiceError,
-    transport::{Protocol, Stream, Transport},
+    transport::Transport,
 };
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use rocky_core::{Commitment, DomainId, MeshId, ResourceGrant, Right, RowSelection, commitment};
 use rocky_credentials::{
-    Admission, AuthorRange, Authority, Credentials, IdentityProvider, Invitation,
+    Admission, Authority, Credentials, EpochRequest, IdentityProvider, Invitation,
     MAX_LIVE_REVOCATIONS, PairRequest, Profile, REVOCATION_SET_FULL, RenewRequest, Renewal,
     Revocation, open_enrollment, seal_enrollment,
 };
@@ -34,19 +35,17 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::Arc,
-    time::Duration,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements, envelopes wait in `deliveries`,
 /// join requests wait in `Issuing::requests`.
-pub const VERSION: u32 = 32;
+pub const VERSION: u32 = 33;
 /// Current invitation format: the issuer's node key, and a profile only
 /// when the invited device is admitted on arrival.
 const INVITE_VERSION: u32 = 7;
 /// Current format of what an issuer seals to a joining device.
-const ANSWER_FORMAT: u32 = 5;
+const ANSWER_FORMAT: u32 = 6;
 const CONTACT_VERSION: u32 = 3;
 /// Contacts one device keeps: routes to peers, which grant nothing.
 pub const MAX_CONTACTS: usize = 64;
@@ -61,12 +60,9 @@ pub const DEFAULT_TTL: u64 = 30 * 24 * 60 * 60;
 const INVITATION_TTL: u64 = 600;
 /// Key epochs kept per collection: one per revocation that rotated it.
 const MAX_EPOCHS: usize = 256;
-/// A renewal answer carries the whole revocation set, hexadecimal in JSON.
-const MAX_MESSAGE: usize = 3 * rocky_credentials::MAX_REVOCATION_SET_BYTES;
 /// Accepted clock difference between devices.
 const SKEW: u64 = 300;
 type GroupDelivery = (GroupRecord, Vec<Vec<u8>>);
-pub(crate) const EPOCHS: &[u8] = b"rocky.sdk.epochs.v1\n";
 /// The naming root an enrollment of `profile` carries: an issuer's only.
 pub(crate) fn naming_for(vault: &Vault, profile: &Profile) -> Result<Option<String>, Failure> {
     if !profile.issues() {
@@ -92,13 +88,6 @@ pub(crate) fn hold_naming(vault: &Vault, naming: Option<&str>) -> Result<(), Fai
     vault.put(crate::groups::NAMING_ROLE, &root)?;
     Ok(())
 }
-pub(crate) const POLICY: &[u8] = b"rocky.sdk.policy.v1\n";
-/// A new node of an identity asks a node of the same identity for it.
-pub(crate) const UNLINK: &[u8] = b"rocky.sdk.membership-unlink.v1\n";
-pub(crate) const LINK: &[u8] = b"rocky.sdk.membership-link.v1\n";
-pub(crate) const IDENTITY: &[u8] = b"rocky.sdk.identity.v1\n";
-const TIMEOUT: Duration = Duration::from_secs(15);
-
 /// The statement that revokes this device.
 #[derive(Debug)]
 pub(crate) struct Revoked(pub SignedRevocation);
@@ -214,7 +203,7 @@ struct Notice {
     version: u32,
     statement: SignedRevocation,
 }
-const NOTICE_VERSION: u32 = 2;
+const NOTICE_VERSION: u32 = 3;
 
 /// The persisted identity of one installation. It holds no secret; keys
 /// are in the `SecretStore` under `installation`.
@@ -275,12 +264,6 @@ pub struct Settings {
     #[serde(skip)]
     pub enrollment_routes: BTreeMap<PublicKey, Contact>,
     pub logged_out: bool,
-    /// The author numbers this principal grants to other principals, if any.
-    pub minting: Option<Minting>,
-    /// Stable outgoing principal ranges, including non-issuer delegations.
-    pub granted_authors: BTreeMap<PublicKey, AuthorRange>,
-    /// Retained across removal/replacement of a supplied author range.
-    pub author_high_water: u32,
     /// Envelopes this device sends, by delivery digest, until delivered.
     pub deliveries: BTreeMap<String, crate::delivery::Pending>,
     /// This identity's counter claim right, which its node presents to the
@@ -290,48 +273,6 @@ pub struct Settings {
     /// acknowledged holding. Until it matches the held set's, any node
     /// holding them pushes them again.
     pub revocations_pushed: Option<Commitment>,
-}
-/// An assigner's author numbers: its range and the next free one. It is
-/// saved before any number it hands out leaves the device.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Minting {
-    pub range: AuthorRange,
-    pub next: u32,
-}
-impl Minting {
-    /// The next `count` free numbers, for a recipient that assigns them.
-    fn carve(&mut self, count: u32) -> Result<AuthorRange, Failure> {
-        let last = self
-            .next
-            .checked_add(
-                count
-                    .checked_sub(1)
-                    .ok_or("assign at least one author number")?,
-            )
-            .filter(|last| *last <= self.range.last)
-            .ok_or("not enough free author numbers")?;
-        let carved = AuthorRange::new(self.next, last)?;
-        self.next = last + 1;
-        Ok(carved)
-    }
-    /// Default grants keep half a small free range; explicit counts remain exact.
-    fn grant(&mut self, count: Option<u32>) -> Result<AuthorRange, Failure> {
-        let available = self.range.last.saturating_add(1).saturating_sub(self.next);
-        self.carve(count.unwrap_or(available.div_ceil(2).min(1024)))
-    }
-    /// The upper half of the free numbers, handed to another issuer; this
-    /// device keeps the lower half. None when fewer than two are free.
-    fn split(&mut self) -> Option<AuthorRange> {
-        let free = self.range.last.checked_sub(self.next)?;
-        if free == 0 {
-            return None;
-        }
-        let first = self.next + free / 2 + 1;
-        let upper = AuthorRange::new(first, self.range.last).ok()?;
-        self.range = AuthorRange::new(self.range.first, first - 1).ok()?;
-        Some(upper)
-    }
 }
 /// What an issuer keeps besides the registry: its invitation, the device
 /// that claimed it, a revocation it has begun and the keys revoked for good.
@@ -370,8 +311,6 @@ pub struct Claim {
     pub node: PublicKey,
     /// The identity the invitation granted to.
     pub user: PublicKey,
-    /// The range reserved for the recipient principal.
-    pub authors: Option<AuthorRange>,
 }
 /// A begun revocation: its statement and the key epoch each collection and
 /// group partition rotates to. Signing is deterministic: the statement keeps
@@ -393,11 +332,12 @@ pub struct Rotation {
     pub groups: BTreeMap<String, u64>,
 }
 /// What an issuer's revocation ends: an identity and every node of it, or a
-/// claim right. Of a trusted identity only the root revokes, and its
-/// revocation also ends every identity the trusted one first enrolled.
+/// claim right. Only the root revokes a trusted identity and chooses
+/// whether its first enrollees also end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Revoke {
     Identity(PublicKey),
+    TrustedIdentity(PublicKey, rocky_credentials::RevocationMode),
     /// A claim right, by its grant id: every link of it, whoever signed it.
     Claims(Commitment),
 }
@@ -571,9 +511,6 @@ struct Enrollment {
     /// The issuer links `capability` follows; empty when the owner signed.
     chain: CredentialChain,
     ttl: u64,
-    /// The principal range granted by this enrollment.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    authors: Option<AuthorRange>,
     /// Contacts of the other issuers the enrolling issuer reaches.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     issuers: Vec<String>,
@@ -593,12 +530,6 @@ struct Sealed {
     /// A fresh claim link, when the answering issuer renews a claim right.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     claims: Option<CredentialChain>,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct EpochRequest {
-    pub request: Vec<u8>,
-    pub revocations: RevocationSet,
 }
 impl Sealed {
     fn parse(bytes: &[u8]) -> Result<Self, Failure> {
@@ -697,7 +628,7 @@ pub struct NodeKeys {
     pub node: PublicKey,
 }
 /// Credentials and reader keys supplied to a device from outside the SDK.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Supplied {
     pub mesh: MeshId,
@@ -714,17 +645,14 @@ pub struct Supplied {
     /// Contacts of the issuers that renew this device.
     pub issuers: Vec<String>,
 }
-/// The lifetime, further delegations and author numbers of granted or
-/// delegated credentials. Absent values are this device's lifetime, 1 (the
-/// recipient reaches only its own node key) and none.
+/// The lifetime and further delegations of granted or delegated
+/// credentials. Absent values are this device's lifetime and 1 (the
+/// recipient reaches only its own node key).
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Terms {
     pub ttl: Option<u64>,
     pub delegations: Option<u8>,
-    /// How many of this device's free author numbers the recipient may
-    /// certify for its nodes.
-    pub authors: Option<u32>,
 }
 impl Terms {
     fn ttl(&self, default: u64) -> Result<u64, Failure> {
@@ -888,15 +816,20 @@ impl Settings {
             crate::RevocationReason::Node
         } else if revoked.identities.contains(&self.identity) {
             crate::RevocationReason::Identity
-        } else if let Some(recovery) = revoked.recovery.filter(|_| statement.root()) {
+        } else if let Some(recovery) = revoked.grants().filter(|_| statement.root()) {
             crate::RevocationReason::Recovery {
                 recovered: recovery.keep.to_hex(),
             }
-        } else if let Some(origin) = self
-            .link_origin()?
-            .filter(|origin| statement.root() && revoked.identities.contains(origin))
-        {
-            crate::RevocationReason::Origin {
+        } else if revoked.reset().is_some() && statement.root() {
+            crate::RevocationReason::Reset {
+                reset: statement.id()?,
+            }
+        } else if let Some(origin) = self.link_origin()?.filter(|origin| {
+            statement.root()
+                && revoked.mode == rocky_credentials::RevocationMode::Compromised
+                && revoked.identities.contains(origin)
+        }) {
+            crate::RevocationReason::Cascade {
                 trusted: origin.to_hex(),
             }
         } else {
@@ -954,13 +887,13 @@ impl Settings {
     }
     /// The digest and live count of the held revocations, and whether the
     /// coordination service has yet to acknowledge them, as status shows them.
-    pub(crate) fn revocation_status(&self) -> Result<serde_json::Value, Failure> {
+    pub(crate) fn revocation_status(&self) -> Result<crate::RevocationStatus, Failure> {
         let time = now()?;
-        Ok(serde_json::json!({
-            "digest": HEXLOWER.encode(&self.revocations.digest(time)?),
-            "statements": self.revocations.live(time),
-            "unpushed": self.unpushed_revocations(time)?.is_some(),
-        }))
+        Ok(crate::RevocationStatus {
+            digest: HEXLOWER.encode(&self.revocations.digest(time)?),
+            statements: self.revocations.live(time) as u64,
+            unpushed: self.unpushed_revocations(time)?.is_some(),
+        })
     }
     /// The held revocations and their digest at `time` while the
     /// coordination service has not acknowledged that digest.
@@ -1481,12 +1414,8 @@ impl Settings {
             keys.insert(name.to_owned(), vec![epoch]);
         }
         let manifest = SignedManifest::sign(&bound.manifest(), root)?;
-        let grant = Authority::owner(root).issue_trusted(
-            identity.public_key()?,
-            bound.scope,
-            AuthorRange::DOMAIN,
-            now()?,
-        )?;
+        let grant =
+            Authority::owner(root).issue_trusted(identity.public_key()?, bound.scope, now()?)?;
         let mut settings = Self::installed(
             (installation, single_use),
             (publisher, identity.public_key()?),
@@ -1496,7 +1425,6 @@ impl Settings {
         );
         settings.keys = keys;
         settings.authority = Some(Issuing::default());
-        settings.minting = Some(settings.minting_of(AuthorRange::DOMAIN));
         let links = CredentialChain(vec![grant]);
         settings.credentials =
             crate::identities::with_identity(identity, || settings.certify(&vault, links, &bound))?;
@@ -1518,9 +1446,8 @@ impl Settings {
     /// restores, any node, with the keys `recovered` opened from its
     /// store's escrow records. A collection none opened gets a fresh key,
     /// and a store without the naming root a fresh one. Its identity is
-    /// fresh, supplied or single-use; the root
-    /// grants it trust over a recovery slot of the author numbers only the
-    /// root grants (`recovery_authors`).
+    /// fresh, supplied or single-use; the root grants it trust. Its nodes
+    /// write under their own keys, so nothing it creates collides.
     pub(crate) fn recover(
         store: &std::sync::Arc<dyn crate::SecretStore>,
         (archived, predecessor): (&Self, PublicKey),
@@ -1532,7 +1459,6 @@ impl Settings {
         if publisher != archived.publisher {
             return Err("the root key is not this domain's root".into());
         }
-        let authors = recovery_authors(archived)?;
         let installation = HEXLOWER.encode(&random::<16>());
         let vault = Vault::new(store.clone(), &installation);
         let single_use = provider.is_none();
@@ -1584,7 +1510,6 @@ impl Settings {
         let grant = Authority::owner(root).issue_trusted(
             identity.public_key()?,
             bound.scope,
-            authors,
             after_recovery(&archived.revocations, now()? + 1),
         )?;
         let mut settings = Self::installed(
@@ -1603,7 +1528,6 @@ impl Settings {
         settings.groups = groups;
         settings.epoch_statements = archived.epoch_statements.clone();
         settings.authority = Some(Issuing::default());
-        settings.minting = Some(settings.minting_of(authors));
         let links = CredentialChain(vec![grant]);
         settings.credentials =
             crate::identities::with_identity(identity, || settings.certify(&vault, links, &bound))?;
@@ -1661,9 +1585,6 @@ impl Settings {
             peers: BTreeMap::new(),
             enrollment_routes: BTreeMap::new(),
             logged_out: false,
-            minting: None,
-            granted_authors: BTreeMap::new(),
-            author_high_water: 0,
             deliveries: BTreeMap::new(),
             claims: None,
             revocations_pushed: None,
@@ -1671,12 +1592,15 @@ impl Settings {
             epoch_statements: BTreeMap::new(),
         }
     }
-    pub(crate) fn validity(&self) -> Result<(u64, u64, u64), Failure> {
-        Ok((now()?, self.ttl, SKEW))
+    pub(crate) fn validity(&self) -> Result<rocky_credentials::Validity, Failure> {
+        Ok(rocky_credentials::Validity {
+            issued_at: now()?,
+            lifetime: std::time::Duration::from_secs(self.ttl),
+            clock_skew: std::time::Duration::from_secs(SKEW),
+        })
     }
     /// The root's trusted grant to `identity`, a recorded issuer identity, with the registry row that tells every trusted
-    /// node: issuer authority over its recorded author range, tip and
-    /// bookmark control, and no expiry. `root` signs and is dropped.
+    /// node: issuer authority, tip and bookmark control, and no expiry. `root` signs and is dropped.
     pub fn trust(
         &self,
         registry: &Registry,
@@ -1684,17 +1608,14 @@ impl Settings {
         root: Option<&dyn IdentityProvider>,
     ) -> Result<(SignedCapability, Changes), Failure> {
         let root = root_signer(root, self.publisher, "granting trust")?;
-        if self.tombstoned(&identity) || self.revocations.revokes_origin(&identity) {
+        if self.tombstoned(&identity) || self.revocations.revokes_trusted(&identity) {
             return Err("identity was revoked".into());
         }
         let record = registry
             .get(&identity)
             .filter(|record| !record.revoked)
             .ok_or("this identity is not recorded")?;
-        let authors = record
-            .capability()
-            .map(|capability| capability.authors)
-            .ok_or("this identity is not recorded")?;
+        record.capability().ok_or("this identity is not recorded")?;
         if !record.profile().is_some_and(Profile::issues) {
             return Err("only an identity enrolled with an issuer invitation is trusted".into());
         }
@@ -1710,7 +1631,6 @@ impl Settings {
         let grant = Authority::owner(root).issue_trusted(
             identity,
             self.domain()?.scope,
-            authors,
             after_recovery(&self.revocations, now()?),
         )?;
         let mut changes = Changes::default();
@@ -1742,14 +1662,9 @@ impl Settings {
             .filter(|_| links.0.len() == 1)
             .ok_or("a recovered identity holds one trusted grant")?
             .capability;
-        let slot = grant
-            .authors()?
-            .and_then(|authors| authors.recovery_slot())
-            .ok_or("not a recovered identity")?;
         let recovery = rocky_credentials::RootRecovery {
             since: grant.not_before,
             keep: self.identity,
-            slot,
         };
         if self.revocations.recoveries().contains(&recovery) {
             return Ok(false);
@@ -1780,7 +1695,8 @@ impl Settings {
                         identities: BTreeSet::new(),
                         capabilities: BTreeSet::new(),
                         cut,
-                        recovery: Some(recovery),
+                        mode: rocky_credentials::RevocationMode::Compromised,
+                        recovery: Some(rocky_credentials::RootDecision::Grants(recovery)),
                     },
                     database,
                 )
@@ -1824,17 +1740,17 @@ impl Settings {
             .map(|_| chain)
     }
     /// An identity capability `authority` signs for `identity`: issuer
-    /// authority with `authors`, or `grants` and their whole partitions.
+    /// authority, or `grants` and their whole partitions.
     fn issue(
         &self,
         authority: &Authority<'_>,
         domain: &Domain,
         identity: PublicKey,
         grants: Vec<ResourceGrant>,
-        (issues, authors): (bool, Option<AuthorRange>),
+        issues: bool,
     ) -> Result<SignedCapability, Failure> {
         if issues {
-            return Ok(authority.issue_issuer(identity, authors, self.validity()?)?);
+            return Ok(authority.issue_issuer(identity, self.validity()?)?);
         }
         let partitions = domain
             .families
@@ -1850,7 +1766,7 @@ impl Settings {
             identity,
             grants,
             partitions,
-            (1, authors),
+            rocky_credentials::DelegationTerms { delegations: 1 },
             self.validity()?,
         )?)
     }
@@ -1959,10 +1875,12 @@ impl Settings {
                 envelopes.push(
                     rocky_credentials::GroupSecretEnvelope::seal_recorded(
                         &sender,
-                        record.address,
-                        epoch.generation,
-                        vault.get(&role)?,
-                        record.name,
+                        rocky_credentials::GroupSecrets {
+                            group: record.address,
+                            epoch: epoch.generation,
+                            secret: vault.get(&role)?,
+                            name: record.name,
+                        },
                         node,
                         self.epoch_statements
                             .get(&role)
@@ -2339,30 +2257,9 @@ impl Settings {
                 Vec::new(),
             )),
             Some(State::Refused) => Ok((seal(Outcome::Refused)?, Changes::default(), Vec::new())),
-            Some(State::Admitted {
-                profile,
-                label,
-                authors,
-            }) => {
-                let authors = match authors {
-                    Some(authors) => authors,
-                    None => self.carve_authors(&profile)?,
-                };
-                if let Some(held) = self
-                    .issuing("enrolls devices")?
-                    .requests
-                    .of_mut(&request.node)
-                    && let State::Admitted { authors: kept, .. } = &mut held.state
-                {
-                    *kept = Some(authors);
-                }
-                let (enrollment, changes) = self.enroll(
-                    vault,
-                    &request,
-                    registry,
-                    (&token, profile.clone(), label),
-                    authors,
-                )?;
+            Some(State::Admitted { profile, label }) => {
+                let (enrollment, changes) =
+                    self.enroll(vault, &request, registry, (&token, profile.clone(), label))?;
                 let enrolled = Note::Enrolled {
                     node: request.node,
                     profile,
@@ -2423,11 +2320,6 @@ impl Settings {
             }
             _ => {}
         }
-        // A retry carves nothing again: the first answer's range is kept.
-        let authors = match claimed.and_then(|claim| claim.authors) {
-            Some(authors) => authors,
-            None => self.carve_authors(&profile)?,
-        };
         let authority = self.issuing("enrolls devices")?;
         authority
             .invitation
@@ -2437,16 +2329,10 @@ impl Settings {
         authority.claimed = Some(Claim {
             node: request.node,
             user: request.user,
-            authors: Some(authors),
         });
         let label = authority.invitation_label.clone();
-        let (enrollment, changes) = self.enroll(
-            vault,
-            request,
-            registry,
-            (token, profile.clone(), label),
-            authors,
-        )?;
+        let (enrollment, changes) =
+            self.enroll(vault, request, registry, (token, profile.clone(), label))?;
         let answer = Answer {
             format: ANSWER_FORMAT,
             outcome: Outcome::Enrolled(Box::new(enrollment)),
@@ -2458,17 +2344,6 @@ impl Settings {
         };
         Ok((sealed, changes, vec![enrolled]))
     }
-    /// The author numbers a device enrolled as `profile` gets: an issuer
-    /// half of the free ones, any other device a grant of them.
-    fn carve_authors(&mut self, profile: &Profile) -> Result<AuthorRange, Failure> {
-        if profile.issues() {
-            self.minting()?
-                .split()
-                .ok_or_else(|| "not enough free author numbers".into())
-        } else {
-            self.minting()?.grant(None)
-        }
-    }
     /// What admitting a device creates: its capability as `profile`, the
     /// enrollment that carries it and the registry rows recording it. The
     /// one place admission makes a device's credentials.
@@ -2478,7 +2353,6 @@ impl Settings {
         request: &PairRequest,
         registry: &Registry,
         (token, profile, label): (&[u8; 32], Profile, Option<Vec<u8>>),
-        authors: AuthorRange,
     ) -> Result<(Enrollment, Changes), Failure> {
         if !registry.admitted(&request.user) && registry.identities() >= registry::MAX_IDENTITIES {
             return Err(Box::new(RegistryFull));
@@ -2495,7 +2369,7 @@ impl Settings {
             &domain,
             request.user,
             grants.clone(),
-            (profile.issues(), Some(authors)),
+            profile.issues(),
         )?;
         self.learn_joined_peer(request.node, &request.routes, profile.issues());
         let mut changes = Changes::default();
@@ -2528,10 +2402,6 @@ impl Settings {
         changes.capability(
             &request.user,
             registry::Capability {
-                authors: issued
-                    .capability
-                    .authors()?
-                    .ok_or("principal has no author range")?,
                 id: issued.id()?,
                 expires: issued.capability.expires,
             },
@@ -2555,7 +2425,6 @@ impl Settings {
             chain: links.clone(),
             ttl: self.ttl,
             profile,
-            authors: Some(authors),
             issuers: self.issuer_contacts(&[request.node])?,
         };
         Ok((enrollment, changes))
@@ -2565,8 +2434,7 @@ impl Settings {
     /// keys `device` names: credentials and reader keys it installs with
     /// `Database::install`, on `terms`, and the registry rows that record
     /// it. Save the identity and commit the rows before handing them out.
-    /// Author numbers are carved afresh each time. The result carries
-    /// reader keys: a secret.
+    /// The result carries reader keys: a secret.
     pub fn grant(
         &mut self,
         vault: &Vault,
@@ -2591,7 +2459,6 @@ impl Settings {
         {
             return Err(Box::new(RegistryFull));
         }
-        let authors = Some(self.reserve_authors(device.identity, Some(registry), terms.authors)?);
         let node = Self::node_key(vault)?;
         let authority = self.authority(&node)?;
         let time = now()?;
@@ -2607,8 +2474,14 @@ impl Settings {
             domain
                 .families
                 .compact_partitions(&whole_partitions(&domain, &grants)),
-            (terms.delegations.unwrap_or(1), authors),
-            (time, ttl, SKEW),
+            rocky_credentials::DelegationTerms {
+                delegations: terms.delegations.unwrap_or(1),
+            },
+            rocky_credentials::Validity {
+                issued_at: time,
+                lifetime: std::time::Duration::from_secs(ttl),
+                clock_skew: std::time::Duration::from_secs(SKEW),
+            },
         )?;
         let mut keys = Vec::new();
         for (name, epochs) in self.keys_for(vault, &domain, &grants)? {
@@ -2641,10 +2514,6 @@ impl Settings {
         changes.capability(
             &device.identity,
             registry::Capability {
-                authors: capability
-                    .capability
-                    .authors()?
-                    .ok_or("principal has no author range")?,
                 id: capability.id()?,
                 expires: capability.capability.expires,
             },
@@ -2672,8 +2541,7 @@ impl Settings {
     /// the device whose public keys `device` names: a link signed by this
     /// node's identity, with the reader keys the grants read. Any device
     /// whose capability allows a further delegation does this; the
-    /// delegate renews by being delegated to again. `authors` carves fresh
-    /// numbers from this device's range each time. On an issuer the
+    /// delegate renews by being delegated to again. On an issuer the
     /// registry rows recording the delegate come with it.
     pub fn delegate(
         &mut self,
@@ -2702,7 +2570,6 @@ impl Settings {
             }
         }
         let node = Self::node_key(vault)?;
-        let authors = Some(self.reserve_authors(device.identity, registry, terms.authors)?);
         // An issuer grants instead: its links refuse to delegate.
         let family_context = if domain.families.is_empty() {
             rocky_credentials::GrantFamilies::default()
@@ -2711,14 +2578,22 @@ impl Settings {
         };
         let chain = self.credentials.delegable().delegate_with_families(
             rocky_credentials::Signer::node(&node, &self.credentials)?,
-            device.identity,
-            rocky_core::PrincipalKind::User,
-            domain.families.compact_resources(&grants),
-            domain
-                .families
-                .compact_partitions(&whole_partitions(&domain, &grants)),
-            (terms.delegations.unwrap_or(1), authors),
-            (now()?, ttl, SKEW),
+            rocky_credentials::Delegation {
+                subject: device.identity,
+                kind: rocky_core::PrincipalKind::User,
+                grants: domain.families.compact_resources(&grants),
+                partitions: domain
+                    .families
+                    .compact_partitions(&whole_partitions(&domain, &grants)),
+                terms: rocky_credentials::DelegationTerms {
+                    delegations: terms.delegations.unwrap_or(1),
+                },
+                validity: rocky_credentials::Validity {
+                    issued_at: now()?,
+                    lifetime: std::time::Duration::from_secs(ttl),
+                    clock_skew: std::time::Duration::from_secs(SKEW),
+                },
+            },
             &family_context,
         )?;
         let mut keys = Vec::new();
@@ -2747,10 +2622,6 @@ impl Settings {
             changes.capability(
                 &device.identity,
                 registry::Capability {
-                    authors: leaf
-                        .capability
-                        .authors()?
-                        .ok_or("principal has no author range")?,
                     id: leaf.id()?,
                     expires: chain.expires(),
                 },
@@ -2829,25 +2700,9 @@ impl Settings {
             claims: None,
         })
     }
-    pub(crate) fn reserve_authors(
-        &mut self,
-        principal: PublicKey,
-        registry: Option<&Registry>,
-        count: Option<u32>,
-    ) -> Result<AuthorRange, Failure> {
-        if let Some(range) = registry
-            .and_then(|registry| registry.authors(principal))
-            .or_else(|| self.granted_authors.get(&principal).copied())
-        {
-            return Ok(range);
-        }
-        let range = self.minting()?.grant(count)?;
-        self.granted_authors.insert(principal, range);
-        Ok(range)
-    }
     /// Supplied credentials as this node's chain: a chain that ends at this
     /// identity, or at a certificate it signed for this node, is certified
-    /// here, with this node's alias and author number.
+    /// here, with this node's alias.
     fn own_chain(
         &self,
         vault: &Vault,
@@ -2884,12 +2739,6 @@ impl Settings {
         }
         Ok(chain)
     }
-    fn minting(&mut self) -> Result<&mut Minting, Failure> {
-        self.minting
-            .as_mut()
-            .ok_or_else(|| "this principal has no author range available for delegation".into())
-    }
-
     /// The rows of this issuer's own identity record: its identity entry,
     /// current capability. Rows that exist are kept.
     pub(crate) fn own_record(&self, registry: &Registry) -> Result<Changes, Failure> {
@@ -2914,10 +2763,6 @@ impl Settings {
         changes.capability(
             &own,
             registry::Capability {
-                authors: root
-                    .capability
-                    .authors()?
-                    .ok_or("principal has no author range")?,
                 id: root.id()?,
                 expires: root.capability.expires,
             },
@@ -3165,9 +3010,6 @@ impl Settings {
             peers: BTreeMap::new(),
             enrollment_routes: BTreeMap::new(),
             logged_out: false,
-            minting: None,
-            granted_authors: BTreeMap::new(),
-            author_high_water: 0,
             deliveries: BTreeMap::new(),
             claims: None,
             revocations_pushed: None,
@@ -3199,11 +3041,6 @@ impl Settings {
             .saturating_sub(now()?)
             .clamp(60, DEFAULT_TTL);
         settings.profile = profile_of(&grants, &domain);
-        settings.minting = settings
-            .credentials
-            .delegable()
-            .authors()?
-            .map(|range| settings.minting_of(range));
         let readable: BTreeMap<&str, _> = domain
             .scopes()
             .filter(|(_, scope)| reads(&grants, *scope))
@@ -3261,33 +3098,6 @@ impl Settings {
     }
 }
 
-/// The author numbers of a recovery: a slot of the root's reserve, which
-/// no trusted node's range reaches, so nothing a lost node handed out
-/// before or after the backup collides. Slots the archived identity's
-/// grant used are skipped; among the rest one is random, so recoveries the
-/// copy never learned of collide only with probability 1 in
-/// `RECOVERY_SLOTS` each.
-fn recovery_authors(archived: &Settings) -> Result<AuthorRange, Failure> {
-    let used: BTreeSet<u32> = archived
-        .credentials
-        .0
-        .iter()
-        .filter_map(|link| link.capability.authors().ok().flatten())
-        .filter_map(|range| range.recovery_slot())
-        .collect();
-    let free = rocky_credentials::RECOVERY_SLOTS - u32::try_from(used.len())?;
-    let mut pick = u32::from_le_bytes(random::<4>()) % free.max(1);
-    for slot in 0..rocky_credentials::RECOVERY_SLOTS {
-        if used.contains(&slot) {
-            continue;
-        }
-        if pick == 0 {
-            return Ok(AuthorRange::recovery(slot)?);
-        }
-        pick -= 1;
-    }
-    Err("every recovery slot of author numbers is used".into())
-}
 /// A trusted grant's time: `time`, or later when a recovery would end a
 /// grant valid from then.
 fn after_recovery(revocations: &RevocationSet, time: u64) -> u64 {
@@ -3352,7 +3162,16 @@ impl Joining {
         {
             request = request.with_routes(&token, vec![(transport.kind().into(), address)]);
         }
-        let sealed = exchange(transport, &addresses, Protocol::Pair, &request.to_bytes()?).await?;
+        let PeerReply::Pair(sealed) = exchange(
+            transport,
+            &addresses,
+            invite.database.scope,
+            &PeerRequest::Pair(request.clone()),
+        )
+        .await?
+        else {
+            return Err("pair reply kind".into());
+        };
         let answer: serde_json::Value =
             serde_json::from_slice(&open_enrollment(&token, &request, &sealed)?)?;
         if answer["format"].as_u64() != Some(u64::from(ANSWER_FORMAT)) {
@@ -3424,9 +3243,6 @@ impl Joining {
                 BTreeMap::new()
             },
             logged_out: false,
-            minting: None,
-            granted_authors: BTreeMap::new(),
-            author_high_water: 0,
             deliveries: BTreeMap::new(),
             claims: None,
             revocations_pushed: None,
@@ -3490,11 +3306,7 @@ impl Joining {
             hold_naming(&vault, enrollment.naming.as_deref())?;
             // Tombstones start with every statement already held.
             settings.learn_revocations(&RevocationSet::new())?;
-            if enrollment.capability.capability.authors()? != enrollment.authors {
-                return Err("the enrollment's author range differs from its capability".into());
-            }
         }
-        settings.minting = enrollment.authors.map(|range| settings.minting_of(range));
         settings.adopt_groups(&vault, &enrollment.groups)?;
         settings.learn_issuers(&vault, &enrollment.issuers);
         settings.save(path)?;
@@ -3597,16 +3409,14 @@ impl Settings {
             }
             let (request, secret) =
                 RenewRequest::sign(&node, *issuer, self.credentials.clone(), now()?)?;
-            let message = [
-                EPOCHS,
-                &serde_json::to_vec(&EpochRequest {
-                    request: request.to_bytes()?,
-                    revocations: self.revocations.clone(),
-                })?,
-            ]
-            .concat();
-            let bytes = match exchange(transport, &addresses, Protocol::Renew, &message).await {
-                Ok(bytes) => bytes,
+            let message = PeerRequest::Epochs(EpochRequest {
+                request: request.clone(),
+                revocations: self.revocations.clone(),
+            });
+            let bytes = match exchange(transport, &addresses, self.domain()?.scope, &message).await
+            {
+                Ok(PeerReply::Epochs(bytes)) => bytes,
+                Ok(_) => return Err("epochs reply kind".into()),
                 Err(error) => {
                     failure = error;
                     continue;
@@ -3745,16 +3555,27 @@ impl Settings {
         let node = PrivateKey::from_bytes(&vault.get("node")?);
         let (request, secret) =
             RenewRequest::sign(&node, issuer, self.credentials.clone(), now()?)?;
-        let reply = match exchange(transport, addresses, Protocol::Renew, &request.to_bytes()?)
-            .await
+        let reply = match exchange(
+            transport,
+            addresses,
+            self.domain()?.scope,
+            &PeerRequest::Renew(request.clone()),
+        )
+        .await
         {
-            Ok(reply) => reply,
+            Ok(PeerReply::Renew(reply)) => reply,
+            Ok(_) => return Err("renew reply kind".into()),
             Err(error) => {
-                if let Ok(reply) = exchange(transport, addresses, Protocol::Renew, POLICY).await {
-                    let set: RevocationSet = serde_json::from_slice(&reply)?;
-                    if let Some(statement) = self.revoking(&set)? {
-                        return Err(Box::new(Revoked(statement)));
-                    }
+                if let Ok(PeerReply::Policy(set)) = exchange(
+                    transport,
+                    addresses,
+                    self.domain()?.scope,
+                    &PeerRequest::Policy,
+                )
+                .await
+                    && let Some(statement) = self.revoking(&set)?
+                {
+                    return Err(Box::new(Revoked(statement)));
                 }
                 return Err(error);
             }
@@ -3908,16 +3729,8 @@ impl Settings {
         draft.adopt_groups(vault, &renewed.groups)?;
         draft.forget_revoked();
         draft.learn_issuers(vault, &renewed.issuers);
-        // Changing or removing a range must never rewind its allocator.
         if let Some(profile) = &renewed.profile {
             draft.profile = profile.clone();
-            draft.author_high_water = draft
-                .author_high_water
-                .max(draft.minting.map_or(0, |minting| minting.next));
-            draft.minting = renewed.chain.delegable().authors()?.map(|range| Minting {
-                next: draft.minting_of(range).next.max(draft.author_high_water),
-                range,
-            });
         }
         let changed = !draft.persisted_eq(self);
         if changed {
@@ -4005,7 +3818,11 @@ impl Settings {
             &request,
             prior,
             self.revocations.clone(),
-            (time, self.ttl, SKEW),
+            rocky_credentials::Validity {
+                issued_at: time,
+                lifetime: std::time::Duration::from_secs(self.ttl),
+                clock_skew: std::time::Duration::from_secs(SKEW),
+            },
             &serde_json::to_vec(&sealed)?,
         )?;
         let mut changes = Changes::default();
@@ -4027,11 +3844,6 @@ impl Settings {
         changes.capability(
             &prior.subject,
             registry::Capability {
-                authors: renewal
-                    .capability
-                    .capability
-                    .authors()?
-                    .ok_or("principal has no author range")?,
                 id: renewal.capability.id()?,
                 expires: renewal.capability.capability.expires,
             },
@@ -4108,8 +3920,7 @@ impl Settings {
     /// key epoch each collection and group partition it could read rotates
     /// to, the held maximum plus one. The intent is all that changes;
     /// `rotate` signs and completes it, now or at the next open. A trusted
-    /// identity only `root` revokes: it signs here, and the statement also
-    /// ends every identity that one first enrolled.
+    /// identity only `root` revokes: its signed mode controls the cascade.
     #[cfg(test)]
     pub fn begin_revocation(
         &mut self,
@@ -4130,7 +3941,9 @@ impl Settings {
     ) -> Result<(), Failure> {
         let own = self.identity;
         let trusted = match target {
-            Revoke::Identity(identity) => registry.trusted.contains_key(&identity),
+            Revoke::Identity(identity) | Revoke::TrustedIdentity(identity, _) => {
+                registry.trusted.contains_key(&identity)
+            }
             Revoke::Claims(_) => false,
         };
         let root = if trusted {
@@ -4142,21 +3955,31 @@ impl Settings {
         } else {
             None
         };
+        let mode = match target {
+            Revoke::TrustedIdentity(_, mode) if trusted => mode,
+            Revoke::TrustedIdentity(_, _) => return Err("identity is not trusted".into()),
+            Revoke::Identity(_) if trusted => {
+                return Err("revoking a trusted identity requires a revocation mode".into());
+            }
+            _ => rocky_credentials::RevocationMode::Lost,
+        };
         let identities: Vec<PublicKey> = match target {
-            Revoke::Identity(identity) => {
+            Revoke::Identity(identity) | Revoke::TrustedIdentity(identity, _) => {
                 if identity == own {
                     return Err("an issuer cannot revoke its own identity".into());
                 }
                 if identity == self.publisher {
                     return Err("the root is never revoked".into());
                 }
-                if self.tombstoned(&identity) {
+                if self.tombstoned(&identity)
+                    && !(trusted
+                        && mode == rocky_credentials::RevocationMode::Compromised
+                        && !self.revocations.revokes_origin(&identity))
+                {
                     return Err("identity is already revoked".into());
                 }
-                // A trusted identity and the identities it first enrolled,
-                // which its revocation ends too.
                 let mut identities = BTreeSet::from([identity]);
-                if trusted {
+                if trusted && mode == rocky_credentials::RevocationMode::Compromised {
                     identities.extend(registry.enrolled_by(identity));
                 }
                 identities.into_iter().collect()
@@ -4185,10 +4008,11 @@ impl Settings {
         let statement = match target {
             // The cascade is the root statement's: it names the trusted
             // identity alone, whose origin the enrolled ones carry.
-            Revoke::Identity(identity) => Revocation {
+            Revoke::Identity(identity) | Revoke::TrustedIdentity(identity, _) => Revocation {
                 app: domain.manifest().app,
                 issuer,
                 time,
+                mode,
                 nodes: BTreeSet::new(),
                 identities: [identity].into(),
                 capabilities: records
@@ -4208,6 +4032,7 @@ impl Settings {
                 app: domain.manifest().app,
                 issuer: own,
                 time,
+                mode: rocky_credentials::RevocationMode::Lost,
                 nodes: BTreeSet::new(),
                 identities: BTreeSet::new(),
                 capabilities: [capability].into(),
@@ -4635,139 +4460,33 @@ pub(crate) mod fault {
     }
 }
 
-/// A stream to the first of `addresses` that answers.
-pub async fn dial(
+/// One typed request and its matching answer.
+pub(crate) async fn exchange(
     transport: &dyn Transport,
     addresses: &[String],
-    protocol: Protocol,
-) -> Result<Stream, Failure> {
-    let span = tracing::debug_span!(
-        "dial",
-        addresses = addresses.len(),
-        outcome = tracing::field::Empty
-    );
-    let result =
-        tracing::Instrument::instrument(dial_any(transport, addresses, protocol), span.clone())
-            .await;
-    span.record(
-        "outcome",
-        match &result {
-            Ok(_) => "ok",
-            Err(error) => match error.downcast_ref::<ServiceError>() {
-                Some(ServiceError::TimedOut(_)) => "timeout",
-                _ => "unreachable",
-            },
-        },
-    );
-    result
-}
-async fn dial_any(
-    transport: &dyn Transport,
-    addresses: &[String],
-    protocol: Protocol,
-) -> Result<Stream, Failure> {
-    let mut failure = None;
-    let mut timed_out = false;
-    for address in addresses {
-        match rocky_platform::time::timeout(TIMEOUT, transport.connect(address, protocol)).await {
-            Ok(Ok(stream)) => return Ok(stream),
-            Ok(Err(error)) => {
-                timed_out = error.is::<rocky_platform::time::error::Elapsed>()
-                    || error
-                        .downcast_ref::<std::io::Error>()
-                        .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut);
-                failure = Some(error.to_string());
+    scope: rocky_core::Scope,
+    request: &PeerRequest,
+) -> Result<PeerReply, Failure> {
+    let bytes = request.to_bytes()?;
+    let reply = transport
+        .request(addresses, scope, &bytes)
+        .await
+        .map_err(|error| -> Failure {
+            if error.is::<rocky_core::net::ScopeRefusal>() {
+                error
+            } else {
+                ServiceError::Unreachable(error.to_string()).into()
             }
-            Err(_) => {
-                timed_out = true;
-                failure = Some("the dial timed out".into());
-            }
-        }
+        })?;
+    let reply = ReplyFrame::from_bytes(&reply)?;
+    let reply = reply
+        .result
+        .map_err(|error| -> Failure { Box::new(error) })?;
+    if !request.accepts(&reply) {
+        return Err("peer RPC reply kind mismatch".into());
     }
-    let cause = failure.unwrap_or_else(|| "no route".into());
-    Err(if timed_out {
-        ServiceError::TimedOut(cause)
-    } else {
-        ServiceError::Unreachable(cause)
-    }
-    .into())
+    Ok(reply)
 }
-/// One request and its answer on a fresh stream: the reply's bytes, or
-/// the peer's refusal.
-pub async fn exchange(
-    transport: &dyn Transport,
-    addresses: &[String],
-    protocol: Protocol,
-    request: &[u8],
-) -> Result<Vec<u8>, Failure> {
-    let stream = dial(transport, addresses, protocol).await?;
-    exchange_stream(stream, request).await
-}
-pub(crate) async fn exchange_stream(
-    mut stream: Stream,
-    request: &[u8],
-) -> Result<Vec<u8>, Failure> {
-    rocky_platform::time::timeout(2 * TIMEOUT, async {
-        write_message(&mut stream, request).await?;
-        let reply = read_message(&mut stream).await?;
-        let _ = stream.shutdown().await;
-        let reply: serde_json::Value = serde_json::from_slice(&reply)?;
-        // The peer answered with a definite refusal, such as a revoked renewal.
-        if let Some(error) = reply.get("error") {
-            let message = error.as_str().unwrap_or("peer refused").to_owned();
-            if reply["retryable"] == true {
-                return Err(ServiceError::Unreachable(message).into());
-            }
-            let refused: Failure = Box::new(crate::node::Refused(message));
-            return Err(refused);
-        }
-        Ok(HEXLOWER.decode(reply["reply"].as_str().ok_or("missing reply")?.as_bytes())?)
-    })
-    .await
-    .unwrap_or_else(|_| Err(ServiceError::Unreachable("exchange timed out".into()).into()))
-}
-/// Serves one request of an inbound stream with `answer`.
-pub async fn answer(
-    mut stream: Stream,
-    answer: impl AsyncFnOnce(Vec<u8>) -> Result<Vec<u8>, Failure>,
-) -> Result<(), Failure> {
-    let request = rocky_platform::time::timeout(TIMEOUT, read_message(&mut stream)).await??;
-    let reply = match answer(request).await {
-        Ok(reply) => serde_json::json!({"reply": HEXLOWER.encode(&reply)}),
-        Err(error) => {
-            serde_json::json!({"error": error.to_string(), "retryable": crate::node::error(&error)["retryable"]})
-        }
-    };
-    let reply = serde_json::to_vec(&reply).unwrap_or_default();
-    rocky_platform::time::timeout(TIMEOUT, async {
-        write_message(&mut stream, &reply).await?;
-        stream.shutdown().await?;
-        // Wait for the peer to close, so the answer is delivered.
-        let mut rest = [0; 1];
-        let _ = stream.read(&mut rest).await;
-        Ok::<_, Failure>(())
-    })
-    .await?
-}
-async fn write_message(stream: &mut Stream, bytes: &[u8]) -> Result<(), Failure> {
-    if bytes.len() > MAX_MESSAGE {
-        return Err("message quota".into());
-    }
-    stream.write_u32(u32::try_from(bytes.len())?).await?;
-    stream.write_all(bytes).await?;
-    stream.flush().await?;
-    Ok(())
-}
-async fn read_message(stream: &mut Stream) -> Result<Vec<u8>, Failure> {
-    let length = stream.read_u32().await? as usize;
-    if length == 0 || length > MAX_MESSAGE {
-        return Err("message quota".into());
-    }
-    let mut bytes = vec![0; length];
-    stream.read_exact(&mut bytes).await?;
-    Ok(bytes)
-}
-
 /// Replaces an invitation's or issuer contact's routes with a custody peer's
 /// routes. Grants, invitation token and issuer identity stay unchanged.
 pub fn route_enrollment(uri: &str, custody_contact: &str) -> Result<String, Failure> {
@@ -4929,9 +4648,6 @@ impl Settings {
             contact_meta: _,
             enrollment_routes: _,
             logged_out,
-            minting,
-            granted_authors,
-            author_high_water,
             deliveries,
             claims,
             revocations_pushed,
@@ -4959,9 +4675,6 @@ impl Settings {
             && *epoch_statements == other.epoch_statements
             && *authority == other.authority
             && *logged_out == other.logged_out
-            && *granted_authors == other.granted_authors
-            && *minting == other.minting
-            && *author_high_water == other.author_high_water
             && *deliveries == other.deliveries
             && *claims == other.claims
             && *revocations_pushed == other.revocations_pushed
@@ -5031,22 +4744,30 @@ impl Settings {
         let Some(entry) = self.contact_refs.get(&id) else {
             return Ok(None);
         };
-        let (contact, protocol) = if entry.contact.routes.is_empty() {
+        let contact = if entry.contact.routes.is_empty() {
             match &entry.enrollment {
-                Some(contact) => (contact, Protocol::Renew),
+                Some(contact) => contact,
                 None => return Ok(None),
             }
         } else {
-            (&entry.contact, Protocol::Link)
+            &entry.contact
         };
         let addresses = contact.addresses(transport.kind());
         if addresses.is_empty() {
             return Ok(None);
         }
-        let stream = dial(transport, &addresses, protocol).await?;
-        Ok(Some(
-            rocky_secure::network::NativeSession::resolve_peer(stream, id).await?,
-        ))
+        let request = rocky_credentials::PeerResolutionRequest::fresh();
+        let PeerReply::Resolve(reply) = exchange(
+            transport,
+            &addresses,
+            self.domain()?.scope,
+            &PeerRequest::Resolve(request.clone()),
+        )
+        .await?
+        else {
+            return Err("resolution reply kind".into());
+        };
+        Ok(Some(reply.verify(&request, id)?))
     }
     pub(crate) fn has_enrollment_upstream(&self) -> bool {
         self.enrollment_upstream.is_some() || self.contact_refs.values().any(|entry| entry.upstream)
@@ -5073,78 +4794,3 @@ impl Settings {
 // native temporary directories.
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests;
-
-#[cfg(test)]
-mod deadline_tests {
-    use super::*;
-    use crate::transport::BoxFuture;
-    use std::sync::{
-        Mutex,
-        atomic::{AtomicUsize, Ordering},
-    };
-
-    struct Routes {
-        attempts: AtomicUsize,
-        stream: Mutex<Option<Stream>>,
-    }
-    impl Transport for Routes {
-        fn kind(&self) -> &str {
-            "test"
-        }
-        fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
-            Box::pin(async { Ok("third".into()) })
-        }
-        fn connect<'a>(
-            &'a self,
-            address: &'a str,
-            _: Protocol,
-        ) -> BoxFuture<'a, Result<Stream, Failure>> {
-            Box::pin(async move {
-                self.attempts.fetch_add(1, Ordering::SeqCst);
-                if address != "third" {
-                    std::future::pending::<()>().await;
-                }
-                Ok(self.stream.lock().unwrap().take().unwrap())
-            })
-        }
-        fn accept(&self) -> BoxFuture<'_, Option<(Protocol, Stream)>> {
-            Box::pin(async { None })
-        }
-        fn close(&self) -> BoxFuture<'_, ()> {
-            Box::pin(async {})
-        }
-    }
-
-    // Needs tokio's paused clock.
-    #[cfg(not(target_family = "wasm"))]
-    #[tokio::test(start_paused = true)]
-    async fn exchange_tries_later_routes_after_two_full_dial_deadlines() {
-        let (client, server) = tokio::io::duplex(1024);
-        let mut server = Stream::new(server);
-        let transport = Routes {
-            attempts: AtomicUsize::new(0),
-            stream: Mutex::new(Some(Stream::new(client))),
-        };
-        let answer = rocky_platform::task::spawn(async move {
-            assert_eq!(read_message(&mut server).await.unwrap(), b"request");
-            // Use some of the exchange budget, after the two dial budgets.
-            rocky_platform::time::sleep(TIMEOUT).await;
-            write_message(&mut server, br#"{"reply":"6f6b"}"#)
-                .await
-                .unwrap();
-        });
-        let start = rocky_platform::time::Instant::now();
-        let reply = exchange(
-            &transport,
-            &["first".into(), "second".into(), "third".into()],
-            Protocol::Pair,
-            b"request",
-        )
-        .await
-        .unwrap();
-        assert_eq!(reply, b"ok");
-        assert_eq!(transport.attempts.load(Ordering::SeqCst), 3);
-        assert!(start.elapsed() >= 3 * TIMEOUT);
-        answer.await.unwrap();
-    }
-}

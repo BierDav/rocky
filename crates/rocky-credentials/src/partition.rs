@@ -65,6 +65,13 @@ impl PartitionGrant {
     }
 }
 
+/// A partition tuple bound to its keyed resource scope by the caller.
+#[derive(Clone, Copy, Debug)]
+pub struct PartitionContext<'a> {
+    pub scope: ResourceScope,
+    pub tuple: &'a PartitionTuple,
+}
+
 impl crate::CredentialChain {
     /// Verifies a node without discarding its partition selectors.
     pub fn verify_selectors(
@@ -97,74 +104,64 @@ impl crate::CredentialChain {
         }
         resolve_leaf(held, scope, tuple)
     }
-    /// Verifies a node's number and partition grant without a reader key.
-    #[allow(clippy::too_many_arguments)]
+    /// Verifies a node writer's partition grant without a reader key.
     pub fn verify_partition_author(
         &self,
         publisher: PublicKey,
         signer: PublicKey,
-        author: u32,
-        scope: ResourceScope,
-        tuple: &PartitionTuple,
+        partition: PartitionContext<'_>,
         revocations: &crate::RevocationSet,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
+        let PartitionContext { scope, tuple } = partition;
         let (leaf, held) = self.node(publisher, Some((revocations, time)))?;
-        if leaf.subject != signer
-            || leaf.authors()?.and_then(|range| range.single()) != Some(author)
-        {
-            return Err(denied(
-                "the partition author number does not belong to the signing key",
-            ));
+        if leaf.subject != signer {
+            return Err(denied("the partition writer is not the signing node"));
         }
         resolve_leaf(held, scope, tuple)
     }
     /// Delegates selected partitions, with the same attenuation checks as receipt.
-    #[allow(clippy::too_many_arguments)]
     pub fn delegate_partitions<'s>(
         &self,
         holder: impl Into<crate::Signer<'s>>,
-        subject: PublicKey,
-        kind: rocky_core::PrincipalKind,
-        grants: Vec<ResourceGrant>,
-        partitions: Vec<PartitionGrant>,
-        terms: (u8, Option<crate::AuthorRange>),
-        validity: (u64, u64, u64),
+        request: crate::Delegation,
     ) -> Result<Self, Error> {
         if !matches!(
-            kind,
+            request.kind,
             rocky_core::PrincipalKind::User | rocky_core::PrincipalKind::Deployment
-        ) || terms.0 == 0
+        ) || request.terms.delegations == 0
         {
             return Err(denied(
                 "partition delegation requires a delegable principal",
             ));
         }
-        self.append_partition_link(
-            holder.into(),
-            subject,
-            kind,
-            grants,
-            crate::Extended {
-                authors: terms.1,
-                partitions,
-                ..crate::Extended::default()
-            },
-            terms.0,
-            validity,
-        )
+        self.append_partition_link(holder.into(), request)
     }
-    #[allow(clippy::too_many_arguments)]
     fn append_partition_link(
         &self,
         holder: crate::Signer<'_>,
-        subject: PublicKey,
-        kind: rocky_core::PrincipalKind,
-        grants: Vec<ResourceGrant>,
-        extended: crate::Extended,
-        delegations: u8,
-        (time, ttl, skew): (u64, u64, u64),
+        request: crate::Delegation,
     ) -> Result<Self, Error> {
+        let crate::Delegation {
+            subject,
+            kind,
+            grants,
+            partitions,
+            terms,
+            validity,
+        } = request;
+        let crate::Validity {
+            issued_at: time,
+            lifetime,
+            clock_skew,
+        } = validity;
+        let ttl = lifetime.as_secs();
+        let skew = clock_skew.as_secs();
+        let delegations = terms.delegations;
+        let extended = crate::Extended {
+            partitions,
+            ..crate::Extended::default()
+        };
         let root = self.0.first().ok_or_else(|| denied("credential depth"))?;
         let parent = self.links(root.issuer, None)?;
         if parent.subject != holder.principal()? {
@@ -215,23 +212,15 @@ fn resolve_leaf(
 }
 impl crate::Authority<'_> {
     /// Issues concrete and selector grants, retaining their separate row/field pairs.
-    #[allow(clippy::too_many_arguments)]
     pub fn issue_partition_terms(
         &self,
         subject: PublicKey,
         grants: Vec<ResourceGrant>,
         partitions: Vec<PartitionGrant>,
-        (delegations, authors): (u8, Option<crate::AuthorRange>),
-        validity: (u64, u64, u64),
+        terms: crate::DelegationTerms,
+        validity: crate::Validity,
     ) -> Result<crate::SignedCapability, Error> {
-        self.issue_table_terms(
-            subject,
-            grants,
-            partitions,
-            (delegations, authors),
-            validity,
-            false,
-        )
+        self.issue_table_terms(subject, grants, partitions, terms, validity, false)
     }
     /// Issues grants that opt into schema-authenticated families.
     pub fn issue_family_terms(
@@ -239,26 +228,24 @@ impl crate::Authority<'_> {
         subject: PublicKey,
         grants: Vec<ResourceGrant>,
         partitions: Vec<PartitionGrant>,
-        terms: (u8, Option<crate::AuthorRange>),
-        validity: (u64, u64, u64),
+        terms: crate::DelegationTerms,
+        validity: crate::Validity,
     ) -> Result<crate::SignedCapability, Error> {
         self.issue_table_terms(subject, grants, partitions, terms, validity, true)
     }
-    #[allow(clippy::too_many_arguments)]
     fn issue_table_terms(
         &self,
         subject: PublicKey,
         grants: Vec<ResourceGrant>,
         partitions: Vec<PartitionGrant>,
-        (delegations, authors): (u8, Option<crate::AuthorRange>),
-        validity: (u64, u64, u64),
+        crate::DelegationTerms { delegations }: crate::DelegationTerms,
+        validity: crate::Validity,
         families: bool,
     ) -> Result<crate::SignedCapability, Error> {
         self.sign_link(
             subject,
             grants,
             crate::Extended {
-                authors,
                 partitions,
                 families,
                 origin: self.origin()?,
@@ -277,16 +264,10 @@ impl crate::VerifiedChain {
     pub fn partition_author(
         &self,
         subject: PublicKey,
-        author: u32,
         scope: ResourceScope,
         tuple: &PartitionTuple,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
-        if self.leaf.authors()?.and_then(|range| range.single()) != Some(author) {
-            return Err(denied(
-                "the partition author number does not belong to the signing key",
-            ));
-        }
         self.partition(subject, scope, tuple, time)
     }
     /// Whether a node may write some partition of `scope`'s table, for a
@@ -295,17 +276,11 @@ impl crate::VerifiedChain {
     pub fn unseen_partition_author(
         &self,
         subject: PublicKey,
-        author: u32,
         scope: ResourceScope,
         time: u64,
     ) -> Result<(), Error> {
         self.valid_node(subject, time)?;
         let (grants, partitions) = self.grants_for(scope.table)?;
-        if self.leaf.authors()?.and_then(|range| range.single()) != Some(author) {
-            return Err(denied(
-                "the partition author number does not belong to the signing key",
-            ));
-        }
         let writes = |rights: &std::collections::BTreeSet<rocky_core::Right>| {
             [
                 rocky_core::Right::Insert,

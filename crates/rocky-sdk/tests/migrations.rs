@@ -8,6 +8,7 @@ mod common;
 mod prepared_pull;
 #[path = "migrations/replayed.rs"]
 mod replayed;
+use common::identity::snapshot as snap;
 use common::{Device, Failure, introduce};
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};
@@ -63,16 +64,21 @@ async fn sync(device: &Device) {
     }
 }
 async fn generation(device: &Device) -> Value {
-    device.ok(json!({"type": "generation"})).await
+    snap::ok(device.session.generation()).await
 }
 async fn rows(device: &Device, sql: &str) -> Value {
-    device
-        .ok(json!({"type": "read", "query": {"sql": sql, "values": [], "max_rows": 1024}}))
-        .await["rows"]
+    snap::ok(device.session.read(rocky_sdk::ReadQuery {
+        sql: snap::text(&(sql)),
+        values: vec![],
+        max_rows: 1024,
+        max_bytes: None,
+        cursor: None,
+    }))
+    .await["rows"]
         .clone()
 }
-fn text(value: &str) -> Value {
-    json!({"type": "text", "value": value})
+fn text(value: &str) -> rocky_sdk::SqlValue {
+    rocky_sdk::SqlValue::Text(snap::text(&(value)))
 }
 const POSITIONS: &str = "SELECT title, position FROM items ORDER BY title";
 const TAGS: &str = "SELECT key, label FROM tags ORDER BY key";
@@ -87,10 +93,8 @@ const DUPLICATES: &str = r#"{"application":"shopping","version":2,"format":6,"ta
 
 /// The followed tip and the number of seals in the graph.
 async fn graph(device: &Device) -> (Value, usize) {
-    let tip = device.ok(json!({"type": "tips", "action": "status"})).await["tip"].clone();
-    let seals = device
-        .ok(json!({"type": "tips", "action": "inspect"}))
-        .await["seals"]
+    let tip = snap::ok(device.session.tip_status()).await["tip"].clone();
+    let seals = snap::ok(device.session.inspect_tips()).await["seals"]
         .as_array()
         .map_or(0, Vec::len);
     (tip, seals)
@@ -139,8 +143,8 @@ async fn a_failed_migration_runs_again_and_a_committed_one_never() -> Result<(),
         json!({"state": "publishing", "bundles": 1, "published": 0})
     );
     let positions = json!([
-        [text("apples"), text("apples")],
-        [text("bread"), text("bread")]
+        [snap::cell(text("apples")), snap::cell(text("apples"))],
+        [snap::cell(text("bread")), snap::cell(text("bread"))]
     ]);
     let tags = rows(&a, TAGS).await;
     assert_eq!(rows(&a, POSITIONS).await, positions);
@@ -195,8 +199,8 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
         assert_eq!(
             rows(device, POSITIONS).await,
             json!([
-                [text("apples"), text("apples")],
-                [text("bread"), text("bread")]
+                [snap::cell(text("apples")), snap::cell(text("apples"))],
+                [snap::cell(text("bread")), snap::cell(text("bread"))]
             ])
         );
         let tags = rows(device, TAGS).await;
@@ -206,14 +210,14 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
     assert_eq!(rows(&a, TAGS).await, rows(&b, TAGS).await);
     let (tip, _) = graph(&a).await;
     assert_eq!(graph(&b).await.0, tip);
-    let inspected = b.ok(json!({"type": "tips", "action": "inspect"})).await;
+    let inspected = snap::ok(b.session.inspect_tips()).await;
     let losers = inspected["bookmarks"][0]["losers"]
         .as_array()
         .cloned()
         .unwrap_or_default();
     assert_eq!(losers.len(), 1, "{inspected}");
     assert_eq!(losers[0]["name"], "main/1");
-    assert_eq!(b.ok(json!({"type":"held_changes"})).await["count"], 0);
+    assert_eq!(snap::ok(b.session.held_changes()).await["count"], 0);
     b.close().await;
     a.close().await;
     Ok(())
@@ -230,18 +234,15 @@ const POSITIONED_LISTS: &str = r#"{"format":6,"application":"lists","version":2,
 
 /// Creates a list in its own partition; returns its id.
 async fn list(device: &Device, title: &str) -> Result<String, Failure> {
-    device
-        .ok(json!({"type": "partition_next", "table": "lists"}))
-        .await;
-    device.ok(json!({"type": "sql", "sql": "BEGIN"})).await;
-    let id = device
-        .ok(json!({"type": "next_id", "table": "lists"}))
-        .await["id"]
-        .clone();
-    device
-        .ok(json!({"type": "sql", "sql": format!("INSERT INTO lists(id,title) VALUES(?,'{title}')"), "values": [{"type": "integer", "value": id}]}))
-        .await;
-    device.ok(json!({"type": "sql", "sql": "COMMIT"})).await;
+    snap::ok(device.session.next_partition("lists")).await;
+    snap::ok(device.session.execute("BEGIN", Vec::new())).await;
+    let id = snap::ok(device.session.next_id("lists")).await["id"].clone();
+    snap::ok(device.session.execute(
+        &(snap::text(&(format!("INSERT INTO lists(id,title) VALUES(?,'{title}')")))),
+        vec![snap::row_id(&(id))],
+    ))
+    .await;
+    snap::ok(device.session.execute("COMMIT", Vec::new())).await;
     Ok(id.as_str().ok_or("id")?.to_owned())
 }
 
@@ -262,8 +263,20 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     list(&a, "From a").await?;
     let theirs = list(&b, "From b").await?;
     // `a` learns of `b`'s list before the list's key reached it.
-    a.ok(json!({"type": "partition_register", "group": "list", "values": [{"type": "integer", "value": theirs}]}))
-        .await;
+    snap::ok(
+        a.session.register_partition(
+            rocky_sdk::PartitionTarget::Group {
+                group: "list".to_owned(),
+                values: vec![snap::row_id(&(theirs))],
+            },
+            rocky_sdk::PartitionSelection {
+                name: None,
+                omit: serde_json::from_value::<std::collections::BTreeSet<String>>(json!([]))
+                    .expect("typed fixture"),
+            },
+        ),
+    )
+    .await;
     a.close().await;
 
     // Holding no key of that list, `a` does not sign.
@@ -275,11 +288,16 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
         status["migration"],
         json!({"state": "full_access_required"})
     );
-    let query = a
-        .call(json!({"type": "read", "query": {"sql": "SELECT position FROM lists", "values": [], "max_rows": 8}}))
-        .await
-        .err()
-        .ok_or("a query on the new field answered")?;
+    let query = snap::observe(a.session.read(rocky_sdk::ReadQuery {
+        sql: "SELECT position FROM lists".to_owned(),
+        values: vec![],
+        max_rows: 8,
+        max_bytes: None,
+        cursor: None,
+    }))
+    .await
+    .err()
+    .ok_or("a query on the new field answered")?;
     assert!(query.to_string().contains("no such column"), "{query}");
 
     // Issuers pass each other their group keys: once `a` holds it, the
@@ -294,8 +312,8 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     assert_eq!(
         rows(&a, "SELECT title, position FROM lists ORDER BY title").await,
         json!([
-            [text("From a"), text("From a")],
-            [text("From b"), text("From b")]
+            [snap::cell(text("From a")), snap::cell(text("From a"))],
+            [snap::cell(text("From b")), snap::cell(text("From b"))]
         ])
     );
     // An explicit schema open installs the signed generation before sync.
@@ -306,8 +324,8 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     assert_eq!(
         rows(&b, "SELECT title, position FROM lists ORDER BY title").await,
         json!([
-            [text("From a"), text("From a")],
-            [text("From b"), text("From b")]
+            [snap::cell(text("From a")), snap::cell(text("From a"))],
+            [snap::cell(text("From b")), snap::cell(text("From b"))]
         ])
     );
     b.close().await;
@@ -378,15 +396,15 @@ async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFi
     sync(&b).await;
     let history_clock = std::time::Instant::now();
     for index in 0..history {
-        a.ok(json!({"type":"tips", "action":"seal"})).await;
+        snap::ok(a.session.seal(false)).await;
         if index == 0 {
-            a.ok(json!({"type":"tips", "action":"compact"})).await;
+            snap::ok(a.session.compact(0)).await;
         }
     }
     if history > 1 {
         // Finish the empty historical states before authoring the migration.
         // Their seals and listed records remain on the returning member's path.
-        a.ok(json!({"type":"tips", "action":"compact"})).await;
+        snap::ok(a.session.compact(0)).await;
     }
     let history_time = history_clock.elapsed();
     eprintln!("STAGE rows={large} history={history_time:?}");
@@ -490,7 +508,7 @@ async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFi
     );
     assert_eq!(generation(&a).await["migration"], Value::Null);
     if history > 0 {
-        let inspection = a.ok(json!({"type":"tips", "action":"inspect"})).await;
+        let inspection = snap::ok(a.session.inspect_tips()).await;
         let seals = inspection["seals"].as_array().ok_or("missing seals")?;
         assert!(seals.len() >= history + 2, "only {} seals", seals.len());
         assert!(
@@ -551,11 +569,16 @@ async fn pull_member_fixture(fixture: MemberFixture) -> Result<(), Failure> {
     let clock = std::time::Instant::now();
     let mut syncs = 0;
     // A table whose frames are still arriving reads as unavailable.
-    while b
-        .call(json!({"type": "read", "query": {"sql": ready_query, "values": [], "max_rows": 1}}))
-        .await
-        .ok()
-        .map(|page| page["rows"].clone())
+    while snap::observe(b.session.read(rocky_sdk::ReadQuery {
+        sql: snap::text(&(ready_query)),
+        values: vec![],
+        max_rows: 1,
+        max_bytes: None,
+        cursor: None,
+    }))
+    .await
+    .ok()
+    .map(|page| page["rows"].clone())
         != Some(ready_rows.clone())
     {
         syncs += 1;
@@ -654,7 +677,7 @@ async fn a_member_writes_its_shared_partition_after_following_a_migration() -> R
     introduce(&a, &b).await;
     let id = list(&a, "Weekly").await?;
     let node = b.node().await;
-    a.ok(json!({"type": "partition_share", "group": "list", "values": [{"type": "integer", "value": id}], "recipients": [node]}))
+    snap::ok(a.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: vec![snap::row_id(&(id))] }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
         .await;
     sync(&b).await;
     a.close().await;
@@ -668,14 +691,17 @@ async fn a_member_writes_its_shared_partition_after_following_a_migration() -> R
     sync(&b).await;
     assert_eq!(generation(&b).await["current"]["schema"], 2);
     assert_eq!(generation(&b).await["application"], "behind");
-    b.ok(json!({"type": "sql", "sql": "BEGIN"})).await;
-    b.ok(json!({"type": "sql", "sql": format!("UPDATE lists SET title='Monthly' WHERE id={id}")}))
-        .await;
-    b.ok(json!({"type": "sql", "sql": "COMMIT"})).await;
+    snap::ok(b.session.execute("BEGIN", Vec::new())).await;
+    snap::ok(b.session.execute(
+        &(snap::text(&(format!("UPDATE lists SET title='Monthly' WHERE id=X'{id}'")))),
+        Vec::new(),
+    ))
+    .await;
+    snap::ok(b.session.execute("COMMIT", Vec::new())).await;
     sync(&b).await;
     assert_eq!(
         rows(&a, "SELECT title, position FROM lists").await,
-        json!([[text("Monthly"), text("Weekly")]])
+        json!([[snap::cell(text("Monthly")), snap::cell(text("Weekly"))]])
     );
     b.close().await;
     a.close().await;
@@ -691,12 +717,6 @@ impl rocky_sdk::IdentityProvider for DescriptorIdentity {
         &self,
     ) -> Result<rocky_sdk::credentials::PublicKey, rocky_sdk::credentials::Error> {
         self.provider.public_key()
-    }
-    fn reserve_author(
-        &self,
-        range: rocky_sdk::credentials::AuthorRange,
-    ) -> Result<u32, rocky_sdk::credentials::Error> {
-        self.provider.reserve_author(range)
     }
     fn sign(
         &self,
@@ -733,13 +753,13 @@ async fn a_migration_uses_its_node_signer_and_reopening_does_not_repeat_sql() ->
     let a = Device::new(Database::open(options(POSITIONED))?)?;
     assert_eq!(
         rows(&a, POSITIONS).await,
-        json!([[text("once"), text("once")]])
+        json!([[snap::cell(text("once")), snap::cell(text("once"))]])
     );
     a.close().await;
     let a = Device::new(Database::open(options(POSITIONED))?)?;
     assert_eq!(
         rows(&a, POSITIONS).await,
-        json!([[text("once"), text("once")]])
+        json!([[snap::cell(text("once")), snap::cell(text("once"))]])
     );
     a.close().await;
     assert!(identity.attempts.lock().unwrap().is_empty());
@@ -765,13 +785,15 @@ async fn a_new_member_replays_a_migration_from_its_implicit_genesis_base() -> Re
     introduce(&a, &b).await;
     for _ in 0..4 {
         b.sync().await.map_err(|e| e.to_string())?;
-        if rows(&b, POSITIONS).await == json!([[text("inherited"), text("inherited")]]) {
+        if rows(&b, POSITIONS).await
+            == json!([[snap::cell(text("inherited")), snap::cell(text("inherited"))]])
+        {
             break;
         }
     }
     assert_eq!(
         rows(&b, POSITIONS).await,
-        json!([[text("inherited"), text("inherited")]])
+        json!([[snap::cell(text("inherited")), snap::cell(text("inherited"))]])
     );
     b.close().await;
     a.close().await;
@@ -805,7 +827,7 @@ async fn a_migration_open_drives_maintenance_before_the_first_request() -> Resul
     let a = Device::new(database)?;
     assert_eq!(
         rows(&a, POSITIONS).await,
-        json!([[text("apples"), text("apples")]])
+        json!([[snap::cell(text("apples")), snap::cell(text("apples"))]])
     );
     a.close().await;
     Ok(())
@@ -822,8 +844,7 @@ async fn a_new_member_imports_an_earlier_schemas_checkpoint_before_the_migration
     let a = reopen(open(&source, &SEEDED.replace("100000", "8"), None))?;
     a.close().await;
     let a = reopen(open(&source, &TAGGED.replace("100000", "8"), None))?;
-    a.ok(json!({"type":"tips","action":"compact","keep":0}))
-        .await;
+    snap::ok(a.session.compact(0)).await;
     a.close().await;
     let hub = Arc::new(Hub::default());
     let schema = FILLED.replace("100000", "8");

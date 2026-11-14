@@ -1,6 +1,7 @@
 //! Credentialed strangers against the inbound link budget
 //! (`docs/decisions/0051-roster-free-admission.md`).
 use super::*;
+use crate::test_snapshot as snap;
 use rocky_credentials::Authority;
 use rocky_secure::network::link::Link;
 
@@ -35,20 +36,18 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
                         user.public_key(),
                         grants.clone(),
                         Vec::new(),
-                        (1, Some(rocky_credentials::AuthorRange::ALL)),
-                        (now()?, crate::enrollment::DEFAULT_TTL, 300),
+                        rocky_credentials::DelegationTerms { delegations: 1 },
+                        rocky_credentials::Validity {
+                            issued_at: now()?,
+                            lifetime: std::time::Duration::from_secs(
+                                crate::enrollment::DEFAULT_TTL,
+                            ),
+                            clock_skew: std::time::Duration::from_secs(300),
+                        },
                     )?;
-                    let first = capability
-                        .capability
-                        .authors()?
-                        .ok_or("principal range")?
-                        .first;
                     let mut chain = issuer_links.clone();
                     chain.0.push(capability);
-                    Ok((
-                        node.clone(),
-                        chain.complete(&user, node.public_key(), first)?,
-                    ))
+                    Ok((node.clone(), chain.complete(&user, node.public_key())?))
                 })
                 .collect::<Result<Vec<_>, Failure>>()?;
             // The strangers share one replica: it only checks A's chain.
@@ -71,7 +70,7 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
             // slot, so the 33rd and later are refused as busy.
             let mut links = Vec::new();
             for (node, chain) in strangers {
-                let stream = dialer.connect("a", Protocol::Link).await?;
+                let stream = dialer.connect("a", Protocol::Link, None).await?;
                 let mut opened = Link::open(stream, &replica, node, chain, Some(own)).await?;
                 links.push(opened.ready(false).await.map(|_| opened));
             }
@@ -86,20 +85,14 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
             assert_eq!(link.refused.load(Ordering::Relaxed), refused + 32);
             assert_eq!(link.live_budget.available_permits(), 0);
             // `peers` lists the served strangers, met without a contact.
-            let peers = a.peers().await;
-            assert_eq!(
-                peers
-                    .iter()
-                    .filter(|peer| peer["configured"] == false)
-                    .count(),
-                32
-            );
+            let peers = a.observed_peers().await;
+            assert_eq!(peers.iter().filter(|peer| !peer.is_configured).count(), 32);
             drop(links);
             while link.live_budget.available_permits() < live_links::BUDGET {
                 tokio::task::yield_now().await;
             }
             // A configured peer syncs afterwards.
-            let synced = b.dispatch(&*b.client(1)?, &json!({"type":"sync"})).await?;
+            let synced = snap::value(b.sync_once()).await?;
             assert_eq!(completed_peers(&synced), 1);
             assert!(link.served.load(Ordering::Relaxed) > served + 64);
             assert_eq!(link.refused.load(Ordering::Relaxed), refused + 32);

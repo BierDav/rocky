@@ -631,10 +631,7 @@ impl State {
         } else {
             self.sql().await?.next_id_partition(table, values).await?
         };
-        Ok(Pending::rows(
-            vec![NEXT_ID.into()],
-            vec![vec![SqlValue::Integer(id.integer())]],
-        ))
+        Ok(Pending::rows(vec![NEXT_ID.into()], vec![vec![id.sql()]]))
     }
 
     async fn write(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<Pending, Failure> {

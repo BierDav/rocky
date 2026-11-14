@@ -513,19 +513,6 @@ async fn wide_signed_definitions_are_cached_without_weakening_row_admission() {
             },
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
-                authors: Some(if kind == PrincipalKind::Node {
-                    rocky_credentials::AuthorRange::new(
-                        crate::tests::node_number(subject),
-                        crate::tests::node_number(subject),
-                    )
-                    .unwrap()
-                } else {
-                    rocky_credentials::AuthorRange::new(
-                        crate::tests::node_number(node.public_key()),
-                        rocky_credentials::MAX_AUTHOR,
-                    )
-                    .unwrap()
-                }),
                 node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
                 database: Some(rocky_credentials::DatabaseContext {
                     publisher: f.publisher.public_key(),
@@ -777,18 +764,12 @@ async fn lthash_fixture_matches_phase_start() {
     .unwrap();
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     inner.conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
-    let digest = inner
-        .fixed_row_digest(f.public.domain, 1_000)
-        .await
-        .unwrap();
+    let digest = inner.fixed_row_digest(1_000).await.unwrap();
     inner.conn.execute("ROLLBACK", ()).await.unwrap();
     // Rebuilding the same canonical corpus must remain deterministic.  The
     // exact digest is an implementation detail; this test is not a benchmark
     // or a large-corpus compatibility fixture.
-    let repeated = inner
-        .fixed_row_digest(f.public.domain, 1_000)
-        .await
-        .unwrap();
+    let repeated = inner.fixed_row_digest(1_000).await.unwrap();
     assert_eq!(digest, repeated);
 }
 

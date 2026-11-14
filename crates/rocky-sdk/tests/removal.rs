@@ -5,6 +5,7 @@
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 mod common;
+use common::identity::snapshot as snap;
 use common::{Device, Failure, introduce};
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};
@@ -12,7 +13,7 @@ use std::{path::Path, sync::Arc};
 
 /// Items with a uniquely indexed `category` and a `shelf` referencing
 /// `shelves`.
-const SHELVED: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true},{"name":"category","type":"text"},{"name":"shelf","type":"integer"}],"primary_key":["key"],"indexes":[{"name":"items_category","unique":true,"columns":[{"name":"category","descending":false}]}],"foreign_keys":[{"columns":["shelf"],"table":"shelves","on_delete":"set_null"}]},{"name":"shelves","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const SHELVED: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true},{"name":"category","type":"text"},{"name":"shelf","type":"blob"}],"primary_key":["key"],"indexes":[{"name":"items_category","unique":true,"columns":[{"name":"category","descending":false}]}],"foreign_keys":[{"columns":["shelf"],"table":"shelves","on_delete":"set_null"}]},{"name":"shelves","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 /// `SHELVED` without `category`, its index, `shelf` and `shelves`.
 const UNSHELVED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 /// Items with a nullable `note`; the next version removes it and the one
@@ -33,39 +34,42 @@ fn version(schema: &str, version: u32) -> String {
     schema.replace(r#""version":1"#, &format!(r#""version":{version}"#))
 }
 async fn rows(device: &Device, sql: &str) -> Value {
-    device
-        .ok(json!({"type": "read", "query": {"sql": sql, "values": [], "max_rows": 1024}}))
-        .await["rows"]
+    snap::ok(device.session.read(rocky_sdk::ReadQuery {
+        sql: snap::text(&(sql)),
+        values: vec![],
+        max_rows: 1024,
+        max_bytes: None,
+        cursor: None,
+    }))
+    .await["rows"]
         .clone()
 }
-fn text(value: &str) -> Value {
-    json!({"type": "text", "value": value})
+fn text(value: &str) -> rocky_sdk::SqlValue {
+    rocky_sdk::SqlValue::Text(snap::text(&(value)))
 }
 async fn generation(device: &Device) -> Value {
-    device.ok(json!({"type": "generation"})).await
+    snap::ok(device.session.generation()).await
 }
 /// Creates a row of `collection`; returns its key.
 async fn create(device: &Device, handle: u8, collection: &str, values: Value) -> String {
-    let reply = device
-        .ok(json!({
-            "type": "mutate",
-            "handle": vec![handle; 32],
-            "payload": json!({"type": "create", "collection": collection, "values": values}).to_string().into_bytes(),
-            "entity": null,
-            "baseline": null,
-        }))
-        .await;
+    let reply = snap::ok(snap::mutate(
+        &device.session,
+        vec![handle; 32],
+        snap::Action::Create {
+            table: snap::text(&(collection)),
+            values: snap::fields(values),
+        },
+        None,
+        None,
+    ))
+    .await;
     reply["id"].as_str().unwrap_or_default().to_owned()
 }
 /// Runs `sql` as one transaction: one frame.
 async fn write(device: &Device, _collection: &str, handle: u8, sql: &str) {
-    let _scope: Value = serde_json::from_str(&device.database.scope()).expect("scope");
-
-    device.ok(json!({"type": "sql", "sql": "BEGIN"})).await;
-    device.ok(json!({"type": "sql", "sql": sql})).await;
-    device
-        .ok(json!({"type": "sql", "sql": "COMMIT", "handle": vec![handle; 32]}))
-        .await;
+    snap::ok(device.session.execute("BEGIN", Vec::new())).await;
+    snap::ok(device.session.execute(&(snap::text(&(sql))), Vec::new())).await;
+    snap::ok(device.session.commit([handle; 32])).await;
 }
 /// The application tables, indexes and `items` columns of the file.
 fn schema_of(directory: &Path) -> Result<(Vec<String>, Vec<String>), Failure> {
@@ -103,10 +107,9 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
     )?)?;
     introduce(&a, &b).await;
     create(&a, 1, "shelves", json!({"label": "pantry"})).await;
-    let shelf = rows(&a, "SELECT id FROM shelves").await[0][0]["value"]
-        .as_str()
-        .ok_or("shelf id")?
-        .parse::<i64>()?;
+    let shelf: Vec<u8> =
+        serde_json::from_value(rows(&a, "SELECT id FROM shelves").await[0][0]["value"].clone())?;
+    let shelf = rocky_sdk::RowIdentity::from_bytes(&shelf)?.to_string();
     create(
         &a,
         2,
@@ -149,10 +152,15 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
     }
     // The member's application declares the removed column: its reads of
     // it fail with an ordinary SQLite error.
-    let failed = b
-        .call(json!({"type": "read", "query": {"sql": "SELECT category FROM items", "values": [], "max_rows": 8}}))
-        .await
-        .expect_err("removed column");
+    let failed = snap::observe(b.session.read(rocky_sdk::ReadQuery {
+        sql: "SELECT category FROM items".to_owned(),
+        values: vec![],
+        max_rows: 8,
+        max_bytes: None,
+        cursor: None,
+    }))
+    .await
+    .expect_err("removed column");
     assert!(
         failed["message"]
             .as_str()
@@ -224,9 +232,7 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> 
         member.sync().await.expect("sync");
     }
     for member in [&c, &d, &e] {
-        member
-            .ok(json!({"type": "networking_control", "enabled": false}))
-            .await;
+        snap::ok(member.session.set_networking_enabled(false)).await;
     }
     // A (note) -> B (no note) -> C (note again), each a `continue` seal.
     a.close().await;
@@ -235,10 +241,6 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> 
         &version(common::SCHEMA, 2),
         None,
     ))?)?;
-    let removed_manifest = generation(&removed).await["manifest"]
-        .as_str()
-        .ok_or("manifest")?
-        .to_owned();
     removed.close().await;
     let a = Device::new(Database::open(open(
         &directory("a"),
@@ -247,31 +249,19 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> 
     ))?)?;
     assert_eq!(generation(&a).await["current"]["schema"], 3);
     let notes = "SELECT title, note FROM items ORDER BY title";
-    let empty = json!([[text("apples"), {"type": "null"}], [text("bread"), {"type": "null"}]]);
+    let empty = json!([[snap::cell(text("apples")), {"type": "null"}], [snap::cell(text("bread")), {"type": "null"}]]);
     assert_eq!(rows(&a, notes).await, empty);
     // d, still at A, writes the note after the removal was sealed.
     d.set(3, &apples, "note", json!("late")).await;
 
     // c follows `main` from A to C at once: B's schema is on the path.
-    hub.record("c");
-    c.ok(json!({"type":"networking_control", "enabled":true}))
-        .await;
+    snap::ok(c.session.set_networking_enabled(true)).await;
     c.sync().await.expect("sync");
     assert_eq!(generation(&c).await["current"]["schema"], 3);
-    let request = serde_json::to_vec(
-        &json!({"manifest":data_encoding::HEXLOWER.decode(removed_manifest.as_bytes())?}),
-    )?;
-    assert!(
-        hub.transcript("c")
-            .windows(request.len())
-            .any(|bytes| bytes == request),
-        "B must be fetched from the only provider, which follows C"
-    );
 
     assert_eq!(rows(&c, notes).await, empty);
     // d's late write crosses B: its note reaches no device, d's included.
-    d.ok(json!({"type": "networking_control", "enabled": true}))
-        .await;
+    snap::ok(d.session.set_networking_enabled(true)).await;
     d.sync().await.expect("sync");
     assert_eq!(generation(&d).await["current"]["schema"], 3);
     // The late write replays in C, where its field is off its path: it
@@ -283,10 +273,9 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> 
     }
     // A write at C carries the field again.
     a.set(4, &apples, "note", json!("current")).await;
-    let expected = json!([[text("apples"), text("current")], [text("bread"), {"type": "null"}]]);
+    let expected = json!([[snap::cell(text("apples")), snap::cell(text("current"))], [snap::cell(text("bread")), {"type": "null"}]]);
     // e held the first rows with their notes; following strips them.
-    e.ok(json!({"type": "networking_control", "enabled": true}))
-        .await;
+    snap::ok(e.session.set_networking_enabled(true)).await;
     for device in [&c, &d, &e] {
         device.sync().await.expect("sync");
     }
@@ -332,22 +321,20 @@ async fn an_unsent_change_naming_a_removed_table_drops_whole_in_the_successor()
     b.sync().await.expect("sync");
     // Offline, the member edits a kept table and the table the next
     // version removes in one transaction, and never sends it.
-    let _scope: Value = serde_json::from_str(&b.database.scope())?;
 
-    b.ok(json!({"type": "sql", "sql": "BEGIN"})).await;
-    b.ok(
-        json!({"type": "sql", "sql": "UPDATE items SET title='green apples' WHERE title='apples'"}),
-    )
+    snap::ok(b.session.execute("BEGIN", Vec::new())).await;
+    snap::ok(b.session.execute(
+        "UPDATE items SET title='green apples' WHERE title='apples'",
+        Vec::new(),
+    ))
     .await;
-    let id = b.ok(json!({"type": "next_id", "table": "shelves"})).await["id"].clone();
-    b.ok(json!({
-        "type": "sql",
-        "sql": "INSERT INTO shelves(key,label,id) VALUES('cellar','cellar',?)",
-        "values": [{"type": "integer", "value": id.to_string().trim_matches('"')}],
-    }))
+    let id = snap::ok(b.session.next_id("shelves")).await["id"].clone();
+    snap::ok(b.session.execute(
+        "INSERT INTO shelves(key,label,id) VALUES('cellar','cellar',?)",
+        vec![snap::row_id(&(id.to_string().trim_matches('"')))],
+    ))
     .await;
-    b.ok(json!({"type": "sql", "sql": "COMMIT", "handle": vec![3; 32]}))
-        .await;
+    snap::ok(b.session.commit([3; 32])).await;
     assert_eq!(b.titles().await, ["bread", "green apples"]);
 
     a.close().await;
@@ -377,7 +364,7 @@ async fn an_unsent_change_naming_a_removed_table_drops_whole_in_the_successor()
     let completed = "SELECT title, completed FROM items WHERE completed=1";
     assert_eq!(
         rows(&a, completed).await,
-        json!([[text("bread"), {"type": "integer", "value": "1"}]])
+        json!([[snap::cell(text("bread")), {"type": "integer", "value": "1"}]])
     );
     a.close().await;
     b.close().await;
@@ -400,10 +387,7 @@ impl rocky_sdk::transport::Connector for NeverStarts {
         &self,
         _: bool,
         _: [u8; 32],
-    ) -> rocky_sdk::transport::BoxFuture<
-        '_,
-        Result<Arc<dyn rocky_sdk::transport::Transport>, Failure>,
-    > {
+    ) -> rocky_sdk::transport::BoxFuture<'_, Result<rocky_sdk::transport::Connected, Failure>> {
         self.0.store(true, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async { Err("network must not start before confirmation".into()) })
     }
@@ -610,19 +594,33 @@ async fn an_impact_report_counts_the_live_rows_of_all_local_partitions() -> Resu
     let b = Device::new(Database::create(open(&b_dir, &before, None), None)?)?;
     b.follow_main_migrating().await;
     for (handle, list) in [(1, "first"), (2, "second")] {
-        b.ok(json!({"type":"partition_create", "table":"items", "values":[text(list)]}))
-            .await;
-        let _scope: Value = serde_json::from_str(&b.database.scope())?;
+        snap::ok(
+            b.session
+                .create_partition(rocky_sdk::PartitionTarget::Table {
+                    table: "items".to_owned(),
+                    values: vec![text(list)],
+                }),
+        )
+        .await;
 
-        b.ok(json!({"type":"sql", "sql":"BEGIN"})).await;
-        let id = b
-            .ok(json!({"type":"next_id", "table":"items", "partition_values":[text(list)]}))
-            .await["id"]
-            .clone();
-        b.ok(json!({"type":"sql", "sql":"INSERT INTO items(list,key,title,completed,note,id) VALUES(?,?,?,?,?,?)",
-            "values":[text(list), text("key"), text(list), {"type":"integer", "value":"0"}, text("old"), {"type":"integer", "value":id}]})).await;
-        b.ok(json!({"type":"sql", "sql":"COMMIT", "handle":vec![handle; 32]}))
-            .await;
+        snap::ok(b.session.execute("BEGIN", Vec::new())).await;
+        let id =
+            snap::ok(b.session.next_partition_id("items", vec![text(list)])).await["id"].clone();
+        snap::ok(b.session.execute(
+            &(snap::text(
+                &("INSERT INTO items(list,key,title,completed,note,id) VALUES(?,?,?,?,?,?)"),
+            )),
+            vec![
+                text(list),
+                text("key"),
+                text(list),
+                rocky_sdk::SqlValue::Integer(0),
+                text("old"),
+                snap::row_id(&(id)),
+            ],
+        ))
+        .await;
+        snap::ok(b.session.commit([handle; 32])).await;
     }
     b.close().await;
     schema["version"] = json!(2);

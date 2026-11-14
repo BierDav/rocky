@@ -211,7 +211,6 @@ mod tests {
             delegations: 0,
             extension: Extension::new(Extended {
                 node: Some(PeerId::of(node.public_key())),
-                authors: Some(crate::AuthorRange::new(1, 1).unwrap()),
                 sequence: Some(sequence),
                 previous,
                 database: Some(crate::DatabaseContext {

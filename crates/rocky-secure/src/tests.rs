@@ -296,12 +296,12 @@ pub(crate) fn lifetime() -> (u64, u64) {
     })
 }
 /// Issuance terms for a fixture: from now for 300 days.
-pub(crate) fn validity() -> (u64, u64, u64) {
-    (
-        now().unwrap(),
-        300 * rocky_credentials::DAY,
-        rocky_credentials::DAY,
-    )
+pub(crate) fn validity() -> rocky_credentials::Validity {
+    rocky_credentials::Validity {
+        issued_at: now().unwrap(),
+        lifetime: std::time::Duration::from_secs(300 * rocky_credentials::DAY),
+        clock_skew: std::time::Duration::from_secs(rocky_credentials::DAY),
+    }
 }
 /// The digest of an empty revocation set.
 pub(crate) fn unrevoked() -> Commitment {
@@ -322,6 +322,7 @@ pub(crate) fn revoking(
         identities: users.iter().copied().collect(),
         capabilities: capabilities.iter().copied().collect(),
         cut: Default::default(),
+        mode: rocky_credentials::RevocationMode::Lost,
         recovery: None,
     };
     RevocationSet::try_from(vec![
@@ -410,19 +411,6 @@ impl Fixture {
             },
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
-                authors: Some(if kind == PrincipalKind::Node {
-                    rocky_credentials::AuthorRange::new(
-                        crate::tests::node_number(subject),
-                        crate::tests::node_number(subject),
-                    )
-                    .unwrap()
-                } else {
-                    rocky_credentials::AuthorRange::new(
-                        crate::tests::node_number(node.public_key()),
-                        rocky_credentials::MAX_AUTHOR,
-                    )
-                    .unwrap()
-                }),
                 node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
                 database: Some(rocky_credentials::DatabaseContext {
                     publisher: root.public_key(),
@@ -1186,7 +1174,6 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
         expires: 100,
         delegations: 2,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
-            authors: Some(rocky_credentials::AuthorRange::ALL),
             ..Default::default()
         })
         .unwrap(),
@@ -1196,7 +1183,6 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
         kind: PrincipalKind::User,
         delegations: 1,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
-            authors: Some(rocky_credentials::AuthorRange::new(12, 12).unwrap()),
             ..Default::default()
         })
         .unwrap(),
@@ -1224,7 +1210,7 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
         ]);
         assert!(
             chain
-                .certify(&delegate, node.public_key(), 12)
+                .certify(&delegate, node.public_key())
                 .and_then(|chain| chain.verify(
                     fixture.publisher.public_key(),
                     node.public_key(),
@@ -1240,7 +1226,7 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
     ]);
     assert!(
         chain
-            .certify(&delegate, node.public_key(), 12)
+            .certify(&delegate, node.public_key())
             .and_then(|chain| chain.verify(
                 fixture.publisher.public_key(),
                 node.public_key(),
@@ -1649,6 +1635,7 @@ mod placements;
 mod recovery;
 #[cfg(unix)]
 mod replayed_constraints;
+mod reset;
 pub(crate) mod revocations;
 mod roles;
 mod rotation;
@@ -1659,11 +1646,6 @@ mod tip_schemas;
 mod tips;
 
 pub(crate) mod group_sync_measurement;
-
-/// Stable fixture allocation; production numbers come from granted ranges.
-fn node_number(node: PublicKey) -> u32 {
-    (u32::from_le_bytes(node.as_bytes()[..4].try_into().unwrap()) & 0x7fff_ffff).max(1)
-}
 
 mod bulk;
 

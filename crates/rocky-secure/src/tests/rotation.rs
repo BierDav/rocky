@@ -32,19 +32,6 @@ fn chain(f: &Fixture, node: &PrivateKey, grants: Vec<ResourceGrant>) -> Credenti
         },
         delegations,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
-            authors: Some(if kind == PrincipalKind::Node {
-                rocky_credentials::AuthorRange::new(
-                    crate::tests::node_number(subject),
-                    crate::tests::node_number(subject),
-                )
-                .unwrap()
-            } else {
-                rocky_credentials::AuthorRange::new(
-                    crate::tests::node_number(node.public_key()),
-                    rocky_credentials::MAX_AUTHOR,
-                )
-                .unwrap()
-            }),
             node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
             database: Some(rocky_credentials::DatabaseContext {
                 publisher: f.publisher.public_key(),

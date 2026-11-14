@@ -10,6 +10,13 @@ const SCHEMA: &str = r#"{"application":"revocation_faults","version":1,"format":
  {"name":"labels","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
  {"name":"attachments","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
 
+fn list_partition(list: impl Into<String>) -> crate::PartitionTarget {
+    crate::PartitionTarget::Group {
+        group: "list".into(),
+        values: vec![rocky_core::SqlValue::Text(list.into())],
+    }
+}
+
 /// Keys in memory: the file store syncs every key, which dominated this test.
 /// A copy carries the template's keys to one stop.
 #[derive(Clone, Default)]
@@ -132,6 +139,105 @@ fn tombstones(directory: &std::path::Path, node: PublicKey) -> Result<i64, Failu
     )?)
 }
 
+#[tokio::test]
+async fn a_saved_root_revocation_preserves_its_mode_and_cascade_targets() -> Result<(), Failure> {
+    use crate::registry::{Admitted, IdentityRecord, Kind, Registry, TrustedRecord};
+    use rocky_credentials::{Authority, RevocationMode};
+    let directory = tempfile::tempdir()?;
+    let root = crate::RootKey::generate();
+    let store: Arc<dyn crate::SecretStore> = Arc::new(Keys::default());
+    let node = issuer_with_root(directory.path(), store.clone(), None, &root).await?;
+    let initial = node.settings.lock().await.clone();
+    let target = PrivateKey::new().public_key();
+    let enrollee = PrivateKey::new().public_key();
+    let grant = Authority::owner(&root).issue_trusted(target, node.domain().scope, now()?)?;
+    let mut registry = Registry::default();
+    registry.trusted.insert(
+        target,
+        TrustedRecord {
+            granted: grant.capability.not_before,
+            grant,
+        },
+    );
+    registry.records.insert(
+        enrollee,
+        IdentityRecord {
+            admitted: Some(Admitted {
+                kind: Kind::Paired,
+                profile: Some(crate::GrantProfile::Issuer),
+                issuer: target,
+                origin: Some(target),
+                enrolled: now()?,
+                invitation: None,
+                single_use: true,
+            }),
+            ..IdentityRecord::default()
+        },
+    );
+    let membership = crate::membership::Membership::default();
+    for mode in [RevocationMode::Lost, RevocationMode::Compromised] {
+        let mut settings = initial.clone();
+        settings.begin_revocation(
+            crate::enrollment::Revoke::TrustedIdentity(target, mode),
+            (&registry, &membership),
+            Some(&root),
+        )?;
+        settings.save(&node.path)?;
+        let mut saved = Settings::load(&node.path)?;
+        let intent = saved
+            .authority
+            .as_ref()
+            .and_then(|authority| authority.rotation.as_ref())
+            .ok_or("missing revocation intent")?;
+        assert_eq!(intent.statement.mode, mode);
+        assert_eq!(
+            intent
+                .signed
+                .as_ref()
+                .ok_or("missing root signature")?
+                .statement
+                .mode,
+            mode
+        );
+        assert!(intent.identities.contains(&target));
+        assert_eq!(
+            intent.identities.contains(&enrollee),
+            mode == RevocationMode::Compromised
+        );
+        let id = intent.statement.id()?;
+        saved.rotate(&node.vault)?;
+        assert_eq!(
+            saved
+                .revocations
+                .get(&id)
+                .ok_or("missing statement")?
+                .statement
+                .mode,
+            mode
+        );
+        assert_eq!(
+            saved.revocations.revokes_origin(&target),
+            mode == RevocationMode::Compromised
+        );
+        // An already lost identity can be escalated when its keys are later
+        // found compromised. The earlier direct tombstone does not block it.
+        if mode == RevocationMode::Lost {
+            let mut committed = registry.clone();
+            committed.records.entry(target).or_default().revoked = true;
+            saved.complete_revocation(&node.vault, &node.domain(), (&committed, &membership))?;
+            saved.begin_revocation(
+                crate::enrollment::Revoke::TrustedIdentity(target, RevocationMode::Compromised),
+                (&registry, &membership),
+                Some(&root),
+            )?;
+            saved.rotate(&node.vault)?;
+            assert!(saved.revocations.revokes_origin(&target));
+            assert_eq!(saved.revocations.len(), 2);
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn reopen_completes_each_revocation_reader_secret_boundary() -> Result<(), Failure> {
     use fault::Stage;
@@ -187,9 +293,8 @@ fn reopen_at_revocation_boundaries(stops: &[(fault::Stage, usize)]) -> Result<()
     let keys = Keys::default();
     runtime()?.block_on(async {
         let node = issuer(template.path(), Arc::new(keys.clone())).await?;
-        let client = node.client(1)?;
         for list in ["L", "M"] {
-            node.dispatch(&client,&json!({"type":"partition_create","group":"list","values":[{"type":"text","value":list}]})).await?;
+            node.create_partition(&list_partition(list)).await?;
         }
         Ok::<_, Failure>(())
     })?;
@@ -226,7 +331,6 @@ async fn stop_at(
     copy_tree(template, root.path())?;
     let store: Arc<dyn crate::SecretStore> = Arc::new(keys.copy()?);
     let node = reload(root.path(), store.clone()).await?;
-    let client = node.client(1)?;
     let revoked = PrivateKey::new().public_key();
     fault::STOP.with(|at| at.set(Some(stop)));
     assert!(
@@ -263,7 +367,6 @@ async fn stop_at(
         "{stop:?}"
     );
     let vault = node.vault.clone();
-    drop(client);
     drop(node);
     // Exercise the real database open, before any network attaches.
     let open = || crate::Open {
@@ -278,12 +381,10 @@ async fn stop_at(
     let completed = Settings::load(&root.path().join("identity.json"))?;
     let session = reopened.session();
     for list in ["L", "M"] {
-        let response: Value = serde_json::from_str(&session.call(json!({"version":1,"scope":serde_json::from_str::<Value>(&reopened.scope())?,"request":{"type":"partition_status","group":"list","values":[{"type":"text","value":list}]}}).to_string()).await?)?;
-        let status = &response["value"];
-        assert_eq!(response["status"], "ok");
-        for table in status["tables"].as_array().ok_or("group tables")? {
-            assert_eq!(table["epochs"], status["epochs"], "{stop:?}");
-            assert_eq!(table["current"], status["current"], "{stop:?}");
+        let status = session.partition_status(list_partition(list)).await?;
+        for table in status.tables {
+            assert_eq!(table.epochs, status.epochs, "{stop:?}");
+            assert_eq!(table.current, status.current, "{stop:?}");
         }
     }
     session.close().await;
@@ -348,10 +449,10 @@ async fn stop_at(
 async fn holding_every_group_partition_keeps_escrow_in_one_pass() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let node = issuer(directory.path(), Arc::new(Keys::default())).await?;
-    let client = node.client(1)?;
     let lists = 8;
     for list in 0..lists {
-        node.dispatch(&client, &json!({"type":"partition_create","group":"list","values":[{"type":"text","value":format!("L{list}")}]})).await?;
+        node.create_partition(&list_partition(format!("L{list}")))
+            .await?;
     }
     let settings = node.settings.lock().await.clone();
     let partitions = settings.partitions(&node.domain())?;
@@ -388,10 +489,7 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
     let template = tempfile::tempdir()?;
     let keys = Keys::default();
     let node = issuer(template.path(), Arc::new(keys.clone())).await?;
-    let client = node.client(1)?;
-    let request =
-        json!({"type":"partition_create","group":"list","values":[{"type":"text","value":"L"}]});
-    node.dispatch(&client, &request).await?;
+    node.create_partition(&list_partition("L")).await?;
     let settings = node.settings.lock().await.clone();
     let record = settings.groups.values().next().ok_or("group")?;
     let secret = [245; 32];
@@ -406,7 +504,6 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
         PrivateKey::from_bytes(&node.vault.get("node")?).public_key(),
     )?;
     let partition = crate::groups::GroupPartition::of(&node.domain(), record)?;
-    drop(client);
     drop(node);
     for passed in 0..3 {
         let root = tempfile::tempdir()?;
@@ -437,12 +534,10 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
         assert_eq!(epochs.len(), 2);
         assert!(epochs.contains(&rocky_core::KeyEpoch::new(1, &secret)));
         let session = database.session();
-        let reply: Value = serde_json::from_str(&session.call(json!({"version":1,"scope":serde_json::from_str::<Value>(&database.scope())?,"request":{"type":"partition_status","group":"list","values":[{"type":"text","value":"L"}]}}).to_string()).await?)?;
-        assert_eq!(reply["status"], "ok");
-        let status = &reply["value"];
-        for table in status["tables"].as_array().ok_or("tables")? {
-            assert_eq!(table["epochs"], status["epochs"]);
-            assert_eq!(table["current"], status["current"]);
+        let status = session.partition_status(list_partition("L")).await?;
+        for table in status.tables {
+            assert_eq!(table.epochs, status.epochs);
+            assert_eq!(table.current, status.current);
         }
         session.close().await;
         database.close().await?;
@@ -465,18 +560,14 @@ async fn concurrent_membership_links_void_both_alert_and_allow_a_fresh_sequence(
     let links = settings.issuer_links();
     let first = settings.credentials.certificate().ok_or("certificate")?;
     let predecessor = first.id()?;
-    let author = links.authors()?.ok_or("authors")?.first;
     let keys = [PrivateKey::new(), PrivateKey::new()];
     let mut known = node.replica.revocations().await;
     let mut chains = Vec::new();
     for key in &keys {
-        let chain = links.clone().certify_member(
-            &*identity,
-            key.public_key(),
-            author + 1,
-            1,
-            Some(predecessor),
-        )?;
+        let chain =
+            links
+                .clone()
+                .certify_member(&*identity, key.public_key(), 1, Some(predecessor))?;
         known.link(chain.certificate().ok_or("certificate")?.clone())?;
         chains.push(chain);
     }
@@ -498,7 +589,6 @@ async fn concurrent_membership_links_void_both_alert_and_allow_a_fresh_sequence(
     let chain = links.certify_member(
         &*identity,
         replacement.public_key(),
-        author + 2,
         membership.next_sequence(settings.identity)?,
         membership
             .head(settings.identity)
@@ -512,7 +602,6 @@ async fn concurrent_membership_links_void_both_alert_and_allow_a_fresh_sequence(
         &node.replica.revocations().await,
         now()?,
     )?;
-    assert_eq!(chain.author_number()?, author + 2);
     Ok(())
 }
 
@@ -535,12 +624,10 @@ async fn unlinking_the_last_node_keeps_the_identity_and_allows_relinking() -> Re
     let membership = settings.revocations.membership()?;
     let replacement = PrivateKey::new();
     let links = settings.identity_links();
-    let first = links.authors()?.ok_or("authors")?.first;
     let sequence = membership.next_sequence(settings.identity)?;
     let chain = links.certify_member(
         &*identity,
         replacement.public_key(),
-        first + u32::try_from(sequence)?,
         sequence,
         membership
             .head(settings.identity)
@@ -602,13 +689,8 @@ async fn foreign_membership_and_unlinks_are_refused_before_runtime_mutation() ->
         let revision = *local.replica.observe_revision().borrow();
         let saved = std::fs::read(&local.path)?;
         assert!(local.replica.learn_revocations(&evidence).await.is_err());
-        assert!(
-            local
-                .accept_link(&serde_json::to_vec(&certificate)?)
-                .await
-                .is_err()
-        );
-        assert!(local.accept_unlink(&evidence.to_bytes()?).await.is_err());
+        assert!(local.accept_link(certificate.clone()).await.is_err());
+        assert!(local.accept_unlink(evidence.clone()).await.is_err());
         assert_eq!(local.replica.revocations().await, before);
         assert_eq!(*local.replica.observe_revision().borrow(), revision);
         assert_eq!(std::fs::read(&local.path)?, saved);
@@ -663,13 +745,13 @@ async fn link_challenges_are_bounded_retryable_and_expire_before_bundle_release(
             time,
             settings.database_context()?,
         )?;
-        let wire = serde_json::to_vec(&LinkRequest {
-            request: request.to_bytes()?,
+        let wire = LinkRequest {
+            request: request.clone(),
             code: None,
-        })?;
+        };
         assert_eq!(
-            node.answer_link(&settings, &wire)?,
-            b"confirmation required"
+            node.answer_link(&settings, wire)?,
+            rocky_credentials::IdentityReply::ConfirmationRequired
         );
         // Give the first arrival an unambiguous oldest timestamp without sleeping.
         if index == 0 {
@@ -689,21 +771,19 @@ async fn link_challenges_are_bounded_retryable_and_expire_before_bundle_release(
     }
     let request = &requests[32];
     let code = request.confirmation_code()?;
-    node.confirm_link(&json!({"node": request.node.to_hex(), "code":code}))
-        .await?;
+    node.confirm_link(request.node, &code).await?;
     // Retrying the same challenge preserves the answering device's confirmation.
-    let wire = serde_json::to_vec(&LinkRequest {
-        request: request.to_bytes()?,
+    let wire = LinkRequest {
+        request: request.clone(),
         code: None,
-    })?;
-    node.answer_link(&settings, &wire)?;
-    let confirmed = serde_json::to_vec(&LinkRequest {
-        request: request.to_bytes()?,
+    };
+    node.answer_link(&settings, wire)?;
+    let confirmed = LinkRequest {
+        request: request.clone(),
         code: Some(code.clone()),
-    })?;
+    };
     assert!(
-        rocky_credentials::IdentityAnswer::from_bytes(&node.answer_link(&settings, &confirmed)?)
-            .is_ok()
+        matches!(node.answer_link(&settings, LinkRequest { request: confirmed.request.clone(), code: confirmed.code.clone() })?, rocky_credentials::IdentityReply::Enrolled(bytes) if rocky_credentials::IdentityAnswer::from_bytes(&bytes).is_ok())
     );
     node.link_requests
         .lock()
@@ -711,12 +791,8 @@ async fn link_challenges_are_bounded_retryable_and_expire_before_bundle_release(
         .get_mut(&request.node)
         .ok_or("missing request")?
         .received = time - 300;
-    assert!(
-        node.confirm_link(&json!({"node":request.node.to_hex(), "code":code}))
-            .await
-            .is_err()
-    );
-    assert!(node.answer_link(&settings, &confirmed).is_err());
+    assert!(node.confirm_link(request.node, &code).await.is_err());
+    assert!(node.answer_link(&settings, confirmed).is_err());
     assert_eq!(
         node.replica
             .revocations()

@@ -29,18 +29,13 @@ async fn dropping_branch_frames_preserves_main_and_requires_catchup_on_return() 
     let node = PrivateKey::new();
     let chain = CredentialChain(vec![
         Authority::owner(&f.publisher)
-            .issue(
-                identity.public_key(),
-                f.full(),
-                rocky_credentials::AuthorRange::ALL,
-                validity(),
-            )
+            .issue(identity.public_key(), f.full(), validity())
             .unwrap(),
     ]);
     let mut config = f.config(&node, f.full(), &[f.public]);
     config.credentials = chain
         .clone()
-        .complete(&identity, node.public_key(), 1)
+        .complete(&identity, node.public_key())
         .unwrap();
     let replica = EncryptedReplica::open(&dir.path().join("drop.db"), f.app(), config)
         .await
@@ -106,7 +101,6 @@ async fn dropping_branch_frames_preserves_main_and_requires_catchup_on_return() 
                 .certify_member(
                     &identity,
                     branch_node.public_key(),
-                    2,
                     1,
                     replica
                         .revocations()

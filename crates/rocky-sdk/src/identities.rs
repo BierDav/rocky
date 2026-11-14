@@ -1,7 +1,7 @@
 //! Identity signers supplied for one call; installations retain only public credentials.
 use crate::{Failure, domain::Domain, enrollment::Settings, secrets::Vault};
 use rocky_credentials::{
-    AuthorRange, Authority, CredentialChain, IdentityProvider, PrivateKey, SignedCapability,
+    Authority, CredentialChain, IdentityProvider, PrivateKey, SignedCapability,
 };
 use std::sync::Arc;
 
@@ -68,34 +68,10 @@ impl Settings {
         }
         Ok(Authority::issuer(node, &self.credentials)?)
     }
-    /// Reserves the lower half, at most 256 numbers, for this identity's nodes.
-    /// Single-use identities need one; delegation draws from the remainder.
-    pub(crate) fn node_numbers(&self, range: AuthorRange) -> AuthorRange {
-        // Half the range, rounded down.
-        let slice = (range.last - range.first).div_ceil(2).clamp(1, 256);
-        let last = if self.single_use {
-            range.first
-        } else {
-            range.first + slice - 1
-        };
-        AuthorRange {
-            first: range.first,
-            last,
-        }
-    }
-    /// What this node hands to others of `range`: the numbers above its
-    /// identity's node numbers, so no grant meets a node of the identity.
-    pub(crate) fn minting_of(&self, range: AuthorRange) -> crate::enrollment::Minting {
-        crate::enrollment::Minting {
-            range,
-            next: self.node_numbers(range).last + 1,
-        }
-    }
     /// This node's chain under `links`, the identity's capabilities. The
-    /// node keeps the certificate it holds while it names this identity
-    /// and a number of its range, so a renewal needs no identity key; only
-    /// a node without one asks the identity to certify it, with the number
-    /// it held before or a fresh one of its identity's node numbers.
+    /// node keeps the certificate it holds while it names this identity,
+    /// so a renewal needs no identity key; only a node without one asks the
+    /// identity to certify it. The node key is its writer identity.
     pub(crate) fn certify(
         &self,
         vault: &Vault,
@@ -107,18 +83,11 @@ impl Settings {
         }
         let key = Self::node_key(vault)?;
         let node = key.public_key();
-        let range = links
-            .authors()?
-            .ok_or("the identity holds no author range")?;
         let identity = links.principal();
-        let held = self.credentials.certificate().filter(|held| {
-            Some(held.issuer) == identity
-                && held.capability.subject == node
-                && self
-                    .credentials
-                    .author_number()
-                    .is_ok_and(|author| range.contains(author))
-        });
+        let held = self
+            .credentials
+            .certificate()
+            .filter(|held| Some(held.issuer) == identity && held.capability.subject == node);
         // A lost link acknowledgment retries the same certified node.
         if held.is_none()
             && let Some(certificate) = self.revocations.certificates().find(|certificate| {
@@ -140,14 +109,9 @@ impl Settings {
                 }
                 let sequence = membership.next_sequence(self.identity)?;
                 let previous = membership.head(self.identity).map(|head| head.certificate);
-                let author = range
-                    .first
-                    .checked_add(u32::try_from(sequence)?)
-                    .filter(|author| self.node_numbers(range).contains(*author))
-                    .ok_or("the identity's node author range is exhausted")?;
                 links
                     .clone()
-                    .certify_member(&*identity, node, author, sequence, previous)?
+                    .certify_member(&*identity, node, sequence, previous)?
                     .0
                     .pop()
                     .ok_or("missing certificate")?
@@ -210,7 +174,6 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn identity_signers_are_call_scoped_and_single_use_identities_refuse_them()
@@ -237,11 +200,11 @@ mod tests {
         )?;
         let vault = settings.vault(&store);
         assert!(settings.identity().is_err());
-        for given in [
-            json!({"phrase":key.phrase()}),
-            json!({"secret":data_encoding::HEXLOWER.encode(&key.secret())}),
+        for supplied in [
+            crate::IdentityKey::from_phrase(&key.phrase())?,
+            crate::IdentityKey::from_secret(key.secret()),
         ] {
-            let supplied = crate::node::call_identity(&json!({"identity":given}), None)?;
+            let supplied: Option<Arc<dyn crate::IdentityProvider>> = Some(Arc::new(supplied));
             supplying(supplied, async {
                 assert_eq!(settings.identity()?.public_key()?, key.public_key());
                 Ok::<_, Failure>(())

@@ -82,8 +82,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             };
             let frame = inner.stored_frame(header.clone(), body.clone()).await?;
             if inner
-                .config
-                .revocations
+                .header_revocations(&frame.operation_ref()?.header)
                 .revoking(frame.chain()?.credentials())
                 .map_err(credential)?
                 .is_some()

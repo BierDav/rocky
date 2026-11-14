@@ -14,8 +14,6 @@ pub const MAX_SEEN: usize = crate::registry::MAX_IDENTITIES * 32;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LinkedNode {
     pub node: PublicKey,
-    /// Unknown until a certificate of it is held.
-    pub author: Option<u32>,
     /// The earliest certificate or admission known of it, in epoch seconds.
     pub linked: u64,
 }
@@ -66,16 +64,12 @@ impl Membership {
                 *node,
                 LinkedNode {
                     node: *node,
-                    author: None,
                     linked: seen.linked,
                 },
             );
         }
         for chain in chains {
             let Some(leaf) = chain.0.last() else {
-                continue;
-            };
-            let Ok(author) = chain.author_number() else {
                 continue;
             };
             if leaf.capability.kind != PrincipalKind::Node {
@@ -88,15 +82,8 @@ impl Membership {
                 .entry(leaf.issuer)
                 .or_default()
                 .entry(node)
-                .and_modify(|held| {
-                    held.author = Some(author);
-                    held.linked = held.linked.min(linked);
-                })
-                .or_insert(LinkedNode {
-                    node,
-                    author: Some(author),
-                    linked,
-                });
+                .and_modify(|held| held.linked = held.linked.min(linked))
+                .or_insert(LinkedNode { node, linked });
         }
         membership
     }
@@ -110,13 +97,11 @@ impl Membership {
             if set.ends_node_of(certificate.issuer, certificate.capability.subject, false) {
                 continue;
             }
-            let author = certificate.capability.authors()?.map(|range| range.first);
             let node = certificate.capability.subject;
             view.0.entry(certificate.issuer).or_default().insert(
                 node,
                 LinkedNode {
                     node,
-                    author,
                     linked: certificate.capability.not_before,
                 },
             );

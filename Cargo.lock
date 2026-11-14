@@ -6031,21 +6031,13 @@ dependencies = [
 name = "rocky-coordinator"
 version = "0.1.0"
 dependencies = [
- "directory-app",
- "fs2",
- "inventory-app",
- "iroh-relay",
- "openraft",
  "p2panda-core",
  "rocky-core",
  "rocky-credentials",
  "rocky-iroh",
  "rocky-platform",
- "rocky-runtime",
- "rocky-secure",
  "serde",
  "serde_json",
- "tempfile",
  "tokio",
  "tracing",
  "wasm-bindgen-test",
@@ -6073,6 +6065,7 @@ dependencies = [
  "p2panda-core",
  "rand 0.8.8",
  "rocky-core",
+ "rocky-credentials",
  "rocky-platform",
  "serde",
  "serde_bytes",
@@ -6096,6 +6089,7 @@ dependencies = [
  "n0-error",
  "rand 0.8.8",
  "rocky-core",
+ "rocky-credentials",
  "rocky-iroh",
  "rocky-platform",
  "serde",
@@ -6104,6 +6098,18 @@ dependencies = [
  "tracing",
  "wasm-bindgen-test",
  "web-time",
+]
+
+[[package]]
+name = "rocky-peer"
+version = "0.1.0"
+dependencies = [
+ "rocky-coordinator",
+ "rocky-iroh",
+ "rocky-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -6161,6 +6167,7 @@ dependencies = [
  "rocky-runtime",
  "rocky-secure",
  "rocky-storage",
+ "rocky-voter",
  "rusqlite",
  "serde",
  "serde_bytes",
@@ -6241,6 +6248,29 @@ dependencies = [
  "tokio",
  "wasm-bindgen-test",
  "web-time",
+]
+
+[[package]]
+name = "rocky-voter"
+version = "0.1.0"
+dependencies = [
+ "directory-app",
+ "fs2",
+ "inventory-app",
+ "iroh-relay",
+ "openraft",
+ "p2panda-core",
+ "rocky-coordinator",
+ "rocky-core",
+ "rocky-credentials",
+ "rocky-iroh",
+ "rocky-runtime",
+ "rocky-secure",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -7437,7 +7467,6 @@ version = "0.1.0"
 dependencies = [
  "rocky-sdk",
  "rocky-secure",
- "serde_json",
  "tempfile",
  "tokio",
 ]
@@ -7449,6 +7478,7 @@ dependencies = [
  "dioxus",
  "employees-app",
  "rocky-core",
+ "rocky-iroh",
  "rocky-runtime",
  "rocky-sdk",
  "rocky-secure",

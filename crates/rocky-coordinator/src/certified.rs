@@ -255,10 +255,10 @@ pub fn node_id(key: PublicKey) -> NodeId {
     }
 }
 
-pub(crate) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, CoordinationError> {
+pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, CoordinationError> {
     p2panda_core::cbor::encode_cbor(value).map_err(|_| CoordinationError::Corrupt)
 }
-pub(crate) fn decode<T: Serialize + DeserializeOwned>(data: &[u8]) -> Result<T, CoordinationError> {
+pub fn decode<T: Serialize + DeserializeOwned>(data: &[u8]) -> Result<T, CoordinationError> {
     if data.len() > MAX_STORE {
         return Err(CoordinationError::Denied);
     }
@@ -268,10 +268,10 @@ pub(crate) fn decode<T: Serialize + DeserializeOwned>(data: &[u8]) -> Result<T, 
     }
     Ok(value)
 }
-pub(crate) fn bytes<T: Serialize>(label: &str, value: &T) -> Result<Vec<u8>, CoordinationError> {
+pub fn bytes<T: Serialize>(label: &str, value: &T) -> Result<Vec<u8>, CoordinationError> {
     encode(&(label, value))
 }
-pub(crate) fn now() -> Result<u64, CoordinationError> {
+pub fn now() -> Result<u64, CoordinationError> {
     rocky_platform::time::SystemTime::now()
         .duration_since(rocky_platform::time::UNIX_EPOCH)
         .map(|t| t.as_secs())

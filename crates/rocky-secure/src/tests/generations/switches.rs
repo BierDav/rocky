@@ -318,19 +318,14 @@ async fn a_base_at_a_seal_of_the_previous_schema_rebootstraps_typed_rows_and_tom
         vec![vec![text("noted")]]
     );
     // The base keeps the old numeric identity's sequence mark.
-    let number = (u32::from_le_bytes(
-        rocky_core::commitment("items", alice_key.as_bytes())[..4]
-            .try_into()
-            .unwrap(),
-    ) & 0x7fff_ffff)
-        .max(1);
-    let old_id = rocky_core::RowIdentity::new(number, 4).unwrap();
+    let old_id =
+        rocky_core::RowIdentity::new(crate::writer::writer(&alice_key.public_key()), 4).unwrap();
     assert!(
         session(&carol)
             .await
             .run(
                 "INSERT INTO items(key,title,note,id) VALUES('0003','again',NULL,?)",
-                vec![SqlValue::Integer(old_id.integer())]
+                vec![old_id.sql()]
             )
             .await
             .is_err()

@@ -1,6 +1,11 @@
 //! One fixed DNS-SD type; topic claims are private, bounded and short lived.
-// A browser has no backend that reads claims; their format stays tested there.
-#![cfg_attr(target_family = "wasm", allow(dead_code))]
+#![cfg_attr(
+    target_family = "wasm",
+    expect(
+        dead_code,
+        reason = "Browsers have no discovery backend that reads claims; their format is still tested."
+    )
+)]
 use super::{Failure, Finder, LOCAL_PATH, cipher, now, open, seal};
 use data_encoding::BASE64URL_NOPAD;
 use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr, Watcher};

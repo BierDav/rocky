@@ -166,7 +166,7 @@ impl<A: RowApplication> Inner<A> {
                     self.grant_families(),
                 )
                 .map_err(credential)?
-                .partition_author(signing_key.public_key(), signer.number, scope, tuple, time)
+                .partition_author(signing_key.public_key(), scope, tuple, time)
                 .map_err(credential)?,
             None => signer
                 .credentials
@@ -177,7 +177,7 @@ impl<A: RowApplication> Inner<A> {
                     self.grant_families(),
                 )
                 .map_err(credential)?
-                .author(signing_key.public_key(), signer.number, scope.table, time)
+                .author(signing_key.public_key(), scope.table, time)
                 .map_err(credential)?,
         };
         let key = self
@@ -209,7 +209,7 @@ impl<A: RowApplication> Inner<A> {
             base.push(BaseMark {
                 author: header
                     .extensions
-                    .author
+                    .author(&header.public_key)
                     .ok_or_else(|| Error::Corrupt("intent base author".into()))?,
                 sequence: header.extensions.author_sequence,
             });
@@ -242,26 +242,28 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         let frame = author(
             signing_key,
-            Extensions {
-                author: Some(signer.number),
-                author_sequence,
-                row_format: ROW_FORMAT,
-                births: Vec::new(),
-                tip: self.workspace.tip,
-                scope,
-                generation: key.generation,
-                chain: signer.chain.digest(),
+            crate::wire::FrameDraft {
+                extensions: Extensions {
+                    authored: true,
+                    author_sequence,
+                    row_format: ROW_FORMAT,
+                    births: Vec::new(),
+                    tip: self.workspace.tip,
+                    scope,
+                    generation: key.generation,
+                    chain: signer.chain.digest(),
+                },
+                chain: signer.chain.clone(),
+                encryption_key: &key.key,
+                log: (sequence, backlink, clock),
+                previous: previous.into_iter().collect(),
+                partition: partition.as_ref(),
+                plaintext: &RowPayload::compact(
+                    &RowPayload::witness(payload(sequence, base)?, Vec::new())?,
+                    &self.definition,
+                    scope,
+                )?,
             },
-            signer.chain.clone(),
-            &key.key,
-            (sequence, backlink, clock),
-            previous.into_iter().collect(),
-            partition.as_ref(),
-            &RowPayload::compact(
-                &RowPayload::witness(payload(sequence, base)?, Vec::new())?,
-                &self.definition,
-                scope,
-            )?,
         )?;
         self.verify_frame(&frame, time)?;
         // A range page carries at most this much; a larger frame could
@@ -332,7 +334,7 @@ impl<A: RowApplication> Inner<A> {
             self.visible_frame(
                 graph,
                 extension.tip,
-                extension.author.ok_or_else(corrupt)?,
+                extension.author(&header.public_key).ok_or_else(corrupt)?,
                 extension.author_sequence,
                 self.workspace.tip,
             )

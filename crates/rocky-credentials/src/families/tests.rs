@@ -1,5 +1,5 @@
 use super::*;
-use crate::{AuthorRange, Authority, CredentialChain, PrivateKey, RevocationSet};
+use crate::{Authority, CredentialChain, PrivateKey, RevocationSet};
 use rocky_core::{
     DomainId, MeshId, PartitionSelection, PartitionTuple, PartitionValue, PrincipalKind, Right,
     Scope,
@@ -157,11 +157,15 @@ impl Fixture {
             self.identity.public_key(),
             grants,
             partitions,
-            (3, Some(AuthorRange::new(1, 1000).unwrap())),
-            (TIME, 3600, 0),
+            crate::DelegationTerms { delegations: 3 },
+            crate::Validity {
+                issued_at: TIME,
+                lifetime: std::time::Duration::from_secs(3600),
+                clock_skew: std::time::Duration::ZERO,
+            },
         )
         .unwrap();
-        crate::device_chain(capability, &self.identity, self.node.public_key(), 1).unwrap()
+        crate::device_chain(capability, &self.identity, self.node.public_key()).unwrap()
     }
     fn tuple(&self, table: usize, value: &str) -> (ResourceScope, PartitionTuple) {
         let slot = *self.partitions[table].selector.0.keys().next().unwrap();
@@ -203,7 +207,15 @@ fn compact_families_and_per_table_credentials_verify_without_changing_signed_byt
             },
         )
         .unwrap()
-        .renew(held, &RevocationSet::new(), (TIME, 3600, 0))
+        .renew(
+            held,
+            &RevocationSet::new(),
+            crate::Validity {
+                issued_at: TIME,
+                lifetime: std::time::Duration::from_secs(3600),
+                clock_skew: std::time::Duration::from_secs(0),
+            },
+        )
         .unwrap();
         assert_eq!(
             renewed.capability.extended().unwrap().families,
@@ -221,13 +233,14 @@ fn compact_families_and_per_table_credentials_verify_without_changing_signed_byt
         for table in 0..2 {
             let (scope, tuple) = f.tuple(table, "A");
             let grants = verified
-                .partition_author(f.node.public_key(), 1, scope, &tuple, TIME)
+                .partition_author(f.node.public_key(), scope, &tuple, TIME)
                 .unwrap();
             assert_eq!(grants[0].rights, f.resources[table].rights);
             assert_eq!(grants[0].fields, FieldSelection::All);
+            // Another key never writes under this node's certificate.
             assert!(
                 verified
-                    .partition_author(f.node.public_key(), 2, scope, &tuple, TIME)
+                    .partition_author(PrivateKey::new().public_key(), scope, &tuple, TIME)
                     .is_err()
             );
             let (scope, tuple) = f.tuple(table, "B");
@@ -321,17 +334,23 @@ fn delegation_checks_resolved_authority_and_cannot_remove_follower_restrictions(
     let delegable = chain.delegable();
     let identity = PrivateKey::from_bytes(&[6; 32]);
     let node = PrivateKey::from_bytes(&[7; 32]);
-    let terms = (1, Some(AuthorRange::new(100, 200).unwrap()));
+    let terms = crate::DelegationTerms { delegations: 1 };
     assert!(
         delegable
             .delegate_with_families(
                 &f.identity,
-                identity.public_key(),
-                PrincipalKind::User,
-                vec![f.resources[0].clone()],
-                vec![],
-                terms,
-                (TIME, 1000, 0),
+                crate::Delegation {
+                    subject: identity.public_key(),
+                    kind: PrincipalKind::User,
+                    grants: vec![f.resources[0].clone()],
+                    partitions: vec![],
+                    terms,
+                    validity: crate::Validity {
+                        issued_at: TIME,
+                        lifetime: std::time::Duration::from_secs(1000),
+                        clock_skew: std::time::Duration::from_secs(0)
+                    }
+                },
                 &f.families
             )
             .is_err()
@@ -342,13 +361,10 @@ fn delegation_checks_resolved_authority_and_cannot_remove_follower_restrictions(
     capability.subject = identity.public_key();
     capability.delegations = 1;
     capability.grants = vec![f.resources[0].clone()];
-    let mut extended = capability.extended().unwrap();
-    extended.authors = terms.1;
-    capability.extension = crate::Extension::new(extended).unwrap();
     forged
         .0
         .push(crate::SignedCapability::sign(capability, &f.identity).unwrap());
-    let forged = forged.certify(&identity, node.public_key(), 100).unwrap();
+    let forged = forged.certify(&identity, node.public_key()).unwrap();
     assert!(
         forged
             .verified_with_families(
@@ -364,16 +380,22 @@ fn delegation_checks_resolved_authority_and_cannot_remove_follower_restrictions(
     let delegated = delegable
         .delegate_with_families(
             &f.identity,
-            identity.public_key(),
-            PrincipalKind::User,
-            vec![narrow],
-            vec![],
-            terms,
-            (TIME, 1000, 0),
+            crate::Delegation {
+                subject: identity.public_key(),
+                kind: PrincipalKind::User,
+                grants: vec![narrow],
+                partitions: vec![],
+                terms,
+                validity: crate::Validity {
+                    issued_at: TIME,
+                    lifetime: std::time::Duration::from_secs(1000),
+                    clock_skew: std::time::Duration::from_secs(0),
+                },
+            },
             &f.families,
         )
         .unwrap()
-        .certify(&identity, node.public_key(), 100)
+        .certify(&identity, node.public_key())
         .unwrap();
     let verified = delegated
         .verified_with_families(
@@ -384,12 +406,12 @@ fn delegation_checks_resolved_authority_and_cannot_remove_follower_restrictions(
         )
         .unwrap();
     let grants = verified
-        .author(node.public_key(), 100, f.resources[1].scope.table, TIME)
+        .author(node.public_key(), f.resources[1].scope.table, TIME)
         .unwrap();
     assert_eq!(grants[0].rights, [Right::Read].into());
     assert!(
         verified
-            .author(node.public_key(), 100, f.resources[0].scope.table, TIME)
+            .author(node.public_key(), f.resources[0].scope.table, TIME)
             .is_err()
     );
 }
@@ -438,8 +460,12 @@ fn wire_grant_quota_stays_bounded_when_profiles_can_resolve_wide_schemas() {
                 f.identity.public_key(),
                 vec![f.resources[0].clone(); crate::MAX_GRANTS + 1],
                 vec![],
-                (1, Some(AuthorRange::new(1, 1000).unwrap())),
-                (TIME, 3600, 0)
+                crate::DelegationTerms { delegations: 1 },
+                crate::Validity {
+                    issued_at: TIME,
+                    lifetime: std::time::Duration::from_secs(3600),
+                    clock_skew: std::time::Duration::from_secs(0)
+                }
             )
             .is_err()
     );
@@ -474,7 +500,6 @@ fn old_sparse_grants_never_acquire_family_authority() {
             &bindings,
             f.root.public_key(),
             f.resources[1].scope.table,
-            1,
             f.node.public_key(),
             &f.families
         )
@@ -495,7 +520,6 @@ fn old_sparse_grants_never_acquire_family_authority() {
         &bindings,
         f.root.public_key(),
         f.resources[1].scope.table,
-        1,
         f.node.public_key(),
         &f.families,
     )

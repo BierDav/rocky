@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{Failure, TransactionToken, transport::memory::Hub};
 use rocky_core::{Blocker, BlockerKind, WaitReason, replay::TransactionOutcome};
-use serde_json::{Value, json};
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
@@ -215,7 +215,8 @@ impl Simulation {
     async fn setup(&mut self) -> Result<(), Failure> {
         self.members[0].create(&self.hub).await?;
         self.members[0]
-            .call(json!({"type": "tips", "action": "create", "name": "main"}))
+            .session()?
+            .create_bookmark("main", None)
             .await?;
         self.follow(0, "main").await?;
         self.invite(0, 1).await?;
@@ -281,8 +282,8 @@ impl Simulation {
                 Ok("set".into())
             }
             Action::Alerts(node) => {
-                let status = self.running(*node)?.call(json!({"type": "status"})).await?;
-                let alerts: Vec<crate::Alert> = serde_json::from_value(status["alerts"].clone())?;
+                let status = self.running(*node)?.session()?.status().await?;
+                let alerts = status.alerts;
                 Ok(self.alerts(&alerts))
             }
             Action::Watch(node) => {
@@ -334,7 +335,8 @@ impl Simulation {
                 .into())
             }
             Action::Trust(node) => {
-                self.invite_as(0, *node, json!({"kind": "issuer"})).await?;
+                self.invite_as(0, *node, crate::GrantProfile::Issuer)
+                    .await?;
                 let identity = self
                     .database(*node)?
                     .session()
@@ -363,7 +365,8 @@ impl Simulation {
             }
             Action::StaleAfter(node, after) => {
                 self.running(*node)?
-                    .call(json!({"type": "trusted_stale_after", "seconds": after.as_secs()}))
+                    .session()?
+                    .set_trusted_stale_after(after.as_secs())
                     .await?;
                 Ok("set".into())
             }
@@ -419,9 +422,14 @@ impl Simulation {
                     .node_key
                     .clone()
                     .ok_or("node 0 has no key")?;
+                let owner = rocky_credentials::PeerId::of(owner.parse()?);
                 self.running(*node)?
-                    .call(json!({"type": "partition_role", "role":
-                        {"role": "Partial", "full_nodes": [owner], "custody": 1}}))
+                    .session()?
+                    .set_replica_role(crate::ReplicaRoleConfig {
+                        role: crate::ReplicaRole::Partial,
+                        full_nodes: [owner].into(),
+                        custody: 1,
+                    })
                     .await?;
                 self.partial[*node] = true;
                 Ok("partial".into())
@@ -443,10 +451,8 @@ impl Simulation {
             Action::Probe(node) => {
                 let member = self.running(*node)?;
                 let key = format!("w{index}");
-                let (synced, written) = tokio::join!(
-                    member.call(json!({"type": "sync"})),
-                    member.write(&key, index as u64)
-                );
+                let (synced, written) =
+                    tokio::join!(member.sync(), member.write(&key, index as u64));
                 self.synced[*node] = true;
                 written?;
                 synced?;
@@ -509,25 +515,27 @@ impl Simulation {
                 Ok(format!("{fired}, {}", self.reopen(*node).await?))
             }
             Action::Seal(node) => {
-                let sealed = self
-                    .running(*node)?
-                    .call(json!({"type": "tips", "action": "seal"}))
-                    .await?;
-                Ok(format!("sealed {}", short_hash(&sealed["tip"])))
+                let sealed = self.running(*node)?.session()?.seal(false).await?;
+                Ok(format!("sealed {}", short_hash(&sealed.tip)))
             }
             Action::Compact(node) => {
                 let report = self
                     .running(*node)?
-                    .call(json!({"type": "tips", "action": "compact"}))
+                    .session()
+                    .expect("running crash fixture")
+                    .compact(0)
                     .await?;
-                Ok(format!("compacted, pruned {}", report["pruned"]))
+                Ok(format!("compacted, pruned {}", report.pruned))
             }
             Action::Branch(node, bookmark) => self.branch(*node, bookmark).await,
             Action::Follow(node, bookmark) => self.follow(*node, bookmark).await,
             Action::Partition(list) => {
                 self.running(0)?
-                    .call(json!({"type": "partition_create", "group": "list",
-                        "values": [{"type": "text", "value": list}]}))
+                    .session()?
+                    .create_partition(crate::PartitionTarget::Group {
+                        group: "list".into(),
+                        values: vec![crate::SqlValue::Text(list.clone())],
+                    })
                     .await?;
                 self.lists.push(list.clone());
                 Ok("created".into())
@@ -538,8 +546,15 @@ impl Simulation {
                     .clone()
                     .ok_or("skipped: never joined")?;
                 self.running(0)?
-                    .call(json!({"type": "partition_share", "group": "list",
-                        "values": [{"type": "text", "value": list}], "recipients": [key]}))
+                    .session()?
+                    .share_partition(
+                        crate::PartitionTarget::Group {
+                            group: "list".into(),
+                            values: vec![crate::SqlValue::Text(list.clone())],
+                        },
+                        [key.parse()?].into(),
+                        None,
+                    )
                     .await?;
                 self.shared.insert((*node, list.clone()));
                 Ok("shared".into())
@@ -554,13 +569,10 @@ impl Simulation {
             }
             Action::Invite(by, node) => self.invite(*by, *node).await,
             Action::Revoke(node) => {
-                let identity = self
-                    .running(*node)?
-                    .call(json!({"type": "session"}))
-                    .await?["principal"]
-                    .clone();
+                let identity = self.running(*node)?.session()?.info().await?.principal;
                 self.running(0)?
-                    .call(json!({"type": "revoke", "identity": identity}))
+                    .session()?
+                    .revoke_identity(&identity.to_hex())
                     .await?;
                 self.members[*node].revoked = true;
                 self.members[*node].close().await?;
@@ -584,27 +596,44 @@ impl Simulation {
                 if !self.partial[*node] {
                     // The owner holds every list: eviction waits for it.
                     member
-                        .call(json!({"type": "partition_role", "role":
-                            {"role": "Partial", "full_nodes": [owner], "custody": 1}}))
+                        .session()?
+                        .set_replica_role(crate::ReplicaRoleConfig {
+                            role: crate::ReplicaRole::Partial,
+                            full_nodes: [owner].into(),
+                            custody: 1,
+                        })
                         .await?;
                 }
-                let partition = |kind: &str| json!({"type": kind, "group": "list", "values": [{"type": "text", "value": list}]});
-                member.call(partition("partition_unsubscribe")).await?;
+                let target = crate::PartitionTarget::Group {
+                    group: "list".into(),
+                    values: vec![crate::SqlValue::Text(list.clone())],
+                };
+                member
+                    .session()?
+                    .unsubscribe_partition(target.clone(), Default::default())
+                    .await?;
                 self.partial[*node] = true;
                 let evicted = self
                     .running(*node)?
-                    .call(partition("partition_evict"))
+                    .session()?
+                    .evict_partition(target, Default::default())
                     .await?;
                 self.count("evicted");
-                Ok(format!("evicted {} rows", evicted["rows"]))
+                Ok(format!("evicted {} rows", evicted.rows))
             }
             Action::Hold(node, list) => {
                 if !self.shared.contains(&(*node, list.clone())) {
                     return Err("skipped: never shared".into());
                 }
                 self.running(*node)?
-                    .call(json!({"type": "partition_subscribe", "group": "list",
-                        "values": [{"type": "text", "value": list}]}))
+                    .session()?
+                    .subscribe_partition(
+                        crate::PartitionTarget::Group {
+                            group: "list".into(),
+                            values: vec![crate::SqlValue::Text(list.clone())],
+                        },
+                        Default::default(),
+                    )
                     .await?;
                 Ok("holding".into())
             }
@@ -765,9 +794,7 @@ impl Simulation {
                     "{} stale",
                     self.identities.get(identity).map_or("?", String::as_str)
                 ),
-                crate::AlertKind::RecoveriesMet { shared_slot, .. } => {
-                    format!("recoveries met shared slot {shared_slot}")
-                }
+                crate::AlertKind::RecoveriesMet { .. } => "recoveries met".to_owned(),
                 crate::AlertKind::RecoveryEnded { ended, .. } => format!(
                     "{} ended by recovery",
                     self.identities.get(ended).map_or("?", String::as_str)
@@ -777,29 +804,25 @@ impl Simulation {
         format!("alerts {described:?}")
     }
     async fn sync(&mut self, node: usize) -> Result<String, Failure> {
-        let report = self.running(node)?.call(json!({"type": "sync"})).await;
+        let report = self.running(node)?.sync().await;
         self.synced[node] = true;
         let report = report?;
 
-        let peers = report["peers"].as_array().map_or(0, Vec::len);
-        let completed = report["peers"]
-            .as_array()
-            .into_iter()
-            .flatten()
+        let peers = report.peers.len();
+        let completed = report
+            .peers
+            .iter()
             .filter(|peer| {
-                peer["attempts"].as_array().is_some_and(|attempts| {
-                    attempts.iter().any(|attempt| {
-                        attempt["operation"] == "reconcile" && attempt["outcome"] == "completed"
-                    })
+                peer.attempts.iter().any(|attempt| {
+                    attempt.operation == crate::AttemptOperation::Reconcile
+                        && attempt.outcome == Some(crate::AttemptOutcome::Completed)
                 })
             })
             .count();
         Ok(format!("reconciled {completed}/{peers}"))
     }
     async fn follow(&mut self, node: usize, bookmark: &str) -> Result<String, Failure> {
-        self.running(node)?
-            .call(json!({"type": "tips", "action": "follow", "name": bookmark}))
-            .await?;
+        self.running(node)?.follow(bookmark).await?;
         let member = self.running(node)?;
         if member.keys().await.is_ok() {
             return Ok("following".into());
@@ -820,22 +843,17 @@ impl Simulation {
     }
     async fn branch(&mut self, node: usize, bookmark: &str) -> Result<String, Failure> {
         let member = self.running(node)?;
-        let inspection = member
-            .call(json!({"type": "tips", "action": "inspect"}))
-            .await?;
-        let seal = inspection["seals"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .rfind(|seal| seal["canonical"] == true)
-            .map(|seal| seal["id"].clone())
+        let inspection = member.session()?.inspect_tips().await?;
+        let seal = inspection
+            .seals
+            .iter()
+            .rfind(|seal| seal.canonical)
+            .map(|seal| seal.id.clone())
             .ok_or("skipped: no seal")?;
-        let tip = member
-            .call(json!({"type": "tips", "action": "open", "seal": seal, "minimum_in_sync": 1}))
-            .await?["tip"]
-            .clone();
+        let tip = member.session()?.open_tip(&seal, 1).await?;
         member
-            .call(json!({"type": "tips", "action": "create", "name": bookmark, "tip": tip}))
+            .session()?
+            .create_bookmark(bookmark, Some(&(tip)))
             .await?;
         self.follow(node, bookmark).await?;
         Ok(format!("following {}", short_hash(&tip)))
@@ -861,7 +879,9 @@ impl Simulation {
         let _ = match point {
             Prune | Compact | BasePrepare | BasePrepared | BasePublished | BaseCleanup
             | BaseCleaned => member
-                .call(json!({"type": "tips", "action": "compact"}))
+                .session()
+                .expect("running crash fixture")
+                .compact(0)
                 .await
                 .map(drop),
             GroupBeforeCommit | GroupAfterCommit if self.fixture == Fixture::Relational => {
@@ -891,25 +911,31 @@ impl Simulation {
         }
     }
     async fn invite(&mut self, by: usize, node: usize) -> Result<String, Failure> {
-        let writer = json!({"kind": "writer", "scopes": self.fixture.scopes()});
+        let writer = crate::GrantProfile::Writer {
+            scopes: self
+                .fixture
+                .scopes()
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        };
         self.invite_as(by, node, writer).await
     }
     async fn invite_as(
         &mut self,
         by: usize,
         node: usize,
-        profile: serde_json::Value,
+        profile: crate::GrantProfile,
     ) -> Result<String, Failure> {
         if self.members[node].node_key.is_some() {
             return Err("skipped: already a member".into());
         }
         let uri = self
             .running(by)?
-            .call(json!({"type": "invitation", "profile": profile}))
-            .await?["uri"]
-            .as_str()
-            .ok_or("pairing uri")?
-            .to_owned();
+            .session()?
+            .invitation_with(profile)
+            .await?
+            .uri;
         let hub = self.hub.clone();
         self.members[node].join(&hub, &uri).await?;
         self.synced[node] = false;
@@ -929,10 +955,14 @@ impl Simulation {
                 continue;
             };
             let _ = self.members[other]
-                .call(json!({"type": "peer_add", "contact": contact}))
+                .session()
+                .expect("running peer")
+                .add_peer(&contact)
                 .await;
             let _ = self.members[node]
-                .call(json!({"type": "peer_add", "contact": theirs}))
+                .session()
+                .expect("running peer")
+                .add_peer(&theirs)
                 .await;
         }
     }
@@ -1235,11 +1265,18 @@ impl Simulation {
         let mut held = BTreeSet::new();
         for list in &self.lists {
             let status = member
-                .call(json!({"type": "partition_status", "group": "list",
-                    "values": [{"type": "text", "value": list}]}))
+                .session()?
+                .partition_status(crate::PartitionTarget::Group {
+                    group: "list".into(),
+                    values: vec![crate::SqlValue::Text(list.clone())],
+                })
                 .await?;
-            let tables = status["tables"].as_array().cloned().unwrap_or_default();
-            if !tables.is_empty() && tables.iter().all(|table| table["holding"] == "held") {
+            let tables = status.tables;
+            if !tables.is_empty()
+                && tables
+                    .iter()
+                    .all(|table| table.holding == Some(rocky_secure::Holding::Held))
+            {
                 held.insert(list.clone());
             }
         }
@@ -1261,19 +1298,20 @@ impl Simulation {
             .clone();
         for (table, list) in &authored.scopes {
             let status = member
-                .call(json!({"type": "partition_status", "group": "list",
-                    "values": [{"type": "text", "value": list}]}))
+                .session()?
+                .partition_status(crate::PartitionTarget::Group {
+                    group: "list".into(),
+                    values: vec![crate::SqlValue::Text(list.clone())],
+                })
                 .await?;
-            let Some(scope) = status["tables"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|entry| entry["table"] == *table)
-                .filter(|entry| !entry["scope"].is_null())
+            let Some(scope) = status
+                .tables
+                .iter()
+                .find(|entry| entry.table == *table)
+                .and_then(|entry| entry.scope)
             else {
                 return Ok(false);
             };
-            let scope: rocky_core::ResourceScope = serde_json::from_value(scope["scope"].clone())?;
             if !replica.base_covers(scope, stamp).await? {
                 return Ok(false);
             }
@@ -1296,23 +1334,12 @@ impl Simulation {
     /// The canonical seals `node` knows, by short id; inspection lists
     /// them in no defined order.
     async fn canonical_seals(&self, node: usize) -> Result<BTreeSet<String>, Failure> {
-        let inspection = self
-            .running(node)?
-            .call(json!({"type": "tips", "action": "inspect"}))
-            .await?;
-        Ok(inspection["seals"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|seal| seal["canonical"] == true)
-            .map(|seal| {
-                seal["id"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .chars()
-                    .take(8)
-                    .collect()
-            })
+        let inspection = self.running(node)?.session()?.inspect_tips().await?;
+        Ok(inspection
+            .seals
+            .iter()
+            .filter(|seal| seal.canonical)
+            .map(|seal| short_hash(&seal.id))
             .collect())
     }
     /// Merges every open replica's canonical positions. A position a seal
@@ -1582,6 +1609,6 @@ fn variant(value: &impl std::fmt::Debug) -> String {
         .to_owned()
 }
 
-fn short_hash(value: &Value) -> String {
-    value.as_str().unwrap_or("?").chars().take(8).collect()
+fn short_hash(value: &str) -> String {
+    value.chars().take(8).collect()
 }

@@ -22,14 +22,14 @@ fn column(name: &str, affinity: Affinity, not_null: bool) -> LogicalColumn {
     }
 }
 fn table(name: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable {
-    columns.push(column("id", Affinity::Integer, true));
+    columns.push(column("id", Affinity::Blob, true));
     let sql: Vec<String> = columns
         .iter()
         .map(|column| {
-            let kind = if column.affinity == Affinity::Integer {
-                "INTEGER"
-            } else {
-                "TEXT"
+            let kind = match column.affinity {
+                Affinity::Integer => "INTEGER",
+                Affinity::Blob => "BLOB",
+                _ => "TEXT",
             };
             let null = if column.not_null { " NOT NULL" } else { "" };
             let key = if column.sql_name == "key" {
@@ -258,7 +258,7 @@ impl Lineage {
         {
             let mut clauses = Vec::new();
             for (name, action) in [("item", "CASCADE"), ("also", "SET NULL")] {
-                tags.columns.push(column(name, Affinity::Integer, false));
+                tags.columns.push(column(name, Affinity::Blob, false));
                 let key = rocky_core::LogicalForeignKey {
                     table: "items".into(),
                     columns: vec![name.into()],
@@ -271,7 +271,7 @@ impl Lineage {
                 tags.foreign_keys.push(key);
             }
             let sql = tags.create_sql.strip_suffix(')').unwrap();
-            tags.create_sql = format!("{sql},item INTEGER,also INTEGER,{})", clauses.join(","));
+            tags.create_sql = format!("{sql},item BLOB,also BLOB,{})", clauses.join(","));
         }
         for tags in tables
             .iter_mut()
@@ -515,19 +515,6 @@ impl Lineage {
             },
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
-                authors: Some(if kind == PrincipalKind::Node {
-                    rocky_credentials::AuthorRange::new(
-                        crate::tests::node_number(subject),
-                        crate::tests::node_number(subject),
-                    )
-                    .unwrap()
-                } else {
-                    rocky_credentials::AuthorRange::new(
-                        crate::tests::node_number(node.public_key()),
-                        rocky_credentials::MAX_AUTHOR,
-                    )
-                    .unwrap()
-                }),
                 node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
                 partitions: if kind == PrincipalKind::Node {
                     Vec::new()
@@ -717,11 +704,8 @@ pub(super) async fn identity_insert(
         };
         let id = session.next_id(name).await?;
         let tail = tail.trim().trim_end_matches(')');
-        // The allocator value is a checked integer; embed it without changing positional bindings.
-        let rewritten = format!(
-            "INSERT INTO {name}({columns},id) VALUES{tail},{})",
-            id.integer()
-        );
+        // The allocated identity is a canonical BLOB; embed it without changing positional bindings.
+        let rewritten = format!("INSERT INTO {name}({columns},id) VALUES{tail},X'{id}')");
         session.run(&rewritten, std::mem::take(&mut values)).await
     }
     .await;

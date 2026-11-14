@@ -91,16 +91,15 @@ impl Trace {
         }
         // These public observations are later, non-atomic and never drive progress.
         for (name, peer) in peers {
-            for request in [
-                json!({"type":"status"}),
-                json!({"type":"tips","action":"status"}),
-                json!({"type":"tips","action":"inspect"}),
-                json!({"type":"tips","action":"compaction"}),
-            ] {
-                let result =
-                    tokio::time::timeout(Duration::from_secs(2), peer.call(request.clone())).await;
+            let observations = [
+                ("status", snap::value(peer.session.status()).await),
+                ("tip", snap::value(peer.session.tip_status()).await),
+                ("tips", snap::value(peer.session.inspect_tips()).await),
+                ("compaction", snap::value(peer.session.compaction()).await),
+            ];
+            for (observation, result) in observations {
                 eprintln!(
-                    "rollback diagnostic: later_public peer={name} unix_ms={} request={request} result={result:?}",
+                    "rollback diagnostic: later_public peer={name} unix_ms={} observation={observation} result={result:?}",
                     now()
                 );
             }

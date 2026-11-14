@@ -9,7 +9,11 @@ use rocky_credentials::*;
 use std::collections::BTreeSet;
 
 const NOW: u64 = 1_800_000_000;
-const VALIDITY: (u64, u64, u64) = (NOW, 30 * DAY, 300);
+const VALIDITY: rocky_credentials::Validity = rocky_credentials::Validity {
+    issued_at: NOW,
+    lifetime: std::time::Duration::from_secs(30 * DAY),
+    clock_skew: std::time::Duration::from_secs(300),
+};
 
 struct Domain {
     owner: PrivateKey,
@@ -59,7 +63,7 @@ impl Domain {
         }
     }
     /// An issuer identity the owner appointed, with its issuer chain.
-    async fn issuer(&self, authors: AuthorRange) -> (FileIdentity, CredentialChain) {
+    async fn issuer(&self) -> (FileIdentity, CredentialChain) {
         let identity = FileIdentity::new().await;
         let link = Authority::owner_in(
             &self.owner,
@@ -69,7 +73,7 @@ impl Domain {
             },
         )
         .unwrap()
-        .issue_issuer(identity.key(), Some(authors), VALIDITY)
+        .issue_issuer(identity.key(), VALIDITY)
         .expect("issuer");
         (identity, CredentialChain(vec![link]))
     }
@@ -87,6 +91,7 @@ impl Domain {
             identities: BTreeSet::new(),
             capabilities: BTreeSet::new(),
             cut: Default::default(),
+            mode: rocky_credentials::RevocationMode::Lost,
             recovery: None,
         };
         statement(&mut body);
@@ -120,56 +125,46 @@ impl FileIdentity {
     }
 }
 
-/// A node of `identity` certified under `chain`, with an author number its
-/// provider reserves from the identity's range.
+/// A node of `identity` certified under `chain` after `previous`; its key
+/// is its writer identity.
 fn node(
     identity: &dyn IdentityProvider,
     chain: &CredentialChain,
     previous: Option<&CredentialChain>,
 ) -> (PrivateKey, CredentialChain) {
     let node = PrivateKey::new();
-    let range = chain
-        .authors()
-        .expect("range")
-        .expect("the identity's range");
-    let author = identity.reserve_author(range).expect("author");
+    let previous = previous.map(|chain| chain.certificate().unwrap());
+    let sequence = previous.map_or(0, |certificate| {
+        certificate.membership().unwrap().unwrap().0 + 1
+    });
     let certified = chain
         .clone()
         .certify_member(
             identity,
             node.public_key(),
-            author,
-            u64::from(author - range.first),
-            previous.map(|chain| chain.certificate().unwrap().id().unwrap()),
+            sequence,
+            previous.map(|certificate| certificate.id().unwrap()),
         )
         .expect("certificate");
     (node, certified)
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_file_identity_reopens_and_reserves_each_author_once() {
+async fn a_file_identity_reopens_with_its_one_key() {
     let identity = FileIdentity::new().await;
     let again = identity.reopen();
     assert_eq!(
         identity.provider.public_key().expect("key"),
         again.public_key().expect("key")
     );
-    let range = AuthorRange::new(7, 8).expect("range");
-    assert_eq!(identity.provider.reserve_author(range).expect("7"), 7);
-    assert_eq!(again.reserve_author(range).expect("8"), 8);
-    assert!(identity.provider.reserve_author(range).is_err());
     let signature = again.sign(Purpose::Statement, b"x").expect("signature");
     assert!(identity.key().verify(b"x", &signature));
-    // A key held in memory signs, but keeps no author numbers.
-    assert!(PrivateKey::new().reserve_author(AuthorRange::ALL).is_err());
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issuer() {
     let domain = Domain::new();
-    let (issuer, issuing) = domain
-        .issuer(AuthorRange::new(100, 199).expect("range"))
-        .await;
+    let (issuer, issuing) = domain.issuer().await;
     let authority = rocky_credentials::testing::authority(&issuer.provider, &issuing);
     // The issuer grants a member identity a range and its grants; it signs
     // through its own chain, never with the publisher key.
@@ -178,7 +173,7 @@ async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issu
         .issue_terms(
             member.key(),
             vec![domain.grant()],
-            (1, Some(AuthorRange::new(120, 129).expect("range"))),
+            rocky_credentials::DelegationTerms { delegations: 1 },
             VALIDITY,
         )
         .expect("granted");
@@ -186,12 +181,12 @@ async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issu
     assert_eq!(identity_chain.0[0].issuer, domain.publisher());
     assert_eq!(identity_chain.0[1].issuer, issuer.key());
     // Three nodes of the identity: each signs under its own certificate
-    // and author number; the later ones need no issuer and no invitation.
+    // as its own writer; the later ones need no issuer and no invitation.
     let set = RevocationSet::new();
     let first = node(&member.provider, &identity_chain, None);
     let second = node(&member.reopen(), &identity_chain, Some(&first.1));
     let third = node(&member.reopen(), &identity_chain, Some(&second.1));
-    let mut authors = BTreeSet::new();
+    let mut writers = BTreeSet::new();
     for (key, chain) in [&first, &second, &third] {
         assert!(domain.verify(chain, key, &set));
         assert_eq!(
@@ -201,11 +196,11 @@ async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issu
             vec![domain.grant()]
         );
         assert_eq!(chain.principal(), Some(member.key()));
-        authors.insert(chain.author_number().expect("number"));
+        writers.insert(key.public_key());
     }
-    assert_eq!(authors, (120..=122).collect());
+    assert_eq!(writers.len(), 3);
     // A certificate holds no rights of its own, never expires and keeps
-    // to the identity's range.
+    // the identity's membership sequence.
     let certificate = first.1.certificate().expect("certificate");
     assert!(certificate.capability.grants.is_empty());
     assert_eq!(certificate.capability.expires, rocky_credentials::NEVER);
@@ -213,7 +208,7 @@ async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issu
     assert!(
         identity_chain
             .clone()
-            .certify(&member.provider, stranger.public_key(), 130)
+            .certify_member(&member.provider, stranger.public_key(), 1, None)
             .is_err()
     );
     // Another identity cannot certify a node of this one.
@@ -221,7 +216,7 @@ async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issu
     assert!(
         identity_chain
             .clone()
-            .certify(&other, stranger.public_key(), 129)
+            .certify(&other, stranger.public_key())
             .is_err()
     );
     // A member holds no issuer authority: it neither appoints issuers nor
@@ -232,7 +227,6 @@ async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issu
             .issue(
                 PrivateKey::new().public_key(),
                 vec![domain.grant()],
-                AuthorRange::new(120, 129).expect("range"),
                 VALIDITY
             )
             .is_err()
@@ -247,7 +241,7 @@ async fn revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_nod
         .issue_terms(
             member.key(),
             vec![domain.grant()],
-            (1, Some(AuthorRange::new(1, 9).expect("range"))),
+            rocky_credentials::DelegationTerms { delegations: 1 },
             VALIDITY,
         )
         .expect("granted");
@@ -293,6 +287,7 @@ async fn revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_nod
         identities: [domain.publisher()].into(),
         capabilities: BTreeSet::new(),
         cut: Default::default(),
+        mode: rocky_credentials::RevocationMode::Lost,
         recovery: None,
     };
     let signed = Authority::owner(&domain.owner)
@@ -308,9 +303,7 @@ async fn revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_nod
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_key() {
     let domain = Domain::new();
-    let (issuer, issuing) = domain
-        .issuer(AuthorRange::new(100, 199).expect("range"))
-        .await;
+    let (issuer, issuing) = domain.issuer().await;
     let authority = rocky_credentials::testing::authority(&issuer.provider, &issuing);
     let none = RevocationSet::new();
     // Before revocation the issuer endorses a manifest through its chain.
@@ -329,18 +322,13 @@ async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_
     // Its member's chain runs through it.
     let member = PrivateKey::new();
     let link = authority
-        .issue(
-            member.public_key(),
-            vec![domain.grant()],
-            AuthorRange::new(150, 159).expect("range"),
-            VALIDITY,
-        )
+        .issue(member.public_key(), vec![domain.grant()], VALIDITY)
         .expect("granted");
-    // A key held in memory keeps no author numbers: the node takes 150.
+    // A key held in memory certifies a node that writes under its own key.
     let member_node = PrivateKey::new();
     let member_chain = authority
         .chain_of(link)
-        .complete(&member, member_node.public_key(), 150)
+        .complete(&member, member_node.public_key())
         .expect("certified");
     assert!(domain.verify(&member_chain, &member_node, &none));
 
@@ -370,9 +358,7 @@ async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_
     );
     // Every chain through it ends; another issuer renews its members.
     assert!(!domain.verify(&member_chain, &member_node, &revoked));
-    let (other, other_chain) = domain
-        .issuer(AuthorRange::new(200, 299).expect("range"))
-        .await;
+    let (other, other_chain) = domain.issuer().await;
     let renewer = rocky_credentials::testing::authority(&other.provider, &other_chain);
     let (request, secret) =
         RenewRequest::sign(&member_node, other.key(), member_chain.clone(), NOW).expect("request");
@@ -401,7 +387,7 @@ async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_
     );
     let renewed = renewal
         .chain()
-        .complete(&member, member_node.public_key(), 150)
+        .complete(&member, member_node.public_key())
         .expect("certified");
     assert!(domain.verify(&renewed, &member_node, &revoked));
     // A revoked issuer's renewal does not verify where its revocation is known.
@@ -409,7 +395,7 @@ async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_
         .expect("signed anyway");
     let stale = stale
         .chain()
-        .complete(&member, member_node.public_key(), 150)
+        .complete(&member, member_node.public_key())
         .expect("certified");
     assert!(!domain.verify(&stale, &member_node, &revoked));
     // Issuers renew identities below them, never one at their own level.

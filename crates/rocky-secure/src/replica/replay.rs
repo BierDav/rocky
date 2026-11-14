@@ -26,7 +26,7 @@ pub(super) const SCHEMA: &[&str] = &[
     // `violated` names the constraint or assertion a `constraint` drop broke,
     // or the restriction of a `restricted` one;
     // `births` the identities an applied member created, for checkpoints.
-    "CREATE TABLE IF NOT EXISTS secure_replayed(scope INTEGER NOT NULL,era INTEGER NOT NULL,clock INTEGER NOT NULL,author INTEGER NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,txn BLOB NOT NULL,member INTEGER NOT NULL,members INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,undo BLOB,violated TEXT,births BLOB,PRIMARY KEY(scope,era,clock,author,sequence)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_replayed(scope INTEGER NOT NULL,era INTEGER NOT NULL,clock INTEGER NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,txn BLOB NOT NULL,member INTEGER NOT NULL,members INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,undo BLOB,violated TEXT,births BLOB,PRIMARY KEY(scope,era,clock,author,sequence)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_replayed_txn ON secure_replayed(txn)",
     // Unsealed transactions, counted at every routine seal check.
     "CREATE INDEX IF NOT EXISTS secure_replayed_unsealed ON secure_replayed(txn) WHERE sealed=0",
@@ -162,14 +162,14 @@ fn order_of(row: &[SqlValue]) -> Result<Order, Error> {
         [
             SqlValue::Integer(era),
             SqlValue::Integer(clock),
-            SqlValue::Integer(author),
+            SqlValue::Blob(author),
             SqlValue::Integer(sequence),
             ..,
         ] => Ok((
             *era,
             Stamp {
                 clock: stored_clock(*clock)?,
-                author: *author as u32,
+                author: stored_writer(author)?,
                 sequence: *sequence as u64,
             },
         )),
@@ -182,7 +182,7 @@ fn order_bindings(scope: i64, (era, stamp): &Order) -> Result<Vec<SqlValue>, Err
         SqlValue::Integer(scope),
         SqlValue::Integer(*era),
         clock_value(stamp.clock)?,
-        SqlValue::Integer(i64::from(stamp.author)),
+        writer_value(stamp.author),
         SqlValue::Integer(stamp.sequence as i64),
     ])
 }
@@ -201,7 +201,7 @@ const REPLAY_CAPTURE: (usize, usize) = (MAX_BUNDLE_ROWS, MAX_BUNDLE_BYTES);
 pub(super) fn stamp(header: &p2panda_core::Header<Extensions>) -> Stamp {
     Stamp {
         clock: header.timestamp,
-        author: header.extensions.author.unwrap_or(0),
+        author: writer(&header.public_key),
         sequence: header.extensions.author_sequence,
     }
 }
@@ -1156,12 +1156,12 @@ impl<A: RowApplication> Inner<A> {
     }
 
     /// The frontiers of `domain`'s seals finalized through depth `era`, by
-    /// depth, as author numbers and their last covered sequence.
+    /// depth, as writers and their last covered sequence.
     async fn finalized_frontiers(
         &self,
         domain: rocky_core::Scope,
         era: i64,
-    ) -> Result<Vec<(i64, BTreeMap<u32, u64>)>, Error> {
+    ) -> Result<Vec<(i64, BTreeMap<WriterId, u64>)>, Error> {
         let graph = self.graph_for(domain)?;
         let mut frontiers = Vec::new();
         for row in collect_rows(
@@ -1201,14 +1201,18 @@ impl<A: RowApplication> Inner<A> {
     /// each of them.
     pub(super) async fn seal_replayed(&self, scope: i64, through: i64) -> Result<(), Error> {
         const SEALING: &str = "scope=?1 AND sealed=0 AND hash IN (SELECT hash FROM secure_applied WHERE scope=?1 AND position<=?2) AND (members=1 OR members=(SELECT COUNT(*) FROM secure_outcome_members m WHERE m.txn=secure_replayed.txn))";
-        if let Some(author) = self.node_author.as_ref().map(|author| author.number) {
+        if let Some(author) = self.node_author.as_ref().map(|author| author.writer) {
             for row in collect_rows(
                 self.conn
                     .query(
                         format!(
                             "SELECT DISTINCT txn FROM secure_replayed WHERE {SEALING} AND author=?3"
                         ),
-                        [scope, through, i64::from(author)],
+                        bindings(vec![
+                            SqlValue::Integer(scope),
+                            SqlValue::Integer(through),
+                            writer_value(author),
+                        ]),
                     )
                     .await?,
             )
@@ -1657,7 +1661,7 @@ impl<A: RowApplication> Inner<A> {
                     era.map_or(SqlValue::Null, SqlValue::Integer),
                     SqlValue::Blob(encode(&header.extensions.scope.domain)?),
                     clock_value(stamp.clock)?,
-                    SqlValue::Integer(i64::from(stamp.author)),
+                    writer_value(stamp.author),
                     SqlValue::Integer(stamp.sequence as i64),
                     SqlValue::Blob(operation.hash.as_bytes().to_vec()),
                     SqlValue::Blob(transaction.to_vec()),
@@ -1884,9 +1888,9 @@ impl<A: RowApplication> Inner<A> {
                     violated: Some(violated),
                 }));
             }
-            match self.replayed_birth(&change, header.extensions.author) {
+            match self.replayed_birth(&change, header.extensions.author(&header.public_key)) {
                 Ok(Some(identity)) => births.push(checkpoint::IdentityMark {
-                    author: identity.author(),
+                    author: identity.writer(),
                     signer: header.public_key,
                     sequence: identity.sequence(),
                 }),
@@ -1939,12 +1943,12 @@ impl<A: RowApplication> Inner<A> {
             })
             .collect()
     }
-    /// The identity a replayed change creates. Only its author's own
-    /// number may create one, as `next_id` allocates them.
+    /// The identity a replayed change creates. Only its writer may create
+    /// one, as `next_id` allocates them.
     pub(super) fn replayed_birth(
         &self,
         change: &RowChange,
-        author: Option<u32>,
+        author: Option<WriterId>,
     ) -> Result<Option<rocky_core::RowIdentity>, Error> {
         if change.before.is_some() {
             return Ok(None);
@@ -1956,7 +1960,7 @@ impl<A: RowApplication> Inner<A> {
         else {
             return Ok(None);
         };
-        if Some(identity.author()) != author {
+        if Some(identity.writer()) != author {
             return Err(denied("a replayed insert names another author's identity"));
         }
         // The scope's history created this identity before, retired or not.
@@ -1967,8 +1971,8 @@ impl<A: RowApplication> Inner<A> {
                 "SELECT 1 FROM secure_identity_ledger WHERE scope=? AND author=? AND sequence>=?",
                 storage::bindings(vec![
                     SqlValue::Blob(encode(&change.scope)?),
-                    SqlValue::Integer(i64::from(identity.author())),
-                    SqlValue::Integer(i64::from(identity.sequence())),
+                    writer_value(identity.writer()),
+                    SqlValue::Integer(identity.sequence() as i64),
                 ]),
             )?
             .is_empty()

@@ -44,7 +44,7 @@ async fn transactions_observe_commits_and_reopen_without_json() -> Result<(), Fa
         .collect()
         .await?;
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].get::<i64>("id")?, id);
+    assert_eq!(rows[0].get::<rocky_sdk::RowIdentity>("id")?, id);
     assert_eq!(rows[0].get::<String>("body")?, "quoted ' text");
     assert_eq!(rows[0].get::<Option<String>>("optional")?, None);
     assert!(rows[0].get::<String>("optional").is_err());
@@ -333,7 +333,7 @@ fn outbox_schema() -> Result<Schema, Failure> {
         .table(Table::replayed("orders").column(Column::new("item", Affinity::Text).required()))
         .table(
             Table::replayed("outbox")
-                .column(Column::new("order_id", Affinity::Integer).required())
+                .column(Column::new("order_id", Affinity::Blob).required())
                 .column(Column::new("txn", Affinity::Blob).required()),
         )
         .build()

@@ -1,7 +1,8 @@
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 mod common;
-use rocky_sdk::{Database, Network, Open, Session, transport::memory::Hub};
+use common::identity::snapshot as snap;
+use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 const SCHEMA: &str = r#"{"format":6,"application":"partitionsdk","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],"views":[{"name":"partial_items","create_sql":"CREATE VIEW partial_items AS SELECT * FROM items WHERE amount>=0"}]}"#;
@@ -16,22 +17,9 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>) -> Open<'a> {
         coordination: None,
     }
 }
-async fn reply(session: &Session, scope: &Value, request: Value) -> Value {
-    serde_json::from_str(
-        &session
-            .call(json!({"version":1,"scope":scope,"request":request}).to_string())
-            .await
-            .unwrap(),
-    )
-    .unwrap()
-}
-async fn call(session: &Session, scope: &Value, request: Value) -> Value {
-    let reply = reply(session, scope, request).await;
-    assert_eq!(reply["status"], "ok", "{reply}");
-    reply["value"].clone()
-}
-fn values(name: &str) -> Value {
-    json!([{"type":"text","value":name}])
+
+fn values(name: &str) -> Vec<rocky_sdk::SqlValue> {
+    vec![rocky_sdk::SqlValue::Text(snap::text(&(name)))]
 }
 #[tokio::test]
 async fn public_partition_schema_keys_sql_identity_and_reopen() {
@@ -39,29 +27,32 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     let path = root.path().join("writer");
     let hub = Arc::new(Hub::default());
     let db = Database::create(open(&path, &hub), None).unwrap().database;
-    let scope: Value = serde_json::from_str(&db.scope()).unwrap();
+    let scope: Value = serde_json::to_value(db.scope()).unwrap();
     let session = db.session();
     for name in ["A", "B"] {
-        call(
-            &session,
-            &scope,
-            json!({"type":"partition_create","table":"items","values":values(name)}),
-        )
+        snap::ok(session.create_partition(rocky_sdk::PartitionTarget::Table {
+            table: "items".to_owned(),
+            values: (values(name)).clone(),
+        }))
         .await;
     }
     let mut ids = Vec::new();
     for (name, amount) in [("A", "10"), ("B", "20")] {
-        call(&session, &scope, json!({"type":"sql","sql":"BEGIN"})).await;
-        let id = call(
-            &session,
-            &scope,
-            json!({"type":"next_id","table":"items","partition_values":values(name)}),
-        )
-        .await["id"]
+        snap::ok(session.execute("BEGIN", Vec::new())).await;
+        let id = snap::ok(session.next_partition_id("items", (values(name)).clone())).await["id"]
             .clone();
         ids.push(id.clone());
-        call(&session,&scope,json!({"type":"sql","sql":"INSERT INTO items(list,key,amount,id) VALUES(?,?,?,?)","values":[{"type":"text","value":name},{"type":"text","value":"key"},{"type":"integer","value":amount},{"type":"integer","value":id}]})).await;
-        call(&session, &scope, json!({"type":"sql","sql":"COMMIT"})).await;
+        snap::ok(session.execute(
+            "INSERT INTO items(list,key,amount,id) VALUES(?,?,?,?)",
+            vec![
+                rocky_sdk::SqlValue::Text(snap::text(&(name))),
+                rocky_sdk::SqlValue::Text("key".to_owned()),
+                rocky_sdk::SqlValue::Integer(snap::integer(&(amount))),
+                snap::row_id(&(id)),
+            ],
+        ))
+        .await;
+        snap::ok(session.execute("COMMIT", Vec::new())).await;
     }
     assert_ne!(ids[0], ids[1], "one creation log per author and table");
     let driver = db
@@ -100,19 +91,21 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
         .await
         .unwrap();
 
-    let data=call(&session,&scope,json!({"type":"read","query":{"sql":"SELECT SUM(amount) FROM partial_items","values":[],"max_rows":1}})).await;
-    assert_eq!(data["rows"][0][0]["value"], "30");
-    let address = call(
-        &session,
-        &scope,
-        json!({"type":"partition_address","table":"items","values":values("A")}),
-    )
+    let data = snap::ok(session.read(rocky_sdk::ReadQuery {
+        sql: "SELECT SUM(amount) FROM partial_items".to_owned(),
+        values: vec![],
+        max_rows: 1,
+        max_bytes: None,
+        cursor: None,
+    }))
     .await;
+    assert_eq!(data["rows"][0][0]["value"], "30");
+    let address = snap::ok(session.partition_address("items", (values("A")).clone())).await;
     let parts = address["tuple"].as_array().unwrap();
     let selector = json!([[parts[0][0],{"Only":[parts[0][1]]}]]);
     let reader_path = root.path().join("reader");
     let device = common::node_keys(&reader_path, None).unwrap();
-    let supplied=call(&session,&scope,json!({"type":"partition_grant","device":device,"partitions":[{"domain":scope,"table":address["scope"]["table"],"selector":selector,"rows":"All","rights":["Read"],"fields":[]}]})).await;
+    let supplied=snap::ok(session.grant_partitions(device, serde_json::from_value::<Vec<rocky_sdk::credentials::PartitionGrant>>(json!([{"domain":scope,"table":address["scope"]["table"],"selector":selector,"rows":"All","rights":["Read"],"fields":[]}])).expect("typed fixture"), 1)).await;
     let reader = Database::install(
         open(&reader_path, &hub),
         serde_json::from_value(supplied["supplied"].clone()).unwrap(),
@@ -120,21 +113,23 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     .unwrap()
     .database;
     let reader_session = reader.session();
-    call(&session,&scope,json!({"type":"partition_share","table":"items","values":values("A"),"recipients":[device.node]})).await;
+    snap::ok(session.share_partition(rocky_sdk::PartitionTarget::Table { table: "items".to_owned(), values: (values("A")).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([device.node])).expect("typed fixture"), None)).await;
     // The reader receives the envelope by syncing with its sender.
-    let contact = call(&session, &scope, json!({"type":"contact"})).await;
-    call(
-        &reader_session,
-        &scope,
-        json!({"type":"peer_add","contact":contact["uri"]}),
-    )
+    let contact = snap::ok(session.contact_info()).await;
+    snap::ok(async {
+        let value = reader_session
+            .add_peer(&(snap::text(&(contact["uri"]))))
+            .await?;
+        Ok(json!({"node":value}))
+    })
     .await;
-    call(&reader_session, &scope, json!({"type":"sync"})).await;
+    snap::ok(reader_session.sync_once()).await;
     assert_eq!(
-        call(
-            &reader_session,
-            &scope,
-            json!({"type":"partition_status","table":"items","values":values("A")})
+        snap::ok(
+            reader_session.partition_status(rocky_sdk::PartitionTarget::Table {
+                table: "items".to_owned(),
+                values: (values("A")).clone()
+            })
         )
         .await["epochs"]
             .as_array()
@@ -143,29 +138,40 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
         1
     );
     assert_ne!(
-        reply(
-            &reader_session,
-            &scope,
-            json!({"type":"partition_register","table":"items","values":values("B")})
+        snap::reply(
+            reader_session.register_partition(
+                rocky_sdk::PartitionTarget::Table {
+                    table: "items".to_owned(),
+                    values: (values("B")).clone()
+                },
+                rocky_sdk::PartitionSelection {
+                    name: None,
+                    omit: serde_json::from_value::<std::collections::BTreeSet<String>>(json!([]))
+                        .expect("typed fixture")
+                }
+            )
         )
         .await["status"],
         "ok"
     );
     assert!(
-        !call(
-            &reader_session,
-            &scope,
-            json!({"type":"partition_complete","table":"items","values":values("A")})
-        )
+        !snap::ok(async {
+            let value = reader_session.partition_complete("items").await?;
+            Ok(json!({"complete":value}))
+        })
         .await["complete"]
             .as_bool()
             .unwrap()
     );
-    call(
-        &reader_session,
-        &scope,
-        json!({"type":"install","supplied":supplied["supplied"]}),
-    )
+    snap::ok(async {
+        reader_session
+            .install_credentials(
+                serde_json::from_value::<rocky_sdk::Supplied>(json!(supplied["supplied"]))
+                    .expect("typed fixture"),
+            )
+            .await?;
+        reader_session.info().await
+    })
     .await;
     reader.close().await.unwrap();
     Database::open(open(&reader_path, &hub))
@@ -177,40 +183,33 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     db.close().await.unwrap();
     let db = Database::open(open(&path, &hub)).unwrap().database;
     let session = db.session();
-    call(&session, &scope, json!({"type":"sql","sql":"BEGIN"})).await;
-    let id = call(
-        &session,
-        &scope,
-        json!({"type":"next_id","table":"items","partition_values":values("A")}),
-    )
-    .await;
-    assert_eq!(
-        id["id"].as_str().unwrap().parse::<i64>().unwrap(),
-        ids[0].as_str().unwrap().parse::<i64>().unwrap() + 2
+    snap::ok(session.execute("BEGIN", Vec::new())).await;
+    let id = snap::ok(session.next_partition_id("items", (values("A")).clone())).await;
+    let (id, first): (rocky_sdk::RowIdentity, rocky_sdk::RowIdentity) = (
+        id["id"].as_str().unwrap().parse().unwrap(),
+        ids[0].as_str().unwrap().parse().unwrap(),
     );
-    call(&session, &scope, json!({"type":"sql","sql":"ROLLBACK"})).await;
-    call(
-        &session,
-        &scope,
-        json!({"type":"partition_create","table":"items","values":values("C")}),
-    )
+    assert_eq!(
+        (id.writer(), id.sequence()),
+        (first.writer(), first.sequence() + 2)
+    );
+    snap::ok(session.execute("ROLLBACK", Vec::new())).await;
+    snap::ok(session.create_partition(rocky_sdk::PartitionTarget::Table {
+        table: "items".to_owned(),
+        values: (values("C")).clone(),
+    }))
     .await;
-    let revoked = call(
-        &session,
-        &scope,
-        json!({"type":"revoke","identity":device.identity.to_string()}),
-    )
-    .await;
+    let revoked =
+        snap::ok(session.revoke_identity(&(snap::text(&(device.identity.to_string()))))).await;
     assert_eq!(revoked["revocations"]["statements"], 1);
-    call(&session, &scope, json!({"type":"sql","sql":"BEGIN"})).await;
-    let id = call(
-        &session,
-        &scope,
-        json!({"type":"next_id","table":"items","partition_values":values("A")}),
-    )
+    snap::ok(session.execute("BEGIN", Vec::new())).await;
+    let id = snap::ok(session.next_partition_id("items", (values("A")).clone())).await;
+    snap::ok(session.execute(
+        "INSERT INTO items(list,key,amount,id) VALUES('A','next',7,?)",
+        vec![snap::row_id(&(id["id"]))],
+    ))
     .await;
-    call(&session,&scope,json!({"type":"sql","sql":"INSERT INTO items(list,key,amount,id) VALUES('A','next',7,?)","values":[{"type":"integer","value":id["id"]}]})).await;
-    call(&session, &scope, json!({"type":"sql","sql":"COMMIT"})).await;
+    snap::ok(session.execute("COMMIT", Vec::new())).await;
     db.close().await.unwrap();
     Database::open(open(&path, &hub))
         .unwrap()
@@ -233,31 +232,33 @@ async fn own_id_partitions_continue_the_table_log() {
         coordination: None,
     };
     let mut db = Database::create(options(), None).unwrap().database;
-    let scope: Value = serde_json::from_str(&db.scope()).unwrap();
+    let _scope: Value = serde_json::to_value(db.scope()).unwrap();
     let _session = db.session();
-    let mut previous = 0;
+    let mut previous: Option<rocky_sdk::RowIdentity> = None;
     for index in 0..3 {
         if index == 2 {
             db.close().await.unwrap();
             db = Database::open(options()).unwrap().database;
         }
         let session = db.session();
-        let prepared = call(
-            &session,
-            &scope,
-            json!({"type":"partition_next","table":"lists"}),
-        )
-        .await;
-        call(&session, &scope, json!({"type":"sql","sql":"BEGIN"})).await;
-        let allocated = call(&session, &scope, json!({"type":"next_id","table":"lists"})).await;
+        let prepared = snap::ok(session.next_partition("lists")).await;
+        snap::ok(session.execute("BEGIN", Vec::new())).await;
+        let allocated = snap::ok(session.next_id("lists")).await;
         assert_eq!(allocated["id"], prepared["id"]);
-        let id = allocated["id"].as_str().unwrap().parse::<i64>().unwrap();
-        if previous != 0 {
-            assert_eq!(id, previous + 1);
+        let id: rocky_sdk::RowIdentity = allocated["id"].as_str().unwrap().parse().unwrap();
+        if let Some(previous) = previous {
+            assert_eq!(
+                id,
+                rocky_sdk::RowIdentity::next(previous.writer(), previous.sequence()).unwrap()
+            );
         }
-        previous = id;
-        call(&session,&scope,json!({"type":"sql","sql":"INSERT INTO lists(id,title) VALUES(?,?)","values":[{"type":"integer","value":id.to_string()},{"type":"text","value":"list"}]})).await;
-        call(&session, &scope, json!({"type":"sql","sql":"COMMIT"})).await;
+        previous = Some(id);
+        snap::ok(session.execute(
+            "INSERT INTO lists(id,title) VALUES(?,?)",
+            vec![id.sql(), rocky_sdk::SqlValue::Text("list".to_owned())],
+        ))
+        .await;
+        snap::ok(session.execute("COMMIT", Vec::new())).await;
     }
     db.close().await.unwrap();
 }

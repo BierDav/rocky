@@ -1,12 +1,13 @@
 //! Current-format byte fixtures captured on the software backend.
 use super::*;
 use rocky_core::{AppId, DomainId, MeshId, ResourceGrant, Scope};
-use rocky_credentials::{AuthorRange, Authority, device_chain};
+use rocky_credentials::{Authority, device_chain};
 
 fn materialized(deleted: bool) -> Materialized {
+    let signer = PrivateKey::from_bytes(&[42; 32]).public_key();
     let stamp = Stamp {
         clock: 7,
-        author: 7,
+        author: writer(&signer),
         sequence: 3,
     };
     Materialized {
@@ -18,7 +19,7 @@ fn materialized(deleted: bool) -> Materialized {
             [([5; 32], vec![0, 255, 7])].into()
         },
         stamps: [([5; 32], stamp.clone())].into(),
-        authors: [(7, PrivateKey::from_bytes(&[42; 32]).public_key())].into(),
+        authors: [(writer(&signer), signer)].into(),
         deleted,
         creation: Hash::from_bytes([6; 32]),
         identity: None,
@@ -49,11 +50,14 @@ fn signed() -> SignedCheckpoint {
         .issue(
             user.public_key(),
             vec![grant],
-            AuthorRange::new(7, rocky_credentials::MAX_AUTHOR).unwrap(),
-            (1_800_000_000, 86400, 0),
+            rocky_credentials::Validity {
+                issued_at: 1_800_000_000,
+                lifetime: std::time::Duration::from_secs(86400),
+                clock_skew: std::time::Duration::from_secs(0),
+            },
         )
         .unwrap();
-    let credentials = device_chain(root, &user, node.public_key(), 7).unwrap();
+    let credentials = device_chain(root, &user, node.public_key()).unwrap();
     credentials
         .verify(
             owner.public_key(),
@@ -74,7 +78,7 @@ fn signed() -> SignedCheckpoint {
             seal: Some([12; 32]),
             partition: None,
             identities: vec![CoveredMark {
-                author: 7,
+                author: writer(&node.public_key()),
                 signer: node.public_key(),
                 sequence: 9,
                 own: 3,
@@ -119,7 +123,7 @@ fn signed() -> SignedCheckpoint {
                     SealedTransaction {
                         stamp: Stamp {
                             clock: 5,
-                            author: 7,
+                            author: writer(&node.public_key()),
                             sequence: 1,
                         },
                         transaction: [16; 32],
@@ -131,7 +135,7 @@ fn signed() -> SignedCheckpoint {
                     SealedTransaction {
                         stamp: Stamp {
                             clock: 6,
-                            author: 7,
+                            author: writer(&node.public_key()),
                             sequence: 2,
                         },
                         transaction: [17; 32],
@@ -154,7 +158,12 @@ macro_rules! frozen {
         include_bytes!(concat!("backend_vectors/", $name)).as_slice()
     };
 }
-fn check_lt(actual: &Lt, state: &[u8], digest: &[u8]) {
+fn check_lt(actual: &Lt, name: &str, (state, digest): (&[u8], &[u8])) {
+    if let Some(directory) = updating() {
+        rewrite(&directory, format!("lt-{name}.bin"), actual.to_bytes());
+        rewrite(&directory, format!("lt-{name}-digest.bin"), actual.digest());
+        return;
+    }
     assert_eq!(actual.to_bytes(), state);
     assert_eq!(actual.digest().as_slice(), digest);
     assert!(Lt::from_bytes(state).unwrap() == *actual);
@@ -167,32 +176,40 @@ fn full_lanes_keep_independent_bytes_and_wrapping() {
     let mut value = Lt::new();
     check_lt(
         &value,
-        frozen!("lt-empty.bin"),
-        frozen!("lt-empty-digest.bin"),
+        "empty",
+        (frozen!("lt-empty.bin"), frozen!("lt-empty-digest.bin")),
     );
-    value.add(ROW_LABEL, &row);
-    check_lt(&value, frozen!("lt-row.bin"), frozen!("lt-row-digest.bin"));
     value.add(ROW_LABEL, &row);
     check_lt(
         &value,
-        frozen!("lt-twice.bin"),
-        frozen!("lt-twice-digest.bin"),
+        "row",
+        (frozen!("lt-row.bin"), frozen!("lt-row-digest.bin")),
     );
-    value.remove(ROW_LABEL, &row);
-    check_lt(&value, frozen!("lt-row.bin"), frozen!("lt-row-digest.bin"));
+    value.add(ROW_LABEL, &row);
+    check_lt(
+        &value,
+        "twice",
+        (frozen!("lt-twice.bin"), frozen!("lt-twice-digest.bin")),
+    );
     value.remove(ROW_LABEL, &row);
     check_lt(
         &value,
-        frozen!("lt-empty.bin"),
-        frozen!("lt-empty-digest.bin"),
+        "row",
+        (frozen!("lt-row.bin"), frozen!("lt-row-digest.bin")),
+    );
+    value.remove(ROW_LABEL, &row);
+    check_lt(
+        &value,
+        "empty",
+        (frozen!("lt-empty.bin"), frozen!("lt-empty-digest.bin")),
     );
     value.add(ROW_LABEL, &row);
     value.add(CREATION_LABEL, &creation);
     value.add(HANDLE_LABEL, &handle);
     check_lt(
         &value,
-        frozen!("lt-mixed.bin"),
-        frozen!("lt-mixed-digest.bin"),
+        "mixed",
+        (frozen!("lt-mixed.bin"), frozen!("lt-mixed-digest.bin")),
     );
     let mut opposite = Lt::new();
     opposite.add(HANDLE_LABEL, &handle);
@@ -205,15 +222,54 @@ fn full_lanes_keep_independent_bytes_and_wrapping() {
     right.add(HANDLE_LABEL, &handle);
     check_lt(
         &right,
-        frozen!("lt-handle.bin"),
-        frozen!("lt-handle-digest.bin"),
+        "handle",
+        (frozen!("lt-handle.bin"), frozen!("lt-handle-digest.bin")),
     );
     right.add(CREATION_LABEL, &creation);
     left.merge(&right);
     assert!(left == value);
 }
-fn check_sets(actual: &Sets, state: &[u8], summaries: &[u8], counts: (u64, u64, u64)) {
+/// Rewrites one fixture; `updating` never returns a directory on wasm.
+fn rewrite(
+    directory: &std::path::Path,
+    name: impl AsRef<std::path::Path>,
+    bytes: impl AsRef<[u8]>,
+) {
+    #[cfg(not(target_family = "wasm"))]
+    std::fs::write(directory.join(name), bytes).unwrap();
+    #[cfg(target_family = "wasm")]
+    unreachable!(
+        "{} ({} bytes)",
+        directory.join(name).display(),
+        bytes.as_ref().len()
+    );
+}
+/// The fixture directory when `ROCKY_UPDATE_CHECKPOINT_VECTORS` asks to
+/// rewrite the fixtures instead of checking them.
+fn updating() -> Option<std::path::PathBuf> {
+    #[cfg(not(target_family = "wasm"))]
+    if std::env::var_os("ROCKY_UPDATE_CHECKPOINT_VECTORS").is_some() {
+        return Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/replica/checkpoint/backend_vectors"),
+        );
+    }
+    None
+}
+fn check_sets(
+    actual: &Sets,
+    name: &str,
+    (state, summaries): (&[u8], &[u8]),
+    counts: (u64, u64, u64),
+) {
     assert_eq!((actual.rows, actual.tombstones, actual.creations), counts);
+    if let Some(directory) = updating() {
+        let mut both = actual.rows_summary().digest.to_vec();
+        both.extend_from_slice(&actual.creations_summary().digest);
+        rewrite(&directory, format!("sets-{name}.bin"), actual.to_bytes());
+        rewrite(&directory, format!("sets-{name}-summaries.bin"), both);
+        return;
+    }
     assert_eq!(actual.to_bytes(), state);
     assert!(Sets::from_bytes(state).unwrap() == *actual);
     assert_eq!(actual.rows_summary().count, counts.0);
@@ -228,35 +284,49 @@ fn check_sets(actual: &Sets, state: &[u8], summaries: &[u8], counts: (u64, u64, 
 fn actual_sets_replace_remove_and_merge_keep_frozen_state() {
     let live = encode(&materialized(false)).unwrap();
     let deleted = encode(&materialized(true)).unwrap();
-    assert_eq!(live, frozen!("materialized-live.cbor"));
-    assert_eq!(deleted, frozen!("materialized-deleted.cbor"));
+    if let Some(directory) = updating() {
+        rewrite(&directory, "materialized-live.cbor", &live);
+        rewrite(&directory, "materialized-deleted.cbor", &deleted);
+    } else {
+        assert_eq!(live, frozen!("materialized-live.cbor"));
+        assert_eq!(deleted, frozen!("materialized-deleted.cbor"));
+    }
     let mut sets = Sets::new();
     check_sets(
         &sets,
-        frozen!("sets-empty.bin"),
-        frozen!("sets-empty-summaries.bin"),
+        "empty",
+        (
+            frozen!("sets-empty.bin"),
+            frozen!("sets-empty-summaries.bin"),
+        ),
         (0, 0, 0),
     );
     sets.replace(&[8; 32], None, &live).unwrap();
     sets.create(Hash::from_bytes([6; 32]), 7);
     check_sets(
         &sets,
-        frozen!("sets-live.bin"),
-        frozen!("sets-live-summaries.bin"),
+        "live",
+        (frozen!("sets-live.bin"), frozen!("sets-live-summaries.bin")),
         (1, 0, 1),
     );
     sets.replace(&[8; 32], Some(&live), &deleted).unwrap();
     check_sets(
         &sets,
-        frozen!("sets-deleted.bin"),
-        frozen!("sets-deleted-summaries.bin"),
+        "deleted",
+        (
+            frozen!("sets-deleted.bin"),
+            frozen!("sets-deleted-summaries.bin"),
+        ),
         (1, 1, 1),
     );
     sets.remove(&[8; 32], &deleted).unwrap();
     check_sets(
         &sets,
-        frozen!("sets-removed.bin"),
-        frozen!("sets-removed-summaries.bin"),
+        "removed",
+        (
+            frozen!("sets-removed.bin"),
+            frozen!("sets-removed-summaries.bin"),
+        ),
         (0, 0, 1),
     );
     sets.replace(&[8; 32], None, &live).unwrap();
@@ -266,8 +336,11 @@ fn actual_sets_replace_remove_and_merge_keep_frozen_state() {
     sets.merge_rows(&delta);
     check_sets(
         &sets,
-        frozen!("sets-merged.bin"),
-        frozen!("sets-merged-summaries.bin"),
+        "merged",
+        (
+            frozen!("sets-merged.bin"),
+            frozen!("sets-merged-summaries.bin"),
+        ),
         (2, 1, 1),
     );
     let mut direct = Sets::new();
@@ -279,10 +352,7 @@ fn actual_sets_replace_remove_and_merge_keep_frozen_state() {
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn signed_checkpoint_reproduces_and_verifies_the_software_fixture() {
     let checkpoint = signed();
-    #[cfg(not(target_family = "wasm"))]
-    if std::env::var_os("ROCKY_UPDATE_CHECKPOINT_VECTORS").is_some() {
-        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/replica/checkpoint/backend_vectors");
+    if let Some(directory) = updating() {
         for (name, bytes) in [
             ("statement.cbor", encode(&checkpoint.statement).unwrap()),
             ("signing.bin", checkpoint.signing_bytes().unwrap()),
@@ -290,7 +360,7 @@ fn signed_checkpoint_reproduces_and_verifies_the_software_fixture() {
             ("signature.bin", checkpoint.signature.to_bytes().to_vec()),
             ("checkpoint-id.bin", checkpoint.id().unwrap().to_vec()),
         ] {
-            std::fs::write(directory.join(name), bytes).unwrap();
+            rewrite(&directory, name, bytes);
         }
         return;
     }

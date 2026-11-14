@@ -1,0 +1,33 @@
+[package]
+name = "rocky-voter"
+description = "Persistent Rocky metadata voter and relay server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+license-file.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+rocky-coordinator.workspace = true
+rocky-core.workspace = true
+rocky-iroh.workspace = true
+rocky-credentials.workspace = true
+tracing.workspace = true
+p2panda-core = "=0.5.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+openraft = { version = "=0.9.21", features = ["serde", "storage-v2"] }
+fs2 = "0.4"
+iroh-relay = { version = "=1.3.0", features = ["server"] }
+tokio = { version = "1", features = ["io-util", "sync", "rt-multi-thread", "macros", "net", "signal", "time"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+tempfile = "3"
+rocky-runtime = { path = "../rocky-runtime" }
+rocky-secure = { path = "../rocky-secure" }
+directory-app = { path = "../../examples/directory-app" }
+inventory-app = { path = "../../examples/inventory-app" }
+
+[lints]
+workspace = true

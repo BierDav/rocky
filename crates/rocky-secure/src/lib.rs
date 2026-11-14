@@ -9,6 +9,7 @@ pub mod network;
 mod replica;
 mod store;
 mod wire;
+mod writer;
 #[cfg(feature = "qualification")]
 pub use replica::CHUNK_PAGES;
 #[cfg(any(test, feature = "qualification"))]
@@ -24,10 +25,10 @@ pub use replica::{
     MigrationStorage, OpenConfig, OutcomeDivergence, PUBLICATION_CHUNK_BUNDLES, PeerLag,
     PeerScopeFrontier, PendingSchema, Placement, PlacementPage, PlacementRequest, ProjectionPlan,
     PruneBlock, PruneReport, PrunedPage, Publication, ROWS_PER_FRAME, RangePage, RebootstrapReport,
-    ReceiveStatus, Refusal, RemotePage, ReplicaRole, ReplicaStatus, RetentionLimits,
-    RetentionPolicy, RoleConfig, SchemaConfig, SchemaStage, ScopeFrontier, ScopeStatus,
-    SealRebootstrap, SealViews, SealedOutcome, SealedOutcomes, SealedTransaction, SecureCommit,
-    SecureConfig, SecurePage, SecureRows, SecureSession, SecureSnapshot, SecureSql,
+    ReceiveStatus, Refusal, RemotePage, ReplicaRole, ReplicaStatus, ResetEndsSigner,
+    RetentionLimits, RetentionPolicy, RoleConfig, SchemaConfig, SchemaStage, ScopeFrontier,
+    ScopeStatus, SealRebootstrap, SealViews, SealedOutcome, SealedOutcomes, SealedTransaction,
+    SecureCommit, SecureConfig, SecurePage, SecureRows, SecureSession, SecureSnapshot, SecureSql,
     SecureTransaction, SessionStatus, SetSummary, SignedCheckpoint, SignedVoid, StagedCloseStatus,
     StateAdvice, TipDevice, TipNodeObservation, TipObservation, TipStatement, UpdateMode,
     created_name, installed_tip_schema,
@@ -175,8 +176,13 @@ fn apply_allowed() -> bool {
 }
 
 #[cfg(test)]
-// Crash and thread tests run natively; some of their helpers are unused here.
-#[cfg_attr(target_family = "wasm", allow(dead_code))]
+#[cfg_attr(
+    target_family = "wasm",
+    expect(
+        dead_code,
+        reason = "Crash and thread tests run natively, leaving shared helpers unused in the browser."
+    )
+)]
 mod tests;
 
 pub use replica::checkpoint::IMPORT_ATTEMPTS;

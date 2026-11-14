@@ -3,7 +3,10 @@
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 use common::{Device, Failure};
-use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
+use rocky_sdk::{
+    Database, GrantProfile, Network, Open, ReadQuery, RevocationStatus, SqlValue,
+    transport::memory::Hub,
+};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
@@ -29,9 +32,9 @@ async fn join(
     hub: &Arc<Hub>,
     name: &str,
     issuer: &Device,
-    profile: Value,
+    profile: GrantProfile,
 ) -> Result<Device, Failure> {
-    let invitation = issuer.invite_as(profile).await;
+    let invitation = issuer.session().invitation_with(profile).await?.uri;
     Device::new(Database::join(
         open(&root.join(name), hub, name),
         &invitation,
@@ -47,29 +50,42 @@ fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
     }
     Ok(identity)
 }
-async fn revocations(device: &Device) -> Value {
-    device.ok(json!({"type": "session"})).await["revocations"].clone()
+async fn revocations(device: &Device) -> RevocationStatus {
+    device.session().info().await.expect("session").revocations
 }
-async fn create_row(device: &Device, handle: u8, collection: &str, values: Value) {
+const INSERT_ITEM: &str = "INSERT INTO items(key,id,title,completed) VALUES(?,?,?,0)";
+const INSERT_NOTE: &str = "INSERT INTO notes(key,id,text) VALUES(?,?,?)";
+async fn create_row(device: &Device, handle: u8, table: &str, sql: &str, text: &str) {
+    let handle = [handle; 32];
     device
-        .ok(json!({
-            "type": "mutate",
-            "handle": vec![handle; 32],
-            "payload": json!({"type": "create", "collection": collection, "values": values}).to_string().into_bytes(),
-            "entity": null,
-            "baseline": null,
-        }))
-        .await;
+        .session()
+        .execute("BEGIN", Vec::new())
+        .await
+        .expect("begin");
+    let id = device.session().next_id(table).await.expect("id");
+    device
+        .session()
+        .execute(
+            sql,
+            vec![
+                SqlValue::Text(data_encoding::HEXLOWER.encode(&handle)),
+                id.sql(),
+                SqlValue::Text(text.into()),
+            ],
+        )
+        .await
+        .expect("insert");
+    device.session().commit(handle).await.expect("commit");
 }
 async fn texts(device: &Device, sql: &str) -> Vec<String> {
-    let page = device
-        .ok(json!({"type": "read", "query": {"sql": sql, "values": [], "max_rows": 64}}))
-        .await;
-    page["rows"]
-        .as_array()
+    device
+        .session()
+        .read(ReadQuery::new(sql, 64))
+        .await
+        .expect("read")
+        .rows
         .into_iter()
-        .flatten()
-        .filter_map(|row| row[0]["value"].as_str().map(String::from))
+        .map(|row| row[0].to_text().expect("text"))
         .collect()
 }
 
@@ -89,22 +105,20 @@ struct Domain {
 impl Domain {
     async fn new(root: &Path, hub: &Arc<Hub>) -> Result<Self, Failure> {
         let a = create(root, hub, "a")?;
-        let b = join(root, hub, "b", &a, json!({"kind": "issuer"})).await?;
-        let reader = |scope: &str| json!({"kind": "reader", "scopes": [scope]});
-        let writer = json!({"kind": "writer", "scopes": ["items", "notes"]});
+        let b = join(root, hub, "b", &a, GrantProfile::Issuer).await?;
+        let reader = |scope: &str| GrantProfile::Reader {
+            scopes: [scope.into()].into(),
+        };
+        let writer = GrantProfile::Writer {
+            scopes: ["items".into(), "notes".into()].into(),
+        };
         let x = join(root, hub, "x", &a, reader("items")).await?;
         let y = join(root, hub, "y", &b, reader("notes")).await?;
         let m = join(root, hub, "m", &a, writer.clone()).await?;
         let n = join(root, hub, "n", &b, writer).await?;
         common::introduce(&m, &n).await;
-        create_row(
-            &a,
-            1,
-            "items",
-            json!({"title": "before", "completed": false}),
-        )
-        .await;
-        create_row(&b, 2, "notes", json!({"text": "before"})).await;
+        create_row(&a, 1, "items", INSERT_ITEM, "before").await;
+        create_row(&b, 2, "notes", INSERT_NOTE, "before").await;
         for device in [&b, &a, &x, &y, &m, &n] {
             device.sync().await.map_err(|error| error.to_string())?;
         }
@@ -126,19 +140,15 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
     let hub = Arc::new(Hub::default());
     let Domain { a, b, x, y, m, n } = Domain::new(root, &hub).await?;
     let empty = revocations(&a).await;
-    assert_eq!(empty["statements"], 0);
+    assert_eq!(empty.statements, 0);
 
     // Partitioned: neither issuer syncs while both revoke.
-    let by_a = a
-        .ok(json!({"type": "revoke", "identity": x.identity().await}))
-        .await;
-    let by_b = b
-        .ok(json!({"type": "revoke", "identity": y.identity().await}))
-        .await;
-    assert_ne!(by_a["statement"], by_b["statement"]);
-    assert_eq!(by_a["revocations"]["statements"], 1);
-    assert_eq!(by_b["revocations"]["statements"], 1);
-    assert_ne!(by_a["revocations"]["digest"], by_b["revocations"]["digest"]);
+    let by_a = a.session().revoke_identity(&x.identity().await).await?;
+    let by_b = b.session().revoke_identity(&y.identity().await).await?;
+    assert_ne!(by_a.statement, by_b.statement);
+    assert_eq!(by_a.revocations.statements, 1);
+    assert_eq!(by_b.revocations.statements, 1);
+    assert_ne!(by_a.revocations.digest, by_b.revocations.digest);
     // Each rotated only the collection its device read: the scopes are
     // disjoint, so the two key epochs never meet in one scope.
     assert_eq!(
@@ -156,12 +166,12 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
     // fails until the second holds its key too.
     let (first, second) = if a_first { (&a, &b) } else { (&b, &a) };
     let _ = first.sync().await;
-    assert_eq!(revocations(first).await["statements"], 2);
-    assert_eq!(revocations(second).await["statements"], 2);
+    assert_eq!(revocations(first).await.statements, 2);
+    assert_eq!(revocations(second).await.statements, 2);
     second.sync().await.map_err(|error| error.to_string())?;
     first.sync().await.map_err(|error| error.to_string())?;
     let both = revocations(&a).await;
-    assert_eq!(both["statements"], 2);
+    assert_eq!(both.statements, 2);
     assert_eq!(revocations(&b).await, both);
     for issuer in ["a", "b"] {
         assert_eq!(
@@ -195,20 +205,11 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
             json!({"items": [1, 2], "notes": [1, 2]}),
             "{name}"
         );
-        assert_eq!(
-            device.ok(json!({"type": "status"})).await["data"]["bootstrap_pending"],
-            false
-        );
+        assert!(!device.session().status().await?.data.bootstrap_pending);
     }
     // Rows flow under both new epochs, through either issuer's members.
-    create_row(
-        &m,
-        3,
-        "items",
-        json!({"title": "after", "completed": false}),
-    )
-    .await;
-    create_row(&n, 4, "notes", json!({"text": "after"})).await;
+    create_row(&m, 3, "items", INSERT_ITEM, "after").await;
+    create_row(&n, 4, "notes", INSERT_NOTE, "after").await;
     for device in [&m, &n, &m] {
         device.sync().await.map_err(|error| error.to_string())?;
     }
@@ -224,8 +225,13 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
     for device in [&x, &y] {
         assert!(common::exchange_failed(&device.sync().await));
         assert!(
-            !device.ok(json!({"type": "status"})).await["authority"]["verified_revocation"]
-                .is_null()
+            device
+                .session()
+                .status()
+                .await?
+                .authority
+                .verified_revocation
+                .is_some()
         );
     }
     assert_eq!(
@@ -244,4 +250,97 @@ async fn partitioned_issuers_revocations_merge_when_a_syncs_first() -> Result<()
 #[tokio::test]
 async fn partitioned_issuers_revocations_merge_when_b_syncs_first() -> Result<(), Failure> {
     partitioned_revocations_merge(false).await
+}
+
+/// Partitioned trusted issuers sign conflicting modes for the same creator.
+/// Both statements survive; the cascade and digest agree in either sync order.
+async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure> {
+    use rocky_sdk::{CallFailure, GrantProfile, RevocationMode, RevocationReason};
+
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    let hub = Arc::new(Hub::default());
+    let a = create(root, &hub, "a")?;
+    a.follow_main().await;
+    let early = Device::new(Database::join(
+        open(&root.join("early"), &hub, "early"),
+        &a.invite().await,
+    )?)?;
+    let mut issuers = Vec::new();
+    for name in ["b", "c"] {
+        let invitation = a.session().invitation_with(GrantProfile::Issuer).await?;
+        let issuer = Device::new(Database::join(
+            open(&root.join(name), &hub, name),
+            &invitation.uri,
+        )?)?;
+        let identity = issuer.identity().await;
+        let grant = a.session().trust(&identity, a.root_signer()?).await?;
+        issuer.session().install_trust(&grant.grant).await?;
+        issuers.push(issuer);
+    }
+    let [b, c]: [Device; 2] = issuers.try_into().map_err(|_| "two issuers")?;
+    for device in [&b, &c, &b] {
+        device.session().sync_once().await?;
+    }
+    early.session().renew().await?;
+    let creator = a.identity().await;
+    let root_signer = a.root_signer()?;
+    a.close().await;
+    drop(a);
+
+    let lost = b
+        .session()
+        .revoke_trusted(&creator, RevocationMode::Lost, root_signer.clone())
+        .await?;
+    let compromised = c
+        .session()
+        .revoke_trusted(&creator, RevocationMode::Compromised, root_signer)
+        .await?;
+    assert_eq!(lost.revocations.statements, 1);
+    assert_eq!(compromised.revocations.statements, 1);
+    assert_ne!(lost.statement, compromised.statement);
+
+    let (first, second) = if b_first { (&b, &c) } else { (&c, &b) };
+    let _ = first.session().sync_once().await;
+    let _ = second.session().sync_once().await;
+    let left = b.session().info().await?.revocations;
+    let right = c.session().info().await?.revocations;
+    assert_eq!(left.statements, 2);
+    assert_eq!(left.digest, right.digest);
+    assert_eq!(right.statements, 2);
+    let error = early
+        .session()
+        .renew()
+        .await
+        .err()
+        .ok_or("renewed after cascade")?;
+    assert_eq!(
+        CallFailure::from_failure(&error).code(),
+        "revoked",
+        "{error}"
+    );
+    let status = early.session().status().await?;
+    assert_eq!(
+        status
+            .authority
+            .verified_revocation
+            .as_ref()
+            .map(|notice| &notice.reason),
+        Some(&RevocationReason::Cascade { trusted: creator }),
+        "{status:?}"
+    );
+    for device in [&b, &c, &early] {
+        device.close().await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn conflicting_root_modes_merge_when_lost_syncs_first() -> Result<(), Failure> {
+    conflicting_root_revocations_merge(true).await
+}
+
+#[tokio::test]
+async fn conflicting_root_modes_merge_when_compromised_syncs_first() -> Result<(), Failure> {
+    conflicting_root_revocations_merge(false).await
 }

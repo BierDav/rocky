@@ -61,10 +61,6 @@ impl<A: RowApplication> Inner<A> {
                 &bindings,
                 self.config.publisher,
                 scope.table,
-                header
-                    .extensions
-                    .author
-                    .ok_or_else(|| Error::Corrupt("restoration author number".into()))?,
                 node,
                 self.families_at(self.manifest_of_tip(header.extensions.tip)?)?
                     .as_ref(),

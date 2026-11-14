@@ -3,7 +3,7 @@ use rocky_core::{
     DomainId, PartitionSelection, PartitionSelector, PartitionTuple, PartitionValue,
     SchemaDefinition, SqlValue, TypedRows,
 };
-use rocky_credentials::{AuthorRange, Authority, PartitionGrant};
+use rocky_credentials::{Authority, PartitionGrant};
 use std::path::Path;
 
 struct Fixture {
@@ -130,46 +130,24 @@ impl Fixture {
         path: &Path,
         node: PrivateKey,
         grant: PartitionGrant,
-        signer: Option<(PrivateKey, u32)>,
     ) -> EncryptedReplica<TypedRows> {
         let user = PrivateKey::new();
         let time = now().unwrap();
-        let recorded = if rocky_platform::fs::exists(path) {
-            let (owner, conn) = crate::database::DatabaseOwner::open(path).await.unwrap();
-            let mut rows = conn
-                .query(
-                    "SELECT number FROM secure_node_authors WHERE node=?",
-                    [node.public_key().as_bytes().to_vec()],
-                )
-                .await
-                .unwrap();
-            let number = rows
-                .next()
-                .await
-                .unwrap()
-                .map(|row| row.get::<i64>(0).unwrap() as u32);
-            drop(rows);
-            drop(conn);
-            drop(owner);
-            number
-        } else {
-            None
-        };
-        let number = recorded.unwrap_or_else(|| signer.as_ref().map_or(999, |(_, number)| *number));
         let root = Authority::owner(&self.publisher)
             .issue_partition_terms(
                 user.public_key(),
                 vec![],
                 vec![grant.clone()],
-                (1, Some(AuthorRange::new(number, number).unwrap())),
-                (time, 3600, 5),
+                rocky_credentials::DelegationTerms { delegations: 1 },
+                rocky_credentials::Validity {
+                    issued_at: time,
+                    lifetime: std::time::Duration::from_secs(3600),
+                    clock_skew: std::time::Duration::from_secs(5),
+                },
             )
             .unwrap();
         let prefix = CredentialChain(vec![root]);
-        let credentials = prefix
-            .clone()
-            .complete(&user, node.public_key(), number)
-            .unwrap();
+        let credentials = prefix.clone().complete(&user, node.public_key()).unwrap();
         let replica = EncryptedReplica::open(
             path,
             self.app(),
@@ -233,15 +211,14 @@ async fn insert(
         let id = sql
             .next_id_partition("items", &[SqlValue::Text((*list).into())])
             .await
-            .unwrap()
-            .integer();
+            .unwrap();
         sql.run(
             "INSERT INTO items(list,key,amount,id) VALUES(?,?,?,?)",
             vec![
                 SqlValue::Text((*list).into()),
                 SqlValue::Text((*key).into()),
                 SqlValue::Integer(*amount),
-                SqlValue::Integer(id),
+                id.sql(),
             ],
         )
         .await
@@ -274,7 +251,6 @@ async fn a_future_import_does_not_make_verified_empty_partition_history_missing(
             &root.path().join("writer.sqlite"),
             PrivateKey::new(),
             f.grant(None, &all()),
-            Some((PrivateKey::new(), 1)),
         )
         .await;
     replica
@@ -339,7 +315,6 @@ async fn a_future_import_does_not_make_verified_empty_partition_history_missing(
             &root.path().join("missing.sqlite"),
             PrivateKey::new(),
             f.grant(None, &all()),
-            None,
         )
         .await;
     missing
@@ -388,7 +363,6 @@ async fn unrelated_partition_recovery_does_not_block_constant_queries() {
             &root.path().join("waiting.sqlite"),
             PrivateKey::new(),
             f.grant(None, &all()),
-            None,
         )
         .await;
     f.key(&replica, "A", [1; 32]).await;
@@ -432,7 +406,6 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             &root.path().join("writer.sqlite"),
             PrivateKey::new(),
             f.grant(None, &all()),
-            Some((author.clone(), 1)),
         )
         .await;
     f.key(&a, "A", [1; 32]).await;
@@ -442,7 +415,6 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             &root.path().join("reader.sqlite"),
             PrivateKey::new(),
             f.grant(Some(&["A"]), &[Right::Read]),
-            None,
         )
         .await;
     f.key(&reader, "A", [1; 32]).await;
@@ -451,7 +423,6 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             &root.path().join("custody.sqlite"),
             PrivateKey::new(),
             f.grant(Some(&["A"]), &[Right::Custody]),
-            None,
         )
         .await;
 
@@ -617,7 +588,6 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             &root.path().join("restored.sqlite"),
             PrivateKey::new(),
             f.grant(None, &[Right::Read]),
-            None,
         )
         .await;
     f.key(&restored, "A", [1; 32]).await;
@@ -716,7 +686,10 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             .await
             .is_err()
     );
-    assert_eq!(cp.statement.format, 19);
+    assert_eq!(
+        cp.statement.format,
+        crate::replica::checkpoint::CHECKPOINT_FORMAT
+    );
     assert_eq!(cp.statement.partition, Some(f.tuple("A")));
     reader.rebuild_projection(f.scope("A")).await.unwrap();
     assert_eq!(
@@ -737,7 +710,6 @@ async fn partitioned_sql_refuses_local_duplicates_and_keeps_other_partition_atom
             &root.path().join("a.sqlite"),
             PrivateKey::new(),
             f.grant(None, &all()),
-            Some((PrivateKey::new(), 1)),
         )
         .await;
     for name in ["A", "B"] {
@@ -755,11 +727,10 @@ async fn partitioned_sql_refuses_local_duplicates_and_keeps_other_partition_atom
         let id = sql
             .next_id_partition("items", &[SqlValue::Text(name.into())])
             .await
-            .unwrap()
-            .integer();
+            .unwrap();
         sql.run(
             "INSERT INTO items(list,key,amount,title,id) VALUES(?, 'one',10,'milk',?)",
-            vec![SqlValue::Text(name.into()), SqlValue::Integer(id)],
+            vec![SqlValue::Text(name.into()), id.sql()],
         )
         .await
         .unwrap();
@@ -776,12 +747,11 @@ async fn partitioned_sql_refuses_local_duplicates_and_keeps_other_partition_atom
     let id = sql
         .next_id_partition("items", &[SqlValue::Text("A".into())])
         .await
-        .unwrap()
-        .integer();
+        .unwrap();
     assert!(matches!(
         sql.run(
             "INSERT INTO items(list,key,amount,title,id) VALUES('A','two',10,'MILK',?)",
-            vec![SqlValue::Integer(id)]
+            vec![id.sql()]
         )
         .await,
         Err(Error::Sql(crate::sql::SqlError::Statement {
@@ -808,7 +778,6 @@ async fn an_unheld_partition_is_placed_without_its_tuple_or_a_confirmable_scope(
             &root.path().join("writer.sqlite"),
             PrivateKey::new(),
             f.grant(None, &all()),
-            Some((PrivateKey::new(), 1)),
         )
         .await;
     let reader_key = PrivateKey::new();
@@ -817,7 +786,6 @@ async fn an_unheld_partition_is_placed_without_its_tuple_or_a_confirmable_scope(
             &root.path().join("reader.sqlite"),
             reader_key.clone(),
             f.grant(Some(&["A"]), &[Right::Read]),
-            None,
         )
         .await;
     f.key(&writer, "A", [1; 32]).await;
@@ -846,7 +814,14 @@ async fn an_unheld_partition_is_placed_without_its_tuple_or_a_confirmable_scope(
         panic!("{requests:?}")
     };
     let operation = hidden.operation().unwrap();
-    assert_eq!(request.author, operation.header.extensions.author.unwrap());
+    assert_eq!(
+        request.author,
+        operation
+            .header
+            .extensions
+            .author(&operation.header.public_key)
+            .unwrap()
+    );
     assert_eq!(request.from, operation.header.extensions.author_sequence);
     let credentials = reader
         .inner
@@ -923,7 +898,6 @@ async fn a_frame_whose_keyed_scope_and_sealed_tuple_disagree_is_refused() {
             &root.path().join("writer.sqlite"),
             PrivateKey::new(),
             f.grant(None, &all()),
-            Some((author.clone(), 1)),
         )
         .await;
     let reader = f
@@ -931,7 +905,6 @@ async fn a_frame_whose_keyed_scope_and_sealed_tuple_disagree_is_refused() {
             &root.path().join("reader.sqlite"),
             PrivateKey::new(),
             f.grant(None, &[Right::Read]),
-            None,
         )
         .await;
     for replica in [&writer, &reader] {
@@ -995,7 +968,6 @@ async fn reads_across_held_partitions_agree_inside_and_after_transactions() {
             &root.path().join("writer.sqlite"),
             PrivateKey::new(),
             f.grant(None, &all()),
-            Some((PrivateKey::new(), 1)),
         )
         .await;
     let names: Vec<String> = (1..=64).map(|index| format!("p{index:02}")).collect();

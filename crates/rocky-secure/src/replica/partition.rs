@@ -272,8 +272,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .as_ref()
             .ok_or_else(|| denied("node author credential missing"))?;
         let identity = rocky_core::RowIdentity::next(
-            author.number,
-            inner.highest_identity(table.scope, author.number).await?,
+            author.writer,
+            inner.highest_identity(table.scope, author.writer).await?,
         )
         .map_err(|error| denied(&error.to_string()))?;
         let mut values = vec![SqlValue::Null; logical.columns.len()];
@@ -282,7 +282,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .iter()
             .position(|column| column.sql_name.eq_ignore_ascii_case("id"))
             .ok_or_else(|| denied("missing id column"))?;
-        values[position] = SqlValue::Integer(identity.integer());
+        values[position] = identity.sql();
         let tuple = typed
             .rows
             .partition(&table.table, &values)
@@ -291,7 +291,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let address = typed
             .rows
             .schema()
-            .group_address(typed.domain, name, &[SqlValue::Integer(identity.integer())])
+            .group_address(typed.domain, name, &[identity.sql()])
             .map_err(|error| denied(&error.to_string()))?;
         // This node creates the partition, so it names it.
         let naming = created_name(naming, &address.commitment);
@@ -307,13 +307,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.grant_families(),
             )
             .map_err(credential)?
-            .partition_author(
-                author.key.public_key(),
-                author.number,
-                scope,
-                &tuple,
-                now()?,
-            )
+            .partition_author(author.key.public_key(), scope, &tuple, now()?)
             .map_err(credential)?;
         if !grants
             .iter()

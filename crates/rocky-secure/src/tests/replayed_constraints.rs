@@ -34,7 +34,7 @@ fn definition() -> serde_json::Value {
              "checks": ["cap BETWEEN 1 AND 3"],
              "primary_key": ["id"]},
             {"name": "members", "class": "replayed",
-             "columns": [{"name": "team", "type": "integer", "not_null": true},
+             "columns": [{"name": "team", "type": "blob", "not_null": true},
                          {"name": "email", "type": "text", "not_null": true},
                          {"name": "role", "type": "text"}],
              "checks": ["role IS NULL OR role IN ('lead', 'member')"],
@@ -46,7 +46,7 @@ fn definition() -> serde_json::Value {
              "columns": [{"name": "total", "type": "integer", "not_null": true}],
              "primary_key": ["id"]},
             {"name": "lines", "class": "replayed",
-             "columns": [{"name": "parent", "type": "integer", "not_null": true},
+             "columns": [{"name": "parent", "type": "blob", "not_null": true},
                          {"name": "amount", "type": "integer", "not_null": true}],
              "checks": ["amount > 0"],
              "primary_key": ["id"],
@@ -225,7 +225,6 @@ impl Constrained {
             .collect()
     }
     fn credentials(&self, node: &PrivateKey) -> CredentialChain {
-        let number = node_number(node.public_key());
         let user = PrivateKey::new();
         if let Some(tenant) = self.tenant {
             let root = Authority::owner(&self.publisher)
@@ -233,15 +232,16 @@ impl Constrained {
                     user.public_key(),
                     vec![],
                     self.partition_grants(tenant),
-                    (
-                        1,
-                        Some(rocky_credentials::AuthorRange::new(number, number).unwrap()),
-                    ),
-                    (now().unwrap(), 3600, 5),
+                    rocky_credentials::DelegationTerms { delegations: 1 },
+                    rocky_credentials::Validity {
+                        issued_at: now().unwrap(),
+                        lifetime: std::time::Duration::from_secs(3600),
+                        clock_skew: std::time::Duration::from_secs(5),
+                    },
                 )
                 .unwrap();
             return CredentialChain(vec![root])
-                .complete(&user, node.public_key(), number)
+                .complete(&user, node.public_key())
                 .unwrap();
         }
         let capability = |subject, kind, delegations| Capability {
@@ -260,12 +260,6 @@ impl Constrained {
             },
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
-                authors: Some(if kind == PrincipalKind::Node {
-                    rocky_credentials::AuthorRange::new(number, number).unwrap()
-                } else {
-                    rocky_credentials::AuthorRange::new(number, rocky_credentials::MAX_AUTHOR)
-                        .unwrap()
-                }),
                 node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
                 database: Some(rocky_credentials::DatabaseContext {
                     publisher: self.publisher.public_key(),
@@ -381,14 +375,15 @@ impl Device {
     /// Runs `statements` as one transaction. `#id` in an INSERT takes a
     /// fresh identity of its table; they are returned in order.
     /// `#next(table)` reserves the identity `table`'s next `#id` takes.
-    async fn commit(&self, c: &Constrained, statements: &[&str]) -> Result<Vec<i64>, Error> {
+    async fn commit(&self, c: &Constrained, statements: &[&str]) -> Result<Vec<Id>, Error> {
         let session = self.session(c).await;
         let next_id = async |table: &str| match c.tenant {
-            Some(tenant) => session
-                .next_id_partition(table, &[SqlValue::Integer(tenant)])
-                .await
-                .map(|id| id.integer()),
-            None => session.next_id(table).await.map(|id| id.integer()),
+            Some(tenant) => {
+                session
+                    .next_id_partition(table, &[SqlValue::Integer(tenant)])
+                    .await
+            }
+            None => session.next_id(table).await,
         };
         session.run("BEGIN", vec![]).await?;
         let (mut ids, mut reserved) = (Vec::new(), BTreeMap::new());
@@ -397,7 +392,7 @@ impl Device {
             while let Some(start) = sql.find("#next(") {
                 let end = start + sql[start..].find(')').unwrap();
                 let table = sql[start + 6..end].to_string();
-                let id = next_id(&table).await?;
+                let id = Id(next_id(&table).await?);
                 reserved.insert(table, id);
                 sql.replace_range(start..=end, &id.to_string());
             }
@@ -410,7 +405,7 @@ impl Device {
                     .to_string();
                 let id = match reserved.remove(&table) {
                     Some(id) => id,
-                    None => next_id(&table).await?,
+                    None => Id(next_id(&table).await?),
                 };
                 sql = sql.replace("#id", &id.to_string());
                 ids.push(id);
@@ -533,7 +528,7 @@ fn canonical(c: &Constrained, frames: &[EncryptedFrame]) -> Canonical {
         members.push((
             (
                 header.timestamp,
-                header.extensions.author.unwrap(),
+                header.extensions.author(&header.public_key).unwrap(),
                 header.extensions.author_sequence,
             ),
             membership.transaction,
@@ -698,7 +693,7 @@ fn latest_first(frames: &[EncryptedFrame]) -> Vec<EncryptedFrame> {
         let header = &frame.operation_ref().unwrap().header;
         std::cmp::Reverse((
             header.timestamp,
-            header.extensions.author,
+            header.extensions.author(&header.public_key),
             header.extensions.author_sequence,
         ))
     });
@@ -712,13 +707,26 @@ fn constraint_error(error: Error) -> String {
     }
 }
 
+/// A row identity in test SQL text: it formats as its blob literal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Id(rocky_core::RowIdentity);
+impl std::fmt::Display for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "X'{}'", self.0)
+    }
+}
+impl From<Id> for SqlValue {
+    fn from(id: Id) -> Self {
+        id.0.sql()
+    }
+}
 /// Opens `count` devices that all hold `setup`'s rows.
 async fn devices(
     c: &Constrained,
     root: &Path,
     count: usize,
     setup: &[&str],
-) -> (Vec<Device>, Vec<i64>, Vec<EncryptedFrame>) {
+) -> (Vec<Device>, Vec<Id>, Vec<EncryptedFrame>) {
     let mut devices = Vec::new();
     for index in 0..count {
         devices.push(c.open(&root.join(format!("d{index}.db"))).await);
@@ -872,7 +880,7 @@ async fn checks_pass_null_and_hold_after_every_statement() {
             SqlValue::Integer(5),
             SqlValue::Integer(6),
             SqlValue::Null,
-            SqlValue::Integer(range),
+            SqlValue::from(range),
         ]]
     );
 }
@@ -928,7 +936,7 @@ async fn foreign_keys_drop_orphans_and_cascades_rewind_with_their_transaction() 
             devices[0]
                 .commit(
                     &c,
-                    &["INSERT INTO lines(parent,amount,id) VALUES(12345,1,#id)"]
+                    &["INSERT INTO lines(parent,amount,id) VALUES(X'01010101010101010101010101010101010101010101010101010101010101010101010101010101',1,#id)"]
                 )
                 .await
                 .unwrap_err()
@@ -988,7 +996,7 @@ async fn foreign_keys_drop_orphans_and_cascades_rewind_with_their_transaction() 
             .map(|row| row[row.len() - 1].clone())
             .collect()
     };
-    assert_eq!(ids_of("teams"), [red, green].map(SqlValue::Integer));
+    assert_eq!(ids_of("teams"), [red, green].map(SqlValue::from));
     assert_eq!(expected.rows["members"].len(), 1);
     assert!(expected.rows["lines"].is_empty() && expected.rows["orders"].is_empty());
     assert_eq!(expected.dropped(), 3, "{expected:?}");

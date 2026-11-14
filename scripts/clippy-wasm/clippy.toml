@@ -1,6 +1,6 @@
-# Clippy's configuration for wasm32, a browser Worker; scripts/check sets
-# CLIPPY_CONF_DIR to this directory for that target only. These calls panic or
-# always fail in a browser, so shared code uses rocky_platform instead.
+# Browser-only additions to the root clippy.toml; scripts/clippy combines
+# them for wasm32. Shared settings belong in the root configuration.
+# These calls panic or always fail in a browser, so shared code uses rocky_platform.
 # Native-only seam modules are not compiled for wasm32 and are not checked.
 disallowed-methods = [
     { path = "std::path::Path::exists", reason = "use rocky_platform::fs::exists" },

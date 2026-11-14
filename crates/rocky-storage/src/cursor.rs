@@ -530,9 +530,10 @@ fn free(
     busy.store(false, Ordering::SeqCst);
     retire
 }
-// The worker owns its connection; nothing else locks it while a cursor
-// holds it across the awaits between pages.
-#[allow(clippy::await_holding_lock)]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "The worker owns its connection; nothing else locks it across page awaits."
+)]
 async fn serve(job: Job, connection: &mut Option<(PathBuf, sqlite::Connection)>) {
     let Job {
         plan,

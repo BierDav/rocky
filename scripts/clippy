@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Run Clippy with shared settings and target-specific browser restrictions."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import tomllib
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def inline(value):
+    if isinstance(value, dict):
+        return '{' + ', '.join(f'{inline(k)} = {inline(v)}' for k, v in value.items()) + '}'
+    if isinstance(value, list):
+        return '[' + ', '.join(map(inline, value)) + ']'
+    return json.dumps(value, ensure_ascii=False, allow_nan=False)
+
+
+def browser_config():
+    shared = tomllib.loads((ROOT / 'clippy.toml').read_text())
+    browser = tomllib.loads((ROOT / 'scripts/clippy-wasm/clippy.toml').read_text())
+    if duplicates := shared.keys() & browser.keys():
+        raise SystemExit('clippy: browser restrictions must only be defined in '
+                         'scripts/clippy-wasm/clippy.toml: ' + ', '.join(sorted(duplicates)))
+    merged = shared | browser
+    rendered = ''.join(f'{inline(k)} = {inline(v)}\n' for k, v in merged.items())
+    directory = ROOT / 'local/clippy-wasm'
+    directory.mkdir(parents=True, exist_ok=True)
+    config = directory / 'clippy.toml'
+    # A stable path and mtime let repeat checks reuse artifacts; replace atomically.
+    if not config.exists() or config.read_text() != rendered:
+        with tempfile.NamedTemporaryFile(mode='w', dir=directory, prefix='config.', delete=False) as out:
+            temporary = Path(out.name)
+            out.write(rendered)
+        try:
+            temporary.replace(config)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return directory
+
+
+def main():
+    args = sys.argv[1:]
+    wasm = any(arg in ('wasm32-unknown-unknown', '--target=wasm32-unknown-unknown') for arg in args)
+    config = browser_config() if wasm else ROOT
+    try:
+        return subprocess.run(['cargo', 'clippy', *args], cwd=ROOT,
+                              env=dict(os.environ, CLIPPY_CONF_DIR=str(config))).returncode
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == '__main__':
+    sys.exit(main())

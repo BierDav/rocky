@@ -11,22 +11,22 @@ pub(in crate::replica) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_admission_entries(entry INTEGER PRIMARY KEY,scope BLOB NOT NULL,frame BLOB NOT NULL,kind INTEGER NOT NULL,bytes BLOB NOT NULL,signature BLOB NOT NULL,chain BLOB NOT NULL)",
     "CREATE UNIQUE INDEX IF NOT EXISTS secure_admission_frames ON secure_admission_entries(frame) WHERE kind=0",
     "CREATE INDEX IF NOT EXISTS secure_admission_scopes ON secure_admission_entries(scope,entry)",
-    "CREATE TABLE IF NOT EXISTS secure_admission_claims(allocation INTEGER NOT NULL,identity INTEGER NOT NULL,kind INTEGER NOT NULL,provenance BLOB NOT NULL,entry INTEGER NOT NULL,ordinal INTEGER NOT NULL,PRIMARY KEY(allocation,identity,kind,provenance)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_admission_claims(allocation INTEGER NOT NULL,identity BLOB NOT NULL,kind INTEGER NOT NULL,provenance BLOB NOT NULL,entry INTEGER NOT NULL,ordinal INTEGER NOT NULL,PRIMARY KEY(allocation,identity,kind,provenance)) WITHOUT ROWID",
     "CREATE UNIQUE INDEX IF NOT EXISTS secure_admission_grants ON secure_admission_claims(allocation,identity) WHERE kind=0",
     "CREATE TABLE IF NOT EXISTS secure_identity_tables(id INTEGER PRIMARY KEY,scope BLOB NOT NULL UNIQUE)",
     "CREATE TABLE IF NOT EXISTS secure_identity_partitions(scope BLOB PRIMARY KEY,allocation INTEGER NOT NULL) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_identity_ledger(scope BLOB NOT NULL,author INTEGER NOT NULL,signer BLOB NOT NULL,sequence INTEGER NOT NULL,PRIMARY KEY(scope,author)) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_identity_summary(scope BLOB NOT NULL,author INTEGER NOT NULL,sequence INTEGER NOT NULL,PRIMARY KEY(scope,author)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_identity_ledger(scope BLOB NOT NULL,author BLOB NOT NULL,signer BLOB NOT NULL,sequence INTEGER NOT NULL,PRIMARY KEY(scope,author)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_identity_summary(scope BLOB NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,PRIMARY KEY(scope,author)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_admission_carries(receipt INTEGER NOT NULL,ordinal INTEGER NOT NULL CHECK(ordinal>=0 AND ordinal<32),entry INTEGER NOT NULL UNIQUE,PRIMARY KEY(receipt,ordinal)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_admission_carry_frames ON secure_admission_entries(frame) WHERE kind=2",
-    "CREATE TABLE IF NOT EXISTS secure_identity_own(scope BLOB NOT NULL,author INTEGER NOT NULL,sequence INTEGER NOT NULL,PRIMARY KEY(scope,author)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_identity_own(scope BLOB NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,PRIMARY KEY(scope,author)) WITHOUT ROWID",
 ];
 
 const CONTEXT: &str = "rocky.admission-context.v1";
 const HEAD: &str = "rocky.admission-head.v1";
 const ENTRY: &str = "rocky.admission-entry.v1";
 const CHAIN: &str = "rocky.admission-chain.v1";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 
 /// Who admits into this file and the finite cuts of predecessor evidence
 /// it inherited by restore, oldest first.
@@ -90,7 +90,7 @@ pub(in crate::replica) enum ReceiptAllocation {
 pub(in crate::replica) struct FrameReceipt {
     pub(in crate::replica) frame: Hash,
     pub(in crate::replica) signer: PublicKey,
-    pub(in crate::replica) author: Option<u32>,
+    pub(in crate::replica) author: Option<WriterId>,
     pub(in crate::replica) scope: ResourceScope,
     pub(in crate::replica) allocation: ReceiptAllocation,
     pub(in crate::replica) sequence: u64,
@@ -102,7 +102,7 @@ pub(in crate::replica) struct FrameReceipt {
     pub(in crate::replica) target: Option<TipId>,
     /// With `target`: O(scope, author) at the frame's own first admission
     /// (0 without a mark or an author).
-    pub(in crate::replica) floor: Option<u32>,
+    pub(in crate::replica) floor: Option<u64>,
     pub(in crate::replica) writes: u8,
     pub(in crate::replica) births: Vec<Birth>,
 }
@@ -170,7 +170,7 @@ pub(in crate::replica) struct Claim {
     pub(in crate::replica) ordinal: u8,
 }
 
-type DerivedClaim = (i64, i64, u8, Commitment, u64, u8);
+type DerivedClaim = (i64, rocky_core::RowIdentity, u8, Commitment, u64, u8);
 
 /// Verified entries shared only by the births of one frame in one transaction.
 #[derive(Default)]
@@ -182,9 +182,9 @@ pub(in crate::replica) struct FrameClaims {
 pub(in crate::replica) struct BirthSnapshot {
     pub permanent: Vec<checkpoint::IdentityMark>,
     pub allocation: Vec<checkpoint::IdentityMark>,
-    pub own: BTreeMap<u32, u32>,
+    pub own: BTreeMap<WriterId, u64>,
     pub ledger: IdentityLedger,
-    pub summary: BTreeMap<u32, u32>,
+    pub summary: BTreeMap<WriterId, u64>,
     pub receipt: Option<(u64, FrameReceipt)>,
     pub claims: FrameClaims,
 }
@@ -204,7 +204,7 @@ pub(in crate::replica) struct BirthInput {
     pub identity: rocky_core::RowIdentity,
     pub provenance: Commitment,
     pub signer: PublicKey,
-    pub author: Option<u32>,
+    pub author: Option<WriterId>,
     pub carried: bool,
     pub existing: bool,
     pub finalized: bool,
@@ -226,7 +226,7 @@ impl<A: RowApplication> Inner<A> {
         let extension = &operation.header.extensions;
         if receipt.frame != operation.hash
             || receipt.signer != operation.header.public_key
-            || receipt.author != extension.author
+            || receipt.author != extension.author(&operation.header.public_key)
             || receipt.scope != extension.scope
             || receipt.sequence != operation.header.seq_num
             || receipt.author_sequence != extension.author_sequence
@@ -331,24 +331,26 @@ impl<A: RowApplication> Inner<A> {
             target,
             first,
         } = birth;
-        if [&snapshot.permanent, &snapshot.allocation]
-            .iter()
-            .any(|marks| {
-                marks
-                    .iter()
-                    .any(|mark| mark.author == identity.author() && mark.signer != signer)
-            })
+        // A birth's writer is the key that signed its creation.
+        if identity.writer() != writer(&signer)
+            || [&snapshot.permanent, &snapshot.allocation]
+                .iter()
+                .any(|marks| {
+                    marks
+                        .iter()
+                        .any(|mark| mark.author == identity.writer() && mark.signer != signer)
+                })
             || snapshot
                 .ledger
-                .get(identity.author())
+                .get(identity.writer())
                 .is_some_and(|mark| mark.signer != signer)
-            || (!carried && author != Some(identity.author()))
+            || (!carried && author != Some(identity.writer()))
         {
             return Err(denied("forged row author or reused identity sequence"));
         }
         let retired = snapshot
             .ledger
-            .get(identity.author())
+            .get(identity.writer())
             .is_some_and(|mark| identity.sequence() <= mark.sequence);
         let claims = self
             .claims_on_frame(allocation, identity, &mut snapshot.claims)
@@ -369,7 +371,7 @@ impl<A: RowApplication> Inner<A> {
             // another partition's maximum proves no particular origin.
             let reused = snapshot
                 .own
-                .get(&identity.author())
+                .get(&identity.writer())
                 .is_some_and(|sequence| identity.sequence() <= *sequence)
                 || conflict
                 || claims.iter().any(|claim| claim.kind == 0);
@@ -381,7 +383,7 @@ impl<A: RowApplication> Inner<A> {
                 }
                 let summarized = snapshot
                     .summary
-                    .get(&identity.author())
+                    .get(&identity.writer())
                     .is_some_and(|mark| identity.sequence() <= *mark);
                 return Err(denied(if summarized {
                     "identity evidence below the summarized mark"
@@ -519,7 +521,7 @@ impl<A: RowApplication> Inner<A> {
                 }
                 if snapshot
                     .summary
-                    .get(&identity.author())
+                    .get(&identity.writer())
                     .is_some_and(|mark| identity.sequence() <= *mark)
                 {
                     return Ok(BirthClass::Suppressed(Some(
@@ -882,7 +884,7 @@ impl<A: RowApplication> Inner<A> {
                             provenance,
                         } => claims.push((
                             allocation,
-                            identity.integer(),
+                            *identity,
                             0,
                             *provenance,
                             entry.index,
@@ -894,7 +896,7 @@ impl<A: RowApplication> Inner<A> {
                             ..
                         } => claims.push((
                             allocation,
-                            identity.integer(),
+                            *identity,
                             1,
                             *provenance,
                             entry.index,
@@ -916,7 +918,7 @@ impl<A: RowApplication> Inner<A> {
                     .await?;
                 claims.push((
                     allocation,
-                    restoration.identity.integer(),
+                    restoration.identity,
                     0,
                     restoration.provenance,
                     entry.index,
@@ -935,7 +937,7 @@ impl<A: RowApplication> Inner<A> {
                     .await?;
                 claims.push((
                     allocation,
-                    observation.identity.integer(),
+                    observation.identity,
                     1,
                     observation.provenance,
                     entry.index,
@@ -1059,19 +1061,12 @@ impl<A: RowApplication> Inner<A> {
     }
     async fn insert_claim(
         &self,
-        (allocation, identity, kind, provenance, entry, ordinal): (
-            i64,
-            i64,
-            u8,
-            Commitment,
-            u64,
-            u8,
-        ),
+        (allocation, identity, kind, provenance, entry, ordinal): DerivedClaim,
     ) -> Result<(), Error> {
         // An observation may repeat; a second original assignment may not.
         if kind == 0 && !rows_with(&self.conn,
             "SELECT entry FROM secure_admission_claims WHERE allocation=? AND identity=? AND kind=0",
-            vec![SqlValue::Integer(allocation), SqlValue::Integer(identity)]).await?.is_empty()
+            vec![SqlValue::Integer(allocation), identity.sql()]).await?.is_empty()
         { return Err(corrupt("a second original assignment of one identity")); }
         let sql = match kind {
             0 => "INSERT INTO secure_admission_claims VALUES(?,?,?,?,?,?)",
@@ -1082,7 +1077,7 @@ impl<A: RowApplication> Inner<A> {
                 sql,
                 bindings(vec![
                     SqlValue::Integer(allocation),
-                    SqlValue::Integer(identity),
+                    identity.sql(),
                     SqlValue::Integer(i64::from(kind)),
                     SqlValue::Blob(provenance.to_vec()),
                     SqlValue::Integer(entry as i64),
@@ -1157,7 +1152,7 @@ impl<A: RowApplication> Inner<A> {
             "SELECT kind,provenance,entry,ordinal FROM secure_admission_claims WHERE allocation=? AND identity=?",
             vec![
                 SqlValue::Integer(allocation),
-                SqlValue::Integer(identity.integer()),
+                identity.sql(),
             ],
         )
         .await?
@@ -1188,7 +1183,7 @@ impl<A: RowApplication> Inner<A> {
             };
             if !derived.iter().any(|(a, i, k, p, e, o)| {
                 *a == allocation
-                    && *i == identity.integer()
+                    && *i == identity
                     && *k == claim.kind
                     && *p == claim.provenance
                     && *e == claim.entry
@@ -1284,7 +1279,7 @@ impl<A: RowApplication> Inner<A> {
         {
             let [
                 SqlValue::Integer(allocation),
-                SqlValue::Integer(identity),
+                SqlValue::Blob(identity),
                 SqlValue::Integer(kind),
                 SqlValue::Blob(provenance),
                 SqlValue::Integer(entry),
@@ -1295,7 +1290,8 @@ impl<A: RowApplication> Inner<A> {
             };
             stored.insert((
                 *allocation,
-                *identity,
+                rocky_core::RowIdentity::from_bytes(identity)
+                    .map_err(|_| corrupt("claim identity"))?,
                 u8::try_from(*kind).map_err(|_| corrupt("claim kind"))?,
                 row_of(provenance)?,
                 *entry as u64,
@@ -1340,7 +1336,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<(), Error> {
         for scope in BTreeSet::from([scope, allocation]) {
             if !self.identity_marks(scope).await?.iter().any(|mark| {
-                mark.author == identity.author()
+                mark.author == identity.writer()
                     && mark.signer == signer
                     && mark.sequence >= identity.sequence()
             }) {
@@ -1357,7 +1353,7 @@ impl<A: RowApplication> Inner<A> {
         if !self
             .own_marks(scope)
             .await?
-            .get(&identity.author())
+            .get(&identity.writer())
             .is_some_and(|own| *own >= identity.sequence())
         {
             return Err(corrupt("identity exceeds its own-birth floor"));
@@ -1378,7 +1374,7 @@ impl<A: RowApplication> Inner<A> {
         }
         let marks = self.identity_marks(receipt.scope).await?;
         let own = self.own_marks(receipt.scope).await?;
-        let reaches = |author: u32, sequence: u32, signer: Option<PublicKey>| {
+        let reaches = |author: WriterId, sequence: u64, signer: Option<PublicKey>| {
             marks.iter().any(|mark| {
                 mark.author == author
                     && mark.sequence >= sequence
@@ -1398,7 +1394,7 @@ impl<A: RowApplication> Inner<A> {
             match &birth.disposition {
                 Disposition::Created { identity, .. } | Disposition::Consumed { identity } => {
                     self.check_own_dominance(receipt.scope, *identity).await?;
-                    if !reaches(identity.author(), identity.sequence(), Some(receipt.signer)) {
+                    if !reaches(identity.writer(), identity.sequence(), Some(receipt.signer)) {
                         return Err(corrupt("an admitted identity above the permanent mark"));
                     }
                     let ReceiptAllocation::Bound(allocation) = receipt.allocation else {
@@ -1410,7 +1406,7 @@ impl<A: RowApplication> Inner<A> {
                 Disposition::Carried {
                     identity, signer, ..
                 } => {
-                    if !reaches(identity.author(), identity.sequence(), Some(*signer)) {
+                    if !reaches(identity.writer(), identity.sequence(), Some(*signer)) {
                         return Err(corrupt("a carried identity above the permanent mark"));
                     }
                     let ReceiptAllocation::Bound(allocation) = receipt.allocation else {
@@ -1690,7 +1686,7 @@ mod tests {
     struct VectorReceipt {
         frame: Hash,
         signer: PublicKey,
-        author: Option<u32>,
+        author: Option<WriterId>,
         scope: ResourceScope,
         allocation: ReceiptAllocation,
         sequence: u64,
@@ -1718,7 +1714,7 @@ mod tests {
         let receipt = FrameReceipt {
             frame: Hash::new(b"frame"),
             signer: PrivateKey::from_bytes(&[6; 32]).public_key(),
-            author: Some(1),
+            author: Some(writer(&PrivateKey::from_bytes(&[6; 32]).public_key())),
             scope,
             allocation: ReceiptAllocation::Unresolved,
             sequence: 0,

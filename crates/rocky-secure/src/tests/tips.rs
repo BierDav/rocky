@@ -374,13 +374,13 @@ async fn insert(f: &Fixture, replica: &Replica, row: u8, value: &str) -> Encrypt
 async fn frontier(replica: &Replica, tip: TipId, scope: rocky_core::Scope) -> Vec<AuthorMark> {
     let frames = stored_frames(replica, "SELECT header,body FROM secure_operations").await;
     let graph = replica.tip_graph(scope).await.unwrap();
-    let mut authors = BTreeMap::<u32, u64>::new();
+    let mut authors = BTreeMap::<rocky_core::WriterId, u64>::new();
     for frame in frames {
         let operation = frame.operation().unwrap();
         let e = &operation.header.extensions;
         if e.tip == tip || graph.continues_any(e.tip, tip).unwrap_or(false) {
             authors
-                .entry(e.author.unwrap())
+                .entry(e.author(&operation.header.public_key).unwrap())
                 .and_modify(|sequence| *sequence = (*sequence).max(e.author_sequence))
                 .or_insert(e.author_sequence);
         }
@@ -638,7 +638,7 @@ async fn concurrent_issuer_seals_choose_the_lower_continuation_on_every_device()
                 },
             )
             .unwrap()
-            .issue_issuer(issuer.public_key(), None, validity())
+            .issue_issuer(issuer.public_key(), validity())
             .unwrap(),
         ]);
         let signed = SignedSeal::endorse(
@@ -820,14 +820,13 @@ async fn identity_replica(
     identity: &PrivateKey,
     node: &PrivateKey,
 ) -> (Replica, CredentialChain) {
-    identity_replica_at(f, path, identity, node, 1).await
+    identity_replica_at(f, path, identity, node).await
 }
 async fn identity_replica_at(
     f: &Fixture,
     path: &Path,
     identity: &PrivateKey,
     node: &PrivateKey,
-    first: u32,
 ) -> (Replica, CredentialChain) {
     let root = Authority::owner_in(
         &f.publisher,
@@ -837,18 +836,13 @@ async fn identity_replica_at(
         },
     )
     .unwrap()
-    .issue(
-        identity.public_key(),
-        f.full(),
-        rocky_credentials::AuthorRange::new(first, first + 32).unwrap(),
-        validity(),
-    )
+    .issue(identity.public_key(), f.full(), validity())
     .unwrap();
     let identity_chain = CredentialChain(vec![root]);
     let mut config = f.config(node, f.full(), &[f.public]);
     config.credentials = identity_chain
         .clone()
-        .complete(identity, node.public_key(), first)
+        .complete(identity, node.public_key())
         .unwrap();
     (
         EncryptedReplica::open(path, f.app(), config).await.unwrap(),
@@ -888,7 +882,6 @@ async fn returning_to_main_can_serve_a_checkpoint_signed_by_its_saved_branch_nod
             .certify_member(
                 &identity,
                 branch_node.public_key(),
-                2,
                 1,
                 replica
                     .revocations()
@@ -911,7 +904,7 @@ async fn returning_to_main_can_serve_a_checkpoint_signed_by_its_saved_branch_nod
         .unwrap();
     let mut config = f.config(&original, f.full(), &[f.public]);
     config.credentials = identity_chain
-        .complete(&identity, original.public_key(), 1)
+        .complete(&identity, original.public_key())
         .unwrap();
     drop(replica);
     let replica = EncryptedReplica::open(&dir.path().join("checkpoint-lines.db"), f.app(), config)
@@ -1004,7 +997,6 @@ async fn following_a_branch_requires_its_own_node_and_returns_to_the_main_node()
                 .certify_member(
                     &identity,
                     branch_node.public_key(),
-                    2,
                     1,
                     replica
                         .revocations()
@@ -1110,7 +1102,6 @@ async fn reopening_a_branch_waits_for_its_saved_line_node_and_returns_to_main() 
             .certify_member(
                 &identity,
                 branch_node.public_key(),
-                2,
                 1,
                 replica
                     .revocations()
@@ -1423,9 +1414,9 @@ async fn two_branch_devices_sync_without_main_and_switching_back_drops_branch_fr
     let (b_identity, c_identity) = (PrivateKey::new(), PrivateKey::new());
     let (b_key, c_key) = (PrivateKey::new(), PrivateKey::new());
     let (b, b_chain) =
-        identity_replica_at(&f, &dir.path().join("dev-b.db"), &b_identity, &b_key, 100).await;
+        identity_replica_at(&f, &dir.path().join("dev-b.db"), &b_identity, &b_key).await;
     let (c, c_chain) =
-        identity_replica_at(&f, &dir.path().join("dev-c.db"), &c_identity, &c_key, 200).await;
+        identity_replica_at(&f, &dir.path().join("dev-c.db"), &c_identity, &c_key).await;
     main(&f, &main_replica).await;
     let base = insert(&f, &main_replica, 1, "Base").await;
     for replica in [&b, &c] {
@@ -1446,10 +1437,7 @@ async fn two_branch_devices_sync_without_main_and_switching_back_drops_branch_fr
     let (dev, opened) = branch(&f, sealed);
     main_replica.receive_tip_statements(&opened).await.unwrap();
     let main_tip = main_replica.followed_tip().await;
-    for (replica, identity, chain, number) in [
-        (&b, &b_identity, &b_chain, 101),
-        (&c, &c_identity, &c_chain, 201),
-    ] {
+    for (replica, identity, chain) in [(&b, &b_identity, &b_chain), (&c, &c_identity, &c_chain)] {
         replica.receive_tip_statements(&continued).await.unwrap();
         replica.receive_tip_statements(&opened).await.unwrap();
         replica
@@ -1464,7 +1452,6 @@ async fn two_branch_devices_sync_without_main_and_switching_back_drops_branch_fr
                     .certify_member(
                         identity,
                         node.public_key(),
-                        number,
                         1,
                         replica
                             .revocations()
@@ -1510,9 +1497,7 @@ async fn two_branch_devices_sync_without_main_and_switching_back_drops_branch_fr
         .await
         .is_err()
     );
-    let c_credentials = c_chain
-        .complete(&c_identity, c_key.public_key(), 200)
-        .unwrap();
+    let c_credentials = c_chain.complete(&c_identity, c_key.public_key()).unwrap();
     b.admit_peer(c_key.public_key(), &c_credentials, dev)
         .await
         .unwrap();
@@ -1586,7 +1571,7 @@ async fn the_owners_backward_move_beats_an_issuers_forward_move_and_revocation_r
                     },
                 )
                 .unwrap()
-                .issue_issuer(key.public_key(), None, validity())
+                .issue_issuer(key.public_key(), validity())
                 .unwrap(),
             ]);
             (key, chain)
@@ -1731,17 +1716,12 @@ async fn a_held_cut_refuses_and_prunes_what_follows_its_head() {
             },
         )
         .unwrap()
-        .issue_trusted(
-            trusted.public_key(),
-            f.public.domain,
-            rocky_credentials::AuthorRange::ALL,
-            now().unwrap(),
-        )
+        .issue_trusted(trusted.public_key(), f.public.domain, now().unwrap())
         .unwrap(),
     ]);
     let node_chain = chain
         .clone()
-        .certify(&trusted, trusted.public_key(), 1)
+        .certify(&trusted, trusted.public_key())
         .unwrap();
     let linked = |name: &str, link| {
         let TipStatement::Bookmark(unsigned) = bookmark(&f, name, None, Some(genesis)) else {
@@ -1783,6 +1763,7 @@ async fn a_held_cut_refuses_and_prunes_what_follows_its_head() {
             }],
             acknowledgments: None,
         }],
+        mode: rocky_credentials::RevocationMode::Lost,
         recovery: None,
     };
     let revoked = RevocationSet::try_from(vec![

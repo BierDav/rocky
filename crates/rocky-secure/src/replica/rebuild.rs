@@ -105,15 +105,18 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         while let Some(last) = self
             .replay_sealed(
-                scope,
-                id,
-                checkpoint::Overlay::Scratch,
-                self.workspace.tip,
-                (cursor, through),
-                checkpoint::STEP_OPERATIONS,
+                checkpoint::ReplayRequest {
+                    scope,
+                    id,
+                    overlay: checkpoint::Overlay::Scratch,
+                    target: self.workspace.tip,
+                    after: cursor,
+                    through,
+                    limit: checkpoint::STEP_OPERATIONS,
+                    mode: checkpoint::ReplayMode::Mint,
+                },
                 &mut sets,
                 &mut ledger,
-                checkpoint::ReplayMode::Mint,
             )
             .await?
         {

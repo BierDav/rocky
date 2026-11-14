@@ -31,9 +31,8 @@ async fn format_template() -> (Fixture, Scratch, std::path::PathBuf, PrivateKey)
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn unsupported_checkpoint_formats_refuse_before_writes() {
     let (f, _template, source, node) = format_template().await;
-    for version in [
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20,
-    ] {
+    let current = crate::replica::checkpoint::CHECKPOINT_FORMAT;
+    for version in (0..current).chain([current + 1]) {
         let directory = Scratch::new().await;
         let path = directory.path().join("replica.sqlite");
         rocky_platform::fs::copy(&source, &path).unwrap();
@@ -81,7 +80,7 @@ async fn unsupported_checkpoint_formats_refuse_before_writes() {
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn unsupported_replica_formats_refuse_before_writes() {
     let (f, _template, source, node) = format_template().await;
-    for version in (0..58).chain([59]) {
+    for version in (0..59).chain([60]) {
         let directory = Scratch::new().await;
         let path = directory.path().join("replica.sqlite");
         rocky_platform::fs::copy(&source, &path).unwrap();
@@ -264,12 +263,7 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
         scope: f.public,
         generation: rocky_core::KeyEpoch::new(1, &[11; 32]),
         chain: chain.digest(),
-        author: Some(
-            f.config(&sender, f.full(), &[f.public])
-                .credentials
-                .author_number()
-                .unwrap(),
-        ),
+        authored: true,
         author_sequence: 0,
         row_format: crate::wire::ROW_FORMAT,
         births: Vec::new(),
@@ -300,13 +294,15 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
         .unwrap();
         let frame = crate::wire::author(
             &sender,
-            extensions.clone(),
-            chain.clone(),
-            &[11; 32],
-            (0, None, 1),
-            vec![],
-            None,
-            &plaintext,
+            crate::wire::FrameDraft {
+                extensions: extensions.clone(),
+                chain: chain.clone(),
+                encryption_key: &[11; 32],
+                log: (0, None, 1),
+                previous: vec![],
+                partition: None,
+                plaintext: &plaintext,
+            },
         )
         .unwrap();
         let error = replica.receive(frame).await.unwrap_err();

@@ -184,10 +184,8 @@ impl TypedRows {
         let mut identity = None;
         for fields in change.before.iter().chain(change.after.iter()) {
             let values = self.values(table, fields)?;
-            let SqlValue::Integer(id) = values[id_index] else {
-                return Err("id must be an integer".into());
-            };
-            let id = crate::RowIdentity::from_integer(id).map_err(|error| error.to_string())?;
+            let id = crate::RowIdentity::from_sql(&values[id_index])
+                .map_err(|error| error.to_string())?;
             if identity.is_some_and(|previous| previous != id) {
                 return Err("a row's id cannot change".into());
             }
@@ -362,6 +360,9 @@ mod tests {
             class: ColumnClass::Replicated,
         }
     }
+    fn identity() -> crate::RowIdentity {
+        crate::RowIdentity::new(crate::WriterId::from_bytes([7; 32]), 1).unwrap()
+    }
     fn rows() -> TypedRows {
         let schema = LogicalSchema {
             format: LOGICAL_SCHEMA_FORMAT,
@@ -376,12 +377,12 @@ mod tests {
                 sql_name: "items".into(),
             granted_like: None,
                 class: TableClass::Replayed,
-                create_sql: "CREATE TABLE items(key TEXT NOT NULL COLLATE NOCASE PRIMARY KEY,n INTEGER NOT NULL,id INTEGER NOT NULL)".into(),
+                create_sql: "CREATE TABLE items(key TEXT NOT NULL COLLATE NOCASE PRIMARY KEY,n INTEGER NOT NULL,id BLOB NOT NULL)".into(),
                 auto_generate: false,
                 columns: vec![
                     column("key", Affinity::Text, Collation::Nocase),
                     column("n", Affinity::Integer, Collation::Binary),
-                    column("id", Affinity::Integer, Collation::Binary),
+                    column("id", Affinity::Blob, Collation::Binary),
                 ],
                 primary_key: vec!["key".into()],
                 partition_by: Vec::new(),
@@ -413,7 +414,7 @@ mod tests {
             vec![
                 SqlValue::Text(id.into()),
                 SqlValue::Integer(n),
-                SqlValue::Integer(4294967297),
+                identity().sql(),
             ]
         };
         let row = |id: &str| {
@@ -431,10 +432,7 @@ mod tests {
             before: None,
             after: Some(fields("a", 1)),
         };
-        assert_eq!(
-            rows.row_identity(&change).unwrap(),
-            Some(crate::RowIdentity::from_integer(4294967297).unwrap())
-        );
+        assert_eq!(rows.row_identity(&change).unwrap(), Some(identity()));
         // Typed tables replicate intents: no row image is admitted.
         assert!(
             rows.validate_changes(std::slice::from_ref(&change))
@@ -465,7 +463,7 @@ mod tests {
         let values = vec![
             SqlValue::Text("A".into()),
             SqlValue::Text("key".into()),
-            SqlValue::Integer(4294967297),
+            super::tests::identity().sql(),
         ];
         let domain = Scope {
             mesh: MeshId([3; 16]),

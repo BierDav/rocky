@@ -22,8 +22,8 @@ pub struct Inventory {
     pub format: u32,
     pub created: u64,
     pub publisher: PublicKey,
-    /// The domain's scope as the call contract spells it.
-    pub scope: serde_json::Value,
+    /// The domain this archive belongs to.
+    pub scope: rocky_core::Scope,
     /// The hash of the signed manifest the file is installed with.
     pub manifest: String,
     /// The node key of the device that made it; it signs the archive.
@@ -163,7 +163,7 @@ mod archive {
         target: &Path,
         staged: &[(&str, PathBuf)],
         settings: &Settings,
-        scope: serde_json::Value,
+        scope: rocky_core::Scope,
         revision: u64,
         node: &PrivateKey,
         created: u64,

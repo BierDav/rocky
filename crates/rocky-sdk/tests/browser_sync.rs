@@ -6,10 +6,10 @@
 //! and passes its relay, invitation and service bundle here at build time;
 //! the native side then checks that this node's write and claims reached it.
 #![cfg(target_family = "wasm")]
+use rocky_coordinator::certified::TrustBundle;
 use rocky_platform::{fs::Scratch, time};
 use rocky_sdk::{
-    Affinity, Column, Configuration, Coordination, Database, Failure, Network, Schema, Table,
-    TrustBundle, counters, params, transport::TransportOptions,
+    Affinity, Column, Configuration, Database, Failure, Network, Schema, Table, counters, params,
 };
 use std::sync::Arc;
 use wasm_bindgen_test::wasm_bindgen_test;
@@ -55,16 +55,21 @@ async fn a_browser_node_syncs_and_claims_with_a_native_node_over_a_relay() -> Re
         )
         .build()?;
     let directory = Scratch::new().await;
-    let network = TransportOptions::Iroh {
+    let network = rocky_iroh::Options {
         relay: Some(relay.into()),
         lookup: Some("disabled".into()),
         topic: false,
         local: false,
         bind: None,
     };
+    let coordinator_transport = network
+        .start(*rocky_sdk::credentials::PrivateKey::new().as_bytes())
+        .await?
+        .transport();
+    let coordinator = rocky_coordinator::Client::connect(&bundle, coordinator_transport.clone())?;
     let configuration = Configuration::new(directory.path(), &schema)?
         .network(Network::Owned(Arc::new(network)))
-        .coordination(Coordination::Service(Box::new(bundle)));
+        .coordination(coordinator);
     let db = configuration.join(invitation).await?.database;
     let session = db.session();
     session.set_automatic_sync(false).await?;
@@ -73,16 +78,7 @@ async fn a_browser_node_syncs_and_claims_with_a_native_node_over_a_relay() -> Re
 
     // The owner grants this node's identity a claim right for invoices once
     // it asks; the node fetches the claim link from it when it claims.
-    let scope: serde_json::Value = serde_json::from_str(&db.scope())?;
-    let reply: serde_json::Value = serde_json::from_str(
-        &session
-            .call(
-                serde_json::json!({"version": 1, "scope": scope, "request": {"type": "session"}})
-                    .to_string(),
-            )
-            .await?,
-    )?;
-    let principal = reply["value"]["principal"].as_str().ok_or("no principal")?;
+    let principal = session.info().await?.principal;
     note(&db, &format!("member {principal}")).await?;
     let deadline = time::Instant::now() + time::Duration::from_secs(60);
     loop {
@@ -147,5 +143,7 @@ async fn a_browser_node_syncs_and_claims_with_a_native_node_over_a_relay() -> Re
         (2, Some(counters::Lookup::Claimed(1)))
     );
     assert_eq!(db.claim(invoices, first).await?, 1);
-    db.close().await
+    db.close().await?;
+    coordinator_transport.close().await;
+    Ok(())
 }

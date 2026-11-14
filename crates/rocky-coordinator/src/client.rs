@@ -34,7 +34,7 @@ pub struct NetworkCoordinator {
 }
 /// Sees how each call ended: `Ok` once the service answered it, or the
 /// refusal; `Unavailable` when no voter answered.
-pub type Observer = Arc<dyn Fn(Result<(), &CoordinationError>) + Send + Sync>;
+pub use rocky_credentials::CoordinationObserver as Observer;
 impl NetworkCoordinator {
     /// A client of the voters' TCP addresses, such as the membership
     /// authority's.
@@ -144,7 +144,7 @@ impl NetworkCoordinator {
                     {
                         reply = timeout(Duration::from_secs(3), async {
                             let mut stream = transport
-                                .connect(&endpoint.address, Protocol::Coordinate)
+                                .connect(&endpoint.address, Protocol::Coordinate, None)
                                 .await
                                 .map_err(|_| CoordinationError::Unavailable)?;
                             converse(&mut stream, voter.key, genesis, &self.key, message()).await
@@ -154,7 +154,6 @@ impl NetworkCoordinator {
                         if reply.is_ok() {
                             break;
                         }
-                        transport.forget(&endpoint.address);
                     }
                     reply
                 }
@@ -413,7 +412,13 @@ impl NetworkCoordinator {
         revocations: RevocationSet,
     ) -> Result<Commitment, CoordinationError> {
         match self
-            .call(nonce(), Operation::Revoke { scope, revocations })
+            .call(
+                nonce(),
+                Operation::Revoke {
+                    scope,
+                    revocations: Box::new(revocations),
+                },
+            )
             .await?
         {
             Outcome::Revoked(digest) => Ok(digest),
@@ -590,3 +595,56 @@ impl DomainLog for NetworkCoordinator {
 }
 #[cfg(test)]
 mod tests;
+
+impl rocky_credentials::Coordinator for NetworkCoordinator {
+    fn bind(
+        &self,
+        key: PrivateKey,
+        certificate: SignedCapability,
+    ) -> Result<Arc<dyn rocky_credentials::Coordinator>, CoordinationError> {
+        if certificate.capability.subject != key.public_key() {
+            return Err(CoordinationError::Denied);
+        }
+        let client = Self::new(
+            self.genesis.clone(),
+            self.genesis.root,
+            self.genesis.genesis.mesh,
+            key,
+            self.route.clone(),
+        )?;
+        client.certify(certificate);
+        Ok(Arc::new(client))
+    }
+    fn certify(&self, certificate: SignedCapability) {
+        self.certify(certificate);
+    }
+    fn observe(&self, observer: Observer) {
+        self.observe(observer);
+    }
+    fn present_claims(&self, claims: Option<CredentialChain>) {
+        self.present_claims(claims);
+    }
+    fn claim(
+        &self,
+        scope: Scope,
+        counter: crate::counters::Name,
+        claim: crate::counters::Claim,
+    ) -> CoordinationFuture<'_, u64> {
+        Box::pin(self.claim(scope, counter, claim))
+    }
+    fn counter(
+        &self,
+        scope: Scope,
+        counter: crate::counters::Name,
+        claim: Option<crate::counters::Claim>,
+    ) -> CoordinationFuture<'_, crate::counters::Reading> {
+        Box::pin(self.counter(scope, counter, claim))
+    }
+    fn revoke(
+        &self,
+        scope: Scope,
+        revocations: RevocationSet,
+    ) -> CoordinationFuture<'_, Commitment> {
+        Box::pin(self.revoke(scope, revocations))
+    }
+}

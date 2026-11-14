@@ -304,7 +304,7 @@ impl<A: RowApplication> Inner<A> {
         through: i64,
         tip: bool,
         mut ledger: identity::IdentityLedger,
-    ) -> Result<BTreeSet<i64>, Error> {
+    ) -> Result<BTreeSet<rocky_core::RowIdentity>, Error> {
         let blob = encode(&scope)?;
         self.conn
             .execute("DELETE FROM secure_checkpoint_scratch WHERE scope=?", [id])
@@ -330,15 +330,18 @@ impl<A: RowApplication> Inner<A> {
             let mut cursor = bound;
             while let Some(last) = self
                 .replay_sealed(
-                    scope,
-                    id,
-                    Overlay::Rewind,
-                    self.workspace.tip,
-                    (cursor, through),
-                    STEP_OPERATIONS,
+                    checkpoint::ReplayRequest {
+                        scope,
+                        id,
+                        overlay: Overlay::Rewind,
+                        target: self.workspace.tip,
+                        after: cursor,
+                        through,
+                        limit: STEP_OPERATIONS,
+                        mode: checkpoint::ReplayMode::Mint,
+                    },
                     &mut fold,
                     &mut ledger,
-                    checkpoint::ReplayMode::Mint,
                 )
                 .await?
             {

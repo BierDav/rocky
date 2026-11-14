@@ -39,7 +39,6 @@ pub(super) const SCHEMA: &[&str] = &[
     receipts::SCHEMA[11],
     receipts::SCHEMA[12],
     "CREATE TABLE IF NOT EXISTS secure_author_sequences(node BLOB PRIMARY KEY,sequence INTEGER NOT NULL) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_node_authors(node BLOB PRIMARY KEY,number INTEGER NOT NULL) WITHOUT ROWID",
     // `key` is a 16-byte digest of the business key, keyed by the interned
     // scope id; lookups confirm the full key from the row.
     "CREATE TABLE IF NOT EXISTS secure_row_keys(scope INTEGER NOT NULL,row BLOB NOT NULL,key BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
@@ -53,7 +52,8 @@ pub(super) struct NodeAuthor {
     pub(super) credentials: CredentialChain,
     /// `credentials` with the digest this author's frames name.
     pub(super) chain: Chain,
-    pub(super) number: u32,
+    /// The writer identity: `key`'s public key.
+    pub(super) writer: WriterId,
 }
 
 pub(super) struct BirthMark {
@@ -64,13 +64,13 @@ pub(super) struct BirthMark {
 pub(crate) enum Raise {
     Carried,
     Own,
-    Statement { own: u32 },
+    Statement { own: u64 },
 }
 
 /// The identity marks one replay has passed: seeded from exactly the state
 /// it starts over, raised by eligible own births, never by carries or live maxima.
 #[derive(Clone, Debug, Default)]
-pub(super) struct IdentityLedger(BTreeMap<u32, checkpoint::IdentityMark>);
+pub(super) struct IdentityLedger(BTreeMap<WriterId, checkpoint::IdentityMark>);
 
 impl IdentityLedger {
     pub(super) fn based(marks: &[checkpoint::CoveredMark]) -> Result<Self, Error> {
@@ -87,7 +87,7 @@ impl IdentityLedger {
         }
         Ok(ledger)
     }
-    /// Raises `mark.author`'s mark; one author number has one signer.
+    /// Raises `mark.author`'s mark; a writer is its own signer.
     pub(super) fn merge(&mut self, mark: checkpoint::IdentityMark) -> Result<(), Error> {
         match self.0.get_mut(&mark.author) {
             Some(held) if held.signer != mark.signer => {
@@ -103,7 +103,7 @@ impl IdentityLedger {
             }
         }
     }
-    pub(super) fn get(&self, author: u32) -> Option<&checkpoint::IdentityMark> {
+    pub(super) fn get(&self, author: WriterId) -> Option<&checkpoint::IdentityMark> {
         self.0.get(&author)
     }
     pub(super) fn into_marks(self) -> Vec<checkpoint::IdentityMark> {
@@ -117,8 +117,25 @@ impl NodeAuthor {
             key: config.node.clone(),
             credentials: config.credentials.clone(),
             chain: Chain::new(config.credentials.clone())?,
-            number: config.credentials.author_number().map_err(credential)?,
+            writer: node_writer(&config.credentials, &config.node.public_key())?,
         })
+    }
+}
+/// The writer of a node credential chain: its node key, never a number.
+pub(super) fn node_writer(chain: &CredentialChain, key: &PublicKey) -> Result<WriterId, Error> {
+    check_node_chain(chain)?;
+    Ok(writer(key))
+}
+/// The stored row of an identity's incarnation.
+pub(super) fn incarnation(identity: rocky_core::RowIdentity) -> Commitment {
+    rocky_core::commitment("rocky.row-incarnation.v3", &identity.to_bytes())
+}
+/// Refuses a chain that does not end at a node certificate.
+pub(super) fn check_node_chain(chain: &CredentialChain) -> Result<(), Error> {
+    match chain.0.last() {
+        Some(leaf) if leaf.capability.kind == rocky_core::PrincipalKind::Node => Ok(()),
+        Some(_) => Err(denied("node credential required")),
+        None => Err(denied("node credential missing")),
     }
 }
 
@@ -168,38 +185,6 @@ impl<A: RowApplication> Inner<A> {
             .ok_or_else(|| denied("author sequence exhausted"))?;
         Ok(row.get::<i64>(0)? as u64)
     }
-    /// A node's number cannot change across renewal, scopes, or restart.
-    pub(super) async fn bind_node_author(&self, chain: &CredentialChain) -> Result<(), Error> {
-        let leaf = chain
-            .0
-            .last()
-            .ok_or_else(|| denied("node credential missing"))?;
-        let node = leaf.capability.subject;
-        let number = chain.author_number().map_err(credential)?;
-        let mut stored = self
-            .conn
-            .query(
-                "SELECT number FROM secure_node_authors WHERE node=?",
-                [node.as_bytes().to_vec()],
-            )
-            .await?;
-        if let Some(row) = stored.next().await? {
-            if row.get::<i64>(0)? != i64::from(number) {
-                return Err(denied("a node cannot claim different author numbers"));
-            }
-        } else {
-            self.conn
-                .execute(
-                    "INSERT INTO secure_node_authors VALUES(?,?)",
-                    vec![
-                        crate::sqlite::Value::Blob(node.as_bytes().to_vec()),
-                        crate::sqlite::Value::Integer(i64::from(number)),
-                    ],
-                )
-                .await?;
-        }
-        Ok(())
-    }
     pub(super) fn storage_row(&self, change: &RowChange) -> Result<Commitment, Error> {
         Ok(
             match self
@@ -207,9 +192,7 @@ impl<A: RowApplication> Inner<A> {
                 .row_identity(change)
                 .map_err(|message| denied(&message))?
             {
-                Some(id) => {
-                    rocky_core::commitment("rocky.row-incarnation.v2", &id.integer().to_le_bytes())
-                }
+                Some(id) => incarnation(id),
                 None => change.row,
             },
         )
@@ -429,8 +412,8 @@ impl<A: RowApplication> Inner<A> {
     pub(super) async fn highest_identity(
         &self,
         scope: ResourceScope,
-        author: u32,
-    ) -> Result<u32, Error> {
+        author: WriterId,
+    ) -> Result<u64, Error> {
         Ok(self
             .identity_marks(scope)
             .await?
@@ -464,7 +447,7 @@ impl<A: RowApplication> Inner<A> {
             .into_iter()
             .map(|row| {
                 let [
-                    SqlValue::Integer(author),
+                    SqlValue::Blob(author),
                     SqlValue::Blob(signer),
                     SqlValue::Integer(sequence),
                 ] = row.as_slice()
@@ -472,8 +455,7 @@ impl<A: RowApplication> Inner<A> {
                     return Err(Error::Corrupt("row identity mark".into()));
                 };
                 Ok(checkpoint::IdentityMark {
-                    author: u32::try_from(*author)
-                        .map_err(|_| denied("invalid identity author"))?,
+                    author: stored_writer(author)?,
                     signer: PublicKey::from_bytes(
                         signer
                             .as_slice()
@@ -481,7 +463,7 @@ impl<A: RowApplication> Inner<A> {
                             .map_err(|_| denied("invalid identity signer"))?,
                     )
                     .map_err(|error| denied(&error.to_string()))?,
-                    sequence: u32::try_from(*sequence)
+                    sequence: u64::try_from(*sequence)
                         .map_err(|_| denied("invalid identity sequence"))?,
                 })
             })
@@ -512,28 +494,26 @@ impl<A: RowApplication> Inner<A> {
                 .iter()
                 .any(|held| held.author == mark.author && held.signer != mark.signer)
             {
-                return Err(denied(
-                    "checkpoint author number belongs to another signing key",
-                ));
+                return Err(denied("checkpoint writer belongs to another signing key"));
             }
         }
         for scope in scopes {
             self.conn.execute(
                 "INSERT INTO secure_identity_marks VALUES(?,?,?,?) ON CONFLICT(scope,author) DO UPDATE SET sequence=MAX(sequence,excluded.sequence)",
-                bindings(vec![SqlValue::Blob(encode(&scope)?), SqlValue::Integer(i64::from(mark.author)), SqlValue::Blob(mark.signer.as_bytes().to_vec()), SqlValue::Integer(i64::from(mark.sequence))]),
+                bindings(vec![SqlValue::Blob(encode(&scope)?), writer_value(mark.author), SqlValue::Blob(mark.signer.as_bytes().to_vec()), SqlValue::Integer(mark.sequence as i64)]),
             ).await?;
         }
         if own > 0 {
             self.conn.execute(
                 "INSERT INTO secure_identity_own VALUES(?,?,?) ON CONFLICT(scope,author) DO UPDATE SET sequence=MAX(sequence,excluded.sequence)",
-                bindings(vec![SqlValue::Blob(encode(&scope)?), SqlValue::Integer(i64::from(mark.author)), SqlValue::Integer(i64::from(own))]),
+                bindings(vec![SqlValue::Blob(encode(&scope)?), writer_value(mark.author), SqlValue::Integer(own as i64)]),
             ).await?;
         }
         // S records only the statement's own-birth maximum in this partition.
         if matches!(raise, Raise::Statement { .. }) && own > 0 {
             self.conn.execute(
                 "INSERT INTO secure_identity_summary VALUES(?,?,?) ON CONFLICT(scope,author) DO UPDATE SET sequence=MAX(sequence,excluded.sequence)",
-                bindings(vec![SqlValue::Blob(encode(&scope)?), SqlValue::Integer(i64::from(mark.author)), SqlValue::Integer(i64::from(own))]),
+                bindings(vec![SqlValue::Blob(encode(&scope)?), writer_value(mark.author), SqlValue::Integer(own as i64)]),
             ).await?;
         }
         Ok(())
@@ -554,7 +534,7 @@ impl<A: RowApplication> Inner<A> {
         }
         self.conn.execute(
             "INSERT INTO secure_identity_ledger VALUES(?,?,?,?) ON CONFLICT(scope,author) DO UPDATE SET sequence=MAX(sequence,excluded.sequence)",
-            bindings(vec![SqlValue::Blob(encode(&scope)?), SqlValue::Integer(i64::from(mark.author)), SqlValue::Blob(mark.signer.as_bytes().to_vec()), SqlValue::Integer(i64::from(mark.sequence))]),
+            bindings(vec![SqlValue::Blob(encode(&scope)?), writer_value(mark.author), SqlValue::Blob(mark.signer.as_bytes().to_vec()), SqlValue::Integer(mark.sequence as i64)]),
         ).await?;
         Ok(())
     }
@@ -859,20 +839,20 @@ impl<A: RowApplication> Inner<A> {
     pub(super) async fn summary_marks(
         &self,
         scope: ResourceScope,
-    ) -> Result<BTreeMap<u32, u32>, Error> {
+    ) -> Result<BTreeMap<WriterId, u64>, Error> {
         self.sequence_marks("secure_identity_summary", scope).await
     }
     pub(super) async fn own_marks(
         &self,
         scope: ResourceScope,
-    ) -> Result<BTreeMap<u32, u32>, Error> {
+    ) -> Result<BTreeMap<WriterId, u64>, Error> {
         self.sequence_marks("secure_identity_own", scope).await
     }
     async fn sequence_marks(
         &self,
         table: &str,
         scope: ResourceScope,
-    ) -> Result<BTreeMap<u32, u32>, Error> {
+    ) -> Result<BTreeMap<WriterId, u64>, Error> {
         let records = collect_rows(
             self.conn
                 .query(
@@ -885,9 +865,9 @@ impl<A: RowApplication> Inner<A> {
         records
             .into_iter()
             .map(|row| match row.as_slice() {
-                [SqlValue::Integer(author), SqlValue::Integer(sequence)] => Ok((
-                    u32::try_from(*author).map_err(|_| Error::Corrupt("summary author".into()))?,
-                    u32::try_from(*sequence)
+                [SqlValue::Blob(author), SqlValue::Integer(sequence)] => Ok((
+                    stored_writer(author)?,
+                    u64::try_from(*sequence)
                         .map_err(|_| Error::Corrupt("summary sequence".into()))?,
                 )),
                 _ => Err(Error::Corrupt("summary mark".into())),
@@ -929,7 +909,7 @@ impl<A: RowApplication> Inner<A> {
                 marks.push(BirthMark {
                     carried: payload.carried(&write.change.row).is_some(),
                     mark: checkpoint::IdentityMark {
-                        author: identity.author(),
+                        author: identity.writer(),
                         signer: match payload.carried(&write.change.row) {
                             Some(carried) => carried.proof.signer()?,
                             None => operation.header.public_key,
@@ -1140,18 +1120,16 @@ impl<A: RowApplication> Inner<A> {
                 };
                 after = row.clone();
                 let record = self.decode_record(fields).await?;
-                if let Some(identity) = record.identity {
-                    let identity = rocky_core::RowIdentity::from_integer(identity)
-                        .map_err(|error| Error::Corrupt(error.to_string()))?;
-                    if !marks.iter().any(|mark| {
-                        mark.author == identity.author()
+                if let Some(identity) = record.identity
+                    && !marks.iter().any(|mark| {
+                        mark.author == identity.writer()
                             && mark.sequence >= identity.sequence()
                             && (record.moved_from.is_some() || mark.own >= identity.sequence())
-                    }) {
-                        return Err(Error::Corrupt(
-                            "checkpoint row identity exceeds its covered mark".into(),
-                        ));
-                    }
+                    })
+                {
+                    return Err(Error::Corrupt(
+                        "checkpoint row identity exceeds its covered mark".into(),
+                    ));
                 }
             }
             if records.len() < 256 {
@@ -1162,28 +1140,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 // Checkpoint row identities use the same canonical string boundary as callers.
-pub(super) mod decimal {
-    use serde::{Deserialize, Serialize};
-    pub fn serialize<S: serde::Serializer>(
-        identity: &Option<i64>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        identity
-            .map(rocky_core::RowIdentity::from_integer)
-            .transpose()
-            .map_err(serde::ser::Error::custom)?
-            .serialize(serializer)
-    }
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Option<i64>, D::Error> {
-        Ok(
-            Option::<rocky_core::RowIdentity>::deserialize(deserializer)?
-                .map(rocky_core::RowIdentity::integer),
-        )
-    }
-}
-
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Test access: the `(author, sequence)` marks a replay of kept `seal`
     /// starts from, or None when that prefix is unavailable.
@@ -1192,7 +1148,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         scope: ResourceScope,
         seal: Commitment,
-    ) -> Option<Vec<(u32, u32)>> {
+    ) -> Option<Vec<(WriterId, u64)>> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let id = inner.find_scope_id(scope).await.unwrap()?;
         let (_, bound) = inner.kept_rewind(seal).await.unwrap()?.at(id)?;
@@ -1221,24 +1177,27 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_covered_mark_seeds_only_own_births_and_requires_the_signed_own_field() {
-        let key = PrivateKey::from_bytes(&[221; 32]).public_key();
+        let (seven, eight) = (
+            PrivateKey::from_bytes(&[221; 32]).public_key(),
+            PrivateKey::from_bytes(&[222; 32]).public_key(),
+        );
         let marks = [
             checkpoint::CoveredMark {
-                author: 7,
-                signer: key,
+                author: writer(&seven),
+                signer: seven,
                 sequence: 9,
                 own: 3,
             },
             checkpoint::CoveredMark {
-                author: 8,
-                signer: key,
+                author: writer(&eight),
+                signer: eight,
                 sequence: 8,
                 own: 0,
             },
         ];
         let ledger = IdentityLedger::based(&marks).unwrap();
-        assert_eq!(ledger.get(7).unwrap().sequence, 3);
-        assert!(ledger.get(8).is_none());
+        assert_eq!(ledger.get(writer(&seven)).unwrap().sequence, 3);
+        assert!(ledger.get(writer(&eight)).is_none());
         let mut unsigned_own = serde_json::to_value(&marks[0]).unwrap();
         unsigned_own.as_object_mut().unwrap().remove("own");
         assert!(serde_json::from_value::<checkpoint::CoveredMark>(unsigned_own).is_err());
@@ -1247,8 +1206,9 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn an_identity_author_with_two_signers_fails_closed() {
         let (one, two) = (PrivateKey::new(), PrivateKey::new());
+        let author = writer(&one.public_key());
         let mark = |key: &PrivateKey, sequence| checkpoint::IdentityMark {
-            author: 7,
+            author,
             signer: key.public_key(),
             sequence,
         };
@@ -1256,6 +1216,6 @@ mod tests {
         let mut ledger = IdentityLedger::seeded(&[mark(&one, 3)]).unwrap();
         assert!(ledger.merge(mark(&two, 9)).is_err());
         ledger.merge(mark(&one, 2)).unwrap();
-        assert_eq!(ledger.get(7).unwrap().sequence, 3);
+        assert_eq!(ledger.get(author).unwrap().sequence, 3);
     }
 }

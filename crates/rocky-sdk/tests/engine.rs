@@ -5,6 +5,7 @@
 use rocky_sdk::{Engine, Network, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
+use support::snapshot as snap;
 
 mod support;
 
@@ -12,15 +13,14 @@ type Failure = Box<dyn std::error::Error + Send + Sync>;
 
 const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"body","type":"text","not_null":false}],"primary_key":["key"]}]}"#;
 
-fn iroh() -> Value {
+fn iroh() -> rocky_iroh::Options {
     iroh_at(0)
 }
 /// Loopback only: no relay, no address lookup.
-fn iroh_at(port: u16) -> Value {
-    json!({"kind": "iroh", "relay": "disabled", "lookup": "disabled", "topic": false, "local": false, "bind": format!("127.0.0.1:{port}")})
+fn iroh_at(port: u16) -> rocky_iroh::Options {
+    rocky_iroh::Options::isolated(&format!("127.0.0.1:{port}"))
 }
 /// A port free now, so a restarted creator listens where members look.
-#[cfg(feature = "iroh")]
 fn free_port() -> u16 {
     let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("udp");
     socket.local_addr().expect("addr").port()
@@ -28,92 +28,99 @@ fn free_port() -> u16 {
 
 struct Db {
     engine: Arc<Engine>,
-    scope: Value,
+    scope: rocky_sdk::Scope,
 }
 impl Db {
-    fn open(directory: &Path, mode: Value, transport: Value) -> Result<Self, Failure> {
+    fn open(
+        directory: &Path,
+        mode: rocky_sdk::EngineMode,
+        transport: rocky_iroh::Options,
+    ) -> Result<Self, Failure> {
         Self::with_secrets(directory, mode, transport, None)
     }
     fn with_secrets(
         directory: &Path,
-        mode: Value,
-        transport: Value,
+        mode: rocky_sdk::EngineMode,
+        transport: rocky_iroh::Options,
         secrets: Option<Arc<dyn rocky_sdk::SecretStore>>,
     ) -> Result<Self, Failure> {
-        let mut options = mode;
-        options["directory"] = json!(directory);
-        options["transport"] = transport;
-        let engine = Engine::open(&options.to_string(), SCHEMA, secrets)?;
-        let scope = serde_json::from_str(&engine.scope())?;
+        let options = rocky_sdk::EngineOptions {
+            directory: directory.to_path_buf(),
+            transport: Arc::new(transport),
+            mode,
+        };
+        let engine = Engine::open(options, &rocky_sdk::Schema::parse(SCHEMA)?, secrets)?;
+        let scope = engine.scope();
 
         Ok(Self { engine, scope })
     }
-    #[cfg(feature = "iroh")]
-    fn create(directory: &Path, transport: Value) -> Result<Self, Failure> {
-        Self::open(directory, json!({"mode": "create"}), transport)
-    }
-    fn join(directory: &Path, invitation: &str, transport: Value) -> Result<Self, Failure> {
+    fn create(directory: &Path, transport: rocky_iroh::Options) -> Result<Self, Failure> {
         Self::open(
             directory,
-            json!({"mode": "join", "invitation": invitation}),
+            rocky_sdk::EngineMode::Create {
+                credential_ttl: None,
+                root: None,
+            },
             transport,
         )
     }
-    #[cfg(feature = "iroh")]
-    fn resume(directory: &Path, transport: Value) -> Result<Self, Failure> {
-        Self::open(directory, json!({"mode": "resume"}), transport)
-    }
-    /// The value of a successful call, or its error object.
-    async fn call(&self, request: Value) -> Result<Value, Value> {
-        support::call(&self.scope, request, |request| self.raw_call(request)).await
-    }
-    async fn raw_call(&self, request: Value) -> Result<Value, Value> {
-        let call = json!({"version": 1, "scope": self.scope, "request": request});
-        let reply: Value = serde_json::from_str(
-            &self
-                .engine
-                .call(call.to_string())
-                .await
-                .map_err(|error| json!(error.to_string()))?,
+    fn join(
+        directory: &Path,
+        invitation: &str,
+        transport: rocky_iroh::Options,
+    ) -> Result<Self, Failure> {
+        Self::open(
+            directory,
+            rocky_sdk::EngineMode::Join {
+                invitation: snap::text(&(invitation)),
+            },
+            transport,
         )
-        .map_err(|error| json!(error.to_string()))?;
-        if reply["status"] == "ok" {
-            Ok(reply["value"].clone())
-        } else {
-            Err(reply["error"].clone())
-        }
     }
-    async fn ok(&self, request: Value) -> Value {
-        match self.call(request.clone()).await {
-            Ok(value) => value,
-            Err(error) => panic!("{request} failed: {error}"),
-        }
+    fn resume(directory: &Path, transport: rocky_iroh::Options) -> Result<Self, Failure> {
+        Self::open(directory, rocky_sdk::EngineMode::Resume, transport)
     }
     async fn invite(&self) -> String {
-        self.ok(json!({"type": "invitation", "profile": {"kind": "writer", "scopes": ["items"]}}))
-            .await["uri"]
+        snap::ok(self.engine.session().invite(
+            Some(rocky_sdk::GrantProfile::Writer {
+                scopes: ["items".to_owned()].into_iter().collect(),
+            }),
+            None,
+        ))
+        .await["uri"]
             .as_str()
             .unwrap_or_default()
             .to_owned()
     }
     async fn sync(&self) -> Value {
-        self.ok(json!({"type": "sync"})).await
+        snap::ok(self.engine.session().sync_once()).await
     }
-    async fn mutate(&self, handle: u8, payload: Value, id: Option<&str>) -> Result<Value, Value> {
-        self.call(json!({
-            "type": "mutate",
-            "handle": vec![handle; 32],
-            "payload": payload.to_string().into_bytes(),
-            "entity": id.map(|id| json!({"id": id})),
-            "baseline": null,
-        }))
+    async fn mutate(
+        &self,
+        handle: u8,
+        payload: snap::Action,
+        id: Option<&str>,
+    ) -> Result<Value, Value> {
+        snap::observe(snap::mutate(
+            self.engine.session(),
+            vec![handle; 32],
+            payload,
+            id.map(str::to_owned),
+            None,
+        ))
         .await
     }
     async fn add(&self, handle: u8, title: &str) -> String {
         let reply = self
             .mutate(
                 handle,
-                json!({"type": "create", "collection": "items", "values": {"title": title, "completed": false}}),
+                snap::Action::Create {
+                    table: "items".to_owned(),
+                    values: vec![
+                        ("title".to_owned(), snap::field(json!(title))),
+                        ("completed".to_owned(), snap::field(json!(false))),
+                    ],
+                },
                 None,
             )
             .await
@@ -122,9 +129,14 @@ impl Db {
     }
     /// Titles and completion of every item, by id.
     async fn items(&self) -> Vec<(String, String, i64)> {
-        let page = self
-            .ok(json!({"type": "read", "query": {"sql": "SELECT key, title, completed FROM items ORDER BY key", "values": [], "max_rows": 1024}}))
-            .await;
+        let page = snap::ok(self.engine.session().read(rocky_sdk::ReadQuery {
+            sql: "SELECT key, title, completed FROM items ORDER BY key".to_owned(),
+            values: vec![],
+            max_rows: 1024,
+            max_bytes: None,
+            cursor: None,
+        }))
+        .await;
         page["rows"]
             .as_array()
             .into_iter()
@@ -151,8 +163,7 @@ fn titles(items: &[(String, String, i64)]) -> Vec<&str> {
     titles
 }
 
-#[cfg(feature = "iroh")]
-async fn converge(at: fn(u16) -> Value) -> Result<(), Failure> {
+async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     // The creator keeps its port across the restart.
     let port = free_port();
@@ -161,22 +172,27 @@ async fn converge(at: fn(u16) -> Value) -> Result<(), Failure> {
     let b_keys = Arc::new(support::secrets::Keys::default());
     let creator = Db::with_secrets(
         &root.path().join("a"),
-        json!({"mode":"create"}),
+        rocky_sdk::EngineMode::Create {
+            credential_ttl: None,
+            root: None,
+        },
         transport(),
         Some(a_keys.clone()),
     )?;
     assert_eq!(
-        creator.ok(json!({"type": "domain"})).await["issuer"],
+        snap::ok(creator.engine.session().domain()).await["issuer"],
         json!(true)
     );
     let member = Db::with_secrets(
         &root.path().join("b"),
-        json!({"mode":"join", "invitation":creator.invite().await}),
+        rocky_sdk::EngineMode::Join {
+            invitation: snap::text(&(creator.invite().await)),
+        },
         at(0),
         Some(b_keys.clone()),
     )?;
     assert_eq!(
-        member.ok(json!({"type": "domain"})).await["issuer"],
+        snap::ok(member.engine.session().domain()).await["issuer"],
         json!(false)
     );
     assert_eq!(member.scope, creator.scope);
@@ -186,14 +202,16 @@ async fn converge(at: fn(u16) -> Value) -> Result<(), Failure> {
     assert_eq!(titles(&member.items().await), ["Milk"]);
 
     // Offline edits of different fields converge; a delete is permanent.
-    member
-        .ok(json!({"type": "networking_control", "enabled": false}))
-        .await;
+    snap::ok(member.engine.session().set_networking_enabled(false)).await;
     assert_eq!(member.sync().await["skip"], "networking_disabled");
     creator
         .mutate(
             2,
-            json!({"type": "set", "collection": "items", "field": "title", "value": "Oat milk"}),
+            snap::Action::Set {
+                table: "items".to_owned(),
+                field: "title".to_owned(),
+                value: snap::field(json!("Oat milk")),
+            },
             Some(&milk),
         )
         .await
@@ -201,15 +219,17 @@ async fn converge(at: fn(u16) -> Value) -> Result<(), Failure> {
     member
         .mutate(
             3,
-            json!({"type": "set", "collection": "items", "field": "completed", "value": true}),
+            snap::Action::Set {
+                table: "items".to_owned(),
+                field: "completed".to_owned(),
+                value: snap::field(json!(true)),
+            },
             Some(&milk),
         )
         .await
         .map_err(|error| error.to_string())?;
     member.add(4, "Eggs").await;
-    member
-        .ok(json!({"type": "networking_control", "enabled": true}))
-        .await;
+    snap::ok(member.engine.session().set_networking_enabled(true)).await;
     member.sync().await;
     assert_eq!(creator.items().await, member.items().await);
     assert!(
@@ -221,7 +241,9 @@ async fn converge(at: fn(u16) -> Value) -> Result<(), Failure> {
     creator
         .mutate(
             5,
-            json!({"type": "delete", "collection": "items"}),
+            snap::Action::Delete {
+                table: "items".to_owned(),
+            },
             Some(&milk),
         )
         .await
@@ -229,7 +251,11 @@ async fn converge(at: fn(u16) -> Value) -> Result<(), Failure> {
     member
         .mutate(
             6,
-            json!({"type": "set", "collection": "items", "field": "title", "value": "Late"}),
+            snap::Action::Set {
+                table: "items".to_owned(),
+                field: "title".to_owned(),
+                value: snap::field(json!("Late")),
+            },
             Some(&milk),
         )
         .await
@@ -242,13 +268,13 @@ async fn converge(at: fn(u16) -> Value) -> Result<(), Failure> {
     tokio::join!(member.close(), creator.close());
     let creator = Db::with_secrets(
         &root.path().join("a"),
-        json!({"mode":"resume"}),
+        rocky_sdk::EngineMode::Resume,
         transport(),
         Some(a_keys),
     )?;
     let member = Db::with_secrets(
         &root.path().join("b"),
-        json!({"mode":"resume"}),
+        rocky_sdk::EngineMode::Resume,
         at(0),
         Some(b_keys),
     )?;
@@ -261,13 +287,11 @@ async fn converge(at: fn(u16) -> Value) -> Result<(), Failure> {
     Ok(())
 }
 
-#[cfg(feature = "iroh")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn devices_converge_over_iroh() -> Result<(), Failure> {
     converge(iroh_at).await
 }
 
-#[cfg(feature = "iroh")]
 #[tokio::test]
 async fn mutations_are_durable_once_and_definite_rejections_are_final() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -276,19 +300,36 @@ async fn mutations_are_durable_once_and_definite_rejections_are_final() -> Resul
     assert_eq!(id.len(), 64);
     // The same handle reports its earlier commit and creates nothing else.
     let replay = db
-        .mutate(9, json!({"type": "create", "collection": "items", "values": {"title": "Tea", "completed": false}}), None)
+        .mutate(
+            9,
+            snap::Action::Create {
+                table: "items".to_owned(),
+                values: vec![
+                    ("title".to_owned(), snap::field(json!("Tea"))),
+                    ("completed".to_owned(), snap::field(json!(false))),
+                ],
+            },
+            None,
+        )
         .await
         .map_err(|error| error.to_string())?;
     assert_eq!(replay["replayed"], json!(true));
-    assert_eq!(
-        db.ok(json!({"type": "mutation_progress", "handle": vec![9u8; 32]}))
-            .await["committed"],
-        json!(true)
-    );
+    let handle = snap::mutation_handle(db.engine.session(), &[9; 32], None).await?;
+    assert!(db.engine.session().mutation_committed(handle).await?);
     db.close().await;
     let db = Db::resume(root.path(), iroh())?;
     let replay = db
-        .mutate(9, json!({"type": "create", "collection": "items", "values": {"title": "Tea", "completed": false}}), None)
+        .mutate(
+            9,
+            snap::Action::Create {
+                table: "items".to_owned(),
+                values: vec![
+                    ("title".to_owned(), snap::field(json!("Tea"))),
+                    ("completed".to_owned(), snap::field(json!(false))),
+                ],
+            },
+            None,
+        )
         .await
         .map_err(|error| error.to_string())?;
     assert_eq!(replay["replayed"], json!(true));
@@ -296,19 +337,34 @@ async fn mutations_are_durable_once_and_definite_rejections_are_final() -> Resul
     // Rows of another collection, invalid values and unknown fields are definite.
     for (payload, entity) in [
         (
-            json!({"type": "set", "collection": "notes", "field": "body", "value": "x"}),
+            snap::Action::Set {
+                table: "notes".to_owned(),
+                field: "body".to_owned(),
+                value: snap::field(json!("x")),
+            },
             Some(id.as_str()),
         ),
         (
-            json!({"type": "set", "collection": "items", "field": "completed", "value": "yes"}),
+            snap::Action::Set {
+                table: "items".to_owned(),
+                field: "completed".to_owned(),
+                value: snap::field(json!("yes")),
+            },
             Some(id.as_str()),
         ),
         (
-            json!({"type": "set", "collection": "items", "field": "missing", "value": "x"}),
+            snap::Action::Set {
+                table: "items".to_owned(),
+                field: "missing".to_owned(),
+                value: snap::field(json!("x")),
+            },
             Some(id.as_str()),
         ),
         (
-            json!({"type": "create", "collection": "items", "values": {"title": "Only"}}),
+            snap::Action::Create {
+                table: "items".to_owned(),
+                values: vec![("title".to_owned(), snap::field(json!("Only")))],
+            },
             None,
         ),
     ] {
@@ -322,16 +378,21 @@ async fn mutations_are_durable_once_and_definite_rejections_are_final() -> Resul
     // Reads cannot reach protocol tables or write.
     for sql in ["SELECT * FROM secure_rows", "DELETE FROM items"] {
         assert!(
-            db.call(json!({"type": "read", "query": {"sql": sql, "values": [], "max_rows": 10}}))
-                .await
-                .is_err()
+            snap::observe(db.engine.session().read(rocky_sdk::ReadQuery {
+                sql: snap::text(&(sql)),
+                values: vec![],
+                max_rows: 10,
+                max_bytes: None,
+                cursor: None
+            }))
+            .await
+            .is_err()
         );
     }
     db.close().await;
     Ok(())
 }
 
-#[cfg(feature = "iroh")]
 #[tokio::test]
 async fn pages_and_subscriptions_follow_committed_revisions() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -339,10 +400,15 @@ async fn pages_and_subscriptions_follow_committed_revisions() -> Result<(), Fail
     for handle in 1..=5 {
         db.add(handle, &format!("Item {handle}")).await;
     }
-    let query =
-        json!({"sql": "SELECT title FROM items ORDER BY title", "values": [], "max_rows": 2});
+    let query = rocky_sdk::ReadQuery {
+        sql: "SELECT title FROM items ORDER BY title".to_owned(),
+        values: vec![],
+        max_rows: 2,
+        max_bytes: None,
+        cursor: None,
+    };
     let mut titles = Vec::new();
-    let mut page = db.ok(json!({"type": "read", "query": query})).await;
+    let mut page = snap::ok(db.engine.session().read((query).clone())).await;
     loop {
         titles.extend(
             page["rows"]
@@ -355,34 +421,44 @@ async fn pages_and_subscriptions_follow_committed_revisions() -> Result<(), Fail
             break;
         };
         let mut next = query.clone();
-        next["cursor"] = json!(cursor);
-        page = db.ok(json!({"type": "read", "query": next})).await;
+        next.cursor = Some((cursor).to_string());
+        page = snap::ok(db.engine.session().read((next).clone())).await;
     }
     assert_eq!(titles.len(), 5);
 
-    let subscription =
-        db.ok(json!({"type": "subscribe", "query": query})).await["subscription"].clone();
-    let first = db
-        .ok(json!({"type": "next", "subscription": subscription}))
-        .await;
+    let subscription = snap::ok(async {
+        let id = db.engine.session().subscribe((query).clone()).await?;
+        Ok(json!({"subscription":id.to_string()}))
+    })
+    .await["subscription"]
+        .clone();
+    let first = snap::ok(
+        db.engine
+            .session()
+            .next(snap::integer(&(subscription)) as u64),
+    )
+    .await;
     let waiting = {
         let engine = db.engine.clone();
-        let call = json!({"version": 1, "scope": db.scope, "request": {"type": "next", "subscription": subscription}});
-        tokio::spawn(async move { engine.call(call.to_string()).await })
+        let subscription = snap::integer(&subscription) as u64;
+        tokio::spawn(async move { engine.session().next(subscription).await })
     };
     tokio::task::yield_now().await;
     assert!(!waiting.is_finished());
     db.add(6, "A first").await;
-    let changed: Value = serde_json::from_str(&waiting.await??)?;
-    assert_ne!(changed["value"]["revision"], first["revision"]);
-    assert_eq!(changed["value"]["rows"][0][0]["value"], "A first");
-    db.ok(json!({"type": "unsubscribe", "subscription": subscription}))
-        .await;
+    let changed = waiting.await??;
+    assert_ne!(json!(changed.revision.to_string()), first["revision"]);
+    assert_eq!(changed.rows[0][0].to_text().ok_or("title")?, "A first");
+    snap::ok(
+        db.engine
+            .session()
+            .unsubscribe(snap::integer(&(subscription)) as u64),
+    )
+    .await;
     db.close().await;
     Ok(())
 }
 
-#[cfg(feature = "iroh")]
 #[tokio::test]
 async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -390,61 +466,91 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
     let alice = Db::join(&root.path().join("b"), &creator.invite().await, iroh())?;
     let invitation = creator.invite().await;
     // A wrong application schema does not consume the invitation.
-    let mut wrong = json!({"mode": "join", "invitation": invitation});
-    wrong["directory"] = json!(root.path().join("wrong"));
-    wrong["transport"] = iroh();
-    let other = SCHEMA.replace("shopping", "other");
-    assert!(Engine::open(&wrong.to_string(), &other, None).is_err());
+    let wrong = rocky_sdk::EngineOptions {
+        directory: root.path().join("wrong"),
+        transport: Arc::new(iroh()),
+        mode: rocky_sdk::EngineMode::Join {
+            invitation: invitation.clone(),
+        },
+    };
+    let other = rocky_sdk::Schema::parse(&SCHEMA.replace("shopping", "other"))?;
+    assert!(Engine::open(wrong, &other, None).is_err());
     let bob = Db::join(&root.path().join("c"), &invitation, iroh())?;
     // A used invitation enrolls nobody else.
     assert!(Db::join(&root.path().join("d"), &invitation, iroh()).is_err());
 
-    let status = alice.ok(json!({"type": "session"})).await;
+    let status = snap::ok(alice.engine.session().info()).await;
     assert_eq!(status["revocations"]["statements"], 0);
     assert_ne!(status["principal"], status["node"]);
-    let renewed = alice.ok(json!({"type": "renew"})).await;
+    let renewed = snap::ok(async {
+        alice.engine.session().renew().await?;
+        alice.engine.session().info().await
+    })
+    .await;
     assert!(renewed["expires"].as_str() >= status["expires"].as_str());
 
     // Revoking Bob adds a statement; Alice learns it on her next sync.
     // The creator's identity, Alice's and Bob's.
-    let identities = creator.ok(json!({"type": "identities"})).await;
+    let identities = snap::ok(creator.engine.session().identities()).await;
     assert_eq!(identities["identities"].as_array().map(Vec::len), Some(3));
-    let bob_identity = bob.ok(json!({"type": "session"})).await["principal"].clone();
+    let bob_identity = snap::ok(bob.engine.session().info()).await["principal"].clone();
     assert_eq!(
-        creator
-            .ok(json!({"type": "revoke", "identity": bob_identity}))
-            .await["revocations"]["statements"],
+        snap::ok(
+            creator
+                .engine
+                .session()
+                .revoke_identity(&(snap::text(&(bob_identity))))
+        )
+        .await["revocations"]["statements"],
         1
     );
     creator.add(1, "After revocation").await;
     alice.sync().await;
     assert_eq!(
-        alice.ok(json!({"type": "session"})).await["revocations"]["statements"],
+        snap::ok(alice.engine.session().info()).await["revocations"]["statements"],
         1
     );
     assert_eq!(titles(&alice.items().await), ["After revocation"]);
     // A refused link need not carry the signed revocation. Renewal fetches
     // that statement before checking local sync refusal and revoked reads.
-    assert!(bob.call(json!({"type": "renew"})).await.is_err());
-    assert!(bob.call(json!({"type": "sync"})).await.is_err());
+    assert!(
+        snap::observe(async {
+            bob.engine.session().renew().await?;
+            bob.engine.session().info().await
+        })
+        .await
+        .is_err()
+    );
+    assert!(
+        snap::observe(bob.engine.session().sync_once())
+            .await
+            .is_err()
+    );
     assert!(bob.items().await.is_empty());
 
     // The creator cannot log out; a member can, and purging removes its data.
-    assert!(creator.call(json!({"type": "logout"})).await.is_err());
-    alice.ok(json!({"type": "logout", "purge": true})).await;
     assert!(
-        alice
-            .call(
-                json!({"type": "read", "query": {"sql": "SELECT 1", "values": [], "max_rows": 1}})
-            )
+        snap::observe(creator.engine.session().logout(false))
             .await
             .is_err()
+    );
+    snap::ok(alice.engine.session().logout(true)).await;
+    assert!(
+        snap::observe(alice.engine.session().read(rocky_sdk::ReadQuery {
+            sql: "SELECT 1".to_owned(),
+            values: vec![],
+            max_rows: 1,
+            max_bytes: None,
+            cursor: None
+        }))
+        .await
+        .is_err()
     );
     alice.close().await;
     assert!(!root.path().join("b/identity.json").exists());
     assert!(!root.path().join("b/secrets").exists());
     assert!(Db::resume(&root.path().join("b"), iroh()).is_err());
-    bob.ok(json!({"type": "logout"})).await;
+    snap::ok(bob.engine.session().logout(false)).await;
     bob.close().await;
     assert!(Db::resume(&root.path().join("c"), iroh()).is_err());
     creator.close().await;
@@ -455,24 +561,46 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
 async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let open = |directory: &str, mode: Value, name: &'static str| -> Result<Db, Failure> {
-        let mut options = mode;
-        options["directory"] = json!(root.path().join(directory));
-        let network = Network::Owned(hub.connector(name));
-        let engine = Engine::open_with(&options.to_string(), SCHEMA, None, Some(network))?;
-        let scope = serde_json::from_str(&engine.scope())?;
+    let open =
+        |directory: &str, mode: rocky_sdk::EngineMode, name: &'static str| -> Result<Db, Failure> {
+            let options = rocky_sdk::EngineOptions {
+                directory: root.path().join(directory),
+                transport: Arc::new(rocky_iroh::Options::default()),
+                mode,
+            };
+            let network = Network::Owned(hub.connector(name));
+            let engine = Engine::open_with(
+                options,
+                &rocky_sdk::Schema::parse(SCHEMA)?,
+                None,
+                Some(network),
+            )?;
+            let scope = engine.scope();
 
-        Ok(Db { engine, scope })
-    };
-    let creator = open("a", json!({"mode": "create"}), "a")?;
+            Ok(Db { engine, scope })
+        };
+    let creator = open(
+        "a",
+        rocky_sdk::EngineMode::Create {
+            credential_ttl: None,
+            root: None,
+        },
+        "a",
+    )?;
     assert_eq!(
-        creator.ok(json!({"type": "domain"})).await["transport"],
+        snap::ok(creator.engine.session().domain()).await["transport"],
         "memory"
     );
     let invitation = creator.invite().await;
     // A transport of another kind has no route in the invitation.
     assert!(Db::join(&root.path().join("other"), &invitation, iroh()).is_err());
-    let member = open("b", json!({"mode": "join", "invitation": invitation}), "b")?;
+    let member = open(
+        "b",
+        rocky_sdk::EngineMode::Join {
+            invitation: snap::text(&(invitation)),
+        },
+        "b",
+    )?;
     creator.add(1, "Milk").await;
     member.add(2, "Eggs").await;
     assert!(support::reconciled(&member.sync().await));
@@ -482,8 +610,8 @@ async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Fa
     // Both resume over it. Another kind opens too; see the peers suite.
     member.close().await;
     creator.close().await;
-    let creator = open("a", json!({"mode": "resume"}), "a")?;
-    let member = open("b", json!({"mode": "resume"}), "b")?;
+    let creator = open("a", rocky_sdk::EngineMode::Resume, "a")?;
+    let member = open("b", rocky_sdk::EngineMode::Resume, "b")?;
     creator.add(3, "Jam").await;
     assert!(support::reconciled(&member.sync().await));
     assert_eq!(titles(&member.items().await), ["Eggs", "Jam", "Milk"]);

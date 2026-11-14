@@ -1,42 +1,28 @@
 //! The starter composition: one database, one session and a network
-//! service the engine owns, selected by JSON options. It adds no behaviour
+//! service the engine owns, selected by typed options. It adds no behaviour
 //! to the services it composes. See `docs/runtime/sdk-composition.md`.
 use crate::{
     Failure,
     database::{Database, NetworkService, Open, Opened, Session},
     secrets::SecretStore,
     service::Network,
-    transport::TransportOptions,
 };
-use serde::Deserialize;
-use std::{path::Path, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
-#[derive(Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
-enum Mode {
+pub enum EngineMode {
     Create {
-        #[serde(default)]
         credential_ttl: Option<u64>,
-        /// The root's 24-word phrase; without one a fresh root is made and
-        /// handed out once by `Engine::take_root`.
-        #[serde(default)]
-        root_phrase: Option<String>,
+        root: Option<Arc<dyn crate::IdentityProvider>>,
     },
     Join {
         invitation: String,
     },
     Resume,
 }
-#[derive(Deserialize)]
-struct Options {
-    directory: String,
-    #[serde(default)]
-    transport: TransportOptions,
-    /// The trust bundle of a coordination service, public or self-hosted.
-    #[serde(default)]
-    coordinator: Option<serde_json::Value>,
-    #[serde(flatten)]
-    mode: Mode,
+pub struct EngineOptions {
+    pub directory: PathBuf,
+    pub transport: Arc<dyn rocky_core::net::Connector>,
+    pub mode: EngineMode,
 }
 
 /// A database with the network it starts and owns.
@@ -50,8 +36,8 @@ impl Engine {
     /// Opens a database. Without `secrets`, keys are owner-only files in
     /// the data directory.
     pub fn open(
-        options: &str,
-        schema: &str,
+        options: EngineOptions,
+        schema: &crate::Schema,
         secrets: Option<Arc<dyn SecretStore>>,
     ) -> Result<Arc<Self>, Failure> {
         Self::open_with(options, schema, secrets, None)
@@ -59,8 +45,8 @@ impl Engine {
     /// Opens a database over `network` instead of the transport `options`
     /// name. A borrowed network stays open when the engine closes.
     pub fn open_with(
-        options: &str,
-        schema: &str,
+        options: EngineOptions,
+        schema: &crate::Schema,
         secrets: Option<Arc<dyn SecretStore>>,
         network: Option<Network>,
     ) -> Result<Arc<Self>, Failure> {
@@ -68,34 +54,17 @@ impl Engine {
     }
     /// Opens with an application-owned metadata log or service.
     pub fn open_composed(
-        options: &str,
-        schema: &str,
+        options: EngineOptions,
+        schema: &crate::Schema,
         secrets: Option<Arc<dyn SecretStore>>,
         network: Option<Network>,
-        coordination: Option<crate::Coordination>,
+        coordination: Option<Arc<dyn rocky_credentials::Coordinator>>,
     ) -> Result<Arc<Self>, Failure> {
-        if options.len() > 16 * 1024 {
-            return Err("native options quota".into());
-        }
-        let options: Options = serde_json::from_str(options)?;
-        let coordination = match (options.coordinator.clone(), coordination) {
-            (None, coordination) => coordination,
-            (Some(_), Some(_)) => return Err("two coordinators supplied".into()),
-            #[cfg(feature = "iroh")]
-            (Some(bundle), None) => Some(crate::Coordination::Service(Box::new(
-                serde_json::from_value(bundle)?,
-            ))),
-            #[cfg(not(feature = "iroh"))]
-            (Some(_), None) => {
-                return Err("a coordination service needs iroh".into());
-            }
-        };
-        let network =
-            network.unwrap_or_else(|| Network::Owned(Arc::new(options.transport.clone())));
+        let network = network.unwrap_or_else(|| Network::Owned(options.transport.clone()));
         let open = Open {
             identity: None,
-            directory: Path::new(&options.directory),
-            schema,
+            directory: &options.directory,
+            schema: &serde_json::to_string(schema)?,
             secrets,
             network: Some(network),
             coordination,
@@ -105,18 +74,17 @@ impl Engine {
             network,
             root,
             ..
-        } = match &options.mode {
-            Mode::Create {
+        } = match options.mode {
+            EngineMode::Create {
                 credential_ttl,
-                root_phrase: Some(phrase),
-            } => Database::create_with_root(
-                open,
-                *credential_ttl,
-                Arc::new(crate::RootKey::from_phrase(phrase)?),
-            )?,
-            Mode::Create { credential_ttl, .. } => Database::create(open, *credential_ttl)?,
-            Mode::Join { invitation } => Database::join(open, invitation)?,
-            Mode::Resume => Database::open(open)?,
+                root: Some(root),
+            } => Database::create_with_root(open, credential_ttl, root)?,
+            EngineMode::Create {
+                credential_ttl,
+                root: None,
+            } => Database::create(open, credential_ttl)?,
+            EngineMode::Join { invitation } => Database::join(open, &invitation)?,
+            EngineMode::Resume => Database::open(open)?,
         };
         Ok(Arc::new(Self {
             session: database.session(),
@@ -125,13 +93,18 @@ impl Engine {
             root: std::sync::Mutex::new(root),
         }))
     }
-    pub fn scope(&self) -> String {
+    pub fn scope(&self) -> crate::Scope {
         self.database.scope()
     }
-    pub async fn call(&self, request: String) -> Result<String, Failure> {
-        self.session.call(request).await
+    /// This engine's typed application session.
+    pub fn session(&self) -> &Session {
+        &self.session
     }
-    /// The root key a create without `root_phrase` made, once: show its
+    /// Opens additional typed sessions and SQL connections.
+    pub fn database(&self) -> &Arc<Database> {
+        &self.database
+    }
+    /// The root key a create without a root signer made, once: show its
     /// phrase to the user. Rocky keeps no copy.
     pub fn take_root(&self) -> Option<crate::RootKey> {
         self.root

@@ -2,7 +2,7 @@
 //! implies another, and only a publisher-rooted capability chain grants
 //! anything. An `IdentityProvider` supplies the identity that holds
 //! permissions; see `docs/runtime/credentials.md#identities`.
-use crate::{AuthorRange, Error, PrivateKey, PublicKey, Signature, denied};
+use crate::{Error, PrivateKey, PublicKey, Signature};
 use rocky_core::ResourceScope;
 use rocky_platform::fs;
 use serde::{Deserialize, Serialize};
@@ -80,15 +80,9 @@ pub trait IdentityProvider: Send + Sync {
     fn public_key(&self) -> Result<PublicKey, Error>;
     /// Signs `message`, the domain-separated bytes of a statement.
     fn sign(&self, purpose: Purpose, message: &[u8]) -> Result<Signature, Error>;
-    /// An author number of `range` that this identity never handed out
-    /// before, for a new node certificate.
-    fn reserve_author(&self, range: AuthorRange) -> Result<u32, Error> {
-        let _ = range;
-        Err(denied("this identity provider keeps no author numbers"))
-    }
 }
 
-/// A key held in memory signs as itself; it keeps no author numbers.
+/// A key held in memory signs as itself.
 impl IdentityProvider for PrivateKey {
     fn public_key(&self) -> Result<PublicKey, Error> {
         Ok(PrivateKey::public_key(self))
@@ -99,8 +93,7 @@ impl IdentityProvider for PrivateKey {
 }
 
 /// An identity in one owner-only directory, for tests and servers: the
-/// key in `identity` and one file per reserved author number. Several
-/// processes may share it. Plaintext at rest, like `FileKeyProvider`.
+/// key in `identity`. Several processes may share it. Plaintext at rest, like `FileKeyProvider`.
 pub struct FileIdentityProvider {
     directory: PathBuf,
     key: PrivateKey,
@@ -120,7 +113,7 @@ impl FileIdentityProvider {
                 PrivateKey::from_bytes(&bytes)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_private_dir_all(directory.join("authors")).map_err(provider)?;
+                fs::create_private_dir_all(&directory).map_err(provider)?;
                 let key = PrivateKey::from_bytes(&rocky_platform::entropy::random());
                 // Two processes creating at once: the first file wins.
                 match fs::create_new(&path, key.as_bytes()) {
@@ -145,20 +138,5 @@ impl IdentityProvider for FileIdentityProvider {
     }
     fn sign(&self, _: Purpose, message: &[u8]) -> Result<Signature, Error> {
         Ok(self.key.sign(message))
-    }
-    fn reserve_author(&self, range: AuthorRange) -> Result<u32, Error> {
-        let authors = self.directory.join("authors");
-        fs::create_private_dir_all(&authors).map_err(|error| Error::Provider(error.into()))?;
-        // An exclusive create is the reservation, across processes.
-        for author in range.first..=range.last {
-            match fs::create_new(authors.join(author.to_string()), &[]) {
-                Ok(()) => return Ok(author),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(Error::Provider(error.into())),
-            }
-        }
-        Err(denied(
-            "every author number of the identity's range is taken",
-        ))
     }
 }

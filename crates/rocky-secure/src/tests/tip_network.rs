@@ -50,7 +50,7 @@ fn seal(f: &Fixture, sequence: u64) -> SignedSeal {
             scope: f.public.domain,
             tip: rocky_credentials::genesis_tip(manifest),
             frontier: vec![AuthorMark {
-                author: 1,
+                author: rocky_core::WriterId::from_bytes([1; 32]),
                 sequence,
             }],
             action: SealAction::Continue { schema: manifest },

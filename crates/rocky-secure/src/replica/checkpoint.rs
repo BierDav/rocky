@@ -27,6 +27,18 @@ pub(super) enum ReplayMode {
     Check,
     Rows,
 }
+
+/// One bounded replay page, into a caller-owned fold and identity ledger.
+pub(super) struct ReplayRequest {
+    pub scope: ResourceScope,
+    pub id: i64,
+    pub overlay: Overlay,
+    pub target: TipId,
+    pub after: i64,
+    pub through: i64,
+    pub limit: usize,
+    pub mode: ReplayMode,
+}
 pub use audit::AuditReport;
 use p2panda_core::Signature;
 pub use prune::{PruneBlock, PruneReport};
@@ -37,13 +49,13 @@ pub(crate) use transfer::{forge_page, forge_page_clocks, forge_page_legend};
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_compaction_live_creations(scope INTEGER NOT NULL,hash BLOB NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_stubs(scope INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_identity_marks(scope BLOB NOT NULL,author INTEGER NOT NULL,signer BLOB NOT NULL,sequence INTEGER NOT NULL,PRIMARY KEY(scope,author)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_identity_marks(scope BLOB NOT NULL,author BLOB NOT NULL,signer BLOB NOT NULL,sequence INTEGER NOT NULL,PRIMARY KEY(scope,author)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_scope_state(id INTEGER PRIMARY KEY,scope BLOB NOT NULL UNIQUE,rows INTEGER NOT NULL,tombstones INTEGER NOT NULL,digest BLOB NOT NULL,applied INTEGER NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_retained(id INTEGER PRIMARY KEY CHECK(id=1),records INTEGER NOT NULL,bytes INTEGER NOT NULL,handles INTEGER NOT NULL,handle_digest BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_applied(position INTEGER PRIMARY KEY AUTOINCREMENT,scope INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE)",
     "CREATE INDEX IF NOT EXISTS secure_applied_scope ON secure_applied(scope,position)",
     "CREATE TABLE IF NOT EXISTS secure_finalization_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_birth_positions(scope INTEGER NOT NULL,position INTEGER NOT NULL,author INTEGER NOT NULL,signer BLOB NOT NULL,sequence INTEGER NOT NULL,PRIMARY KEY(scope,position,author)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_birth_positions(scope INTEGER NOT NULL,position INTEGER NOT NULL,author BLOB NOT NULL,signer BLOB NOT NULL,sequence INTEGER NOT NULL,PRIMARY KEY(scope,position,author)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_birth_position_operation ON secure_birth_positions(position)",
     "CREATE TABLE IF NOT EXISTS secure_row_positions(scope INTEGER NOT NULL,row BLOB NOT NULL,position INTEGER NOT NULL,PRIMARY KEY(scope,row,position)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_row_position_operations ON secure_row_positions(position,scope,row)",
@@ -95,19 +107,20 @@ pub const MAX_CHECKPOINT_LOGS: usize = 256;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IdentityMark {
-    pub author: u32,
+    /// The creating writer; `signer` is its key.
+    pub author: WriterId,
     pub signer: PublicKey,
-    pub sequence: u32,
+    pub sequence: u64,
 }
 
 /// Covered maxima over all births and over the author's own births only.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CoveredMark {
-    pub author: u32,
+    pub author: WriterId,
     pub signer: PublicKey,
-    pub sequence: u32,
-    pub own: u32,
+    pub sequence: u64,
+    pub own: u64,
 }
 impl CoveredMark {
     pub(crate) fn mark(&self) -> IdentityMark {
@@ -247,7 +260,7 @@ impl SealedOutcomes {
     }
 }
 /// The current checkpoint statement format; every other one is refused.
-pub(crate) const CHECKPOINT_FORMAT: u32 = 19;
+pub(crate) const CHECKPOINT_FORMAT: u32 = 20;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckpointStatement {
     pub format: u32,
@@ -424,6 +437,7 @@ impl SignedCheckpoint {
                 .any(|pair| pair[0].author >= pair[1].author)
             || statement.identities.iter().any(|mark| {
                 mark.own > mark.sequence
+                    || mark.author != writer(&mark.signer)
                     || rocky_core::RowIdentity::new(mark.author, mark.sequence).is_err()
             })
             || statement.sequence == 0
@@ -1400,20 +1414,22 @@ impl<A: RowApplication> Inner<A> {
     /// application order into `overlay`, at most `limit`, and folds every row
     /// change into `sets`. Each operation opens with the key epoch that
     /// sealed it. Returns the last position replayed.
-    // The scope, its base, the view and target replayed, and the bounds.
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn replay(
         &self,
-        scope: ResourceScope,
-        id: i64,
-        overlay: Overlay,
-        target: TipId,
-        (after, through): (i64, i64),
-        limit: usize,
+        request: ReplayRequest,
         sets: &mut Sets,
         ledger: &mut identity::IdentityLedger,
-        mode: ReplayMode,
     ) -> Result<Option<i64>, Error> {
+        let ReplayRequest {
+            scope,
+            id,
+            overlay,
+            target,
+            after,
+            through,
+            limit,
+            mode,
+        } = request;
         let records = collect_rows(
             self.conn
                 .query(
@@ -1466,7 +1482,8 @@ impl<A: RowApplication> Inner<A> {
                         }
                     };
                     path.admits(
-                        e.author.ok_or_else(|| denied("node author missing"))?,
+                        e.author(&operation.header.public_key)
+                            .ok_or_else(|| denied("node author missing"))?,
                         e.author_sequence,
                     )?
                 }
@@ -1603,7 +1620,10 @@ impl<A: RowApplication> Inner<A> {
                                 identity,
                                 provenance,
                                 signer,
-                                author: operation.header.extensions.author,
+                                author: operation
+                                    .header
+                                    .extensions
+                                    .author(&operation.header.public_key),
                                 carried: carried.is_some(),
                                 existing: current.is_some(),
                                 finalized,
@@ -1627,7 +1647,7 @@ impl<A: RowApplication> Inner<A> {
                 }
                 let ceiling = Stamp {
                     clock: operation.header.timestamp,
-                    author: operation.header.extensions.author.unwrap_or(0),
+                    author: writer(&operation.header.public_key),
                     sequence: operation.header.extensions.author_sequence,
                 };
                 if restoration.is_some() {
@@ -1709,8 +1729,7 @@ impl<A: RowApplication> Inner<A> {
                     .map(|live| self.app.row_identity(&live.change))
                     .transpose()
                     .map_err(|message| denied(&message))?
-                    .flatten()
-                    .map(|identity| identity.integer());
+                    .flatten();
                 if let Some(grant) = restoration {
                     let actual = RowChange {
                         scope,
@@ -1733,7 +1752,7 @@ impl<A: RowApplication> Inner<A> {
                     self.put_identity_mark(
                         scope,
                         &IdentityMark {
-                            author: grant.identity.author(),
+                            author: grant.identity.writer(),
                             signer: operation.header.public_key,
                             sequence: grant.identity.sequence(),
                         },
@@ -1968,7 +1987,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// Exits the process inside the step's transaction instead of failing it.
     #[cfg(test)]
-    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    #[cfg_attr(
+        target_family = "wasm",
+        expect(
+            dead_code,
+            reason = "Process-exit injection is exercised only by native crash tests."
+        )
+    )]
     pub(crate) async fn inject_stage_exit(&self, stage: Stage, skip: usize) {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.stage_fault = Some((stage, skip));

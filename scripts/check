@@ -9,7 +9,7 @@
 #   scripts/check --changed         scope to jj's current change; unknown inputs run everything
 #   scripts/check --integration     only the integration tier
 #   scripts/check --e2e             only the e2e tier, which CI runs, soak tests included,
-#                                   and every tier of the SDK built without iroh
+#                                   and every tier of the SDK standalone build
 #   scripts/check --doc             also the doc tests
 #   scripts/check --wasm            only wasm32: clippy, then the tests in a headless browser
 #                                   and scripts/browser-sync; the full check includes it,
@@ -55,6 +55,7 @@ while [ $# -gt 0 ]; do
     shift
 done
 [ -z "$build" ] || [ -n "$archives" ] || usage
+scripts/lint-rust
 # --wasm adds wasm32 to the tiers, or alone runs only it. The full check,
 # unscoped and without archives, covers wasm32 too.
 wasm=$wasm_only
@@ -82,7 +83,7 @@ wasm_packages="rocky-platform rocky-sqlite rocky-sqlite-opfs rocky-core rocky-cr
 run_wasm() {
     set --
     for package in $wasm_packages; do set -- "$@" -p "$package"; done
-    CLIPPY_CONF_DIR="$repo_root/scripts/clippy-wasm" cargo clippy --locked \
+    scripts/clippy --locked \
         --target wasm32-unknown-unknown --tests "$@" -- -D warnings
     # The binaries run at once, each in its own browser; large ones in shards.
     # A scope runs its packages' binaries of the same build. Meanwhile a
@@ -113,10 +114,8 @@ cargo nextest --version >/dev/null 2>&1 || {
     exit 1
 }
 
-# The two builds of the tests: the workspace, and the SDK without iroh, since
-# the database, sessions and other transports must not need it. Only the
-# iroh branches differ between them, so the gate compiles every target of
-# the second; the e2e tier, which CI runs on each push to main, runs its tests.
+# The SDK selects no networking or coordinator client. Its standalone build
+# also qualifies the application boundary without workspace feature unification.
 archive_args() { # name
     case "$1" in
     workspace) echo --workspace ;;
@@ -145,7 +144,7 @@ run_tiers() { # tiers...
         cargo check --locked --all-targets $(archive_args sdk-without-defaults) || return
     fi
     result=0
-    scripts/test-tiers "$@" --filter "$selection" --build=--workspace || result=1
+    scripts/test-tiers "$@" --filter "$selection" "--build=$(archive_args workspace)" || result=1
     if $sdk && $e2e; then
         scripts/test-tiers unit integration e2e --filter "$selection" \
             "--build=$(archive_args sdk-without-defaults)" || result=1
@@ -154,7 +153,7 @@ run_tiers() { # tiers...
 }
 
 if [ -n "$build" ]; then
-    cargo clippy --workspace --all-targets --locked -- -D warnings
+    scripts/clippy --workspace --all-targets --locked -- -D warnings
     # nextest cannot archive doc tests; --doc runs them here, where the workspace
     # is already compiled, so a later --from needs no compile.
     if $doc; then
@@ -182,7 +181,7 @@ fi
 if [ -z "$tiers" ] || $all; then
     [ -n "$tiers" ] || tiers="unit integration"
     if [ -z "$archives" ] && $clippy; then
-        cargo clippy --workspace --all-targets --locked -- -D warnings
+        scripts/clippy --workspace --all-targets --locked -- -D warnings
     fi
 fi
 # The tiers share one RAM-backed directory for test storage

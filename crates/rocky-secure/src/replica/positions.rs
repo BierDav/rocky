@@ -4,12 +4,12 @@ use rocky_core::Scope;
 use rocky_credentials::SignedSeal;
 
 pub(super) const SCHEMA: &[&str] = &[
-    "CREATE TABLE secure_position_sources(hash BLOB NOT NULL,kind INTEGER NOT NULL,scope BLOB NOT NULL,author INTEGER NOT NULL,sequence INTEGER NOT NULL,signer BLOB NOT NULL,tip BLOB NOT NULL,log_sequence INTEGER NOT NULL,pending INTEGER NOT NULL,applied INTEGER NOT NULL,PRIMARY KEY(hash,kind)) WITHOUT ROWID",
+    "CREATE TABLE secure_position_sources(hash BLOB NOT NULL,kind INTEGER NOT NULL,scope BLOB NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,signer BLOB NOT NULL,tip BLOB NOT NULL,log_sequence INTEGER NOT NULL,pending INTEGER NOT NULL,applied INTEGER NOT NULL,PRIMARY KEY(hash,kind)) WITHOUT ROWID",
     "CREATE INDEX secure_position_sources_seal ON secure_position_sources(scope,tip,author,sequence,kind,hash)",
     "CREATE INDEX secure_position_sources_domain ON secure_position_sources(scope,author,sequence,kind,pending)",
     "CREATE INDEX secure_position_sources_log ON secure_position_sources(scope,signer,tip,author,applied,log_sequence)",
-    "CREATE TABLE secure_position_ranges(scope BLOB NOT NULL,author INTEGER NOT NULL,kind INTEGER NOT NULL,pending INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,CHECK(start<=end),PRIMARY KEY(scope,author,kind,pending,start)) WITHOUT ROWID",
-    "CREATE TABLE secure_log_ranges(scope BLOB NOT NULL,author BLOB NOT NULL,tip BLOB NOT NULL,applied INTEGER NOT NULL,domain_author INTEGER NOT NULL,delta INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,CHECK(start<=end),PRIMARY KEY(scope,author,tip,applied,domain_author,delta,start)) WITHOUT ROWID",
+    "CREATE TABLE secure_position_ranges(scope BLOB NOT NULL,author BLOB NOT NULL,kind INTEGER NOT NULL,pending INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,CHECK(start<=end),PRIMARY KEY(scope,author,kind,pending,start)) WITHOUT ROWID",
+    "CREATE TABLE secure_log_ranges(scope BLOB NOT NULL,author BLOB NOT NULL,tip BLOB NOT NULL,applied INTEGER NOT NULL,domain_author BLOB NOT NULL,delta INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,CHECK(start<=end),PRIMARY KEY(scope,author,tip,applied,domain_author,delta,start)) WITHOUT ROWID",
 ];
 
 /// These triggers are the only status/delete writers, including bulk SQL and cascades.
@@ -167,7 +167,9 @@ pub(crate) async fn insert(
     applied: bool,
 ) -> Result<(), Error> {
     let e = &header.extensions;
-    let author = e.author.ok_or_else(|| denied("node author missing"))?;
+    let author = e
+        .author(&header.public_key)
+        .ok_or_else(|| denied("node author missing"))?;
     let sequence =
         i64::try_from(e.author_sequence).map_err(|_| denied("author sequence overflow"))?;
     let log_sequence =
@@ -179,7 +181,7 @@ pub(crate) async fn insert(
             SqlValue::Blob(header.hash().as_bytes().to_vec()),
             SqlValue::Integer(kind),
             SqlValue::Blob(encode(&e.scope)?),
-            SqlValue::Integer(i64::from(author)),
+            writer_value(author),
             SqlValue::Integer(sequence),
             SqlValue::Blob(header.public_key.as_bytes().to_vec()),
             SqlValue::Blob(e.tip.0.to_vec()),
@@ -230,7 +232,10 @@ impl Runs {
     }
 }
 
-type Positions = (BTreeMap<u32, Runs>, BTreeMap<(ResourceScope, u32), u64>);
+type Positions = (
+    BTreeMap<WriterId, Runs>,
+    BTreeMap<(ResourceScope, WriterId), u64>,
+);
 
 impl<A: RowApplication> Inner<A> {
     pub(super) async fn held_positions(
@@ -240,8 +245,8 @@ impl<A: RowApplication> Inner<A> {
         held_scopes: &BTreeSet<ResourceScope>,
     ) -> Result<Positions, Error> {
         let ready: BTreeSet<_> = scopes.iter().map(|(scope, _)| *scope).collect();
-        let mut held = BTreeMap::<u32, Runs>::new();
-        let mut last = BTreeMap::<(ResourceScope, u32), u64>::new();
+        let mut held = BTreeMap::<WriterId, Runs>::new();
+        let mut last = BTreeMap::<(ResourceScope, WriterId), u64>::new();
         for row in rows(
             &self.conn,
             "SELECT scope,author,kind,pending,start,end FROM secure_position_ranges",
@@ -250,7 +255,7 @@ impl<A: RowApplication> Inner<A> {
         {
             let [
                 SqlValue::Blob(scope),
-                SqlValue::Integer(author),
+                SqlValue::Blob(author),
                 SqlValue::Integer(kind),
                 SqlValue::Integer(pending),
                 SqlValue::Integer(start),
@@ -266,8 +271,7 @@ impl<A: RowApplication> Inner<A> {
             {
                 continue;
             }
-            let author =
-                u32::try_from(*author).map_err(|_| Error::Corrupt("position author".into()))?;
+            let author = stored_writer(author)?;
             let (start, end) = interval(*start, *end)?;
             held.entry(author).or_default().insert(start, end);
             if *kind != 2 && ready.contains(&scope) {
@@ -302,7 +306,7 @@ impl<A: RowApplication> Inner<A> {
         let mut deferred = false;
         if !self.has_scope_key(scope) {
             for mark in &seal.statement.frontier {
-                if !collect_rows(self.conn.query("SELECT 1 FROM secure_position_ranges WHERE scope=? AND author=? AND kind=0 AND start<=? LIMIT 1",bindings(vec![SqlValue::Blob(encode(&scope)?),SqlValue::Integer(i64::from(mark.author)),SqlValue::Integer(i64::try_from(mark.sequence).unwrap_or(i64::MAX))])).await?).await?.is_empty() { deferred=true; break; }
+                if !collect_rows(self.conn.query("SELECT 1 FROM secure_position_ranges WHERE scope=? AND author=? AND kind=0 AND start<=? LIMIT 1",bindings(vec![SqlValue::Blob(encode(&scope)?),writer_value(mark.author),SqlValue::Integer(i64::try_from(mark.sequence).unwrap_or(i64::MAX))])).await?).await?.is_empty() { deferred=true; break; }
             }
         }
         #[cfg(test)]
@@ -325,10 +329,10 @@ impl<A: RowApplication> Inner<A> {
         let graph = self.graph_for(scope.domain)?;
         let mut paths = BTreeMap::new();
         for row in collect_rows(self.conn.query("SELECT author,tip,applied,domain_author,delta,start,end FROM secure_log_ranges WHERE scope=?", [encode(&scope)?]).await?).await? {
-            let [SqlValue::Blob(author),SqlValue::Blob(tip),SqlValue::Integer(applied),SqlValue::Integer(domain_author),SqlValue::Integer(delta),SqlValue::Integer(start),SqlValue::Integer(end)] = row.as_slice() else { return Err(Error::Corrupt("log range".into())); };
+            let [SqlValue::Blob(author),SqlValue::Blob(tip),SqlValue::Integer(applied),SqlValue::Blob(domain_author),SqlValue::Integer(delta),SqlValue::Integer(start),SqlValue::Integer(end)] = row.as_slice() else { return Err(Error::Corrupt("log range".into())); };
             let author = PublicKey::from_bytes(author.as_slice().try_into().map_err(|_| Error::Corrupt("log range signer".into()))?).map_err(|_| Error::Corrupt("log range signer".into()))?;
             let tip = TipId(tip.as_slice().try_into().map_err(|_| Error::Corrupt("log range tip".into()))?);
-            let domain_author = u32::try_from(*domain_author).map_err(|_| Error::Corrupt("log range author".into()))?;
+            let domain_author = stored_writer(domain_author)?;
             let (start, mut end) = interval(*start,*end)?;
             let path = match paths.entry(tip) {
                 std::collections::btree_map::Entry::Occupied(p) => p.into_mut(),
@@ -415,9 +419,9 @@ impl<A: RowApplication> Inner<A> {
             let header: p2panda_core::Header<Extensions> = decode(bytes)?;
             if header.hash().as_bytes().as_slice() != hash { return Err(Error::Corrupt("position source hash".into())); }
             let e=&header.extensions;
-            let author=e.author.ok_or_else(|| Error::Corrupt("position source author".into()))?;
+            let author=e.author(&header.public_key).ok_or_else(|| Error::Corrupt("position source author".into()))?;
             sources.insert((hash.clone(),*kind),vec![
-                SqlValue::Blob(hash.clone()),SqlValue::Integer(*kind),SqlValue::Blob(encode(&e.scope)?),SqlValue::Integer(i64::from(author)),SqlValue::Integer(i64::try_from(e.author_sequence).map_err(|_| Error::Corrupt("position source sequence".into()))?),SqlValue::Blob(header.public_key.as_bytes().to_vec()),SqlValue::Blob(e.tip.0.to_vec()),SqlValue::Integer(i64::try_from(header.seq_num).map_err(|_| Error::Corrupt("position source log sequence".into()))?),SqlValue::Integer(i64::from(status=="pending")),SqlValue::Integer(i64::from(matches!(status.as_str(),"applied"|"held"|"abandoned"))),
+                SqlValue::Blob(hash.clone()),SqlValue::Integer(*kind),SqlValue::Blob(encode(&e.scope)?),writer_value(author),SqlValue::Integer(i64::try_from(e.author_sequence).map_err(|_| Error::Corrupt("position source sequence".into()))?),SqlValue::Blob(header.public_key.as_bytes().to_vec()),SqlValue::Blob(e.tip.0.to_vec()),SqlValue::Integer(i64::try_from(header.seq_num).map_err(|_| Error::Corrupt("position source log sequence".into()))?),SqlValue::Integer(i64::from(status=="pending")),SqlValue::Integer(i64::from(matches!(status.as_str(),"applied"|"held"|"abandoned"))),
             ]);
         }
         let actual = rows(

@@ -2,7 +2,7 @@
 //! that cannot work. See `docs/runtime/sdk-composition.md`.
 use crate::{
     Failure,
-    transport::{Connector, Transport},
+    transport::{Connected, Connector, Transport},
 };
 use std::sync::Arc;
 
@@ -13,6 +13,8 @@ pub enum Network {
     Owned(Arc<dyn Connector>),
     /// A transport the application started. Rocky never closes it.
     Borrowed(Arc<dyn Transport>),
+    /// An application-owned transport with optional discovery and change signals.
+    Attached(Connected),
 }
 impl Network {
     /// The transport and whether the service owns it.
@@ -20,10 +22,11 @@ impl Network {
         self,
         accepts: bool,
         secret: [u8; 32],
-    ) -> Result<(Arc<dyn Transport>, bool), Failure> {
+    ) -> Result<(Connected, bool), Failure> {
         Ok(match self {
             Self::Owned(connector) => (connector.start(accepts, secret).await?, true),
-            Self::Borrowed(transport) => (transport, false),
+            Self::Borrowed(transport) => (Connected::new(transport), false),
+            Self::Attached(connected) => (connected, false),
         })
     }
 }

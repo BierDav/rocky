@@ -1,8 +1,8 @@
+use crate::request::Request;
 use crate::{Failure, GrantProfile, Session};
-use serde_json::json;
 
 /// An enrollment invitation. Treat its URI as a secret.
-#[derive(Clone)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Invitation {
     pub uri: String,
     pub expires_at_epoch_seconds: u64,
@@ -10,9 +10,10 @@ pub struct Invitation {
     /// issuer admits each requesting device.
     pub profile: Option<GrantProfile>,
     pub id: String,
+    pub sequence: u64,
 }
 /// A device that answered an approval invitation and waits for `admit`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct JoinRequest {
     /// The requesting node's key, hexadecimal.
     pub node: String,
@@ -28,7 +29,7 @@ pub struct JoinRequest {
     pub code: String,
 }
 /// The devices this node knows of without having enrolled them.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Discovered {
     /// Join requests waiting on this issuer node, oldest first; empty on
     /// any other node.
@@ -37,7 +38,7 @@ pub struct Discovered {
     pub links: Vec<LinkRequest>,
 }
 /// Certified evidence observed in this database; it grants no authority.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SeenDevice {
     pub node: String,
     pub identity: String,
@@ -48,7 +49,7 @@ pub struct SeenDevice {
     pub unlinked: bool,
 }
 /// A same-identity link waiting for this device's confirmation.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LinkRequest {
     pub node: String,
     pub code: String,
@@ -66,120 +67,290 @@ pub struct Admit {
     /// The registry label of the admitted identity.
     pub label: Option<Vec<u8>>,
 }
+/// The issuer's current state for one invitation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvitationState {
+    pub id: String,
+    pub expires_at_epoch_seconds: u64,
+    pub open: bool,
+    pub enrolled: Option<String>,
+}
+
+/// A contact advertises routes without granting authority.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContactInfo {
+    pub uri: String,
+    pub node: String,
+    pub routes: Vec<crate::Route>,
+}
+
+/// The statement and key rotation committed by a revocation.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RevocationResult {
+    pub statement: String,
+    pub revocations: crate::RevocationStatus,
+    pub cut_dropped_stages: Vec<DroppedStage>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DroppedStage {
+    pub node: String,
+    pub sequence: u64,
+    pub head: String,
+}
+
+/// A bounded read; a returned cursor resumes this query on the same session.
+#[derive(Clone, Debug)]
+pub struct ReadQuery {
+    pub sql: String,
+    pub values: Vec<crate::SqlValue>,
+    pub max_rows: usize,
+    pub max_bytes: Option<usize>,
+    pub cursor: Option<String>,
+}
+impl ReadQuery {
+    pub fn new(sql: impl Into<String>, max_rows: usize) -> Self {
+        Self {
+            sql: sql.into(),
+            values: Vec::new(),
+            max_rows,
+            max_bytes: None,
+            cursor: None,
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct ReadPage {
+    pub scope: crate::Scope,
+    pub revision: u64,
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<crate::SqlValue>>,
+    pub next: Option<String>,
+}
+#[derive(Clone, Debug)]
+pub struct SessionRows {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<crate::SqlValue>>,
+    pub changes: u64,
+    pub committed: Option<CommitSummary>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitSummary {
+    pub handle: rocky_core::Commitment,
+    pub frames: usize,
+}
+
+/// The authenticated device's authority and SQL access.
+#[derive(Clone, Debug)]
+pub struct SessionInfo {
+    pub principal: crate::credentials::PublicKey,
+    pub node: crate::credentials::PublicKey,
+    pub revocations: crate::RevocationStatus,
+    pub expires: u64,
+    pub issuer: bool,
+    pub profile: GrantProfile,
+    pub transport: String,
+    pub readable: usize,
+    pub writable: usize,
+    /// This node's writer identity: its row identities and stamps name it.
+    pub writer: crate::WriterId,
+}
+
 impl Session {
-    /// Unlinks one node of this identity. The signer is used only for this call.
-    /// Issuers rotate the reader scopes exposed to that node as they learn the unlink.
+    pub async fn sign_coordination_grant(
+        &self,
+        tenant: crate::credentials::PublicKey,
+        lifetime: u64,
+        root: std::sync::Arc<dyn crate::IdentityProvider>,
+    ) -> Result<crate::credentials::SignedCoordinationGrant, Failure> {
+        self.send(|reply| {
+            Request::SignCoordinationGrant(tenant, lifetime, crate::node::Root(Some(root)), reply)
+        })
+        .await
+    }
+
+    /// Follows a bookmark, certifying this identity's node if the target starts another line.
+    pub async fn follow_with_identity(
+        &self,
+        name: &str,
+        identity: std::sync::Arc<dyn crate::IdentityProvider>,
+    ) -> Result<crate::TipStatus, Failure> {
+        self.change_tip_with_identity(
+            crate::request::TipChange::Follow { name: name.into() },
+            identity,
+        )
+        .await
+    }
+    /// Supplies the identity when moving the followed bookmark certifies another writer node.
+    pub async fn move_bookmark_with_identity(
+        &self,
+        name: &str,
+        tip: &str,
+        identity: std::sync::Arc<dyn crate::IdentityProvider>,
+    ) -> Result<crate::TipStatus, Failure> {
+        self.change_tip_with_identity(
+            crate::request::TipChange::Move {
+                name: name.into(),
+                tip: tip.into(),
+            },
+            identity,
+        )
+        .await
+    }
+    pub async fn follow_when_ready_with_identity(
+        &self,
+        name: &str,
+        identity: std::sync::Arc<dyn crate::IdentityProvider>,
+    ) -> Result<crate::TipStatus, Failure> {
+        self.change_tip_with_identity(
+            crate::request::TipChange::FollowWhenReady { name: name.into() },
+            identity,
+        )
+        .await
+    }
+    async fn change_tip_with_identity(
+        &self,
+        change: crate::request::TipChange,
+        identity: std::sync::Arc<dyn crate::IdentityProvider>,
+    ) -> Result<crate::TipStatus, Failure> {
+        self.send_signed(Some(identity), |reply| {
+            Request::ChangeTip(change, crate::node::Root::default(), reply)
+        })
+        .await
+    }
+    pub async fn info(&self) -> Result<SessionInfo, Failure> {
+        self.send(Request::Info).await
+    }
+    pub async fn grant(
+        &self,
+        device: crate::NodeKeys,
+        profile: GrantProfile,
+        terms: crate::GrantTerms,
+    ) -> Result<crate::Supplied, Failure> {
+        self.send(|reply| Request::Grant(device, profile, terms, false, reply))
+            .await
+    }
+    pub async fn delegate(
+        &self,
+        device: crate::NodeKeys,
+        profile: GrantProfile,
+        terms: crate::GrantTerms,
+    ) -> Result<crate::Supplied, Failure> {
+        self.send(|reply| Request::Grant(device, profile, terms, true, reply))
+            .await
+    }
+    pub async fn install_credentials(&self, supplied: crate::Supplied) -> Result<(), Failure> {
+        self.send(|reply| Request::Install(Box::new(supplied), reply))
+            .await
+    }
+
+    pub async fn execute(
+        &self,
+        sql: &str,
+        values: Vec<crate::SqlValue>,
+    ) -> Result<SessionRows, Failure> {
+        self.send(|reply| Request::Execute(sql.into(), values, None, reply))
+            .await
+    }
+    pub async fn commit(&self, handle: rocky_core::Commitment) -> Result<SessionRows, Failure> {
+        self.send(|reply| Request::Execute("COMMIT".into(), Vec::new(), Some(handle), reply))
+            .await
+    }
+    pub async fn next_id(&self, table: &str) -> Result<rocky_core::RowIdentity, Failure> {
+        self.send(|reply| Request::NextId(table.into(), None, reply))
+            .await
+    }
+    pub async fn next_partition_id(
+        &self,
+        table: &str,
+        values: Vec<crate::SqlValue>,
+    ) -> Result<rocky_core::RowIdentity, Failure> {
+        self.send(|reply| Request::NextId(table.into(), Some(values), reply))
+            .await
+    }
+    pub async fn mutation_committed(
+        &self,
+        handle: rocky_core::Commitment,
+    ) -> Result<bool, Failure> {
+        self.send(|reply| Request::MutationCommitted(handle, reply))
+            .await
+    }
+    pub async fn read(&self, query: ReadQuery) -> Result<ReadPage, Failure> {
+        self.send(|reply| Request::Read(query, reply)).await
+    }
+    pub async fn subscribe(&self, query: ReadQuery) -> Result<u64, Failure> {
+        self.send(|reply| Request::Subscribe(query, reply)).await
+    }
+    pub async fn next(&self, subscription: u64) -> Result<ReadPage, Failure> {
+        self.send(|reply| Request::Next(subscription, reply)).await
+    }
+    pub async fn unsubscribe(&self, subscription: u64) -> Result<(), Failure> {
+        self.send(|reply| Request::Unsubscribe(subscription, reply))
+            .await
+    }
+
+    /// The identity signer is held only until this unlink finishes.
     pub async fn unlink(
         &self,
         node: &str,
         identity: std::sync::Arc<dyn crate::IdentityProvider>,
     ) -> Result<(), Failure> {
-        self.request_with_identity(json!({"type":"unlink", "node":node}), identity)
-            .await?;
-        Ok(())
+        let node = node.parse()?;
+        self.send(|reply| Request::Unlink(node, identity, reply))
+            .await
     }
-    /// Creates an approval invitation, replacing the issuer's previous one
-    /// and ending its requests. A device answering it waits until an issuer
-    /// admits it with [`Self::admit`].
     pub async fn invitation(&self) -> Result<Invitation, Failure> {
-        self.invite(json!({"type":"invitation"})).await
+        self.invite(None, None).await
     }
-    /// Creates an invitation whose device is admitted on arrival as
-    /// `profile`, replacing the issuer's previous invitation. Grant scopes
-    /// name schema tables; there is deliberately no default grant.
     pub async fn invitation_with(&self, profile: GrantProfile) -> Result<Invitation, Failure> {
-        self.invite(json!({"type":"invitation", "profile": profile}))
+        self.invite(Some(profile), None).await
+    }
+    /// Replaces this issuer's invitation, optionally labeling the admitted identity.
+    pub async fn invite(
+        &self,
+        profile: Option<GrantProfile>,
+        label: Option<Vec<u8>>,
+    ) -> Result<Invitation, Failure> {
+        self.send(|reply| Request::Invitation(profile, label, reply))
             .await
     }
-    async fn invite(&self, request: serde_json::Value) -> Result<Invitation, Failure> {
-        let value = self.request(request).await?;
-        Ok(Invitation {
-            uri: value["uri"]
-                .as_str()
-                .ok_or("missing invitation URI")?
-                .into(),
-            expires_at_epoch_seconds: value["expires"]
-                .as_str()
-                .ok_or("missing expiration")?
-                .parse()?,
-            profile: serde_json::from_value(value["profile"].clone())?,
-            id: value["id"].as_str().ok_or("missing invitation ID")?.into(),
-        })
+    pub async fn invitation_state(&self, uri: &str) -> Result<InvitationState, Failure> {
+        self.send(|reply| Request::InvitationState(uri.into(), reply))
+            .await
     }
-    /// The devices this node knows of without having enrolled them.
+    pub async fn renew(&self) -> Result<(), Failure> {
+        self.send(Request::Renew).await
+    }
     pub async fn discovered(&self) -> Result<Discovered, Failure> {
-        let value = self.request(json!({"type":"discovered"})).await?;
-        let pending = value["pending"]
-            .as_array()
-            .ok_or("missing pending join requests")?
-            .iter()
-            .map(|request| {
-                let text = |field: &str| {
-                    request[field]
-                        .as_str()
-                        .map(String::from)
-                        .ok_or_else(|| format!("missing join request {field}"))
-                };
-                Ok::<_, Failure>(JoinRequest {
-                    node: text("node")?,
-                    nonce: text("nonce")?,
-                    invitation: text("invitation")?,
-                    name: text("name")?,
-                    received_epoch_seconds: text("received")?.parse()?,
-                    expires_epoch_seconds: text("expires")?.parse()?,
-                    code: text("code")?,
-                })
-            })
-            .collect::<Result<_, _>>()?;
-        Ok(Discovered {
-            pending,
-            seen: serde_json::from_value(value["seen"].clone())?,
-            links: serde_json::from_value(value["links"].clone())?,
-        })
+        self.send(Request::Discovered).await
     }
-    /// Confirms the code displayed by the new device before releasing its bundle.
     pub async fn confirm_link(&self, node: &str, code: &str) -> Result<(), Failure> {
-        self.request(json!({"type":"confirm_link", "node":node, "code":code}))
+        let node = node.parse()?;
+        self.send(|reply| Request::ConfirmLink(node, code.into(), reply))
             .await
-            .map(drop)
     }
-    /// Admits a pending join request once `admit.code` equals the code its
-    /// device shows; a mismatch is refused. The device enrolls at its next
-    /// `join`.
     pub async fn admit(&self, admit: Admit) -> Result<(), Failure> {
-        self.request(json!({
-            "type": "admit",
-            "node": admit.node,
-            "code": admit.code,
-            "profile": admit.profile,
-            "label": admit.label,
-        }))
-        .await
-        .map(drop)
+        self.send(|reply| Request::Admit(admit, reply)).await
     }
-    /// Refuses a pending join request; its device's next `join` fails with
-    /// [`crate::JoinRefused`].
     pub async fn refuse(&self, node: &str) -> Result<(), Failure> {
-        self.request(json!({"type":"refuse", "node": node}))
-            .await
-            .map(drop)
+        let node = node.parse()?;
+        self.send(|reply| Request::Refuse(node, reply)).await
     }
-    /// A signed contact URI that another device can pass to `add_peer`.
     pub async fn contact(&self) -> Result<String, Failure> {
-        let value = self.request(json!({"type":"contact"})).await?;
-        Ok(value["uri"].as_str().ok_or("missing contact URI")?.into())
+        self.contact_info().await.map(|contact| contact.uri)
     }
-    /// Saves and validates a contact, then wakes sync. Returns the peer's public key.
+    pub async fn contact_info(&self) -> Result<ContactInfo, Failure> {
+        self.send(Request::Contact).await
+    }
     pub async fn add_peer(&self, contact: &str) -> Result<String, Failure> {
-        let value = self
-            .request(json!({"type":"peer_add", "contact":contact}))
-            .await?;
-        Ok(value["node"].as_str().ok_or("missing peer key")?.into())
-    }
-    /// Removes a saved peer; credentials and grants are unaffected.
-    pub async fn remove_peer(&self, node: &str) -> Result<(), Failure> {
-        self.request(json!({"type":"peer_remove", "node":node}))
+        self.send(|reply| Request::AddPeer(contact.into(), reply))
             .await
-            .map(drop)
+    }
+    pub async fn remove_peer(&self, node: &str) -> Result<(), Failure> {
+        let node = node.parse()?;
+        self.send(|reply| Request::RemovePeer(node, reply)).await
+    }
+    pub async fn set_enrollment_upstream(&self, contact: Option<&str>) -> Result<(), Failure> {
+        self.send(|reply| Request::EnrollmentUpstream(contact.map(str::to_owned), reply))
+            .await
     }
 }

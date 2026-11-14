@@ -3,6 +3,7 @@
 //! See `docs/runtime/sql-driver.md`.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
+use support::snapshot as snap;
 mod support;
 use rocky_sdk::{
     Connection, ConnectionOptions, Database, Network, Open, Page, Profile, SqlValue,
@@ -44,24 +45,13 @@ async fn create(open: Open<'_>, ttl: Option<u64>) -> Result<rocky_sdk::Opened, F
     let opened = Database::create(open, ttl)?;
     let database = &opened.database;
 
-    let scope: Value = serde_json::from_str(&database.scope())?;
-    // Check the allocator's starting identities, then release the reservations.
     let session = database.session();
-    let request = |request: Value| json!({"version":1,"scope":scope,"request":request}).to_string();
-    session
-        .call(request(json!({"type":"sql","sql":"BEGIN"})))
-        .await?;
+    session.execute("BEGIN", Vec::new()).await?;
     for table in ["lists", "items"] {
-        let allocated: Value = serde_json::from_str(
-            &session
-                .call(request(json!({"type":"next_id","table":table})))
-                .await?,
-        )?;
-        assert_eq!(allocated["value"]["id"], "4294967297", "{table}");
+        let id = session.next_id(table).await?;
+        assert_eq!(id.sequence(), 1, "{table}");
     }
-    session
-        .call(request(json!({"type":"sql","sql":"ROLLBACK"})))
-        .await?;
+    session.execute("ROLLBACK", Vec::new()).await?;
     session.close().await;
     Ok(opened)
 }
@@ -104,20 +94,39 @@ async fn identity_insert(connection: &Connection, sql: &str) -> Result<String, F
     }
     insert.columns.push(Ident::new("id").into());
     let source = insert.source.as_mut().unwrap();
+    let query = source.to_string();
     match source.body.as_mut() {
         SetExpr::Values(values) => {
             for row in &mut values.rows {
                 let id = allocated_identity(connection, &table).await?;
-                row.push(expression(&id.to_string()));
+                row.push(expression(&format!("X'{id}'")));
             }
         }
         SetExpr::Select(select) => {
-            let base = allocated_identity(connection, &table).await? - 1;
+            // Each selected row takes the next allocated identity.
+            let statement = connection.statement();
+            let sql = format!("SELECT count(*) FROM ({query})");
+            let mut page = connection.execute(statement, sql, vec![]).await?;
+            let rows = match page.rows.first().map(Vec::as_slice) {
+                Some([SqlValue::Integer(rows)]) => *rows,
+                _ => return Err("fixture row count".into()),
+            };
+            while !page.done {
+                page = connection.next(statement).await?;
+            }
+            let mut arms = String::new();
+            for row in 1..=rows {
+                let id = allocated_identity(connection, &table).await?;
+                arms.push_str(&format!(" WHEN {row} THEN X'{id}'"));
+            }
+            let id = if arms.is_empty() {
+                "NULL".to_owned()
+            } else {
+                format!("CASE row_number() OVER (){arms} END")
+            };
             select
                 .projection
-                .push(SelectItem::UnnamedExpr(expression(&format!(
-                    "{base} + row_number() OVER ()"
-                ))));
+                .push(SelectItem::UnnamedExpr(expression(&id)));
         }
         _ => panic!("fixture insert"),
     }
@@ -158,7 +167,10 @@ async fn all(
     }
     Ok(rows)
 }
-async fn allocated_identity(connection: &Connection, table: &str) -> Result<i64, Failure> {
+async fn allocated_identity(
+    connection: &Connection,
+    table: &str,
+) -> Result<rocky_sdk::RowIdentity, Failure> {
     let statement = connection.statement();
     let mut page = connection
         .execute(
@@ -168,7 +180,7 @@ async fn allocated_identity(connection: &Connection, table: &str) -> Result<i64,
         )
         .await?;
     let id = match page.rows.first().and_then(|row| row.first()) {
-        Some(SqlValue::Integer(id)) => *id,
+        Some(SqlValue::Blob(id)) => rocky_sdk::RowIdentity::from_bytes(id)?,
         _ => return Err("allocator returned no identity".into()),
     };
     while !page.done {
@@ -347,8 +359,10 @@ async fn a_row_id_is_reserved_before_its_insert_in_the_same_transaction() -> Res
     let before = published(root.path())?;
     let id = |rows: Vec<Vec<SqlValue>>| match rows[..] {
         [ref row] => match row[..] {
-            [SqlValue::Integer(id)] => Ok(id),
-            _ => Err("one integer"),
+            [SqlValue::Blob(ref id)] => {
+                rocky_sdk::RowIdentity::from_bytes(id).map_err(|_| "a row identity")
+            }
+            _ => Err("one row identity"),
         },
         _ => Err("one row"),
     };
@@ -357,12 +371,13 @@ async fn a_row_id_is_reserved_before_its_insert_in_the_same_transaction() -> Res
     exact(&writer, "BEGIN IMMEDIATE TRANSACTION", vec![]).await?;
     let first = id(exact(&writer, "SELECT rocky_next_id('items')", vec![]).await?)?;
     let second = id(exact(&writer, "select ROCKY_NEXT_ID(?);", vec![text("items")]).await?)?;
-    assert_eq!((first, second), (4294967297, 4294967298));
+    assert_eq!((first.sequence(), second.sequence()), (1, 2));
+    assert_eq!(first.writer(), second.writer());
     for (key, id) in [("i1", first), ("i2", second)] {
         exact(
             &writer,
             "INSERT INTO items(key,list,title,completed,id) VALUES(?,'l1',?,0,?)",
-            vec![text(key), text(key), SqlValue::Integer(id)],
+            vec![text(key), text(key), id.sql()],
         )
         .await?;
     }
@@ -370,8 +385,8 @@ async fn a_row_id_is_reserved_before_its_insert_in_the_same_transaction() -> Res
     assert_eq!(
         all(&reader, "SELECT key, id FROM items ORDER BY key", vec![]).await?,
         vec![
-            vec![text("i1"), SqlValue::Integer(first)],
-            vec![text("i2"), SqlValue::Integer(second)]
+            vec![text("i1"), first.sql()],
+            vec![text("i2"), second.sql()]
         ]
     );
     let after = published(root.path())?;
@@ -381,7 +396,7 @@ async fn a_row_id_is_reserved_before_its_insert_in_the_same_transaction() -> Res
     for _ in 0..2 {
         exact(&writer, "BEGIN IMMEDIATE TRANSACTION", vec![]).await?;
         let third = id(exact(&writer, "SELECT rocky_next_id('items')", vec![]).await?)?;
-        assert_eq!(third, 4294967299);
+        assert_eq!((third.writer(), third.sequence()), (first.writer(), 3));
         exact(&writer, "ROLLBACK", vec![]).await?;
     }
     assert_eq!(published(root.path())?, after);
@@ -626,20 +641,6 @@ async fn readers_page_snapshots_and_never_hold_the_writer() -> Result<(), Failur
     Ok(())
 }
 
-async fn call(database: &Database, request: Value) -> Result<Value, Failure> {
-    let scope: Value = serde_json::from_str(&database.scope())?;
-    let reply = database
-        .session()
-        .call(json!({"version": 1, "scope": scope, "request": request}).to_string())
-        .await?;
-    let reply: Value = serde_json::from_str(&reply)?;
-    if reply["status"] == "ok" {
-        Ok(reply["value"].clone())
-    } else {
-        Err(reply["error"].to_string().into())
-    }
-}
-
 #[tokio::test]
 async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
 -> Result<(), Failure> {
@@ -654,9 +655,15 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
     )
     .await?
     .database;
-    let invitation = call(
-        &a,
-        json!({"type": "invitation", "profile": {"kind": "writer", "scopes": ["lists", "items"]}}),
+    let invitation = snap::value(
+        a.session().invite(
+            Some(rocky_sdk::GrantProfile::Writer {
+                scopes: ["lists".to_owned(), "items".to_owned()]
+                    .into_iter()
+                    .collect(),
+            }),
+            None,
+        ),
     )
     .await?;
     let b = Database::join(
@@ -667,8 +674,8 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
         invitation["uri"].as_str().ok_or("uri")?,
     )?
     .database;
-    call(&b, json!({"type": "sync"})).await?;
-    let _scope: Value = serde_json::from_str(&b.scope())?;
+    snap::value(b.session().sync_once()).await?;
+
     let (writer_a, writer_b) = (a.connect(WRITER).await?, b.connect(WRITER).await?);
     let reader_b = b.connect(READER).await?;
     let events = b.observe_tables(None).await?;
@@ -690,7 +697,7 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
     )
     .await?;
     run(&writer_a, "END TRANSACTION").await?;
-    call(&b, json!({"type": "sync"})).await?;
+    snap::value(b.session().sync_once()).await?;
     // One change covers both tables: the bundle applied as a whole.
     let change = tokio::time::timeout(Duration::from_secs(5), events.next()).await??;
     assert_eq!(
@@ -704,8 +711,8 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
     // change of `completed` elsewhere: under `changed` both survive.
     run(&writer_a, "UPDATE items SET key = 'i1', list = 'l1', title = 'Oat milk', completed = 0, note = NULL WHERE key = 'i1'").await?;
     run(&writer_b, "UPDATE items SET completed = 1 WHERE key = 'i1'").await?;
-    call(&b, json!({"type": "sync"})).await?;
-    call(&a, json!({"type": "sync"})).await?;
+    snap::value(b.session().sync_once()).await?;
+    snap::value(a.session().sync_once()).await?;
     for writer in [&writer_a, &writer_b] {
         let rows = all(
             writer,
@@ -761,7 +768,11 @@ async fn room_schema_reads_refresh_authority_before_a_deferred_transaction_uses_
         })
         .await?;
     run(&writer, "BEGIN DEFERRED TRANSACTION").await?;
-    call(&database, json!({"type": "renew"})).await?;
+    snap::value(async {
+        database.session().renew().await?;
+        database.session().info().await
+    })
+    .await?;
     assert!(
         !all(&writer, "PRAGMA table_info(`items`)", vec![])
             .await?
@@ -775,7 +786,11 @@ async fn room_schema_reads_refresh_authority_before_a_deferred_transaction_uses_
     run(&writer, "ROLLBACK").await?;
     // The first real statement must use the refreshed session too.
     run(&writer, "BEGIN DEFERRED TRANSACTION").await?;
-    call(&database, json!({"type": "renew"})).await?;
+    snap::value(async {
+        database.session().renew().await?;
+        database.session().info().await
+    })
+    .await?;
     assert_eq!(count(&writer, "items").await?, 0);
     run(&writer, "ROLLBACK").await?;
     writer.close().await;
@@ -945,7 +960,7 @@ async fn room_housekeeping_is_answered_from_the_catalog_and_the_file() -> Result
         .iter()
         .find(|row| row[1] == text("id"))
         .ok_or("id")?;
-    assert_eq!(id[2], text("INTEGER"));
+    assert_eq!(id[2], text("BLOB"));
     assert_eq!(id[3], SqlValue::Integer(1));
     let indexes = all(&reader, "PRAGMA index_list(`items`)", vec![]).await?;
     assert!(
@@ -1004,10 +1019,10 @@ async fn room_reads_each_reference_action_when_references_share_a_partition_colu
     const GROUPED: &str = r#"{"format":6,"application":"grouped","version":1,"tables":[
  {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
- {"name":"categories","class":"replayed","columns":[{"name":"list","type":"integer","not_null":true}],
+ {"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true}],
   "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list"},
  {"name":"items","class":"replayed","columns":[
-   {"name":"list","type":"integer","not_null":true},{"name":"category","type":"integer"}],
+   {"name":"list","type":"blob","not_null":true},{"name":"category","type":"blob"}],
   "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
   "foreign_keys":[{"columns":["list","category"],"table":"categories","on_delete":"set_null"},
    {"columns":["list"],"table":"lists","on_delete":"cascade"}]}
@@ -1086,10 +1101,12 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
         coordination: None,
     };
     let a = Database::create(setup(&a_path, "a"), None)?.database;
-    let invitation = call(
-        &a,
-        json!({"type": "invitation", "profile":{"kind":"reader", "scopes":["lists"]}}),
-    )
+    let invitation = snap::value(a.session().invite(
+        Some(rocky_sdk::GrantProfile::Reader {
+            scopes: ["lists".to_owned()].into_iter().collect(),
+        }),
+        None,
+    ))
     .await?;
     let b = Database::join(
         setup(&b_path, "b"),
@@ -1138,13 +1155,8 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
 async fn an_older_room_application_validates_the_schema_it_declares() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let created = create(open(root.path(), None), None).await?.database;
-    for action in ["create", "follow"] {
-        call(
-            &created,
-            json!({"type": "tips", "action": action, "name": "main"}),
-        )
-        .await?;
-    }
+    created.session().create_bookmark("main", None).await?;
+    created.session().follow("main").await?;
     created.close().await?;
     // The issuer's next application version adds a nullable rank.
     let newer = SHOPPING
@@ -1181,7 +1193,7 @@ async fn an_older_room_application_validates_the_schema_it_declares() -> Result<
     // its own version and tables as it declares them.
     let database = Database::open(open(root.path(), None))?.database;
     assert_eq!(
-        call(&database, json!({"type": "generation"})).await?["application"],
+        snap::value(database.session().generation()).await?["application"],
         "behind"
     );
     let writer = database.connect(room.clone()).await?;
@@ -1233,16 +1245,15 @@ fn titles(rows: Vec<Vec<SqlValue>>) -> Vec<String> {
 async fn a_connection_bound_to_a_kept_seal_reads_it_and_never_writes() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let database = create(open(root.path(), None), None).await?.database;
-    let tips = |action: &str, body: Value| {
-        let mut request = json!({"type": "tips", "action": action});
-        for (key, value) in body.as_object().into_iter().flatten() {
-            request[key] = value.clone();
-        }
-        call(&database, request)
-    };
-    tips("create", json!({"name": "main"})).await?;
-    tips("follow", json!({"name": "main"})).await?;
-    tips("keep", json!({"kept": {"every": true}})).await?;
+    snap::value(database.session().create_bookmark("main", None)).await?;
+    snap::value(database.session().follow("main")).await?;
+    snap::value(
+        database.session().set_kept_seals(
+            serde_json::from_value::<rocky_sdk::KeptSeals>(json!({"every": true}))
+                .expect("typed fixture"),
+        ),
+    )
+    .await?;
     let writer = database.connect(WRITER).await?;
     run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
     run(
@@ -1257,7 +1268,7 @@ async fn a_connection_bound_to_a_kept_seal_reads_it_and_never_writes() -> Result
     .await?;
     run(&writer, "END TRANSACTION").await?;
     // A continue seal's id is its successor tip.
-    let first = tips("seal", json!({})).await?["tip"].clone();
+    let first = snap::value(database.session().seal(false)).await?["tip"].clone();
     run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
     run(&writer, "UPDATE items SET title='Oat milk' WHERE key='i1'").await?;
     run(
@@ -1266,7 +1277,7 @@ async fn a_connection_bound_to_a_kept_seal_reads_it_and_never_writes() -> Result
     )
     .await?;
     run(&writer, "END TRANSACTION").await?;
-    let second = tips("seal", json!({})).await?["tip"].clone();
+    let second = snap::value(database.session().seal(false)).await?["tip"].clone();
     run(&writer, "DELETE FROM items WHERE key='i1'").await?;
     let seal = |value: &Value| -> Result<rocky_core::Commitment, Failure> {
         let hex = value.as_str().ok_or("seal")?;
@@ -1276,7 +1287,7 @@ async fn a_connection_bound_to_a_kept_seal_reads_it_and_never_writes() -> Result
             .collect::<Result<_, _>>()?;
         Ok(bytes.try_into().map_err(|_| "seal")?)
     };
-    let kept = tips("inspect", json!({})).await?;
+    let kept = snap::value(database.session().inspect_tips()).await?;
     for id in [&first, &second] {
         let held = kept["seals"]
             .as_array()

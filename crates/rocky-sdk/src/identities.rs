@@ -81,6 +81,22 @@ impl Settings {
         if links.database_context(self.publisher)? != self.database_context()? {
             return Err("identity capability belongs to another database".into());
         }
+        // In a personal database the root trusts only the owner, whose
+        // devices stand alone; custody principals keep membership links.
+        let owner = self.kind()?.owner();
+        if let Some(owner) = owner
+            && links.0.first().is_some_and(|grant| {
+                grant.capability.subject != owner
+                    && grant
+                        .capability
+                        .extended()
+                        .is_ok_and(|extended| extended.trusted.is_some())
+            })
+        {
+            return Err(crate::enrollment::personal_refusal(
+                rocky_credentials::PersonalError::WrongOwner,
+            ));
+        }
         let key = Self::node_key(vault)?;
         let node = key.public_key();
         let identity = links.principal();
@@ -98,6 +114,37 @@ impl Settings {
         }
         let certificate = match held {
             Some(held) => held.clone(),
+            None if owner.is_some_and(|owner| identity == Some(owner)) => {
+                let identity = self.installing_identity()?;
+                if self.revocations.tombstones(self.identity, node) {
+                    return Err(crate::enrollment::personal_refusal(
+                        rocky_credentials::PersonalError::Tombstoned {
+                            node: rocky_credentials::PeerId::of(node),
+                        },
+                    ));
+                }
+                let devices = self.revocations.personal_devices(self.identity)?;
+                if !devices.contains(&node)
+                    && devices.len() >= rocky_credentials::MAX_PERSONAL_DEVICES
+                {
+                    return Err(crate::enrollment::personal_refusal(
+                        rocky_credentials::PersonalError::DeviceLimit {
+                            limit: rocky_credentials::MAX_PERSONAL_DEVICES,
+                        },
+                    ));
+                }
+                // Each owner device stands alone: no sequence, no predecessor.
+                links
+                    .clone()
+                    .certify_personal(
+                        &*identity,
+                        &key,
+                        (self.identity, self.manifest()?.descriptor()?),
+                    )?
+                    .0
+                    .pop()
+                    .ok_or("missing certificate")?
+            }
             None => {
                 let identity = self.installing_identity()?;
                 let known = &self.revocations;

@@ -7,10 +7,15 @@ use std::collections::BTreeSet;
 
 pub struct Employees {
     publisher: [u8; 32],
+    domain: DomainId,
 }
 impl Employees {
     pub fn new(publisher: [u8; 32]) -> Self {
-        Self { publisher }
+        Self::in_domain(publisher, DomainId([1; 16]))
+    }
+    /// The same application in `domain`, such as a personal database's.
+    pub fn in_domain(publisher: [u8; 32], domain: DomainId) -> Self {
+        Self { publisher, domain }
     }
     pub fn definition(&self) -> ApplicationManifest {
         let mut manifest = ApplicationManifest {
@@ -24,7 +29,7 @@ impl Employees {
             fields: vec![],
             operations: vec![],
             domains: vec![DomainRule {
-                domain: DomainId([1; 16]),
+                domain: self.domain,
                 author_log: AuthorLogScope::Domain,
                 rule: "Public employees with private 1:1 payroll companions".into(),
             }],
@@ -62,7 +67,7 @@ impl Employees {
             domain: Scope {
                 mesh,
                 app: manifest.app,
-                domain: DomainId([1; 16]),
+                domain: self.domain,
             },
             encryption: rocky_core::commitment("employees.reader-set.v1", name.as_bytes()),
             table: manifest.item_id("entity", name),

@@ -115,8 +115,10 @@ impl Settings {
         )?;
         if self
             .revocations
+            .unfenced()
             .ends_node_of(self.identity, request.node, false)
-            || self.revocations.revokes(&self.identity)
+            || self.signed_out(&request.node)
+            || self.tombstoned(&self.identity)
         {
             return Err("the node or its identity was revoked".into());
         }
@@ -145,6 +147,8 @@ impl Settings {
                 if let Some(certificate) = self.credentials.certificate() {
                     known.link(certificate.clone())?;
                 }
+                let database = self.database_context()?;
+                crate::reset::admit_after_resets(&mut known, &node, database, request.node)?;
                 known
             },
             links: self.identity_links(),
@@ -245,7 +249,7 @@ impl Settings {
             transport,
             &addresses,
             record.database.scope,
-            &PeerRequest::Identity(wire),
+            &PeerRequest::Identity(rocky_credentials::IdentityEnrollment::Shared(wire)),
         )
         .await?;
         if confirmed.is_none() {
@@ -346,7 +350,9 @@ impl Settings {
             transport,
             &addresses,
             record.database.scope,
-            &PeerRequest::LinkEnroll(Box::new(certificate.clone())),
+            &PeerRequest::LinkEnroll(rocky_credentials::LinkEnrollment::Shared(Box::new(
+                certificate.clone(),
+            ))),
         )
         .await?;
         let PeerReply::LinkEnroll(accepted) = reply else {

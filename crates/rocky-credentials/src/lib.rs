@@ -29,8 +29,10 @@ mod migration;
 pub use membership::{MAX_MEMBERSHIP_NODES, MembershipLink, MembershipSet};
 pub use migration::{MAX_MIGRATION_DESCRIPTOR_BYTES, SignedMigrationPublication};
 mod partition;
+mod passkey;
 mod peer;
 mod peer_rpc;
+mod personal;
 mod phrase_key;
 mod reset;
 mod revocation;
@@ -77,16 +79,25 @@ pub use issue::{Authority, Grant, MAX_GRANTS, NEVER, Profile, Resource, device_c
 pub use keys::{FileKeyProvider, KeyProvider, ProviderError, Vault, write_private};
 pub use p2panda_core::{Hash, PrivateKey, PublicKey, Signature};
 pub use partition::{PartitionContext, PartitionGrant};
+pub use passkey::{
+    DiscoveryCapability, PersonalAccount, PersonalLocator, PrfInput, PrfUnsupported,
+    VerifiedPasskeyPrf,
+};
 pub use peer::PeerId;
 pub use peer_rpc::{
-    EpochRequest, IdentityEnrollmentRequest, IdentityReply, MAX_MESSAGE as MAX_PEER_RPC_MESSAGE,
-    PeerAdmission, PeerError, PeerReply, PeerReplyFrame, PeerRequest, PeerRequestFrame,
-    PeerResolutionProof, PeerResolutionRequest, PeerTrust, StagedCloseStatus,
-    VERSION as PEER_RPC_VERSION,
+    EpochRequest, IdentityEnrollment, IdentityEnrollmentRequest, IdentityReply, LinkEnrollment,
+    MAX_MESSAGE as MAX_PEER_RPC_MESSAGE, PeerAdmission, PeerError, PeerReply, PeerReplyFrame,
+    PeerRequest, PeerRequestFrame, PeerResolutionProof, PeerResolutionRequest, PeerTrust,
+    StagedCloseStatus, VERSION as PEER_RPC_VERSION,
+};
+pub use personal::{
+    DatabaseKind, MAX_PERSONAL_DEVICES, PersonalAct, PersonalAnswer, PersonalAudience,
+    PersonalAuthorization, PersonalBinding, PersonalChallenge, PersonalContext, PersonalError,
+    PersonalHello, PersonalLink, PersonalNamespace, PersonalPublication,
 };
 pub use reset::{
     FenceLog, FenceScope, MAX_FENCE_LOGS, MAX_RESET_BYTES, MAX_RESET_FOLLOWS, MAX_RESET_KEEP,
-    Reset, ResetStanding,
+    Reset, ResetAdmission, ResetStanding, SignedResetAdmission,
 };
 pub use revocation::{
     Cut, DAY, Head, Heads, LIFETIME_SKEW, MAX_CHAIN_LIFETIME, MAX_CUT_HEADS, MAX_CUT_LANES,
@@ -122,6 +133,8 @@ pub enum Error {
     Protocol(rocky_core::ProtocolError),
     /// The key provider failed or holds no such secret.
     Provider(ProviderError),
+    /// A personal database's mode, owner or device rules refused.
+    Personal(PersonalError),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -129,6 +142,7 @@ impl std::fmt::Display for Error {
             Self::Denied(message) => f.write_str(message),
             Self::Protocol(error) => write!(f, "{error}"),
             Self::Provider(error) => write!(f, "{error}"),
+            Self::Personal(error) => write!(f, "{error}"),
         }
     }
 }

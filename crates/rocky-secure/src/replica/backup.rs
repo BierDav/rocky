@@ -23,7 +23,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .ok_or_else(|| denied("the backup target is not a UTF-8 path"))?
             .to_string();
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        inner = flush_guard(inner, &self.inner).await?;
+        inner = flushed(inner, &self.inner).await?;
         inner
             .conn
             .execute("VACUUM INTO ?", bindings(vec![SqlValue::Text(target)]))

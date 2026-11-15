@@ -71,9 +71,12 @@ impl Node {
         self.expire_requests().await?;
         let registry = self.registry().await?;
         let bootstrap = self.enrollment_bootstrap().await?;
+        // Resets synced since are what an admission must name.
+        let held = self.replica.revocations().await;
         let (reply, changes, notes) = {
             let mut settings = self.settings.lock().await;
             let mut draft = settings.clone();
+            draft.learn_revocations(&held)?;
             draft.bootstrap = Some(bootstrap);
             let answer = draft.pair(&self.vault, request, &registry);
             // Attempts count even when the request is refused.
@@ -207,6 +210,7 @@ impl Node {
         if !self.settings.lock().await.issuer() {
             return Err(refused("only an issuer admits devices"));
         }
+        self.settings.lock().await.admits(Some(&admit.profile))?;
         self.expire_requests().await?;
         let registry = self.registry().await?;
         let notes = self

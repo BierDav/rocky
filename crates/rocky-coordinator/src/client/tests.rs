@@ -498,6 +498,33 @@ fn a_client_needs_an_endpoint_of_its_transport_kind() {
     ));
 }
 
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_memory_log_binds_only_the_key_its_certificate_names() {
+    let client = crate::coordinated::MemoryLog::new().client(PrivateKey::new().public_key());
+    let key = PrivateKey::new();
+    let certificate = self_certificate_in(
+        &key,
+        rocky_credentials::DatabaseContext {
+            publisher: PrivateKey::new().public_key(),
+            scope: Scope {
+                mesh: MeshId([1; 16]),
+                app: AppId([2; 16]),
+                domain: DomainId([3; 16]),
+            },
+        },
+    );
+    assert!(matches!(
+        rocky_credentials::Coordinator::bind(&client, PrivateKey::new(), certificate.clone()),
+        Err(CoordinationError::Denied)
+    ));
+    assert_eq!(
+        rocky_credentials::Coordinator::bind(&client, key.clone(), certificate)
+            .unwrap()
+            .node(),
+        *key.public_key().as_bytes()
+    );
+}
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn application_client_bindings_keep_node_authority_and_observers_independent() {
     let service = Service::start().await;

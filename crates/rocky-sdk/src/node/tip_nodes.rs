@@ -164,25 +164,41 @@ impl Node {
             return Ok(());
         }
         let identity = settings.identity()?;
-        let membership = known.membership()?;
-        if !membership.can_link(settings.identity, |node| {
-            known.identity_unlinks(settings.identity, node)
-        }) {
-            return Err("identity membership limit reached".into());
-        }
-        let sequence = membership.next_sequence(settings.identity)?;
-        let previous = membership
-            .head(settings.identity)
-            .map(|head| head.certificate);
         let key = PrivateKey::from_bytes(&rocky_platform::entropy::random());
         let links = settings.identity_links();
-        let certificate = links
-            .clone()
-            .certify_member(&*identity, key.public_key(), sequence, previous)?
-            .0
-            .pop()
-            .ok_or("missing node certificate")?;
-        known.link(certificate.clone())?;
+        let personal = settings
+            .personal()?
+            .filter(|context| context.owner == settings.identity);
+        let certificate = if let Some(context) = personal {
+            // An owner's line node stands alone, like each of its devices.
+            let certificate = links
+                .clone()
+                .certify_personal(&*identity, &key, (context.owner, context.descriptor))?
+                .0
+                .pop()
+                .ok_or("missing node certificate")?;
+            known.admit_personal(certificate.clone(), &context)?;
+            certificate
+        } else {
+            let membership = known.membership()?;
+            if !membership.can_link(settings.identity, |node| {
+                known.identity_unlinks(settings.identity, node)
+            }) {
+                return Err("identity membership limit reached".into());
+            }
+            let sequence = membership.next_sequence(settings.identity)?;
+            let previous = membership
+                .head(settings.identity)
+                .map(|head| head.certificate);
+            let certificate = links
+                .clone()
+                .certify_member(&*identity, key.public_key(), sequence, previous)?
+                .0
+                .pop()
+                .ok_or("missing node certificate")?;
+            known.link(certificate.clone())?;
+            certificate
+        };
         let credentials = settings.chain_for(&key, links, certificate, &self.domain())?;
         let node = rocky_secure::LineNode { key, credentials };
         saved.nodes.push(SavedNode {

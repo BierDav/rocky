@@ -83,6 +83,77 @@ async fn commit_during_flush_keeps_current_state_out_of_maintenance() {
     );
 }
 
+// Pauses work that natively runs on a blocking thread; a Worker runs it in place.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn authority_change_during_flush_leaves_held_listing_current() {
+    let t = Typed::new();
+    let dir = Scratch::new().await;
+    let replica = t
+        .open(
+            &dir.path().join("authority.db"),
+            &PrivateKey::new(),
+            t.full(),
+            &[t.items],
+        )
+        .await;
+    let sql = buffered(&replica, t.items).await;
+    insert(&sql, "INSERT INTO items VALUES('a','first',0)", vec![])
+        .await
+        .unwrap();
+    let (entered, resume) = replica.pause_flush().await;
+    let listing = replica.held_changes();
+    tokio::pin!(listing);
+    tokio::select! {
+        result = &mut listing => panic!("listing did not flush: {result:?}"),
+        result = entered => result.unwrap(),
+    }
+    // A first sync learns keys or credentials while the writer is released.
+    replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .authority += 1;
+    resume.send(()).unwrap();
+    assert!(listing.await.unwrap().is_empty());
+}
+
+// The backup reads nothing authority-dependent before its flush.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn authority_change_during_flush_leaves_backup_current() {
+    let t = Typed::new();
+    let dir = Scratch::new().await;
+    let replica = t
+        .open(
+            &dir.path().join("authority.db"),
+            &PrivateKey::new(),
+            t.full(),
+            &[t.items],
+        )
+        .await;
+    let sql = buffered(&replica, t.items).await;
+    insert(&sql, "INSERT INTO items VALUES('a','first',0)", vec![])
+        .await
+        .unwrap();
+    let (entered, resume) = replica.pause_flush().await;
+    let target = dir.path().join("backup.db");
+    let backup = replica.backup_into(&target);
+    tokio::pin!(backup);
+    tokio::select! {
+        result = &mut backup => panic!("backup did not flush: {result:?}"),
+        result = entered => result.unwrap(),
+    }
+    replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .authority += 1;
+    resume.send(()).unwrap();
+    backup.await.unwrap();
+    assert!(rocky_platform::fs::exists(&target));
+}
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn flushed_commit_defers_maintenance_until_driver_runs() {
     let t = Typed::new();

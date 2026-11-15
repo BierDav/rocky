@@ -814,6 +814,78 @@ async fn a_coordinated_seal_enters_the_graph_only_after_ending_its_tips_log() {
     assert_eq!(coordinator.head(log).unwrap().terminal, Some(terminal));
 }
 
+// Two trusted nodes seal routinely at the same threshold. The loser of the
+// tip's log must not follow its own seal before the winner arrives: the
+// winner becomes final and the loser's author log would cross a fork.
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn an_own_seal_that_lost_the_tips_log_is_not_published_before_the_winner_arrives() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
+    let a = open(&f, &dir.path().join("a.db"), &a_key).await;
+    let b = open(&f, &dir.path().join("b.db"), &b_key).await;
+    main(&f, &a).await;
+    b.receive_tip_statements(&a.tip_statements(None, 32).await.unwrap())
+        .await
+        .unwrap();
+    b.follow_bookmark(f.public.domain, "main").await.unwrap();
+    b.receive(insert(&f, &a, 1, "Common").await).await.unwrap();
+    let coordinator = rocky_coordinator::coordinated::MemoryLog::new();
+    a.set_domain_log(Some(std::sync::Arc::new(
+        coordinator.client(a_key.public_key()),
+    )));
+    b.set_domain_log(Some(std::sync::Arc::new(
+        coordinator.client(b_key.public_key()),
+    )));
+    let tip = a.followed_tip().await;
+    let won = seal(&f, &b).await;
+    let winner = vec![
+        TipStatement::Seal(won.clone()),
+        bookmark(&f, "main", Some(tip), won.successor().unwrap()),
+    ];
+    b.publish_tip_statements(&winner).await.unwrap();
+    // The same seal endorsed by another signer has another digest.
+    let issuer = PrivateKey::new();
+    let chain = CredentialChain(vec![
+        Authority::owner_in(
+            &f.publisher,
+            rocky_credentials::DatabaseContext {
+                publisher: f.publisher.public_key(),
+                scope: f.public.domain,
+            },
+        )
+        .unwrap()
+        .issue_issuer(issuer.public_key(), validity())
+        .unwrap(),
+    ]);
+    let lost = SignedSeal::endorse(
+        won.statement.clone(),
+        rocky_credentials::testing::lane_for(&issuer, &chain),
+        &chain,
+    )
+    .unwrap();
+    assert_ne!(lost.id().unwrap(), won.id().unwrap());
+    let message = a
+        .publish_tip_statements(&[
+            TipStatement::Seal(lost.clone()),
+            bookmark(&f, "main", Some(tip), lost.successor().unwrap()),
+        ])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("first"), "{message}");
+    assert!(a.tip_graph(f.public.domain).await.unwrap().seals.is_empty());
+    assert_eq!(a.followed_tip().await, tip);
+    a.receive_tip_statements(&winner).await.unwrap();
+    assert_eq!(a.followed_tip().await, won.successor().unwrap().unwrap());
+    // The node's author log continues on the winning line.
+    b.receive(insert(&f, &a, 2, "After the race").await)
+        .await
+        .unwrap();
+    assert_eq!(b.snapshot(f.public).await.unwrap().rows.len(), 2);
+}
+
 async fn identity_replica(
     f: &Fixture,
     path: &Path,

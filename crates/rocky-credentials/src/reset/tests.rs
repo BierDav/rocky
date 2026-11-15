@@ -54,8 +54,30 @@ impl Owner {
     }
     /// A node of the owner identity: its key and full chain.
     fn node(&self) -> (PublicKey, CredentialChain) {
-        let (key, chain) = crate::testing::node(&self.identity, &self.chain);
+        let (key, chain) = self.device();
         (key.public_key(), chain)
+    }
+    /// A node of the owner identity that signs itself.
+    fn device(&self) -> (PrivateKey, CredentialChain) {
+        crate::testing::node(&self.identity, &self.chain)
+    }
+    /// `by` admits `node` after the resets `follows`.
+    fn admit(
+        &self,
+        by: &PrivateKey,
+        node: PublicKey,
+        follows: &[&SignedRevocation],
+    ) -> crate::SignedResetAdmission {
+        crate::SignedResetAdmission::sign(
+            by,
+            crate::DatabaseContext {
+                publisher: self.root.public_key(),
+                scope: scope(0).domain,
+            },
+            PeerId::of(node),
+            follows.iter().map(|reset| reset.id().unwrap()).collect(),
+        )
+        .unwrap()
     }
     fn reset(
         &self,
@@ -257,6 +279,68 @@ fn concurrent_resets_end_each_other_and_a_following_reset_admits_a_new_node() {
     }
     // Before the following reset arrives, the new node is ended too.
     assert!(ended(&set(&[&first, &second]), &fresh_chain));
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_node_a_kept_node_admits_after_a_reset_stays_and_one_a_signed_out_node_admits_ends() {
+    let owner = Owner::new();
+    let (this, _) = owner.device();
+    let (laptop, _) = owner.device();
+    let reset = owner.reset(&[], &[this.public_key()], Vec::new());
+    let (phone, phone_chain) = owner.device();
+    let (tablet, tablet_chain) = owner.node();
+    let (stolen, stolen_chain) = owner.node();
+    let admissions = [
+        owner.admit(&this, phone.public_key(), &[&reset]),
+        // An admitted node admits in turn.
+        owner.admit(&phone, tablet, &[&reset]),
+        // The signed-out laptop admits nobody, nor does an admission vouch
+        // for its own signer.
+        owner.admit(&laptop, stolen, &[&reset]),
+        owner.admit(&laptop, laptop.public_key(), &[&reset]),
+    ];
+    for order in [[0, 1, 2, 3], [3, 2, 1, 0]] {
+        let mut held = set(&[&reset]);
+        for index in order {
+            assert!(held.admit(admissions[index].clone()).unwrap());
+        }
+        assert!(!ended(&held, &phone_chain) && !ended(&held, &tablet_chain));
+        assert!(ended(&held, &stolen_chain));
+        assert!(held.reset_ends(&PeerId::of(laptop.public_key())));
+        assert_eq!(
+            held.reset_standing(&scope(1), &tablet, 0),
+            ResetStanding::Live
+        );
+        // The admissions travel with the set, in its one current format.
+        let decoded = RevocationSet::from_bytes(&held.to_bytes().unwrap()).unwrap();
+        assert_eq!(decoded, held);
+        assert!(!decoded.reset_ends(&PeerId::of(tablet)));
+        // A following reset that keeps neither ends both again, and an
+        // admission naming only the earlier reset does not get past it.
+        let again = owner.reset(&[&reset], &[this.public_key()], Vec::new());
+        let mut later = held.clone();
+        later
+            .merge(&set(&[&again]), owner.root.public_key(), APP, NOW)
+            .unwrap();
+        assert!(ended(&later, &phone_chain) && ended(&later, &tablet_chain));
+        assert_eq!(
+            later.ending_resets(&PeerId::of(tablet)),
+            vec![again.id().unwrap()]
+        );
+    }
+    // Naming a reset the set does not hold admits nothing yet; a forged
+    // signature is refused outright.
+    let mut early = RevocationSet::new();
+    early.admit(admissions[0].clone()).unwrap();
+    assert!(!early.reset_ends(&PeerId::of(phone.public_key())));
+    let mut forged = admissions[2].clone();
+    forged.admission.signer = this.public_key();
+    assert!(set(&[&reset]).admit(forged).is_err());
+    // A statement ending the admitter by name voids its admissions.
+    let lost = owner.revoke(RevocationMode::Lost, &[this.public_key()], &[]);
+    let mut held = set(&[&reset, &lost]);
+    held.admit(admissions[0].clone()).unwrap();
+    assert!(held.reset_ends(&PeerId::of(phone.public_key())));
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]

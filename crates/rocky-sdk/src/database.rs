@@ -70,6 +70,9 @@ pub(crate) enum Install {
         /// The bookmark the creating device makes and follows before the
         /// database is handed out.
         bookmark: Option<&'static str>,
+        /// A personal database of the root's owner identity, whose
+        /// interrupted create resumes from its install intent.
+        personal: Option<Box<crate::personal::Create>>,
     },
     Join {
         invitation: String,
@@ -84,6 +87,9 @@ pub(crate) enum Install {
         confirmed: Option<Arc<crate::AwaitingLink>>,
     },
     Installed,
+    /// One more owner device of a personal database, signed in with the
+    /// passkey; its interrupted install resumes from its intent.
+    SignIn(Box<crate::personal::SignIn>),
     /// A backup archive, under a fresh identity the invitation enrolls.
     Restore {
         archive: PathBuf,
@@ -98,6 +104,14 @@ pub(crate) enum Install {
         /// The archived identity record, once the archive is opened.
         archived: std::sync::Mutex<Option<Box<Settings>>>,
     },
+}
+impl Install {
+    /// A shared create that fails takes its secrets back. A personal
+    /// create keeps its device keys and pinned epochs for the retry its
+    /// install intent resumes.
+    fn discards_secrets(&self) -> bool {
+        matches!(self, Self::Create { personal: None, .. })
+    }
 }
 struct Setup {
     directory: PathBuf,
@@ -329,7 +343,7 @@ impl Database {
         let created = crate::RootKey::from_secret(root.secret());
         let mut opened = Self::start(
             open,
-            Self::create_install(credential_ttl, Arc::new(root), None)?,
+            Self::create_install(credential_ttl, Arc::new(root), None, None)?,
         )?;
         opened.root = Some(created);
         Ok(opened)
@@ -345,12 +359,16 @@ impl Database {
         credential_ttl: Option<u64>,
         root: Arc<dyn crate::IdentityProvider>,
     ) -> Result<Opened, Failure> {
-        Self::start(open, Self::create_install(credential_ttl, root, None)?)
+        Self::start(
+            open,
+            Self::create_install(credential_ttl, root, None, None)?,
+        )
     }
     fn create_install(
         credential_ttl: Option<u64>,
         root: Arc<dyn crate::IdentityProvider>,
         bookmark: Option<&'static str>,
+        personal: Option<Box<crate::personal::Create>>,
     ) -> Result<Install, Failure> {
         let ttl = credential_ttl.unwrap_or(DEFAULT_TTL);
         if !(60..=366 * 24 * 60 * 60).contains(&ttl) {
@@ -360,6 +378,7 @@ impl Database {
             ttl,
             root: std::sync::Mutex::new(Some(root)),
             bookmark,
+            personal,
         })
     }
     // Blocks the caller until the database is open, which a browser cannot.
@@ -583,9 +602,9 @@ impl Database {
         open: Open<'_>,
         credential_ttl: Option<u64>,
         root: Arc<dyn crate::IdentityProvider>,
-        bookmark: &'static str,
+        (bookmark, personal): (&'static str, Option<Box<crate::personal::Create>>),
     ) -> Result<Opened, Failure> {
-        let install = Self::create_install(credential_ttl, root, Some(bookmark))?;
+        let install = Self::create_install(credential_ttl, root, Some(bookmark), personal)?;
         Self::launch(open, install, None).await
     }
     pub(crate) async fn launch_join(
@@ -629,6 +648,12 @@ impl Database {
                 confirmed: Some(pending),
             },
         )
+    }
+    pub(crate) async fn launch_sign_in(
+        open: Open<'_>,
+        sign_in: crate::personal::SignIn,
+    ) -> Result<Opened, Failure> {
+        Self::launch(open, Install::SignIn(Box::new(sign_in)), None).await
     }
     pub(crate) async fn launch_open(open: Open<'_>) -> Result<Opened, Failure> {
         Self::launch(open, Install::Installed, None).await
@@ -1272,23 +1297,19 @@ impl Session {
             .await
     }
     /// "This is everything: sign out everywhere else." The root ends every
-    /// node except this one and `custodians`, including nodes this store
-    /// never saw, and keeps their operations only up to what this replica
-    /// applied: anything not on this device now is discarded on every
-    /// replica. A later reset follows this one; resets signed concurrently
-    /// end each other's devices. Fails on a device a reset already ended.
+    /// node except this one and those `keep` names, including nodes this
+    /// store never saw, and keeps their operations only up to what this
+    /// replica applied: anything not on this device now is discarded on
+    /// every replica. A later reset follows this one; resets signed
+    /// concurrently end each other's devices. Devices a kept device admits
+    /// afterwards stay. Fails on a device a reset already ended.
     pub async fn sign_out_everywhere_else(
         &self,
         root: Arc<dyn crate::IdentityProvider>,
-        custodians: &[rocky_credentials::PeerId],
+        keep: crate::ResetKeep,
     ) -> Result<crate::ResetReceipt, Failure> {
-        let custodians = custodians.iter().copied().collect();
         self.send(|reply| {
-            crate::request::Request::SignOutEverywhereElse(
-                node::Root(Some(root)),
-                custodians,
-                reply,
-            )
+            crate::request::Request::SignOutEverywhereElse(node::Root(Some(root)), keep, reply)
         })
         .await
     }
@@ -1456,13 +1477,56 @@ async fn identity(
         );
     }
     match install {
-        Install::Create { ttl, root, .. } => {
+        Install::Create {
+            ttl,
+            root,
+            personal,
+            ..
+        } => {
             let root = root
                 .lock()
                 .map_err(|_| "root poisoned")?
                 .take()
                 .ok_or(crate::enrollment::PublisherRequired("creating a domain"))?;
-            let settings = Settings::create(schema, secrets, *ttl, setup.identity.clone(), &*root)?;
+            let settings = match personal {
+                Some(personal) => {
+                    if setup.identity.is_some() {
+                        return Err(crate::enrollment::personal_refusal(
+                            rocky_credentials::PersonalError::WrongOwner,
+                        ));
+                    }
+                    let discovery = personal
+                        .discovery
+                        .lock()
+                        .map_err(|_| "discovery poisoned")?
+                        .take()
+                        .ok_or("the personal create was already attempted")?;
+                    let installing = crate::personal::Installing::resume(
+                        directory,
+                        secrets,
+                        &*root,
+                        (&personal.namespace, discovery),
+                    )?;
+                    // What an interrupted attempt wrote besides its intent goes.
+                    if installing.resumed() {
+                        remove_installation(directory)?;
+                    }
+                    let settings = Settings::create_personal(
+                        schema,
+                        secrets,
+                        *ttl,
+                        (personal.namespace.clone(), installing),
+                        &*root,
+                    )?;
+                    *personal.coverage.lock().map_err(|_| "coverage poisoned")? =
+                        Some(crate::personal::RestoreCoverage::held(
+                            &settings,
+                            &settings.vault(secrets),
+                        )?);
+                    settings
+                }
+                None => Settings::create(schema, secrets, *ttl, setup.identity.clone(), &*root)?,
+            };
             drop(root);
             let vault = settings.vault(secrets);
             let started = async {
@@ -1476,7 +1540,9 @@ async fn identity(
             match started {
                 Ok(link) => Ok((settings, link)),
                 Err(error) => {
-                    let _ = vault.forget(settings.roles());
+                    if install.discards_secrets() {
+                        let _ = vault.forget(settings.roles());
+                    }
                     Err(error)
                 }
             }
@@ -1525,6 +1591,15 @@ async fn identity(
                     Err(error)
                 }
             }
+        }
+        Install::SignIn(sign_in) => {
+            if setup.identity.is_some() {
+                return Err(crate::enrollment::personal_refusal(
+                    rocky_credentials::PersonalError::WrongOwner,
+                ));
+            }
+            crate::personal::sign_in::install(path, directory, secrets, schema, sign_in, network)
+                .await
         }
         Install::Supplied(supplied) => {
             let settings =
@@ -1940,10 +2015,13 @@ async fn run_inner(
             .await?;
         }
     }
-    // A create or a supplied install that fails before it is handed out
-    // takes back what it wrote; see `unwind`.
-    let fresh = matches!(setup.install, Install::Create { .. } | Install::Supplied(_))
-        && !rocky_platform::fs::exists(&path);
+    // A create, sign-in or supplied install that fails before it is handed
+    // out takes back what it wrote; see `unwind`. A personal install keeps
+    // its intent and keys for the retry.
+    let fresh = matches!(
+        setup.install,
+        Install::Create { .. } | Install::SignIn(_) | Install::Supplied(_)
+    ) && !rocky_platform::fs::exists(&path);
     let (mut settings, link) = match identity(&path, &setup, network).await {
         Ok(installed) => installed,
         Err(error) if fresh => return Err(unwind(&directory, None, error)),
@@ -2120,7 +2198,9 @@ async fn run_inner(
                 transport.close().await;
             }
             if fresh {
-                let created = matches!(setup.install, Install::Create { .. })
+                let created = setup
+                    .install
+                    .discards_secrets()
                     .then(|| (&vault, settings.roles()));
                 return Err(unwind(&directory, created, error));
             }
@@ -2214,6 +2294,17 @@ async fn run_inner(
         }
         _ => Vec::new(),
     };
+    // A personal install's intent ends once it is handed out; until then
+    // a retry resumes it. An open ends one an interrupted install left
+    // beside its saved identity, so no later sign-in takes that store back.
+    let personal = matches!(
+        setup.install,
+        Install::Create {
+            personal: Some(_),
+            ..
+        } | Install::SignIn(_)
+            | Install::Installed
+    );
     if hello.send(Ok((scope, network, revoked))).is_err() {
         let abandoned: Failure = "database opener abandoned".into();
         // Nobody received the created domain's root: the domain goes too.
@@ -2224,6 +2315,9 @@ async fn run_inner(
                 abandoned
             },
         );
+    }
+    if personal && let Err(error) = crate::personal::finish(&directory) {
+        tracing::warn!(%error, "the finished personal install intent could not be removed");
     }
     if rocky_platform::fs::exists(directory.join("bootstrap.json")) && network.is_some() {
         let joining = node.clone();
@@ -2518,10 +2612,10 @@ fn remove_installation(directory: &Path) -> Result<(), Failure> {
     }
     Ok(())
 }
-/// Takes back a create or a supplied install that failed before it was
-/// handed out, so the directory takes a retry: its files go, and a created
-/// domain's secrets, whose root was never handed out either. A supplied
-/// install keeps the prepared device keys it is retried with.
+/// Takes back a create, sign-in or supplied install that failed before it
+/// was handed out, so the directory takes a retry: its files go, and a
+/// created domain's secrets, whose root was never handed out either. A
+/// supplied or personal install keeps the device keys it is retried with.
 fn unwind(
     directory: &Path,
     created: Option<(&crate::secrets::Vault, Vec<String>)>,
@@ -2551,7 +2645,7 @@ async fn discard(
     let roles = node.settings.lock().await.roles();
     drop(node);
     drop(replica);
-    let created = matches!(install, Install::Create { .. }).then_some((&vault, roles));
+    let created = install.discards_secrets().then_some((&vault, roles));
     unwind(directory, created, error)
 }
 #[cfg(test)]

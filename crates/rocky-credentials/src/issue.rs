@@ -908,7 +908,7 @@ impl CredentialChain {
         Ok(chain)
     }
     /// The last link, which `holder` must hold and which may delegate.
-    fn holder(&self, holder: &dyn IdentityProvider) -> Result<&Capability, Error> {
+    pub(crate) fn holder(&self, holder: &dyn IdentityProvider) -> Result<&Capability, Error> {
         self.holder_key(holder.public_key()?)
     }
     fn holder_key(&self, key: PublicKey) -> Result<&Capability, Error> {

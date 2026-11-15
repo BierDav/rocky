@@ -246,7 +246,7 @@ pub(crate) enum Request {
     ),
     SignOutEverywhereElse(
         crate::node::Root,
-        std::collections::BTreeSet<rocky_credentials::PeerId>,
+        crate::ResetKeep,
         Reply<crate::ResetReceipt>,
     ),
     Freshness(Reply<crate::Freshness>),

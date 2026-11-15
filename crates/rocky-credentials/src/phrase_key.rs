@@ -8,8 +8,11 @@ impl PhraseKey {
     pub(crate) fn generate() -> Self {
         Self(PrivateKey::from_bytes(&rocky_platform::entropy::random()))
     }
-    pub(crate) fn from_secret(secret: [u8; 32]) -> Self {
-        Self(PrivateKey::from_bytes(&secret))
+    /// The caller's copy of `secret` is erased.
+    pub(crate) fn from_secret(mut secret: [u8; 32]) -> Self {
+        let key = Self(PrivateKey::from_bytes(&secret));
+        zeroize::Zeroize::zeroize(&mut secret);
+        key
     }
     /// The key a 24-word English BIP 39 phrase names; whitespace is free.
     pub(crate) fn from_phrase(phrase: &str) -> Result<Self, Error> {

@@ -18,8 +18,10 @@ const MAX_IDS: usize = 4 * MAX_LIVE_REVOCATIONS;
 #[derive(Serialize, Deserialize)]
 pub(super) enum RevocationMessage {
     Exchange,
+    /// Membership certificates and reset admissions, a page of each.
     Certificates {
         certificates: Vec<rocky_credentials::SignedCapability>,
+        admissions: Vec<rocky_credentials::SignedResetAdmission>,
         last: bool,
     },
     Digest {
@@ -97,17 +99,25 @@ impl NativeSession {
             return Ok(None);
         }
         let certificates: Vec<_> = held.certificates().cloned().collect();
+        let admissions: Vec<_> = held.admissions().cloned().collect();
         let mut pages = certificates.chunks(STATEMENTS_PAGE);
+        let mut admission_pages = admissions.chunks(STATEMENTS_PAGE);
         let (mut sent, mut received) = (false, false);
         let mut learned_links = RevocationSet::new();
         while !(sent && received) {
             let page = pages.next().unwrap_or_default();
-            sent = pages.len() == 0;
-            let RevocationMessage::Certificates { certificates, last } = self
+            let admitting = admission_pages.next().unwrap_or_default();
+            sent = pages.len() == 0 && admission_pages.len() == 0;
+            let RevocationMessage::Certificates {
+                certificates,
+                admissions,
+                last,
+            } = self
                 .swap(
                     initiator,
                     RevocationMessage::Certificates {
                         certificates: page.to_vec(),
+                        admissions: admitting.to_vec(),
                         last: sent,
                     },
                 )
@@ -115,12 +125,20 @@ impl NativeSession {
             else {
                 return Err(denied("unexpected membership certificates"));
             };
-            if (received && !certificates.is_empty()) || certificates.len() > STATEMENTS_PAGE {
+            if (received && !(certificates.is_empty() && admissions.is_empty()))
+                || certificates.len() > STATEMENTS_PAGE
+                || admissions.len() > STATEMENTS_PAGE
+            {
                 return Err(denied("membership certificates outside the exchange"));
             }
             for certificate in certificates {
                 if !learned_links.link(certificate).map_err(credential)? {
                     return Err(denied("duplicate membership certificate"));
+                }
+            }
+            for admission in admissions {
+                if !learned_links.admit(admission).map_err(credential)? {
+                    return Err(denied("duplicate admission"));
                 }
             }
             received |= last;

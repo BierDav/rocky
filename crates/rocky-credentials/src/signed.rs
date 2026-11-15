@@ -42,6 +42,7 @@ impl Certificate {
         ) {
             return Err(denied("invalid node certificate"));
         }
+        crate::personal::check_possession(&self.capability, identity)?;
         Ok(self.capability.subject)
     }
     /// The node key, as named, unverified.
@@ -65,7 +66,9 @@ fn node_shape(capability: &Capability) -> Result<(), Error> {
         || extended.claims.is_some()
         || extended.origin.is_some()
         || extended.database.is_none()
-        || extended.sequence.is_none()
+        // A shared node takes a membership sequence; a personal device an
+        // owner binding instead.
+        || extended.sequence.is_none() == extended.personal.is_none()
         || extended
             .sequence
             .is_some_and(|sequence| (sequence == 0) != extended.previous.is_none())
@@ -357,30 +360,41 @@ impl Endorsement {
     }
 }
 
+/// A manifest and the database mode its signer pins with it. The genesis
+/// is the root's; its mode never changes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SignedManifest {
     body: Vec<u8>,
+    kind: crate::DatabaseKind,
     endorsement: Endorsement,
 }
-const MANIFEST: &str = "rocky.signed-manifest.v2";
+const MANIFEST: &str = "rocky.signed-manifest.v4";
 impl SignedManifest {
     /// The owner signs.
     pub fn sign(
         manifest: &ApplicationManifest,
+        kind: crate::DatabaseKind,
         owner: &dyn IdentityProvider,
     ) -> Result<Self, Error> {
-        Self::endorse(manifest, owner, &CredentialChain(Vec::new()))
+        Self::endorse(manifest, kind, owner, &CredentialChain(Vec::new()))
     }
     /// The owner, or an issuer's node through `chain`, signs.
     pub fn endorse<'s>(
         manifest: &ApplicationManifest,
+        kind: crate::DatabaseKind,
         signer: impl Into<Signer<'s>>,
         chain: &CredentialChain,
     ) -> Result<Self, Error> {
         manifest.validate()?;
+        kind.validate(manifest)?;
         let body = manifest.canonical_body();
-        let endorsement = Endorsement::sign(signer, chain, MANIFEST, &body)?;
-        let signed = Self { body, endorsement };
+        let endorsement = Endorsement::sign(signer, chain, MANIFEST, &(&body, &kind))?;
+        let signed = Self {
+            body,
+            kind,
+            endorsement,
+        };
         let publisher = PublicKey::from_bytes(&manifest.publisher)
             .map_err(|_| denied("invalid manifest publisher"))?;
         signed.verify(publisher)?;
@@ -394,9 +408,49 @@ impl SignedManifest {
             return Err(denied("invalid manifest signature"));
         }
         self.endorsement
-            .verify(trusted_publisher, MANIFEST, &self.body)
+            .verify(trusted_publisher, MANIFEST, &(&self.body, &self.kind))
             .map_err(|_| denied("invalid manifest signature"))?;
+        self.kind.validate(&manifest)?;
         Ok(manifest)
+    }
+    /// The authentic manifest and the mode it pins.
+    pub fn verify_kind(
+        &self,
+        trusted_publisher: PublicKey,
+    ) -> Result<(ApplicationManifest, &crate::DatabaseKind), Error> {
+        Ok((self.verify(trusted_publisher)?, &self.kind))
+    }
+    /// The genesis of `owner`'s personal database in `namespace`, under the
+    /// root `publisher` both were derived with. Another root, owner, mode or
+    /// namespace is refused, whatever a request claims.
+    pub fn verify_personal(
+        &self,
+        publisher: PublicKey,
+        owner: PublicKey,
+        namespace: &crate::PersonalNamespace,
+    ) -> Result<ApplicationManifest, Error> {
+        let manifest = ApplicationManifest::from_body(&self.body)?;
+        if manifest.publisher != *publisher.as_bytes() {
+            return Err(crate::PersonalError::WrongPublisher.into());
+        }
+        let manifest = self.verify(publisher)?;
+        match &self.kind {
+            crate::DatabaseKind::Shared => Err(crate::PersonalError::ModeMismatch.into()),
+            crate::DatabaseKind::Personal { owner: pinned, .. } if *pinned != owner => {
+                Err(crate::PersonalError::WrongOwner.into())
+            }
+            crate::DatabaseKind::Personal {
+                namespace: pinned, ..
+            } if pinned != namespace => Err(crate::PersonalError::NamespaceMismatch.into()),
+            crate::DatabaseKind::Personal { .. } => Ok(manifest),
+        }
+    }
+    /// Identifies the signed definition and mode, whoever signed them.
+    pub fn descriptor(&self) -> Result<Commitment, Error> {
+        Ok(rocky_core::commitment(
+            "rocky.database-descriptor.v1",
+            &encode(&(&self.body, &self.kind))?,
+        ))
     }
     /// As `verify`, by a signer no statement of `revocations` ended: what
     /// adopting a newly met manifest needs.
@@ -413,10 +467,11 @@ impl SignedManifest {
         self.endorsement.verify_current(
             trusted_publisher,
             MANIFEST,
-            &self.body,
+            &(&self.body, &self.kind),
             revocations,
             time,
         )?;
+        self.kind.validate(&manifest)?;
         Ok(manifest)
     }
     pub fn endorsement(&self) -> &Endorsement {
@@ -428,7 +483,7 @@ impl SignedManifest {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         decode_bounded(
             bytes,
-            rocky_core::MAX_MANIFEST_BYTES * 2 + 1024 + MAX_ENDORSEMENT_BYTES,
+            rocky_core::MAX_MANIFEST_BYTES * 2 + 2048 + MAX_ENDORSEMENT_BYTES,
         )
     }
 }
@@ -986,6 +1041,22 @@ impl CredentialChain {
                 return Err(denied("credential resource quota"));
             }
             Self::shape(capability, &extended)?;
+            if node {
+                self.check_personal(index)?;
+            }
+            // A set pinned to the genesis judges the database mode.
+            if let Some(genesis) = current.and_then(|(revocations, _)| revocations.genesis()) {
+                if extended.trusted.is_some() {
+                    genesis.check_trusted(capability.subject)?;
+                }
+                if node {
+                    genesis.check_node(signed.issuer, capability)?;
+                }
+                // A link a node signed names that node's certificate.
+                if let Some(certificate) = signed.attestation.certificate() {
+                    genesis.check_node(signed.issuer, &certificate.capability)?;
+                }
+            }
             if let Some((parent, parent_extended)) = &parent {
                 // Issuer authority grants anything; other links narrow.
                 let authority = parent_extended.issues;

@@ -16,24 +16,31 @@ impl Node {
     }
     /// The current topic and, within its window, the previous one. None
     /// before an admitted session handed over the root, and none once this
-    /// device knows it is revoked or logged out.
+    /// device knows it is revoked or logged out. A personal database's
+    /// devices and custodians also announce under the passkey's stable
+    /// bootstrap topic, which a device holding only the passkey derives.
     pub(super) async fn discovery_topics(&self) -> Vec<[u8; 32]> {
-        if self.lifecycle.lock().await.is_logged_out()
-            || self.replica.private_schema().await.unwrap_or(true)
-        {
+        if self.lifecycle.lock().await.is_logged_out() {
             return Vec::new();
         }
+        let public = !self.replica.private_schema().await.unwrap_or(true);
         let settings = self.settings.lock().await;
         if settings.logged_out || !matches!(settings.revocation(&self.path), Ok(None)) {
             return Vec::new();
         }
-        let Ok(time) = self.discovery_time() else {
-            return Vec::new();
+        let personal = self
+            .vault
+            .find(crate::personal::DISCOVERY_ROLE)
+            .ok()
+            .flatten();
+        let shared = match self.discovery_time() {
+            Ok(time) if public => match settings.discovery_topics(&self.vault, time) {
+                Ok((current, previous)) => std::iter::once(current).chain(previous).collect(),
+                Err(_) => Vec::new(),
+            },
+            _ => Vec::new(),
         };
-        match settings.discovery_topics(&self.vault, time) {
-            Ok((current, previous)) => std::iter::once(current).chain(previous).collect(),
-            Err(_) => Vec::new(),
-        }
+        shared.into_iter().chain(personal).collect()
     }
     /// Announces under the topics this device derives now.
     pub(super) async fn announce(&self, discovery: &dyn Discovery) {

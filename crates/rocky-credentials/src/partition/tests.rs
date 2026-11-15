@@ -453,6 +453,7 @@ fn paired_grants_and_partition_nodes_never_expand_authority() {
         sequence: Some(0),
         previous: None,
         database: None,
+        personal: None,
     })
     .unwrap();
     // A node certificate holds no partitions of its own.

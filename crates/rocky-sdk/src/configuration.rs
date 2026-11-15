@@ -11,6 +11,7 @@ pub struct Configuration {
     network: Option<Network>,
     coordination: Option<Arc<dyn rocky_credentials::Coordinator>>,
     name: String,
+    sign_in_wait: std::time::Duration,
 }
 impl Configuration {
     /// The bookmark `create` makes and follows on the genesis tip.
@@ -27,6 +28,7 @@ impl Configuration {
             network: None,
             coordination: None,
             name: String::new(),
+            sign_in_wait: std::time::Duration::from_secs(15),
         })
     }
     #[must_use]
@@ -50,6 +52,14 @@ impl Configuration {
     #[must_use]
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
+        self
+    }
+    /// How long a discovering [`Self::sign_in`] waits for a first source
+    /// before it reports `SourceUnavailable`; 15 seconds by default. It
+    /// only bounds the wait: sources answer as soon as they are found.
+    #[must_use]
+    pub fn sign_in_wait(mut self, wait: std::time::Duration) -> Self {
+        self.sign_in_wait = wait;
         self
     }
     #[must_use]
@@ -92,7 +102,140 @@ impl Configuration {
         &self,
         root: Arc<dyn crate::IdentityProvider>,
     ) -> Result<Opened, Failure> {
-        Database::launch_create(self.options(), None, root, Self::BOOKMARK).await
+        Database::launch_create(self.options(), None, root, (Self::BOOKMARK, None)).await
+    }
+    /// Creates the personal database of the account `prf` names in
+    /// `namespace`: the root is `RootKey::from_secret(prf)`, the owner its
+    /// derived identity, and the namespace also locates the mesh and
+    /// domain, so a device that knows only the passkey finds it. Data keys
+    /// stay random. Root, identity and PRF are erased when this returns;
+    /// the device keeps its node keys, reader keys and the discovery
+    /// capability, and reopens with [`Self::open`] alone.
+    ///
+    /// Refuses a directory holding any state, including a sign-in's
+    /// install intent, and another account's as `WrongLocalAccount`,
+    /// without touching it. An interrupted create keeps its install intent:
+    /// calling this again with the same passkey resumes under the same node. An explicit [`Self::identity`] is
+    /// refused: the owner is the root's own. Only the owner's devices and
+    /// explicitly granted custody principals join the database.
+    pub async fn create_personal(
+        &self,
+        prf: crate::VerifiedPasskeyPrf,
+        namespace: crate::PersonalNamespace,
+    ) -> Result<crate::PersonalOpened, crate::PersonalSignInError> {
+        use crate::PersonalSignInError as Refused;
+        let account = rocky_credentials::PersonalAccount::derive(prf, &namespace)
+            .map_err(|_| Refused::PrfUnsupported)?;
+        if self.identity.is_some() {
+            return Err(Refused::Failed(crate::enrollment::personal_refusal(
+                rocky_credentials::PersonalError::WrongOwner,
+            )));
+        }
+        crate::personal::check_empty(&self.directory, &account)?;
+        let (root, discovery) = account.into_parts();
+        let coverage = Arc::new(std::sync::Mutex::new(None));
+        let personal = crate::personal::Create {
+            namespace,
+            discovery: std::sync::Mutex::new(Some(discovery)),
+            coverage: coverage.clone(),
+        };
+        let opened = Database::launch_create(
+            self.options(),
+            None,
+            Arc::new(root),
+            (Self::BOOKMARK, Some(Box::new(personal))),
+        )
+        .await
+        .map_err(Refused::from_failure)?;
+        let restored = coverage
+            .lock()
+            .map_err(|_| Refused::Failed("coverage poisoned".into()))?
+            .take()
+            .unwrap_or_default();
+        Ok(crate::PersonalOpened {
+            opened,
+            restored,
+            freshness: crate::Freshness::LocallyAnchored,
+        })
+    }
+    /// Signs this empty device in to the personal database the account
+    /// `prf` names in `namespace`, as one more owner device: from a sibling
+    /// or custodian announcing under the passkey's discovery topic on the
+    /// configured network, or from a verified backup without one. The root
+    /// opens the escrow the source holds and the owner certifies a fresh
+    /// node; nothing is revoked, rotated or granted to anyone else, and no
+    /// code or other device confirms it. Root, identity and PRF are erased
+    /// when this returns.
+    ///
+    /// No reachable source is `SourceUnavailable`, never an empty
+    /// database, and leaves the directory as it was. Sources whose genesis
+    /// differs are `GenesisConflict`, and both stay. An interrupted sign-in
+    /// resumes under the same node, certificate and publication ID when
+    /// called again with the same passkey; another account's state is
+    /// `WrongLocalAccount`, and an installed database or a create's intent
+    /// `ExistingState`, untouched. `restored` names what the source's
+    /// escrow covered; `freshness` is `Unwitnessed` unless another owner
+    /// device answered.
+    pub async fn sign_in(
+        &self,
+        prf: crate::VerifiedPasskeyPrf,
+        namespace: crate::PersonalNamespace,
+        source: crate::SignInSource,
+    ) -> Result<crate::PersonalOpened, crate::PersonalSignInError> {
+        use crate::PersonalSignInError as Refused;
+        let account = rocky_credentials::PersonalAccount::derive(prf, &namespace)
+            .map_err(|_| Refused::PrfUnsupported)?;
+        if self.identity.is_some() {
+            return Err(Refused::Failed(crate::enrollment::personal_refusal(
+                rocky_credentials::PersonalError::WrongOwner,
+            )));
+        }
+        crate::personal::prepare_sign_in(&self.directory, &account)?;
+        match &source {
+            crate::SignInSource::Discover if self.network.is_none() => {
+                return Err(Refused::SourceUnavailable);
+            }
+            crate::SignInSource::Backup(backup) => {
+                let locator = account.locator();
+                let database = rocky_credentials::DatabaseContext {
+                    publisher: locator.publisher,
+                    scope: locator.scope(
+                        &Schema::parse(&self.schema)
+                            .map_err(Refused::Failed)?
+                            .application,
+                    ),
+                };
+                backup.check(&account, &database)?;
+            }
+            crate::SignInSource::Discover => {}
+        }
+        let before = rocky_platform::fs::exists(&self.directory)
+            .then(|| rocky_platform::fs::read_dir(&self.directory).unwrap_or_default());
+        let outcome = Arc::new(std::sync::Mutex::new(None));
+        let sign_in = crate::personal::SignIn {
+            account: std::sync::Mutex::new(Some(account)),
+            source: std::sync::Mutex::new(Some(source)),
+            wait: self.sign_in_wait,
+            outcome: outcome.clone(),
+        };
+        let opened = match Database::launch_sign_in(self.options(), sign_in).await {
+            Ok(opened) => opened,
+            Err(error) => {
+                // A sign-in that kept no intent leaves nothing behind.
+                crate::personal::tidy(&self.directory, before.as_deref());
+                return Err(Refused::from_failure(error));
+            }
+        };
+        let (restored, freshness) = outcome
+            .lock()
+            .map_err(|_| Refused::Failed("outcome poisoned".into()))?
+            .take()
+            .ok_or_else(|| Refused::Failed("the sign-in reported no outcome".into()))?;
+        Ok(crate::PersonalOpened {
+            opened,
+            restored,
+            freshness,
+        })
     }
     /// The root recovers the domain from `archive`, a backup of one of its
     /// trusted nodes, with every trusted node and device lost: a fresh

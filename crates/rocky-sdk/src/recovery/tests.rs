@@ -166,7 +166,7 @@ async fn a_backup_exported_as_bytes_recovers_the_domain() -> Result<(), Failure>
     write(&created.database, "notes", "before").await?;
     grant(&created.database, &root.path().join("reader")).await?;
     let archive = created.database.export_backup().await?;
-    assert!(archive.starts_with(b"rocky.backup.v2\n"));
+    assert!(archive.starts_with(b"rocky.backup.v3\n"));
     created.database.close().await?;
     let files = |directory: &Path| -> Result<Vec<String>, Failure> {
         Ok(rocky_platform::fs::read_dir(directory)?

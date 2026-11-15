@@ -1958,11 +1958,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         identity: &dyn rocky_credentials::IdentityProvider,
     ) -> Result<LineNode, Error> {
-        let (mut chain, mut known) = {
+        let (mut chain, mut known, genesis) = {
             let inner = self.inner.lock(crate::replica::Class::Background).await;
             (
                 inner.config.credentials.clone(),
                 inner.config.revocations.clone(),
+                (inner.config.manifest.clone(), inner.config.publisher),
             )
         };
         if let Some(certificate) = chain.certificate() {
@@ -1979,20 +1980,46 @@ impl<A: RowApplication> EncryptedReplica<A> {
         {
             chain.0.pop();
         }
-        let membership = known.membership().map_err(credential)?;
-        if !membership.can_link(owner, |node| known.identity_unlinks(owner, node)) {
-            return Err(denied("identity membership limit reached"));
-        }
-        let sequence = membership.next_sequence(owner).map_err(credential)?;
         let key = PrivateKey::new();
-        let credentials = chain
-            .certify_member(
-                identity,
-                key.public_key(),
-                sequence,
-                membership.head(owner).map(|head| head.certificate),
-            )
-            .map_err(credential)?;
+        let (manifest, publisher) = genesis;
+        let pinned = manifest
+            .verify_kind(publisher)
+            .map_err(credential)?
+            .1
+            .owner();
+        let credentials = if pinned == Some(owner) {
+            // An owner's line node stands alone, like each of its devices.
+            let devices = known.personal_devices(owner).map_err(credential)?;
+            if devices.len() >= rocky_credentials::MAX_PERSONAL_DEVICES {
+                return Err(credential(
+                    rocky_credentials::PersonalError::DeviceLimit {
+                        limit: rocky_credentials::MAX_PERSONAL_DEVICES,
+                    }
+                    .into(),
+                ));
+            }
+            chain
+                .certify_personal(
+                    identity,
+                    &key,
+                    (owner, manifest.descriptor().map_err(credential)?),
+                )
+                .map_err(credential)?
+        } else {
+            let membership = known.membership().map_err(credential)?;
+            if !membership.can_link(owner, |node| known.identity_unlinks(owner, node)) {
+                return Err(denied("identity membership limit reached"));
+            }
+            let sequence = membership.next_sequence(owner).map_err(credential)?;
+            chain
+                .certify_member(
+                    identity,
+                    key.public_key(),
+                    sequence,
+                    membership.head(owner).map(|head| head.certificate),
+                )
+                .map_err(credential)?
+        };
         known
             .link(
                 credentials

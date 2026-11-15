@@ -180,6 +180,17 @@ impl Node {
         if let Some(own) = current.credentials.certificate() {
             known.link(own.clone())?;
         }
+        if let Some(context) = current.personal()? {
+            // An owner device needs no predecessor; its binding, tombstone
+            // and the device limit decide, and refusals store nothing.
+            known.admit_personal(certificate.clone(), &context)?;
+            let mut draft = current.clone();
+            draft.learn_revocations(&known)?;
+            draft.save(&self.path)?;
+            *current = draft;
+            self.replica.learn_revocations(&known).await?;
+            return Ok(known);
+        }
         let membership = known.membership()?;
         let link = rocky_credentials::MembershipLink::from_certificate(&certificate)?;
         if link.sequence > membership.next_sequence(current.identity)? {

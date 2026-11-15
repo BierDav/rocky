@@ -152,11 +152,30 @@ impl Recovered {
         (records, held): Archived,
         root: &RootKey,
     ) -> Result<Self, Failure> {
-        let publisher = root.public_key();
-        if publisher != archived.publisher {
+        if root.public_key() != archived.publisher {
             return Err("the root key is not this domain's root".into());
         }
-        let domain = archived.domain()?;
+        let (recovered, missing) = Self::import(&archived.domain()?, (records, held), root)?;
+        if let Some((scope, epoch)) = missing.first() {
+            return Err(format!(
+                "the backup holds data of key epoch {} of scope {} that no root escrow record \
+                 opens",
+                epoch.generation,
+                rocky_core::scope_label(scope)
+            )
+            .into());
+        }
+        Ok(recovered)
+    }
+    /// Opens what it can of `records` with `root`, as `open` does, and
+    /// returns the key epochs in `held` that no record opened: a gap to
+    /// report, never a key to replace.
+    pub fn import(
+        domain: &Domain,
+        (records, held): Archived,
+        root: &RootKey,
+    ) -> Result<(Self, Vec<(ResourceScope, KeyEpoch)>), Failure> {
+        let publisher = root.public_key();
         let mut recovered = Self::default();
         let mut covered = BTreeSet::new();
         for (slot, record) in records {
@@ -189,21 +208,16 @@ impl Recovered {
                     }
                 }
                 (Some((scope, epoch)), item) => {
-                    covered.extend(recovered.group(&domain, scope, epoch, item)?);
+                    covered.extend(recovered.group(domain, scope, epoch, item)?);
                 }
                 (None, _) => {}
             }
         }
-        if let Some((scope, epoch)) = held.iter().find(|slot| !covered.contains(*slot)) {
-            return Err(format!(
-                "the backup holds data of key epoch {} of scope {} that no root escrow record \
-                 opens",
-                epoch.generation,
-                rocky_core::scope_label(scope)
-            )
-            .into());
-        }
-        Ok(recovered)
+        let missing = held
+            .into_iter()
+            .filter(|slot| !covered.contains(slot))
+            .collect();
+        Ok((recovered, missing))
     }
     /// Takes a group secret sealed for `scope` at `epoch` if it is that
     /// epoch's and the partition it names has `scope` as a member; returns

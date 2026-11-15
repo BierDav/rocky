@@ -133,6 +133,7 @@ impl Member {
                 ttl: DEFAULT_TTL,
                 root: std::sync::Mutex::new(Some(root)),
                 bookmark: None,
+                personal: None,
             },
         )
         .await

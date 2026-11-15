@@ -238,8 +238,8 @@ impl Node {
             Request::RevokeIdentity(identity, mode, root, keep, reply) => {
                 let _ = reply.send(self.revoke_identity(identity, mode, &root, keep).await);
             }
-            Request::SignOutEverywhereElse(root, custodians, reply) => {
-                let _ = reply.send(self.sign_out_everywhere_else(&root, custodians).await);
+            Request::SignOutEverywhereElse(root, keep, reply) => {
+                let _ = reply.send(self.sign_out_everywhere_else(&root, keep).await);
             }
             Request::Freshness(reply) => {
                 let _ = reply.send(self.freshness().await);

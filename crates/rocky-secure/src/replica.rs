@@ -721,13 +721,27 @@ impl Flusher {
         Ok(())
     }
 }
+/// As [`flushed`], for a caller that already relied on the current authority:
+/// a change while the writer was released is a conflict.
+async fn flush_guard<'a, A: RowApplication>(
+    inner: Guard<tokio::sync::MutexGuard<'a, Inner<A>>>,
+    owner: &'a ReplicaLock<Inner<A>>,
+) -> Result<Guard<tokio::sync::MutexGuard<'a, Inner<A>>>, Error> {
+    // Authority only grows, so one check covers every reacquisition.
+    let authority = inner.authority;
+    let inner = flushed(inner, owner).await?;
+    if inner.authority != authority {
+        return Err(Error::Conflict);
+    }
+    Ok(inner)
+}
 /// Releases the writer while forcing durability. Rechecking the commit after
 /// reacquiring prevents a serving call from including a newer unflushed write.
-async fn flush_guard<'a, A: RowApplication>(
+/// A caller that reads its authority only afterwards needs no other check.
+async fn flushed<'a, A: RowApplication>(
     mut inner: Guard<tokio::sync::MutexGuard<'a, Inner<A>>>,
     owner: &'a ReplicaLock<Inner<A>>,
 ) -> Result<Guard<tokio::sync::MutexGuard<'a, Inner<A>>>, Error> {
-    let authority = inner.authority;
     loop {
         let (flusher, commit) = (inner.flusher.clone(), inner.commit);
         if flusher.durable() >= commit {
@@ -742,9 +756,6 @@ async fn flush_guard<'a, A: RowApplication>(
         drop(inner);
         flusher.run(commit).await?;
         inner = owner.lock(Class::Background).await;
-        if inner.authority != authority {
-            return Err(Error::Conflict);
-        }
     }
 }
 /// A local commit that power loss may still remove. It is durable once
@@ -1085,6 +1096,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
         {
             return Err(denied("compiled application differs from the domain root"));
         }
+        // The genesis judges every node certificate this replica holds.
+        config
+            .revocations
+            .pin(&config.manifest, config.publisher)
+            .map_err(credential)?;
         if let Some(certificate) = config.credentials.certificate() {
             config
                 .revocations
@@ -1859,7 +1875,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Flushes first: the status may be acknowledged to the sender.
     pub async fn receipt_status(&self, id: Hash) -> Result<ReceiveStatus, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        inner = flush_guard(inner, &self.inner).await?;
+        inner = flushed(inner, &self.inner).await?;
         inner.status(id).await
     }
     /// Merges `revocations` into the set this replica holds: the union of
@@ -2251,7 +2267,7 @@ impl<A: RowApplication> Inner<A> {
         self.header_authority(
             header,
             frame.chain()?.credentials(),
-            &RevocationSet::new(),
+            &self.config.revocations.pinned_only(),
             header.timestamp / 1_000_000,
         )
     }
@@ -2519,7 +2535,10 @@ impl<A: RowApplication> Inner<A> {
         {
             return Err(denied("secure file identity mismatch"));
         }
-        let stored = RevocationSet::from_bytes(&row.get::<Vec<u8>>(1)?).map_err(credential)?;
+        let mut stored = RevocationSet::from_bytes(&row.get::<Vec<u8>>(1)?).map_err(credential)?;
+        stored
+            .pin(&self.config.manifest, self.config.publisher)
+            .map_err(credential)?;
         stored
             .verify_in(
                 self.config
@@ -2633,6 +2652,7 @@ impl<A: RowApplication> Inner<A> {
             return Ok(added);
         }
         let authority_changed = !added.is_empty()
+            || merged.admissions().ne(self.config.revocations.admissions())
             || self.config.revocations.certificates().any(|certificate| {
                 let node = certificate.capability.subject;
                 merged.ends_node_of(certificate.issuer, node, false)

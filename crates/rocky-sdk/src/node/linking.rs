@@ -17,10 +17,12 @@ impl Node {
             settings.database_context()?,
         )?;
         if settings.single_use
-            || settings.revocations.revokes(&settings.identity)
+            || settings.tombstoned(&settings.identity)
             || settings
                 .revocations
+                .unfenced()
                 .ends_node_of(settings.identity, request.node, false)
+            || settings.signed_out(&request.node)
         {
             return Err("identity or node cannot link".into());
         }

@@ -471,6 +471,8 @@ impl SignedRevocation {
 pub struct RevocationSet {
     database: Option<Box<crate::DatabaseContext>>,
     certificates: BTreeMap<Commitment, SignedCapability>,
+    /// Nodes admitted after the resets their admitter held.
+    admissions: BTreeMap<Commitment, crate::SignedResetAdmission>,
     statements: BTreeMap<Commitment, SignedRevocation>,
     subjects: BTreeSet<PublicKey>,
     references: BTreeSet<crate::PeerId>,
@@ -484,7 +486,19 @@ pub struct RevocationSet {
     /// The latest recovery: it ends every trusted grant an earlier one does.
     recovery: Option<RootRecovery>,
     derived: Derived,
+    /// The genesis this holder pinned, which judges every node certificate.
+    genesis: Pinned,
 }
+/// The holder's verified genesis: local, never compared, serialized or
+/// adopted from another set.
+#[derive(Clone, Debug, Default)]
+struct Pinned(Option<std::sync::Arc<crate::personal::Genesis>>);
+impl PartialEq for Pinned {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for Pinned {}
 /// What the whole set determines, computed once until it changes. Never
 /// compared or serialized.
 #[derive(Clone, Default)]
@@ -525,21 +539,24 @@ struct ReplicatedAuthority {
     database: Option<crate::DatabaseContext>,
     statements: Vec<SignedRevocation>,
     certificates: Vec<SignedCapability>,
+    admissions: Vec<crate::SignedResetAdmission>,
 }
+const AUTHORITY_FORMAT: u32 = 6;
 impl From<RevocationSet> for ReplicatedAuthority {
     fn from(set: RevocationSet) -> Self {
         Self {
-            format: 5,
+            format: AUTHORITY_FORMAT,
             database: set.database.map(|database| *database),
             statements: set.statements.into_values().collect(),
             certificates: set.certificates.into_values().collect(),
+            admissions: set.admissions.into_values().collect(),
         }
     }
 }
 impl TryFrom<ReplicatedAuthority> for RevocationSet {
     type Error = Error;
     fn try_from(value: ReplicatedAuthority) -> Result<Self, Error> {
-        if value.format != 5 {
+        if value.format != AUTHORITY_FORMAT {
             return Err(denied("unsupported replicated authority format"));
         }
         let mut set = Self {
@@ -556,7 +573,14 @@ impl TryFrom<ReplicatedAuthority> for RevocationSet {
             }
             set.add_link(certificate)?;
         }
-        if !set.certificates.is_empty() {
+        // A replayed device certificate never outlives its tombstone.
+        set.prune_tombstoned();
+        for admission in value.admissions {
+            if set.add_admission(admission)?.is_none() {
+                return Err(denied("duplicate admission"));
+            }
+        }
+        if !set.certificates.is_empty() || !set.admissions.is_empty() {
             set.check_size()?;
         }
         Ok(set)
@@ -628,6 +652,10 @@ impl RevocationSet {
             .statements
             .values()
             .any(|statement| statement.database != Some(database))
+            || self
+                .admissions
+                .values()
+                .any(|signed| signed.admission.database != database)
         {
             return Err(denied("authority evidence belongs to another database"));
         }
@@ -647,8 +675,48 @@ impl RevocationSet {
         }
         Ok(())
     }
+    /// Judges held and later node certificates, and the chains verified
+    /// against this set, by the root's verified `genesis`: a shared database
+    /// refuses personal certificates, a personal one any but its owner's,
+    /// bound to it. A refusal changes nothing; another pin is refused.
+    pub fn pin(
+        &mut self,
+        genesis: &crate::SignedManifest,
+        publisher: PublicKey,
+    ) -> Result<(), Error> {
+        let genesis = crate::personal::Genesis::of(genesis, publisher)?;
+        if let Some(held) = &self.genesis.0 {
+            return if **held == genesis {
+                Ok(())
+            } else {
+                Err(denied("authority set is pinned to another genesis"))
+            };
+        }
+        for certificate in self.certificates.values() {
+            genesis.check_node(certificate.issuer, &certificate.capability)?;
+        }
+        self.genesis = Pinned(Some(std::sync::Arc::new(genesis)));
+        Ok(())
+    }
+    /// No evidence, judged by this set's pinned genesis: what a check that
+    /// ignores revocations verifies against.
+    pub fn pinned_only(&self) -> Self {
+        Self {
+            genesis: self.genesis.clone(),
+            ..Self::default()
+        }
+    }
+    pub(crate) fn genesis(&self) -> Option<&crate::personal::Genesis> {
+        self.genesis.0.as_deref()
+    }
     /// Records identity-signed membership evidence; it grants no permissions.
+    /// A device certificate a tombstone ended is not kept.
     pub fn link(&mut self, certificate: SignedCapability) -> Result<bool, Error> {
+        if crate::PersonalLink::of(&certificate)?
+            .is_some_and(|link| self.tombstones(link.owner, link.node))
+        {
+            return Ok(false);
+        }
         let database = self.database.clone();
         let Some(id) = self.add_link(certificate)? else {
             return Ok(false);
@@ -668,7 +736,10 @@ impl RevocationSet {
             certificate.capability.subject,
             certificate.capability.not_before,
         )?;
-        crate::MembershipLink::from_certificate(&certificate)?;
+        crate::membership::node_database(&certificate)?;
+        if let Some(genesis) = self.genesis() {
+            genesis.check_node(certificate.issuer, &certificate.capability)?;
+        }
         let id = certificate.id()?;
         if self.certificates.contains_key(&id) {
             return Ok(None);
@@ -686,12 +757,77 @@ impl RevocationSet {
     pub fn certificates(&self) -> impl Iterator<Item = &SignedCapability> {
         self.certificates.values()
     }
+    /// Records a node's admission after the resets its signer held; the
+    /// held resets decide whether it counts.
+    pub fn admit(&mut self, admission: crate::SignedResetAdmission) -> Result<bool, Error> {
+        let database = self.database.clone();
+        let Some(id) = self.add_admission(admission)? else {
+            return Ok(false);
+        };
+        if let Err(error) = self.check_size() {
+            self.admissions.remove(&id);
+            self.database = database;
+            self.derived = Derived::default();
+            return Err(error);
+        }
+        Ok(true)
+    }
+    /// [`Self::admit`] without the size check. Changes nothing on error;
+    /// returns the ID of a new admission.
+    fn add_admission(
+        &mut self,
+        admission: crate::SignedResetAdmission,
+    ) -> Result<Option<Commitment>, Error> {
+        admission.verify()?;
+        let id = admission.id()?;
+        if self.admissions.contains_key(&id) {
+            return Ok(None);
+        }
+        self.bind(Some(admission.admission.database))?;
+        self.derived = Derived::default();
+        self.admissions.insert(id, admission);
+        Ok(Some(id))
+    }
+    pub fn admissions(&self) -> impl Iterator<Item = &crate::SignedResetAdmission> {
+        self.admissions.values()
+    }
     pub fn membership(&self) -> Result<crate::MembershipSet, Error> {
         let mut membership = crate::MembershipSet::new();
         for certificate in self.certificates.values() {
-            membership.insert(certificate)?;
+            membership.record(certificate)?;
         }
         Ok(membership)
+    }
+    /// Whether a root statement names `node` or its key: permanent.
+    pub(crate) fn root_names(&self, node: PublicKey) -> bool {
+        self.root.subjects.contains(&node)
+            || self.root.references.contains(&crate::PeerId::of(node))
+    }
+    /// A tombstone replaces every personal certificate of its node but the
+    /// one a held statement carries, so holders converge in any order.
+    fn prune_tombstoned(&mut self) {
+        let carried: BTreeSet<Commitment> = self
+            .statements
+            .values()
+            .filter_map(|signed| signed.chain.certificate())
+            .filter_map(|certificate| certificate.id().ok())
+            .collect();
+        let ended: Vec<Commitment> = self
+            .certificates
+            .iter()
+            .filter(|(id, certificate)| {
+                !carried.contains(*id)
+                    && certificate
+                        .capability
+                        .extended()
+                        .is_ok_and(|extended| extended.personal.is_some())
+                    && self.tombstones(certificate.issuer, certificate.capability.subject)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ended {
+            self.certificates.remove(&id);
+        }
     }
     fn fork_ends(&self, identity: PublicKey, node: crate::PeerId) -> bool {
         self.fork_ended().contains(&(identity, node))
@@ -814,7 +950,11 @@ impl RevocationSet {
             heads.statements.extend(cut.statements.iter().copied());
             heads.acknowledgments.extend(cut.acknowledgments);
         }
+        let permanent = signed.root() || signed.identity_unlink();
         self.statements.insert(id, signed);
+        if permanent {
+            self.prune_tombstoned();
+        }
         Ok(true)
     }
     /// Verifies every statement and certificate against its signing authority.
@@ -827,9 +967,19 @@ impl RevocationSet {
                 certificate.capability.subject,
                 certificate.capability.not_before,
             )?;
-            let database = crate::MembershipLink::from_certificate(certificate)?.database;
+            let database = crate::membership::node_database(certificate)?;
             if database.publisher != publisher || database.scope.app != app {
                 return Err(denied("membership certificate belongs to another database"));
+            }
+            if let Some(genesis) = self.genesis() {
+                genesis.check_node(certificate.issuer, &certificate.capability)?;
+            }
+        }
+        for signed in self.admissions.values() {
+            signed.verify()?;
+            let database = signed.admission.database;
+            if database.publisher != publisher || database.scope.app != app {
+                return Err(denied("admission belongs to another database"));
             }
         }
         self.check_size()
@@ -876,7 +1026,16 @@ impl RevocationSet {
             }
         }
         for certificate in other.certificates.values() {
+            // A replayed device certificate never outlives its tombstone.
+            if crate::PersonalLink::of(certificate)?
+                .is_some_and(|link| next.tombstones(link.owner, link.node))
+            {
+                continue;
+            }
             next.add_link(certificate.clone())?;
+        }
+        for admission in other.admissions.values() {
+            next.add_admission(admission.clone())?;
         }
         next = next.pruned(time);
         next.check_size()?;
@@ -888,6 +1047,8 @@ impl RevocationSet {
         let mut set = Self {
             database: self.database.clone(),
             certificates: self.certificates.clone(),
+            admissions: self.admissions.clone(),
+            genesis: self.genesis.clone(),
             ..Self::default()
         };
         for signed in self.statements.values() {
@@ -909,7 +1070,7 @@ impl RevocationSet {
         self.statements.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.statements.is_empty() && self.certificates.is_empty()
+        self.statements.is_empty() && self.certificates.is_empty() && self.admissions.is_empty()
     }
     /// Whether evidence can end a chain; valid links alone do not.
     pub fn has_revocations(&self) -> bool {
@@ -961,10 +1122,11 @@ impl RevocationSet {
     /// The full replicated evidence, including still-valid membership links.
     pub fn exchange_digest(&self, time: u64) -> Result<Commitment, Error> {
         Ok(rocky_core::commitment(
-            "rocky.authority-exchange.v2",
+            "rocky.authority-exchange.v3",
             &encode(&(
                 self.digest(time)?,
                 self.certificates.keys().collect::<Vec<_>>(),
+                self.admissions.keys().collect::<Vec<_>>(),
             ))?,
         ))
     }
@@ -1172,12 +1334,28 @@ impl RevocationSet {
     }
     fn resets(&self) -> &crate::reset::Resets {
         self.derived.resets.get_or_init(|| {
+            // A node a statement names, or whose key it ends, admits nobody.
+            let revoked = |signer: &PublicKey| {
+                self.subjects.contains(signer)
+                    || self.references.contains(&crate::PeerId::of(*signer))
+            };
             crate::reset::Resets::new(
                 self.statements
                     .iter()
                     .filter(|(_, signed)| signed.root())
                     .filter_map(|(id, signed)| Some((*id, signed.statement.reset()?.clone())))
                     .collect(),
+                self.admissions
+                    .values()
+                    .map(|signed| &signed.admission)
+                    .filter(|admission| !revoked(&admission.signer))
+                    .map(|admission| {
+                        (
+                            admission.node,
+                            admission.follows.clone(),
+                            crate::PeerId::of(admission.signer),
+                        )
+                    }),
             )
         })
     }
@@ -1221,6 +1399,7 @@ impl RevocationSet {
             let mut set = Self {
                 database: self.database.clone(),
                 certificates: self.certificates.clone(),
+                genesis: self.genesis.clone(),
                 ..Self::default()
             };
             for signed in self.statements.values() {

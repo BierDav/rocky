@@ -65,7 +65,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         // first without the replica so local statements do not wait for it.
         self.flush().await?;
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        inner = flush_guard(inner, &self.inner).await?;
+        inner = flushed(inner, &self.inner).await?;
         let grants = inner.verify_chain(credentials, peer, now()?)?;
         inner.same_tip_peer(peer)?;
         if scopes.is_empty()

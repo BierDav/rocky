@@ -175,6 +175,7 @@ mod mesh;
 mod node;
 mod partitions;
 mod peer;
+mod personal;
 mod reactor;
 mod recovery;
 mod registry;
@@ -222,13 +223,16 @@ pub use enrollment::{
 pub use inspection::*;
 pub use join_requests::Dropped as JoinRequestDropReason;
 pub use partitions::*;
+pub use personal::{
+    PersonalOpened, PersonalSignInError, RestoreCoverage, SignInSource, VerifiedBackup,
+};
 #[cfg(feature = "qualification")]
 pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
 pub use registry::{
     ClaimRecord as RecordedClaimRight, Grant as RecordedPartitionGrant, Kind as IdentityOrigin,
 };
 pub(crate) use reset::ResetRefused;
-pub use reset::{Freshness, ResetReceipt, RestoreChoice};
+pub use reset::{Freshness, ResetKeep, ResetReceipt, RestoreChoice};
 pub use rocky_credentials::Coordinator;
 pub use rocky_credentials::counters;
 
@@ -259,7 +263,9 @@ pub use rocky_credentials as credentials;
 pub use rocky_credentials::Profile as GrantProfile;
 /// The identity port an application supplies, and a file-backed provider.
 pub use rocky_credentials::{
-    FileIdentityProvider, IdentityKey, IdentityProvider, Purpose, RevocationMode, RootKey,
+    DatabaseKind, DiscoveryCapability, FileIdentityProvider, IdentityKey, IdentityProvider,
+    PersonalAccount, PersonalError, PersonalLocator, PersonalNamespace, PrfInput, Purpose,
+    RevocationMode, RootKey, VerifiedPasskeyPrf,
 };
 pub use rocky_secure::{
     CheckpointStatus, CurrentValue, HeldChange, HeldField, HeldKind, HeldRow, Holding,

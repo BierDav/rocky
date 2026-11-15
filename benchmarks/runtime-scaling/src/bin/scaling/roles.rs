@@ -34,7 +34,7 @@ impl World {
         let body = app.definition();
         let public = app.scope(MeshId([1; 16]), false);
         Ok(Self {
-            manifest: SignedManifest::sign(&body, &publisher)?,
+            manifest: SignedManifest::sign(&body, rocky_secure::DatabaseKind::Shared, &publisher)?,
             scopes: (0..SCOPES)
                 .map(|index| ResourceScope {
                     encryption: commitment("roles.department.v1", &[index]),

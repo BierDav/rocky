@@ -344,7 +344,12 @@ impl Lineage {
         self.app(generation).manifest()
     }
     fn manifest(&self, generation: u32) -> SignedManifest {
-        SignedManifest::sign(&self.definition(generation), &self.publisher).unwrap()
+        SignedManifest::sign(
+            &self.definition(generation),
+            rocky_credentials::DatabaseKind::Shared,
+            &self.publisher,
+        )
+        .unwrap()
     }
     pub(super) fn scope(&self, name: &str) -> ResourceScope {
         let schema = self.schema(3);

@@ -19,10 +19,11 @@ const MAX_PENDING_RECEIVED: usize = 32;
 
 /// Where a seal's tip log stands after its terminal entry was submitted.
 enum Ending {
-    /// Ended by this seal, or by a terminal entry this replica holds no
-    /// statement for: the graph decides between concurrent ordinary seals.
+    /// Ended by this seal, or, for a received seal, by a terminal entry this
+    /// replica holds no statement for: the graph decides between them.
     Ended,
-    /// A seal this replica already holds ended the log first.
+    /// Another seal ended the log first: one this replica holds, or any
+    /// for this node's own seal.
     Lost,
     /// Never enters the graph: a recovery the log did not commit.
     Refused(&'static str, String),
@@ -45,8 +46,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// the coordinator did not confirm ended waits with what depends on it,
     /// and a recovery the log did not commit is dropped with its
     /// dependents. `strict`, for this node's own publication, fails
-    /// instead, and also when a seal this replica holds ended the log
-    /// first, so nothing is published.
+    /// instead, and also when another seal ended the log first, so nothing
+    /// is published.
     pub(in crate::replica) async fn coordinate_tip_statements(
         &self,
         statements: &[TipStatement],
@@ -112,7 +113,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     continue;
                 }
                 let ending = match coordinator.as_deref() {
-                    Some(coordinator) => self.end_log(seal, coordinator).await?,
+                    Some(coordinator) => self.end_log(seal, coordinator, own).await?,
                     None => Ending::Unconfirmed {
                         code: "recovery_pending",
                         reason: "recovery needs its line's trusted acknowledgments".into(),
@@ -139,7 +140,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let Some(coordinator) = coordinator.as_deref() else {
                 continue;
             };
-            match self.end_log(seal, coordinator).await? {
+            match self.end_log(seal, coordinator, own).await? {
                 Ending::Ended => {}
                 Ending::Lost if strict => {
                     return Err(refusal(
@@ -198,12 +199,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(coordinated)
     }
-    /// Ends `seal`'s tip log with it unless it ended already. A recovery is
-    /// confirmed only by the exact terminal entry it is.
+    /// Ends `seal`'s tip log with it unless it ended already. A recovery, and
+    /// this node's `own` seal, is confirmed only by the exact terminal entry
+    /// it is.
     async fn end_log(
         &self,
         seal: &SignedSeal,
         coordinator: &dyn DomainLog,
+        own: bool,
     ) -> Result<Ending, Error> {
         let log = TipLog {
             scope: seal.statement.scope,
@@ -222,7 +225,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Err(error) => return Ok(unavailable(error)),
         };
         if let Some(ended) = head.terminal {
-            return self.ended_by(seal, terminal, ended, &head).await;
+            return self.ended_by(seal, terminal, ended, &head, own).await;
         }
         let submitted = match seal.statement.recovery {
             Some(_) => {
@@ -235,8 +238,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ok(_) => Ok(Ending::Ended),
             Err(CoordinationError::Sealed) => match coordinator.log_head(log).await {
                 Ok(head) if head.terminal.is_some() => {
-                    self.ended_by(seal, terminal, head.terminal.unwrap_or(terminal), &head)
-                        .await
+                    self.ended_by(
+                        seal,
+                        terminal,
+                        head.terminal.unwrap_or(terminal),
+                        &head,
+                        own,
+                    )
+                    .await
                 }
                 Ok(_) => Ok(unavailable(CoordinationError::Sealed)),
                 Err(error) => Ok(unavailable(error)),
@@ -265,6 +274,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         terminal: LogTerminal,
         ended: LogTerminal,
         head: &LogHead,
+        own: bool,
     ) -> Result<Ending, Error> {
         if ended == terminal {
             if let Some(recovery) = seal.statement.recovery
@@ -290,8 +300,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 "another terminal entry ended the tip's log; the recovery never committed".into(),
             ));
         }
+        // Only the terminal entry's seal becomes final and wins once its
+        // statement arrives: this node never follows, or writes past, an own
+        // seal that is not it.
         Ok(
-            match ended.digest != terminal.digest && self.holds_statement(ended.digest).await? {
+            match ended.digest != terminal.digest
+                && (own || self.holds_statement(ended.digest).await?)
+            {
                 true => Ending::Lost,
                 false => Ending::Ended,
             },

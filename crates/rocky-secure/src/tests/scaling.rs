@@ -481,7 +481,12 @@ async fn wide_signed_definitions_are_cached_without_weakening_row_admission() {
             });
         }
     }
-    let signed = SignedManifest::sign(&manifest, &f.publisher).unwrap();
+    let signed = SignedManifest::sign(
+        &manifest,
+        rocky_credentials::DatabaseKind::Shared,
+        &f.publisher,
+    )
+    .unwrap();
     let bytes = signed.to_bytes().unwrap();
     assert!(bytes.len() > MAX_SECURE_FRAME);
     assert_eq!(

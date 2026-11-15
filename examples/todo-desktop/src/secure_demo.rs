@@ -67,7 +67,12 @@ impl SecureDemo {
                 fields: FieldSelection::Only(BTreeSet::new()),
             })
             .collect();
-        let manifest = SignedManifest::sign(&app.definition(), &publisher).map_err(signing)?;
+        let manifest = SignedManifest::sign(
+            &app.definition(),
+            rocky_secure::DatabaseKind::Shared,
+            &publisher,
+        )
+        .map_err(signing)?;
         // Credentials live at most a year; each start issues them afresh.
         const DAY: u64 = 24 * 60 * 60;
         let time = std::time::SystemTime::now()

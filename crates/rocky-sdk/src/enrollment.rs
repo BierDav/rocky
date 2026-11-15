@@ -22,9 +22,9 @@ use crate::{
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use rocky_core::{Commitment, DomainId, MeshId, ResourceGrant, Right, RowSelection, commitment};
 use rocky_credentials::{
-    Admission, Authority, Credentials, EpochRequest, IdentityProvider, Invitation,
-    MAX_LIVE_REVOCATIONS, PairRequest, Profile, REVOCATION_SET_FULL, RenewRequest, Renewal,
-    Revocation, open_enrollment, seal_enrollment,
+    Admission, Authority, Credentials, DatabaseKind, EpochRequest, IdentityProvider, Invitation,
+    MAX_LIVE_REVOCATIONS, PairRequest, PersonalContext, PersonalError, PersonalNamespace, Profile,
+    REVOCATION_SET_FULL, RenewRequest, Renewal, Revocation, open_enrollment, seal_enrollment,
 };
 use rocky_secure::{
     CredentialChain, KeyMaterial, PrivateKey, PublicKey, RevocationSet, SecureConfig,
@@ -39,13 +39,14 @@ use std::{
 
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements, envelopes wait in `deliveries`,
-/// join requests wait in `Issuing::requests`.
-pub const VERSION: u32 = 33;
+/// join requests wait in `Issuing::requests`, a passkey-installed personal
+/// device keeps its publication ID in `personal`.
+pub const VERSION: u32 = 34;
 /// Current invitation format: the issuer's node key, and a profile only
 /// when the invited device is admitted on arrival.
 const INVITE_VERSION: u32 = 7;
 /// Current format of what an issuer seals to a joining device.
-const ANSWER_FORMAT: u32 = 6;
+const ANSWER_FORMAT: u32 = 7;
 const CONTACT_VERSION: u32 = 3;
 /// Contacts one device keeps: routes to peers, which grant nothing.
 pub const MAX_CONTACTS: usize = 64;
@@ -205,6 +206,11 @@ struct Notice {
 }
 const NOTICE_VERSION: u32 = 3;
 
+/// A personal database's refusal as the call reports it.
+pub(crate) fn personal_refusal(error: PersonalError) -> Failure {
+    Box::new(rocky_credentials::Error::Personal(error))
+}
+
 /// The persisted identity of one installation. It holds no secret; keys
 /// are in the `SecretStore` under `installation`.
 #[derive(Clone, Serialize, Deserialize)]
@@ -273,6 +279,8 @@ pub struct Settings {
     /// acknowledged holding. Until it matches the held set's, any node
     /// holding them pushes them again.
     pub revocations_pushed: Option<Commitment>,
+    /// Present on a personal device a passkey installed.
+    pub(crate) personal: Option<crate::personal::Device>,
 }
 /// What an issuer keeps besides the registry: its invitation, the device
 /// that claimed it, a revocation it has begun and the keys revoked for good.
@@ -506,6 +514,9 @@ struct Enrollment {
     epoch_statements: BTreeMap<String, Vec<Commitment>>,
     /// The partition naming root, hex, for an issuer only.
     naming: Option<String>,
+    /// A personal database's bootstrap discovery capability, hex, for a
+    /// custodian only: it announces where a passkey-only device looks.
+    discovery: Option<String>,
     /// The enrolling issuer's node key, which sync sessions pin.
     issuer: PublicKey,
     /// The issuer links `capability` follows; empty when the owner signed.
@@ -866,6 +877,8 @@ impl Settings {
     ) -> Result<Vec<SignedRevocation>, Failure> {
         set.verify_in(self.database_context()?)?;
         let app = self.domain()?.manifest().app;
+        // The genesis judges the node certificates this identity learns.
+        self.revocations.pin(&self.manifest()?, self.publisher)?;
         if let Some(certificate) = self.credentials.certificate() {
             self.revocations.link(certificate.clone())?;
         }
@@ -935,7 +948,11 @@ impl Settings {
         if value["version"].as_u64() != Some(u64::from(VERSION)) {
             return Err("unsupported identity version; reinstall the domain".into());
         }
-        let settings: Self = serde_json::from_value(value)?;
+        let mut settings: Self = serde_json::from_value(value)?;
+        // The genesis judges the node certificates and chains it holds.
+        settings
+            .revocations
+            .pin(&settings.manifest()?, settings.publisher)?;
         for contact in settings
             .peers
             .values()
@@ -1015,6 +1032,62 @@ impl Settings {
         Ok(SignedManifest::from_bytes(
             &HEXLOWER.decode(self.genesis.as_bytes())?,
         )?)
+    }
+    /// The mode the root pinned in the genesis; no request changes it.
+    pub(crate) fn kind(&self) -> Result<DatabaseKind, Failure> {
+        let genesis = self.manifest()?;
+        let (_, kind) = genesis.verify_kind(self.publisher)?;
+        if let DatabaseKind::Personal {
+            owner, namespace, ..
+        } = kind
+            && (namespace.mesh(*owner)? != self.mesh || namespace.domain(*owner)? != self.domain)
+        {
+            return Err(personal_refusal(PersonalError::NamespaceMismatch));
+        }
+        Ok(kind.clone())
+    }
+    /// What every owner device certificate here binds; `None` when shared.
+    pub(crate) fn personal(&self) -> Result<Option<PersonalContext>, Failure> {
+        let DatabaseKind::Personal { owner, .. } = self.kind()? else {
+            return Ok(None);
+        };
+        Ok(Some(PersonalContext {
+            database: self.database_context()?,
+            owner,
+            grant: self.owner_grant(owner)?.id()?,
+            descriptor: self.manifest()?.descriptor()?,
+        }))
+    }
+    /// The root's trusted grant to the personal `owner` this chain holds,
+    /// which every owner device binds.
+    pub(crate) fn owner_grant(&self, owner: PublicKey) -> Result<&SignedCapability, Failure> {
+        self.credentials
+            .0
+            .iter()
+            .find(|link| {
+                link.issuer == self.publisher
+                    && link.capability.subject == owner
+                    && link
+                        .capability
+                        .extended()
+                        .is_ok_and(|extended| extended.trusted.is_some())
+            })
+            .ok_or_else(|| personal_refusal(PersonalError::WrongOwner))
+    }
+    /// A personal database admits nobody but the owner's devices and
+    /// explicitly granted custody principals.
+    pub(crate) fn admits(&self, profile: Option<&Profile>) -> Result<(), Failure> {
+        if self.kind()?.is_personal() && !matches!(profile, Some(Profile::Custody { .. })) {
+            return Err(personal_refusal(PersonalError::OwnerOnly));
+        }
+        Ok(())
+    }
+    /// Only the owner itself holds authority in a personal database.
+    pub(crate) fn admits_identity(&self, identity: PublicKey) -> Result<(), Failure> {
+        if self.kind()?.owner().is_some_and(|owner| owner != identity) {
+            return Err(personal_refusal(PersonalError::OwnerOnly));
+        }
+        Ok(())
     }
     /// The grants of this device's node: its chain's leaf.
     fn grants(&self, domain: &Domain) -> Vec<ResourceGrant> {
@@ -1275,6 +1348,7 @@ impl Settings {
             "author-issuer",
             "tip-nodes",
             "discovery",
+            crate::personal::DISCOVERY_ROLE,
         ]
         .into_iter()
         .map(String::from)
@@ -1387,7 +1461,40 @@ impl Settings {
         provider: Option<Arc<dyn IdentityProvider>>,
         root: &dyn IdentityProvider,
     ) -> Result<Self, Failure> {
-        let installation = HEXLOWER.encode(&random::<16>());
+        Self::create_as(schema, store, ttl, provider, root, None)
+    }
+    /// A personal database of the root's derived owner identity, pinned in
+    /// the genesis with `namespace`, which also locates its mesh and domain.
+    /// `installing` supplies the device keys and pins the reader epochs, so
+    /// an interrupted create resumes under the same node.
+    pub(crate) fn create_personal(
+        schema: &Schema,
+        store: &std::sync::Arc<dyn crate::SecretStore>,
+        ttl: u64,
+        (namespace, installing): (PersonalNamespace, crate::personal::Installing),
+        root: &dyn IdentityProvider,
+    ) -> Result<Self, Failure> {
+        Self::create_as(
+            schema,
+            store,
+            ttl,
+            None,
+            root,
+            Some((namespace, installing)),
+        )
+    }
+    fn create_as(
+        schema: &Schema,
+        store: &std::sync::Arc<dyn crate::SecretStore>,
+        ttl: u64,
+        provider: Option<Arc<dyn IdentityProvider>>,
+        root: &dyn IdentityProvider,
+        personal: Option<(PersonalNamespace, crate::personal::Installing)>,
+    ) -> Result<Self, Failure> {
+        let installation = match &personal {
+            Some((_, installing)) => installing.installation().to_owned(),
+            None => HEXLOWER.encode(&random::<16>()),
+        };
         let vault = Vault::new(store.clone(), &installation);
         let single_use = false;
         let identity: Arc<dyn IdentityProvider> = match provider {
@@ -1400,20 +1507,47 @@ impl Settings {
         if identity.public_key()? == publisher {
             return Err("a device's identity is never the root key".into());
         }
-        vault.create("node")?;
-        vault.create("transport")?;
-        vault.create(crate::groups::NAMING_ROLE)?;
-        let (mesh, domain) = (MeshId(random()), DomainId(random()));
+        let (kind, mesh, domain, installing) = match personal {
+            Some((namespace, installing)) => {
+                let owner = identity.public_key()?;
+                let located = (namespace.mesh(owner)?, namespace.domain(owner)?);
+                installing.naming(&vault)?;
+                (
+                    DatabaseKind::Personal {
+                        owner,
+                        namespace,
+                        creation: installing.creation()?,
+                    },
+                    located.0,
+                    located.1,
+                    Some(installing),
+                )
+            }
+            None => {
+                vault.create("node")?;
+                vault.create("transport")?;
+                vault.create(crate::groups::NAMING_ROLE)?;
+                (
+                    DatabaseKind::Shared,
+                    MeshId(random()),
+                    DomainId(random()),
+                    None,
+                )
+            }
+        };
         let bound = Domain::new(schema, *publisher.as_bytes(), mesh, domain)?;
+        let manifest = SignedManifest::sign(&bound.manifest(), kind, root)?;
         // The registry's key is made like any collection's.
-        let mut keys = BTreeMap::new();
-        for (name, _) in bound.scopes() {
-            let key = random::<32>();
-            let epoch = rocky_core::KeyEpoch::new(1, &key);
-            vault.put(&key_role(name, epoch), &key)?;
-            keys.insert(name.to_owned(), vec![epoch]);
-        }
-        let manifest = SignedManifest::sign(&bound.manifest(), root)?;
+        let fresh = || crate::personal::fresh_readers(&vault, &bound);
+        let (keys, device) = match installing {
+            Some(mut installing) => {
+                let keys = installing.pin(&vault, manifest.descriptor()?, fresh)?;
+                let device = installing.device();
+                installing.keep_discovery(&vault)?;
+                (keys, Some(device))
+            }
+            None => (fresh()?, None),
+        };
         let grant =
             Authority::owner(root).issue_trusted(identity.public_key()?, bound.scope, now()?)?;
         let mut settings = Self::installed(
@@ -1424,6 +1558,7 @@ impl Settings {
             ttl,
         );
         settings.keys = keys;
+        settings.personal = device;
         settings.authority = Some(Issuing::default());
         let links = CredentialChain(vec![grant]);
         settings.credentials =
@@ -1446,8 +1581,9 @@ impl Settings {
     /// restores, any node, with the keys `recovered` opened from its
     /// store's escrow records. A collection none opened gets a fresh key,
     /// and a store without the naming root a fresh one. Its identity is
-    /// fresh, supplied or single-use; the root grants it trust. Its nodes
-    /// write under their own keys, so nothing it creates collides.
+    /// fresh, supplied or single-use, and in a personal database the pinned
+    /// owner; the root grants it trust. Its nodes write under their own
+    /// keys, so nothing it creates collides.
     pub(crate) fn recover(
         store: &std::sync::Arc<dyn crate::SecretStore>,
         (archived, predecessor): (&Self, PublicKey),
@@ -1461,9 +1597,20 @@ impl Settings {
         }
         let installation = HEXLOWER.encode(&random::<16>());
         let vault = Vault::new(store.clone(), &installation);
-        let single_use = provider.is_none();
-        let identity: Arc<dyn IdentityProvider> =
-            provider.unwrap_or_else(|| Arc::new(crate::IdentityKey::generate()));
+        // A personal database stays its pinned owner's: the root's derived
+        // owner identity, or a supplied provider of that same key.
+        let owner = archived.kind()?.owner();
+        let (single_use, identity): (bool, Arc<dyn IdentityProvider>) = match (owner, provider) {
+            (Some(owner), provider) => {
+                let identity = provider
+                    .or_else(|| root.owner_identity())
+                    .filter(|identity| identity.public_key().ok() == Some(owner))
+                    .ok_or_else(|| personal_refusal(PersonalError::WrongOwner))?;
+                (false, identity)
+            }
+            (None, Some(provider)) => (false, provider),
+            (None, None) => (true, Arc::new(crate::IdentityKey::generate())),
+        };
         if identity.public_key()? == publisher {
             return Err("a device's identity is never the root key".into());
         }
@@ -1506,12 +1653,17 @@ impl Settings {
                 None => drop(groups.insert(key.clone(), record.clone())),
             }
         }
-        // A second ahead, so a grant signed in the same second precedes it.
-        let grant = Authority::owner(root).issue_trusted(
-            identity.public_key()?,
-            bound.scope,
-            after_recovery(&archived.revocations, now()? + 1),
-        )?;
+        let grant = match owner {
+            // A new owner device under the grant every sibling binds; the
+            // recovery then ends no grant of the owner.
+            Some(owner) => archived.owner_grant(owner)?.clone(),
+            // A second ahead, so a grant signed in the same second precedes it.
+            None => Authority::owner(root).issue_trusted(
+                identity.public_key()?,
+                bound.scope,
+                after_recovery(&archived.revocations, now()? + 1),
+            )?,
+        };
         let mut settings = Self::installed(
             (installation, single_use),
             (publisher, identity.public_key()?),
@@ -1588,6 +1740,7 @@ impl Settings {
             deliveries: BTreeMap::new(),
             claims: None,
             revocations_pushed: None,
+            personal: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         }
@@ -2408,9 +2561,17 @@ impl Settings {
             registry.get(&request.user),
         )?;
         let keys = self.keys_for(vault, &domain, &grants)?;
+        let database = self.database_context()?;
+        crate::reset::admit_after_resets(&mut self.revocations, &node, database, request.node)?;
         let enrollment = Enrollment {
             groups: self.groups_for(vault, request.node, &issued.capability, false)?,
             naming: naming_for(vault, &profile)?,
+            discovery: match profile {
+                Profile::Custody { .. } if self.kind()?.is_personal() => vault
+                    .find(crate::personal::DISCOVERY_ROLE)?
+                    .map(|topic| HEXLOWER.encode(&topic)),
+                _ => None,
+            },
             epoch_statements: self.statements_for(&keys),
             mesh: self.mesh,
             domain: self.domain,
@@ -2519,6 +2680,8 @@ impl Settings {
             },
             known,
         )?;
+        let database = self.database_context()?;
+        crate::reset::admit_after_resets(&mut self.revocations, &node, database, device.node)?;
         let supplied = Supplied {
             epoch_statements: self.statements_for_keys(&keys),
             mesh: self.mesh,
@@ -2628,6 +2791,8 @@ impl Settings {
                 known,
             )?;
         }
+        let database = self.database_context()?;
+        crate::reset::admit_after_resets(&mut self.revocations, &node, database, device.node)?;
         let supplied = Supplied {
             epoch_statements: self.statements_for_keys(&keys),
             mesh: self.mesh,
@@ -3013,6 +3178,7 @@ impl Settings {
             deliveries: BTreeMap::new(),
             claims: None,
             revocations_pushed: None,
+            personal: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
@@ -3246,6 +3412,7 @@ impl Joining {
             deliveries: BTreeMap::new(),
             claims: None,
             revocations_pushed: None,
+            personal: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
@@ -3308,6 +3475,14 @@ impl Joining {
             settings.learn_revocations(&RevocationSet::new())?;
         }
         settings.adopt_groups(&vault, &enrollment.groups)?;
+        if let Some(topic) = &enrollment.discovery {
+            if !matches!(settings.profile, Profile::Custody { .. })
+                || !settings.kind()?.is_personal()
+            {
+                return Err("only a personal custodian receives the discovery capability".into());
+            }
+            vault.put(crate::personal::DISCOVERY_ROLE, &hex32(topic)?)?;
+        }
         settings.learn_issuers(&vault, &enrollment.issuers);
         settings.save(path)?;
         rocky_platform::fs::remove_file(Intent::path(path, false))?;
@@ -3854,12 +4029,28 @@ impl Settings {
     /// Whether a key is revoked for good here: by a held statement or, on
     /// an issuer, a tombstone.
     pub(crate) fn tombstoned(&self, key: &PublicKey) -> bool {
-        self.revocations.revokes(key)
+        self.revocations.unfenced().revokes(key)
+            || self.signed_out(key)
             || self.authority.as_ref().is_some_and(|authority| {
                 authority
                     .tombstones
                     .contains(&rocky_credentials::PeerId::of(*key))
             })
+    }
+    /// Whether a held reset ended `node`, a node this device knew: it signs
+    /// in again as a new node. A reset ends no identity, and a node it never
+    /// saw joins once a node standing after the reset admits it.
+    pub(crate) fn signed_out(&self, node: &PublicKey) -> bool {
+        self.revocations
+            .reset_ends(&rocky_credentials::PeerId::of(*node))
+            && (self
+                .revocations
+                .certificates()
+                .any(|certificate| certificate.capability.subject == *node)
+                || self
+                    .authority
+                    .as_ref()
+                    .is_some_and(|authority| authority.seen.contains_key(node)))
     }
     /// Whether a statement, a tombstone or the registry revoked `identity`.
     pub(crate) fn revoked_identity(&self, identity: &PublicKey, registry: &Registry) -> bool {
@@ -4651,6 +4842,7 @@ impl Settings {
             deliveries,
             claims,
             revocations_pushed,
+            personal,
         } = self;
         *version == other.version
             && *installation == other.installation
@@ -4678,6 +4870,7 @@ impl Settings {
             && *deliveries == other.deliveries
             && *claims == other.claims
             && *revocations_pushed == other.revocations_pushed
+            && *personal == other.personal
             && self.saved_contacts() == other.saved_contacts()
     }
     fn validate_saved_contacts(&self) -> Result<(), Failure> {

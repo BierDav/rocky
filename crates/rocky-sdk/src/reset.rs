@@ -1,8 +1,43 @@
 //! "This is everything: sign out everywhere else": the owner reset and
 //! what an application shows around it.
 use rocky_core::Commitment;
-use rocky_credentials::PeerId;
+use rocky_credentials::{DatabaseContext, PeerId, RevocationSet, SignedResetAdmission};
+use rocky_secure::{PrivateKey, PublicKey};
 use std::collections::BTreeSet;
+
+/// `key`, the node answering `node`'s invitation or link, admits it past
+/// the resets `known` holds, so they do not end it. A node those resets
+/// end admits nobody, and without a reset there is nothing to admit past.
+pub(crate) fn admit_after_resets(
+    known: &mut RevocationSet,
+    key: &PrivateKey,
+    database: DatabaseContext,
+    node: PublicKey,
+) -> Result<(), crate::Failure> {
+    let heads = known.reset_heads();
+    if heads.is_empty() || known.reset_ends(&PeerId::of(key.public_key())) {
+        return Ok(());
+    }
+    known.admit(SignedResetAdmission::sign(
+        key,
+        database,
+        PeerId::of(node),
+        heads,
+    )?)?;
+    Ok(())
+}
+
+/// Who a reset keeps besides the signing device: by default every
+/// custodian this device knows of, since a server or custody replica the
+/// reset leaves out stops syncing for good.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ResetKeep {
+    /// Further nodes to keep. Naming one a statement already ended refuses
+    /// the reset.
+    pub also: BTreeSet<PeerId>,
+    /// Known custodians to sign out anyway.
+    pub except: BTreeSet<PeerId>,
+}
 
 /// How far this device's view of the database is witnessed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,7 +91,7 @@ impl RestoreChoice {
 pub struct ResetReceipt {
     /// The signed statement's ID, which later resets follow.
     pub reset: Commitment,
-    /// This node and the named custodians.
+    /// This node, the known custodians it did not except and `also`.
     pub kept: BTreeSet<PeerId>,
     /// The earlier resets it follows.
     pub follows: BTreeSet<Commitment>,

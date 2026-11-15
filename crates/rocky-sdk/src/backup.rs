@@ -59,7 +59,7 @@ pub(crate) enum Recovery {
 
 // Archives are files a user moves elsewhere: natively streamed from disk; in
 // a browser, whole files in Rocky's storage (`rocky_platform::fs`).
-pub(crate) use archive::{open, place, write};
+pub(crate) use archive::{Unsupported, inspect, open, place, write};
 mod archive {
     use super::*;
     use crate::{Failure, enrollment::Settings};
@@ -133,15 +133,16 @@ mod archive {
         }
     }
 
-    const MAGIC: &[u8] = b"rocky.backup.v2\n";
-    const FORMAT: u32 = 2;
+    /// The archive format follows the identity format it carries.
+    const MAGIC: &[u8] = b"rocky.backup.v3\n";
+    const FORMAT: u32 = 3;
     const MAX_HEADER: usize = 256 * 1024;
     /// The files an archive carries, in order. The database is required.
     const DATABASE: &str = "rocky.sqlite";
     const IDENTITY: &str = "identity.json";
 
     fn label(inventory: &[u8]) -> Vec<u8> {
-        [b"rocky.backup.v2".as_slice(), inventory].concat()
+        [b"rocky.backup.v3".as_slice(), inventory].concat()
     }
     fn digest(path: &Path) -> Result<(u64, String), Failure> {
         let mut reader = reader(path)?;
@@ -212,11 +213,17 @@ mod archive {
         /// A digest of the signed inventory, naming this archive.
         pub id: String,
     }
-    /// Reads and verifies `archive`, extracting its files into `staging`.
-    /// The signature must be the exporter's, whose credentials the publisher
-    /// issued for the manifest; every file must match its digest.
-    pub(crate) fn open(archive: &Path, staging: &Path) -> Result<Opened, Failure> {
-        let mut input = reader(archive)?;
+    /// An archive or identity record in another format version.
+    #[derive(Debug)]
+    pub(crate) struct Unsupported(&'static str);
+    impl std::fmt::Display for Unsupported {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "unsupported {}", self.0)
+        }
+    }
+    impl std::error::Error for Unsupported {}
+    /// The signed inventory at the start of `input`, with its bytes.
+    fn header(input: &mut impl Read) -> Result<(Inventory, Vec<u8>), Failure> {
         let mut magic = vec![0; MAGIC.len()];
         input.read_exact(&mut magic)?;
         if magic != MAGIC {
@@ -234,7 +241,7 @@ mod archive {
         input.read_exact(&mut signature)?;
         let inventory: Inventory = serde_json::from_slice(&header)?;
         if inventory.format != FORMAT {
-            return Err("unsupported backup archive format".into());
+            return Err(Unsupported("backup archive format").into());
         }
         if !inventory
             .node
@@ -250,6 +257,71 @@ mod archive {
         if names.first() != Some(&IDENTITY) || names.get(1) != Some(&DATABASE) || names.len() != 2 {
             return Err("the backup archive holds unexpected files".into());
         }
+        Ok((inventory, header))
+    }
+    /// The identity record an archive carries, checked against its inventory.
+    fn identity(inventory: &Inventory, bytes: &[u8]) -> Result<Settings, Failure> {
+        let record: serde_json::Value = serde_json::from_slice(bytes)?;
+        if record["version"].as_u64() != Some(u64::from(crate::enrollment::VERSION)) {
+            return Err(Unsupported("backup identity version").into());
+        }
+        let identity: Settings = serde_json::from_value(record)?;
+        let manifest = identity.manifest()?.verify(inventory.publisher)?;
+        if identity.publisher != inventory.publisher
+            || HEXLOWER.encode(&manifest.hash()) != inventory.manifest
+        {
+            return Err("the backup identity differs from its inventory".into());
+        }
+        identity.credentials.provenance_with_families(
+            inventory.publisher,
+            inventory.node,
+            &identity.domain()?.families,
+        )?;
+        Ok(identity)
+    }
+    /// Verifies `archive` as `open` does without extracting it: its
+    /// inventory, its identity record and its ID.
+    pub(crate) fn inspect(archive: &Path) -> Result<(Inventory, Settings, String), Failure> {
+        let mut input = reader(archive)?;
+        let (inventory, header) = header(&mut input)?;
+        let mut identity = Vec::new();
+        for entry in &inventory.files {
+            let mut hash = Sha256::new();
+            let mut taken = (&mut input).take(entry.length);
+            let mut buffer = vec![0; 64 * 1024];
+            let mut length = 0u64;
+            loop {
+                let read = taken.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                hash.update(&buffer[..read]);
+                if entry.name == IDENTITY {
+                    if identity.len() + read > MAX_HEADER * 64 {
+                        return Err("backup identity quota".into());
+                    }
+                    identity.extend_from_slice(&buffer[..read]);
+                }
+                length += read as u64;
+            }
+            if (length, HEXLOWER.encode(&hash.finalize())) != (entry.length, entry.sha256.clone()) {
+                return Err(format!("{} differs from the backup inventory", entry.name).into());
+            }
+        }
+        if input.read(&mut [0])? != 0 {
+            return Err("the backup archive has trailing bytes".into());
+        }
+        let identity = self::identity(&inventory, &identity)?;
+        let id = HEXLOWER.encode(&rocky_core::commitment("rocky.backup.id.v1", &header));
+        Ok((inventory, identity, id))
+    }
+
+    /// Reads and verifies `archive`, extracting its files into `staging`.
+    /// The signature must be the exporter's, whose credentials the publisher
+    /// issued for the manifest; every file must match its digest.
+    pub(crate) fn open(archive: &Path, staging: &Path) -> Result<Opened, Failure> {
+        let mut input = reader(archive)?;
+        let (inventory, header) = header(&mut input)?;
         rocky_platform::fs::create_dir_all(staging)?;
         let mut files = Vec::new();
         for entry in &inventory.files {
@@ -265,18 +337,7 @@ mod archive {
         if input.read(&mut [0])? != 0 {
             return Err("the backup archive has trailing bytes".into());
         }
-        let identity: Settings = serde_json::from_slice(&rocky_platform::fs::read(&files[0].1)?)?;
-        let manifest = identity.manifest()?.verify(inventory.publisher)?;
-        if identity.publisher != inventory.publisher
-            || HEXLOWER.encode(&manifest.hash()) != inventory.manifest
-        {
-            return Err("the backup identity differs from its inventory".into());
-        }
-        identity.credentials.provenance_with_families(
-            inventory.publisher,
-            inventory.node,
-            &identity.domain()?.families,
-        )?;
+        let identity = identity(&inventory, &rocky_platform::fs::read(&files[0].1)?)?;
         Ok(Opened {
             id: HEXLOWER.encode(&rocky_core::commitment("rocky.backup.id.v1", &header)),
             inventory,

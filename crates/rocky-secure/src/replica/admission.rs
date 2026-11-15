@@ -40,7 +40,7 @@ impl<A: RowApplication> Inner<A> {
         let (grants, selectors) = chain
             .verified_with_families(
                 self.config.publisher,
-                &RevocationSet::new(),
+                &self.config.revocations.pinned_only(),
                 time,
                 self.grant_families(),
             )

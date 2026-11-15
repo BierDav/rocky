@@ -47,7 +47,7 @@ fn config(
     };
     Ok(SecureConfig {
         publisher: publisher.public_key(),
-        manifest: SignedManifest::sign(manifest, publisher)?,
+        manifest: SignedManifest::sign(manifest, DatabaseKind::Shared, publisher)?,
         revocations: RevocationSet::new(),
         node: node.clone(),
         credentials: CredentialChain(vec![

@@ -33,7 +33,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub(super) async fn list_held_changes(&self) -> Result<Vec<HeldChange>, Error> {
         let source = {
             let mut inner = self.inner.lock(Class::Background).await;
-            inner = flush_guard(inner, &self.inner).await?;
+            // The source, authority included, is read once flushed.
+            inner = flushed(inner, &self.inner).await?;
             let tables = ["secure_held", "secure_rows"].map(|table| {
                 inner
                     .conn

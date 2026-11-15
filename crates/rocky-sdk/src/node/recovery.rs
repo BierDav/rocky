@@ -89,7 +89,12 @@ impl Node {
             if self.replica.unsealed_replayed_transactions().await?
                 >= rocky_secure::ROUTINE_SEAL_TRANSACTIONS
             {
-                self.seal_followed(scope, false).await?;
+                match self.seal_followed(scope, false).await {
+                    // Another trusted node's seal ended the tip's log; sync
+                    // brings it.
+                    Err(error) if call_failure(&error).code == "sealed" => {}
+                    sealed => sealed?,
+                }
             }
             let awaiting = self.replica.awaiting_outcomes().await?;
             if !awaiting.is_empty() {

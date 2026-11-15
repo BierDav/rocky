@@ -4,16 +4,18 @@ use rocky_credentials::{PeerId, Reset, Revocation, RevocationSet, RootDecision};
 use std::collections::BTreeSet;
 
 impl Node {
-    /// Ends every node but this one and `custodians`, including nodes this
-    /// store never saw, and fences their data at what this replica applied.
-    /// The fence is captured and the statement merged under one replica
-    /// lock; the receipt is returned after the local commit.
+    /// Ends every node but this one and those `keep` names, including nodes
+    /// this store never saw, and fences their data at what this replica
+    /// applied. The fence is captured and the statement merged under one
+    /// replica lock; the receipt is returned after the local commit.
     pub(super) async fn sign_out_everywhere_else(
         &self,
         root: &Root,
-        custodians: BTreeSet<PeerId>,
+        crate::ResetKeep { also, except }: crate::ResetKeep,
     ) -> Result<crate::ResetReceipt, Failure> {
         let own = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
+        let mut custodians = self.known_custodians().await?;
+        custodians.retain(|node| !except.contains(node));
         let graph = self.replica.tip_graph(self.domain().scope).await?;
         let mut settings = self.settings.lock().await;
         let root = crate::enrollment::root_signer(
@@ -28,6 +30,7 @@ impl Node {
             }));
         }
         let mut keep = custodians;
+        keep.extend(also.iter().copied());
         keep.insert(PeerId::of(own));
         let revocations = &settings.revocations;
         // Keep the held heads of every ended lane's tip statements, as a
@@ -63,7 +66,7 @@ impl Node {
                         statement: ended.id()?,
                     }));
                 }
-                if let Some(custodian) = keep.iter().find(|node| held.revokes_reference(node)) {
+                if let Some(custodian) = also.iter().find(|node| held.revokes_reference(node)) {
                     return Err(Box::new(crate::ResetRefused::CustodianSignedOut {
                         custodian: *custodian,
                     }));
@@ -127,6 +130,40 @@ impl Node {
             fenced_logs,
             pushed,
         })
+    }
+    /// The nodes of every custody identity the registry names that no
+    /// statement ended: the servers and custodians a reset keeps unless
+    /// told otherwise.
+    async fn known_custodians(&self) -> Result<BTreeSet<PeerId>, Failure> {
+        let registry = self.registry().await?;
+        let membership = self.membership().await?;
+        let custody: BTreeSet<PublicKey> = registry
+            .records
+            .iter()
+            .filter(|(_, record)| {
+                matches!(
+                    record.profile(),
+                    Some(rocky_credentials::Profile::Custody { .. })
+                )
+            })
+            .map(|(identity, _)| *identity)
+            .collect();
+        let settings = self.settings.lock().await;
+        // Nodes this issuer admitted count before their certificates arrive.
+        let seen = settings
+            .authority
+            .iter()
+            .flat_map(|authority| &authority.seen)
+            .filter(|(_, seen)| custody.contains(&seen.identity))
+            .map(|(node, _)| *node)
+            .filter(|node| !settings.tombstoned(node));
+        Ok(custody
+            .iter()
+            .flat_map(|identity| membership.nodes(identity))
+            .map(|linked| linked.node)
+            .chain(seen)
+            .map(PeerId::of)
+            .collect())
     }
     /// Whether an owner reset fenced this device's view; see [`crate::Freshness`].
     pub(super) async fn freshness(&self) -> Result<crate::Freshness, Failure> {

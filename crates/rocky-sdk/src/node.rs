@@ -13,6 +13,7 @@ mod live_links;
 mod membership;
 mod mesh;
 mod partition;
+mod personal;
 mod recovery;
 mod registry;
 mod reset;
@@ -36,7 +37,7 @@ use crate::{
 use data_encoding::HEXLOWER;
 use futures_util::{StreamExt, stream};
 use rocky_core::{ResourceScope, SqlValue, TypedRows, commitment};
-use rocky_credentials::Profile;
+use rocky_credentials::{IdentityEnrollment, IdentityReply, LinkEnrollment, Profile};
 use rocky_secure::{
     CredentialChain, EncryptedReplica, Error, KeyMaterial, PrivateKey, PublicKey, RevocationSet,
     SecureSession, SecureSql, SqlError, SqlOptions, Unavailable, secure_node_id,
@@ -291,6 +292,8 @@ pub(crate) struct Node {
     /// most `MET` are kept.
     met: std::sync::Mutex<BTreeMap<PublicKey, u64>>,
     link_requests: std::sync::Mutex<BTreeMap<PublicKey, crate::self_enrollment::PendingLink>>,
+    /// Nonces this node issued to personal sign-ins.
+    personal_nonces: std::sync::Mutex<personal::Nonces>,
     /// Peers whose clock the last handshake found more than
     /// `MAX_CLOCK_AHEAD` apart from this one's, as alerts; at most `MET`.
     clocks: std::sync::Mutex<BTreeMap<PublicKey, crate::Alert>>,
@@ -393,6 +396,7 @@ impl Node {
             coordination: Arc::new(health::Coordination::new(observations.clone())),
             mesh: Default::default(),
             link_requests: Default::default(),
+            personal_nonces: Default::default(),
             mesh_revision: watch::channel(0).0,
             trusted_watch: Default::default(),
             seal_skipped: Default::default(),
@@ -836,6 +840,7 @@ impl Node {
         {
             return Err(refused("invitation label exceeds 256 bytes"));
         }
+        self.settings.lock().await.admits(profile.as_ref())?;
         let attached = self.network.read().await;
         let work = async {
             let transport = &*attached
@@ -1039,6 +1044,7 @@ impl Node {
         terms: Terms,
         delegate: bool,
     ) -> Result<crate::Supplied, Failure> {
+        self.settings.lock().await.admits(Some(&profile))?;
         let contact = match self.current() {
             Some(link) if !delegate => {
                 let settings = self.settings.lock().await.clone();
@@ -3385,15 +3391,28 @@ impl Node {
                 settings.learn_revocations(&self.replica.revocations().await)?;
                 Ok(PeerReply::Policy(settings.revocations.clone()))
             }
-            PeerRequest::Identity(request) => {
+            PeerRequest::Identity(IdentityEnrollment::Shared(request)) => {
                 let mut settings = self.settings.lock().await.clone();
                 settings.bootstrap = Some(self.enrollment_bootstrap().await?);
                 settings.learn_revocations(&self.replica.revocations().await)?;
                 Ok(PeerReply::Identity(self.answer_link(&settings, request)?))
             }
-            PeerRequest::LinkEnroll(certificate) => {
+            PeerRequest::Identity(IdentityEnrollment::PersonalHello(hello)) => {
+                Ok(PeerReply::Identity(IdentityReply::PersonalChallenge(
+                    Box::new(self.answer_personal_hello(hello).await?),
+                )))
+            }
+            PeerRequest::Identity(IdentityEnrollment::Personal(authorization)) => {
+                Ok(PeerReply::Identity(IdentityReply::Personal(Box::new(
+                    self.answer_personal_bootstrap(*authorization).await?,
+                ))))
+            }
+            PeerRequest::LinkEnroll(LinkEnrollment::Shared(certificate)) => {
                 Ok(PeerReply::LinkEnroll(self.accept_link(*certificate).await?))
             }
+            PeerRequest::LinkEnroll(LinkEnrollment::Personal(publication)) => Ok(
+                PeerReply::LinkEnroll(self.accept_personal(*publication).await?),
+            ),
             PeerRequest::Unlink(known) => Ok(PeerReply::Unlink(self.accept_unlink(known).await?)),
             PeerRequest::Resolve(request) => Ok(PeerReply::Resolve(
                 request.answer(&Settings::node_key(&self.vault)?)?,
@@ -3790,6 +3809,7 @@ pub(crate) fn call_failure(error: &Failure) -> crate::CallFailure {
     } else if let Some(credentials) = error.downcast_ref::<rocky_credentials::Error>() {
         match credentials {
             rocky_credentials::Error::Provider(_) => ("storage", false),
+            rocky_credentials::Error::Personal(personal) => (personal.code(), false),
             _ => ("denied", false),
         }
     } else {

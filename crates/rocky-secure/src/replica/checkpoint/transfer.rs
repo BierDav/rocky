@@ -1123,7 +1123,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         after: Option<PublicKey>,
     ) -> Result<PrunedPage, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        inner = flush_guard(inner, &self.inner).await?;
+        inner = flushed(inner, &self.inner).await?;
         inner.authorize_peer(peer, credentials, scope)?;
         let mut logs = match inner.find_scope_id(scope).await? {
             Some(id) => inner.logs(id, after, true, STEP_ROWS + 1).await?,
@@ -1235,7 +1235,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         });
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        inner = flush_guard(inner, &self.inner).await?;
+        inner = flushed(inner, &self.inner).await?;
         inner
             .authorize_checkpoint_peer(peer, credentials, scope, checkpoint)
             .await?;

@@ -108,7 +108,12 @@ impl Constrained {
         schema.supported_on(rocky_core::Profile::Secure).unwrap();
         let manifest = schema.manifest(&[DomainId([1; 16])]);
         Self {
-            manifest: SignedManifest::sign(&manifest, &publisher).unwrap(),
+            manifest: SignedManifest::sign(
+                &manifest,
+                rocky_credentials::DatabaseKind::Shared,
+                &publisher,
+            )
+            .unwrap(),
             domain: Scope {
                 mesh: MeshId([1; 16]),
                 app: schema.app_id(),

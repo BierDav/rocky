@@ -2,7 +2,7 @@
 use crate::{Error, decode_bounded, denied, encode};
 use serde::{Deserialize, Serialize};
 
-const EXTENSION_VERSION: u32 = 12;
+const EXTENSION_VERSION: u32 = 13;
 const MAX_EXTENSION: usize = 64 * 1024;
 
 /// A capability's required, canonical versioned authority fields.
@@ -24,6 +24,7 @@ struct Body {
     sequence: Option<u64>,
     previous: Option<rocky_core::Commitment>,
     database: Option<DatabaseContext>,
+    personal: Option<crate::PersonalBinding>,
 }
 /// Reads only the version, whatever else a later body holds.
 #[derive(Deserialize)]
@@ -57,6 +58,9 @@ pub struct Extended {
     pub previous: Option<rocky_core::Commitment>,
     /// Stable database authority and namespace, independent of its schema.
     pub database: Option<DatabaseContext>,
+    /// An independent owner device of a personal database, in place of a
+    /// membership sequence.
+    pub personal: Option<crate::PersonalBinding>,
 }
 
 /// The pinned root and stable namespace of one database.
@@ -94,6 +98,7 @@ impl Extension {
             sequence: extended.sequence,
             previous: extended.previous,
             database: extended.database,
+            personal: extended.personal,
         };
         let extension = Self(encode(&body)?);
         extension.read()?;
@@ -110,7 +115,9 @@ impl Extension {
             return Err(denied("unsupported credential extension version"));
         }
         let body: Body = decode_bounded(&self.0, MAX_EXTENSION)?;
-        if body.sequence.is_none() != body.previous.is_none() && body.sequence != Some(0) {
+        if (body.sequence.is_none() != body.previous.is_none() && body.sequence != Some(0))
+            || (body.personal.is_some() && (body.sequence.is_some() || body.previous.is_some()))
+        {
             return Err(denied("invalid membership link"));
         }
         if body.partitions.len() > crate::MAX_GRANTS {
@@ -133,6 +140,7 @@ impl Extension {
             sequence: body.sequence,
             previous: body.previous,
             database: body.database,
+            personal: body.personal,
         })
     }
 }
@@ -147,7 +155,7 @@ mod tests {
         assert_eq!(current.read().unwrap(), Extended::default());
         let body: Body = decode_bounded(&current.0, MAX_EXTENSION).unwrap();
         assert_eq!(body.version, EXTENSION_VERSION);
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, u32::MAX] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, u32::MAX] {
             let other = Extension(
                 encode(&Body {
                     node: None,
@@ -161,6 +169,7 @@ mod tests {
                     sequence: None,
                     previous: None,
                     database: None,
+                    personal: None,
                 })
                 .unwrap(),
             );

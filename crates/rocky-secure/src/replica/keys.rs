@@ -691,6 +691,20 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.escrow_of(slots, None).await
     }
+    /// As `archived_escrow`, of this open replica: every root escrow record
+    /// it holds, whoever carried it, and the key epochs of its ciphertext.
+    pub async fn escrow_inventory(
+        &self,
+    ) -> Result<
+        (
+            Vec<(Slot, RootEscrow)>,
+            BTreeSet<(ResourceScope, rocky_core::KeyEpoch)>,
+        ),
+        Error,
+    > {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        escrow_inventory(&inner.conn).await
+    }
     /// Reads a closed file, a backup's copy: its root escrow records and
     /// the key epochs of the ciphertext it holds, which they must cover.
     pub async fn archived_escrow(
@@ -708,20 +722,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             None,
             crate::store::SCHEMA,
         );
-        let records = rows(&conn, "SELECT scope,generation,record FROM secure_escrow")
-            .await?
-            .iter()
-            .map(|row| escrow_row(row).map(|(slot, stored)| (slot, stored.record().clone())))
-            .collect::<Result<Vec<_>, Error>>()?;
-        let mut held = BTreeSet::new();
-        for row in rows(&conn, "SELECT header FROM secure_operations").await? {
-            let [SqlValue::Blob(header)] = row.as_slice() else {
-                return Err(Error::Corrupt("retained operation".into()));
-            };
-            let header: p2panda_core::Header<Extensions> = decode(header)?;
-            held.insert((header.extensions.scope, header.extensions.generation));
-        }
-        Ok((records, held))
+        escrow_inventory(&conn).await
     }
     /// The installed key epochs of a scope, ascending; the last is current.
     pub async fn key_epochs(&self, scope: ResourceScope) -> Vec<rocky_core::KeyEpoch> {
@@ -734,6 +735,32 @@ impl<A: RowApplication> EncryptedReplica<A> {
         epochs.sort_unstable();
         epochs
     }
+}
+
+/// A store's root escrow records and the key epochs of its ciphertext.
+async fn escrow_inventory(
+    conn: &ScopedConnection,
+) -> Result<
+    (
+        Vec<(Slot, RootEscrow)>,
+        BTreeSet<(ResourceScope, rocky_core::KeyEpoch)>,
+    ),
+    Error,
+> {
+    let records = rows(conn, "SELECT scope,generation,record FROM secure_escrow")
+        .await?
+        .iter()
+        .map(|row| escrow_row(row).map(|(slot, stored)| (slot, stored.record().clone())))
+        .collect::<Result<Vec<_>, Error>>()?;
+    let mut held = BTreeSet::new();
+    for row in rows(conn, "SELECT header FROM secure_operations").await? {
+        let [SqlValue::Blob(header)] = row.as_slice() else {
+            return Err(Error::Corrupt("retained operation".into()));
+        };
+        let header: p2panda_core::Header<Extensions> = decode(header)?;
+        held.insert((header.extensions.scope, header.extensions.generation));
+    }
+    Ok((records, held))
 }
 
 impl<A: RowApplication> Inner<A> {

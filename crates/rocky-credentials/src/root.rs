@@ -41,7 +41,8 @@ impl RootKey {
     /// `"rocky identity v1"`), so one phrase or passkey restores both. It
     /// is a different key: nothing it signs verifies as the root's.
     pub fn identity(&self) -> IdentityKey {
-        IdentityKey::from_secret(crate::group::hkdf(&[], &self.secret(), IDENTITY_DERIVATION))
+        let secret = zeroize::Zeroizing::new(self.secret());
+        IdentityKey::from_secret(crate::group::hkdf(&[], &*secret, IDENTITY_DERIVATION))
     }
     pub(crate) fn private(&self) -> &PrivateKey {
         self.0.private()

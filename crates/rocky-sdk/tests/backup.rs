@@ -62,7 +62,7 @@ async fn a_backup_restores_into_a_fresh_identity_without_forking_or_resending()
 
     let retired = root.path().join("retired.backup");
     let mut retired_bytes = std::fs::read(&archive)?;
-    let old_magic = b"rocky.backup.v1\n";
+    let old_magic = b"rocky.backup.v2\n";
     retired_bytes[..old_magic.len()].copy_from_slice(old_magic);
     std::fs::write(&retired, retired_bytes)?;
     let error = Database::restore(

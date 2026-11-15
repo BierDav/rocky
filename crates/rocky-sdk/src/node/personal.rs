@@ -1,0 +1,304 @@
+//! The responder side of personal sign-in: any owner device or custodian
+//! answers a passkey holder's hello, releases the bootstrap pages its
+//! authorization unlocks and persists the new device's certificate. It
+//! signs no grant and returns no plaintext key.
+use super::*;
+use crate::personal::bootstrap::{Metadata, Page};
+use rocky_credentials::{
+    PersonalAct, PersonalAudience, PersonalAuthorization, PersonalChallenge, PersonalError,
+    PersonalHello, PersonalPublication,
+};
+
+/// How long an issued nonce authorizes, and how many spent ones are held.
+const NONCE_LIFETIME: u64 = 300;
+const MAX_NONCES: usize = 256;
+const NONCE_TAG: &str = "rocky.personal-nonce.v1";
+/// Escrow bytes one bootstrap page carries at most, besides one record.
+const PAGE_ESCROW_BYTES: usize = 1024 * 1024;
+
+/// Nonces this responder issues: each carries its issue time and a tag
+/// keyed by this process, so an untrusted hello stores nothing and no
+/// flood of hellos evicts another sign-in's nonce. Only an authorization
+/// the root signed records the acts it spent: bounded replay state, never
+/// persisted.
+pub(crate) struct Nonces {
+    key: [u8; 32],
+    spent: BTreeMap<[u8; 32], (u64, Vec<PersonalAct>)>,
+}
+impl Default for Nonces {
+    fn default() -> Self {
+        Self {
+            key: rocky_platform::entropy::random(),
+            spent: BTreeMap::new(),
+        }
+    }
+}
+impl Nonces {
+    fn tag(&self, head: &[u8]) -> [u8; 16] {
+        let digest = rocky_core::commitment(NONCE_TAG, &[self.key.as_slice(), head].concat());
+        let mut tag = [0; 16];
+        tag.copy_from_slice(&digest[..16]);
+        tag
+    }
+    fn issue(&self, time: u64) -> [u8; 32] {
+        let mut nonce = [0; 32];
+        nonce[..8].copy_from_slice(&time.to_be_bytes());
+        nonce[8..16].copy_from_slice(&rocky_platform::entropy::random::<8>());
+        let tag = self.tag(&nonce[..16]);
+        nonce[16..].copy_from_slice(&tag);
+        nonce
+    }
+    /// Takes `act` once under a live nonce this responder issued.
+    fn spend(&mut self, nonce: &[u8; 32], act: PersonalAct, time: u64) -> Result<(), Failure> {
+        let unknown = || refused("the personal nonce is unknown, expired or spent");
+        let (head, tag) = nonce.split_at(16);
+        let mut issued = [0; 8];
+        issued.copy_from_slice(&head[..8]);
+        let issued = u64::from_be_bytes(issued);
+        if issued > time || time - issued >= NONCE_LIFETIME || self.tag(head) != tag {
+            return Err(unknown());
+        }
+        self.spent
+            .retain(|_, (issued, _)| time.saturating_sub(*issued) < NONCE_LIFETIME);
+        if !self.spent.contains_key(nonce) && self.spent.len() >= MAX_NONCES {
+            return Err(refused("too many personal sign-ins in progress"));
+        }
+        let (_, used) = self.spent.entry(*nonce).or_insert((issued, Vec::new()));
+        if used.contains(&act) {
+            return Err(unknown());
+        }
+        used.push(act);
+        Ok(())
+    }
+}
+
+impl Node {
+    /// What a personal authorization here must match.
+    async fn personal_audience(&self) -> Result<(Settings, PersonalAudience), Failure> {
+        let settings: Settings = (**self.settings.lock().await).clone();
+        let context = settings
+            .personal()?
+            .ok_or_else(|| refused("this database is not a personal one"))?;
+        if settings.logged_out || settings.revocation(&self.path)?.is_some() {
+            return Err(refused("this device was revoked or logged out"));
+        }
+        Ok((
+            settings,
+            PersonalAudience {
+                database: context.database,
+                owner: context.owner,
+                descriptor: context.descriptor,
+                node: Settings::node_key(&self.vault)?.public_key(),
+            },
+        ))
+    }
+    /// Whether a statement `known` holds ended the owner's `node`.
+    fn personal_ended(known: &RevocationSet, owner: PublicKey, node: PublicKey) -> bool {
+        known.tombstones(owner, node) || known.unfenced().ends_node_of(owner, node, false)
+    }
+    /// The verified authorization's node, unless a statement ended it.
+    fn personal_node(
+        known: &RevocationSet,
+        audience: &PersonalAudience,
+        authorization: &PersonalAuthorization,
+    ) -> Result<PublicKey, Failure> {
+        let node = authorization.node();
+        if Self::personal_ended(known, audience.owner, node) {
+            return Err(crate::enrollment::personal_refusal(
+                PersonalError::Tombstoned {
+                    node: rocky_credentials::PeerId::of(node),
+                },
+            ));
+        }
+        Ok(node)
+    }
+    /// This device's revocations with its own certificate and the replica's.
+    async fn personal_known(&self, settings: &Settings) -> Result<RevocationSet, Failure> {
+        let mut known = settings.revocations.clone();
+        known.merge(
+            &self.replica.revocations().await,
+            settings.publisher,
+            self.domain().manifest().app,
+            now()?,
+        )?;
+        if let Some(certificate) = settings.credentials.certificate() {
+            known.link(certificate.clone())?;
+        }
+        Ok(known)
+    }
+
+    /// An untrusted hello learns the root-signed genesis, a nonce and this
+    /// node's proof; nothing private.
+    pub(super) async fn answer_personal_hello(
+        &self,
+        hello: PersonalHello,
+    ) -> Result<PersonalChallenge, Failure> {
+        let (settings, audience) = self.personal_audience().await?;
+        let nonce = self
+            .personal_nonces
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .issue(now()?);
+        Ok(PersonalChallenge::answer(
+            &hello,
+            audience.database,
+            &settings.manifest()?,
+            &Settings::node_key(&self.vault)?,
+            nonce,
+        )?)
+    }
+
+    /// One bootstrap page for a node the root, the owner and the node key
+    /// authorized: the signed descriptor, schema, owner grant, membership
+    /// and policy, and opaque root escrow. Sealed to that node alone.
+    pub(super) async fn answer_personal_bootstrap(
+        &self,
+        authorization: PersonalAuthorization,
+    ) -> Result<rocky_credentials::PersonalAnswer, Failure> {
+        let (mut settings, audience) = self.personal_audience().await?;
+        authorization.verify(&audience)?;
+        let PersonalAct::Bootstrap { page } = authorization.act() else {
+            return Err(refused("the authorization is not for a bootstrap"));
+        };
+        self.personal_nonces
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .spend(&authorization.nonce(), authorization.act(), now()?)?;
+        let mut known = self.personal_known(&settings).await?;
+        let node = authorization.node();
+        // A node a statement ended learns only the metadata that carries
+        // those signed statements, never escrow: it verifies them itself
+        // and starts over as a fresh node.
+        let ended = Self::personal_ended(&known, audience.owner, node);
+        if ended && page != 0 {
+            return Err(crate::enrollment::personal_refusal(
+                PersonalError::Tombstoned {
+                    node: rocky_credentials::PeerId::of(node),
+                },
+            ));
+        }
+        let (mut escrow, held) = if ended {
+            (Vec::new(), std::collections::BTreeSet::new())
+        } else {
+            self.replica.escrow_inventory().await?
+        };
+        escrow.sort_by_key(|(slot, record)| (*slot, record.tag()));
+        let mut pages = vec![Vec::new()];
+        let mut bytes = 0;
+        for record in escrow {
+            let size = rocky_credentials::encode(&record)?.len();
+            if bytes + size > PAGE_ESCROW_BYTES
+                && pages.last().is_some_and(|page: &Vec<_>| !page.is_empty())
+            {
+                pages.push(Vec::new());
+                bytes = 0;
+            }
+            bytes += size;
+            pages
+                .last_mut()
+                .ok_or("missing bootstrap page")?
+                .push(record);
+        }
+        let total = u32::try_from(pages.len()).map_err(|_| "bootstrap pages")?;
+        let index = usize::try_from(page).map_err(|_| "bootstrap page")?;
+        let escrow = pages
+            .into_iter()
+            .nth(index)
+            .ok_or_else(|| refused("no such bootstrap page"))?;
+        let metadata = if page == 0 {
+            settings.bootstrap = Some(match self.enrollment_bootstrap().await {
+                Ok(bootstrap) => bootstrap,
+                Err(_) => settings.schema_bootstrap()?,
+            });
+            if !ended {
+                let key = Settings::node_key(&self.vault)?;
+                crate::reset::admit_after_resets(&mut known, &key, audience.database, node)?;
+            }
+            Some(Box::new(Metadata {
+                record: crate::tip_schemas::Record::new(
+                    &settings.schema,
+                    settings.generation,
+                    settings.engine,
+                ),
+                bootstrap: settings.schema_bootstrap()?,
+                ttl: settings.ttl,
+                grant: settings.owner_grant(audience.owner)?.clone(),
+                responder: settings.credentials.clone(),
+                revocations: known,
+                groups: settings
+                    .groups
+                    .values()
+                    .map(|record| crate::groups::GroupRecord {
+                        epochs: Vec::new(),
+                        ..record.clone()
+                    })
+                    .collect(),
+                epoch_statements: settings.epoch_statements.clone(),
+                held,
+            }))
+        } else {
+            None
+        };
+        let page = Page {
+            metadata,
+            escrow,
+            pages: total,
+        };
+        Ok(authorization.answer(&rocky_credentials::encode(&page)?)?)
+    }
+
+    /// Persists an owner device's independent certificate that the root,
+    /// the owner and the node authorized: idempotent by certificate ID,
+    /// after the pinned mode, owner, binding, tombstone and device limit.
+    /// Owner devices and custodians alike keep and relay it.
+    pub(super) async fn accept_personal(
+        &self,
+        publication: PersonalPublication,
+    ) -> Result<RevocationSet, Failure> {
+        let publication_id = publication.check()?;
+        let (_, audience) = self.personal_audience().await?;
+        publication.authorization.verify(&audience)?;
+        self.personal_nonces
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .spend(
+                &publication.authorization.nonce(),
+                publication.authorization.act(),
+                now()?,
+            )?;
+        let mut current = self.settings.lock().await;
+        let context = current
+            .personal()?
+            .ok_or_else(|| refused("this database is not a personal one"))?;
+        let mut known = self.personal_known(&current).await?;
+        let node = Self::personal_node(&known, &audience, &publication.authorization)?;
+        let certificate = publication.certificate;
+        rocky_credentials::CredentialChain(vec![
+            current.owner_grant(context.owner)?.clone(),
+            certificate.clone(),
+        ])
+        .provenance_with_families(current.publisher, node, &self.domain().families)?;
+        let added = known.admit_personal(certificate, &context)?;
+        if added {
+            let mut draft = current.clone();
+            draft.learn_revocations(&known)?;
+            draft.save(&self.path)?;
+            *current = draft;
+            self.replica.learn_revocations(&known).await?;
+            tracing::debug!(
+                node = %node.to_hex(),
+                publication = %data_encoding::HEXLOWER.encode(&publication_id),
+                "personal device certificate recorded"
+            );
+        }
+        drop(current);
+        if added {
+            self.topics_changed();
+            self.wake_sync();
+        }
+        Ok(known)
+    }
+}
+
+#[cfg(test)]
+mod tests;

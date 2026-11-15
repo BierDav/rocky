@@ -4,7 +4,7 @@
 #![cfg(not(target_family = "wasm"))]
 use common::identity::snapshot as snap;
 use rocky_sdk::{
-    ActivityKind, CallFailure, Database, Freshness, Network, Open, RestoreChoice,
+    ActivityKind, CallFailure, Database, Freshness, Network, Open, ResetKeep, RestoreChoice,
     transport::memory::Hub,
 };
 use serde_json::{Value, json};
@@ -88,7 +88,7 @@ async fn recorded_reset(device: &Device, reset: rocky_sdk::Commitment) -> Result
 async fn refusal(device: &Device, root: &Device) -> Result<CallFailure, Failure> {
     let error = device
         .session
-        .sign_out_everywhere_else(root.root(), &[])
+        .sign_out_everywhere_else(root.root(), ResetKeep::default())
         .await
         .err()
         .ok_or("the reset succeeded")?;
@@ -144,7 +144,7 @@ async fn signing_out_everywhere_else_ends_other_devices_and_discards_what_it_nev
 
     let receipt = owner
         .session
-        .sign_out_everywhere_else(owner.root(), &[])
+        .sign_out_everywhere_else(owner.root(), ResetKeep::default())
         .await?;
     assert_eq!(receipt.kept.len(), 1);
     assert!(receipt.follows.is_empty());
@@ -169,7 +169,13 @@ async fn signing_out_everywhere_else_ends_other_devices_and_discards_what_it_nev
     // An ended custodian is refused, recording nothing.
     let error = owner
         .session
-        .sign_out_everywhere_else(owner.root(), &[laptop_node])
+        .sign_out_everywhere_else(
+            owner.root(),
+            ResetKeep {
+                also: [laptop_node].into(),
+                ..ResetKeep::default()
+            },
+        )
         .await
         .err()
         .ok_or("a reset kept an ended custodian")?;
@@ -180,7 +186,7 @@ async fn signing_out_everywhere_else_ends_other_devices_and_discards_what_it_nev
     // A second reset follows the first.
     let again = owner
         .session
-        .sign_out_everywhere_else(owner.root(), &[])
+        .sign_out_everywhere_else(owner.root(), ResetKeep::default())
         .await?;
     assert_eq!(again.follows, [receipt.reset].into());
     write_note(&owner, "after").await;
@@ -210,7 +216,7 @@ async fn a_device_another_enrolled_resets_and_the_root_signed_device_it_ends_can
     laptop.sync().await.map_err(|error| error.to_string())?;
     let receipt = laptop
         .session
-        .sign_out_everywhere_else(owner.root(), &[])
+        .sign_out_everywhere_else(owner.root(), ResetKeep::default())
         .await?;
     // The laptop's identity and grants survive the reset it signed.
     snap::ok(laptop.session.status()).await;
@@ -227,6 +233,158 @@ async fn a_device_another_enrolled_resets_and_the_root_signed_device_it_ends_can
     assert_eq!(revocation_reason(&owner).await["type"], "reset");
     refuses_as_signed_out(&owner, &owner, receipt.reset).await?;
     for device in [&laptop, &owner] {
+        device.close().await;
+    }
+    Ok(())
+}
+
+/// Joins `name` through `invitation`, the normal invite flow.
+fn join(directory: &Path, hub: &Arc<Hub>, invitation: &str) -> Result<Device, Failure> {
+    Device::new(Database::join(open(directory, hub), invitation)?)
+}
+async fn node_of(device: &Device) -> Result<rocky_credentials::PeerId, Failure> {
+    Ok(rocky_credentials::PeerId::of(
+        device.session.info().await?.node,
+    ))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn devices_invited_after_a_reset_sync_and_write_and_a_signed_out_device_admits_none()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let owner = Device::new(Database::create(
+        open(&root.path().join("owner"), &hub),
+        None,
+    )?)?;
+    write_note(&owner, "before").await;
+    let laptop = join(
+        &root.path().join("laptop"),
+        &hub,
+        &owner.invite_as(json!({"kind": "issuer"})).await,
+    )?;
+    common::introduce(&owner, &laptop).await;
+    laptop.sync().await.map_err(|error| error.to_string())?;
+    let receipt = owner
+        .session
+        .sign_out_everywhere_else(owner.root(), ResetKeep::default())
+        .await?;
+    learn_ended(&laptop).await;
+    refuses_as_signed_out(&laptop, &owner, receipt.reset).await?;
+
+    // A phone joins through the owner's invitation after the reset.
+    let phone = join(
+        &root.path().join("phone"),
+        &hub,
+        &owner.invite_as(json!({"kind": "issuer"})).await,
+    )?;
+    common::introduce(&owner, &phone).await;
+    phone.sync().await.map_err(|error| error.to_string())?;
+    write_note(&phone, "phone").await;
+    phone.sync().await.map_err(|error| error.to_string())?;
+    assert_eq!(notes(&owner).await, ["before", "phone"]);
+    assert_eq!(phone.session.freshness().await?, Freshness::LocallyAnchored);
+    // A tablet the phone invites joins too: an admitted device admits.
+    let tablet = join(
+        &root.path().join("tablet"),
+        &hub,
+        &phone
+            .invite_as(json!({"kind": "writer", "scopes": ["notes"]}))
+            .await,
+    )?;
+    common::introduce(&phone, &tablet).await;
+    tablet.sync().await.map_err(|error| error.to_string())?;
+    write_note(&tablet, "tablet").await;
+    tablet.sync().await.map_err(|error| error.to_string())?;
+    phone.sync().await.map_err(|error| error.to_string())?;
+    assert_eq!(notes(&owner).await, ["before", "phone", "tablet"]);
+    assert_eq!(notes(&tablet).await, ["before", "phone", "tablet"]);
+
+    // The signed-out laptop still invites, but admits nobody: the device
+    // it enrolls stays ended, so kept devices refuse it as a peer and its
+    // writes never reach them.
+    let stray = join(
+        &root.path().join("stray"),
+        &hub,
+        &laptop
+            .invite_as(json!({"kind": "writer", "scopes": ["notes"]}))
+            .await,
+    )?;
+    let contact = stray.contact().await;
+    for kept in [&owner, &phone] {
+        let refused = kept
+            .add_peer(&contact)
+            .await
+            .err()
+            .ok_or("a kept device added the stray")?;
+        assert_eq!(refused["code"], "rejected", "{refused}");
+    }
+    let _ = snap::observe(async {
+        stray.session.execute("BEGIN", Vec::new()).await?;
+        let id = stray.session.next_id("notes").await?;
+        stray
+            .session
+            .execute(
+                "INSERT INTO notes(key,id) VALUES('stray',?)",
+                vec![id.sql()],
+            )
+            .await?;
+        stray.session.execute("COMMIT", Vec::new()).await
+    })
+    .await;
+    common::introduce(&laptop, &stray).await;
+    let _ = stray.sync().await;
+    let _ = laptop.sync().await;
+    let _ = owner.sync().await;
+    assert_eq!(notes(&owner).await, ["before", "phone", "tablet"]);
+    for device in [&stray, &tablet, &phone, &laptop, &owner] {
+        device.close().await;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_keeps_the_custodians_it_knows_unless_told_otherwise() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let owner = Device::new(Database::create(
+        open(&root.path().join("owner"), &hub),
+        None,
+    )?)?;
+    let custody = json!({"kind": "custody", "scopes": ["notes"]});
+    let server = join(
+        &root.path().join("server"),
+        &hub,
+        &owner.invite_as(custody.clone()).await,
+    )?;
+    let backup = join(
+        &root.path().join("backup"),
+        &hub,
+        &owner.invite_as(custody).await,
+    )?;
+    let (own, server_node, backup_node) = (
+        node_of(&owner).await?,
+        node_of(&server).await?,
+        node_of(&backup).await?,
+    );
+    let receipt = owner
+        .session
+        .sign_out_everywhere_else(owner.root(), ResetKeep::default())
+        .await?;
+    assert_eq!(receipt.kept, [own, server_node, backup_node].into());
+    // Excepting one signs it out; the rest stay kept.
+    let again = owner
+        .session
+        .sign_out_everywhere_else(
+            owner.root(),
+            ResetKeep {
+                except: [backup_node].into(),
+                ..ResetKeep::default()
+            },
+        )
+        .await?;
+    assert_eq!(again.kept, [own, server_node].into());
+    for device in [&backup, &server, &owner] {
         device.close().await;
     }
     Ok(())

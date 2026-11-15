@@ -163,7 +163,10 @@ impl std::fmt::Display for Error {
             Self::Backpressure => {
                 write!(f, "storage queue is full; retry when pending work finishes")
             }
-            Self::Conflict => write!(f, "submission identity reused with different input"),
+            Self::Conflict => write!(
+                f,
+                "the operation conflicts with a concurrent change or an earlier submission of the same identity; retry against the current state"
+            ),
             Self::Retention { retained, limit } => write!(
                 f,
                 "retained history holds {retained} of {limit} bytes; waiting for a checkpoint and delivery acknowledgments"

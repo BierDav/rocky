@@ -1234,9 +1234,12 @@ impl rocky_credentials::Coordinator for MemoryLogClient {
     fn bind(
         &self,
         key: rocky_credentials::PrivateKey,
-        _: rocky_credentials::SignedCapability,
+        certificate: rocky_credentials::SignedCapability,
     ) -> std::result::Result<std::sync::Arc<dyn rocky_credentials::Coordinator>, CoordinationError>
     {
+        if certificate.capability.subject != key.public_key() {
+            return Err(CoordinationError::Denied);
+        }
         Ok(std::sync::Arc::new(self.logs.client(key.public_key())))
     }
     fn certify(&self, _: rocky_credentials::SignedCapability) {}

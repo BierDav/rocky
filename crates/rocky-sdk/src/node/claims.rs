@@ -52,6 +52,7 @@ impl Node {
         if !(1..=7).contains(&delegations) {
             return Err(refused("delegations must be 1 to 7"));
         }
+        self.settings.lock().await.admits_identity(identity)?;
         let (grant, changes) = self.settings.lock().await.grant_claims(
             &self.vault,
             identity,

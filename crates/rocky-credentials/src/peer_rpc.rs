@@ -1,6 +1,7 @@
 //! The single peer RPC contract. Routes and endpoint identities grant no trust.
 use crate::{
-    Error, IdentityRequest, PairRequest, PrivateKey, PublicKey, RenewRequest, RevocationSet,
+    Error, IdentityRequest, PairRequest, PersonalAnswer, PersonalAuthorization, PersonalChallenge,
+    PersonalHello, PersonalPublication, PrivateKey, PublicKey, RenewRequest, RevocationSet,
     SealFinality, Signature, SignedCapability, SignedSeal, denied, signing_bytes,
 };
 use rocky_core::Commitment;
@@ -17,6 +18,26 @@ pub struct EpochRequest {
 pub struct IdentityEnrollmentRequest {
     pub request: IdentityRequest,
     pub code: Option<String>,
+}
+/// One identity-enrollment branch. A shared link proves the identity and
+/// both matching codes; a personal one starts with an untrusted hello and
+/// then proves the root, the owner and the new node.
+#[derive(Serialize, Deserialize)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one request per RPC, the shared one as large as its siblings"
+)]
+pub enum IdentityEnrollment {
+    Shared(IdentityEnrollmentRequest),
+    PersonalHello(PersonalHello),
+    Personal(Box<PersonalAuthorization>),
+}
+/// A node certificate to persist: an identity's own link, or an owner
+/// device's independent certificate with its root authorization.
+#[derive(Serialize, Deserialize)]
+pub enum LinkEnrollment {
+    Shared(Box<SignedCapability>),
+    Personal(Box<PersonalPublication>),
 }
 
 const RESOLUTION_VERSION: u32 = 1;
@@ -96,7 +117,7 @@ pub enum StagedCloseStatus {
     },
 }
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const MAX_MESSAGE: usize = 3 * crate::MAX_REVOCATION_SET_BYTES;
 
 #[derive(Serialize, Deserialize)]
@@ -105,8 +126,8 @@ pub enum PeerRequest {
     Renew(RenewRequest),
     Epochs(EpochRequest),
     Policy,
-    Identity(IdentityEnrollmentRequest),
-    LinkEnroll(Box<SignedCapability>),
+    Identity(IdentityEnrollment),
+    LinkEnroll(LinkEnrollment),
     Unlink(RevocationSet),
     Resolve(PeerResolutionRequest),
     TipSchema { manifest: Commitment },
@@ -119,6 +140,8 @@ pub enum PeerTrust {
     Invitation,
     Enrolled,
     Identity,
+    /// A personal authorization the root, its owner and the node signed.
+    Root,
     Issuer,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,12 +156,17 @@ impl PeerRequest {
         match self {
             Self::Pair(_) => (PeerTrust::Invitation, PeerAdmission::Enrollment),
             Self::Renew(_) | Self::Epochs(_) => (PeerTrust::Enrolled, PeerAdmission::Enrollment),
-            Self::Identity(_) | Self::LinkEnroll(_) | Self::Unlink(_) => {
-                (PeerTrust::Identity, PeerAdmission::Membership)
+            Self::Identity(IdentityEnrollment::Personal(_))
+            | Self::LinkEnroll(LinkEnrollment::Personal(_)) => {
+                (PeerTrust::Root, PeerAdmission::Membership)
             }
-            Self::Policy | Self::Resolve(_) | Self::TipSchema { .. } => {
-                (PeerTrust::Public, PeerAdmission::Metadata)
-            }
+            Self::Identity(IdentityEnrollment::Shared(_))
+            | Self::LinkEnroll(LinkEnrollment::Shared(_))
+            | Self::Unlink(_) => (PeerTrust::Identity, PeerAdmission::Membership),
+            Self::Identity(IdentityEnrollment::PersonalHello(_))
+            | Self::Policy
+            | Self::Resolve(_)
+            | Self::TipSchema { .. } => (PeerTrust::Public, PeerAdmission::Metadata),
             Self::StagedClose(_) => (PeerTrust::Issuer, PeerAdmission::Metadata),
         }
     }
@@ -149,7 +177,20 @@ impl PeerRequest {
                 | (Self::Renew(_), PeerReply::Renew(_))
                 | (Self::Epochs(_), PeerReply::Epochs(_))
                 | (Self::Policy, PeerReply::Policy(_))
-                | (Self::Identity(_), PeerReply::Identity(_))
+                | (
+                    Self::Identity(IdentityEnrollment::Shared(_)),
+                    PeerReply::Identity(
+                        IdentityReply::ConfirmationRequired | IdentityReply::Enrolled(_)
+                    )
+                )
+                | (
+                    Self::Identity(IdentityEnrollment::PersonalHello(_)),
+                    PeerReply::Identity(IdentityReply::PersonalChallenge(_))
+                )
+                | (
+                    Self::Identity(IdentityEnrollment::Personal(_)),
+                    PeerReply::Identity(IdentityReply::Personal(_))
+                )
                 | (Self::LinkEnroll(_), PeerReply::LinkEnroll(_))
                 | (Self::Unlink(_), PeerReply::Unlink(_))
                 | (Self::Resolve(_), PeerReply::Resolve(_))
@@ -159,10 +200,13 @@ impl PeerRequest {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum IdentityReply {
     ConfirmationRequired,
     Enrolled(#[serde(with = "serde_bytes")] Vec<u8>),
+    PersonalChallenge(Box<PersonalChallenge>),
+    /// One bootstrap page, sealed to the authorized node.
+    Personal(Box<PersonalAnswer>),
 }
 #[derive(Serialize, Deserialize)]
 pub enum PeerReply {
@@ -308,6 +352,66 @@ mod tests {
             frame
                 .request
                 .accepts(&PeerReply::Policy(RevocationSet::default()))
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn personal_branches_declare_their_own_trust_and_replies() {
+        let hello =
+            PeerRequest::Identity(IdentityEnrollment::PersonalHello(PersonalHello::fresh()));
+        assert_eq!(
+            hello.requirements(),
+            (PeerTrust::Public, PeerAdmission::Metadata)
+        );
+        // A hello never takes a sealed answer or a shared link reply.
+        assert!(!hello.accepts(&PeerReply::Identity(IdentityReply::ConfirmationRequired)));
+        assert!(!hello.accepts(&PeerReply::Identity(IdentityReply::Enrolled(Vec::new()))));
+        let root = crate::RootKey::from_secret([1; 32]);
+        let owner = root.identity();
+        let node = PrivateKey::new();
+        let database = crate::DatabaseContext {
+            publisher: root.public_key(),
+            scope: rocky_core::Scope {
+                mesh: rocky_core::MeshId([1; 16]),
+                app: rocky_core::AppId([2; 16]),
+                domain: rocky_core::DomainId([3; 16]),
+            },
+        };
+        let (authorization, _) = PersonalAuthorization::sign(
+            (&root, &owner),
+            &node,
+            (database, PrivateKey::new().public_key()),
+            ([4; 32], [5; 32]),
+            crate::PersonalAct::Bootstrap { page: 0 },
+        )
+        .unwrap();
+        let bootstrap = PeerRequest::Identity(IdentityEnrollment::Personal(Box::new(
+            authorization.clone(),
+        )));
+        assert_eq!(
+            bootstrap.requirements(),
+            (PeerTrust::Root, PeerAdmission::Membership)
+        );
+        let answer = authorization.answer(b"page").unwrap();
+        assert!(
+            bootstrap.accepts(&PeerReply::Identity(IdentityReply::Personal(Box::new(
+                answer.clone()
+            ))))
+        );
+        assert!(
+            !hello.accepts(&PeerReply::Identity(IdentityReply::Personal(Box::new(
+                answer
+            ))))
+        );
+        // The other paths keep the trust they had: personal bootstrap is no
+        // credential for epochs, renewal, unlink or a staged close.
+        assert_eq!(
+            PeerRequest::Policy.requirements(),
+            (PeerTrust::Public, PeerAdmission::Metadata)
+        );
+        assert_eq!(
+            PeerRequest::Unlink(RevocationSet::default()).requirements(),
+            (PeerTrust::Identity, PeerAdmission::Membership)
         );
     }
 

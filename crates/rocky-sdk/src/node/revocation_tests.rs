@@ -749,10 +749,10 @@ async fn link_challenges_are_bounded_retryable_and_expire_before_bundle_release(
             request: request.clone(),
             code: None,
         };
-        assert_eq!(
+        assert!(matches!(
             node.answer_link(&settings, wire)?,
             rocky_credentials::IdentityReply::ConfirmationRequired
-        );
+        ));
         // Give the first arrival an unambiguous oldest timestamp without sleeping.
         if index == 0 {
             node.link_requests

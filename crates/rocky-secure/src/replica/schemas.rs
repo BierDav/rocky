@@ -688,7 +688,7 @@ impl<A: RowApplication> Inner<A> {
         &mut self,
         tip: TipId,
         app: A,
-        config: SchemaConfig,
+        mut config: SchemaConfig,
         withdraw: Option<&super::staging::SchemaStage>,
     ) -> Result<bool, Error> {
         IN_PLACE_SWITCH_CHANGES.store(-1, std::sync::atomic::Ordering::SeqCst);
@@ -775,6 +775,11 @@ impl<A: RowApplication> Inner<A> {
             }
             None => config_families(&config.security, &manifest)?,
         };
+        let security = &mut config.security;
+        security
+            .revocations
+            .pin(&security.manifest, security.publisher)
+            .map_err(credential)?;
         check_config_with_families(&config.security, &manifest, &families)?;
         let source = inner.workspace.tip;
         let mut security = config.security;

@@ -53,7 +53,12 @@ impl Fixture {
         };
         Ok(SecureConfig {
             publisher: self.publisher.public_key(),
-            manifest: SignedManifest::sign(&manifest, &self.publisher).map_err(signing)?,
+            manifest: SignedManifest::sign(
+                &manifest,
+                rocky_secure::DatabaseKind::Shared,
+                &self.publisher,
+            )
+            .map_err(signing)?,
             revocations: RevocationSet::new(),
             node: node.clone(),
             credentials: CredentialChain(vec![

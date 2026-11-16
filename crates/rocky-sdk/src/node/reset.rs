@@ -165,16 +165,23 @@ impl Node {
             .map(PeerId::of)
             .collect())
     }
-    /// Whether an owner reset fenced this device's view; see [`crate::Freshness`].
+    /// Whether an owner reset fenced this device's view, or no other owner
+    /// device witnessed it yet; see [`crate::Freshness`].
     pub(super) async fn freshness(&self) -> Result<crate::Freshness, Failure> {
         let own = PeerId::of(PrivateKey::from_bytes(&self.vault.get("node")?).public_key());
         // No owner fence vouches for an ended device's view.
         if self.settings.lock().await.revocation(&self.path)?.is_some() {
             return Ok(crate::Freshness::LocallyAnchored);
         }
+        let unwitnessed = self
+            .settings
+            .lock()
+            .await
+            .personal
+            .is_some_and(|device| device.unwitnessed);
         let revocations = self.replica.revocations().await;
         // The newest unfollowed reset that keeps this node fences the rest.
-        Ok(revocations
+        let fenced = revocations
             .reset_heads()
             .into_iter()
             .filter_map(|id| Some((revocations.get(&id)?, id)))
@@ -185,8 +192,13 @@ impl Node {
                     .is_some_and(|reset| reset.keep.contains(&own))
             })
             .max_by_key(|(signed, id)| (signed.statement.time, *id))
-            .map_or(crate::Freshness::LocallyAnchored, |(_, reset)| {
-                crate::Freshness::FencedByOwner { reset }
-            }))
+            .map(|(_, reset)| crate::Freshness::FencedByOwner { reset });
+        // A sign-in no other owner device witnessed stays unwitnessed until
+        // one reconciles with this device.
+        Ok(fenced.unwrap_or(if unwitnessed {
+            crate::Freshness::Unwitnessed
+        } else {
+            crate::Freshness::LocallyAnchored
+        }))
     }
 }

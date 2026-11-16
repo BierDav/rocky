@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One page. The first carries the metadata and how many pages follow;
-/// every page carries a share of the opaque root escrow.
+/// every page carries a share of the opaque root escrow of key epochs.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Page {
@@ -35,4 +35,7 @@ pub(crate) struct Metadata {
     pub(crate) epoch_statements: BTreeMap<String, Vec<Commitment>>,
     /// Key epochs of the ciphertext the responder holds.
     pub(crate) held: BTreeSet<(ResourceScope, KeyEpoch)>,
+    /// The partition naming root, sealed to the root and vouched for by an
+    /// owner device under this genesis: no frame carries it.
+    pub(crate) naming: Option<rocky_credentials::MetadataEscrow>,
 }

@@ -40,13 +40,14 @@ use std::{
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements, envelopes wait in `deliveries`,
 /// join requests wait in `Issuing::requests`, a passkey-installed personal
-/// device keeps its publication ID in `personal`.
-pub const VERSION: u32 = 34;
+/// device keeps its publication ID and freshness in `personal`, and a
+/// personal custodian its vouched naming root escrow in `naming_escrow`.
+pub const VERSION: u32 = 35;
 /// Current invitation format: the issuer's node key, and a profile only
 /// when the invited device is admitted on arrival.
 const INVITE_VERSION: u32 = 7;
 /// Current format of what an issuer seals to a joining device.
-const ANSWER_FORMAT: u32 = 7;
+const ANSWER_FORMAT: u32 = 8;
 const CONTACT_VERSION: u32 = 3;
 /// Contacts one device keeps: routes to peers, which grant nothing.
 pub const MAX_CONTACTS: usize = 64;
@@ -60,9 +61,9 @@ const MAX_ADDRESS: usize = 2048;
 pub const DEFAULT_TTL: u64 = 30 * 24 * 60 * 60;
 const INVITATION_TTL: u64 = 600;
 /// Key epochs kept per collection: one per revocation that rotated it.
-const MAX_EPOCHS: usize = 256;
+pub(crate) const MAX_EPOCHS: usize = 256;
 /// Accepted clock difference between devices.
-const SKEW: u64 = 300;
+pub(crate) const SKEW: u64 = 300;
 type GroupDelivery = (GroupRecord, Vec<Vec<u8>>);
 /// The naming root an enrollment of `profile` carries: an issuer's only.
 pub(crate) fn naming_for(vault: &Vault, profile: &Profile) -> Result<Option<String>, Failure> {
@@ -281,6 +282,9 @@ pub struct Settings {
     pub revocations_pushed: Option<Commitment>,
     /// Present on a personal device a passkey installed.
     pub(crate) personal: Option<crate::personal::Device>,
+    /// A personal custodian's vouched naming root escrow, which it serves
+    /// in bootstrap pages and cannot open.
+    pub(crate) naming_escrow: Option<rocky_credentials::MetadataEscrow>,
 }
 /// What an issuer keeps besides the registry: its invitation, the device
 /// that claimed it, a revocation it has begun and the keys revoked for good.
@@ -517,6 +521,9 @@ struct Enrollment {
     /// A personal database's bootstrap discovery capability, hex, for a
     /// custodian only: it announces where a passkey-only device looks.
     discovery: Option<String>,
+    /// A personal database's vouched naming root escrow, for a custodian
+    /// only: it serves the record and cannot open it.
+    naming_escrow: Option<rocky_credentials::MetadataEscrow>,
     /// The enrolling issuer's node key, which sync sessions pin.
     issuer: PublicKey,
     /// The issuer links `capability` follows; empty when the owner signed.
@@ -541,6 +548,9 @@ struct Sealed {
     /// A fresh claim link, when the answering issuer renews a claim right.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     claims: Option<CredentialChain>,
+    /// For a personal custodian, the vouched naming root escrow it serves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    naming: Option<rocky_credentials::MetadataEscrow>,
 }
 impl Sealed {
     fn parse(bytes: &[u8]) -> Result<Self, Failure> {
@@ -690,6 +700,8 @@ pub struct Renewed {
     pub issuers: Vec<String>,
     /// A renewed claim link from the answering issuer.
     pub claims: Option<CredentialChain>,
+    /// The vouched naming root escrow a personal custodian keeps.
+    pub(crate) naming: Option<rocky_credentials::MetadataEscrow>,
 }
 
 pub fn now() -> Result<u64, Failure> {
@@ -1542,7 +1554,7 @@ impl Settings {
         let (keys, device) = match installing {
             Some(mut installing) => {
                 let keys = installing.pin(&vault, manifest.descriptor()?, fresh)?;
-                let device = installing.device();
+                let device = installing.device(crate::Freshness::LocallyAnchored);
                 installing.keep_discovery(&vault)?;
                 (keys, Some(device))
             }
@@ -1563,6 +1575,21 @@ impl Settings {
         let links = CredentialChain(vec![grant]);
         settings.credentials =
             crate::identities::with_identity(identity, || settings.certify(&vault, links, &bound))?;
+        // The first owner device is a member like any later one: custodians
+        // relay its certificate, and a device restored from them learns it
+        // is an owner device.
+        if let Some(context) = settings.personal()? {
+            let mut known = settings.revocations.clone();
+            known.admit_personal(
+                settings
+                    .credentials
+                    .certificate()
+                    .ok_or("missing node certificate")?
+                    .clone(),
+                &context,
+            )?;
+            settings.learn_revocations(&known)?;
+        }
         let node = Settings::node_key(&vault)?;
         let credentials = settings.credentials.clone();
         let links = credentials.capabilities();
@@ -1741,6 +1768,7 @@ impl Settings {
             claims: None,
             revocations_pushed: None,
             personal: None,
+            naming_escrow: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         }
@@ -2566,6 +2594,12 @@ impl Settings {
         let enrollment = Enrollment {
             groups: self.groups_for(vault, request.node, &issued.capability, false)?,
             naming: naming_for(vault, &profile)?,
+            naming_escrow: match profile {
+                Profile::Custody { .. } if self.kind()?.is_personal() => {
+                    crate::escrow::seal_naming(self, vault)?
+                }
+                _ => None,
+            },
             discovery: match profile {
                 Profile::Custody { .. } if self.kind()?.is_personal() => vault
                     .find(crate::personal::DISCOVERY_ROLE)?
@@ -2863,6 +2897,7 @@ impl Settings {
             profile: Some(profile_of(&grants, &domain)),
             issuers: Vec::new(),
             claims: None,
+            naming: None,
         })
     }
     /// Supplied credentials as this node's chain: a chain that ends at this
@@ -3179,6 +3214,7 @@ impl Settings {
             claims: None,
             revocations_pushed: None,
             personal: None,
+            naming_escrow: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
@@ -3413,6 +3449,7 @@ impl Joining {
             claims: None,
             revocations_pushed: None,
             personal: None,
+            naming_escrow: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
@@ -3483,6 +3520,7 @@ impl Joining {
             }
             vault.put(crate::personal::DISCOVERY_ROLE, &hex32(topic)?)?;
         }
+        crate::escrow::keep_naming(&mut settings, enrollment.naming_escrow)?;
         settings.learn_issuers(&vault, &enrollment.issuers);
         settings.save(path)?;
         rocky_platform::fs::remove_file(Intent::path(path, false))?;
@@ -3543,6 +3581,7 @@ impl Settings {
             groups: self.groups_for(vault, request.node, prior, all)?,
             issuers: self.issuer_contacts(&[request.node])?,
             claims: None,
+            naming: None,
         };
         let node = Self::node_key(vault)?;
         Ok(Renewal::seal_current_with_families(
@@ -3615,6 +3654,7 @@ impl Settings {
                 epoch_statements,
                 issuers,
                 claims: _,
+                naming: _,
             } = Sealed::parse(&payload)?;
             let mut keys = Vec::new();
             let domain = self.domain()?;
@@ -3647,6 +3687,7 @@ impl Settings {
                 profile: None,
                 issuers,
                 claims: None,
+                naming: None,
             });
         }
         Err(failure)
@@ -3684,6 +3725,7 @@ impl Settings {
                 profile: None,
                 issuers: Vec::new(),
                 claims: None,
+                naming: None,
             });
         }
         let transport = transport.ok_or(ServiceError::NetworkRequired("renew"))?;
@@ -3777,6 +3819,7 @@ impl Settings {
             epoch_statements,
             issuers,
             claims,
+            naming,
         } = Sealed::parse(&sealed)?;
         let mut keys = Vec::new();
         for (name, scope) in domain.scopes() {
@@ -3800,6 +3843,7 @@ impl Settings {
             profile: None,
             issuers,
             claims,
+            naming,
         })
     }
     /// Whether this generation needs wider grants or newly inherited table keys.
@@ -3902,6 +3946,7 @@ impl Settings {
             draft.hold_claims(claims.clone(), renewed.contacted)?;
         }
         draft.adopt_groups(vault, &renewed.groups)?;
+        crate::escrow::keep_naming(&mut draft, renewed.naming.clone())?;
         draft.forget_revoked();
         draft.learn_issuers(vault, &renewed.issuers);
         if let Some(profile) = &renewed.profile {
@@ -3987,6 +4032,14 @@ impl Settings {
             keys: self.keys_for(vault, &domain, &granted)?,
             issuers: self.issuer_contacts(&[request.node])?,
             claims,
+            // A personal custodian's renewal also brings the vouched
+            // naming root escrow it serves to passkey-only devices.
+            naming: match profile_of(&granted, &domain) {
+                Profile::Custody { .. } if self.kind()?.is_personal() => {
+                    crate::escrow::seal_naming(self, vault)?
+                }
+                _ => None,
+            },
         };
         let renewal = Renewal::seal(
             &authority,
@@ -4843,6 +4896,7 @@ impl Settings {
             claims,
             revocations_pushed,
             personal,
+            naming_escrow,
         } = self;
         *version == other.version
             && *installation == other.installation
@@ -4871,6 +4925,7 @@ impl Settings {
             && *claims == other.claims
             && *revocations_pushed == other.revocations_pushed
             && *personal == other.personal
+            && *naming_escrow == other.naming_escrow
             && self.saved_contacts() == other.saved_contacts()
     }
     fn validate_saved_contacts(&self) -> Result<(), Failure> {

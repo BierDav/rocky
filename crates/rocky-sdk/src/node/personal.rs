@@ -5,8 +5,8 @@
 use super::*;
 use crate::personal::bootstrap::{Metadata, Page};
 use rocky_credentials::{
-    PersonalAct, PersonalAudience, PersonalAuthorization, PersonalChallenge, PersonalError,
-    PersonalHello, PersonalPublication,
+    PersonalAct, PersonalAudience, PersonalAuthorization, PersonalChallenge,
+    PersonalCustodyRenewal, PersonalError, PersonalHello, PersonalPublication,
 };
 
 /// How long an issued nonce authorizes, and how many spent ones are held.
@@ -15,6 +15,12 @@ const MAX_NONCES: usize = 256;
 const NONCE_TAG: &str = "rocky.personal-nonce.v1";
 /// Escrow bytes one bootstrap page carries at most, besides one record.
 const PAGE_ESCROW_BYTES: usize = 1024 * 1024;
+
+/// Responders that answer one bootstrap with another schema record, as a
+/// lying source would, by identity path.
+#[cfg(test)]
+pub(crate) static FORGED_SCHEMA: std::sync::Mutex<Vec<(std::path::PathBuf, crate::Schema)>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// Nonces this responder issues: each carries its issue time and a tag
 /// keyed by this process, so an untrusted hello stores nothing and no
@@ -182,6 +188,9 @@ impl Node {
         } else {
             self.replica.escrow_inventory().await?
         };
+        // Records of no key epoch are unvouched: the naming root travels
+        // in the metadata as a vouched record instead.
+        escrow.retain(|(slot, _)| slot.is_some());
         escrow.sort_by_key(|(slot, record)| (*slot, record.tag()));
         let mut pages = vec![Vec::new()];
         let mut bytes = 0;
@@ -214,12 +223,25 @@ impl Node {
                 let key = Settings::node_key(&self.vault)?;
                 crate::reset::admit_after_resets(&mut known, &key, audience.database, node)?;
             }
+            let record = crate::tip_schemas::Record::new(
+                &settings.schema,
+                settings.generation,
+                settings.engine,
+            );
+            #[cfg(test)]
+            let record = {
+                let mut forged = FORGED_SCHEMA.lock().unwrap_or_else(PoisonError::into_inner);
+                match forged.iter().position(|(path, _)| *path == self.path) {
+                    Some(index) => crate::tip_schemas::Record::new(
+                        &forged.remove(index).1,
+                        settings.generation,
+                        settings.engine,
+                    ),
+                    None => record,
+                }
+            };
             Some(Box::new(Metadata {
-                record: crate::tip_schemas::Record::new(
-                    &settings.schema,
-                    settings.generation,
-                    settings.engine,
-                ),
+                record,
                 bootstrap: settings.schema_bootstrap()?,
                 ttl: settings.ttl,
                 grant: settings.owner_grant(audience.owner)?.clone(),
@@ -235,6 +257,14 @@ impl Node {
                     .collect(),
                 epoch_statements: settings.epoch_statements.clone(),
                 held,
+                naming: if ended {
+                    None
+                } else {
+                    match crate::escrow::seal_naming(&settings, &self.vault)? {
+                        Some(record) => Some(record),
+                        None => settings.naming_escrow.clone(),
+                    }
+                },
             }))
         } else {
             None
@@ -296,6 +326,112 @@ impl Node {
             self.topics_changed();
             self.wake_sync();
         }
+        Ok(known)
+    }
+
+    /// Anchors an unwitnessed sign-in once it reconciled with `peer`,
+    /// another owner device no statement this device holds ended: that
+    /// device's durable store now witnesses this one's view, as a sign-in
+    /// from it would have. Persisted, so it survives reopening.
+    pub(super) async fn witnessed_by(&self, peer: PublicKey) -> Result<(), Failure> {
+        let mut current = self.settings.lock().await;
+        let Some(device) = current.personal.filter(|device| device.unwitnessed) else {
+            return Ok(());
+        };
+        let rocky_credentials::DatabaseKind::Personal { owner, .. } = current.kind()? else {
+            return Ok(());
+        };
+        let known = self.personal_known(&current).await?;
+        if peer == Settings::node_key(&self.vault)?.public_key()
+            || Self::personal_ended(&known, owner, peer)
+            || !known.personal_devices(owner)?.contains(&peer)
+        {
+            return Ok(());
+        }
+        let mut draft = current.clone();
+        draft.personal = Some(crate::personal::Device {
+            unwitnessed: false,
+            ..device
+        });
+        draft.save(&self.path)?;
+        *current = draft;
+        tracing::debug!(peer = %peer.to_hex(), "an owner device witnessed this device");
+        Ok(())
+    }
+
+    /// Takes a lapsed custody link back from an owner device the passkey
+    /// just certified: the same subject, grants, partitions and delegations
+    /// as the link this custodian holds, under the same owner grant, only
+    /// valid anew. Its rights never widen.
+    pub(super) async fn accept_custody_renewal(
+        &self,
+        renewal: PersonalCustodyRenewal,
+    ) -> Result<RevocationSet, Failure> {
+        let renewed = renewal.renewed()?.clone();
+        let (_, audience) = self.personal_audience().await?;
+        renewal.authorization.verify(&audience)?;
+        self.personal_nonces
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .spend(
+                &renewal.authorization.nonce(),
+                renewal.authorization.act(),
+                now()?,
+            )?;
+        let mut current = self.settings.lock().await;
+        if !matches!(current.profile, rocky_credentials::Profile::Custody { .. }) {
+            return Err(refused("only a custodian takes a custody renewal"));
+        }
+        let known = self.personal_known(&current).await?;
+        Self::personal_node(&known, &audience, &renewal.authorization)?;
+        let links = current.identity_links();
+        let (Some(prior), Some(owner_grant)) = (links.0.last(), links.0.first()) else {
+            return Err(refused("this custodian holds no custody link"));
+        };
+        let prior = &prior.capability;
+        let same = renewed.capability.subject == prior.subject
+            && renewed.capability.kind == prior.kind
+            && renewed.capability.grants == prior.grants
+            && renewed.capability.delegations == prior.delegations
+            && renewed.capability.extended()? == prior.extended()?
+            && renewed.issuer == audience.owner
+            && renewal
+                .chain
+                .0
+                .first()
+                .map(|grant| grant.id())
+                .transpose()?
+                == Some(owner_grant.id()?)
+            && prior.grants.iter().all(|grant| {
+                grant.rights == [rocky_core::Right::Custody].into() && grant.fields.is_none()
+            });
+        if !same {
+            return Err(refused("the renewal is not this custodian's custody grant"));
+        }
+        let time = now()?;
+        if renewed.capability.expires <= prior.expires.max(time) {
+            return Err(refused("the renewal does not extend the custody grant"));
+        }
+        // The chain this node already certified, under the renewed link.
+        let links = rocky_credentials::CredentialChain(vec![owner_grant.clone(), renewed]);
+        let chain = current.certify(&self.vault, links, &self.domain())?;
+        let renewed = crate::enrollment::Renewed {
+            contacted: None,
+            revocations: known.clone(),
+            chain,
+            keys: Vec::new(),
+            epoch_statements: BTreeMap::new(),
+            groups: Vec::new(),
+            profile: None,
+            issuers: Vec::new(),
+            claims: None,
+            naming: None,
+        };
+        current.adopt(&self.path, &self.vault, &renewed)?;
+        self.apply(&mut current, Vec::new()).await?;
+        drop(current);
+        tracing::debug!("custody grant renewed under the owner");
+        self.wake_sync();
         Ok(known)
     }
 }

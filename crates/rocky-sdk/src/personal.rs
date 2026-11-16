@@ -31,7 +31,7 @@ pub(crate) use sign_in::{SignIn, prepare_sign_in, tidy};
 /// The vault role of the bootstrap discovery capability.
 pub(crate) const DISCOVERY_ROLE: &str = "personal-discovery";
 /// The one current install intent format; others are refused.
-const INTENT_VERSION: u32 = 3;
+const INTENT_VERSION: u32 = 4;
 const INTENT_FILE: &str = "personal.intent";
 const MAX_INTENT: usize = 64 * 1024;
 
@@ -190,6 +190,19 @@ impl PublicationId {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Device {
     pub(crate) publication: PublicationId,
+    /// Installed from a source no other owner device witnessed, and no
+    /// such device reconciled with it since: `Freshness::Unwitnessed`.
+    pub(crate) unwitnessed: bool,
+}
+
+/// What a source named that the installed device holds no key of, kept
+/// with the intent once the identity is about to be saved: a sign-in
+/// resumed after that point reports the same coverage.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Gaps {
+    missing: Vec<(String, KeyEpoch)>,
+    unkeyed: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,6 +263,8 @@ struct Intent {
     /// Partition secrets kept in the secret store, recorded before each
     /// is stored.
     secrets: BTreeSet<(Commitment, KeyEpoch)>,
+    /// Set just before a sign-in saves its identity.
+    gaps: Option<Gaps>,
 }
 impl Intent {
     fn path(directory: &Path) -> PathBuf {
@@ -278,6 +293,47 @@ impl Intent {
     }
     fn save(&self, directory: &Path) -> Result<(), Failure> {
         write_private(&Self::path(directory), &rocky_credentials::encode(self)?)
+    }
+    /// The installed database this sign-in saved but never handed out: the
+    /// identity in `directory` is this account's, under this intent's
+    /// installation and node.
+    fn finished(
+        &self,
+        directory: &Path,
+        account: (PublicKey, PublicKey, &PersonalNamespace),
+        secrets: &Arc<dyn SecretStore>,
+    ) -> Result<Option<Finished>, PersonalSignInError> {
+        let identity = directory.join("identity.json");
+        if self.origin != Origin::SignIn
+            || !self.names(account)
+            || !rocky_platform::fs::exists(&identity)
+        {
+            return Ok(None);
+        }
+        let settings = load_settings(&identity)?;
+        let vault = settings.vault(secrets);
+        let node = Settings::node_key(&vault)
+            .map(|key| key.public_key())
+            .map_err(PersonalSignInError::Failed)?;
+        let Some(device) = settings
+            .personal
+            .filter(|_| settings.installation == self.installation && node == self.node)
+        else {
+            return Ok(None);
+        };
+        let gaps = self.gaps.clone().unwrap_or_default();
+        let mut restored =
+            RestoreCoverage::held(&settings, &vault).map_err(PersonalSignInError::Failed)?;
+        restored.missing = gaps.missing;
+        restored.unkeyed = gaps.unkeyed;
+        Ok(Some(Finished {
+            restored,
+            freshness: if device.unwitnessed {
+                Freshness::Unwitnessed
+            } else {
+                Freshness::LocallyAnchored
+            },
+        }))
     }
     fn names(&self, account: (PublicKey, PublicKey, &PersonalNamespace)) -> bool {
         (self.publisher, self.owner, &self.namespace) == account
@@ -430,6 +486,7 @@ impl Installing {
                     publication: PublicationId(crate::enrollment::random()),
                     stage: Stage::Prepared,
                     secrets: BTreeSet::new(),
+                    gaps: None,
                 };
                 intent.save(directory)?;
                 intent
@@ -455,9 +512,14 @@ impl Installing {
     pub(crate) fn installation(&self) -> &str {
         &self.intent.installation
     }
-    pub(crate) fn device(&self) -> Device {
+    pub(crate) fn directory(&self) -> &Path {
+        &self.directory
+    }
+    /// The device record of this install, as its source witnessed it.
+    pub(crate) fn device(&self, freshness: Freshness) -> Device {
         Device {
             publication: self.intent.publication,
+            unwitnessed: freshness == Freshness::Unwitnessed,
         }
     }
     /// The naming root an earlier attempt made, or a fresh one.
@@ -532,6 +594,7 @@ impl Installing {
                     publication: PublicationId(crate::enrollment::random()),
                     stage: Stage::Prepared,
                     secrets: BTreeSet::new(),
+                    gaps: None,
                 };
                 intent.save(directory)?;
                 intent
@@ -641,6 +704,20 @@ impl Installing {
         };
         self.intent.save(&self.directory)
     }
+    /// Stores the discovery capability and records what `coverage` lacks:
+    /// the last step before the identity is saved.
+    pub(crate) fn installed(
+        mut self,
+        vault: &Vault,
+        coverage: &RestoreCoverage,
+    ) -> Result<(), Failure> {
+        vault.put(DISCOVERY_ROLE, self.discovery.topic())?;
+        self.intent.gaps = Some(Gaps {
+            missing: coverage.missing.clone(),
+            unkeyed: coverage.unkeyed.clone(),
+        });
+        self.intent.save(&self.directory)
+    }
     /// Stores the discovery capability and ends the attempt's hold on it.
     pub(crate) fn keep_discovery(self, vault: &Vault) -> Result<(), Failure> {
         vault.put(DISCOVERY_ROLE, self.discovery.topic())?;
@@ -691,11 +768,96 @@ pub(crate) fn discard(directory: &Path, store: &Arc<dyn SecretStore>) -> Result<
     finish(directory)
 }
 
-/// Ends the install intent once the database was handed out.
+/// Ends the install intent once the database was handed out, with the
+/// staging a backup sign-in left if it stopped right after saving.
 pub(crate) fn finish(directory: &Path) -> Result<(), Failure> {
+    if !rocky_platform::fs::exists(Intent::path(directory)) {
+        return Ok(());
+    }
+    let staging = directory.join(sign_in::STAGING);
+    if rocky_platform::fs::exists(&staging) {
+        rocky_platform::fs::remove_dir_all(&staging)?;
+    }
     match rocky_platform::fs::remove_file(Intent::path(directory)) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
         _ => Ok(()),
+    }
+}
+
+/// A sign-in that saved its identity but was never handed out: what the
+/// next sign-in of the same account reports when it opens that database.
+pub(crate) struct Finished {
+    pub(crate) restored: RestoreCoverage,
+    pub(crate) freshness: Freshness,
+}
+
+/// Whether `directory` holds an unfinished install: an intent without a
+/// saved identity, which only the call that wrote it continues.
+pub(crate) fn unfinished(directory: &Path) -> bool {
+    rocky_platform::fs::exists(Intent::path(directory))
+        && !rocky_platform::fs::exists(directory.join("identity.json"))
+}
+
+/// Deterministic crash points of a personal install. A crash stops the
+/// attempt where it is and takes back nothing it wrote, as a killed
+/// process would; the next call of the same kind resumes.
+pub(crate) mod fault {
+    use crate::Failure;
+    use std::path::Path;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Stage {
+        /// The intent and node keys exist; nothing is pinned.
+        Prepared,
+        /// The genesis and imported epochs are pinned; no key is stored.
+        Pinned,
+        /// Some imported keys are stored, not all.
+        Importing,
+        /// The node certificate is kept; nothing is published.
+        Certified,
+        /// The source kept the certificate; nothing is saved here.
+        Published,
+        /// A backup's files are placed; the identity is not saved.
+        Placed,
+        /// The identity is saved; the database is not handed out.
+        Saved,
+    }
+    /// A crash injected at a stage.
+    #[derive(Debug)]
+    pub(crate) struct Crashed(pub(crate) Stage);
+    impl std::fmt::Display for Crashed {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "injected crash at {:?}", self.0)
+        }
+    }
+    impl std::error::Error for Crashed {}
+
+    /// The directories and stages at which an install crashes once;
+    /// process-wide, keyed by directory.
+    #[cfg(test)]
+    pub(crate) static CRASHES: std::sync::Mutex<Vec<(std::path::PathBuf, Stage)>> =
+        std::sync::Mutex::new(Vec::new());
+    #[cfg(test)]
+    pub(crate) fn check(directory: &Path, stage: Stage) -> Result<(), Failure> {
+        let mut crashes = CRASHES.lock().map_err(|_| "poisoned fault")?;
+        match crashes
+            .iter()
+            .position(|(at, crash)| at == directory && *crash == stage)
+        {
+            Some(index) => {
+                crashes.remove(index);
+                Err(Box::new(Crashed(stage)))
+            }
+            None => Ok(()),
+        }
+    }
+    #[cfg(not(test))]
+    pub(crate) fn check(_: &Path, _: Stage) -> Result<(), Failure> {
+        Ok(())
+    }
+    /// Whether `error` is an injected crash, whose writes stay.
+    pub(crate) fn crashed(error: &Failure) -> bool {
+        error.is::<Crashed>()
     }
 }
 

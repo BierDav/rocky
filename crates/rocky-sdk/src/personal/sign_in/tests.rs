@@ -34,3 +34,329 @@ fn only_an_owner_device_no_statement_ended_anchors() -> Result<(), Failure> {
     assert!(!anchors(&grant, locator.owner, &RevocationSet::new())?);
     Ok(())
 }
+
+/// Whole sign-ins on the in-memory hub, with crashes and lying sources
+/// injected at fixed points.
+#[cfg(not(target_family = "wasm"))]
+mod installs {
+    use super::account;
+    use crate::{
+        Affinity, Column, Configuration, Database, Failure, Freshness, Network, PersonalOpened,
+        PersonalSignInError, Schema, SignInSource, Table, VerifiedBackup, params,
+        personal::fault::{CRASHES, Stage},
+        transport::memory::Hub,
+    };
+    use rocky_platform::fs::Scratch;
+    use std::{
+        path::Path,
+        sync::{Arc, atomic::Ordering},
+    };
+
+    fn schema() -> Result<Schema, Failure> {
+        Schema::builder("notes", 1)
+            .table(Table::replayed("notes").column(Column::new("body", Affinity::Text).required()))
+            .build()
+    }
+    /// The same application with another table: another manifest.
+    fn forged() -> Result<Schema, Failure> {
+        Schema::builder("notes", 1)
+            .table(
+                Table::replayed("notes")
+                    .column(Column::new("body", Affinity::Text).required())
+                    .column(Column::new("extra", Affinity::Text)),
+            )
+            .build()
+    }
+    fn prf() -> crate::VerifiedPasskeyPrf {
+        let namespace = account().namespace().clone();
+        let input = namespace.prf_input().expect("input");
+        crate::VerifiedPasskeyPrf::new(&input, [4; 32])
+    }
+    fn hub() -> Arc<Hub> {
+        let hub = Arc::new(Hub::default());
+        hub.discovery.store(true, Ordering::SeqCst);
+        hub
+    }
+    async fn write(database: &Database, body: &str) -> Result<(), Failure> {
+        let mut tx = database.transaction().await?;
+        let id = tx.next_id("notes", vec![]).await?;
+        tx.execute("INSERT INTO notes(id,body) VALUES(?,?)", params![id, body])
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+    async fn bodies(database: &Database) -> Result<Vec<String>, Failure> {
+        let rows = database
+            .query("SELECT body FROM notes ORDER BY body", params![])
+            .await?
+            .collect()
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| row.get::<String>("body"))
+            .collect::<Result<_, _>>()?)
+    }
+    fn known(directory: &Path) -> Result<rocky_credentials::RevocationSet, Failure> {
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)?;
+        Ok(serde_json::from_value(saved["revocations"].clone())?)
+    }
+    fn config(directory: &Path, network: Option<&Arc<Hub>>) -> Result<Configuration, Failure> {
+        let name = directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("name")?;
+        let config = Configuration::new(directory, &schema()?)?;
+        Ok(match network {
+            Some(hub) => config.network(Network::Owned(hub.connector(name))),
+            None => config,
+        })
+    }
+    async fn sign_in(
+        directory: &Path,
+        network: Option<&Arc<Hub>>,
+        source: SignInSource,
+    ) -> Result<PersonalOpened, PersonalSignInError> {
+        config(directory, network)
+            .map_err(PersonalSignInError::Failed)?
+            .sign_in(prf(), account().namespace().clone(), source)
+            .await
+    }
+    async fn announced(hub: &Hub, name: &str) {
+        let topic = *account().discovery().topic();
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while !hub.topics(name).contains(&topic) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("announced under the bootstrap topic");
+    }
+    fn crash(directory: &Path, stage: Stage) {
+        CRASHES
+            .lock()
+            .expect("faults")
+            .push((directory.to_path_buf(), stage));
+    }
+    /// Signs in once with a crash injected at `stage`, then checks that the
+    /// crashed state opens as nothing and the next sign-in resumes it.
+    async fn crashed_then_resumed(
+        directory: &Path,
+        hub: Option<&Arc<Hub>>,
+        stage: Stage,
+        source: impl Fn() -> Result<SignInSource, Failure>,
+    ) -> Result<PersonalOpened, Failure> {
+        crash(directory, stage);
+        let error = match sign_in(directory, hub, source()?).await {
+            Ok(_) => return Err(format!("{stage:?}: signed in past the crash").into()),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("injected crash"), "{stage:?}: {error}");
+        assert!(
+            directory.join("personal.intent").exists(),
+            "{stage:?}: the crash lost the intent"
+        );
+        if stage != Stage::Saved {
+            assert!(!directory.join("identity.json").exists(), "{stage:?}");
+            // Nothing is handed out before the identity is saved.
+            let refused = config(directory, hub)?.open().await.err();
+            let refused = refused.ok_or("opened a partial install")?.to_string();
+            assert!(refused.contains("unfinished"), "{stage:?}: {refused}");
+        }
+        let personal = sign_in(directory, hub, source()?).await?;
+        // The database thread ends the intent before it answers a call.
+        personal.opened.database.session().info().await?;
+        assert!(
+            !directory.join("personal.intent").exists(),
+            "{stage:?}: the intent outlived the handout"
+        );
+        assert!(
+            !CRASHES
+                .lock()
+                .map_err(|_| "faults")?
+                .iter()
+                .any(|(at, _)| at == directory),
+            "{stage:?}: the crash was never reached"
+        );
+        Ok(personal)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_discovered_sign_in_crashed_at_any_stage_resumes_as_one_device() -> Result<(), Failure>
+    {
+        let root = Scratch::new().await;
+        let hub = hub();
+        let owner_path = root.path().join("owner");
+        let owner = config(&owner_path, Some(&hub))?
+            .create_personal(prf(), account().namespace().clone())
+            .await?
+            .opened
+            .database;
+        write(&owner, "from owner").await?;
+        announced(&hub, "owner").await;
+        let owner_key = account().locator().owner;
+        for stage in [
+            Stage::Prepared,
+            Stage::Pinned,
+            Stage::Importing,
+            Stage::Certified,
+            Stage::Published,
+            Stage::Saved,
+        ] {
+            let directory = root.path().join(format!("{stage:?}").to_lowercase());
+            let personal =
+                crashed_then_resumed(&directory, Some(&hub), stage, || Ok(SignInSource::Discover))
+                    .await?;
+            assert!(
+                personal.restored.complete(),
+                "{stage:?}: {:?}",
+                personal.restored
+            );
+            assert_eq!(personal.freshness, Freshness::LocallyAnchored, "{stage:?}");
+            let device = personal.opened.database;
+            let node = device.session().info().await?.node;
+            // One node and one certificate, however often it was published.
+            let held = known(&owner_path)?;
+            assert!(
+                held.personal_devices(owner_key)?.contains(&node),
+                "{stage:?}"
+            );
+            assert_eq!(
+                held.certificates()
+                    .filter(|certificate| certificate.capability.subject == node)
+                    .count(),
+                1,
+                "{stage:?}"
+            );
+            device.session().sync_once().await?;
+            assert_eq!(bodies(&device).await?, ["from owner"], "{stage:?}");
+            assert_eq!(
+                device.session().freshness().await?,
+                Freshness::LocallyAnchored
+            );
+            device.close().await?;
+        }
+        owner.close().await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_backup_sign_in_crashed_at_any_stage_resumes_as_one_device() -> Result<(), Failure> {
+        let root = Scratch::new().await;
+        let owner_path = root.path().join("owner");
+        let owner = config(&owner_path, None)?
+            .create_personal(prf(), account().namespace().clone())
+            .await?
+            .opened
+            .database;
+        write(&owner, "backed up").await?;
+        let archive = root.path().join("owner.backup");
+        owner.backup(&archive).await?;
+        owner.close().await?;
+        for stage in [
+            Stage::Prepared,
+            Stage::Pinned,
+            Stage::Importing,
+            Stage::Certified,
+            Stage::Placed,
+            Stage::Saved,
+        ] {
+            let directory = root.path().join(format!("{stage:?}").to_lowercase());
+            let personal = crashed_then_resumed(&directory, None, stage, || {
+                Ok(SignInSource::Backup(VerifiedBackup::open(&archive)?))
+            })
+            .await?;
+            assert!(
+                personal.restored.complete(),
+                "{stage:?}: {:?}",
+                personal.restored
+            );
+            assert_eq!(personal.freshness, Freshness::Unwitnessed, "{stage:?}");
+            let device = personal.opened.database;
+            let node = device.session().info().await?.node;
+            let held = known(&directory)?;
+            assert!(
+                held.personal_devices(account().locator().owner)?
+                    .contains(&node),
+                "{stage:?}"
+            );
+            assert_eq!(
+                held.certificates()
+                    .filter(|certificate| certificate.capability.subject == node)
+                    .count(),
+                1,
+                "{stage:?}"
+            );
+            assert_eq!(bodies(&device).await?, ["backed up"], "{stage:?}");
+            assert_eq!(device.session().freshness().await?, Freshness::Unwitnessed);
+            device.close().await?;
+            assert!(!directory.join(super::STAGING).exists(), "{stage:?}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_source_refused_while_staging_leaves_the_install_for_the_next() -> Result<(), Failure>
+    {
+        use crate::node::FORGED_SCHEMA;
+        let root = Scratch::new().await;
+        let hub = hub();
+        let owner_path = root.path().join("owner");
+        let owner = config(&owner_path, Some(&hub))?
+            .create_personal(prf(), account().namespace().clone())
+            .await?
+            .opened
+            .database;
+        write(&owner, "from owner").await?;
+        announced(&hub, "owner").await;
+        let forge = || -> Result<(), Failure> {
+            FORGED_SCHEMA
+                .lock()
+                .map_err(|_| "forged")?
+                .push((owner_path.join("identity.json"), forged()?));
+            Ok(())
+        };
+        // Its only source answers with another schema: the authenticated
+        // genesis refuses it while staging, and the install keeps nothing.
+        forge()?;
+        let laptop = root.path().join("laptop");
+        let error = match sign_in(&laptop, Some(&hub), SignInSource::Discover).await {
+            Ok(_) => return Err("installed a forged schema".into()),
+            Err(error) => error,
+        };
+        assert!(matches!(error, PersonalSignInError::Failed(_)), "{error}");
+        let intent = crate::personal::Intent::load(&laptop)?.ok_or("intent")?;
+        assert_eq!(intent.stage, crate::personal::Stage::Prepared);
+        assert!(intent.secrets.is_empty());
+
+        // An honest second source.
+        let phone = sign_in(
+            &root.path().join("phone"),
+            Some(&hub),
+            SignInSource::Discover,
+        )
+        .await?
+        .opened
+        .database;
+        announced(&hub, "phone").await;
+        // The lying owner answers first; the phone's answer installs.
+        forge()?;
+        let personal = sign_in(&laptop, Some(&hub), SignInSource::Discover).await?;
+        assert!(
+            FORGED_SCHEMA.lock().map_err(|_| "forged")?.is_empty(),
+            "the lying source was never asked"
+        );
+        assert!(personal.restored.complete(), "{:?}", personal.restored);
+        let device = personal.opened.database;
+        let node = device.session().info().await?.node;
+        assert!(
+            known(&root.path().join("phone"))?
+                .personal_devices(account().locator().owner)?
+                .contains(&node)
+        );
+        device.session().sync_once().await?;
+        assert_eq!(bodies(&device).await?, ["from owner"]);
+        device.close().await?;
+        phone.close().await?;
+        owner.close().await
+    }
+}

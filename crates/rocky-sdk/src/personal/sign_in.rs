@@ -53,17 +53,26 @@ pub(crate) struct SignIn {
     pub(crate) outcome: Arc<Mutex<Option<(RestoreCoverage, Freshness)>>>,
 }
 
+/// Where a backup sign-in stages the archive's files.
+pub(crate) const STAGING: &str = "restore";
+
 /// Readies `directory` for a sign-in of `account`, refusing other state
 /// untouched: only this account's unfinished sign-in continues, and what
 /// it left besides its intent and keys goes. An installed database, which
-/// may have been handed out, is never removed: it opens instead.
+/// may have been handed out, is never removed: one this account's sign-in
+/// saved but never handed out is returned, to open as it is.
 pub(crate) fn prepare_sign_in(
     directory: &Path,
     account: &PersonalAccount,
-) -> Result<(), PersonalSignInError> {
+    secrets: &Arc<dyn SecretStore>,
+) -> Result<Option<super::Finished>, PersonalSignInError> {
     let Some(saved) = super::Intent::load(directory)? else {
-        return super::check_empty(directory, account);
+        super::check_empty(directory, account)?;
+        return Ok(None);
     };
+    if let Some(finished) = saved.finished(directory, names(account), secrets)? {
+        return Ok(Some(finished));
+    }
     super::check_installed(directory, account)?;
     saved.continues(names(account), false)?;
     let removed = (|| -> Result<(), Failure> {
@@ -83,12 +92,13 @@ pub(crate) fn prepare_sign_in(
                 _ => {}
             }
         }
-        if rocky_platform::fs::exists(directory.join("restore")) {
-            rocky_platform::fs::remove_dir_all(directory.join("restore"))?;
+        if rocky_platform::fs::exists(directory.join(STAGING)) {
+            rocky_platform::fs::remove_dir_all(directory.join(STAGING))?;
         }
         Ok(())
     })();
-    removed.map_err(PersonalSignInError::Failed)
+    removed.map_err(PersonalSignInError::Failed)?;
+    Ok(None)
 }
 
 /// What a sign-in that left no install intent wrote goes: entries of
@@ -418,6 +428,7 @@ async fn discovered(
         ),
         (node, transport_key),
     )?;
+    super::fault::check(directory, super::fault::Stage::Prepared)?;
     // A source's refusal or forged answer ends only its own attempt: only
     // signed statements this device verifies end the install.
     let mut last: Option<Failure> = None;
@@ -436,6 +447,7 @@ async fn discovered(
             }
         };
         let held = metadata.held.clone();
+        let responder = metadata.responder.clone();
         let source = Source {
             genesis: candidate.genesis.clone(),
             record: metadata.record,
@@ -445,10 +457,39 @@ async fn discovered(
             revocations: metadata.revocations,
             groups: metadata.groups,
             epoch_statements: metadata.epoch_statements,
-            escrow: (escrow, held),
+            // Only vouched records name the unscoped naming root.
+            escrow: (
+                escrow
+                    .into_iter()
+                    .filter(|(slot, _)| slot.is_some())
+                    .collect(),
+                held,
+            ),
+            naming: metadata.naming,
+            freshness,
         };
-        let (mut settings, coverage) = stage(secrets, account, &mut installing, source)?;
+        let (mut settings, coverage) = match stage(secrets, account, &mut installing, source) {
+            Ok(staged) => staged,
+            Err(error) if ends_install(&error) => return Err(error),
+            Err(error) => {
+                last = Some(error);
+                continue;
+            }
+        };
         let vault = settings.vault(secrets);
+        // A custodian whose custody grant lapsed serves again under the
+        // same grant, renewed by the root.
+        if let Err(error) = renew_custody(
+            transport,
+            (account, node),
+            (database, candidate),
+            (&settings, &responder),
+        )
+        .await
+        {
+            last = Some(error);
+            continue;
+        }
         let certificate = settings
             .credentials
             .certificate()
@@ -470,6 +511,7 @@ async fn discovered(
                 continue;
             }
         };
+        super::fault::check(directory, super::fault::Stage::Published)?;
         settings.learn_revocations(&accepted)?;
         let owner = account.locator().owner;
         if settings.revocations.tombstones(owner, node.public_key()) {
@@ -486,10 +528,11 @@ async fn discovered(
             false,
             now()?,
         )?;
-        // The first sync brings the ciphertext; checkpoints first.
+        // The first sync brings the ciphertext; checkpoints first. The
+        // identity last: until it is saved, the intent resumes.
         rocky_credentials::write_private(&directory.join("bootstrap.json"), b"true")?;
+        installing.installed(&vault, &coverage)?;
         settings.save(path)?;
-        installing.keep_discovery(&vault)?;
         return Ok((settings, coverage, freshness));
     }
     // A source answered: the intent stays, and a retry resumes it.
@@ -545,6 +588,70 @@ async fn publish(
         return Err("the source did not keep the device certificate".into());
     }
     Ok(accepted)
+}
+
+/// Renews the custody link of a custodian `candidate` whose chain
+/// `responder` lapses within half a lifetime: the same pinned custody-only
+/// grant, signed anew under the owner by this node, which `settings`
+/// certified. An owner device, or a custodian whose link holds, is left
+/// alone. Nothing widens: the custodian takes only its own grant back.
+async fn renew_custody(
+    transport: &Connected,
+    (account, node): (&PersonalAccount, &PrivateKey),
+    (database, candidate): (DatabaseContext, &Candidate),
+    (settings, responder): (&Settings, &CredentialChain),
+) -> Result<(), Failure> {
+    let links = responder.capabilities();
+    let Some(link) = links.0.last().filter(|_| links.0.len() > 1) else {
+        return Ok(());
+    };
+    let custody = !link.capability.grants.is_empty()
+        && link
+            .capability
+            .grants
+            .iter()
+            .all(|grant| grant.rights == [rocky_core::Right::Custody].into());
+    let time = now()?;
+    if !custody || link.capability.expires > time.saturating_add(settings.ttl / 2) {
+        return Ok(());
+    }
+    let authority = rocky_credentials::Authority::issuer(node, &settings.credentials)?;
+    let renewed = authority.renew(
+        &link.capability,
+        &settings.revocations,
+        rocky_credentials::Validity {
+            issued_at: time,
+            lifetime: std::time::Duration::from_secs(settings.ttl),
+            clock_skew: std::time::Duration::from_secs(crate::enrollment::SKEW),
+        },
+    )?;
+    let (authorization, _) = authorize(
+        account,
+        node,
+        database,
+        candidate,
+        PersonalAct::RenewCustody {
+            capability: renewed.id()?,
+        },
+    )?;
+    let request = PeerRequest::LinkEnroll(LinkEnrollment::PersonalCustody(Box::new(
+        rocky_credentials::PersonalCustodyRenewal {
+            authorization,
+            chain: authority.chain_of(renewed),
+        },
+    )));
+    let reply = exchange(
+        &**transport,
+        std::slice::from_ref(&candidate.address),
+        database.scope,
+        &request,
+    )
+    .await?;
+    let PeerReply::LinkEnroll(known) = reply else {
+        return Err("custody renewal reply kind".into());
+    };
+    known.verify_in(database)?;
+    Ok(())
 }
 
 /// How far a bootstrap from `candidate` is witnessed: another owner device
@@ -616,12 +723,26 @@ struct Source {
     groups: Vec<GroupRecord>,
     epoch_statements: BTreeMap<String, Vec<rocky_core::Commitment>>,
     escrow: Archived,
+    /// The vouched naming root escrow the source holds.
+    naming: Option<rocky_credentials::MetadataEscrow>,
+    freshness: Freshness,
+}
+
+/// Whether a refusal of one source ends the whole install: only a signed
+/// statement this device verified, or a genesis other than the pinned one.
+fn ends_install(error: &Failure) -> bool {
+    matches!(
+        error.downcast_ref::<PersonalSignInError>(),
+        Some(PersonalSignInError::RevokedNode { .. } | PersonalSignInError::GenesisConflict)
+    ) || super::fault::crashed(error)
 }
 
 /// Verifies `source` against the account, opens its escrow with the root,
 /// keeps the keys and pins them, and certifies the node: the settings of
 /// one more owner device, not yet saved. Nothing is revoked or rotated;
-/// an epoch no record opens is reported, never replaced.
+/// an epoch no record opens is reported, never replaced. Every check runs
+/// before anything is kept, so a source refused here leaves the install as
+/// it was for the next.
 fn stage(
     secrets: &Arc<dyn SecretStore>,
     account: &PersonalAccount,
@@ -679,19 +800,22 @@ fn stage(
     let domain = settings.domain()?;
     let (records, held) = source.escrow;
     let holds = !held.is_empty();
-    let (recovered, missing) = Recovered::import(&domain, (records, held), account.root())?;
+    let (mut recovered, missing) = Recovered::import(&domain, (records, held), account.root())?;
+    if let Some(naming) = &source.naming {
+        recovered.naming = crate::escrow::open_naming(naming, &settings, &domain, account.root())?;
+    }
     if holds && recovered.readers.is_empty() && recovered.secrets.is_empty() {
         return Err(PersonalSignInError::MissingEscrow.into());
     }
-    for ((name, epoch), key) in &recovered.readers {
-        settings.hold(&vault, name, *epoch, key)?;
+    let mut keys: BTreeMap<String, Vec<rocky_core::KeyEpoch>> = BTreeMap::new();
+    for (name, epoch) in recovered.readers.keys() {
+        keys.entry(name.clone()).or_default().push(*epoch);
     }
-    installing.hold_secrets(recovered.secrets.keys().copied())?;
-    for ((address, epoch), secret) in &recovered.secrets {
-        vault.put(&secret_role(address, *epoch), secret)?;
-    }
-    if let Some(naming) = recovered.naming {
-        vault.put(NAMING_ROLE, &naming)?;
+    if keys
+        .values()
+        .any(|epochs| epochs.len() > crate::enrollment::MAX_EPOCHS)
+    {
+        return Err("key epoch capacity reached".into());
     }
     // Partitions the source names without a key stay known, keyless.
     let mut groups: BTreeMap<String, GroupRecord> = source
@@ -707,7 +831,7 @@ fn stage(
             )
         })
         .collect();
-    for (key, record) in recovered.groups {
+    for (key, record) in std::mem::take(&mut recovered.groups) {
         match groups.get_mut(&key) {
             Some(named) if named.name != record.name => {
                 return Err("an escrowed partition differs from the one the source names".into());
@@ -719,8 +843,7 @@ fn stage(
     settings.groups = groups;
     settings.epoch_statements = source.epoch_statements;
     settings.authority = Some(crate::enrollment::Issuing::default());
-    settings.personal = Some(installing.device());
-    installing.import(descriptor, settings.keys.clone())?;
+    settings.personal = Some(installing.device(source.freshness));
     // A retry publishes the certificate it kept, never another.
     if let Some(certificate) = installing.certificate() {
         let mut known = settings.revocations.clone();
@@ -736,15 +859,11 @@ fn stage(
         .certificate()
         .ok_or("missing node certificate")?
         .clone();
-    if installing.certificate().is_none() {
-        installing.certify(certificate)?;
-    }
-    let mut coverage = RestoreCoverage::held(&settings, &vault)?;
     let labels: BTreeMap<_, _> = domain
         .scopes()
         .map(|(name, scope)| (scope, name.to_owned()))
         .collect();
-    coverage.missing = missing
+    let missing: Vec<(String, rocky_core::KeyEpoch)> = missing
         .into_iter()
         .map(|(scope, epoch)| {
             (
@@ -756,13 +875,38 @@ fn stage(
             )
         })
         .collect();
-    coverage.unkeyed = domain
+    let unkeyed: Vec<String> = domain
         .scopes()
-        .filter(|(name, scope)| {
-            settings.reads_whole(&domain, scope) && !settings.keys.contains_key(*name)
-        })
+        .filter(|(name, scope)| settings.reads_whole(&domain, scope) && !keys.contains_key(*name))
         .map(|(name, _)| name.to_owned())
         .collect();
+
+    // Verified: from here on the install keeps what this source brought.
+    // Each key is recorded in the intent before the secret store holds it,
+    // so a discarded install forgets it too.
+    let directory = installing.directory().to_path_buf();
+    installing.hold_secrets(recovered.secrets.keys().copied())?;
+    installing.import(descriptor, keys)?;
+    super::fault::check(&directory, super::fault::Stage::Pinned)?;
+    for (index, ((name, epoch), key)) in recovered.readers.iter().enumerate() {
+        settings.hold(&vault, name, *epoch, key)?;
+        if index == 0 {
+            super::fault::check(&directory, super::fault::Stage::Importing)?;
+        }
+    }
+    for ((address, epoch), secret) in &recovered.secrets {
+        vault.put(&secret_role(address, *epoch), secret)?;
+    }
+    if let Some(naming) = recovered.naming {
+        vault.put(NAMING_ROLE, &naming)?;
+    }
+    if installing.certificate().is_none() {
+        installing.certify(certificate)?;
+    }
+    super::fault::check(&directory, super::fault::Stage::Certified)?;
+    let mut coverage = RestoreCoverage::held(&settings, &vault)?;
+    coverage.missing = missing;
+    coverage.unkeyed = unkeyed;
     Ok((settings, coverage))
 }
 
@@ -781,7 +925,7 @@ async fn from_backup(
         Some(keys) => keys,
         None => (PrivateKey::new(), rocky_platform::entropy::random()),
     };
-    let staging = directory.join("restore");
+    let staging = directory.join(STAGING);
     let opened = crate::backup::open(backup.archive(), &staging)?;
     if opened.id != backup.id() {
         return Err("the backup changed since it was verified".into());
@@ -803,6 +947,7 @@ async fn from_backup(
         ),
         (&node, transport),
     )?;
+    super::fault::check(directory, super::fault::Stage::Prepared)?;
     let archived = &opened.identity;
     let owner = account.locator().owner;
     let mut revocations = archived.revocations.clone();
@@ -823,7 +968,11 @@ async fn from_backup(
         revocations,
         groups: archived.groups.values().cloned().collect(),
         epoch_statements: archived.epoch_statements.clone(),
+        // The signed archive's own records, an owner device's naming root
+        // included; a custodian's archive holds its vouched record instead.
         escrow,
+        naming: archived.naming_escrow.clone(),
+        freshness: Freshness::Unwitnessed,
     };
     let (mut settings, coverage) = stage(secrets, account, &mut installing, source)?;
     settings.pending = archived.pending.clone();
@@ -854,9 +1003,10 @@ async fn from_backup(
         },
     )?;
     crate::backup::place(&opened, directory)?;
+    super::fault::check(directory, super::fault::Stage::Placed)?;
+    installing.installed(&vault, &coverage)?;
     settings.save(path)?;
     rocky_platform::fs::remove_dir_all(&staging)?;
-    installing.keep_discovery(&vault)?;
     Ok((settings, coverage))
 }
 

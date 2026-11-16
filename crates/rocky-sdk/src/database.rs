@@ -2243,6 +2243,9 @@ async fn run_inner(
         replica.maintain().await;
         replica.finalize_path(node.domain().scope).await?;
         crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Started)?;
+        if matches!(setup.install, Install::SignIn(_)) {
+            crate::personal::fault::check(&directory, crate::personal::fault::Stage::Saved)?;
+        }
         if matches!(setup.install, Install::Supplied(_)) {
             rocky_platform::fs::remove_file(crate::enrollment::Intent::path(&path, true))?;
         }
@@ -2621,6 +2624,10 @@ fn unwind(
     created: Option<(&crate::secrets::Vault, Vec<String>)>,
     error: Failure,
 ) -> Failure {
+    // A crash takes back nothing: the next attempt finds what it wrote.
+    if crate::personal::fault::crashed(&error) {
+        return error;
+    }
     if let Some((vault, roles)) = created {
         let _ = vault.forget(roles);
     }

@@ -193,3 +193,130 @@ async fn two_databases_share_each_endpoint_and_detach_independently() -> Result<
     right_router.shutdown().await?;
     Ok(())
 }
+
+/// The personal database `name`'s passkey locates in its own namespace.
+fn personal(name: &str) -> (rocky_sdk::VerifiedPasskeyPrf, rocky_sdk::PersonalNamespace) {
+    let namespace = rocky_sdk::PersonalNamespace::new(format!("{name}.example"), "account root")
+        .expect("namespace");
+    let input = namespace.prf_input().expect("input");
+    (
+        rocky_sdk::VerifiedPasskeyPrf::new(
+            &input,
+            rocky_core::commitment("fixture", name.as_bytes()),
+        ),
+        namespace,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_personal_databases_share_an_endpoint_and_a_coordinator_and_detach_independently()
+-> Result<(), Failure> {
+    use rocky_sdk::{Configuration, GrantProfile, Schema, counters};
+    let root = tempfile::tempdir()?;
+    let left = local().bind([81; 32]).await?;
+    let right = local().bind([82; 32]).await?;
+    let left_harness = Attachment::new(left.clone());
+    let right_harness = Attachment::new(right.clone());
+    let left_router = left_harness
+        .register(Router::builder(left.clone()).accept(ECHO, Echo))
+        .spawn();
+    let right_router = right_harness
+        .register(Router::builder(right.clone()))
+        .spawn();
+    // One application coordinator serves both databases.
+    let logs = rocky_coordinator::coordinated::MemoryLog::new();
+    let coordinator: Arc<dyn rocky_sdk::Coordinator> =
+        Arc::new(logs.client(rocky_sdk::credentials::PrivateKey::new().public_key()));
+    let schema = Schema::parse(common::SCHEMA)?;
+    let mut owners = Vec::new();
+    let mut custodians = Vec::new();
+    for name in ["a", "b"] {
+        let (prf, namespace) = personal(name);
+        let owner = Device::new(
+            Configuration::new(root.path().join(name), &schema)?
+                .network(Network::Borrowed(left_harness.transport()))
+                .coordination(coordinator.clone())
+                .create_personal(prf, namespace)
+                .await?
+                .opened,
+        )?;
+        let invitation = owner
+            .session
+            .invitation_with(GrantProfile::Custody {
+                scopes: ["items".to_owned()].into(),
+            })
+            .await?
+            .uri;
+        let custodian = Device::new(
+            Configuration::new(root.path().join(format!("{name}-custody")), &schema)?
+                .network(Network::Borrowed(right_harness.transport()))
+                .join(&invitation)
+                .await?,
+        )?;
+        common::introduce(&owner, &custodian).await;
+        owners.push(owner);
+        custodians.push(custodian);
+    }
+    let (a, b) = (&owners[0], &owners[1]);
+    assert_ne!(a.scope(), b.scope());
+    a.add(1, "Only A").await;
+    b.add(1, "Only B").await;
+    for owner in [a, b] {
+        let report = owner.sync().await.map_err(|error| error.to_string())?;
+        assert!(common::reconciled(&report), "{report}");
+    }
+    let counter = counters::Name::new("orders")?;
+    assert_eq!(
+        a.database
+            .claim(counter.clone(), counters::Claim::fresh()?)
+            .await?,
+        1
+    );
+    assert_eq!(
+        b.database
+            .claim(counter.clone(), counters::Claim::fresh()?)
+            .await?,
+        1
+    );
+
+    // Detaching A leaves B's routes, the endpoint and the coordinator.
+    a.network.as_ref().ok_or("a network")?.close().await;
+    assert!(common::exchange_failed(&a.sync().await));
+    b.add(2, "B after A detached").await;
+    let report = b.sync().await.map_err(|error| error.to_string())?;
+    assert!(common::reconciled(&report), "{report}");
+    assert_eq!(
+        b.database
+            .claim(counter.clone(), counters::Claim::fresh()?)
+            .await?,
+        2
+    );
+    assert_eq!(
+        a.database
+            .claim(counter.clone(), counters::Claim::fresh()?)
+            .await?,
+        2
+    );
+    assert_eq!(echo(&right, left.addr()).await?, b"hello");
+    assert!(!left.is_closed() && !left_router.is_shutdown());
+
+    // Closing A altogether leaves B and the coordinator working.
+    let mut owners = owners.into_iter();
+    let (a, b) = (owners.next().ok_or("a")?, owners.next().ok_or("b")?);
+    a.close().await;
+    b.add(3, "B after A closed").await;
+    let report = b.sync().await.map_err(|error| error.to_string())?;
+    assert!(common::reconciled(&report), "{report}");
+    assert_eq!(
+        b.database.claim(counter, counters::Claim::fresh()?).await?,
+        3
+    );
+    assert_eq!(echo(&right, left.addr()).await?, b"hello");
+    b.close().await;
+    for custodian in custodians {
+        custodian.close().await;
+    }
+    left_router.shutdown().await?;
+    right_router.shutdown().await?;
+    Ok(())
+}

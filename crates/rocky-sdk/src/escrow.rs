@@ -2,7 +2,10 @@
 //! key epoch and group secret epoch (with its partition's naming secret)
 //! is sealed to the domain's offline root and kept in the replica beside
 //! the frames of that epoch, which carry it to every holder of the scope,
-//! keyless custody too. An issuer's partition naming root stays local.
+//! keyless custody too. An issuer's partition naming root stays local,
+//! except in a personal database: there an owner device vouches for its
+//! record, bound to the genesis descriptor, which custodians receive at
+//! enrollment and renewal and serve in bootstrap pages, unable to open it.
 //! The root alone then recovers the data of any node's backup, with every
 //! trusted node and device lost (`Configuration::recover`). Records are
 //! opaque: see `rocky_credentials::RootEscrow`.
@@ -14,7 +17,7 @@ use crate::{
     secrets::Vault,
 };
 use rocky_core::{Commitment, KeyEpoch, PartitionName, PartitionValue, ResourceScope};
-use rocky_credentials::{RootEscrow, RootKey, escrow_tag};
+use rocky_credentials::{DatabaseKind, MetadataEscrow, RootEscrow, RootKey, escrow_tag};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -130,6 +133,120 @@ pub(crate) async fn keep(
         .keep_escrow(seal(settings, vault, domain, &held)?)
         .await?;
     Ok(())
+}
+
+/// This owner device's partition naming root, sealed to the root and
+/// vouched for under its chain, bound to the personal database's genesis;
+/// none on a device without one, or outside a personal database.
+pub(crate) fn seal_naming(
+    settings: &Settings,
+    vault: &Vault,
+) -> Result<Option<MetadataEscrow>, Failure> {
+    if !settings.kind()?.is_personal() {
+        return Ok(None);
+    }
+    let Some(root) = vault.find(NAMING_ROLE)? else {
+        return Ok(None);
+    };
+    let item = Escrowed::Naming { root };
+    let tag = escrow_tag(settings.publisher, item.secret());
+    let record = RootEscrow::seal(settings.publisher, tag, &serde_json::to_vec(&item)?)?;
+    Ok(Some(MetadataEscrow::sign(
+        &Settings::node_key(vault)?,
+        settings.credentials.clone(),
+        (
+            settings.database_context()?,
+            settings.manifest()?.descriptor()?,
+        ),
+        record,
+        crate::enrollment::now()?,
+    )?))
+}
+
+/// Refuses a naming root record unless an owner device of `settings`'s
+/// personal database, which no statement it holds ended, vouched for it
+/// under this genesis. Anyone can seal to the root; only an owner device
+/// holds the naming root.
+fn judge_naming(
+    record: &MetadataEscrow,
+    settings: &Settings,
+    domain: &Domain,
+) -> Result<(), Failure> {
+    let DatabaseKind::Personal { owner, .. } = settings.kind()? else {
+        return Err("only a personal database escrows its naming root".into());
+    };
+    let descriptor = settings.manifest()?.descriptor()?;
+    record.verify(settings.database_context()?, descriptor)?;
+    let ahead = rocky_core::MAX_CLOCK_AHEAD.as_secs();
+    if record.signed_at() > crate::enrollment::now()?.saturating_add(ahead) {
+        return Err("the naming root escrow is vouched for in the future".into());
+    }
+    let signer = record.signer();
+    record
+        .chain()
+        .provenance_with_families(settings.publisher, signer, &domain.families)?;
+    let link = record
+        .chain()
+        .certificate()
+        .map(rocky_credentials::PersonalLink::of)
+        .transpose()?
+        .flatten()
+        .ok_or("the naming root escrow's signer is no owner device")?;
+    let known = &settings.revocations;
+    if link.owner != owner
+        || link.descriptor != descriptor
+        || known.tombstones(owner, signer)
+        || known.unfenced().ends_node_of(owner, signer, false)
+    {
+        return Err("the naming root escrow's signer is no live owner device".into());
+    }
+    Ok(())
+}
+
+/// Keeps `record` as a personal custodian's naming root escrow once it
+/// judged it; a record is never replaced by another device's.
+pub(crate) fn keep_naming(
+    settings: &mut Settings,
+    record: Option<MetadataEscrow>,
+) -> Result<(), Failure> {
+    let Some(record) = record else {
+        return Ok(());
+    };
+    if !matches!(settings.profile, rocky_credentials::Profile::Custody { .. }) {
+        return Err("only a personal custodian keeps the naming root escrow".into());
+    }
+    if settings.naming_escrow.is_none() {
+        judge_naming(&record, settings, &settings.domain()?)?;
+        settings.naming_escrow = Some(record);
+    }
+    Ok(())
+}
+
+/// The naming root `record` escrows, opened with `root`; none for a record
+/// no owner device of this genesis vouched for, or that opens to no key of
+/// its tag. A missing root is reported, never replaced.
+pub(crate) fn open_naming(
+    record: &MetadataEscrow,
+    settings: &Settings,
+    domain: &Domain,
+    root: &RootKey,
+) -> Result<Option<[u8; 32]>, Failure> {
+    if judge_naming(record, settings, domain).is_err() {
+        return Ok(None);
+    }
+    let sealed = record.record();
+    Ok(sealed
+        .open(root)
+        .ok()
+        .and_then(|payload| serde_json::from_slice::<Escrowed>(&payload).ok())
+        .and_then(|item| match item {
+            Escrowed::Naming { root: naming }
+                if sealed.tag() == escrow_tag(settings.publisher, &naming) =>
+            {
+                Some(naming)
+            }
+            _ => None,
+        }))
 }
 
 /// Keys a root opened from a store's escrow records.

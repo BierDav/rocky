@@ -14,6 +14,8 @@ mod membership;
 mod mesh;
 mod partition;
 mod personal;
+#[cfg(test)]
+pub(crate) use personal::FORGED_SCHEMA;
 mod recovery;
 mod registry;
 mod reset;
@@ -2852,6 +2854,13 @@ impl Node {
         {
             *retry = self.owes_retry(peer, transfer).await;
         }
+        if let Ok((_, transfer)) = &result
+            && transfer.failed.is_empty()
+            && transfer.denied.is_empty()
+            && let Err(error) = self.witnessed_by(peer).await
+        {
+            tracing::warn!(%error, "the witnessing owner device could not be recorded");
+        }
         result
     }
     /// Whether another exchange with `peer` is owed: a blocker that this
@@ -3412,6 +3421,9 @@ impl Node {
             }
             PeerRequest::LinkEnroll(LinkEnrollment::Personal(publication)) => Ok(
                 PeerReply::LinkEnroll(self.accept_personal(*publication).await?),
+            ),
+            PeerRequest::LinkEnroll(LinkEnrollment::PersonalCustody(renewal)) => Ok(
+                PeerReply::LinkEnroll(self.accept_custody_renewal(*renewal).await?),
             ),
             PeerRequest::Unlink(known) => Ok(PeerReply::Unlink(self.accept_unlink(known).await?)),
             PeerRequest::Resolve(request) => Ok(PeerReply::Resolve(

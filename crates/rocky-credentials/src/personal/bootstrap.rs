@@ -139,6 +139,9 @@ pub enum PersonalAct {
         certificate: Commitment,
         publication: [u8; 16],
     },
+    /// Replace the responder's lapsed custody link with `capability`, the
+    /// same pinned custody grant signed anew under the owner's authority.
+    RenewCustody { capability: Commitment },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,6 +325,30 @@ impl PersonalPublication {
             {
                 Ok(publication)
             }
+            _ => Err(crate::PersonalError::WrongBinding.into()),
+        }
+    }
+}
+
+/// A custodian's custody link renewed by an owner device the passkey
+/// just certified: `chain` is that device's issuer links followed by the
+/// renewed link, and the authorization names the link.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersonalCustodyRenewal {
+    pub authorization: PersonalAuthorization,
+    pub chain: crate::CredentialChain,
+}
+impl PersonalCustodyRenewal {
+    /// The renewed link the authorization's act names, which `chain` ends at.
+    pub fn renewed(&self) -> Result<&SignedCapability, Error> {
+        let renewed = self
+            .chain
+            .0
+            .last()
+            .ok_or_else(|| denied("an empty custody renewal"))?;
+        match self.authorization.act() {
+            PersonalAct::RenewCustody { capability } if capability == renewed.id()? => Ok(renewed),
             _ => Err(crate::PersonalError::WrongBinding.into()),
         }
     }

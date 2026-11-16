@@ -79,6 +79,19 @@ pub mod simulation {
             }
         })
     }
+    /// Seconds every thread's operating-system wall clock skips.
+    static SKIPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    /// Moves the operating-system wall clock of every thread in this
+    /// process on by `by`, as a long absence would, for threads the
+    /// simulation does not cover, such as a database's own. Every database
+    /// the process runs sees it: a test that skips runs in a binary of its
+    /// own.
+    pub fn skip(by: Duration) {
+        SKIPPED.fetch_add(by.as_secs(), std::sync::atomic::Ordering::SeqCst);
+    }
+    pub(crate) fn skipped() -> Duration {
+        Duration::from_secs(SKIPPED.load(std::sync::atomic::Ordering::SeqCst))
+    }
     /// Stops this thread's wall clock at the epoch for good, as a clock
     /// that stands still: hybrid stamps then advance by observation only.
     pub fn freeze() {

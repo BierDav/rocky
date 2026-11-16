@@ -38,6 +38,8 @@ pub enum IdentityEnrollment {
 pub enum LinkEnrollment {
     Shared(Box<SignedCapability>),
     Personal(Box<PersonalPublication>),
+    /// A lapsed custodian's same custody grant, renewed under the owner.
+    PersonalCustody(Box<crate::PersonalCustodyRenewal>),
 }
 
 const RESOLUTION_VERSION: u32 = 1;
@@ -117,7 +119,7 @@ pub enum StagedCloseStatus {
     },
 }
 
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 pub const MAX_MESSAGE: usize = 3 * crate::MAX_REVOCATION_SET_BYTES;
 
 #[derive(Serialize, Deserialize)]
@@ -157,7 +159,7 @@ impl PeerRequest {
             Self::Pair(_) => (PeerTrust::Invitation, PeerAdmission::Enrollment),
             Self::Renew(_) | Self::Epochs(_) => (PeerTrust::Enrolled, PeerAdmission::Enrollment),
             Self::Identity(IdentityEnrollment::Personal(_))
-            | Self::LinkEnroll(LinkEnrollment::Personal(_)) => {
+            | Self::LinkEnroll(LinkEnrollment::Personal(_) | LinkEnrollment::PersonalCustody(_)) => {
                 (PeerTrust::Root, PeerAdmission::Membership)
             }
             Self::Identity(IdentityEnrollment::Shared(_))

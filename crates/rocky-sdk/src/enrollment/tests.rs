@@ -731,6 +731,7 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
                     profile: None,
                     issuers: Vec::new(),
                     claims: None,
+                    naming: None,
                 },
             )?;
             assert!(!target.begin_exposure_rotation(&registry)?, "round {round}");

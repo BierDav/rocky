@@ -175,7 +175,9 @@ impl Configuration {
     /// `WrongLocalAccount`, and an installed database or a create's intent
     /// `ExistingState`, untouched. `restored` names what the source's
     /// escrow covered; `freshness` is `Unwitnessed` unless another owner
-    /// device answered.
+    /// device answered, and [`crate::Session::freshness`] reports the same
+    /// until another owner device reconciles with this one. A sign-in that
+    /// saved its database but stopped before handing it out returns it.
     pub async fn sign_in(
         &self,
         prf: crate::VerifiedPasskeyPrf,
@@ -190,7 +192,26 @@ impl Configuration {
                 rocky_credentials::PersonalError::WrongOwner,
             )));
         }
-        crate::personal::prepare_sign_in(&self.directory, &account)?;
+        let secrets = self.secrets.clone().unwrap_or_else(|| {
+            Arc::new(crate::secrets::FileSecretStore::new(
+                self.directory.join("secrets"),
+            ))
+        });
+        // This account's sign-in that saved its identity but was never
+        // handed out is complete: it opens as installed.
+        if let Some(finished) =
+            crate::personal::prepare_sign_in(&self.directory, &account, &secrets)?
+        {
+            drop(account);
+            let opened = Database::launch_open(self.options())
+                .await
+                .map_err(Refused::from_failure)?;
+            return Ok(crate::PersonalOpened {
+                opened,
+                restored: finished.restored,
+                freshness: finished.freshness,
+            });
+        }
         match &source {
             crate::SignInSource::Discover if self.network.is_none() => {
                 return Err(Refused::SourceUnavailable);
@@ -330,6 +351,14 @@ impl Configuration {
     }
     /// Opens an existing installation. Startup runs off the caller's async executor.
     pub async fn open(&self) -> Result<Opened, Failure> {
+        // An interrupted personal create or sign-in has no database yet.
+        if crate::personal::unfinished(&self.directory) {
+            return Err(
+                "a personal install is unfinished in this directory: call the same \
+                 create_personal or sign_in again"
+                    .into(),
+            );
+        }
         Database::launch_open(self.options()).await
     }
     /// Resumes an approval join, retaining its single-use key only in this continuation.

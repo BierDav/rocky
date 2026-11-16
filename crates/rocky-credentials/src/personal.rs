@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 mod bootstrap;
 pub use bootstrap::{
     PersonalAct, PersonalAnswer, PersonalAudience, PersonalAuthorization, PersonalChallenge,
-    PersonalHello, PersonalPublication,
+    PersonalCustodyRenewal, PersonalHello, PersonalPublication,
 };
 
 /// The one current namespace format; others are refused.

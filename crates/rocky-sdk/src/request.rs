@@ -298,6 +298,11 @@ pub(crate) enum Request {
         Reply<rocky_credentials::SignedCoordinationGrant>,
     ),
     ReplicaRole(crate::ReplicaRoleConfig, Reply<()>),
+    PartitionCustody(
+        rocky_core::ResourceScope,
+        crate::PartitionCustody,
+        Reply<()>,
+    ),
     NextPartition(String, Reply<crate::CreatedPartition>),
     PartitionRecipients(
         crate::PartitionTarget,
@@ -394,7 +399,7 @@ impl Request {
             Self::Grant(..) => Kind::Grant,
             Self::Install(..) => Kind::Install,
             Self::SignCoordinationGrant(..) => Kind::CoordinationGrant,
-            Self::ReplicaRole(..) => Kind::PartitionRole,
+            Self::ReplicaRole(..) | Self::PartitionCustody(..) => Kind::PartitionRole,
             Self::NextPartition(..) => Kind::PartitionNext,
             Self::PartitionRecipients(..) => Kind::PartitionStatus,
             Self::SharePartition(..) => Kind::PartitionShare,
@@ -641,7 +646,7 @@ impl Request {
             Self::SignCoordinationGrant(_, _, _, reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::ReplicaRole(_, reply) => {
+            Self::ReplicaRole(_, reply) | Self::PartitionCustody(_, _, reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::NextPartition(_, reply) => {

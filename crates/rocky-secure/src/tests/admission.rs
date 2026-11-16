@@ -298,10 +298,13 @@ async fn unconfigured_peers_stay_within_the_bound_and_the_least_recently_served_
     let frontier = a.frontier(f.public).await.unwrap();
     let (configured, full_node) = (PrivateKey::new(), PrivateKey::new());
     a.configure_peers([configured.public_key()]).await;
-    a.set_role(RoleConfig {
-        full_nodes: [rocky_credentials::PeerId::of(full_node.public_key())].into(),
-        ..RoleConfig::default()
-    })
+    a.set_partition_custody(
+        f.public,
+        crate::PartitionCustody {
+            peers: [rocky_credentials::PeerId::of(full_node.public_key())].into(),
+            copies: 0,
+        },
+    )
     .await
     .unwrap();
     let serve = async |key: &PrivateKey| {

@@ -807,7 +807,6 @@ async fn frame_metadata_observes_writes_and_rollback() {
     );
     let changed = super::super::replica::roles::RoleConfig {
         role: super::super::replica::roles::ReplicaRole::Partial,
-        ..Default::default()
     };
     inner.conn.execute(
         "INSERT INTO secure_roles VALUES(1,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config",

@@ -335,16 +335,12 @@ async fn a_branch_writes_under_its_own_node_and_keeps_it_across_reopen() -> Resu
             .await
             .is_err()
     );
-    // Dropping would lose writes no other device holds yet.
-    let unsent = message(
-        snap::observe(a.session.drop_tip(&(snap::text(&(dev)))))
-            .await
-            .unwrap_err(),
-    );
-    assert!(unsent.contains("acknowledged custody"), "{unsent}");
+    // Custody zero (the default) has no custody veto: the explicit drop
+    // discards the branch's unsent frames and stops keeping that tip.
+    snap::ok(a.session.drop_tip(&(snap::text(&(dev))))).await;
     let nodes = snap::ok(a.session.inspect_tips()).await["nodes"].clone();
     assert!(
-        nodes[0]["kept_tips"]
+        !nodes[0]["kept_tips"]
             .as_array()
             .ok_or("kept")?
             .contains(&dev)

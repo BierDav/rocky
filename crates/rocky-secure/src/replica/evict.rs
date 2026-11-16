@@ -9,24 +9,42 @@ pub struct EvictReport {
     pub rows: u64,
     /// Retained operations dropped.
     pub operations: u64,
+    /// Opaque archived checkpoints dropped.
+    pub checkpoints: u64,
+    /// No eligible remote durable copy is confirmed; the dropped data may be lost.
+    pub recovery_unconfirmed: bool,
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Drops a scope's rows and history once enough full nodes have applied
-    /// every operation this node authored in it. Neither deletion nor
-    /// pruning: peers keep the rows, and `subscribe` brings them back. An
-    /// interrupted eviction continues on the next call; until it ends the
-    /// scope reads as unavailable.
+    /// Explicitly drops a scope's rows, ciphertext and checkpoints after its
+    /// partition custody prerequisite. An interrupted eviction resumes on the
+    /// next call; the scope remains unavailable until it finishes.
     pub async fn evict(&self, scope: ResourceScope) -> Result<EvictReport, Error> {
-        {
+        let recovery_unconfirmed = {
             let mut inner = self.inner.lock(crate::replica::Class::Background).await;
             if inner.holding(scope).await? != Some(Holding::Evicting) {
                 inner.begin_eviction(scope).await?;
             }
-        }
+            let mut saved = inner
+                .conn
+                .query(
+                    "SELECT unconfirmed FROM secure_eviction_custody WHERE scope=?",
+                    [encode(&scope)?],
+                )
+                .await?;
+            let unconfirmed = saved
+                .next()
+                .await?
+                .ok_or_else(|| Error::Corrupt("eviction custody report".into()))?
+                .get::<i64>(0)?
+                != 0;
+            unconfirmed || inner.custody_coverage(scope).await? == 0
+        };
         let mut report = EvictReport {
             rows: 0,
             operations: 0,
+            checkpoints: 0,
+            recovery_unconfirmed,
         };
         loop {
             let mut inner = self.inner.lock(crate::replica::Class::Background).await;
@@ -50,14 +68,15 @@ impl<A: RowApplication> Inner<A> {
         if self.holding(scope).await? == Some(Holding::Evicted) {
             return Err(denied("scope is already evicted"));
         }
-        let needed = role.custody.max(1);
-        let covering = self.custody_coverage(scope, &role.full_nodes).await?;
+        let needed = self.partition_custody(scope).await?.copies;
+        let covering = self.custody_coverage(scope).await?;
         if covering < needed {
             return Err(denied(&format!(
-                "eviction needs {needed} full nodes to have applied every local operation; {covering} have"
+                "eviction needs {needed} durable custody receipts; {covering} cover the scope"
             )));
         }
         transaction!(self, |inner| {
+            inner.conn.execute("INSERT INTO secure_eviction_custody VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET unconfirmed=excluded.unconfirmed", bindings(vec![SqlValue::Blob(encode(&scope)?), SqlValue::Integer(i64::from(covering == 0))])).await?;
             inner.save_eviction_guard(scope).await?;
             inner.mark_evicting(scope, false).await?;
             inner
@@ -71,51 +90,6 @@ impl<A: RowApplication> Inner<A> {
         })?;
         self.publish_revision().await
     }
-    /// Full nodes that applied every operation this node authored in the scope.
-    pub(super) async fn custody_coverage(
-        &self,
-        scope: ResourceScope,
-        full_nodes: &BTreeSet<rocky_credentials::PeerId>,
-    ) -> Result<usize, Error> {
-        let me = self.config.node.public_key();
-        let Some(id) = self.find_scope_id(scope).await? else {
-            return Ok(full_nodes.len());
-        };
-        let Some(log) = self.log(id, me).await? else {
-            return Ok(full_nodes.len());
-        };
-        let blob = encode(&scope)?;
-        let mut covering = 0;
-        for node in full_nodes {
-            let (_, applied) = self.peer_mark(*node, &blob, me).await?;
-            if applied as i64 > log.sequence {
-                covering += 1;
-                continue;
-            }
-            // Pruned operations are known applied only through the frontier.
-            if log.pruned_prefix >= 0 && applied as i64 <= log.pruned_prefix {
-                continue;
-            }
-            let missing = collect_rows(
-                self.conn
-                    .query(
-                        "SELECT COUNT(*) FROM secure_operations o WHERE o.author=? AND o.scope=? AND o.sequence>=? AND NOT EXISTS(SELECT 1 FROM secure_ack a WHERE a.hash=o.hash AND a.peer=? AND a.applied=1)",
-                        bindings(vec![
-                            SqlValue::Blob(me.as_bytes().to_vec()),
-                            SqlValue::Blob(blob.clone()),
-                            SqlValue::Integer(applied as i64),
-                            SqlValue::Blob(node.as_bytes().to_vec()),
-                        ]),
-                    )
-                    .await?,
-            )
-            .await?;
-            if missing == vec![vec![SqlValue::Integer(0)]] {
-                covering += 1;
-            }
-        }
-        Ok(covering)
-    }
     /// Deletes one bounded batch; true once the scope is evicted.
     async fn eviction_step(
         &mut self,
@@ -124,7 +98,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<bool, Error> {
         let blob = encode(&scope)?;
         let id = self.find_scope_id(scope).await?;
-        let (rows, operations, done) = transaction!(self, |inner| {
+        let (rows, operations, checkpoints, done) = transaction!(self, |inner| {
             inner
                 .replace_ledger(scope, identity::IdentityLedger::default())
                 .await?;
@@ -205,7 +179,9 @@ impl<A: RowApplication> Inner<A> {
                     )
                     .await?;
             }
-            let done = rows == 0 && batch.is_empty();
+            let archive_pages = inner.conn.execute("DELETE FROM secure_checkpoint_archive_pages WHERE scope=?1 AND (checkpoint,cursor) IN (SELECT checkpoint,cursor FROM secure_checkpoint_archive_pages WHERE scope=?1 LIMIT ?2)", bindings(vec![SqlValue::Blob(blob.clone()), SqlValue::Integer(STEP_ROWS as i64)])).await?;
+            let checkpoints = inner.conn.execute("DELETE FROM secure_checkpoint_archive WHERE scope=?1 AND checkpoint IN (SELECT a.checkpoint FROM secure_checkpoint_archive a WHERE a.scope=?1 AND NOT EXISTS(SELECT 1 FROM secure_checkpoint_archive_pages p WHERE p.scope=a.scope AND p.checkpoint=a.checkpoint) LIMIT ?2)", bindings(vec![SqlValue::Blob(blob.clone()), SqlValue::Integer(STEP_ROWS as i64)])).await?;
+            let done = rows == 0 && batch.is_empty() && archive_pages == 0 && checkpoints == 0;
             if done {
                 if let Some(id) = id {
                     for table in [
@@ -251,6 +227,8 @@ impl<A: RowApplication> Inner<A> {
                     "secure_retention",
                     "secure_peer_frontiers",
                     "secure_identity_ledger",
+                    "secure_custody_receipts",
+                    "secure_custody_challenges",
                 ] {
                     inner
                         .conn
@@ -268,10 +246,11 @@ impl<A: RowApplication> Inner<A> {
                     .await?;
             }
             inner.fault(checkpoint::Stage::Evict)?;
-            Ok((rows, batch.len() as u64, done))
+            Ok((rows, batch.len() as u64, checkpoints, done))
         })?;
         report.rows += rows;
         report.operations += operations;
+        report.checkpoints += checkpoints;
         if done {
             if let Some(id) = id {
                 self.verified_at.remove(&id);

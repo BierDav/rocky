@@ -6,6 +6,8 @@ use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CrashPoint {
+    /// After ciphertext, before carried escrow commits.
+    Custody,
     /// A checkpoint page import, before its transaction commits.
     Import,
     /// Switching a scope to an imported checkpoint.
@@ -42,7 +44,8 @@ pub enum CrashPoint {
     UndoDeletion,
 }
 impl CrashPoint {
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
+        Self::Custody,
         Self::Import,
         Self::Switch,
         Self::Prune,
@@ -66,6 +69,7 @@ impl CrashPoint {
     pub(super) fn stage(self) -> Option<checkpoint::Stage> {
         use checkpoint::Stage;
         Some(match self {
+            Self::Custody => Stage::Custody,
             Self::Import => Stage::Import,
             Self::Switch => Stage::Switch,
             Self::Prune => Stage::Prune,

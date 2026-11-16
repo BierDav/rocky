@@ -1,6 +1,107 @@
 use super::*;
 use rocky_credentials::{Authority, PersonalContext};
 
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn personal_custody_requires_the_owner_vouched_naming_escrow() {
+    use rocky_credentials::{MetadataEscrow, PeerId, RootEscrow, escrow_tag};
+    let directory = Scratch::new().await;
+    let (owner, f) = Owner::new();
+    let node = PrivateKey::new();
+    let chain = owner.device(&f, &node);
+    let mut known = f.policy.clone();
+    known
+        .admit_personal(chain.certificate().unwrap().clone(), &owner.context)
+        .unwrap();
+    let source = replica(&f, &directory, "source.db", &node, (chain.clone(), &known)).await;
+    let keeper = PrivateKey::new();
+    let keeper_chain = f.credentials(&keeper, vec![grant(f.public, &[Right::Custody], &[])]);
+    let mut config = f.config(&keeper, vec![], &[]);
+    config.credentials = keeper_chain.clone();
+    config.revocations = known;
+    let custody = EncryptedReplica::open(directory.path().join("custody.db"), f.app(), config)
+        .await
+        .unwrap();
+    source
+        .set_partition_custody(
+            f.public,
+            PartitionCustody {
+                peers: [PeerId::of(keeper.public_key())].into(),
+                copies: 1,
+            },
+        )
+        .await
+        .unwrap();
+    let key = [11; 32];
+    let slot = (f.public, rocky_core::KeyEpoch::new(1, &key));
+    let epoch_record = RootEscrow::seal(
+        f.publisher.public_key(),
+        escrow_tag(f.publisher.public_key(), &key),
+        &key,
+    )
+    .unwrap();
+    source
+        .keep_escrow(vec![(Some(slot), epoch_record)])
+        .await
+        .unwrap();
+    custody.receive(write(&source, &f, 1).await).await.unwrap();
+    custody
+        .keep_carried_escrow(
+            node.public_key(),
+            source.escrow_of(&[slot].into()).await.unwrap(),
+        )
+        .await
+        .unwrap();
+    let (binding, challenge) = ([3; 32], [4; 32]);
+    assert!(
+        custody
+            .custody_receipt(node.public_key(), &chain, f.public, binding, challenge)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let secret = [8; 32];
+    let naming = MetadataEscrow::sign(
+        &node,
+        chain.clone(),
+        (owner.context.database, owner.context.descriptor),
+        RootEscrow::seal(
+            f.publisher.public_key(),
+            escrow_tag(f.publisher.public_key(), &secret),
+            &secret,
+        )
+        .unwrap(),
+        now().unwrap(),
+    )
+    .unwrap();
+    source.keep_custody_metadata(naming.clone()).await.unwrap();
+    custody.keep_custody_metadata(naming).await.unwrap();
+    let receipt = custody
+        .custody_receipt(node.public_key(), &chain, f.public, binding, challenge)
+        .await
+        .unwrap()
+        .unwrap();
+    source
+        .begin_custody_challenge(keeper.public_key(), f.public, binding, challenge)
+        .await
+        .unwrap();
+    source
+        .record_custody_receipt(keeper.public_key(), f.public, binding, challenge, receipt)
+        .await
+        .unwrap();
+    assert_eq!(
+        source
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .custody_coverage(f.public)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(custody.key_epochs(f.public).await.is_empty());
+    assert!(custody.snapshot(f.public).await.is_err());
+}
+
 /// The owner of a personal database and the authority its devices share.
 struct Owner {
     owner: PrivateKey,

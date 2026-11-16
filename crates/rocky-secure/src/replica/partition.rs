@@ -246,6 +246,31 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 impl<A: RowApplication> EncryptedReplica<A> {
+    /// Local registration learned through an authorized partition offer or
+    /// explicit registration. Conflicting names are never selected by order.
+    pub async fn registered_partition(
+        &self,
+        domain: rocky_core::Scope,
+        table: Commitment,
+        tuple: &PartitionTuple,
+    ) -> Result<Option<(ResourceScope, PartitionName)>, Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        let mut found = None;
+        for (scope, held) in &inner.partitions {
+            if scope.domain == domain && scope.table == table && held == tuple {
+                let name = inner
+                    .partition_names
+                    .get(scope)
+                    .copied()
+                    .ok_or_else(|| Error::Corrupt("registered partition name".into()))?;
+                if found.is_some_and(|(_, previous)| previous != name) {
+                    return Err(denied("conflicting registered partition names"));
+                }
+                found = Some((*scope, name));
+            }
+        }
+        Ok(found)
+    }
     /// Prepares the next own-id partition before its key can leave this node,
     /// naming it with `naming` (see `created_name`). The write transaction
     /// still allocates and verifies the identity.

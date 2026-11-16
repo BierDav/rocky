@@ -17,10 +17,10 @@ pub enum PruneBlock {
     },
     /// Too few other nodes acknowledged this operation: it is a sole copy.
     SoleCopy { operation: Hash },
-    /// Too few configured full nodes have applied this operation.
+    /// Too few eligible peers have durable ciphertext coverage.
     Custody {
         operation: Hash,
-        applied: usize,
+        durable: usize,
         needed: usize,
     },
 }
@@ -157,7 +157,7 @@ impl<A: RowApplication> Inner<A> {
         };
         let bound = *bound;
         let copies = policy.copies.max(1);
-        let role = self.role().await?;
+        let custody = self.partition_custody(scope).await?;
         let blob = encode(&scope)?;
         transaction!(self, |inner| {
             let candidates = collect_rows(
@@ -193,7 +193,7 @@ impl<A: RowApplication> Inner<A> {
                 let operation = hash_of(hash)?;
                 let header: p2panda_core::Header<Extensions> = decode(header)?;
                 // Acknowledged per operation or through a reported frontier.
-                let (mut peers, mut applied) = inner
+                let (mut peers, _) = inner
                     .covering_peers(&blob, header.public_key, header.seq_num)
                     .await?;
                 for peer in collect_rows(
@@ -207,20 +207,18 @@ impl<A: RowApplication> Inner<A> {
                 )
                 .await?
                 {
-                    let [SqlValue::Blob(peer), SqlValue::Integer(done)] = peer.as_slice() else {
+                    let [SqlValue::Blob(peer), SqlValue::Integer(_)] = peer.as_slice() else {
                         return Err(Error::Corrupt("acknowledgment".into()));
                     };
                     peers.insert(super::super::roles::peer_id(peer)?);
-                    if *done == 1 {
-                        applied.insert(super::super::roles::peer_id(peer)?);
-                    }
                 }
-                // Receipt alone is not custody: full nodes count once applied.
-                let custodians = role
-                    .full_nodes
-                    .iter()
-                    .filter(|node| applied.contains(*node))
-                    .count();
+                let custodians = if custody.copies == 0 {
+                    0
+                } else {
+                    inner
+                        .custody_count(scope, header.public_key, header.seq_num)
+                        .await?
+                };
                 step.blocked = policy
                     .required
                     .difference(&policy.behind)
@@ -233,10 +231,10 @@ impl<A: RowApplication> Inner<A> {
                         (peers.len() < copies).then_some(PruneBlock::SoleCopy { operation })
                     })
                     .or_else(|| {
-                        (custodians < role.custody).then_some(PruneBlock::Custody {
+                        (custodians < custody.copies).then_some(PruneBlock::Custody {
                             operation,
-                            applied: custodians,
-                            needed: role.custody,
+                            durable: custodians,
+                            needed: custody.copies,
                         })
                     });
                 if step.blocked.is_some() {

@@ -261,8 +261,6 @@ async fn a_future_import_does_not_make_verified_empty_partition_history_missing(
     replica
         .set_role(crate::RoleConfig {
             role: crate::ReplicaRole::Full,
-            full_nodes: Default::default(),
-            custody: 0,
         })
         .await
         .unwrap();
@@ -325,8 +323,6 @@ async fn a_future_import_does_not_make_verified_empty_partition_history_missing(
     missing
         .set_role(crate::RoleConfig {
             role: crate::ReplicaRole::Full,
-            full_nodes: Default::default(),
-            custody: 0,
         })
         .await
         .unwrap();
@@ -374,8 +370,6 @@ async fn unrelated_partition_recovery_does_not_block_constant_queries() {
     replica
         .set_role(crate::RoleConfig {
             role: crate::ReplicaRole::Full,
-            full_nodes: Default::default(),
-            custody: 0,
         })
         .await
         .unwrap();
@@ -652,8 +646,6 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
     restored
         .set_role(crate::RoleConfig {
             role: crate::ReplicaRole::Partial,
-            full_nodes: [rocky_credentials::PeerId::of(full_node)].into(),
-            custody: 1,
         })
         .await
         .unwrap();

@@ -115,7 +115,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }) {
             return Err(denied("signed evidence depends on retained tip frames"));
         }
-        let needed = inner.role().await?.custody.max(1) as i64;
         let local_nodes = rows(&inner.conn, "SELECT node FROM secure_line_nodes").await?;
         for (hash, (_, scope, author, sequence)) in &removed {
             for sql in [
@@ -139,45 +138,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .iter()
                     .any(|row| row.as_slice() == [SqlValue::Blob(author.as_bytes().to_vec())]);
             if local {
-                let acknowledged = collect_rows(
-                    inner
-                        .conn
-                        .query(
-                            "SELECT peer FROM secure_ack WHERE hash=? AND applied=1",
-                            [hash.clone()],
-                        )
-                        .await?,
-                )
-                .await?;
-                let mut own =
-                    BTreeSet::from([
-                        rocky_credentials::PeerId::of(inner.config.node.public_key())
-                            .as_bytes()
-                            .to_vec(),
-                    ]);
-                for record in &local_nodes {
-                    let [SqlValue::Blob(bytes)] = record.as_slice() else {
-                        return Err(Error::Corrupt("line node".into()));
-                    };
-                    let public = PublicKey::try_from(bytes.as_slice())
-                        .map_err(|_| Error::Corrupt("line node key".into()))?;
-                    own.insert(rocky_credentials::PeerId::of(public).as_bytes().to_vec());
-                }
-                // Acknowledged per operation or through a reported frontier,
-                // as pruning counts them.
-                let (_, mut applied) = inner
-                    .covering_peers(&encode(scope)?, *author, *sequence)
-                    .await?;
-                for record in &acknowledged {
-                    let [SqlValue::Blob(peer)] = record.as_slice() else {
-                        return Err(Error::Corrupt("acknowledgment".into()));
-                    };
-                    applied.insert(super::roles::peer_id(peer)?);
-                }
-                let remote = applied
-                    .iter()
-                    .filter(|peer| !own.contains(peer.as_bytes().as_slice()))
-                    .count() as i64;
+                let needed = inner.partition_custody(*scope).await?.copies;
+                let remote = if needed == 0 {
+                    0
+                } else {
+                    inner.custody_count(*scope, *author, *sequence).await?
+                };
                 if remote < needed {
                     return Err(denied(
                         "dropping local tip writes requires acknowledged custody",

@@ -87,8 +87,6 @@ pub async fn join(configuration: &Configuration, code: &str, name: &str) -> Resu
             .session()
             .set_replica_role(ReplicaRoleConfig {
                 role: ReplicaRole::Partial,
-                full_nodes: BTreeSet::new(),
-                custody: 0,
             })
             .await?;
     }

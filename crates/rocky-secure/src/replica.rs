@@ -26,6 +26,8 @@ mod coordinated;
 mod crash;
 #[cfg(any(test, feature = "qualification"))]
 pub use crash::CrashPoint;
+pub(crate) mod custody;
+pub use custody::PartitionCustody;
 mod evict;
 mod frontiers;
 mod generation;
@@ -860,6 +862,7 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         compaction::TRANSITION_SCHEMA,
         compaction::HISTORY_SCHEMA,
         roles::SCHEMA,
+        custody::SCHEMA,
         keys::SCHEMA,
         chains::SCHEMA,
         publication::SCHEMA,
@@ -1422,6 +1425,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .execute(
                     "UPDATE secure_metadata SET identity=? WHERE id=1",
                     [identity.clone()],
+                )
+                .await?;
+            inner
+                .conn
+                .execute(
+                    "INSERT OR IGNORE INTO secure_custody_bootstrap VALUES(1,?)",
+                    [inner.config.manifest.to_bytes().map_err(credential)?],
                 )
                 .await?;
             identity::check_node_chain(&inner.config.credentials)?;

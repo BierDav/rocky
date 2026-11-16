@@ -254,11 +254,6 @@ async fn evicting_a_scope_drops_its_carried_escrow_records_unless_frames_stay() 
     let (b, _) = open(&f, &dir, &PrivateKey::new()).await;
     b.set_role(crate::replica::RoleConfig {
         role: crate::replica::ReplicaRole::Partial,
-        full_nodes: [rocky_credentials::PeerId::of(
-            PrivateKey::new().public_key(),
-        )]
-        .into(),
-        custody: 1,
     })
     .await
     .unwrap();

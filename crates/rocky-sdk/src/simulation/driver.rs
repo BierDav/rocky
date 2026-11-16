@@ -418,17 +418,10 @@ impl Simulation {
                 Ok(self.mesh(&mesh))
             }
             Action::Partial(node) => {
-                let owner = self.members[0]
-                    .node_key
-                    .clone()
-                    .ok_or("node 0 has no key")?;
-                let owner = rocky_credentials::PeerId::of(owner.parse()?);
                 self.running(*node)?
                     .session()?
                     .set_replica_role(crate::ReplicaRoleConfig {
                         role: crate::ReplicaRole::Partial,
-                        full_nodes: [owner].into(),
-                        custody: 1,
                     })
                     .await?;
                 self.partial[*node] = true;
@@ -584,14 +577,13 @@ impl Simulation {
                 if !self.shared.contains(&(*node, list.clone())) {
                     return Err("skipped: never shared".into());
                 }
-                // A full node must hold everything this one wrote first.
-                let _ = self.sync(*node).await;
-                let owner = self.members[0].node_key.clone().ok_or("no owner")?;
-                let owner = data_encoding::HEXLOWER.decode(owner.as_bytes())?;
-                let owner =
-                    rocky_credentials::PeerId::of(rocky_credentials::PublicKey::from_bytes(
-                        owner.as_slice().try_into().map_err(|_| "owner key")?,
-                    )?);
+                let owner = rocky_credentials::PeerId::of(
+                    self.members[0]
+                        .node_key
+                        .as_ref()
+                        .ok_or("no owner")?
+                        .parse()?,
+                );
                 let member = self.running(*node)?;
                 if !self.partial[*node] {
                     // The owner holds every list: eviction waits for it.
@@ -599,8 +591,6 @@ impl Simulation {
                         .session()?
                         .set_replica_role(crate::ReplicaRoleConfig {
                             role: crate::ReplicaRole::Partial,
-                            full_nodes: [owner].into(),
-                            custody: 1,
                         })
                         .await?;
                 }
@@ -608,7 +598,22 @@ impl Simulation {
                     group: "list".into(),
                     values: vec![crate::SqlValue::Text(list.clone())],
                 };
-                member
+                let session = member.session()?;
+                for table in session.partition_status(target.clone()).await?.tables {
+                    if let Some(scope) = table.scope {
+                        session
+                            .set_partition_custody(
+                                scope,
+                                crate::PartitionCustody {
+                                    peers: [owner].into(),
+                                    copies: 1,
+                                },
+                            )
+                            .await?;
+                    }
+                }
+                self.sync(*node).await?;
+                self.running(*node)?
                     .session()?
                     .unsubscribe_partition(target.clone(), Default::default())
                     .await?;
@@ -896,7 +901,7 @@ impl Simulation {
                 member.write(&format!("w{index}"), index as u64).await
             }
             // Replay points never fire on the simulation's row-frame tables.
-            Import | Switch | Settle | Evict | Apply | Rewind | Redo | UndoDeletion => {
+            Custody | Import | Switch | Settle | Evict | Apply | Rewind | Redo | UndoDeletion => {
                 self.sync(node).await.map(drop)
             }
         };

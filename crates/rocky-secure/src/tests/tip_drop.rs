@@ -145,10 +145,28 @@ async fn dropping_branch_frames_preserves_main_and_requires_catchup_on_return() 
         .await
         .unwrap();
     assert!(replica.drop_tip(genesis).await.is_err());
+    replica
+        .set_partition_custody(
+            f.public,
+            PartitionCustody {
+                peers: [rocky_credentials::PeerId::of(peer.public_key())].into(),
+                copies: 1,
+            },
+        )
+        .await
+        .unwrap();
     assert!(replica.drop_tip(dev).await.is_err());
     // The reader acknowledges the original frame offered before switching.
     replica
         .acknowledge(peer.public_key(), &peer_chain, frame.id().unwrap(), true)
+        .await
+        .unwrap();
+    assert!(
+        replica.drop_tip(dev).await.is_err(),
+        "an applied ACK is separate from durable ciphertext custody"
+    );
+    replica
+        .set_partition_custody(f.public, PartitionCustody::default())
         .await
         .unwrap();
     assert_eq!(replica.drop_tip(dev).await.unwrap(), 1);

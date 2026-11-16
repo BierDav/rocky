@@ -282,6 +282,186 @@ async fn a_custodian_alone_restores_an_unwitnessed_view() -> Result<(), Failure>
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn partition_custody_receipts_and_a_keyless_backup_restore_only_retained_data()
+-> Result<(), Failure> {
+    use rocky_sdk::{
+        PartitionCustody, PartitionSelection, PartitionTarget, ReplicaRole, ReplicaRoleConfig,
+        SqlValue,
+    };
+    let directory = tempfile::tempdir()?;
+    let hub = hub();
+    let schema = Schema::parse(&common::SCHEMA.replace(
+        r#""primary_key":["key"]"#,
+        r#""primary_key":["key"],"partition_by":["key"],"partition_group":"list""#,
+    ))?;
+    let configuration = |path: &Path, name: &str| -> Result<Configuration, Failure> {
+        Ok(Configuration::new(path, &schema)?.network(Network::Owned(hub.connector(name))))
+    };
+    let owner_path = directory.path().join("owner");
+    let owner = Device::new(
+        configuration(&owner_path, "owner")?
+            .create_personal(prf(), namespace())
+            .await?
+            .opened,
+    )?;
+    owner.session.set_automatic_sync(false).await?;
+    let target = |key: &str| PartitionTarget::Table {
+        table: "items".into(),
+        values: vec![SqlValue::Text(key.into())],
+    };
+    for key in ["registry", "chat"] {
+        owner.session.create_partition(target(key)).await?;
+        owner.session.execute("BEGIN", vec![]).await?;
+        let id = owner
+            .session
+            .next_partition_id("items", vec![SqlValue::Text(key.into())])
+            .await?;
+        owner
+            .session
+            .execute(
+                "INSERT INTO items(key,id,title,completed) VALUES(?,?,?,0)",
+                vec![
+                    SqlValue::Text(key.into()),
+                    id.sql(),
+                    SqlValue::Text(format!("{key} confidential")),
+                ],
+            )
+            .await?;
+        owner.session.execute("COMMIT", vec![]).await?;
+    }
+    let invitation = owner
+        .session
+        .invitation_with(GrantProfile::Custody {
+            scopes: ["items".to_owned()].into(),
+        })
+        .await?
+        .uri;
+    let keeper_path = directory.path().join("custody");
+    let keeper = Device::new(
+        configuration(&keeper_path, "custody")?
+            .join(&invitation)
+            .await?,
+    )?;
+    keeper.session.set_automatic_sync(false).await?;
+    common::introduce(&owner, &keeper).await;
+    owner
+        .session
+        .set_replica_role(ReplicaRoleConfig {
+            role: ReplicaRole::Partial,
+        })
+        .await?;
+    for key in ["registry", "chat"] {
+        owner
+            .session
+            .subscribe_partition(target(key), PartitionSelection::default())
+            .await?;
+    }
+    let registry = owner
+        .session
+        .partition_address("items", vec![SqlValue::Text("registry".into())])
+        .await?
+        .scope;
+    let chat = owner
+        .session
+        .partition_address("items", vec![SqlValue::Text("chat".into())])
+        .await?
+        .scope;
+    owner
+        .session
+        .set_partition_custody(
+            registry,
+            PartitionCustody {
+                peers: [rocky_credentials::PeerId::of(
+                    keeper.session.info().await?.node,
+                )]
+                .into(),
+                copies: 1,
+            },
+        )
+        .await?;
+    owner
+        .session
+        .set_partition_custody(chat, PartitionCustody::default())
+        .await?;
+    assert!(
+        owner
+            .session
+            .evict_partition(target("registry"), Default::default())
+            .await
+            .is_err()
+    );
+    owner.sync_once().await?;
+    assert_eq!(
+        owner.titles().await,
+        ["chat confidential", "registry confidential"]
+    );
+    assert!(
+        !owner
+            .session
+            .evict_partition(target("registry"), Default::default())
+            .await?
+            .recovery_unconfirmed
+    );
+    keeper
+        .session
+        .set_replica_role(ReplicaRoleConfig {
+            role: ReplicaRole::Partial,
+        })
+        .await?;
+    keeper
+        .session
+        .subscribe_partition(target("registry"), PartitionSelection::default())
+        .await?;
+    keeper
+        .session
+        .evict_partition(target("chat"), Default::default())
+        .await?;
+    assert!(
+        owner
+            .session
+            .evict_partition(target("chat"), Default::default())
+            .await?
+            .recovery_unconfirmed
+    );
+    assert_eq!(secrets_named(&keeper_path, ".partition-naming")?, 0);
+    assert!(
+        saved(&keeper_path)?["keys"]
+            .as_object()
+            .is_some_and(|keys| keys.is_empty())
+    );
+    assert!(
+        keeper
+            .session
+            .read(rocky_sdk::ReadQuery::new("SELECT title FROM items", 8))
+            .await
+            .is_err()
+    );
+    let archive = directory.path().join("custody.backup");
+    keeper.database.backup(&archive).await?;
+    owner.close().await;
+    keeper.close().await;
+    assert!(files(&keeper_path)?.values().all(|bytes| {
+        !bytes
+            .windows(b"registry confidential".len())
+            .any(|window| window == b"registry confidential")
+    }));
+    std::fs::remove_dir_all(owner_path)?;
+    let path = directory.path().join("restored");
+    let restored = Configuration::new(&path, &schema)?
+        .sign_in(
+            prf(),
+            namespace(),
+            SignInSource::Backup(VerifiedBackup::open(&archive)?),
+        )
+        .await?;
+    assert!(restored.restored.naming);
+    let restored = Device::new(restored.opened)?;
+    assert_eq!(restored.titles().await, ["registry confidential"]);
+    restored.close().await;
+    Ok(())
+}
+
 /// An owner and a custodian holding "kept by custody", which announces
 /// under the bootstrap topic; the owner closed, its directory kept.
 async fn custody(directory: &Path, hub: &Arc<Hub>) -> Result<(PathBuf, Device), Failure> {
@@ -335,6 +515,10 @@ async fn a_custodian_without_the_naming_record_reports_it_and_nothing_replaces_i
         held["naming_escrow"]
     );
     held["naming_escrow"] = Value::Null;
+    let connection = rusqlite::Connection::open(custodian_path.join("rocky.sqlite"))?;
+    let table: String = connection.query_row("SELECT name FROM sqlite_schema WHERE type='table' AND name LIKE '%secure_custody_metadata'", [], |row| row.get(0))?;
+    connection.execute(&format!("DELETE FROM [{table}]"), [])?;
+    drop(connection);
     std::fs::write(
         custodian_path.join("identity.json"),
         serde_json::to_vec(&held)?,

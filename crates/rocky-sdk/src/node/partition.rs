@@ -16,6 +16,25 @@ pub(super) enum Naming {
     Sealed(rocky_core::PartitionName),
 }
 impl Node {
+    async fn offered_group_name(
+        &self,
+        partition: &GroupPartition,
+    ) -> Result<Option<rocky_core::PartitionName>, Failure> {
+        let mut name = None;
+        for member in &partition.members {
+            if let Some((_, offered)) = self
+                .replica
+                .registered_partition(member.scope.domain, member.scope.table, &member.tuple)
+                .await?
+            {
+                if name.is_some_and(|name| name != offered) {
+                    return Err(refused("conflicting offered group names"));
+                }
+                name = Some(offered);
+            }
+        }
+        Ok(name)
+    }
     async fn group_partition(
         &self,
         target: &crate::PartitionTarget,
@@ -25,23 +44,29 @@ impl Node {
         let known = self.settings.lock().await.groups.clone();
         let naming_key = crate::groups::naming_key(&self.vault)?;
         let issuer = self.vault.find(crate::groups::NAMING_ROLE)?.is_some();
-        GroupPartition::resolve(
-            &self.domain(),
-            group,
-            table,
-            values.to_vec(),
-            |address| match known.get(&record_key(address)) {
+        let unnamed =
+            GroupPartition::resolve(&self.domain(), group, table, values.to_vec(), |_| {
+                Ok([0; 32])
+            })?;
+        let offered = if naming == Naming::Known
+            && !issuer
+            && !known.contains_key(&record_key(&unnamed.record.address))
+        {
+            self.offered_group_name(&unnamed).await?
+        } else {
+            None
+        };
+        GroupPartition::resolve(&self.domain(), group, table, values.to_vec(), |address| {
+            match known.get(&record_key(address)) {
                 Some(record) => Ok(record.name),
                 None if let Naming::Sealed(name) = naming => Ok(name),
                 // Issuers name every partition an issuer creates alike.
                 None if naming == Naming::Create || issuer => {
                     Ok(rocky_secure::created_name(&naming_key, address))
                 }
-                None => Err(refused(
-                    "this device does not know the partition: its group secret or a custody offer names it",
-                )),
-            },
-        )
+                None => offered.ok_or_else(|| refused("this device does not know the partition: its group secret or a custody offer names it")),
+            }
+        })
     }
     /// A requested partition this device does not know; its scopes stay
     /// unnamed and must not be used.
@@ -60,7 +85,12 @@ impl Node {
             .await
             .groups
             .contains_key(&record_key(&unnamed.record.address));
-        Ok((!known).then_some(unnamed))
+        let offered = if known {
+            true
+        } else {
+            self.offered_group_name(&unnamed).await?.is_some()
+        };
+        Ok((!offered).then_some(unnamed))
     }
     /// The partition's naming secret an envelope seals, opened as
     /// `install_envelope` opens it.
@@ -821,6 +851,8 @@ impl Node {
                 let report = self.replica.evict(member.scope).await?;
                 evicted.rows += report.rows as u64;
                 evicted.operations += report.operations as u64;
+                evicted.checkpoints += report.checkpoints;
+                evicted.recovery_unconfirmed |= report.recovery_unconfirmed;
             }
             self.activity.record(crate::ActivityKind::PartitionEvicted {
                 target: target.clone(),
@@ -876,8 +908,7 @@ impl Node {
     }
     fn save_bootstrap(&self, added: Vec<ResourceScope>) -> Result<(), Failure> {
         let marker = self.path.with_file_name("bootstrap.json");
-        // A pending intent waits for a peer that offers checkpoints, which a
-        // keyless custody peer never does: later partitions join it.
+        // Later partitions join a pending checkpoint-first intent.
         let mut intent = if rocky_platform::fs::exists(&marker) {
             serde_json::from_slice::<Value>(&rocky_platform::fs::read(&marker)?)?
         } else {

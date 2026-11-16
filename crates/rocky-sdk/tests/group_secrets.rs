@@ -735,10 +735,8 @@ async fn a_phone_holds_a_list_and_its_items_while_leaving_out_attachments() {
     issuer.share("A", &[&device]).await.unwrap();
     snap::ok(
         phone.session.set_replica_role(
-            serde_json::from_value::<rocky_sdk::ReplicaRoleConfig>(
-                json!({"role":"Partial","full_nodes":[],"custody":0}),
-            )
-            .expect("typed fixture"),
+            serde_json::from_value::<rocky_sdk::ReplicaRoleConfig>(json!({"role":"Partial"}))
+                .expect("typed fixture"),
         ),
     )
     .await;

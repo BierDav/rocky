@@ -3,7 +3,7 @@ use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
 /// The handshake's version; its signing label carries it, so another is refused.
-pub(super) const HANDSHAKE_VERSION: u32 = 28;
+pub(super) const HANDSHAKE_VERSION: u32 = 29;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
 mod lanes;
@@ -803,7 +803,7 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn only_current_link_name_and_handshake_label() {
         // The cryptographic handshake accepts one current version.
-        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v28");
+        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v29");
     }
 }
 

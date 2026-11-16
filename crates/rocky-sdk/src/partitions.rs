@@ -49,6 +49,14 @@ pub struct PartitionShare {
     pub sender: Option<CredentialChain>,
 }
 impl Session {
+    pub async fn set_partition_custody(
+        &self,
+        scope: rocky_core::ResourceScope,
+        policy: crate::PartitionCustody,
+    ) -> Result<(), Failure> {
+        self.send(|reply| Request::PartitionCustody(scope, policy, reply))
+            .await
+    }
     pub async fn set_replica_role(&self, role: crate::ReplicaRoleConfig) -> Result<(), Failure> {
         self.send(|reply| Request::ReplicaRole(role, reply)).await
     }
@@ -114,6 +122,9 @@ pub struct PartitionDelivery {
 pub struct PartitionEviction {
     pub rows: u64,
     pub operations: u64,
+    pub checkpoints: u64,
+    /// At least one evicted member has no confirmed remote durable copy.
+    pub recovery_unconfirmed: bool,
 }
 /// Tables left out of holding, bootstrap or eviction; a sealed name lets custody register a partition.
 #[derive(Clone, Debug, Default)]

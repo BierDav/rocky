@@ -1,6 +1,5 @@
 //! Key epochs of a reader scope: one current key that seals new writes and
-//! the earlier ones kept to open retained ciphertext. See
-//! `docs/runtime/credentials.md`.
+//! the earlier ones kept to open retained ciphertext.
 use super::*;
 
 pub(super) const SCHEMA: &[&str] = &[
@@ -86,7 +85,11 @@ impl<A: RowApplication> Inner<A> {
     /// it must be signed by a node whose chain, at the signing time and
     /// under the current revocations, let it read the whole scope, as a
     /// frame's author is judged.
-    fn judge_escrow(&self, vouched: &VouchedEscrow, time: u64) -> Result<Vec<u8>, &'static str> {
+    pub(super) fn judge_escrow(
+        &self,
+        vouched: &VouchedEscrow,
+        time: u64,
+    ) -> Result<Vec<u8>, &'static str> {
         if vouched.verify().is_err() {
             return Err("its vouch signature does not verify");
         }
@@ -643,18 +646,42 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// epoch: one per issuer, the root-issued identity atop the vouching
     /// chain, which a record under the same issuer replaces. Any other
     /// record is refused and counted against `peer` (`escrow_refusals`).
+    #[cfg(test)]
     pub(crate) async fn keep_carried_escrow(
         &self,
         peer: PublicKey,
         records: Vec<VouchedEscrow>,
     ) -> Result<(), Error> {
-        if records.is_empty() {
+        self.keep_carried_dependencies(peer, records, None).await
+    }
+    /// Boxes the inner future because every sync pull path awaits it.
+    pub(crate) async fn keep_carried_dependencies(
+        &self,
+        peer: PublicKey,
+        records: Vec<VouchedEscrow>,
+        metadata: Option<Box<rocky_credentials::MetadataEscrow>>,
+    ) -> Result<(), Error> {
+        Box::pin(self.keep_carried_dependencies_inner(peer, records, metadata)).await
+    }
+    async fn keep_carried_dependencies_inner(
+        &self,
+        peer: PublicKey,
+        records: Vec<VouchedEscrow>,
+        metadata: Option<Box<rocky_credentials::MetadataEscrow>>,
+    ) -> Result<(), Error> {
+        if records.is_empty() && metadata.is_none() {
             return Ok(());
         }
         let time = now()?;
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(@cache_neutral inner, |inner| {
-            inner.keep_carried_escrow_rows(peer, &records, time).await
+            inner.keep_carried_escrow_rows(peer, &records, time).await?;
+            if let Some(record) = &metadata {
+                inner.store_custody_metadata(record).await?;
+            }
+            inner.check_archive_quota(0).await?;
+            inner.fault(checkpoint::Stage::Custody)?;
+            Ok(())
         })
     }
     /// The carried root escrow records refused, by peer: how many and the
@@ -759,6 +786,20 @@ async fn escrow_inventory(
         };
         let header: p2panda_core::Header<Extensions> = decode(header)?;
         held.insert((header.extensions.scope, header.extensions.generation));
+    }
+    for row in rows(
+        conn,
+        "SELECT signed FROM secure_checkpoint_archive WHERE complete=1",
+    )
+    .await?
+    {
+        let [SqlValue::Blob(bytes)] = row.as_slice() else {
+            return Err(Error::Corrupt("custody checkpoint inventory".into()));
+        };
+        let signed = SignedCheckpoint::from_bytes(bytes)?;
+        if let Some(epoch) = signed.statement.key_epoch() {
+            held.insert((signed.statement.scope, epoch));
+        }
     }
     Ok((records, held))
 }

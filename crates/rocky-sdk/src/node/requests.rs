@@ -304,6 +304,15 @@ impl Node {
             Request::SignCoordinationGrant(tenant, lifetime, root, reply) => {
                 let _ = reply.send(self.sign_coordination_grant(tenant, lifetime, &root).await);
             }
+            Request::PartitionCustody(scope, policy, reply) => {
+                let result = self
+                    .replica
+                    .set_partition_custody(scope, policy)
+                    .await
+                    .map_err(Into::into);
+                self.wake_sync();
+                let _ = reply.send(result);
+            }
             Request::ReplicaRole(role, reply) => {
                 let _ = reply.send(self.set_replica_role(role).await);
             }

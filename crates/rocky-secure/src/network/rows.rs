@@ -7,6 +7,13 @@ pub(super) const MAX_SECURE_PAGE: usize = 32;
 
 #[derive(Serialize, Deserialize)]
 pub(super) enum RowMessage {
+    CustodyQuery {
+        scope: ResourceScope,
+        challenge: Commitment,
+    },
+    CustodyReceipt {
+        receipt: Option<Box<crate::replica::custody::CustodyReceipt>>,
+    },
     MigrationQuery {
         publication: Commitment,
     },
@@ -271,6 +278,7 @@ impl NativeSession {
             if after.is_none() {
                 replica.restored(scope).await?;
                 self.resolve_revoked_heads(replica, scope).await?;
+                self.request_custody(replica, scope).await?;
                 return Ok(report);
             }
         }
@@ -318,6 +326,7 @@ impl NativeSession {
                 return Ok(pushed);
             }
             if page.frames.is_empty() && page.voids.is_empty() {
+                self.request_custody(replica, scope).await?;
                 return Ok(pushed);
             }
             pushed.frames += page.frames.len();
@@ -345,6 +354,7 @@ impl NativeSession {
             frontier = theirs;
             after = page.next;
             if after.is_none() {
+                self.request_custody(replica, scope).await?;
                 return Ok(pushed);
             }
         }
@@ -367,6 +377,49 @@ impl NativeSession {
             .acknowledge_frontier(self.peer, &self.credentials, &frontier)
             .await?;
         Ok(frontier)
+    }
+    /// A separate signed, flushed storage attestation; row ACKs never count.
+    pub async fn request_custody<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scope: ResourceScope,
+    ) -> Result<(), Error> {
+        Box::pin(self.request_custody_inner(replica, scope)).await
+    }
+    async fn request_custody_inner<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scope: ResourceScope,
+    ) -> Result<(), Error> {
+        if !replica
+            .partition_custody(scope)
+            .await?
+            .peers
+            .contains(&rocky_credentials::PeerId::of(self.peer))
+        {
+            return Ok(());
+        }
+        self.ensure_holding(replica, &[scope]).await?;
+        self.carry_escrow_slots(replica, replica.custody_escrow_slots(scope).await?)
+            .await?;
+        self.push_checkpoint_custody(replica, scope).await?;
+        let challenge = rocky_platform::entropy::random();
+        replica
+            .begin_custody_challenge(self.peer, scope, self.binding, challenge)
+            .await?;
+        self.send(RowMessage::CustodyQuery { scope, challenge })
+            .await?;
+        let RowMessage::CustodyReceipt { receipt } = self.reply::<RowMessage>().await? else {
+            return Err(denied("unexpected custody response"));
+        };
+        if let Some(receipt) = receipt {
+            replica
+                .record_custody_receipt(self.peer, scope, self.binding, challenge, *receipt)
+                .await?;
+        } else {
+            replica.forget_custody_receipt(self.peer, scope).await?;
+        }
+        Ok(())
     }
     /// Scopes the peer holds and this replica may hold too, 64 per page.
     pub async fn peer_scopes(
@@ -415,6 +468,26 @@ impl NativeSession {
         }
         Ok(page)
     }
+    /// Boxed: receipt construction would otherwise enlarge every row answer.
+    async fn answer_custody<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scope: ResourceScope,
+        challenge: Commitment,
+    ) -> Result<(), Error> {
+        self.require_holding(replica, scope).await?;
+        replica
+            .authorize_scope_peer(self.peer, &self.credentials, scope)
+            .await?;
+        self.keep_pending_escrow(replica, scope).await?;
+        let receipt = replica
+            .custody_receipt(self.peer, &self.credentials, scope, self.binding, challenge)
+            .await?;
+        self.send(RowMessage::CustodyReceipt {
+            receipt: receipt.map(Box::new),
+        })
+        .await
+    }
     pub(super) async fn answer_rows<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -428,6 +501,9 @@ impl NativeSession {
                 .same_tip_peer(self.peer)?;
         }
         match message {
+            RowMessage::CustodyQuery { scope, challenge } => {
+                Box::pin(self.answer_custody(replica, scope, challenge)).await
+            }
             RowMessage::MigrationQuery { publication } => {
                 let inner = replica.inner.lock(crate::replica::Class::Background).await;
                 self.credentials
@@ -501,10 +577,10 @@ impl NativeSession {
                 // An incomplete frame is not received; the frontier that
                 // answers the push shows the sender what is still missing.
                 let (frames, _) = self.complete_frames(frames)?;
-                self.keep_escrow(replica, &frames).await?;
-                for status in replica.receive_migration_all(frames).await {
+                for status in replica.receive_migration_all(frames.clone()).await {
                     status?;
                 }
+                self.keep_escrow(replica, &frames).await?;
                 let frontier = replica.frontier(scope).await?;
                 self.send(RowMessage::Frontier { frontier }).await
             }

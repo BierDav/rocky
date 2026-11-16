@@ -356,9 +356,12 @@ impl Node {
                 naming: if ended {
                     None
                 } else {
-                    match crate::escrow::seal_naming(&settings, &self.vault)? {
+                    match self.replica.custody_naming_escrow().await? {
                         Some(record) => Some(record),
-                        None => settings.naming_escrow.clone(),
+                        None => match crate::escrow::seal_naming(&settings, &self.vault)? {
+                            Some(record) => Some(record),
+                            None => settings.naming_escrow.clone(),
+                        },
                     }
                 },
             }))

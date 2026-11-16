@@ -27,16 +27,11 @@ pub enum ReplicaRole {
     /// Holds only subscribed scopes and may evict them.
     Partial,
 }
-/// The local role and the peers this replica relies on as full replica nodes.
+/// Local holding behavior. Custody prerequisites belong to each partition.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RoleConfig {
     pub role: ReplicaRole,
-    /// Peers trusted as full replica nodes, pinned by key.
-    pub full_nodes: BTreeSet<PeerId>,
-    /// Full nodes that must have applied an operation before it is pruned or
-    /// evicted. Zero keeps pruning on the retention policy alone; eviction
-    /// always needs at least one.
-    pub custody: usize,
 }
 /// Whether a scope is held, and where an eviction stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,7 +212,7 @@ pub struct ScopeStatus {
     pub pruned_logs: usize,
     /// Operations this node authored in the scope.
     pub local_operations: u64,
-    /// Per configured full node: local operations it has applied.
+    /// Per eligible custodian: local operations covered by a durable receipt.
     pub custody: Vec<(PeerId, u64)>,
     pub peers: Vec<PeerLag>,
 }
@@ -588,29 +583,6 @@ impl<A: RowApplication> Inner<A> {
         // A lost report only delays pruning, which flushes before publishing.
         Ok(())
     }
-    /// What `peer` last reported for one log: (held, applied) next sequences.
-    pub(crate) async fn peer_mark(
-        &self,
-        peer: PeerId,
-        scope: &[u8],
-        author: PublicKey,
-    ) -> Result<(u64, u64), Error> {
-        let mut result = self
-            .conn
-            .query(
-                "SELECT held,applied FROM secure_peer_frontiers WHERE peer=? AND scope=? AND author=?",
-                bindings(vec![
-                    SqlValue::Blob(peer.as_bytes().to_vec()),
-                    SqlValue::Blob(scope.to_vec()),
-                    SqlValue::Blob(author.as_bytes().to_vec()),
-                ]),
-            )
-            .await?;
-        Ok(match result.next().await? {
-            Some(row) => (row.get::<i64>(0)? as u64, row.get::<i64>(1)? as u64),
-            None => (0, 0),
-        })
-    }
     /// Peers whose frontier covers one operation: held, and applied.
     pub(crate) async fn covering_peers(
         &self,
@@ -874,17 +846,9 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Declares this replica's role and the full replica nodes it relies on.
+    /// Declares this replica's local holding behavior.
     pub async fn set_role(&self, config: RoleConfig) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        if config.full_nodes.len() > 64
-            || config.custody > config.full_nodes.len()
-            || config
-                .full_nodes
-                .contains(&PeerId::of(inner.config.node.public_key()))
-        {
-            return Err(denied("invalid role configuration"));
-        }
         let evicting = rows(
             &inner.conn,
             "SELECT 1 FROM secure_subscriptions WHERE state='evicting' LIMIT 1",
@@ -947,11 +911,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         transaction!(inner, |inner| inner.set_holding(scope, Holding::Held).await)
     }
-    /// Stops holding new frames of the scope. Rows already held stay; they
-    /// are neither deleted nor reported complete. A partial replica that
-    /// wrote there leaves only once enough full nodes applied every frame
-    /// it wrote, as eviction requires: a left scope no longer syncs, so
-    /// they would reach no one.
+    /// Stops following the scope while retaining its rows. A partial writer
+    /// first satisfies this partition's custody prerequisite.
     pub async fn unsubscribe(&self, scope: ResourceScope) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         match inner.holding(scope).await? {
@@ -964,11 +925,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     None => false,
                 };
                 if role.role == ReplicaRole::Partial && wrote {
-                    let needed = role.custody.max(1);
-                    let covering = inner.custody_coverage(scope, &role.full_nodes).await?;
+                    let needed = inner.partition_custody(scope).await?.copies;
+                    let covering = if needed == 0 {
+                        0
+                    } else {
+                        inner.custody_coverage(scope).await?
+                    };
                     if covering < needed {
                         return Err(denied(&format!(
-                            "leaving needs {needed} full nodes to have applied every local operation; {covering} have"
+                            "leaving needs {needed} durable custody receipts; {covering} cover the scope"
                         )));
                     }
                 }
@@ -1220,11 +1185,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 }
                 entry.pruned_logs = inner.logs(id, None, true, MAX_CHECKPOINT_LOGS).await?.len();
             }
-            for node in &role.full_nodes {
-                let (_, applied) = inner.peer_mark(*node, &blob, me).await?;
-                entry
-                    .custody
-                    .push((*node, applied.min(entry.local_operations)));
+            let receipts = inner.durable_custodians(scope).await?;
+            for peer in inner.partition_custody(scope).await?.peers {
+                let held = receipts
+                    .iter()
+                    .find(|receipt| receipt.peer() == peer)
+                    .map_or(0, |receipt| receipt.held(me));
+                entry.custody.push((peer, held.min(entry.local_operations)));
             }
             let peers = collect_rows(
                 inner

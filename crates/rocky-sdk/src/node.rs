@@ -1288,7 +1288,10 @@ impl Node {
             let settings = self.settings.lock().await;
             let database = staging.join("rocky.sqlite");
             let revision = self.replica.backup_into(&database).await?;
-            let snapshot = settings.clone();
+            let mut snapshot = settings.clone();
+            if let Some(naming) = self.replica.custody_naming_escrow().await? {
+                snapshot.naming_escrow = Some(naming);
+            }
             drop(settings);
             let settings = snapshot;
             let identity = staging.join("identity.json");

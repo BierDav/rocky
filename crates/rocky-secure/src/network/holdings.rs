@@ -282,7 +282,8 @@ impl NativeSession {
                 RowMessage::FrontierQuery { scope }
                 | RowMessage::Push { scope, .. }
                 | RowMessage::Read { scope, .. }
-                | RowMessage::RevokedHeadsQuery { scope, .. } => vec![*scope],
+                | RowMessage::RevokedHeadsQuery { scope, .. }
+                | RowMessage::CustodyQuery { scope, .. } => vec![*scope],
                 _ => Vec::new(),
             },
             Message::HeldChanges(
@@ -297,7 +298,7 @@ impl NativeSession {
             Message::Checkpoints(CheckpointMessage::ArchiveBegin { signed }) => {
                 vec![signed.statement.scope]
             }
-            Message::Checkpoints(CheckpointMessage::ArchivePage { page }) => vec![page.scope],
+            Message::Checkpoints(CheckpointMessage::ArchivePage { page, .. }) => vec![page.scope],
             _ => Vec::new(),
         };
         for scope in scopes {

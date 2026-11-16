@@ -1,6 +1,7 @@
 //! Signed checkpoints, pruning and rebootstrap of one encryption scope.
 //! Format and rules: `docs/runtime/encrypted-checkpoints.md`.
 mod archive;
+pub(crate) use archive::CheckpointVouch;
 #[cfg(test)]
 mod backend_vectors;
 pub(super) use archive::SCHEMA as ARCHIVE_SCHEMA;
@@ -555,6 +556,7 @@ pub struct CheckpointStatus {
 /// Fault points of the bounded maintenance steps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stage {
+    Custody,
     #[cfg(test)]
     AuditReplay,
     #[cfg(test)]

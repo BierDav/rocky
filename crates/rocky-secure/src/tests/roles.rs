@@ -224,14 +224,9 @@ async fn connect_with(
     });
     (session.with_budget(budget), task)
 }
-fn partial(full: &[&Node], custody: usize) -> RoleConfig {
+fn partial() -> RoleConfig {
     RoleConfig {
         role: ReplicaRole::Partial,
-        full_nodes: full
-            .iter()
-            .map(|node| rocky_credentials::PeerId::of(node.key.public_key()))
-            .collect(),
-        custody,
     }
 }
 fn keep_one_copy() -> RetentionPolicy {
@@ -356,7 +351,7 @@ async fn a_partial_replica_holds_only_its_subscription() {
         &scopes,
     )
     .await;
-    device.replica.set_role(partial(&[&full], 1)).await.unwrap();
+    device.replica.set_role(partial()).await.unwrap();
     device.replica.subscribe(scopes[3]).await.unwrap();
     for scope in &scopes {
         insert(&f, &full, *scope, 0..20, 5).await;
@@ -422,7 +417,7 @@ async fn a_partial_replica_holds_only_its_subscription() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn eviction_needs_applied_custody_and_a_resubscribed_scope_converges() {
+async fn eviction_needs_fresh_durable_custody_and_a_resubscribed_scope_converges() {
     let f = Fixture::new();
     let dir = Scratch::new().await;
     let scopes = departments(&f, 2);
@@ -460,13 +455,14 @@ async fn eviction_needs_applied_custody_and_a_resubscribed_scope_converges() {
     .await;
     let scope = scopes[0];
     for node in [&device, &other] {
-        node.replica.set_role(partial(&[&full], 1)).await.unwrap();
+        node.replica.set_role(partial()).await.unwrap();
         node.replica.subscribe(scope).await.unwrap();
     }
     insert(&f, &device, scope, 0..30, 3).await;
     rename(&f, &device, scope, 0, "row 0", "renamed").await;
 
-    // No acknowledgment, then a custody-only receipt: both are refused.
+    custody::escrow(&f, &device, &[scope]).await;
+    custody::policy(&device, scope, &[&full], 1).await;
     assert!(device.replica.evict(scope).await.is_err());
     let (mut session, server) = connect(&device, &custodian).await;
     assert_eq!(
@@ -479,19 +475,11 @@ async fn eviction_needs_applied_custody_and_a_resubscribed_scope_converges() {
     );
     drop(session);
     server.await.unwrap();
-    device
-        .replica
-        .set_role(RoleConfig {
-            full_nodes: [
-                rocky_credentials::PeerId::of(full.key.public_key()),
-                rocky_credentials::PeerId::of(custodian.key.public_key()),
-            ]
-            .into(),
-            ..partial(&[], 0)
-        })
-        .await
-        .unwrap();
-    assert!(device.replica.evict(scope).await.is_err());
+    custody::policy(&device, scope, &[&full, &custodian], 1).await;
+    assert!(
+        device.replica.evict(scope).await.is_err(),
+        "transport acknowledgments from an ineligible peer earn no custody credit"
+    );
 
     // The full node applies the pushed frames; its frontier is custody.
     let (mut session, server) = connect(&device, &full).await;
@@ -639,7 +627,7 @@ async fn a_resubscribed_scope_without_own_writes_reads_incomplete_until_restored
     )
     .await;
     insert(&f, &full, scope, 0..10, 2).await;
-    device.replica.set_role(partial(&[&full], 1)).await.unwrap();
+    device.replica.set_role(partial()).await.unwrap();
     device.replica.subscribe(scope).await.unwrap();
     let restoring = || async {
         device
@@ -674,18 +662,10 @@ async fn a_resubscribed_scope_without_own_writes_reads_incomplete_until_restored
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn pruning_counts_full_nodes_only_once_they_applied() {
+async fn pruning_requires_complete_escrow_and_counts_a_keyless_receipt() {
     let f = Fixture::new();
     let dir = Scratch::new().await;
     let scope = department(&f, 0);
-    let full = open_node(
-        &f,
-        &dir.path().join("full.db"),
-        &PrivateKey::new(),
-        &[scope],
-        &[scope],
-    )
-    .await;
     let custodian = open_node(
         &f,
         &dir.path().join("custodian.db"),
@@ -707,12 +687,6 @@ async fn pruning_counts_full_nodes_only_once_they_applied() {
         .replica
         .set_role(RoleConfig {
             role: ReplicaRole::Partial,
-            full_nodes: [
-                rocky_credentials::PeerId::of(full.key.public_key()),
-                rocky_credentials::PeerId::of(custodian.key.public_key()),
-            ]
-            .into(),
-            custody: 1,
         })
         .await
         .unwrap();
@@ -723,6 +697,7 @@ async fn pruning_counts_full_nodes_only_once_they_applied() {
         .await
         .unwrap();
     compacted_base(&device.replica, &f.publisher, scope).await;
+    custody::policy(&device, scope, &[&custodian], 1).await;
     // A custody-only full node holds every frame but cannot apply them.
     let (mut session, server) = connect(&device, &custodian).await;
     session.push(&device.replica, scope, QUOTA).await.unwrap();
@@ -733,12 +708,13 @@ async fn pruning_counts_full_nodes_only_once_they_applied() {
     assert!(matches!(
         blocked.blocked,
         Some(PruneBlock::Custody {
-            applied: 0,
+            durable: 0,
             needed: 1,
             ..
         })
     ));
-    let (mut session, server) = connect(&device, &full).await;
+    custody::escrow(&f, &device, &[scope]).await;
+    let (mut session, server) = connect(&device, &custodian).await;
     session.push(&device.replica, scope, QUOTA).await.unwrap();
     drop(session);
     server.await.unwrap();
@@ -775,7 +751,7 @@ async fn a_remote_read_states_its_source_and_is_never_local_state() {
         &scopes[..1],
     )
     .await;
-    device.replica.set_role(partial(&[&full], 1)).await.unwrap();
+    device.replica.set_role(partial()).await.unwrap();
     device.replica.subscribe(scopes[0]).await.unwrap();
     insert(&f, &full, scopes[1], 0..50, 10).await;
     let revision = *device.replica.observe_revision().borrow();
@@ -905,7 +881,7 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
         &scopes,
     )
     .await;
-    device.replica.set_role(partial(&[&full], 1)).await.unwrap();
+    device.replica.set_role(partial()).await.unwrap();
     device.replica.subscribe(scopes[0]).await.unwrap();
     device.replica.subscribe(scopes[1]).await.unwrap();
     for scope in &scopes {
@@ -1100,11 +1076,7 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
     }
     // The device continues against the replacement.
     rename(&f, &device, scopes[0], 3, "row 3", "moved").await;
-    device
-        .replica
-        .set_role(partial(&[&replacement], 1))
-        .await
-        .unwrap();
+    device.replica.set_role(partial()).await.unwrap();
     let (mut session, server) = connect(&device, &replacement).await;
     assert_eq!(
         session
@@ -1157,7 +1129,7 @@ async fn a_far_behind_replica_catches_up_while_both_sides_keep_writing() {
         &scopes,
     )
     .await;
-    device.replica.set_role(partial(&[&full], 1)).await.unwrap();
+    device.replica.set_role(partial()).await.unwrap();
     device.replica.subscribe(scopes[0]).await.unwrap();
     device.replica.subscribe(scopes[1]).await.unwrap();
     const CATCH_UP_ROWS: u32 = 128;
@@ -1298,3 +1270,5 @@ async fn a_sync_larger_than_a_session_continues_on_the_next() {
         all_rows(&full.replica, scope).await
     );
 }
+
+mod custody;

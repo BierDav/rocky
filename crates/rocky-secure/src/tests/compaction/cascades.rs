@@ -255,8 +255,6 @@ async fn partial(replica: &Replica, full: &Replica, held: &[ResourceScope]) {
     replica
         .set_role(crate::RoleConfig {
             role: crate::ReplicaRole::Partial,
-            full_nodes: [rocky_credentials::PeerId::of(node)].into(),
-            custody: 1,
         })
         .await
         .unwrap();

@@ -102,7 +102,7 @@ impl<A: RowApplication> Inner<A> {
     /// bound. Configured peers and full nodes are never removed. A lost
     /// frontier only delays pruning, lost credentials a pruned_prefix deadline.
     pub(super) async fn bound_peers(&mut self) -> Result<(), Error> {
-        let full = self.role().await?.full_nodes;
+        let full = self.custody_peers().await?;
         let configured: BTreeSet<_> = self.configured.iter().copied().map(PeerId::of).collect();
         let mut unconfigured = Vec::new();
         for record in rows(

@@ -19,13 +19,19 @@ const RECONSTRUCTED_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Serialize, Deserialize)]
 pub(super) enum EscrowMessage {
     /// Records of the key epochs the next page's frames name. It has no answer.
-    Carry { records: Vec<CarriedEscrow> },
+    Carry {
+        records: Vec<CarriedEscrow>,
+        metadata: Option<Box<rocky_credentials::MetadataEscrow>>,
+    },
 }
 
 /// Lives one session, like the chain table.
 #[derive(Default)]
 pub(super) struct EscrowTable {
     sent: BTreeSet<Slot>,
+    metadata_sent: bool,
+    /// Boxed so the large record does not enlarge every session future.
+    metadata: Option<Box<rocky_credentials::MetadataEscrow>>,
     received: BTreeMap<Slot, Vec<VouchedEscrow>>,
     /// Carried records seen, by digest: a repeat is neither stored nor charged.
     seen: BTreeSet<Commitment>,
@@ -52,7 +58,14 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         frames: &[EncryptedFrame],
     ) -> Result<(), Error> {
-        let fresh: BTreeSet<Slot> = slots(frames)?
+        self.carry_escrow_slots(replica, slots(frames)?).await
+    }
+    pub(super) async fn carry_escrow_slots<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        slots: BTreeSet<Slot>,
+    ) -> Result<(), Error> {
+        let fresh: BTreeSet<Slot> = slots
             .into_iter()
             .filter(|slot| self.escrow.sent.insert(*slot))
             .collect();
@@ -66,7 +79,13 @@ impl NativeSession {
             records.splice(0..0, std::mem::take(&mut self.escrow.forged));
             records
         };
-        if !records.is_empty() {
+        let metadata = if self.escrow.metadata_sent {
+            None
+        } else {
+            self.escrow.metadata_sent = true;
+            replica.custody_naming_escrow().await?.map(Box::new)
+        };
+        if !records.is_empty() || metadata.is_some() {
             self.carry_credentials(
                 records
                     .iter()
@@ -79,7 +98,8 @@ impl NativeSession {
                 .map(VouchedEscrow::carried)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(credential)?;
-            self.send(EscrowMessage::Carry { records }).await?;
+            self.send(EscrowMessage::Carry { records, metadata })
+                .await?;
         }
         Ok(())
     }
@@ -87,7 +107,10 @@ impl NativeSession {
     /// session's byte budget and the reconstruction quota bound them, and
     /// none is judged first-come.
     pub(super) fn learn_escrow(&mut self, message: EscrowMessage) -> Result<(), Error> {
-        let EscrowMessage::Carry { records } = message;
+        let EscrowMessage::Carry { records, metadata } = message;
+        if let Some(record) = metadata {
+            self.escrow.metadata = Some(record);
+        }
         for record in records {
             if !self.escrow.seen.insert(rocky_core::commitment(
                 "rocky.carried-escrow.v1",
@@ -136,7 +159,29 @@ impl NativeSession {
         for slot in slots(frames)? {
             kept.extend(self.escrow.received.remove(&slot).unwrap_or_default());
         }
-        replica.keep_carried_escrow(self.peer, kept).await
+        replica
+            .keep_carried_dependencies(self.peer, kept, self.escrow.metadata.take())
+            .await
+    }
+    pub(super) async fn keep_pending_escrow<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scope: ResourceScope,
+    ) -> Result<(), Error> {
+        let slots: Vec<_> = self
+            .escrow
+            .received
+            .keys()
+            .filter(|(held, _)| *held == scope)
+            .copied()
+            .collect();
+        let mut records = Vec::new();
+        for slot in slots {
+            records.extend(self.escrow.received.remove(&slot).unwrap_or_default());
+        }
+        replica
+            .keep_carried_dependencies(self.peer, records, self.escrow.metadata.take())
+            .await
     }
     #[cfg(test)]
     pub(crate) fn forge_escrow(&mut self, records: Vec<VouchedEscrow>) {
@@ -182,7 +227,10 @@ mod tests {
             .carried()
             .unwrap()
         };
-        let carried = |records| EscrowMessage::Carry { records };
+        let carried = |records| EscrowMessage::Carry {
+            records,
+            metadata: None,
+        };
         // A repeated record is neither kept nor charged again.
         session
             .learn_escrow(carried(vec![carry(0), carry(0)]))

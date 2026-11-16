@@ -131,6 +131,22 @@ impl World {
             config,
         )
         .await?;
+        let records = scopes
+            .iter()
+            .map(|scope| {
+                let secret = commitment("roles.key.v1", &scope.encryption);
+                let epoch = rocky_core::KeyEpoch::new(1, &secret);
+                Ok((
+                    Some((*scope, epoch)),
+                    rocky_secure::credentials::RootEscrow::seal(
+                        self.publisher.public_key(),
+                        rocky_secure::credentials::escrow_tag(self.publisher.public_key(), &secret),
+                        &secret,
+                    )?,
+                ))
+            })
+            .collect::<Result<Vec<_>, Failure>>()?;
+        replica.keep_escrow(records).await?;
         // A full node keeps everything it was not told it may drop.
         replica
             .set_retention_limits(RetentionLimits {
@@ -320,12 +336,24 @@ async fn push(client: &Node, server: &Node, scope: ResourceScope) -> Result<usiz
         }
     }
 }
-fn partial(full: &Node) -> RoleConfig {
-    RoleConfig {
-        role: ReplicaRole::Partial,
-        full_nodes: [rocky_secure::PeerId::of(full.key.public_key())].into(),
-        custody: 1,
+async fn partial(world: &World, node: &Node, full: &Node) -> Result<(), Failure> {
+    node.replica
+        .set_role(RoleConfig {
+            role: ReplicaRole::Partial,
+        })
+        .await?;
+    for scope in &world.scopes {
+        node.replica
+            .set_partition_custody(
+                *scope,
+                rocky_secure::PartitionCustody {
+                    peers: [rocky_secure::PeerId::of(full.key.public_key())].into(),
+                    copies: 1,
+                },
+            )
+            .await?;
     }
+    Ok(())
 }
 /// Authors `count` single-row edits of fresh rows in `scope`, timing each.
 async fn writes(
@@ -374,7 +402,7 @@ pub async fn run(total: usize, behind: usize) -> Result<(), Failure> {
     let a = open("a.db").await?;
     let b = open("b.db").await?;
     for node in [&a, &b] {
-        node.replica.set_role(partial(&full)).await?;
+        partial(&world, node, &full).await?;
     }
     let per_scope = total / SCOPES as usize;
     println!("roles rows={total} scopes={SCOPES} rows_per_scope={per_scope} behind={behind}");
@@ -591,7 +619,7 @@ pub async fn run(total: usize, behind: usize) -> Result<(), Failure> {
 
     // 5. The full node dies mid-transfer and mid-checkpoint-serve.
     let c = open("c.db").await?;
-    c.replica.set_role(partial(&full)).await?;
+    partial(&world, &c, &full).await?;
     c.replica.subscribe(world.scopes[1]).await?;
     c.replica.subscribe(world.scopes[4]).await?;
     let (mut session, task) = connect(&c, &full).await?;
@@ -668,7 +696,7 @@ pub async fn run(total: usize, behind: usize) -> Result<(), Failure> {
     }
     check(equal, "the replacement full node reaches the same state")?;
     for node in [&a, &b] {
-        node.replica.set_role(partial(&replacement)).await?;
+        partial(&world, node, &replacement).await?;
     }
     for (node, scope) in [(&a, 0), (&b, 1)] {
         sync(node, &replacement, world.scopes[scope]).await?;

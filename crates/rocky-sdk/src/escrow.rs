@@ -128,6 +128,20 @@ pub(crate) async fn keep(
     vault: &Vault,
     domain: &Domain,
 ) -> Result<(), Failure> {
+    let naming = match replica.custody_naming_escrow().await? {
+        Some(record) => Some(record),
+        None => match settings
+            .naming_escrow
+            .clone()
+            .filter(|record| judge_naming(record, settings, domain).is_ok())
+        {
+            Some(record) => Some(record),
+            None => seal_naming(settings, vault)?,
+        },
+    };
+    if let Some(record) = naming {
+        replica.keep_custody_metadata(record).await?;
+    }
     let held = replica.escrowed().await?;
     replica
         .keep_escrow(seal(settings, vault, domain, &held)?)

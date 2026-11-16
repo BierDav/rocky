@@ -19,7 +19,6 @@ impl AuditFixture {
             replica
                 .set_role(crate::RoleConfig {
                     role: crate::ReplicaRole::Partial,
-                    ..Default::default()
                 })
                 .await
                 .unwrap();

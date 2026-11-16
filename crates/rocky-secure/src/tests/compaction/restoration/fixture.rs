@@ -69,8 +69,6 @@ impl HeldPrefix {
         replica
             .set_role(crate::RoleConfig {
                 role: crate::ReplicaRole::Partial,
-                full_nodes: [rocky_credentials::PeerId::of(peer.public_key())].into(),
-                custody: 1,
             })
             .await
             .unwrap();

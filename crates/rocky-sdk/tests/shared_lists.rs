@@ -1005,10 +1005,8 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
     // A partial replica holds only the lists shared with it.
     snap::value(
         writer.session.set_replica_role(
-            serde_json::from_value::<rocky_sdk::ReplicaRoleConfig>(
-                json!({"role":"Partial","full_nodes":[],"custody":0}),
-            )
-            .expect("typed fixture"),
+            serde_json::from_value::<rocky_sdk::ReplicaRoleConfig>(json!({"role":"Partial"}))
+                .expect("typed fixture"),
         ),
     )
     .await?;

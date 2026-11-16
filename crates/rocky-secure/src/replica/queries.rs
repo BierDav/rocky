@@ -1,6 +1,5 @@
 //! Snapshot cursors, session catalogs, availability and committed table
-//! events of a secure replica's typed tables. See
-//! `docs/runtime/queries-and-observation.md`.
+//! events of a secure replica's typed tables.
 use super::*;
 use crate::{
     cursor::{CursorHost, CursorLimits, CursorPlan, SnapshotCursor, SnapshotRows},
@@ -656,8 +655,7 @@ impl<A: RowApplication> SecureSql<A> {
     }
     /// Answers `pragma` about `table`, or one of its indexes, as a file
     /// installed with that definition would: what an application declaring
-    /// another generation's schema validates. See
-    /// `docs/runtime/sql-driver.md#room-284`.
+    /// another generation's schema validates.
     pub async fn describe_declared(
         &self,
         pragma: Describe,

@@ -1,5 +1,4 @@
-//! Credentialed strangers against the inbound link budget
-//! (`docs/decisions/0051-roster-free-admission.md`).
+//! Credentialed strangers against the inbound link budget.
 use super::*;
 use crate::test_snapshot as snap;
 use rocky_credentials::Authority;

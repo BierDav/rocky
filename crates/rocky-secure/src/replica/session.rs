@@ -1,6 +1,5 @@
 //! Authorized sessions: a principal's bounded view of a secure replica and
-//! its transactions, which commit as bundles. See
-//! `docs/runtime/secure-sessions.md`.
+//! its transactions, which commit as bundles.
 use super::*;
 
 /// What a session is bound to. Authentication and enrollment supply these

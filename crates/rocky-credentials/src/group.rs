@@ -1,7 +1,6 @@
 //! Group secrets: one random secret per group partition and key epoch, the
 //! table keys derived from it, and its recipient-bound envelope, which also
-//! seals the partition's naming secret (`rocky_core::PartitionName`). See
-//! `docs/runtime/partition-credentials.md#group-secrets`.
+//! seals the partition's naming secret (`rocky_core::PartitionName`).
 use crate::{
     Error, PrivateKey, PublicKey, Signature, decode_bounded, denied, encode, enroll::SEAL_OVERHEAD,
     signing_bytes,

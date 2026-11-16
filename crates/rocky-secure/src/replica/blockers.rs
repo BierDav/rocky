@@ -41,7 +41,7 @@ const STATE_TABLES: &[&str] = &[
 ];
 
 /// One domain's blockers: those every scope shares, kept domain-wide by the
-/// phase 7 inventory (`docs/features_11/07-scope-local-gates-evidence.md`),
+/// phase 7 inventory,
 /// and each scope's own.
 #[derive(Default)]
 pub(super) struct DomainReadiness {

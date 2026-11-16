@@ -1,6 +1,5 @@
 //! Group partitions: one secret per group partition and key epoch, every
-//! member table's key derived from it and the holding rule. See
-//! `docs/runtime/partitioned-scopes.md`.
+//! member table's key derived from it and the holding rule.
 use crate::{Failure, domain::Domain, secrets::Vault};
 use data_encoding::HEXLOWER;
 use rocky_core::{

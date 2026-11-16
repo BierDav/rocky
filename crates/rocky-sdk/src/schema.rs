@@ -16,7 +16,7 @@ pub struct Schema {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub restrictions: Vec<rocky_core::LogicalRestriction>,
     /// SQL the first issuer to sign the schema's generation runs once, after
-    /// signing it; see `docs/runtime/generations.md#migrations`.
+    /// signing it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub migrations: Vec<Migration>,
 }

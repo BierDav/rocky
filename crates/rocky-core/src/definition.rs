@@ -1,6 +1,5 @@
 //! Portable schema definitions: the ORM-neutral way to construct a
 //! `LogicalSchema` from data a host language can write, without Room or Rust.
-//! See `docs/runtime/schema-definitions.md`.
 use crate::{
     Affinity, Collation, ColumnClass, IndexColumn, LOGICAL_SCHEMA_FORMAT, LogicalAssertion,
     LogicalColumn, LogicalForeignKey, LogicalIndex, LogicalRestriction, LogicalSchema,

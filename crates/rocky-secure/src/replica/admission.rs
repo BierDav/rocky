@@ -1,6 +1,5 @@
 //! Admission of a session peer by its chain, and the bound on what
-//! unconfigured peers leave behind
-//! (`docs/decisions/0051-roster-free-admission.md`).
+//! unconfigured peers leave behind.
 use super::*;
 use rocky_credentials::PeerId;
 

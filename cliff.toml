@@ -1,5 +1,5 @@
 # git-cliff configuration: the next version and release notes from
-# Conventional Commits; see docs/releasing.md.
+# Conventional Commits.
 
 [changelog]
 header = ""

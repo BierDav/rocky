@@ -112,8 +112,7 @@ fn page_signing_bytes(plain: &PagePlain) -> Result<Vec<u8>, Error> {
 const PAGE_ROWS: usize = 256;
 /// Rows committed per checkpoint-storage step, including up to eight metadata
 /// records in its first transaction. Pixel medians 24.7/44.3 ms, max 464.6 ms;
-/// throughput passes, phone latency remains open. See
-/// docs/features_12/02-bounded-holds-evidence.md.
+/// throughput passes, phone latency remains open.
 // Small test steps retain interruption coverage; calibration overrides this.
 const STORE_ROWS: usize = if cfg!(test) { 8 } else { 128 };
 #[cfg(test)]

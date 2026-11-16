@@ -1,4 +1,4 @@
-//! Configuration-only custody peer. See `docs/runtime/always-on-peer.md`.
+//! Configuration-only custody peer.
 use crate::{
     Database, Failure, Network, Open, Opened,
     enrollment::{Invite, Settings},

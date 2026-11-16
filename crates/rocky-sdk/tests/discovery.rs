@@ -2,8 +2,7 @@
 //! host find each other with no trusted node reachable, discovery their
 //! only source of contacts, once over mDNS and once over the rendezvous
 //! record on a local lookup server. And the first relay run: two endpoints
-//! with no direct path converge through a local relay. See
-//! `docs/runtime/sdk-transports.md#qualification`.
+//! with no direct path converge through a local relay.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 use common::identity::snapshot as snap;

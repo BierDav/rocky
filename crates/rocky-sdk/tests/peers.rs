@@ -1,6 +1,5 @@
 //! Direct sync between admitted peers, and identities that do not depend
-//! on routes or transport kinds. See
-//! `docs/runtime/sdk-enrollment.md` and `docs/runtime/sdk-transports.md`.
+//! on routes or transport kinds.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 use common::identity::snapshot as snap;

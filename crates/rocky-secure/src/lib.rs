@@ -1,5 +1,4 @@
 //! Signed capabilities, encrypted rows and bounded native ciphertext synchronization.
-//! See `docs/runtime/permissions-and-sync.md` for the supported security boundary.
 #[macro_use]
 mod transaction;
 use rocky_storage::{

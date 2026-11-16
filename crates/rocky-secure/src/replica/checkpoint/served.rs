@@ -1,6 +1,6 @@
 //! Checkpoints this node signs of seals it keeps, for a node that pulls
 //! one: the kept seal's stored rows, restored from history, and the
-//! operations through its bound. See `docs/runtime/kept-seals.md`.
+//! operations through its bound.
 use super::*;
 
 pub(crate) const SCHEMA: &[&str] = &[

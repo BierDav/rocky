@@ -1,5 +1,5 @@
 //! Phase 7 gate: one full replica node and two partial replicas over the
-//! native transport. See docs/runtime/scaling-limits.md.
+//! native transport.
 use super::{Failure, lifetime, line, resident_mib};
 use employees_app::Employees;
 use rocky_core::*;

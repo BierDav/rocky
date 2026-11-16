@@ -2,7 +2,7 @@
 //! capabilities and revocations, the identities they bind and the provider
 //! port that supplies them, key providers, issuance and the enrollment and
 //! renewal messages. A runtime enforces
-//! what these verify. See `docs/runtime/credentials.md`.
+//! what these verify.
 mod author_binding;
 mod checkpoint_record;
 mod claims;

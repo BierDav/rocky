@@ -1,6 +1,5 @@
 //! Signed header placements: positions of a seal's frontier in scopes the
-//! requester cannot hold, shown by their author-signed headers alone. See
-//! `docs/runtime/lazy-compaction.md`.
+//! requester cannot hold, shown by their author-signed headers alone.
 use super::*;
 use crate::replica::{PlacementPage, PlacementRequest};
 

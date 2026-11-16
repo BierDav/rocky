@@ -2,7 +2,7 @@
 //! session: one transaction is one commit and one signed bundle. A reader
 //! steps snapshot cursors and never holds the writer. Values cross typed,
 //! never as JSON; a compatibility profile answers an ORM's housekeeping
-//! statements. See `docs/runtime/sql-driver.md`.
+//! statements.
 use crate::{Failure, node::Node};
 use rocky_core::{SqlValue, TypedRows};
 use rocky_runtime::{CursorLimits, SnapshotCursor, SqlControl, TableObserver, classify_sql};
@@ -39,7 +39,7 @@ impl std::str::FromStr for Profile {
     }
 }
 /// The sealed state a read-only connection reads instead of the live
-/// tables. See `docs/runtime/kept-seals.md`.
+/// tables.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Binding {
     /// A seal this device keeps.
@@ -894,7 +894,7 @@ pub(crate) async fn serve(state: Arc<Mutex<State>>, call: Call) -> Result<Reply,
 }
 
 /// Committed changes of a database's tables, for a driver to invalidate
-/// what it read. See `docs/runtime/queries-and-observation.md#table-events`.
+/// what it read.
 pub struct TableEvents {
     observer: Mutex<TableObserver>,
 }

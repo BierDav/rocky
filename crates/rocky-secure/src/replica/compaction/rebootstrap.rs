@@ -1,8 +1,7 @@
 //! Rebootstrap at a seal of the followed path: a held scope whose replay
 //! base left the path, because its compacted seal lost a race, or that was
 //! pruned under a checkpoint at another cut imports a checkpoint the graph
-//! lists at a seal of the path, else replays frames. See
-//! `docs/runtime/lazy-compaction.md#rebootstrap`.
+//! lists at a seal of the path, else replays frames.
 use super::*;
 use rocky_credentials::{CHECKPOINT_RECORD_FORMAT, CheckpointRecordStatement};
 

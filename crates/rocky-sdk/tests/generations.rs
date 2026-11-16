@@ -1,6 +1,6 @@
 //! Schema changes as seals: an issuer publishes the schema its application
 //! declares on the followed bookmark, and every device switches when its
-//! bookmark reaches it. See `docs/runtime/generations.md`.
+//! bookmark reaches it.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 mod common;

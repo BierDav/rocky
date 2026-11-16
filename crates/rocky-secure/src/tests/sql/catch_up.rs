@@ -1,5 +1,4 @@
-//! A SQL writer beside a replica that receives a long catch-up. See
-//! `docs/runtime/sql-driver.md#the-writer`.
+//! A SQL writer beside a replica that receives a long catch-up.
 use super::*;
 use crate::network::link::Link;
 use std::sync::atomic::{AtomicBool, Ordering};

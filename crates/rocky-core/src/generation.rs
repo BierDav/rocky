@@ -1,5 +1,5 @@
 //! Generations of an application definition: whether a new schema changes
-//! what replicas agree on. See `docs/runtime/generations.md`.
+//! what replicas agree on.
 use crate::{ColumnClass, LogicalSchema};
 use std::collections::BTreeSet;
 

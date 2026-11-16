@@ -97,7 +97,7 @@ shared list with 200–240 items. `partition_evict` succeeds. Then
   while the issuer has 240. After restart: still `Ok(0)`. The application sees
   a complete, empty list, which is silent data loss from its point of view.
 
-Documentation (`docs/runtime/replica-roles.md#eviction`): "`subscribe` brings
+The replica roles documentation said: "`subscribe` brings
 the scope back; sync it before authoring in it again". Sync never brings it
 back. `evict_with_full_node` also shows that writes into the resubscribed list
 are refused with a foreign-key error rather than a "not held" refusal.
@@ -125,7 +125,7 @@ OS does when it reclaims a suspended app's sockets) leaves the node offline:
 (`crates/rocky-iroh/src/lib.rs`, `foreground`). With a fixed port that bind
 always fails, presumably because the closed endpoint still holds the socket,
 and nothing retries afterwards. Fixed ports are what
-[always-on peer](../../docs/runtime/always-on-peer.md) recommends ("use a fixed
+the always-on peer guidance recommended ("use a fixed
 UDP bind"), and any app that pins a port for LAN reachability is affected.
 Detection is also missing: nothing notices the dead endpoint until the app calls
 `network_foreground`, and `sync` keeps returning `ok` (finding 11).
@@ -142,7 +142,7 @@ Immediately, writes on the issuer and on healthy member B are refused:
 restart does not help. The freeze lasts until C's deadline, which is up to 30
 days (`HORIZON_WAIT_SECONDS`), unless an operator revokes C. After revocation,
 `maintain` finalizes, the issuer writes again, and B writes after its next sync.
-[Mergeable horizon](../../docs/runtime/mergeable-horizon.md) documents this as an
+The mergeable horizon design accepts this as an
 availability cost. Recording it here because one lost phone can stop a whole
 household's writes for a month, and nothing in the status tells the user why.
 

@@ -1,6 +1,5 @@
 //! Admission evidence: this file's signed record of the births it admitted,
-//! consumed, withheld or saw carried, and the claims derived from it. See
-//! `docs/runtime/admission-evidence.md`.
+//! consumed, withheld or saw carried, and the claims derived from it.
 use super::*;
 use crate::replica::checkpoint::row_of;
 use p2panda_core::Signature;

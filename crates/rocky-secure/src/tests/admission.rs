@@ -1,6 +1,5 @@
 //! Admission by chain and revocation set, the statements a handshake
-//! exchanges and the bound on unconfigured peers
-//! (`docs/decisions/0051-roster-free-admission.md`).
+//! exchanges and the bound on unconfigured peers.
 use super::revocations::{hello, insert, open};
 use super::*;
 use crate::network::{

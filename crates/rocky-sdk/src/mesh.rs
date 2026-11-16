@@ -1,4 +1,4 @@
-//! Local contact hints and secret-store discovery state; see decision 0056.
+//! Local contact hints and secret-store discovery state.
 use crate::{
     Failure,
     enrollment::{Contact, Route, Settings, now},

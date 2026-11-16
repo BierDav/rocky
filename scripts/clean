@@ -1,5 +1,5 @@
 #!/bin/sh
-# Reclaim regenerable build output; see docs/development.md#disk-use.
+# Reclaim regenerable build output.
 #
 #   scripts/clean             this checkout's Cargo output
 #   scripts/clean --evidence  also this checkout's generated benchmark databases

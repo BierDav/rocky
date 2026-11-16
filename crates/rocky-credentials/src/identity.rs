@@ -1,7 +1,7 @@
 //! The distinct identities of a domain. Each is its own key or name; none
 //! implies another, and only a publisher-rooted capability chain grants
 //! anything. An `IdentityProvider` supplies the identity that holds
-//! permissions; see `docs/runtime/credentials.md#identities`.
+//! permissions.
 use crate::{Error, PrivateKey, PublicKey, Signature};
 use rocky_core::ResourceScope;
 use rocky_platform::fs;

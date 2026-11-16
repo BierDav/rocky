@@ -1,6 +1,6 @@
 #!/bin/sh
 # Checks the commits a push would publish, then forwards its arguments to
-# `jj git push`. Jujutsu runs no hooks; this is its pre-push gate. See docs/linting.md.
+# `jj git push`. Jujutsu runs no hooks; this is its pre-push gate.
 #
 #   scripts/jj-push [JJ GIT PUSH ARGS...]   check, then push
 #   scripts/jj-push --check-only [ARGS...]  check only

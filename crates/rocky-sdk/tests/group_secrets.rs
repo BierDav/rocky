@@ -1,7 +1,7 @@
 //! Group secrets: one envelope shares every table of a group partition and
 //! reaches its recipient by sync, revocation rotates the group as one unit,
 //! and the holding rule keeps a group partition whole unless a table is
-//! left out explicitly. See `docs/runtime/partitioned-scopes.md#group-secrets`.
+//! left out explicitly.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 mod common;

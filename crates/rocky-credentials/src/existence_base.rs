@@ -1,6 +1,5 @@
 //! Existence bases: an existence log folded at a seal into per-signer heads,
-//! identity marks and a digest of the rows still evidenced. See
-//! `docs/runtime/lazy-compaction.md#existence-logs`.
+//! identity marks and a digest of the rows still evidenced.
 use crate::{
     CredentialChain, Endorsement, Error, IdentityProvider, PublicKey, RevocationSet, TipGraph,
     decode_bounded, denied, encode,

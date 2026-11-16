@@ -1,7 +1,6 @@
 //! Row capture for SQL sessions. The write connection's one row hook feeds
 //! this sink beside the digest tracker; its statement authorizer asks the
 //! gate. Both know tables by their installed classification.
-//! See `docs/runtime/sql-sessions.md`.
 use crate::{Error, scoped_connection::Names, sqlite::Value, storage};
 use rocky_core::{
     Affinity, ColumnClass, KeyColumn, LogicalSchema, SqlValue, TableClass, key_components,

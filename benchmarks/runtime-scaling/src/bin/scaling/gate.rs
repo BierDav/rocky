@@ -1,6 +1,5 @@
 //! Phase 5 gate: sustained local writes on 16 domains at full durability,
-//! with incoming pages and paced writers running beside them; see
-//! docs/runtime/write-concurrency.md.
+//! with incoming pages and paced writers running beside them.
 use super::{CALLER, Failure, NODE, Wide, installation, resident_mib, scope};
 use rocky_core::*;
 use rocky_runtime::{

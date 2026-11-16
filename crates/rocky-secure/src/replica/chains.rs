@@ -1,7 +1,6 @@
 //! Stored credential chains. Retained operations and the local node author
 //! name a chain by digest; the chain is kept once
-//! and removed with the last of them. See
-//! `docs/decisions/0053-chains-by-reference.md`.
+//! and removed with the last of them.
 use super::*;
 use crate::wire::Chain;
 

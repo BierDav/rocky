@@ -1,6 +1,6 @@
 //! Checkpoint records: graph statements listing a checkpoint of one scope at
 //! a seal, so every device learns where it may rebootstrap. The body moves
-//! only on request. See `docs/runtime/lazy-compaction.md#checkpoints-at-seals`.
+//! only on request.
 use crate::{
     CredentialChain, Endorsement, Error, IdentityProvider, PublicKey, RevocationSet, TipGraph,
     decode_bounded, denied, encode,

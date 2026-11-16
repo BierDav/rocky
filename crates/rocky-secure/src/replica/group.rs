@@ -15,8 +15,8 @@ pub(super) const GROUP_BYTES: usize = 4 * 1024 * 1024;
 /// request, so it uses RECEIVE_REQUESTS instead of this admission-only bound.
 const STEP_REQUESTS: usize = 2;
 /// One-row incoming frames per transaction, including ready application.
-/// Pixel cold/warm p99 27.032/25.025 ms, including inspection and commit;
-/// see docs/features_12/02-bounded-holds-evidence.md. Larger requests run alone.
+/// Pixel cold/warm p99 27.032/25.025 ms, including inspection and commit.
+/// Larger requests run alone.
 pub(crate) const RECEIVE_REQUESTS: usize = 4;
 /// Encoded input bytes per transaction; a larger atomic request runs alone.
 /// Sized in the receive-step sizing evidence.

@@ -1,5 +1,4 @@
 //! Replica roles, scope subscriptions, per-log frontiers and range transfer.
-//! Rules: `docs/runtime/replica-roles.md`.
 use super::checkpoint::{MAX_CHECKPOINT_LOGS, key_of};
 use super::*;
 use rocky_credentials::PeerId;

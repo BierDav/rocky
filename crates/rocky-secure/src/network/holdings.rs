@@ -1,4 +1,4 @@
-//! Session-bound partition proofs; decision 0052 defines the wire contract.
+//! Session-bound partition proofs and their wire contract.
 use super::*;
 use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit};
 use std::collections::BTreeSet;

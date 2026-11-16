@@ -1,6 +1,6 @@
 #!/bin/sh
 # Prepares a clone for development: pinned lint tools, Jujutsu repository
-# settings and, in a colocated Git repository, Git hooks. See docs/linting.md.
+# settings and, in a colocated Git repository, Git hooks.
 # Safe to run again; it only sets the keys and links it owns.
 set -eu
 

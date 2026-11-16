@@ -1,6 +1,5 @@
 //! Grant profiles, issuer devices, revocation with key rotation and
-//! credentials supplied from outside the SDK. See
-//! `docs/runtime/credentials.md` and `docs/runtime/sdk-enrollment.md`.
+//! credentials supplied from outside the SDK.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 use common::identity::snapshot as snap;

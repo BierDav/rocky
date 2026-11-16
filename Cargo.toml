@@ -55,7 +55,7 @@ incremental = false
 
 # Crypto and SQLite dominate test time; optimize dependencies. Generic code
 # such as encoding is compiled in the crate that uses it, so the crates
-# that encode most are optimized as well; decision 0060 has the measurements.
+# that encode most are optimized as well.
 [profile.dev.package."*"]
 opt-level = 2
 

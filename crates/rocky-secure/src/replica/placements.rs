@@ -2,8 +2,7 @@
 //! this replica cannot hold lie, proved by each frame's author-signed header
 //! without its body. A header names a partition only by its keyed scope,
 //! so any domain member may see it: one that does not hold the partition
-//! learns only that the position is not its own. See
-//! `docs/runtime/lazy-compaction.md`.
+//! learns only that the position is not its own.
 use super::*;
 use rocky_core::Scope;
 

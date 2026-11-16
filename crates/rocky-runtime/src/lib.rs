@@ -1,4 +1,4 @@
-//! Persistent local replicas. See `docs/runtime/local-replica.md` for lifecycle and APIs.
+//! Persistent local replicas.
 mod bootstrap;
 mod checkpoint;
 mod layout;

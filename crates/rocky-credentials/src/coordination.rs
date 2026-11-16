@@ -1,6 +1,6 @@
 //! Control tokens of a coordination service. They delegate coordination
 //! metadata only: no row, key, command or enrollment right follows from
-//! either. See `docs/runtime/public-coordination.md`.
+//! either.
 use crate::{
     CoordinatorControl, Error, IdentityProvider, PrivateKey, PublicKey, Publisher, Purpose, denied,
     signing_bytes,

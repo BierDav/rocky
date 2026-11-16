@@ -1,6 +1,6 @@
 //! Envelope delivery between an issuer, a keyless custody mailbox and
 //! members: directly, through mailboxes, at their bounds, across crashes and
-//! after a revocation. See `docs/decisions/0054-envelope-delivery.md`.
+//! after a revocation.
 use crate::test_snapshot as snap;
 use crate::{
     Database, Open, SecretStore, Session,

@@ -1,6 +1,6 @@
 //! No-frames checkpoints: a signed fact that a scope's state at a seal holds
 //! no frame history. It needs no key, has no pages and places nothing but
-//! its own scope. See `docs/runtime/encrypted-checkpoints.md`.
+//! its own scope.
 use super::*;
 
 impl<A: RowApplication> Inner<A> {

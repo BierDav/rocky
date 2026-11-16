@@ -1,6 +1,6 @@
 # Rocky DB engine decision
 
-Status: superseded by [design rationale](../../docs/runtime/write-concurrency.md#engine) on 2026-10-04; kept as historical evidence.
+Status: superseded on 2026-10-04 by Rocky's SQLite WAL write path; kept as historical evidence.
 
 **Recommend Turso for concurrent independent mutations in one database file, with MVCC and a framework-owned explicit logical-operation/outbox path.** Its measured advantage is material enough to justify a new storage adapter and targeted compatibility qualification. **Choose SQLite WAL if Rocky retains one serial writer per file or partitions independent work across files.** This is a conditional foundation recommendation; the workload mix determines the choice.
 

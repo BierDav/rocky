@@ -1,5 +1,5 @@
 //! SQLite access, row capture and errors shared by the runtimes. An internal
-//! boundary of the workspace; see `docs/modules.md`.
+//! boundary of the workspace.
 pub mod capture;
 pub mod cursor;
 pub mod database;

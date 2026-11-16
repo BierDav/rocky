@@ -1,7 +1,6 @@
 //! Checkpoints, the pruned prefix and pruning of one domain. The checkpoint is a
 //! second copy of the application's tables that lags the projection; it
-//! advances by replaying retained operations. See
-//! `docs/runtime/checkpoints.md`.
+//! advances by replaying retained operations.
 use super::*;
 use crate::checkpoint::{
     CheckpointHold, CheckpointInfo, CheckpointRecord, Deduplication, PeerRetention, Request,

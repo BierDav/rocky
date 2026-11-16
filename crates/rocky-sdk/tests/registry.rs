@@ -1,7 +1,6 @@
 //! The replicated issuer registry: records reach every issuer, any issuer
 //! renews, only issuers open it, concurrent writers converge, answers commit
-//! their record first and the bound holds. See
-//! `docs/decisions/0048-replicated-issuer-registry.md`.
+//! their record first and the bound holds.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 use common::identity::snapshot as snap;

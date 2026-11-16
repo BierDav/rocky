@@ -1,5 +1,5 @@
 //! Announces this device under the domain's discovery topics on a transport
-//! that can, and keeps what it finds as contacts. See decision 0057.
+//! that can, and keeps what it finds as contacts.
 use super::*;
 use crate::transport::{Discovery, Found, LOCAL_PATH, PathState, TOPIC_PATH};
 

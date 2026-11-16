@@ -1,7 +1,6 @@
 //! Seal states pulled from a node that keeps them. A verified checkpoint at
 //! a seal this replica does not hold is kept aside; following a tip whose
-//! path passes the seal installs it as the scope's replay base. See
-//! `docs/runtime/kept-seals.md`.
+//! path passes the seal installs it as the scope's replay base.
 use super::*;
 use rocky_core::Scope;
 

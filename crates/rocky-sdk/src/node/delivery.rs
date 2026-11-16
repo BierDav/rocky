@@ -1,6 +1,5 @@
 //! The node as owner of envelope delivery: what it hands a peer, installs,
-//! holds as a mailbox and drops on a receipt or a revocation. See
-//! `docs/decisions/0054-envelope-delivery.md`.
+//! holds as a mailbox and drops on a receipt or a revocation.
 use super::*;
 use crate::{
     delivery::{

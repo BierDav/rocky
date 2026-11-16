@@ -1,8 +1,7 @@
 //! History tables of the live workspace. A change to a live row writes its
 //! previous version to the table's history, in the same transaction, while
 //! a kept seal still needs it; a kept seal's state is the live rows unchanged
-//! since its mark plus the history rows valid at it. See
-//! `docs/runtime/kept-seals.md`.
+//! since its mark plus the history rows valid at it.
 use super::typed::{Typed, quoted};
 use super::*;
 use rocky_core::Scope;

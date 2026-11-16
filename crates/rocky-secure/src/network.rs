@@ -2,7 +2,7 @@
 //! limits. The [live link](link) handshake runs over any reliable ordered
 //! byte stream; every request runs on one of its channels. A peer is admitted
 //! by its credential chain and the revocation set, which the handshake
-//! exchanges; see `docs/decisions/0051-roster-free-admission.md`.
+//! exchanges.
 //!
 //! Each message family has its module, with its requests, the client calls
 //! that send them and the answers that serve them.
@@ -52,7 +52,7 @@ pub use rows::{CatchUp, Pushed, ScopeSync};
 use tips::TipMessage;
 
 /// The stream a session runs over. The transport adds no security the
-/// session relies on; see `docs/runtime/permissions-and-sync.md`.
+/// session relies on.
 pub use rocky_core::net::SessionStream;
 
 const TIMEOUT: Duration = Duration::from_secs(10);

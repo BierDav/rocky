@@ -1,5 +1,5 @@
 //! Order-independent digests of stored rows and operations, and the row
-//! tracker that keeps them current. See `docs/runtime/checkpoints.md`.
+//! tracker that keeps them current.
 use crate::sqlite::Value;
 use rocky_core::Commitment;
 use std::collections::HashMap;

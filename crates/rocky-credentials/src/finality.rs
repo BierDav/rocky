@@ -1,7 +1,6 @@
 //! Final seals: trusted nodes acknowledge the terminal entry a tip's
 //! coordinated log committed, and a record carrying enough of them makes
-//! that seal final for every member, without a coordinator call. See
-//! `docs/runtime/seal-finality.md`.
+//! that seal final for every member, without a coordinator call.
 use crate::{
     ChainLink, CredentialChain, Error, PrivateKey, PublicKey, RevocationSet, Signature,
     decode_bounded, denied, encode, signing_bytes,

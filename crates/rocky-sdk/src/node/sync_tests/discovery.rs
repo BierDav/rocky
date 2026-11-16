@@ -1,4 +1,4 @@
-//! Discovery on the hub's deterministic capability; see decision 0057.
+//! Discovery on the hub's deterministic capability.
 use super::*;
 use crate::test_snapshot as snap;
 

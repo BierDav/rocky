@@ -1,7 +1,6 @@
 //! Removal: a generation drops tables and fields on every device that
 //! follows it. A removed-and-readded name filters earlier values through
-//! the schema path; an unsent change it would split is held. See
-//! `docs/runtime/removal.md` and `docs/runtime/held-changes.md`.
+//! the schema path; an unsent change it would split is held.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 mod common;

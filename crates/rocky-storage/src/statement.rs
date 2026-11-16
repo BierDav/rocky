@@ -1,7 +1,7 @@
 //! Application statements as a SQLite-dialect syntax tree: the supported
 //! surface is checked and logical table names are resolved to physical ones
 //! by position, never by textual replacement. The engine's authorizer still
-//! decides every table access. See `docs/runtime/queries-and-observation.md`.
+//! decides every table access.
 use sqlparser::ast::{
     Expr, FromTable, ObjectName, ObjectNamePart, Query, SelectItem,
     SelectItemQualifiedWildcardKind, Statement, TableFactor, TableObject, Visit, Visitor,

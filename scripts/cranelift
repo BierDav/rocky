@@ -1,6 +1,6 @@
 #!/bin/sh
 # Local test builds with the workspace crates on Cranelift and dependencies on
-# LLVM; see docs/development.md#cranelift.
+# LLVM.
 #
 #   scripts/cranelift install        install the pinned nightly under local/cranelift
 #   scripts/cranelift installed      succeed when it is installed

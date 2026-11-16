@@ -1,5 +1,4 @@
-//! Seals, tips and bookmarks through the JSON contract and `Session`. See
-//! `docs/runtime/tips-and-bookmarks.md`.
+//! Seals, tips and bookmarks through the JSON contract and `Session`.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 mod common;
@@ -478,7 +477,7 @@ async fn bookmark_operations_work_through_a_native_offline_session() -> Result<(
 }
 
 /// Coordinated seals: a seal or a move off an open tip ends that tip's log
-/// first. See `docs/runtime/coordinated-writes.md#seals-and-moves`.
+/// first.
 mod coordinated {
     use super::*;
     use rocky_coordinator::coordinated::MemoryLog;
@@ -1229,8 +1228,7 @@ mod trusted {
 
 /// Races resolve by authority, then digest; revocation resolves again.
 /// Trusted identities race here: an issuer device that imported the
-/// registry from a checkpoint cannot rebuild another tip until phase 15
-/// (`docs/features_09/14-seals-and-bookmarks-evidence.md`); the issuer
+/// registry from a checkpoint cannot rebuild another tip until phase 15; the issuer
 /// variants run in `rocky-secure`.
 mod races {
     use super::*;

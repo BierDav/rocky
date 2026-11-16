@@ -1,7 +1,6 @@
 //! The live workspace of a replica: the typed tables that hold the followed
 //! tip under their plain names, the tip they hold and their observers. The
 //! runtime keeps exactly one; code reaches the live tables only through it.
-//! See `docs/runtime/kept-seals.md`.
 use super::*;
 
 pub(crate) struct Workspace {

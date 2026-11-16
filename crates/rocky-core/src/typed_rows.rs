@@ -1,6 +1,6 @@
 //! Typed tables as secure rows: one row per business key, one field per
 //! replicated column. The row contract that `EncryptedReplica` admits and a
-//! secure SQL session commits. See `docs/runtime/secure-sql.md`.
+//! secure SQL session commits.
 use crate::{
     ApplicationManifest, Commitment, DomainId, KeyColumn, LogicalSchema, RowApplication, RowChange,
     RowFields, RowWrite, SchemaError, SqlValue, commitment, key_components,

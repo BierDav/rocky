@@ -145,8 +145,7 @@ pub trait StoredApplication: Application + ProjectionSchema + Sized + Send + 'st
 /// reads see `name` as the result of `sql`, never the stored tables themselves.
 /// Each `?` in `sql` takes the next of `values`; a policy filter belongs here.
 ///
-/// `key` decides how reads of this view page; see "Paging" in
-/// `docs/runtime/app-runtime.md`. With a key, a read ordered by plain columns
+/// `key` decides how reads of this view page. With a key, a read ordered by plain columns
 /// continues by seeking to its last row, at a cost proportional to the page.
 /// Without one, every read continues by row offset, at a cost that grows with
 /// the rows already passed.

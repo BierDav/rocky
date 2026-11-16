@@ -1,5 +1,5 @@
 //! Credential chains by reference: the frame header's digest, the session's
-//! chain table and stored chains (`docs/decisions/0053-chains-by-reference.md`).
+//! chain table and stored chains.
 use super::*;
 use crate::network::NativeSession;
 use crate::replica::checkpoint::Stage;

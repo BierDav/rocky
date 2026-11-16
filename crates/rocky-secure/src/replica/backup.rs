@@ -1,8 +1,7 @@
 //! Coherent file copies for backups, and opening a copy under a fresh
 //! signing identity. The copy keeps every operation, handle, ticket,
 //! result and effect observation with its original identity; the new node
-//! authors its own log and never signs as its predecessor. See
-//! `docs/runtime/backup-and-restore.md`.
+//! authors its own log and never signs as its predecessor.
 use super::generation::identity;
 use super::*;
 

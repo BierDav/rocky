@@ -1,4 +1,4 @@
-//! Authenticated live link framing. See `docs/runtime/live-links.md`.
+//! Authenticated live link framing.
 use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 

@@ -1,5 +1,5 @@
 //! The database owner and the handles composed on it: sessions and an
-//! optional network service. See `docs/runtime/sdk-composition.md`.
+//! optional network service.
 #[cfg(test)]
 #[cfg(test)]
 #[cfg(test)]
@@ -779,8 +779,7 @@ impl Database {
             .await?
     }
     /// A SQL connection for a database driver: the writer is a secure SQL
-    /// session, a reader steps snapshot cursors. See
-    /// `docs/runtime/sql-driver.md`.
+    /// session, a reader steps snapshot cursors.
     pub async fn connect(&self, options: ConnectionOptions) -> Result<Connection, Failure> {
         self.shared
             .request(|reply| Command::Connect {

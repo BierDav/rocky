@@ -146,7 +146,7 @@ pub struct LogPoint {
 }
 /// What the owner's recovery seal of a stuck tip abandons: the committed
 /// entries of the tip's log after `retained` through `replaced`, the exact
-/// commit it ends. See `docs/runtime/stuck-recovery.md`.
+/// commit it ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Recovery {
     /// The end of the prefix that stays: `retained ≤ replaced`.

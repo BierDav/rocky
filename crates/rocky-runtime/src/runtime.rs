@@ -41,7 +41,6 @@ pub(crate) const MAX_GROUP_COMMIT: usize = 256;
 pub(crate) const MIN_CHECKPOINT_FRAMES: u32 = 256;
 pub(crate) const MAX_CHECKPOINT_FRAMES: u32 = 1 << 20;
 /// Experimental scaling controls; defaults reproduce the qualified behaviour.
-/// See `docs/runtime/scaling-limits.md` before changing them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RuntimeOptions {
     pub durability: Durability,

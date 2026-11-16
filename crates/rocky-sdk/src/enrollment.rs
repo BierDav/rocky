@@ -431,7 +431,7 @@ impl Contact {
     }
 }
 /// What a contact URI carries: a node of the publisher's domain and its
-/// routes. It grants nothing; see `docs/runtime/sdk-enrollment.md`.
+/// routes. It grants nothing.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ContactRecord {

@@ -1,6 +1,5 @@
 //! The canonical logical schema descriptor: what an ORM declared, how each
-//! part is replicated and which identities it has. See
-//! `docs/runtime/logical-schema.md`.
+//! part is replicated and which identities it has.
 use crate::{
     AppId, ApplicationManifest, AuthorLogScope, Commitment, DefinitionItem, DomainId, DomainRule,
     SqlValue, commitment, definition_item_id,
@@ -69,7 +68,7 @@ pub struct SchemaSource {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogicalColumn {
-    /// The field's identity, forever; see decision 0067.
+    /// The field's identity, forever.
     pub sql_name: String,
     pub affinity: Affinity,
     pub not_null: bool,
@@ -207,7 +206,7 @@ impl LogicalRestriction {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogicalTable {
-    /// The table's identity, forever; see decision 0067.
+    /// The table's identity, forever.
     pub sql_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granted_like: Option<String>,
@@ -268,8 +267,7 @@ pub enum Incompatibility {
     Unsupported(TableClass),
 }
 
-/// The storage profile a descriptor is installed on. Their differences are
-/// listed in `docs/runtime/schema-definitions.md`.
+/// The storage profile a descriptor is installed on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Profile {
     /// `rocky-runtime`: typed tables over replicated incarnations.

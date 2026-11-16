@@ -1,6 +1,5 @@
-//! Roster-free admission on the in-process hub: acceptance 5 of
-//! `docs/features_07/scope-mesh.md` and a device revoked while offline. See
-//! `docs/decisions/0051-roster-free-admission.md`.
+//! Roster-free admission on the in-process hub, including a device revoked
+//! while offline.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 use common::identity::snapshot as snap;

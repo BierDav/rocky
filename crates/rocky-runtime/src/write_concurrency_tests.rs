@@ -1,5 +1,4 @@
-//! Grouped incoming pages and the awaiting submit; see
-//! `docs/runtime/write-concurrency.md`.
+//! Grouped incoming pages and the awaiting submit.
 use super::*;
 use crate::scaling_option_tests::{NODE, PEER, grouped, note, open_node, pause, scope};
 use crate::worker::{Fault, GroupLog};

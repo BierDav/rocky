@@ -2,7 +2,7 @@ name: Baseline checks
 
 # A job that passed for the same source tree records a cache marker; later runs
 # of that tree (rebased, redescribed or released commits) reuse it instead of
-# running again. See docs/development.md#ci.
+# running again.
 
 on:
   # Only the default branch and the release call run baselines; there are no
@@ -44,7 +44,7 @@ env:
 jobs:
   lint:
     if: ${{ !inputs.release }}
-    # Formatting and static lint checks need no build, so they fail fast; see docs/linting.md.
+    # Formatting and static lint checks need no build, so they fail fast.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -331,7 +331,7 @@ jobs:
 
   check:
     # A job after `build`: the source step, reuse-build, its own steps and
-    # record-pass. Add a job the same way; see docs/development.md#adding-a-ci-job.
+    # record-pass. Add a job the same way.
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 45

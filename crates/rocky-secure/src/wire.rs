@@ -58,8 +58,7 @@ pub(crate) const INCOMPLETE_FRAME: &str = "incomplete frame: its credential chai
 
 /// A credential chain with the digest a frame header names it by. The digest
 /// shares the chain's bytes between frames, sessions and stored operations;
-/// it carries no authority, and every use still verifies the chain. See
-/// `docs/decisions/0053-chains-by-reference.md`.
+/// it carries no authority, and every use still verifies the chain.
 #[derive(Clone, Debug)]
 pub(crate) struct Chain {
     digest: Commitment,

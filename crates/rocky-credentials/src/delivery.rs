@@ -1,6 +1,6 @@
 //! Envelope delivery: a payload sealed to one recipient's node key, which a
 //! mailbox holds without learning what it carries, and the recipient's
-//! signed receipt. See `docs/decisions/0054-envelope-delivery.md`.
+//! signed receipt.
 use crate::{
     Error, PrivateKey, PublicKey, Signature, decode_bounded, denied, encode,
     enroll::SEAL_OVERHEAD,

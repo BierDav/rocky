@@ -1,4 +1,4 @@
-//! Scaling sweeps for the local runtime; see docs/runtime/scaling-limits.md.
+//! Scaling sweeps for the local runtime.
 //! Run a release build: `cargo run --release -p rocky-runtime-bench --bin scaling_probe -- all`.
 use inventory_app::{InventoryApp, Policy};
 use rocky_core::*;

@@ -1,5 +1,4 @@
 //! Checkpoints, the pruning pruned prefix and rebootstrap of the trusted path.
-//! See `docs/runtime/checkpoints.md`.
 use crate::{Command, Error, Replica, SyncState, TransferPage, digest::SetDigest};
 use rocky_core::{
     AppliedFrontier, AuthorSequence, Commitment, NodeId, OperationId, Scope, SqlValue,

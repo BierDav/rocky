@@ -1,6 +1,6 @@
 //! Private SQLite adapter. Calls are synchronous and complete before they
 //! return; the `async` signatures only let storage code share one shape with
-//! its async callers. See `docs/runtime/write-concurrency.md`.
+//! its async callers.
 use std::{cell::Cell, collections::VecDeque, path::Path, sync::Mutex};
 use web_time::Instant;
 

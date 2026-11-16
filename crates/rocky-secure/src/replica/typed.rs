@@ -1,6 +1,6 @@
 //! Typed tables of a secure replica: the generated SQL storage that
 //! authorized secure rows project into, in the same transaction as every
-//! row change. See `docs/runtime/secure-sql.md`.
+//! row change.
 use super::*;
 use crate::{capture::Plan, scoped_connection::Names};
 use rocky_core::{LogicalSchema, Scope, TableClass, TypedRows, TypedTable};

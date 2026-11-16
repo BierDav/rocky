@@ -2,8 +2,8 @@
 use super::*;
 use crate::replica::incoming::Outcome;
 
-/// Metadata rows examined per refresh step. Provisional until the separated
-/// phone costs are recorded in docs/features_12/02-bounded-holds-evidence.md.
+/// Metadata rows examined per refresh step. Provisional until separated
+/// phone costs are measured.
 const REFRESH_RECORDS: usize = 64;
 #[derive(Clone, Default)]
 struct Refresh {

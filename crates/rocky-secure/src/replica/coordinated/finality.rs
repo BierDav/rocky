@@ -1,7 +1,6 @@
 //! Final seals on a trusted node: it acknowledges the terminal entry that
 //! ended a tip's log with a seal it holds, and publishes the seal's
-//! finality record once the coordinator keeps enough acknowledgments. See
-//! `docs/runtime/seal-finality.md`.
+//! finality record once the coordinator keeps enough acknowledgments.
 use super::*;
 use crate::TipStatement;
 use rocky_core::LogTerminal;

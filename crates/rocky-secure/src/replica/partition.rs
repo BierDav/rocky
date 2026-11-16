@@ -1,4 +1,4 @@
-//! Concrete partition addresses and selector resolution (`docs/runtime/partitioned-scopes.md`).
+//! Concrete partition addresses and selector resolution.
 //! A partition's scope identity is keyed by its naming secret, so only its
 //! holders and custodians can compute or recognize it: this registry is
 //! the only way from a tuple to its scope.
@@ -762,7 +762,7 @@ impl<A: RowApplication> Inner<A> {
 impl<A: RowApplication> EncryptedReplica<A> {
     /// The partition tuples of `scopes` that `peer` may hold only as keyless
     /// custody. Revealed to that peer alone, so it can register partitions
-    /// created after it enrolled (`docs/decisions/0045-custody-partition-offers.md`).
+    /// created after it enrolled.
     pub(crate) async fn custody_offers(
         &self,
         peer: PublicKey,

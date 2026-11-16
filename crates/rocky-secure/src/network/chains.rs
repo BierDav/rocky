@@ -2,8 +2,7 @@
 //! chain by digest; the session carries each distinct chain once, in a
 //! message of its own before the first page whose frames name it, and no
 //! later page repeats it. The table shares bytes, never authority: every
-//! frame's chain is verified as the frame is received. See
-//! `docs/decisions/0053-chains-by-reference.md`.
+//! frame's chain is verified as the frame is received.
 use super::*;
 use crate::wire::Chain;
 use std::collections::{BTreeMap, BTreeSet};

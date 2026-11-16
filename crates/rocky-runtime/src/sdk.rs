@@ -1,4 +1,4 @@
-//! JSON v1 transport contract. See `docs/runtime/sdk-contract.md`.
+//! JSON v1 transport contract.
 use crate::*;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;

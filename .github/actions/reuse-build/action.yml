@@ -4,7 +4,7 @@ description: >-
   looks up the job's passing marker for the tree and, when there is none,
   installs the system libraries, the pinned toolchain and cargo-nextest,
   downloads the build artifacts the job runs to `$RUNNER_TEMP/build` and
-  restores the Rust cache. See docs/development.md#adding-a-ci-job.
+  restores the Rust cache.
 
 inputs:
   job:

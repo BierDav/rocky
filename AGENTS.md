@@ -1,70 +1,65 @@
 # Working in Rocky DB
 
-## Navigation and cleanup
+## Navigation
 
-- Read [README.md](README.md) and applicable nested `AGENTS.md` files before editing.
-- Establish behavior, crate ownership and phase prerequisites from source,
-  manifests, modules and tests. Use `cargo metadata --no-deps --format-version 1`
-  for the workspace map; never maintain per-file inventories.
-- Search with `rg --files` / `rg -n`, starting in the owning crate's source and
-  following definitions and callers into adjacent crates. Exclude generated
-  output and benchmark evidence. Batch independent reads; follow dependencies
-  sequentially.
-- Simplify relevant code and remove unnecessary code while preserving behavior.
-  Use focused modules, clear names and explicit ownership.
-- Keep project documentation to AGENTS instructions, the simple root README and
-  current `docs/features_xx` roadmaps. Do not recreate removed guides or architecture
-  docs. Record phase status and measured evidence in the owning roadmap.
-- Keep comments and API docs brief: intent, invariants and surprising constraints.
-  Express behavior through code and meaningful tests.
+- Read [README.md](README.md) and applicable nested `AGENTS.md` files first.
+- Learn behavior, ownership and phase prerequisites from source, manifests and
+  tests; map the workspace with `cargo metadata --no-deps --format-version 1`.
+- Search with `rg`, starting in the owning crate and following definitions and
+  callers. Skip generated output and benchmark evidence.
+- Documentation is AGENTS files, the root README and current `docs/features_xx`
+  roadmaps, which hold phase status and measured evidence. Add no other docs.
+
+## Design
+
+- Leave code more intuitive than you found it. Restructure modules, types and
+  crate boundaries when the current shape no longer makes sense, even when that
+  touches more code than a quick fix would. Remove unnecessary code.
+- Call out features that do not belong in their crate, or in Rocky at all, and
+  move them to the right crate or remove them.
+- Rocky's API is Rust-native and typed end to end; no stringly or JSON call
+  surface in the SDK; capability contracts stay open to ORM and transport
+  adapters. Networking is optional; shutdown never closes application-owned
+  infrastructure.
+- Protocol types stay independent of storage, transport and UI. The coordinator
+  owns generic metadata only; applications own reducers and business rules; the
+  runtime owns transactions, operation storage and observation.
+- Commit projection, operation, outbox and revision changes atomically; publish
+  and notify only after commit; keep external calls outside DB transactions.
+- Use precise operations with stable identities and safe retries.
+- Keep modules private unless a public boundary needs them; use traits only at
+  real replacement boundaries.
+- Return errors for expected failures; no production panics or casual unwraps.
+  Never report success for unimplemented behavior.
+- Keep one persisted/wire format and reject others: no migrations or legacy readers.
+
+## Comments
+
+- Code explains itself through names, types and tests. Plain comments are
+  forbidden (`scripts/lint-rust`); only brief doc comments on items are allowed.
+- Encode a reason or warning as, in order of preference: a type or guard that
+  makes the mistake impossible; a test named after the rule or an assertion
+  message; a named `const`, `fn` or type with a doc comment; otherwise delete it.
+- Packages in `scripts/comment-budgets.toml` still carry old comments. Convert
+  them when you touch that code; budgets only go down.
 
 ## Version control
 
-- Use Jujutsu (`jj`) exclusively; never invoke the `git` CLI. Inspect with
-  `jj status`, `jj diff`, `jj log` and `jj file list`; fetch via `jj git fetch`.
-- Preserve unrelated changes; never abandon or restore someone else's work.
-  Leave edits in the current change. Push, rewrite shared history or create
-  bookmarks only when requested.
-- Use Conventional Commits (they determine release versions); validate with
-  `scripts/commitlint --jj`. Push through `jj push` (`scripts/jj-push`), which
-  checks first; Git remote transport uses `jj git push`.
-
-## Implementation boundaries
-
-- Rocky's API is Rust-native and typed end to end; other languages wrap it in
-  their own bindings. Keep no stringly or JSON call surface inside the SDK.
-  Keep capability contracts extensible to ORM and transport adapters.
-- Keep networking optional; database/session shutdown must never close
-  application-owned infrastructure.
-- Keep shared protocol types independent of storage, transport and UI. The
-  coordinator owns generic metadata, never application payloads or rules;
-  applications own deterministic reducers and business transitions; the runtime
-  owns transactions, operation storage and observation.
-- Commit related projection, operation, outbox and revision changes atomically.
-  Publish outgoing data and observer notifications only after local commit.
-  Keep network, coordinator and other external calls outside DB transactions.
-- Use precise operations with stable identities and safe retries.
-- Keep internal modules private unless a supported public boundary requires them.
-  Use traits only at real replacement boundaries; avoid speculative abstraction.
-- Return errors for expected failures; avoid production panics and casual unwraps.
-  Unsafe code is forbidden by workspace lints. Never report success for
-  unimplemented behavior.
-- Keep one current persisted/wire format; reject other versions. No backward
-  compatibility, migrations, legacy readers or dual encodings.
+- Use Jujutsu (`jj`) only, never the `git` CLI. Preserve unrelated changes and
+  leave edits in the current change. Push, rewrite shared history or create
+  bookmarks only when asked.
+- Use Conventional Commits, validated by `scripts/commitlint --jj`; push with
+  `jj push`.
 
 ## Verification
 
-- Use `#[expect(lint, reason = "...")]` for lint exceptions; `allow` attributes
-  are forbidden.
-- During development, use `./scripts/check --unit`, `cargo test -p <package>` and
-  targeted checks. Before finishing workspace changes, run `./scripts/lint` and
-  `./scripts/check` from any directory; `./scripts/lint --fix` applies formatting.
-- Separate correctness tests from benchmarks. Test meaningful behavior, invariants
-  and regressions without speed dependencies, latency budgets, large datasets or
-  trivial duplication. Timing is diagnostic; timeouts only stop hangs. Prefer
-  deterministic fault injection over arbitrary sleeps.
-- Check supported feature combinations; do not blindly use `--all-features` with
-  incompatible platform configurations.
-- Report passed checks and limitations: baseline checks do not prove a working
-  storage adapter, desktop app or distributed protocol.
+- Use `#[expect(lint, reason = "...")]`; `allow` attributes are forbidden.
+- Develop with `./scripts/check --unit` and `cargo test -p <package>`; finish
+  with `./scripts/lint` and `./scripts/check`. `./scripts/lint --fix` formats and
+  lowers comment budgets.
+- Test behavior, invariants and regressions deterministically, separate from
+  benchmarks: fault injection instead of sleeps, no timing assertions.
+- Check supported feature combinations, not blindly `--all-features`.
+- Report what passed and what checks cannot prove, such as a working storage
+  adapter, desktop app or distributed protocol.
 - For benchmarks, follow [their instructions](benchmarks/engine-comparison/AGENTS.md).

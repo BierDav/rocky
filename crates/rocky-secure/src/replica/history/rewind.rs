@@ -1,8 +1,7 @@
 //! Stored rows' history and the switch that restores from it. While a seal
 //! is kept, a change to a stored row writes the version it replaces, as the
 //! live tables' history does; a tip whose path passes a kept seal then
-//! starts from that seal's rows plus the operations after it. See
-//! `docs/runtime/kept-seals.md#switching-tips`.
+//! starts from that seal's rows plus the operations after it.
 use super::*;
 use checkpoint::{Overlay, STEP_OPERATIONS, STEP_ROWS, Sets};
 

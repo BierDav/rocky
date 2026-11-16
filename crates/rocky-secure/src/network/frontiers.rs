@@ -7,7 +7,7 @@ use crate::replica::roles::{FrontierReply, MAX_FRONTIER_SCOPES, validate_frontie
 pub(super) enum FrontierMessage {
     FrontiersQuery {
         frontiers: Vec<ScopeFrontier>,
-        /// Tuples offered to a keyless custody peer; see decision 0045.
+        /// Tuples offered to a keyless custody peer.
         partitions: Vec<crate::replica::PartitionOffer>,
         proofs: Vec<(ResourceScope, Vec<holdings::HoldingProof>)>,
     },

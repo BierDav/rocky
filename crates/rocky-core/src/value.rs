@@ -1,5 +1,5 @@
-//! Scalar values at the application/storage boundary. The byte codec and the
-//! getter conversions are specified in `docs/runtime/logical-schema.md`.
+//! Scalar values at the application/storage boundary: their byte codec and
+//! getter conversions.
 use crate::ProtocolError;
 
 /// A REAL in canonical form: never NaN, and negative zero is zero. SQLite

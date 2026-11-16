@@ -1,6 +1,6 @@
 //! Direct key delivery: the envelopes a sender delivers, saved in
 //! `identity.json` before any network call, and the deposits a mailbox
-//! holds in `mailbox.json`. See `docs/decisions/0054-envelope-delivery.md`.
+//! holds in `mailbox.json`.
 use crate::{
     Failure,
     enrollment::Settings,

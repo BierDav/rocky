@@ -1,7 +1,7 @@
 name: Commit messages
 
 # Every pushed or proposed commit follows Conventional Commits, which the
-# release versions are computed from; see docs/commits.md.
+# release versions are computed from.
 
 on:
   push:

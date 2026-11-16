@@ -1,5 +1,5 @@
 //! What composed services own, and the structured refusals of combinations
-//! that cannot work. See `docs/runtime/sdk-composition.md`.
+//! that cannot work.
 use crate::{
     Failure,
     transport::{Connected, Connector, Transport},

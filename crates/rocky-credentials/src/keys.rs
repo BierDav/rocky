@@ -1,5 +1,4 @@
-//! Where an installation's secrets live. See `docs/runtime/credentials.md`
-//! for the threat model of the file provider.
+//! Where an installation's secrets live.
 use crate::Error;
 use rocky_platform::fs;
 use std::{

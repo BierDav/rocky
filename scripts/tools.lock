@@ -1,4 +1,4 @@
-# Pinned tools that scripts/tools installs into local/bin; see docs/linting.md.
+# Pinned tools that scripts/tools installs into local/bin.
 # One line per tool and platform (`uname -s`-`uname -m`, or `any`):
 #
 #   tool version platform sha256 url [member]

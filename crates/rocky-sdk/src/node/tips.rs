@@ -1,5 +1,5 @@
 //! Seals, tips and bookmarks: the developer calls over the replica's tip
-//! graph. See `docs/runtime/tips-and-bookmarks.md`.
+//! graph.
 use super::*;
 use crate::tips::{
     Bookmark, BookmarkMove, KeptSeals, LosingMove, TipAuthorMark, TipCheckpoint, TipCompaction,

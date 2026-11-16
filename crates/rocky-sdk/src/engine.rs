@@ -1,6 +1,6 @@
 //! The starter composition: one database, one session and a network
 //! service the engine owns, selected by typed options. It adds no behaviour
-//! to the services it composes. See `docs/runtime/sdk-composition.md`.
+//! to the services it composes.
 use crate::{
     Failure,
     database::{Database, NetworkService, Open, Opened, Session},

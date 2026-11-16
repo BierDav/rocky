@@ -175,7 +175,7 @@ pub struct TipInspection {
     pub nodes: Vec<TipNode>,
 }
 /// Where this device's compaction of the followed path stands. Seals are
-/// hex digests; see `docs/runtime/lazy-compaction.md`.
+/// hex digests.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipCompaction {
     /// The newest seal whose state this device finalized.

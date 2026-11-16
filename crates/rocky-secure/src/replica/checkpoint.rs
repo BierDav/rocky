@@ -1,5 +1,4 @@
 //! Signed checkpoints, pruning and rebootstrap of one encryption scope.
-//! Format and rules: `docs/runtime/encrypted-checkpoints.md`.
 mod archive;
 pub(crate) use archive::CheckpointVouch;
 #[cfg(test)]
@@ -298,7 +297,7 @@ pub struct CheckpointStatement {
     /// for other scopes.
     pub outcomes: SealedOutcomes,
 }
-/// How a checkpoint's state is held. See `docs/runtime/encrypted-checkpoints.md`.
+/// How a checkpoint's state is held.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CheckpointState {
     /// Rows sealed under this key epoch, transferred in pages.

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Prints `true` when shipped code differs between a release tag and a commit,
-# otherwise `false`; see docs/releasing.md. Needs a clone with both revisions.
+# otherwise `false`. Needs a clone with both revisions.
 #
 #   scripts/release/code-changed TAG SHA
 set -eu

@@ -7,8 +7,7 @@ use rocky_core::{
 use rocky_credentials::{Grant, Profile, Resource};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The reserved collection of issuer records; see
-/// `docs/decisions/0048-replicated-issuer-registry.md`.
+/// The reserved collection of issuer records.
 pub(crate) const REGISTRY: &str = "issuer_registry";
 
 pub(crate) struct Domain {

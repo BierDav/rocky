@@ -1,6 +1,6 @@
 //! Schema migrations of any size: the issuer signs the generation, runs its
 //! migrations in one local transaction and publishes the result as many
-//! bundles. See `docs/runtime/generations.md#migrations`.
+//! bundles.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 mod common;

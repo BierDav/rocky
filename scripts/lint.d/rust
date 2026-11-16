@@ -1,5 +1,5 @@
 # shellcheck shell=sh disable=SC2034 # scripts/lint reads the module's variables
-# Rust formatting and attribute policy. Clippy builds in scripts/check.
+# Rust formatting, attribute and comment policy. Clippy builds in scripts/check.
 tools=python3
 # Every Cargo workspace outside the root one; benchmarks keep their own rules.
 manifests=''
@@ -11,6 +11,7 @@ check() {
 }
 
 fix() {
+    scripts/lint-rust --fix || true
     cargo fmt --all
     for manifest in $manifests; do cargo fmt --manifest-path "$manifest"; done
 }

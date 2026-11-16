@@ -1,6 +1,6 @@
 //! Identities through the SDK: further nodes of an enrolled identity join
 //! without an issuer, and revoking one node or the identity stops exactly
-//! those nodes. See `docs/runtime/sdk-enrollment.md#identities`.
+//! those nodes.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 use common::identity::snapshot as snap;

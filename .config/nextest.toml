@@ -1,4 +1,4 @@
-# Test runner settings; see docs/development.md#test-tiers.
+# Test runner settings.
 
 # A test run outside the tier checks is reported slow after 30 s and
 # terminated after 60 s.

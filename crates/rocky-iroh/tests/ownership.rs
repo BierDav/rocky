@@ -2,7 +2,7 @@
 #![cfg(not(target_family = "wasm"))]
 //! Who owns the endpoint: Rocky's handlers next to an application's own
 //! protocol on its router, and the starter that owns everything it binds.
-//! Loopback only; see `docs/runtime/sdk-transports.md` for what that proves.
+//! Loopback only.
 use rocky_core::net::{Failure, Incoming, Protocol, Transport};
 use rocky_iroh::{
     Attachment, Options,

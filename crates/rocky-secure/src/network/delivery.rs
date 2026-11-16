@@ -2,7 +2,7 @@
 //! it holds for the acceptor, deposits envelopes for others with a mailbox,
 //! then collects what the acceptor holds for it and returns receipts. The
 //! session carries opaque sealed deliveries; their owner implements
-//! `Deliveries`. See `docs/decisions/0054-envelope-delivery.md`.
+//! `Deliveries`.
 use super::*;
 use rocky_credentials::{DeliveryReceipt, SealedDelivery};
 use std::{future::Future, pin::Pin};

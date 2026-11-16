@@ -215,8 +215,7 @@ impl From<rocky_secure::EngineStatus> for EngineStatus {
         }
     }
 }
-/// A schema migration as this device sees it. See
-/// `docs/runtime/generations.md#migrations`.
+/// A schema migration as this device sees it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum MigrationStatus {
@@ -229,8 +228,7 @@ pub enum MigrationStatus {
 }
 /// How the schema the application declares stands to the installed
 /// generation's. An application behind or ahead of its database still
-/// opens it; its statements on what differs fail. See
-/// `docs/runtime/adopting-generations.md`.
+/// opens it; its statements on what differs fail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeclaredSchema {

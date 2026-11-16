@@ -2,7 +2,7 @@
 use super::*;
 
 /// One stored record per cleanup acquisition. Cost calibration is still part
-/// of phase 2 qualification; see docs/features_12/02-bounded-holds-evidence.md.
+/// of phase 2 qualification.
 const CLEANUP_ROWS: usize = 1;
 const PAYLOADS: [(&str, &str); 3] = [
     ("secure_pulled_rows", "row"),

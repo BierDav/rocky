@@ -1,8 +1,7 @@
 //! Bound reads against stored rows. A read names one authorized view; the
 //! view's `SELECT` replaces that name as a subquery, so the filter runs in the
 //! engine with the table's indexes and no row is copied. Reads use a pool of
-//! read-only connections beside the file's writer. See
-//! `docs/runtime/local-replica.md`.
+//! read-only connections beside the file's writer.
 use crate::{
     BoundQuery, Completeness, Error, ReadCursor, ReadOptions, ReadSnapshot,
     scoped_connection::{Names, tokens},
@@ -397,7 +396,7 @@ fn keyset(tokens: &[String], significant: &[usize], from: usize, view: &View) ->
         order: significant[order],
     })
 }
-/// The statement restrictions for dynamic reads; see `docs/runtime/app-runtime.md`.
+/// The statement restrictions for dynamic reads.
 fn validate(sql: &str) -> Result<(), Error> {
     let tokens: Vec<_> = tokens(sql)
         .into_iter()

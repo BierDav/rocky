@@ -1,6 +1,5 @@
 #!/bin/sh
-# Installs the checksum-verified tools pinned in scripts/tools.lock into local/bin;
-# see docs/linting.md.
+# Installs the checksum-verified tools pinned in scripts/tools.lock into local/bin.
 #
 #   scripts/tools [TOOL...]   install the named tools (default: all) when missing
 #                             or outdated, then print local/bin

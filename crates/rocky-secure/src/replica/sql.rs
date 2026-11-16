@@ -1,6 +1,6 @@
 //! SQL sessions on a secure replica's typed tables. A transaction holds the
 //! replica; its commit admits the changed rows as one bundle in the same
-//! engine transaction. See `docs/runtime/secure-sql.md`.
+//! engine transaction.
 use super::*;
 use crate::{
     CommitClass,

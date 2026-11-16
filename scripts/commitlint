@@ -1,5 +1,5 @@
 #!/bin/sh
-# Checks commit messages against Conventional Commits; see docs/commits.md.
+# Checks commit messages against Conventional Commits.
 #
 #   scripts/commitlint [--protected] FILE          one message (`-` reads stdin)
 #   scripts/commitlint [--protected] --jj [REVSET] every described commit in REVSET

@@ -1,6 +1,5 @@
 //! Finding admitted peers through standard DNS-SD and sealed rendezvous records.
-//! Neither path changes the endpoint's own lookup services. See
-//! `docs/runtime/discovery-dns-sd.md` and `docs/runtime/discovery.md`.
+//! Neither path changes the endpoint's own lookup services.
 use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
     aead::{Aead, KeyInit, Payload},

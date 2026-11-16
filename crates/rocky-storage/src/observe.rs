@@ -2,7 +2,6 @@
 //! changed after the commit; observers registered for those tables merge
 //! them into one pending change. Publication visits the observers of the
 //! changed tables only, and an observer holds at most one pending change.
-//! See `docs/runtime/queries-and-observation.md`.
 use crate::Error;
 use rocky_core::{Commitment, Scope};
 use std::{

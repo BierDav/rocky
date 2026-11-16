@@ -1,7 +1,7 @@
 //! The shopping release gate on the group schema: two phones that are never
 //! online together share lists through a keyless custody peer. A duplicate
 //! title converges by policy, a deleted list cascades, a deleted category
-//! nulls only its reference, and a moved item keeps an offline tick. See `docs/runtime/shopping-qualification.md`.
+//! nulls only its reference, and a moved item keeps an offline tick.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 #[path = "support/snapshot.rs"]

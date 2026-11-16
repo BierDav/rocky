@@ -2,7 +2,7 @@
 //! catalog instead of reaching the engine, and its modification log,
 //! emulated from committed table events. Statements are matched as Room
 //! 2.8.4 writes them; anything else goes to the session, which denies
-//! pragmas and schema changes. See `docs/runtime/sql-driver.md#room-284`.
+//! pragmas and schema changes.
 use super::{Failure, Pending, code, failure};
 use rocky_core::{SqlValue, TypedRows};
 use rocky_runtime::TableObserver;

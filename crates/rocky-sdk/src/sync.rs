@@ -1,6 +1,5 @@
 //! Synchronization with one authorized peer: a device pushes and pulls
 //! every collection over request channels of its live link with that peer.
-//! See `docs/runtime/live-links.md`.
 use crate::Failure;
 use rocky_core::{ResourceScope, TypedRows};
 use rocky_secure::{

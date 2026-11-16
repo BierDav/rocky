@@ -283,6 +283,7 @@ impl Worker {
         let held = HOLD_END.with(|hold| hold.borrow_mut().take());
         let thread = std::thread::Builder::new()
             .name("rocky-sdk".into())
+            .stack_size(rocky_platform::task::THREAD_STACK)
             .spawn(move || {
                 serve();
                 #[cfg(test)]
@@ -1928,6 +1929,7 @@ fn serve_on_thread(
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("rocky-sdk-io")
+            .thread_stack_size(rocky_platform::task::THREAD_STACK)
             .enable_all()
             .build()?;
         let local = tokio::task::LocalSet::new();

@@ -380,7 +380,12 @@ async fn qualification_child() -> Result<(), Failure> {
 
 fn child(mode: &str, directory: &Path) -> Result<std::process::Child, Failure> {
     Ok(Command::new(std::env::current_exe()?)
-        .args(["--exact", "qualification_child", "--nocapture", "--quiet"])
+        .args([
+            "--exact",
+            "qualification::qualification_child",
+            "--nocapture",
+            "--quiet",
+        ])
         .env(CHILD, format!("{mode}:{}", directory.display()))
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

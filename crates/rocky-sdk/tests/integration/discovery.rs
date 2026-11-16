@@ -79,7 +79,12 @@ async fn enrolled(root: &Path) -> Result<(), Failure> {
 async fn second_process(root: &Path, lookup: Option<&str>, local: bool) -> Result<Value, Failure> {
     let mut command = std::process::Command::new(std::env::current_exe()?);
     command
-        .args(["--exact", "member_process", "--ignored", "--nocapture"])
+        .args([
+            "--exact",
+            "discovery::member_process",
+            "--ignored",
+            "--nocapture",
+        ])
         .env("ROCKY_DISCOVERY_MEMBER", root.join("b"))
         .env("ROCKY_DISCOVERY_REPORT", root.join("report.json"))
         .env("ROCKY_DISCOVERY_LOCAL", local.to_string());

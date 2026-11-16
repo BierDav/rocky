@@ -54,25 +54,18 @@ debug = "line-tables-only"
 incremental = false
 
 # Crypto and SQLite dominate test time; optimize dependencies. Generic code
-# such as encoding is compiled in the crate that uses it, so the crates
-# that encode most are optimized as well.
+# such as encoding is compiled in the crate that uses it, so the small crates
+# that encode most are optimized as well. The large workspace crates stay
+# unoptimized: optimizing rocky-secure's tests alone took 1665 s of CPU at
+# opt-level 3 or 1 and 62 s at 0.
 [profile.dev.package."*"]
 opt-level = 2
 
 [profile.dev.package.rocky-core]
-opt-level = 1
-
-[profile.dev.package.rocky-credentials]
-opt-level = 1
-
-[profile.dev.package.rocky-secure]
 opt-level = 3
 
-[profile.dev.package.rocky-sdk]
-opt-level = 1
-
-[profile.dev.package.rocky-coordinator]
-opt-level = 1
+[profile.dev.package.rocky-credentials]
+opt-level = 3
 
 [patch.crates-io]
 netdev = { path = "vendor/netdev" }

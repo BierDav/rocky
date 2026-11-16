@@ -446,7 +446,11 @@ async fn an_interrupted_fill_resumes_and_converges() -> Result<(), Failure> {
         let listed = Listed::create(FEW_LISTS).await?;
         listed.seed(CRASH_ROWS).await?;
         let status = std::process::Command::new(std::env::current_exe()?)
-            .args(["--exact", "replayed::crash_fill_child", "--ignored"])
+            .args([
+                "--exact",
+                "migrations::replayed::crash_fill_child",
+                "--ignored",
+            ])
             .env("ROCKY_SQL_KILL_AT", point)
             .env("ROCKY_CRASH_DIRECTORY", listed.path("a"))
             .status()?;

@@ -36,10 +36,10 @@ CONFIG = ROOT / ".config" / "test-tiers.toml"
 REPORTS = ROOT / "target" / "test-tiers"
 TIERS = ("unit", "integration", "e2e")
 # A unit test binary that runs longer than this has hung.
-UNIT_BINARY_TIMEOUT = 120
+UNIT_BINARY_TIMEOUT = 300
 CPUS = os.cpu_count() or 1
 # Integration batches that run at once, each with up to four test threads.
-BATCH_WORKERS = int(os.environ.get("ROCKY_TEST_BATCHES", max(1, CPUS // 4)))
+BATCH_WORKERS = int(os.environ.get("ROCKY_TEST_BATCHES", max(1, CPUS // 3)))
 # A test that took this long before runs in a batch of its own.
 SOLO = 5.0
 VOLUME = ROOT / "scripts" / "test-volume"
@@ -325,6 +325,9 @@ def main():
     # nextest already parallelizes tests across cores. Each Tokio runtime needs
     # two workers for concurrency, not another whole machine's worth of threads.
     os.environ.setdefault("TOKIO_WORKER_THREADS", "2")
+    # Test threads poll the unoptimized workspace crates' deep futures; Cargo's
+    # [env] sets the same for `cargo test` and nextest.
+    os.environ.setdefault("RUST_MIN_STACK", str(16 << 20))
     config = Config()
     builds = args.build or ([] if args.archive else ["--workspace"])
     sources = [Source(build=b, cranelift=args.cranelift) for b in builds]

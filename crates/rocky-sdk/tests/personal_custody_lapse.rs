@@ -1,6 +1,7 @@
 //! A keyless custodian whose custody grant lapsed while every owner device
 //! was gone still restores a passkey-only device, under the same grant
 //! renewed. A binary of its own: it skips the whole process's wall clock.
+#![cfg(not(target_family = "wasm"))]
 use rocky_sdk::{
     Configuration, Freshness, GrantProfile, Network, PersonalNamespace, Schema, SignInSource,
     VerifiedPasskeyPrf, transport::memory::Hub,
@@ -10,7 +11,12 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 
-use crate::common;
+#[expect(dead_code, reason = "this suite uses a few of the shared fixtures")]
+#[path = "integration/common/mod.rs"]
+mod common;
+#[expect(dead_code, reason = "this suite uses a few of the shared fixtures")]
+#[path = "integration/support/mod.rs"]
+mod support;
 use common::{Device, Failure};
 
 fn namespace() -> PersonalNamespace {

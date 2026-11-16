@@ -55,8 +55,6 @@ mod peers;
 #[cfg(not(target_family = "wasm"))]
 mod personal;
 #[cfg(not(target_family = "wasm"))]
-mod personal_custody_lapse;
-#[cfg(not(target_family = "wasm"))]
 mod personal_sign_in;
 #[cfg(not(target_family = "wasm"))]
 mod readiness;

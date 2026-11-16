@@ -21,6 +21,11 @@ where
     tokio::task::spawn_blocking(work)
 }
 
+/// The stack of every thread Rocky starts. An application that builds Rocky
+/// unoptimized, as Cargo's dev profile does, polls futures deep enough to
+/// overflow std's 2 MiB default; the memory is reserved, not committed.
+pub const THREAD_STACK: usize = 16 << 20;
+
 /// Runs `task` to completion on its own thread and current-thread runtime,
 /// so its blocking SQLite work never stalls the caller's executor. A seeded
 /// simulation's thread runs it as a local task, as a browser Worker does.
@@ -43,6 +48,7 @@ where
         .build()?;
     let thread = std::thread::Builder::new()
         .name(name.into())
+        .stack_size(THREAD_STACK)
         .spawn(move || {
             let local = tokio::task::LocalSet::new();
             runtime.block_on(local.run_until(task()))

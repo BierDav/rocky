@@ -134,15 +134,15 @@ mod archive {
     }
 
     /// The archive format follows the identity format it carries.
-    const MAGIC: &[u8] = b"rocky.backup.v3\n";
-    const FORMAT: u32 = 3;
+    const MAGIC: &[u8] = b"rocky.backup.v4\n";
+    const FORMAT: u32 = 4;
     const MAX_HEADER: usize = 256 * 1024;
     /// The files an archive carries, in order. The database is required.
     const DATABASE: &str = "rocky.sqlite";
     const IDENTITY: &str = "identity.json";
 
     fn label(inventory: &[u8]) -> Vec<u8> {
-        [b"rocky.backup.v3".as_slice(), inventory].concat()
+        [b"rocky.backup.v4".as_slice(), inventory].concat()
     }
     fn digest(path: &Path) -> Result<(u64, String), Failure> {
         let mut reader = reader(path)?;

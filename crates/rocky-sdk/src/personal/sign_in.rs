@@ -842,7 +842,20 @@ fn stage(
     }
     settings.groups = groups;
     settings.epoch_statements = source.epoch_statements;
-    settings.authority = Some(crate::enrollment::Issuing::default());
+    let mut authority = crate::enrollment::Issuing::default();
+    crate::membership::observe_trusted(
+        &settings.revocations,
+        &[owner],
+        now()?,
+        &mut authority.trusted_nodes,
+    )?;
+    for nodes in authority.trusted_nodes.values_mut() {
+        for observation in nodes.values_mut() {
+            observation.read = true;
+            observation.acknowledged = true;
+        }
+    }
+    settings.authority = Some(authority);
     settings.personal = Some(installing.device(source.freshness));
     // A retry publishes the certificate it kept, never another.
     if let Some(certificate) = installing.certificate() {

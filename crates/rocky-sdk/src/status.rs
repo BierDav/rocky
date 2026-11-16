@@ -598,7 +598,7 @@ impl CallFailure {
         self.retryable
     }
     pub(crate) fn boxed(error: crate::Failure) -> crate::Failure {
-        if error.is::<crate::ServiceError>() {
+        if error.is::<crate::ServiceError>() || error.is::<crate::PersonalSignInError>() {
             error
         } else {
             Box::new(Self::from_failure(&error))

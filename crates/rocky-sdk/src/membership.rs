@@ -134,6 +134,8 @@ pub struct TrustedObservation {
     /// First observed here, in epoch seconds.
     pub linked: u64,
     pub unlinked: Option<u64>,
+    pub read: bool,
+    pub acknowledged: bool,
 }
 impl TrustedObservation {
     pub(crate) fn alerts(
@@ -143,22 +145,24 @@ impl TrustedObservation {
     ) -> impl Iterator<Item = crate::Alert> {
         let identity = identity.to_hex();
         let node = node.to_hex();
-        std::iter::once(crate::Alert {
-            kind: crate::AlertKind::TrustedNodeLinked {
-                identity: identity.clone(),
-                node: node.clone(),
-                linked: self.linked,
-            },
-            since: Some(self.linked),
-        })
-        .chain(self.unlinked.map(|unlinked| crate::Alert {
-            kind: crate::AlertKind::TrustedNodeUnlinked {
-                identity,
-                node,
-                unlinked,
-            },
-            since: Some(unlinked),
-        }))
+        (!self.acknowledged)
+            .then_some(crate::Alert {
+                kind: crate::AlertKind::TrustedNodeLinked {
+                    identity: identity.clone(),
+                    node: node.clone(),
+                    linked: self.linked,
+                },
+                since: Some(self.linked),
+            })
+            .into_iter()
+            .chain(self.unlinked.map(|unlinked| crate::Alert {
+                kind: crate::AlertKind::TrustedNodeUnlinked {
+                    identity,
+                    node,
+                    unlinked,
+                },
+                since: Some(unlinked),
+            }))
     }
 }
 
@@ -170,10 +174,17 @@ pub(crate) fn observe_trusted(
     observed: &mut BTreeMap<PublicKey, BTreeMap<PublicKey, TrustedObservation>>,
 ) -> Result<(), crate::Failure> {
     let membership = known.membership()?;
-    for certificate in known.certificates() {
+    for certificate in known.certificates().chain(
+        known
+            .statements()
+            .filter_map(|signed| signed.chain.certificate()),
+    ) {
         let identity = certificate.issuer;
         let node = certificate.capability.subject;
-        if !trusted.contains(&identity) || !membership.accepts(certificate.id()?) {
+        if !trusted.contains(&identity)
+            || (!membership.accepts(certificate.id()?)
+                && rocky_credentials::PersonalLink::of(certificate)?.is_none())
+        {
             continue;
         }
         let observation =
@@ -184,6 +195,8 @@ pub(crate) fn observe_trusted(
                 .or_insert(TrustedObservation {
                     linked: time,
                     unlinked: None,
+                    read: false,
+                    acknowledged: false,
                 });
         if let Some(unlinked) = known
             .statements()

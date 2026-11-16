@@ -519,13 +519,6 @@ impl Node {
         automatic: bool,
         retry_only: bool,
     ) -> Result<(ReconciliationReport, SyncStatus, bool), Failure> {
-        let _syncing = self.syncing.lock().await;
-        if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
-            return Err(Box::new(crate::enrollment::Revoked(statement)));
-        }
-        let started_at_epoch_millis = epoch_millis();
-        let first_attempt_id = self.observations.next_id();
-        let peers = std::sync::Mutex::new(Vec::new());
         let skip = if !self.online.load(Ordering::SeqCst) {
             Some(SkipReason::NetworkingDisabled)
         } else if !self.foreground.load(Ordering::SeqCst) {
@@ -533,6 +526,16 @@ impl Node {
         } else {
             None
         };
+        if skip.is_none() && transport.is_some() {
+            self.deliver_unlinks().await?;
+        }
+        let _syncing = self.syncing.lock().await;
+        if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
+            return Err(Box::new(crate::enrollment::Revoked(statement)));
+        }
+        let started_at_epoch_millis = epoch_millis();
+        let first_attempt_id = self.observations.next_id();
+        let peers = std::sync::Mutex::new(Vec::new());
         let result = if skip.is_some() {
             Ok((SyncStatus::new(SyncState::Idle), false))
         } else {

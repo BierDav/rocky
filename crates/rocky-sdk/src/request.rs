@@ -231,8 +231,24 @@ pub(crate) enum Request {
     AddPeer(String, Reply<String>),
     RemovePeer(rocky_credentials::PublicKey, Reply<()>),
     EnrollmentUpstream(Option<String>, Reply<()>),
+    DeviceRevocationReceipt(
+        rocky_credentials::PeerId,
+        Reply<Option<crate::DeviceRevocationReceipt>>,
+    ),
+    PersonalDeviceNotices(Reply<Vec<crate::PersonalDeviceNotice>>),
+    PersonalDeviceNotice(rocky_credentials::PeerId, bool, Reply<()>),
+    RevokePersonalDevice(
+        rocky_credentials::PeerId,
+        crate::VerifiedPasskeyPrf,
+        Reply<crate::DeviceRevocationReceipt>,
+    ),
+    PersonalReset(
+        crate::VerifiedPasskeyPrf,
+        crate::ResetKeep,
+        Reply<crate::ResetReceipt>,
+    ),
     Unlink(
-        rocky_credentials::PublicKey,
+        rocky_credentials::PeerId,
         std::sync::Arc<dyn crate::IdentityProvider>,
         Reply<()>,
     ),
@@ -359,6 +375,10 @@ impl Request {
             Self::AddPeer(..) => Kind::PeerAdd,
             Self::RemovePeer(..) => Kind::PeerRemove,
             Self::EnrollmentUpstream(..) => Kind::EnrollmentUpstream,
+            Self::DeviceRevocationReceipt(..)
+            | Self::PersonalDeviceNotices(..)
+            | Self::PersonalDeviceNotice(..) => Kind::Status,
+            Self::RevokePersonalDevice(..) | Self::PersonalReset(..) => Kind::Revoke,
             Self::Unlink(..) => Kind::Unlink,
             Self::Backup(..) => Kind::Backup,
             Self::RevokeIdentity(..) | Self::SignOutEverywhereElse(..) => Kind::Revoke,
@@ -556,6 +576,21 @@ impl Request {
                 let _ = reply.send(Err(error));
             }
             Self::EnrollmentUpstream(_, reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::DeviceRevocationReceipt(_, reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::PersonalDeviceNotices(reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::PersonalDeviceNotice(_, _, reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::RevokePersonalDevice(_, _, reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::PersonalReset(_, _, reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::Unlink(_, _, reply) => {

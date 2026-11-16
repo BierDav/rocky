@@ -263,7 +263,7 @@ pub use rocky_credentials as credentials;
 pub use rocky_credentials::Profile as GrantProfile;
 /// The identity port an application supplies, and a file-backed provider.
 pub use rocky_credentials::{
-    DatabaseKind, DiscoveryCapability, FileIdentityProvider, IdentityKey, IdentityProvider,
+    DatabaseKind, DiscoveryCapability, FileIdentityProvider, IdentityKey, IdentityProvider, PeerId,
     PersonalAccount, PersonalError, PersonalLocator, PersonalNamespace, PrfInput, Purpose,
     RevocationMode, RootKey, VerifiedPasskeyPrf,
 };
@@ -294,3 +294,5 @@ extern crate self as rocky_sdk;
 #[cfg(test)]
 #[path = "../tests/support/snapshot.rs"]
 mod test_snapshot;
+
+pub use personal::devices::{DeviceRevocationReceipt, PersonalDeviceNotice};

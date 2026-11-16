@@ -295,6 +295,41 @@ mod installs {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_saved_backup_install_reopens_unwitnessed_without_resuming_sign_in()
+    -> Result<(), Failure> {
+        let root = Scratch::new().await;
+        let owner = config(&root.path().join("owner"), None)?
+            .create_personal(prf(), account().namespace().clone())
+            .await?
+            .opened
+            .database;
+        write(&owner, "backed up").await?;
+        let archive = root.path().join("owner.backup");
+        owner.backup(&archive).await?;
+        owner.close().await?;
+        let directory = root.path().join("restored");
+        crash(&directory, Stage::Saved);
+        let error = sign_in(
+            &directory,
+            None,
+            SignInSource::Backup(VerifiedBackup::open(&archive)?),
+        )
+        .await
+        .err()
+        .ok_or("signed in past the crash")?;
+        assert!(error.to_string().contains("injected crash"));
+        let saved = crate::enrollment::Settings::load(&directory.join("identity.json"))?;
+        assert!(saved.personal.ok_or("device")?.unwitnessed);
+        let database = config(&directory, None)?.open().await?.database;
+        assert_eq!(
+            database.session().freshness().await?,
+            Freshness::Unwitnessed
+        );
+        assert_eq!(bodies(&database).await?, ["backed up"]);
+        database.close().await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_source_refused_while_staging_leaves_the_install_for_the_next() -> Result<(), Failure>
     {
         use crate::node::FORGED_SCHEMA;

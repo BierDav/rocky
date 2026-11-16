@@ -448,3 +448,29 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn direct_identity_revocation_reports_identity_rather_than_node_or_cascade()
+-> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let owner = create(directory.path(), &hub, "owner")?;
+    let member = join(directory.path(), &hub, "member", &owner.invite().await)?;
+    let identity = member.session().info().await?.principal;
+    owner.session().revoke_identity(&identity.to_hex()).await?;
+    let _ = member.sync().await;
+    let _ = member.session().renew().await;
+    assert_eq!(
+        member
+            .session()
+            .status()
+            .await?
+            .authority
+            .verified_revocation
+            .map(|notice| notice.reason),
+        Some(rocky_sdk::RevocationReason::Identity)
+    );
+    member.close().await;
+    owner.close().await;
+    Ok(())
+}

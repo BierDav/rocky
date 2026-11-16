@@ -42,7 +42,7 @@ use std::{
 /// join requests wait in `Issuing::requests`, a passkey-installed personal
 /// device keeps its publication ID and freshness in `personal`, and a
 /// personal custodian its vouched naming root escrow in `naming_escrow`.
-pub const VERSION: u32 = 35;
+pub const VERSION: u32 = 36;
 /// Current invitation format: the issuer's node key, and a profile only
 /// when the invited device is admitted on arrival.
 const INVITE_VERSION: u32 = 7;
@@ -254,6 +254,7 @@ pub struct Settings {
     pub epoch_statements: BTreeMap<String, Vec<Commitment>>,
     /// Present on a node whose identity holds issuer authority.
     pub authority: Option<Issuing>,
+    pub device_revocations: BTreeMap<rocky_credentials::PeerId, crate::DeviceRevocationReceipt>,
     /// The issuers that renew this device, by node key. Their routes are
     /// in `peers`.
     #[serde(skip)]
@@ -906,6 +907,23 @@ impl Settings {
                             .map(|key| rocky_credentials::PeerId::of(*key)),
                     ),
                 );
+            }
+        }
+        if let Some(owner) = self.kind()?.owner() {
+            let mut observed = self
+                .authority
+                .as_ref()
+                .map(|a| a.trusted_nodes.clone())
+                .unwrap_or_default();
+            crate::membership::observe_trusted(&self.revocations, &[owner], now()?, &mut observed)?;
+            // This installation observes other devices, never its own sign-in.
+            if let Some(own) = self.credentials.certificate()
+                && let Some(nodes) = observed.get_mut(&owner)
+            {
+                nodes.remove(&own.capability.subject);
+            }
+            if let Some(authority) = &mut self.authority {
+                authority.trusted_nodes = observed;
             }
         }
         Ok(added)
@@ -1755,6 +1773,7 @@ impl Settings {
             profile: Profile::Issuer,
             keys: BTreeMap::new(),
             authority: None,
+            device_revocations: BTreeMap::new(),
             issuers: Vec::new(),
             enrollment_upstream: None,
             delivery_nodes: BTreeMap::new(),
@@ -3201,6 +3220,7 @@ impl Settings {
             profile: Profile::Issuer,
             keys: BTreeMap::new(),
             authority: None,
+            device_revocations: BTreeMap::new(),
             issuers: Vec::new(),
             enrollment_upstream: None,
             delivery_nodes: BTreeMap::new(),
@@ -3425,6 +3445,7 @@ impl Joining {
             profile: enrollment.profile,
             keys: BTreeMap::new(),
             authority: None,
+            device_revocations: BTreeMap::new(),
             issuers: vec![enrollment.issuer],
             enrollment_upstream: None,
             delivery_nodes: BTreeMap::new(),
@@ -3595,6 +3616,24 @@ impl Settings {
         )?
         .to_bytes()?)
     }
+    /// Existing issuers and verified personal siblings can deliver epochs.
+    /// Custody principals and discovery hints confer no such authority.
+    pub(crate) fn epoch_sources(&self) -> Result<BTreeSet<PublicKey>, Failure> {
+        let mut sources: BTreeSet<_> = self.issuers.iter().copied().collect();
+        if self.kind()?.owner() == Some(self.identity) {
+            let own = self
+                .credentials
+                .certificate()
+                .map(|certificate| certificate.capability.subject);
+            sources.extend(
+                self.revocations
+                    .personal_devices(self.identity)?
+                    .into_iter()
+                    .filter(|node| Some(*node) != own),
+            );
+        }
+        Ok(sources)
+    }
     pub(crate) async fn request_epochs(
         &self,
         vault: &Vault,
@@ -3607,8 +3646,8 @@ impl Settings {
             network: transport.kind().into(),
         }
         .into();
-        for issuer in self
-            .issuers
+        let sources = self.epoch_sources()?;
+        for issuer in sources
             .iter()
             .filter(|issuer| first.is_none_or(|first| **issuer == first))
         {
@@ -4538,13 +4577,17 @@ impl Settings {
         let credentials = self.credentials.clone();
         let links = credentials.capabilities();
         let signer = rocky_credentials::Signer::node(&node, &credentials)?;
-        crate::mesh::mint_value(
-            vault,
-            (signer, &links),
-            self.domain()?.scope,
-            &self.revocations,
-            &statement,
-        )?;
+        // Personal bootstrap uses a stable capability. Independent exposure
+        // rotations must not mint conflicting values for the same unlink.
+        if !self.kind()?.is_personal() {
+            crate::mesh::mint_value(
+                vault,
+                (signer, &links),
+                self.domain()?.scope,
+                &self.revocations,
+                &statement,
+            )?;
+        }
         fault::check(fault::Stage::Begun)?;
         let mut keys = Vec::new();
         for (name, epoch) in targets {
@@ -4628,7 +4671,13 @@ impl Settings {
         }
         self.queue_rotation(vault, domain, (registry, membership))?;
         fault::check(fault::Stage::Clearing)?;
-        self.issuing("revokes devices")?.rotation = None;
+        if let Some(rotation) = self.issuing("revokes devices")?.rotation.take() {
+            for receipt in self.device_revocations.values_mut() {
+                if rotation.statements.contains(&receipt.statement) {
+                    receipt.local = true;
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -4812,7 +4861,7 @@ pub(crate) fn whole_partitions(
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StoredContact {
-    contact: Contact,
+    pub(crate) contact: Contact,
     meta: Option<crate::mesh::ContactMeta>,
     issuer: bool,
     enrollment: Option<Contact>,
@@ -4886,6 +4935,7 @@ impl Settings {
             groups,
             epoch_statements,
             authority,
+            device_revocations,
             issuers: _,
             enrollment_upstream: _,
             peers: _,
@@ -4920,6 +4970,7 @@ impl Settings {
             && *groups == other.groups
             && *epoch_statements == other.epoch_statements
             && *authority == other.authority
+            && *device_revocations == other.device_revocations
             && *logged_out == other.logged_out
             && *deliveries == other.deliveries
             && *claims == other.claims

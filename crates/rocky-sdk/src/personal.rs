@@ -23,6 +23,7 @@ use std::{
 
 mod backup;
 pub(crate) mod bootstrap;
+pub(crate) mod devices;
 pub(crate) mod sign_in;
 pub use backup::VerifiedBackup;
 pub use sign_in::SignInSource;
@@ -190,8 +191,7 @@ impl PublicationId {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Device {
     pub(crate) publication: PublicationId,
-    /// Installed from a source no other owner device witnessed, and no
-    /// such device reconciled with it since: `Freshness::Unwitnessed`.
+    /// No owner device has witnessed this install or its latest reset.
     pub(crate) unwitnessed: bool,
 }
 

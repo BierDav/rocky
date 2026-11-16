@@ -277,6 +277,8 @@ pub(crate) struct Node {
     backoff_tip: std::sync::Mutex<Option<rocky_core::TipId>>,
     resolution_retries:
         std::sync::Mutex<BTreeMap<rocky_credentials::PeerId, crate::scheduling::Retry>>,
+    unlink_retries: std::sync::Mutex<BTreeMap<rocky_credentials::PeerId, crate::scheduling::Retry>>,
+    unlink_delivery: Mutex<()>,
     sync_control: watch::Sender<u64>,
     worker_running: watch::Sender<bool>,
     sync_state: watch::Sender<SyncActivityState>,
@@ -429,6 +431,8 @@ impl Node {
             retries: std::sync::Mutex::new(BTreeMap::new()),
             backoff_tip: std::sync::Mutex::new(None),
             resolution_retries: std::sync::Mutex::new(BTreeMap::new()),
+            unlink_retries: std::sync::Mutex::new(BTreeMap::new()),
+            unlink_delivery: Mutex::new(()),
             sync_control: watch::channel(0).0,
             worker_running: watch::channel(false).0,
             sync_state: watch::channel(SyncActivityState::Idle).0,
@@ -1010,6 +1014,17 @@ impl Node {
     pub(crate) async fn admit_request(&self, kind: RequestKind) -> Result<(), Failure> {
         if self.lifecycle.lock().await.is_logged_out() && !kind.allowed_after_logout() {
             return Err(refused("this device logged out of the domain"));
+        }
+        if matches!(
+            kind,
+            RequestKind::Sql | RequestKind::NextId | RequestKind::Tips
+        ) {
+            let settings = self.settings.lock().await;
+            if settings.kind()?.is_personal()
+                && let Some(statement) = settings.revocation(&self.path)?
+            {
+                return Err(Box::new(crate::enrollment::Revoked(statement)));
+            }
         }
         Ok(())
     }
@@ -2025,6 +2040,13 @@ impl Node {
                     .filter_map(crate::scheduling::Retry::deadline),
             )
             .chain(
+                self.unlink_retries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .values()
+                    .filter_map(crate::scheduling::Retry::deadline),
+            )
+            .chain(
                 self.schema_acquisition
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -2397,8 +2419,12 @@ impl Node {
                     .map(|(peer, contact, generation)| async move {
                         let mut result = self.reconcile(transport, peer, &contact).await;
                         let settings = self.settings.lock().await.clone();
+                        let sources = match settings.epoch_sources() {
+                            Ok(sources) => sources,
+                            Err(error) => return (peer, contact, generation, Err(error)),
+                        };
                         if settings.issuer()
-                            && settings.issuers.contains(&peer)
+                            && sources.contains(&peer)
                             && !result
                                 .as_ref()
                                 .is_err_and(|error| error.is::<ServiceError>())
@@ -3331,6 +3357,17 @@ impl Node {
     }
 
     async fn answer_peer(&self, request: PeerRequest) -> Result<PeerReply, Failure> {
+        if !matches!(
+            request,
+            PeerRequest::Unlink(_) | PeerRequest::Policy | PeerRequest::Resolve(_)
+        ) {
+            let settings = self.settings.lock().await;
+            if settings.kind()?.is_personal()
+                && let Some(statement) = settings.revocation(&self.path)?
+            {
+                return Err(Box::new(crate::enrollment::Revoked(statement)));
+            }
+        }
         // Enrollment and its policy lookup may be forwarded. Schema,
         // resolution and membership messages are answered locally.
         if matches!(
@@ -3398,7 +3435,15 @@ impl Node {
             PeerRequest::Policy => {
                 let mut settings = self.settings.lock().await.clone();
                 settings.learn_revocations(&self.replica.revocations().await)?;
-                Ok(PeerReply::Policy(settings.revocations.clone()))
+                let mut known = settings.revocations.clone();
+                if let Some(ended) = settings.revocation(&self.path)? {
+                    known.merge_in(
+                        &RevocationSet::try_from(vec![ended])?,
+                        settings.database_context()?,
+                        now()?,
+                    )?;
+                }
+                Ok(PeerReply::Policy(known))
             }
             PeerRequest::Identity(IdentityEnrollment::Shared(request)) => {
                 let mut settings = self.settings.lock().await.clone();
@@ -3425,7 +3470,22 @@ impl Node {
             PeerRequest::LinkEnroll(LinkEnrollment::PersonalCustody(renewal)) => Ok(
                 PeerReply::LinkEnroll(self.accept_custody_renewal(*renewal).await?),
             ),
-            PeerRequest::Unlink(known) => Ok(PeerReply::Unlink(self.accept_unlink(known).await?)),
+            PeerRequest::Unlink(known) => {
+                self.accept_unlink(known).await?;
+                let settings = self.settings.lock().await;
+                let database = settings.database_context()?;
+                let mut committed = settings.revocations.clone();
+                if let Some(ended) = settings.revocation(&self.path)? {
+                    committed.merge_in(&RevocationSet::try_from(vec![ended])?, database, now()?)?;
+                }
+                Ok(PeerReply::Unlink(Box::new(
+                    rocky_credentials::UnlinkReply::sign(
+                        committed,
+                        database,
+                        &Settings::node_key(&self.vault)?,
+                    )?,
+                )))
+            }
             PeerRequest::Resolve(request) => Ok(PeerReply::Resolve(
                 request.answer(&Settings::node_key(&self.vault)?)?,
             )),

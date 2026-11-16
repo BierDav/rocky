@@ -616,11 +616,16 @@ async fn unlinking_the_last_node_keeps_the_identity_and_allows_relinking() -> Re
     )
     .await?;
     let own = Settings::node_key(&node.vault)?.public_key();
-    crate::identities::supplying(Some(identity.clone()), node.unlink(own)).await?;
+    crate::identities::supplying(
+        Some(identity.clone()),
+        node.unlink(rocky_credentials::PeerId::of(own)),
+    )
+    .await?;
     let settings = node.settings.lock().await;
     assert!(settings.revocation(&node.path)?.is_some());
     assert!(!settings.revocations.revokes(&settings.identity));
-    assert!(settings.revocations.ends_node(own, true));
+    let ended = settings.revocation(&node.path)?.ok_or("revocation")?;
+    assert!(RevocationSet::try_from(vec![ended])?.ends_node(own, true));
     let membership = settings.revocations.membership()?;
     let replacement = PrivateKey::new();
     let links = settings.identity_links();

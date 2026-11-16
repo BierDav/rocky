@@ -1236,7 +1236,10 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
     let before = issuer.epochs("A").await.0;
     first
         .session
-        .unlink(session["node"].as_str().unwrap(), person)
+        .unlink(
+            rocky_credentials::PeerId::of(session["node"].as_str().unwrap().parse().unwrap()),
+            person,
+        )
         .await
         .unwrap();
     snap::ok(first.session.sync_once()).await;

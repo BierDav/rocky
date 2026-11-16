@@ -601,6 +601,9 @@ impl Node {
         {
             return Err("live links are disabled".into());
         }
+        if let Some(statement) = settings.revocation(&self.path)? {
+            return Err(Box::new(crate::enrollment::Revoked(statement)));
+        }
         let mut authority = self.replica.observe_authority().await;
         let local = PrivateKey::from_bytes(&self.vault.get("node")?);
         let own = local.public_key();
@@ -714,6 +717,11 @@ impl Node {
             self.replica.flush().await?;
             if !self.foreground.load(Ordering::SeqCst) {
                 return Err("live links are disabled in the background".into());
+            }
+            // Serialize admission with receipt of self-ending evidence.
+            let current = self.settings.lock().await;
+            if let Some(statement) = current.revocation(&self.path)? {
+                return Err(Box::new(crate::enrollment::Revoked(statement)));
             }
             let mut entries = service
                 .live

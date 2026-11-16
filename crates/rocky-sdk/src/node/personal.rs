@@ -79,6 +79,102 @@ impl Nonces {
 }
 
 impl Node {
+    async fn personal_account(
+        &self,
+        prf: crate::VerifiedPasskeyPrf,
+    ) -> Result<crate::PersonalAccount, Failure> {
+        let settings = self.settings.lock().await;
+        let rocky_credentials::DatabaseKind::Personal {
+            owner, namespace, ..
+        } = settings.kind()?
+        else {
+            return Err(refused("this database is not a personal one"));
+        };
+        let account = crate::PersonalAccount::derive(prf, &namespace)
+            .map_err(|_| crate::PersonalSignInError::PrfUnsupported)?;
+        if account.locator().publisher != settings.publisher || account.locator().owner != owner {
+            return Err(crate::PersonalSignInError::WrongLocalAccount.into());
+        }
+        Ok(account)
+    }
+    pub(super) async fn revoke_personal_device(
+        &self,
+        node: rocky_credentials::PeerId,
+        prf: crate::VerifiedPasskeyPrf,
+    ) -> Result<crate::DeviceRevocationReceipt, Failure> {
+        let account = self.personal_account(prf).await?;
+        let identity = Arc::new(account.identity());
+        drop(account);
+        crate::identities::supplying(Some(identity), self.unlink(node)).await
+    }
+    pub(super) async fn reset_personal(
+        &self,
+        prf: crate::VerifiedPasskeyPrf,
+        keep: crate::ResetKeep,
+    ) -> Result<crate::ResetReceipt, Failure> {
+        let account = self.personal_account(prf).await?;
+        let (root, _) = account.into_parts();
+        self.sign_out_everywhere_else(&Root(Some(Arc::new(root))), keep)
+            .await
+    }
+    pub(super) async fn personal_device_notices(
+        &self,
+    ) -> Result<Vec<crate::PersonalDeviceNotice>, Failure> {
+        // A sync may have committed membership before settings absorbed it.
+        self.absorb_revocations(None).await?;
+        let settings = self.settings.lock().await;
+        let context = settings
+            .personal()?
+            .ok_or_else(|| refused("this database is not a personal one"))?;
+        Ok(settings
+            .authority
+            .as_ref()
+            .and_then(|a| a.trusted_nodes.get(&context.owner))
+            .into_iter()
+            .flat_map(|nodes| nodes.iter())
+            .map(|(node, notice)| crate::PersonalDeviceNotice {
+                scope: context.database.scope,
+                owner: context.owner,
+                node: rocky_credentials::PeerId::of(*node),
+                first_observed: notice.linked,
+                read: notice.read,
+                acknowledged: notice.acknowledged,
+                unlinked: notice.unlinked,
+            })
+            .collect())
+    }
+    pub(super) async fn personal_device_notice(
+        &self,
+        node: rocky_credentials::PeerId,
+        acknowledge: bool,
+    ) -> Result<(), Failure> {
+        self.personal_device_notices().await?;
+        self.configure(|settings| {
+            let owner = settings
+                .personal()?
+                .ok_or_else(|| refused("this database is not a personal one"))?
+                .owner;
+            let notice = settings
+                .authority
+                .as_mut()
+                .and_then(|a| a.trusted_nodes.get_mut(&owner))
+                .and_then(|nodes| {
+                    nodes
+                        .iter_mut()
+                        .find(|(key, _)| rocky_credentials::PeerId::of(**key) == node)
+                        .map(|(_, notice)| notice)
+                })
+                .ok_or_else(|| refused("no notice for this device"))?;
+            notice.read = true;
+            notice.acknowledged |= acknowledge;
+            Ok(())
+        })
+        .await?;
+        self.refresh_trusted_watch().await?;
+        self.observations.touch();
+        Ok(())
+    }
+
     /// What a personal authorization here must match.
     async fn personal_audience(&self) -> Result<(Settings, PersonalAudience), Failure> {
         let settings: Settings = (**self.settings.lock().await).clone();
@@ -314,15 +410,18 @@ impl Node {
             draft.learn_revocations(&known)?;
             draft.save(&self.path)?;
             *current = draft;
-            self.replica.learn_revocations(&known).await?;
             tracing::debug!(
                 node = %node.to_hex(),
                 publication = %data_encoding::HEXLOWER.encode(&publication_id),
                 "personal device certificate recorded"
             );
         }
+        // Retry the replica commit even if settings already kept the
+        // certificate before an interrupted publication.
+        self.replica.learn_revocations(&known).await?;
         drop(current);
         if added {
+            self.observations.touch();
             self.topics_changed();
             self.wake_sync();
         }

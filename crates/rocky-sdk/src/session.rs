@@ -291,10 +291,9 @@ impl Session {
     /// The identity signer is held only until this unlink finishes.
     pub async fn unlink(
         &self,
-        node: &str,
+        node: crate::PeerId,
         identity: std::sync::Arc<dyn crate::IdentityProvider>,
     ) -> Result<(), Failure> {
-        let node = node.parse()?;
         self.send(|reply| Request::Unlink(node, identity, reply))
             .await
     }

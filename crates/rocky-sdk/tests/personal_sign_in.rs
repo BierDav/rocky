@@ -615,7 +615,10 @@ async fn a_revoked_node_never_signs_in_again_under_that_node() -> Result<(), Fai
         .ok_or("the published node")?;
     // The owner unlinks that node before its install finished.
     let identity: Arc<dyn rocky_sdk::IdentityProvider> = Arc::new(account().identity());
-    owner.session.unlink(&node.to_hex(), identity).await?;
+    owner
+        .session
+        .unlink(rocky_credentials::PeerId::of(node), identity)
+        .await?;
     let error = refusal(sign_in(&path, owned(&hub, "phone"), prf(), namespace()).await);
     assert!(
         matches!(error, PersonalSignInError::RevokedNode { node: revoked } if revoked == rocky_credentials::PeerId::of(node)),
@@ -682,6 +685,9 @@ async fn a_backup_restores_offline_and_its_device_keeps_working() -> Result<(), 
     untouched(&path, &saved(&path)?["keys"])?;
     assert_eq!(saved(&path)?["keys"], keys, "the restore made a new key");
 
+    let reopened = Device::new(config(&path)?.open().await?)?;
+    assert_eq!(reopened.session.freshness().await?, Freshness::Unwitnessed);
+    reopened.close().await;
     // The archived device returns and still works beside the new one.
     let owner = Device::new(
         config(&owner_path)?
@@ -1178,5 +1184,490 @@ async fn a_shared_database_answers_no_personal_hello() -> Result<(), Failure> {
     );
     probe.transport.close().await;
     shared.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sign_in_observes_existing_devices_as_read_and_only_new_devices_raise_notices()
+-> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let hub = hub();
+    let owner = create(&directory.path().join("owner"), &hub, "owner").await?;
+    owner.session.set_automatic_sync(false).await?;
+    let phone = Device::new(
+        sign_in(
+            &directory.path().join("phone"),
+            owned(&hub, "phone"),
+            prf(),
+            namespace(),
+        )
+        .await?
+        .opened,
+    )?;
+    phone.session.set_automatic_sync(false).await?;
+    common::introduce(&owner, &phone).await;
+    phone.sync().await.map_err(|e| e.to_string())?;
+    let owner_node = rocky_sdk::PeerId::of(owner.session.info().await?.node);
+    let phone_node = rocky_sdk::PeerId::of(phone.session.info().await?.node);
+    let baseline = phone.session.personal_device_notices().await?;
+    assert_eq!(baseline.len(), 1, "{baseline:?}");
+    assert_eq!(baseline[0].node, owner_node);
+    assert!(baseline[0].read && baseline[0].acknowledged);
+    assert!(
+        !phone
+            .session
+            .status()
+            .await?
+            .alerts
+            .iter()
+            .any(|alert| { matches!(alert.kind, rocky_sdk::AlertKind::TrustedNodeLinked { .. }) })
+    );
+    owner
+        .session
+        .acknowledge_personal_device_notice(phone_node)
+        .await?;
+
+    let laptop = Device::new(
+        sign_in(
+            &directory.path().join("laptop"),
+            owned(&hub, "laptop"),
+            prf(),
+            namespace(),
+        )
+        .await?
+        .opened,
+    )?;
+    laptop.session.set_automatic_sync(false).await?;
+    let laptop_node = rocky_sdk::PeerId::of(laptop.session.info().await?.node);
+    common::introduce(&owner, &laptop).await;
+    for device in [&owner, &phone] {
+        device.sync().await.map_err(|e| e.to_string())?;
+        device.sync().await.map_err(|e| e.to_string())?;
+        let notices = device.session.personal_device_notices().await?;
+        let unread: Vec<_> = notices.iter().filter(|notice| !notice.read).collect();
+        assert_eq!(unread.len(), 1, "{notices:?}");
+        assert_eq!(unread[0].node, laptop_node);
+        assert!(!unread[0].acknowledged);
+        assert_eq!(
+            device
+                .session
+                .status()
+                .await?
+                .alerts
+                .iter()
+                .filter(|alert| {
+                    matches!(alert.kind, rocky_sdk::AlertKind::TrustedNodeLinked { .. })
+                })
+                .count(),
+            1
+        );
+    }
+    laptop.close().await;
+    phone.close().await;
+    owner.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn personal_notices_are_local_durable_and_deduplicated_after_custody_delivery()
+-> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let hub = hub();
+    let owner_path = directory.path().join("owner");
+    let owner = create(&owner_path, &hub, "owner").await?;
+    owner.session.set_automatic_sync(false).await?;
+    assert!(owner.session.personal_device_notices().await?.is_empty());
+    let invitation = owner
+        .session
+        .invitation_with(GrantProfile::Custody {
+            scopes: ["items".to_owned()].into(),
+        })
+        .await?
+        .uri;
+    let custodian = Device::new(
+        config(&directory.path().join("custodian"))?
+            .network(Network::Owned(hub.connector("custodian")))
+            .join(&invitation)
+            .await?,
+    )?;
+    custodian.session.set_automatic_sync(false).await?;
+    common::introduce(&owner, &custodian).await;
+    owner.sync().await.map_err(|e| e.to_string())?;
+    owner.close().await;
+    // No owner device is serving; the new device publishes to custody.
+    let phone = Device::new(
+        config(&directory.path().join("phone"))?
+            .network(Network::Owned(hub.connector("phone")))
+            .sign_in(prf(), namespace(), SignInSource::Discover)
+            .await?
+            .opened,
+    )?;
+    phone.session.set_automatic_sync(false).await?;
+    let node = rocky_sdk::PeerId::of(phone.session.info().await?.node);
+    phone.close().await;
+    let owner = Device::new(
+        config(&owner_path)?
+            .network(Network::Owned(hub.connector("owner")))
+            .open()
+            .await?,
+    )?;
+    owner.session.set_automatic_sync(false).await?;
+    owner.sync().await.map_err(|e| e.to_string())?;
+    let notices = owner.session.personal_device_notices().await?;
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    let notice = notices[0].clone();
+    assert_eq!(notice.node, node);
+    assert_eq!(notice.scope, *owner.scope());
+    assert_eq!(notice.owner, identity_key());
+    assert!(!notice.read && !notice.acknowledged);
+    owner.session.read_personal_device_notice(node).await?;
+    assert!(owner.session.personal_device_notices().await?[0].read);
+    owner
+        .session
+        .acknowledge_personal_device_notice(node)
+        .await?;
+    owner.session.renew().await?;
+    owner.sync().await.map_err(|e| e.to_string())?;
+    owner.sync().await.map_err(|e| e.to_string())?;
+    let retained = owner.session.personal_device_notices().await?;
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].first_observed, notice.first_observed);
+    assert!(retained[0].read && retained[0].acknowledged);
+    owner.close().await;
+    let owner = Device::new(config(&owner_path)?.open().await?)?;
+    assert_eq!(owner.session.personal_device_notices().await?, retained);
+    assert!(
+        !owner
+            .session
+            .status()
+            .await?
+            .alerts
+            .iter()
+            .any(|alert| matches!(&alert.kind, rocky_sdk::AlertKind::TrustedNodeLinked { .. }))
+    );
+    owner.close().await;
+    custodian.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_passkey_revoke_is_precise_idempotent_durable_and_delivered_to_the_ended_node()
+-> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let hub = hub();
+    let owner_path = directory.path().join("owner");
+    let owner = create(&owner_path, &hub, "owner").await?;
+    owner.session.set_automatic_sync(false).await?;
+    let phone = Device::new(
+        sign_in(
+            &directory.path().join("phone"),
+            owned(&hub, "phone"),
+            prf(),
+            namespace(),
+        )
+        .await?
+        .opened,
+    )?;
+    let laptop = Device::new(
+        sign_in(
+            &directory.path().join("laptop"),
+            owned(&hub, "laptop"),
+            prf(),
+            namespace(),
+        )
+        .await?
+        .opened,
+    )?;
+    for device in [&phone, &laptop] {
+        device.session.set_automatic_sync(false).await?;
+        common::introduce(&owner, device).await;
+        device.sync().await.map_err(|e| e.to_string())?;
+    }
+    let target_key = phone.session.info().await?.node;
+    let target = rocky_sdk::PeerId::of(target_key);
+    let before = saved(&owner_path)?["keys"].clone();
+    let wrong = owner
+        .session
+        .revoke_personal_device(target, passkey(2, &namespace()))
+        .await;
+    assert!(matches!(wrong, Err(PersonalSignInError::WrongLocalAccount)));
+    assert_eq!(saved(&owner_path)?["keys"], before);
+    assert!(!known(&owner_path)?.has_revocations());
+    let receipt = owner
+        .session
+        .revoke_personal_device(target, prf())
+        .await
+        .map_err(|e| format!("initial revoke: {e:?}"))?;
+    assert!(receipt.local);
+    assert!(receipt.delivered.contains(&target), "{receipt:?}");
+    let after = saved(&owner_path)?["keys"].clone();
+    assert_ne!(before, after);
+    let known = known(&owner_path)?;
+    let statement = known.get(&receipt.statement).ok_or("statement")?;
+    assert_eq!(statement.statement.nodes, [target].into());
+    assert_eq!(statement.statement.mode, rocky_sdk::RevocationMode::Lost);
+    assert!(statement.statement.identities.is_empty());
+    assert_eq!(known.personal_devices(identity_key())?.len(), 2);
+    assert!(matches!(
+        phone
+            .session
+            .status()
+            .await
+            .map_err(|e| format!("ended status: {e}"))?
+            .authority
+            .verified_revocation
+            .map(|v| v.reason),
+        Some(rocky_sdk::RevocationReason::Node)
+    ));
+    assert!(phone.sync().await.is_err());
+    assert!(phone.session.execute("BEGIN", Vec::new()).await.is_err());
+    assert!(phone.session.seal(false).await.is_err());
+    let repeated = owner.session.revoke_personal_device(target, prf()).await?;
+    assert_eq!(repeated, receipt);
+    assert_eq!(saved(&owner_path)?["keys"], after);
+    // A sibling remains a writer and trusted sealer.
+    laptop
+        .sync()
+        .await
+        .map_err(|e| format!("sibling sync: {e}"))?;
+    laptop.add(4, "survives").await;
+    laptop
+        .sync()
+        .await
+        .map_err(|e| format!("sibling write sync: {e}"))?;
+    owner
+        .sync()
+        .await
+        .map_err(|e| format!("owner write sync: {e}"))?;
+    assert_eq!(
+        owner.titles().await,
+        ["survives"],
+        "sibling write after unlink"
+    );
+    let sealed = laptop
+        .session
+        .seal(false)
+        .await
+        .map_err(|e| format!("sibling seal: {e}"))?;
+    laptop
+        .sync()
+        .await
+        .map_err(|e| format!("sibling seal sync: {e}"))?;
+    owner
+        .sync()
+        .await
+        .map_err(|e| format!("owner seal sync: {e}"))?;
+    let inspection = owner.session.inspect_tips().await?;
+    assert!(
+        inspection
+            .seals
+            .iter()
+            .any(|seal| seal.id == sealed.tip && !seal.revoked),
+        "{inspection:?}"
+    );
+    let notice = owner
+        .session
+        .personal_device_notices()
+        .await?
+        .into_iter()
+        .find(|n| n.node == target)
+        .ok_or("notice")?;
+    assert!(notice.unlinked.is_some());
+    let settled = saved(&owner_path)?["keys"].clone();
+    phone.close().await;
+    laptop.close().await;
+    owner.close().await;
+    let owner = Device::new(config(&owner_path)?.open().await?)?;
+    assert_eq!(
+        owner.session.revoke_personal_device(target, prf()).await?,
+        receipt
+    );
+    assert_eq!(saved(&owner_path)?["keys"], settled);
+    owner.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_personal_owner_reset_uses_passkey_authority_and_refuses_other_full_readers()
+-> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let hub = hub();
+    let owner_path = directory.path().join("owner");
+    let owner = create(&owner_path, &hub, "owner").await?;
+    owner.session.set_automatic_sync(false).await?;
+    let laptop = Device::new(
+        sign_in(
+            &directory.path().join("laptop"),
+            owned(&hub, "laptop"),
+            prf(),
+            namespace(),
+        )
+        .await?
+        .opened,
+    )?;
+    laptop.session.set_automatic_sync(false).await?;
+    common::introduce(&owner, &laptop).await;
+    laptop.add(1, "covered").await;
+    laptop.sync().await.map_err(|e| e.to_string())?;
+    laptop.add(2, "discarded").await;
+    let keep = rocky_sdk::ResetKeep {
+        also: [rocky_sdk::PeerId::of(laptop.session.info().await?.node)].into(),
+        ..Default::default()
+    };
+    let Err(error) = owner.session.sign_out_personal_devices(prf(), keep).await else {
+        panic!("kept another full reader");
+    };
+    assert_eq!(error.code(), "not_custodian");
+    assert!(known(&owner_path)?.reset_heads().is_empty());
+    let receipt = owner
+        .session
+        .sign_out_personal_devices(prf(), Default::default())
+        .await?;
+    assert_eq!(
+        receipt.kept,
+        [rocky_sdk::PeerId::of(owner.session.info().await?.node)].into()
+    );
+    assert_eq!(
+        owner.session.freshness().await?,
+        Freshness::FencedByOwner {
+            reset: receipt.reset
+        }
+    );
+    assert_eq!(saved(&owner_path)?["personal"]["unwitnessed"], true);
+    assert_eq!(owner.titles().await, ["covered"]);
+    assert!(laptop.sync().await.is_err());
+    assert!(
+        matches!(laptop.session.status().await?.authority.verified_revocation.map(|v| v.reason),
+        Some(rocky_sdk::RevocationReason::Reset { reset }) if reset == receipt.reset)
+    );
+    let next = owner
+        .session
+        .sign_out_personal_devices(prf(), Default::default())
+        .await?;
+    assert_eq!(next.follows, [receipt.reset].into());
+    // The passkey still authorizes a fresh node after the reset.
+    let fresh = Device::new(
+        sign_in(
+            &directory.path().join("fresh"),
+            owned(&hub, "fresh"),
+            prf(),
+            namespace(),
+        )
+        .await?
+        .opened,
+    )?;
+    fresh.add(3, "new sign-in").await;
+    fresh.close().await;
+    laptop.close().await;
+    owner.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_offline_revoke_keeps_pending_coverage_and_retries_after_restart() -> Result<(), Failure>
+{
+    let directory = tempfile::tempdir()?;
+    let hub = hub();
+    let owner_path = directory.path().join("owner");
+    let owner = create(&owner_path, &hub, "owner").await?;
+    owner.session.set_automatic_sync(false).await?;
+    let phone = Device::new(
+        sign_in(
+            &directory.path().join("phone"),
+            owned(&hub, "phone"),
+            prf(),
+            namespace(),
+        )
+        .await?
+        .opened,
+    )?;
+    phone.session.set_automatic_sync(false).await?;
+    common::introduce(&owner, &phone).await;
+    let target = rocky_sdk::PeerId::of(phone.session.info().await?.node);
+    phone.session.set_networking_enabled(false).await?;
+    let receipt = owner.session.revoke_personal_device(target, prf()).await?;
+    assert!(receipt.local && receipt.pending.contains(&target));
+    assert!(!receipt.delivered.contains(&target));
+    let epochs = saved(&owner_path)?["keys"].clone();
+    owner.close().await;
+    let owner = Device::new(
+        config(&owner_path)?
+            .network(Network::Owned(hub.connector("owner")))
+            .open()
+            .await?,
+    )?;
+    owner.session.set_automatic_sync(false).await?;
+    assert_eq!(
+        owner.session.device_revocation_receipt(target).await?,
+        Some(receipt.clone())
+    );
+    phone.session.set_networking_enabled(true).await?;
+    owner.sync().await.map_err(|e| e.to_string())?;
+    let delivered = owner
+        .session
+        .device_revocation_receipt(target)
+        .await?
+        .ok_or("receipt")?;
+    assert_eq!(delivered.statement, receipt.statement);
+    assert!(delivered.local && delivered.delivered.contains(&target));
+    assert!(!delivered.pending.contains(&target));
+    assert_eq!(saved(&owner_path)?["keys"], epochs);
+    assert!(matches!(
+        phone
+            .session
+            .status()
+            .await?
+            .authority
+            .verified_revocation
+            .map(|v| v.reason),
+        Some(rocky_sdk::RevocationReason::Node)
+    ));
+    phone.close().await;
+    owner.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_self_unlink_retains_its_cause_and_receipt_after_restart() -> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let hub = hub();
+    let owner_path = directory.path().join("owner");
+    let owner = create(&owner_path, &hub, "owner").await?;
+    let target = rocky_sdk::PeerId::of(owner.session.info().await?.node);
+    let receipt = owner.session.revoke_personal_device(target, prf()).await?;
+    assert!(receipt.local && receipt.pending.is_empty());
+    assert!(matches!(
+        owner
+            .session
+            .status()
+            .await?
+            .authority
+            .verified_revocation
+            .map(|v| v.reason),
+        Some(rocky_sdk::RevocationReason::Node)
+    ));
+    assert!(owner.session.execute("BEGIN", Vec::new()).await.is_err());
+    assert_eq!(
+        owner.session.revoke_personal_device(target, prf()).await?,
+        receipt
+    );
+    owner.close().await;
+    let owner = Device::new(config(&owner_path)?.open().await?)?;
+    assert_eq!(
+        owner.session.device_revocation_receipt(target).await?,
+        Some(receipt)
+    );
+    assert!(matches!(
+        owner
+            .session
+            .status()
+            .await?
+            .authority
+            .verified_revocation
+            .map(|v| v.reason),
+        Some(rocky_sdk::RevocationReason::Node)
+    ));
+    assert!(owner.session.execute("BEGIN", Vec::new()).await.is_err());
+    owner.close().await;
     Ok(())
 }

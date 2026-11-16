@@ -531,7 +531,10 @@ async fn an_identity_unlinks_one_sibling_and_the_issuer_rotates_its_reader_scope
     nodes[0]
         .database
         .session()
-        .unlink(&nodes[1].node().await, person(&root.join("person"))?)
+        .unlink(
+            rocky_credentials::PeerId::of((nodes[1].node().await).parse()?),
+            person(&root.join("person"))?,
+        )
         .await?;
     nodes[0].sync().await.map_err(|error| error.to_string())?;
     owner.sync().await.map_err(|error| error.to_string())?;
@@ -573,7 +576,10 @@ async fn the_last_node_publishes_its_unlink_and_the_identity_links_again() -> Re
         nodes[0]
             .database
             .session()
-            .unlink(&nodes[index].node().await, person(&root.join("person"))?)
+            .unlink(
+                rocky_credentials::PeerId::of((nodes[index].node().await).parse()?),
+                person(&root.join("person"))?,
+            )
             .await?;
     }
     assert_ne!(
@@ -810,7 +816,10 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
         members[0]
             .database
             .session()
-            .unlink(&siblings[0].node().await, personal.clone())
+            .unlink(
+                rocky_credentials::PeerId::of((siblings[0].node().await).parse()?),
+                personal.clone(),
+            )
             .await?;
         members[0].sync().await.map_err(|error| error.to_string())?;
         owners[0].sync().await.map_err(|error| error.to_string())?;
@@ -979,7 +988,7 @@ async fn certified_seen_nodes_are_visible_without_issuer_authority() -> Result<(
         .database
         .session()
         .unlink(
-            &sibling_node,
+            rocky_credentials::PeerId::of(sibling_node.parse()?),
             person(&household._root.path().join("person"))?,
         )
         .await?;
@@ -1128,7 +1137,10 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
     first
         .database
         .session()
-        .unlink(&third_node, personal.clone())
+        .unlink(
+            rocky_credentials::PeerId::of((third_node).parse()?),
+            personal.clone(),
+        )
         .await?;
     for _ in 0..2 {
         for device in all {

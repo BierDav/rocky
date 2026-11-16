@@ -46,7 +46,8 @@ pub enum Freshness {
     LocallyAnchored,
     /// Restored from a source no other device witnessed: newer data or a
     /// revocation may be missing. Personal sign-in from a single custodian
-    /// reports it; the current shared model has no such restore yet.
+    /// reports it and retains it across restart until an owner reset fences
+    /// the view; signatures and ordinary sync do not prove completeness.
     Unwitnessed,
     /// The owner declared this device's state complete: `reset` ended every
     /// other node except named custodians and fenced their data.
@@ -107,11 +108,18 @@ pub struct ResetReceipt {
 pub(crate) enum ResetRefused {
     /// Statement `statement` already ended this device: sign in again as a
     /// new device.
-    DeviceSignedOut { statement: Commitment },
+    DeviceSignedOut {
+        statement: Commitment,
+    },
     /// A held statement already ended the named custodian.
-    CustodianSignedOut { custodian: PeerId },
+    CustodianSignedOut {
+        custodian: PeerId,
+    },
     /// The reset would end this device's own credentials.
     EndsSigner,
+    NotCustodian {
+        node: PeerId,
+    },
 }
 impl ResetRefused {
     pub(crate) fn code(&self) -> &'static str {
@@ -119,6 +127,7 @@ impl ResetRefused {
             Self::DeviceSignedOut { .. } => "device_signed_out",
             Self::CustodianSignedOut { .. } => "custodian_signed_out",
             Self::EndsSigner => "reset_ends_signer",
+            Self::NotCustodian { .. } => "not_custodian",
         }
     }
 }
@@ -134,6 +143,9 @@ impl std::fmt::Display for ResetRefused {
                 write!(f, "custodian {} was already signed out", custodian.to_hex())
             }
             Self::EndsSigner => f.write_str("the reset would sign out this device itself"),
+            Self::NotCustodian { node } => {
+                write!(f, "{} is not a verified custody-only node", node.to_hex())
+            }
         }
     }
 }

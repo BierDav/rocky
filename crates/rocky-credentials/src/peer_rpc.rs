@@ -108,6 +108,57 @@ impl PeerResolutionProof {
         Ok(self.node)
     }
 }
+/// The responding node acknowledges this policy only after its local commit.
+/// Node possession suffices for a receipt, including on a revoked node.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnlinkReply {
+    database: crate::DatabaseContext,
+    known: RevocationSet,
+    node: PublicKey,
+    signature: Signature,
+}
+impl UnlinkReply {
+    pub fn sign(
+        known: RevocationSet,
+        database: crate::DatabaseContext,
+        node: &PrivateKey,
+    ) -> Result<Self, Error> {
+        known.verify_in(database)?;
+        let public = node.public_key();
+        let bytes = signing_bytes(
+            "rocky.unlink-receipt.v1",
+            &(database, known.fingerprint()?, public),
+        )?;
+        Ok(Self {
+            database,
+            known,
+            node: public,
+            signature: node.sign(&bytes),
+        })
+    }
+    /// A replay still proves this peer accepted these permanent statements;
+    /// it makes no claim about newer policy or future retention.
+    pub fn verify(
+        &self,
+        database: crate::DatabaseContext,
+        peer: crate::PeerId,
+    ) -> Result<&RevocationSet, Error> {
+        if self.database != database || crate::PeerId::of(self.node) != peer {
+            return Err(denied("unlink receipt belongs to another peer or database"));
+        }
+        self.known.verify_in(database)?;
+        let bytes = signing_bytes(
+            "rocky.unlink-receipt.v1",
+            &(database, self.known.fingerprint()?, self.node),
+        )?;
+        if !self.node.verify(&bytes, &self.signature) {
+            return Err(denied("invalid unlink receipt signature"));
+        }
+        Ok(&self.known)
+    }
+}
+
 /// Only verified finality establishes the outcome of a private candidate.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum StagedCloseStatus {
@@ -119,7 +170,7 @@ pub enum StagedCloseStatus {
     },
 }
 
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 pub const MAX_MESSAGE: usize = 3 * crate::MAX_REVOCATION_SET_BYTES;
 
 #[derive(Serialize, Deserialize)]
@@ -218,7 +269,7 @@ pub enum PeerReply {
     Policy(RevocationSet),
     Identity(IdentityReply),
     LinkEnroll(RevocationSet),
-    Unlink(RevocationSet),
+    Unlink(Box<UnlinkReply>),
     Resolve(PeerResolutionProof),
     TipSchema(Option<Vec<u8>>),
     StagedClose(StagedCloseStatus),
@@ -324,6 +375,91 @@ mod tests {
                 .verify(&request, crate::PeerId::of(PrivateKey::new().public_key()))
                 .is_err()
         );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn unlink_receipts_bind_policy_database_and_peer_even_after_revocation() {
+        let root = PrivateKey::from_bytes(&[1; 32]);
+        let node = PrivateKey::from_bytes(&[2; 32]);
+        let peer = crate::PeerId::of(node.public_key());
+        let database = crate::DatabaseContext {
+            publisher: root.public_key(),
+            scope: rocky_core::Scope {
+                mesh: rocky_core::MeshId([1; 16]),
+                app: rocky_core::AppId([2; 16]),
+                domain: rocky_core::DomainId([3; 16]),
+            },
+        };
+        let signed = crate::SignedRevocation::sign_in(
+            crate::Revocation {
+                app: database.scope.app,
+                issuer: root.public_key(),
+                time: 100,
+                nodes: [peer].into(),
+                identities: Default::default(),
+                capabilities: Default::default(),
+                cut: Vec::new(),
+                mode: crate::RevocationMode::Lost,
+                recovery: None,
+            },
+            &root,
+            &crate::CredentialChain::default(),
+            database,
+        )
+        .unwrap();
+        let statement = signed.id().unwrap();
+        let known = RevocationSet::try_from(vec![signed]).unwrap();
+        let receipt = UnlinkReply::sign(known, database, &node).unwrap();
+        assert!(
+            receipt
+                .verify(database, peer)
+                .unwrap()
+                .get(&statement)
+                .is_some()
+        );
+        assert!(
+            receipt
+                .verify(database, crate::PeerId::of(root.public_key()))
+                .is_err()
+        );
+        let mut foreign = database;
+        foreign.scope.domain = rocky_core::DomainId([4; 16]);
+        assert!(receipt.verify(foreign, peer).is_err());
+        let mut tampered = receipt.clone();
+        tampered.known = RevocationSet::default();
+        assert!(tampered.verify(database, peer).is_err());
+        let mut forged = receipt.clone();
+        forged.node = root.public_key();
+        assert!(
+            forged
+                .verify(database, crate::PeerId::of(root.public_key()))
+                .is_err()
+        );
+        let frame = PeerReplyFrame {
+            version: VERSION,
+            result: Ok(PeerReply::Unlink(Box::new(receipt))),
+        };
+        let decoded = PeerReplyFrame::from_bytes(&frame.to_bytes().unwrap()).unwrap();
+        let Ok(PeerReply::Unlink(receipt)) = decoded.result else {
+            panic!("unlink receipt");
+        };
+        assert!(
+            receipt
+                .verify(database, peer)
+                .unwrap()
+                .get(&statement)
+                .is_some()
+        );
+        let old = PeerReplyFrame {
+            version: VERSION - 1,
+            result: Ok(PeerReply::Policy(RevocationSet::default())),
+        };
+        assert!(PeerReplyFrame::from_bytes(&encode(&old).unwrap()).is_err());
+        let old = PeerRequestFrame {
+            version: VERSION - 1,
+            request: PeerRequest::Policy,
+        };
+        assert!(PeerRequestFrame::from_bytes(&encode(&old).unwrap()).is_err());
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]

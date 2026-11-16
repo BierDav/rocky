@@ -15,7 +15,6 @@ impl Node {
     ) -> Result<crate::ResetReceipt, Failure> {
         let own = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
         let mut custodians = self.known_custodians().await?;
-        custodians.retain(|node| !except.contains(node));
         let graph = self.replica.tip_graph(self.domain().scope).await?;
         let mut settings = self.settings.lock().await;
         let root = crate::enrollment::root_signer(
@@ -29,6 +28,24 @@ impl Node {
                 statement: ended.id()?,
             }));
         }
+        if let Some(custodian) = also
+            .iter()
+            .find(|node| settings.revocations.revokes_reference(node))
+        {
+            return Err(Box::new(crate::ResetRefused::CustodianSignedOut {
+                custodian: *custodian,
+            }));
+        }
+        // Personal resets keep only the signer and verified custody
+        // principals: another full reader could hold unfenced data.
+        let not_custodian = if settings.kind()?.is_personal() {
+            also.iter()
+                .find(|node| **node != PeerId::of(own) && !custodians.contains(node))
+                .copied()
+        } else {
+            None
+        };
+        custodians.retain(|node| !except.contains(node));
         let mut keep = custodians;
         keep.extend(also.iter().copied());
         keep.insert(PeerId::of(own));
@@ -71,6 +88,9 @@ impl Node {
                         custodian: *custodian,
                     }));
                 }
+                if let Some(node) = not_custodian {
+                    return Err(Box::new(crate::ResetRefused::NotCustodian { node }));
+                }
                 Ok(rocky_credentials::Authority::owner(root).revoke_in(
                     Revocation {
                         app,
@@ -105,6 +125,9 @@ impl Node {
             .unwrap_or_default();
         let mut draft = settings.clone();
         draft.learn_revocations(&RevocationSet::try_from(vec![signed.clone()])?)?;
+        if let Some(device) = &mut draft.personal {
+            device.unwitnessed = true;
+        }
         draft.save(&self.path)?;
         *settings = draft;
         self.apply(&mut settings, Vec::new()).await?;
@@ -170,15 +193,16 @@ impl Node {
     pub(super) async fn freshness(&self) -> Result<crate::Freshness, Failure> {
         let own = PeerId::of(PrivateKey::from_bytes(&self.vault.get("node")?).public_key());
         // No owner fence vouches for an ended device's view.
-        if self.settings.lock().await.revocation(&self.path)?.is_some() {
+        let settings = self.settings.lock().await;
+        if settings.revocation(&self.path)?.is_some() {
             return Ok(crate::Freshness::LocallyAnchored);
         }
-        let unwitnessed = self
-            .settings
-            .lock()
-            .await
-            .personal
-            .is_some_and(|device| device.unwitnessed);
+        let baseline = if settings.personal.is_some_and(|device| device.unwitnessed) {
+            crate::Freshness::Unwitnessed
+        } else {
+            crate::Freshness::LocallyAnchored
+        };
+        drop(settings);
         let revocations = self.replica.revocations().await;
         // The newest unfollowed reset that keeps this node fences the rest.
         let fenced = revocations
@@ -193,12 +217,6 @@ impl Node {
             })
             .max_by_key(|(signed, id)| (signed.statement.time, *id))
             .map(|(_, reset)| crate::Freshness::FencedByOwner { reset });
-        // A sign-in no other owner device witnessed stays unwitnessed until
-        // one reconciles with this device.
-        Ok(fenced.unwrap_or(if unwitnessed {
-            crate::Freshness::Unwitnessed
-        } else {
-            crate::Freshness::LocallyAnchored
-        }))
+        Ok(fenced.unwrap_or(baseline))
     }
 }

@@ -310,16 +310,6 @@ jobs:
           # The archives are already compressed.
           compression-level: 0
 
-      - name: Upload the SDK test archive
-        if: steps.passed.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: nextest-sdk
-          path: ${{ runner.temp }}/build/sdk-without-defaults.tar.zst
-          retention-days: 1
-          compression-level: 0
-
       - name: Upload the test runner
         if: steps.passed.outputs.cache-hit != 'true'
         continue-on-error: true
@@ -366,8 +356,6 @@ jobs:
           job: check
           tree: ${{ steps.source.outputs.tree }}
           workspace-archive: true
-          # The standalone SDK: the build job compiled it, e2e runs it.
-          sdk-archive: false
           dependencies: fallback
 
       - name: Run formatting and the unit and integration tiers
@@ -434,15 +422,13 @@ jobs:
           job: e2e
           tree: ${{ steps.source.outputs.tree }}
           workspace-archive: true
-          sdk-archive: true
           dependencies: fallback
 
       - name: Run the end-to-end tier
         if: steps.reuse.outputs.passed != 'true'
         working-directory: source
         run: |
-          if [ -f "$RUNNER_TEMP/build/workspace.tar.zst" ] \
-              && [ -f "$RUNNER_TEMP/build/sdk-without-defaults.tar.zst" ]; then
+          if [ -f "$RUNNER_TEMP/build/workspace.tar.zst" ]; then
             ./scripts/check --e2e --from "$RUNNER_TEMP/build"
           else
             ./scripts/check --e2e

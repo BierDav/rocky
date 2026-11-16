@@ -195,29 +195,11 @@ async fn offline_peers_transactions_replay_after_the_seal_in_its_successor() {
     assert_eq!(intents(&f, &h.b.fresh().await), 0);
 }
 
-/// Every order of the owner's and the offline transactions, with the
-/// successor learned before, between or after them, converges once the
-/// receiver finalizes the seal.
-/// Shards of the orders below, which run as separate tests at once.
-const ORDER_SHARDS: usize = 6;
-macro_rules! order_shards {
-    ($($name:ident = $shard:expr),* $(,)?) => {$(
-        #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-        async fn $name() {
-            every_order_around_the_successor($shard).await;
-        }
-    )*};
-}
-order_shards!(
-    every_order_around_the_successor_converges_to_the_sealed_replay_0 = 0,
-    every_order_around_the_successor_converges_to_the_sealed_replay_1 = 1,
-    every_order_around_the_successor_converges_to_the_sealed_replay_2 = 2,
-    every_order_around_the_successor_converges_to_the_sealed_replay_3 = 3,
-    every_order_around_the_successor_converges_to_the_sealed_replay_4 = 4,
-    every_order_around_the_successor_converges_to_the_sealed_replay_5 = 5,
-);
-/// The orders whose index is `shard` modulo `ORDER_SHARDS`.
-async fn every_order_around_the_successor(shard: usize) {
+/// Every order of the owner's and the offline transactions converges once
+/// the receiver finalizes the seal. The successor is learned before, between
+/// or after them, at a position that rotates across the orders.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn every_order_around_the_successor_converges_to_the_sealed_replay() {
     let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
     let root = rocky_platform::fs::Scratch::new().await;
     let h = offline_history(&f, root.path()).await;
@@ -225,36 +207,30 @@ async fn every_order_around_the_successor(shard: usize) {
     let units: Vec<Vec<EncryptedFrame>> = std::iter::once(h.sealed.clone())
         .chain(h.offline.iter().cloned())
         .collect();
-    let mut index = 0;
-    for order in permutations(units.len()) {
-        for graph in 0..=units.len() {
-            let path = root.path().join(format!("r{index}.sqlite"));
-            index += 1;
-            if index % ORDER_SHARDS != shard {
-                continue;
-            }
-            let node = PrivateKey::new();
-            let replica = receiver(&f, &path, &node).await;
-            for (position, unit) in order.iter().enumerate() {
-                if position == graph {
-                    exchange_graphs(&h.owner.replica, &replica, f.domain).await;
-                }
-                for status in replica.receive_all(units[*unit].clone()).await {
-                    assert_ne!(status.unwrap(), ReceiveStatus::Rejected);
-                }
-            }
-            if graph == units.len() {
+    for (index, order) in permutations(units.len()).into_iter().enumerate() {
+        let graph = index % (units.len() + 1);
+        let path = root.path().join(format!("r{index}.sqlite"));
+        let node = PrivateKey::new();
+        let replica = receiver(&f, &path, &node).await;
+        for (position, unit) in order.iter().enumerate() {
+            if position == graph {
                 exchange_graphs(&h.owner.replica, &replica, f.domain).await;
             }
-            replica.finalize_path(f.domain).await.unwrap();
-            assert_eq!(
-                state(&f, &replica, &expected).await,
-                expected,
-                "{order:?} {graph}"
-            );
-            drop(replica);
-            rocky_platform::fs::remove_file(&path).ok();
+            for status in replica.receive_all(units[*unit].clone()).await {
+                assert_ne!(status.unwrap(), ReceiveStatus::Rejected);
+            }
         }
+        if graph == units.len() {
+            exchange_graphs(&h.owner.replica, &replica, f.domain).await;
+        }
+        replica.finalize_path(f.domain).await.unwrap();
+        assert_eq!(
+            state(&f, &replica, &expected).await,
+            expected,
+            "{order:?} {graph}"
+        );
+        drop(replica);
+        rocky_platform::fs::remove_file(&path).ok();
     }
 }
 

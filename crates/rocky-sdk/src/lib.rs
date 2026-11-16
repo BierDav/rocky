@@ -292,7 +292,7 @@ pub use self_enrollment::AwaitingLink;
 #[cfg(test)]
 extern crate self as rocky_sdk;
 #[cfg(test)]
-#[path = "../tests/support/snapshot.rs"]
+#[path = "../tests/integration/support/snapshot.rs"]
 mod test_snapshot;
 
 pub use personal::devices::{DeviceRevocationReceipt, PersonalDeviceNotice};

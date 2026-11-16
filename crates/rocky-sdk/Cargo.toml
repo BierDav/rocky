@@ -64,9 +64,11 @@ tokio = { version = "1", features = ["test-util"] }
 name = "browser_sync"
 test = false
 
-# Runs a coordination service and claims through it.
+# Runs a coordination service and claims through it. scripts/browser-sync
+# builds it with the workspace tests, which run its own `main`.
 [[example]]
 name = "browser_peer"
+harness = false
 
 [lints]
 workspace = true

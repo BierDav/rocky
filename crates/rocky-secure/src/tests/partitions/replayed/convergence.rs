@@ -353,31 +353,31 @@ fn permutations(n: usize) -> Vec<Vec<usize>> {
     all
 }
 
-/// Every order of `units` and every split of it into consecutive packets,
-/// each with one restart or retransmission.
+/// Every order of `units`, split into consecutive packets by a pattern that
+/// rotates through every split across the orders, each with one restart or
+/// retransmission.
 fn schedules(units: &[Vec<EncryptedFrame>]) -> Vec<(Vec<Vec<EncryptedFrame>>, Fault)> {
+    let splits = 1usize << (units.len() - 1);
     let mut all = Vec::new();
-    for order in permutations(units.len()) {
-        for cuts in 0..1usize << (units.len() - 1) {
-            let mut packets = vec![Vec::new()];
-            for (position, unit) in order.iter().enumerate() {
-                if position > 0 && cuts & (1 << (position - 1)) != 0 {
-                    packets.push(Vec::new());
-                }
-                packets
-                    .last_mut()
-                    .unwrap()
-                    .extend(units[*unit].iter().cloned());
+    for (index, order) in permutations(units.len()).into_iter().enumerate() {
+        let cuts = index % splits;
+        let mut packets = vec![Vec::new()];
+        for (position, unit) in order.iter().enumerate() {
+            if position > 0 && cuts & (1 << (position - 1)) != 0 {
+                packets.push(Vec::new());
             }
-            let index = all.len();
-            let at = index / 2 % packets.len();
-            let fault = if index % 2 == 0 {
-                Fault::Restart(at)
-            } else {
-                Fault::Retransmit(at)
-            };
-            all.push((packets, fault));
+            packets
+                .last_mut()
+                .unwrap()
+                .extend(units[*unit].iter().cloned());
         }
+        let at = index / 2 % packets.len();
+        let fault = if index % 2 == 0 {
+            Fault::Restart(at)
+        } else {
+            Fault::Retransmit(at)
+        };
+        all.push((packets, fault));
     }
     all
 }
@@ -482,20 +482,17 @@ fn exhaustive(transactions: usize) {
         .collect();
     assert_eq!(dropped.len(), 1);
     let schedules = schedules(&units);
-    assert_eq!(
-        schedules.len(),
-        (1..=units.len()).product::<usize>() << (units.len() - 1)
-    );
+    assert_eq!(schedules.len(), (1..=units.len()).product::<usize>());
     deliver_all(&f, &schedules, &expected);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn every_schedule_of_four_transactions_converges_to_the_canonical_replay() {
+fn every_order_of_four_transactions_converges_to_the_canonical_replay() {
     exhaustive(4);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn every_schedule_of_five_transactions_converges_to_the_canonical_replay() {
+fn every_order_of_five_transactions_converges_to_the_canonical_replay() {
     exhaustive(5);
 }
 

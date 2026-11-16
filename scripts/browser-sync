@@ -15,7 +15,15 @@ set -eu
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
 
-cargo build --locked -p rocky-sdk --example browser_peer
+# The native side links against the workspace test build, which a full
+# check has already compiled, instead of a separate dev-profile build;
+# ROCKY_NATIVE_TARGET_DIR names that build's directory when the wasm32 tests
+# build elsewhere.
+peer=$(CARGO_TARGET_DIR=${ROCKY_NATIVE_TARGET_DIR:-${CARGO_TARGET_DIR:-$repo_root/target}} \
+    cargo test --locked --no-run --workspace --example browser_peer \
+    --message-format json-render-diagnostics |
+    sed -n 's/.*"name":"browser_peer".*"executable":"\([^"]*\)".*/\1/p')
+[ -x "$peer" ] || { echo "browser-sync: the native side did not build" >&2; exit 1; }
 work=$(mktemp -d)
 peer_pid=
 cleanup() {
@@ -24,7 +32,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 mkfifo "$work/input"
-target/debug/examples/browser_peer <"$work/input" >"$work/peer" &
+"$peer" <"$work/input" >"$work/peer" &
 peer_pid=$!
 # Holds the native side's stdin open until the browser is done.
 exec 3>"$work/input"

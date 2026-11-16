@@ -2,7 +2,18 @@
 //! row value, key or invitation.
 // The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
+#[expect(
+    dead_code,
+    reason = "this suite uses one device of the shared fixtures"
+)]
+#[path = "integration/common/mod.rs"]
 mod common;
+#[expect(
+    dead_code,
+    reason = "this suite uses one device of the shared fixtures"
+)]
+#[path = "integration/support/mod.rs"]
+mod support;
 use common::{Device, Failure};
 use rocky_sdk::{Network, transport::memory::Hub};
 use std::{

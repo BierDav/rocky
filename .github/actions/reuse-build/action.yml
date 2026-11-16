@@ -16,9 +16,6 @@ inputs:
   workspace-archive:
     description: "`true` to download `nextest-workspace`, the workspace test archive."
     default: "false"
-  sdk-archive:
-    description: "`true` to download `nextest-sdk`, the SDK test archive without default features."
-    default: "false"
   peer:
     description: "Deprecated: peer artifact download removed."
     default: "false"
@@ -79,7 +76,7 @@ runs:
       id: tools
       if: >-
         steps.passed.outputs.cache-hit != 'true' && inputs.nextest == 'true'
-        && (inputs.workspace-archive == 'true' || inputs.sdk-archive == 'true')
+        && inputs.workspace-archive == 'true'
       uses: actions/download-artifact@v4
       continue-on-error: true
       with:
@@ -110,20 +107,10 @@ runs:
         name: nextest-workspace
         path: ${{ runner.temp }}/build
 
-    - name: Download the SDK test archive
-      id: sdk
-      if: steps.passed.outputs.cache-hit != 'true' && inputs.sdk-archive == 'true'
-      uses: actions/download-artifact@v4
-      continue-on-error: true
-      with:
-        name: nextest-sdk
-        path: ${{ runner.temp }}/build
-
     - uses: Swatinem/rust-cache@v2
       if: >-
         steps.passed.outputs.cache-hit != 'true' && (inputs.dependencies == 'always'
         || (inputs.workspace-archive == 'true' && steps.workspace.outcome != 'success')
-        || (inputs.sdk-archive == 'true' && steps.sdk.outcome != 'success')
         )
       with:
         workspaces: source -> target
@@ -135,7 +122,6 @@ runs:
       if: >-
         steps.passed.outputs.cache-hit != 'true' && (inputs.dependencies == 'always'
         || (inputs.workspace-archive == 'true' && steps.workspace.outcome != 'success')
-        || (inputs.sdk-archive == 'true' && steps.sdk.outcome != 'success')
         )
       shell: sh
       working-directory: source

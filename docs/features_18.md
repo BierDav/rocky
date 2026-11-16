@@ -879,5 +879,5 @@ durability, a desktop UX or distributed security.
 [cascade]: ../crates/rocky-credentials/src/revocation.rs#L366
 [mode-check]: ../crates/rocky-credentials/src/revocation.rs#L222
 [reason]: ../crates/rocky-sdk/src/status.rs#L124
-[custody-tests]: ../crates/rocky-sdk/tests/custody.rs#L13
-[recovery-tests]: ../crates/rocky-sdk/tests/root_recovery.rs#L510
+[custody-tests]: ../crates/rocky-sdk/tests/integration/custody.rs
+[recovery-tests]: ../crates/rocky-sdk/tests/integration/root_recovery.rs

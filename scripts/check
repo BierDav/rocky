@@ -8,8 +8,7 @@
 #   scripts/check --package NAME    package and transitive workspace consumers
 #   scripts/check --changed         scope to jj's current change; unknown inputs run everything
 #   scripts/check --integration     only the integration tier
-#   scripts/check --e2e             only the e2e tier, which CI runs, soak tests included,
-#                                   and every tier of the SDK standalone build
+#   scripts/check --e2e             only the e2e tier, which CI runs, soak tests included
 #   scripts/check --doc             also the doc tests
 #   scripts/check --wasm            only wasm32: clippy, then the tests in a headless browser
 #                                   and scripts/browser-sync; the full check includes it,
@@ -78,13 +77,19 @@ fi
 # in a headless browser (scripts/wasm-runner); tests that need threads,
 # processes, sockets or a paused clock are native-only. Clippy for wasm32 also
 # refuses calls that panic or fail in a browser (scripts/clippy-wasm).
-wasm_packages="rocky-platform rocky-sqlite rocky-sqlite-opfs rocky-core rocky-credentials rocky-storage
-    rocky-runtime rocky-secure rocky-iroh rocky-coordinator rocky-sdk"
+# rocky-secure's tests only compile for wasm32: its replication logic is the
+# same on every target and runs natively, while the browser's seams (files,
+# storage, timers, transport) run in the other packages' browser tests.
+browser_packages="rocky-platform rocky-sqlite rocky-sqlite-opfs rocky-core rocky-credentials
+    rocky-storage rocky-runtime rocky-iroh rocky-coordinator rocky-sdk"
+wasm_packages="$browser_packages rocky-secure"
 run_wasm() {
     set --
     for package in $wasm_packages; do set -- "$@" -p "$package"; done
     scripts/clippy --locked \
         --target wasm32-unknown-unknown --tests "$@" -- -D warnings
+    set --
+    for package in $browser_packages; do set -- "$@" -p "$package"; done
     # The binaries run at once, each in its own browser; large ones in shards.
     # A scope runs its packages' binaries of the same build. Meanwhile a
     # browser node syncs with a native node over a local relay
@@ -93,7 +98,7 @@ run_wasm() {
     sync=--browser-sync
     if [ "$selection" != 'all()' ]; then
         sync=
-        for package in $wasm_packages; do
+        for package in $browser_packages; do
             case "$selection" in *"package(=$package)"*)
                 only="$only --only $package"
                 [ "$package" != rocky-sdk ] || sync=--browser-sync ;;
@@ -114,42 +119,22 @@ cargo nextest --version >/dev/null 2>&1 || {
     exit 1
 }
 
-# The SDK selects no networking or coordinator client. Its standalone build
-# also qualifies the application boundary without workspace feature unification.
-archive_args() { # name
-    case "$1" in
-    workspace) echo --workspace ;;
-    sdk-without-defaults) echo -p rocky-sdk --no-default-features ;;
+# The SDK selects no networking or coordinator client. An application's
+# dependency on it, without workspace or dev-dependency feature unification,
+# must compile; its tests run once, in the workspace build.
+check_sdk_standalone() {
+    case "$selection" in
+    'all()' | *'package(=rocky-sdk)'*)
+        cargo check --locked -p rocky-sdk --lib --no-default-features ;;
     esac
 }
 
 run_tiers() { # tiers...
-    e2e=false
-    case " $* " in *' e2e '*) e2e=true ;; esac
     if [ -n "$archives" ]; then
-        result=0
-        scripts/test-tiers "$@" --archive "$archives/workspace.tar.zst" || result=1
-        if $e2e; then
-            scripts/test-tiers unit integration e2e \
-                --archive "$archives/sdk-without-defaults.tar.zst" || result=1
-        fi
-        return $result
+        scripts/test-tiers "$@" --archive "$archives/workspace.tar.zst"
+    else
+        scripts/test-tiers "$@" --filter "$selection" --build=--workspace
     fi
-    sdk=false
-    case "$selection" in
-    'all()' | *'package(=rocky-sdk)'*) sdk=true ;;
-    esac
-    if $sdk && ! $e2e; then
-        # shellcheck disable=SC2046 # the build arguments are words
-        cargo check --locked --all-targets $(archive_args sdk-without-defaults) || return
-    fi
-    result=0
-    scripts/test-tiers "$@" --filter "$selection" "--build=$(archive_args workspace)" || result=1
-    if $sdk && $e2e; then
-        scripts/test-tiers unit integration e2e --filter "$selection" \
-            "--build=$(archive_args sdk-without-defaults)" || result=1
-    fi
-    return $result
 }
 
 if [ -n "$build" ]; then
@@ -159,12 +144,9 @@ if [ -n "$build" ]; then
     if $doc; then
         cargo test --workspace --doc --locked
     fi
+    check_sdk_standalone
     mkdir -p "$archives"
-    for name in workspace sdk-without-defaults; do
-        # shellcheck disable=SC2046 # the build arguments are words
-        cargo nextest archive --locked $(archive_args "$name") \
-            --archive-file "$archives/$name.tar.zst"
-    done
+    cargo nextest archive --locked --workspace --archive-file "$archives/workspace.tar.zst"
     exit
 fi
 
@@ -178,29 +160,66 @@ if [ "$tiers" = " unit" ] && [ -z "$archives" ] && ! $doc && ! $wasm; then
     fi
     exec scripts/test-tiers unit --filter "$selection" "--build=--workspace --lib --bins"
 fi
+full=false
 if [ -z "$tiers" ] || $all; then
     [ -n "$tiers" ] || tiers="unit integration"
-    if [ -z "$archives" ] && $clippy; then
-        scripts/clippy --workspace --all-targets --locked -- -D warnings
-    fi
+    full=true
+fi
+# Every step runs, so one failure does not hide another's.
+status=0
+# Clippy, the standalone SDK and wasm32 run beside the native test build and
+# tiers, whose longest compile leaves most cores idle. They build in their own
+# target directory so neither waits on the other's Cargo lock; the browser
+# sync's native side still links against the test build.
+side_pid=
+side_log=
+if [ -z "$archives" ] && { $full || $wasm; }; then
+    side_log=$(mktemp "${TMPDIR:-/tmp}/rocky-check.XXXXXX")
+    ROCKY_NATIVE_TARGET_DIR=${CARGO_TARGET_DIR:-$repo_root/target}
+    export ROCKY_NATIVE_TARGET_DIR
+    (
+        export CARGO_TARGET_DIR="$repo_root/target/side"
+        side=0
+        if $full && $clippy; then
+            scripts/clippy --workspace --all-targets --locked -- -D warnings || side=1
+        fi
+        check_sdk_standalone || side=1
+        if $wasm; then
+            run_wasm || side=1
+        fi
+        exit $side
+    ) >"$side_log" 2>&1 &
+    side_pid=$!
+    echo "check: clippy, the standalone SDK and wasm32 run beside the tests; their output follows them"
+elif [ -z "$archives" ]; then
+    check_sdk_standalone || status=1
 fi
 # The tiers share one RAM-backed directory for test storage
 # (scripts/test-volume), removed when the check ends.
-if [ -n "$tiers" ] && [ -z "${ROCKY_TEST_TMPDIR:-}" ]; then
-    ROCKY_TEST_TMPDIR=$(scripts/test-volume up $$)
+volume=
+if [ -z "${ROCKY_TEST_TMPDIR:-}" ]; then
+    volume=$(scripts/test-volume up $$)
+    ROCKY_TEST_TMPDIR=$volume
     export ROCKY_TEST_TMPDIR
-    trap 'scripts/test-volume down "$ROCKY_TEST_TMPDIR" $$' EXIT
-    trap 'exit 130' INT TERM
 fi
-# Every tier runs, so one failure does not hide another's.
-status=0
+cleanup() {
+    [ -z "$side_pid" ] || kill "$side_pid" 2>/dev/null || true
+    [ -z "$side_log" ] || rm -f "$side_log"
+    [ -z "$volume" ] || scripts/test-volume down "$volume" $$
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 # shellcheck disable=SC2086 # tiers are fixed names, not shell expressions
 run_tiers $tiers || status=1
-if $wasm; then
-    run_wasm || status=1
-fi
 # nextest skips doc tests, which are opt-in so a check does not compile them.
 if $doc; then
     cargo test --workspace --doc --locked || status=1
 fi
+if [ -n "$side_pid" ]; then
+    wait "$side_pid" || status=1
+    side_pid=
+    cat "$side_log"
+fi
+trap - EXIT
+cleanup
 exit $status

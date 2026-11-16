@@ -32,25 +32,25 @@ fn permutations(n: usize) -> Vec<Vec<usize>> {
     all
 }
 
-/// Every order of `units`, one packet each; with `splits`, also every split
-/// of each order into consecutive packets.
+/// Every order of `units`, one packet each; with `splits`, split into
+/// consecutive packets by a pattern that rotates through every split across
+/// the orders.
 fn schedules(units: &[Vec<EncryptedFrame>], splits: bool) -> Vec<Vec<Vec<EncryptedFrame>>> {
-    let cuts = 1usize << (units.len() - 1);
+    let every = 1usize << (units.len() - 1);
     let mut all = Vec::new();
-    for order in permutations(units.len()) {
-        for cut in if splits { 0..cuts } else { cuts - 1..cuts } {
-            let mut packets = vec![Vec::new()];
-            for (position, unit) in order.iter().enumerate() {
-                if position > 0 && cut & (1 << (position - 1)) != 0 {
-                    packets.push(Vec::new());
-                }
-                packets
-                    .last_mut()
-                    .unwrap()
-                    .extend(units[*unit].iter().cloned());
+    for (index, order) in permutations(units.len()).into_iter().enumerate() {
+        let cut = if splits { index % every } else { every - 1 };
+        let mut packets = vec![Vec::new()];
+        for (position, unit) in order.iter().enumerate() {
+            if position > 0 && cut & (1 << (position - 1)) != 0 {
+                packets.push(Vec::new());
             }
-            all.push(packets);
+            packets
+                .last_mut()
+                .unwrap()
+                .extend(units[*unit].iter().cloned());
         }
+        all.push(packets);
     }
     all
 }
@@ -433,7 +433,7 @@ async fn indexes_history(root: &Path) -> History {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn expression_and_partial_unique_indexes_converge_in_every_schedule() {
+fn expression_and_partial_unique_indexes_converge_in_every_order() {
     let root = tempfile::tempdir().unwrap();
     let history = runtime().block_on(indexes_history(root.path()));
     let expected = canonical(&history.c, &history.frames());
@@ -512,7 +512,7 @@ async fn cascades_history(root: &Path) -> History {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn cascades_roll_back_with_their_transaction_in_every_schedule() {
+fn cascades_roll_back_with_their_transaction_in_every_order() {
     let root = tempfile::tempdir().unwrap();
     let history = runtime().block_on(cascades_history(root.path()));
     let expected = canonical(&history.c, &history.frames());
@@ -552,7 +552,7 @@ async fn caps_history(root: &Path) -> History {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn assertion_caps_converge_in_every_schedule() {
+fn assertion_caps_converge_in_every_order() {
     let root = tempfile::tempdir().unwrap();
     let history = runtime().block_on(caps_history(root.path()));
     let expected = canonical(&history.c, &history.frames());

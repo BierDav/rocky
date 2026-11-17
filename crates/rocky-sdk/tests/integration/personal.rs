@@ -1,6 +1,3 @@
-//! A personal database pins its owner and namespace in the root-signed
-//! genesis; owner devices hold independent certificates. A verified passkey
-//! PRF names the account; only device keys are stored.
 use rocky_sdk::{
     CallFailure, Configuration, Freshness, GrantProfile, IdentityProvider, Network, Open,
     PersonalAccount, PersonalNamespace, PersonalSignInError, RootKey, Schema, SecretStore,
@@ -23,15 +20,12 @@ use common::{Device, Failure};
 fn namespace() -> PersonalNamespace {
     PersonalNamespace::new("shopping.example", "account root").expect("namespace")
 }
-/// The PRF the fixture's passkey returns for `namespace`.
 fn prf() -> VerifiedPasskeyPrf {
     VerifiedPasskeyPrf::new(&namespace().prf_input().expect("input"), [3; 32])
 }
 fn root() -> RootKey {
     RootKey::from_secret([3; 32])
 }
-/// A stand-in authenticator: credential `credential`'s PRF over the
-/// namespace's evaluation input.
 fn passkey(credential: u8, namespace: &PersonalNamespace) -> VerifiedPasskeyPrf {
     let input = namespace.prf_input().expect("input");
     let output = rocky_core::commitment(
@@ -151,7 +145,7 @@ async fn a_personal_database_admits_only_custody_principals() -> Result<(), Fail
     let error = session.trust(&stranger, root).await.expect_err("refused");
     assert_eq!(code(&error), "personal_owner_only");
     let error = session
-        .grant_claims(&stranger, None, 1)
+        .grant_claims(&stranger, rocky_sdk::ClaimCounters::Every, 1)
         .await
         .expect_err("refused");
     assert_eq!(code(&error), "personal_owner_only");
@@ -232,12 +226,10 @@ async fn recovering_a_personal_archive_keeps_its_owner() -> Result<(), Failure> 
     Ok(())
 }
 
-/// Every secret written, by name; reads and deletes pass through.
 #[derive(Default)]
 struct Recording {
     secrets: Mutex<BTreeMap<String, Vec<u8>>>,
     writes: AtomicUsize,
-    /// Names ending in this fail to store, once.
     fail: Mutex<Option<String>>,
 }
 impl Recording {
@@ -271,7 +263,6 @@ impl SecretStore for Recording {
         Ok(())
     }
 }
-/// A connector that counts every transport it is asked to start.
 struct Counting {
     inner: Arc<dyn Connector>,
     starts: AtomicUsize,
@@ -282,7 +273,6 @@ impl Connector for Counting {
         self.inner.start(accepts, secret)
     }
 }
-/// Every file under `directory`, with its bytes.
 fn files(directory: &Path) -> Result<BTreeMap<std::path::PathBuf, Vec<u8>>, Failure> {
     let mut found = BTreeMap::new();
     if !directory.exists() {

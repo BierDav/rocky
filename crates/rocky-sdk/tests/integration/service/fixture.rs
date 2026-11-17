@@ -13,9 +13,6 @@ pub(super) struct Peer {
     pub session: Session,
     pub scope: rocky_sdk::Scope,
 }
-/// How a fixture peer reaches the voters: an explicit client of a bundle,
-/// or only a connector that reaches the coordinator its synced database
-/// settings name.
 #[derive(Clone, Copy)]
 pub(super) enum Reach<'a> {
     Client(&'a TrustBundle),
@@ -142,7 +139,6 @@ impl Peer {
             )
             .await
     }
-    /// The root a created peer holds, as root-only calls name it.
     pub fn root(&self) -> Arc<dyn rocky_sdk::IdentityProvider> {
         Arc::new(rocky_sdk::RootKey::from_secret(
             self.opened.root.as_ref().expect("fixture root").secret(),
@@ -247,7 +243,6 @@ pub(super) async fn introduce(a: &Peer, t: &Peer) -> Result<(), Failure> {
 pub(super) async fn household(root: &Path, bundle: &TrustBundle) -> Result<(Peer, Peer), Failure> {
     household_reaching(root, bundle, Reach::Client(bundle)).await
 }
-/// `household`, its trusted peer reaching the voters as `trusted_reach` says.
 pub(super) async fn household_reaching(
     root: &Path,
     bundle: &TrustBundle,

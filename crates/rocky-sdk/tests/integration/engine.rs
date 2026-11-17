@@ -1,5 +1,3 @@
-//! The secure SDK engine end to end: enrollment, sync over iroh,
-//! durable mutations, observation, renewal, revocation and logout.
 use rocky_sdk::{Engine, Network, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
@@ -14,11 +12,9 @@ const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":6,"tables
 fn iroh() -> rocky_iroh::Options {
     iroh_at(0)
 }
-/// Loopback only: no relay, no address lookup.
 fn iroh_at(port: u16) -> rocky_iroh::Options {
     rocky_iroh::Options::isolated(&format!("127.0.0.1:{port}"))
 }
-/// A port free now, so a restarted creator listens where members look.
 fn free_port() -> u16 {
     let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("udp");
     socket.local_addr().expect("addr").port()
@@ -125,7 +121,6 @@ impl Db {
             .unwrap_or_else(|error| panic!("create failed: {error}"));
         reply["id"].as_str().unwrap_or_default().to_owned()
     }
-    /// Titles and completion of every item, by id.
     async fn items(&self) -> Vec<(String, String, i64)> {
         let page = snap::ok(self.engine.session().read(rocky_sdk::ReadQuery {
             sql: "SELECT key, title, completed FROM items ORDER BY key".to_owned(),

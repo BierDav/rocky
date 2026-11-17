@@ -1,4 +1,3 @@
-//! Coalesced repair work. The peer generation protects newer hints from completion.
 use super::*;
 
 #[derive(Clone, Debug, Default)]

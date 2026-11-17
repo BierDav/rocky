@@ -10,7 +10,6 @@ pub(super) fn starter() -> rocky_iroh::Options {
     }
 }
 
-/// Three voters of a public service with open admission, and its bundle.
 pub(super) async fn service(
     dir: &std::path::Path,
 ) -> Result<(TrustBundle, NetworkCoordinator), Failure> {
@@ -18,8 +17,6 @@ pub(super) async fn service(
     Ok((bundle, admin))
 }
 
-/// The voters' client transport: while the gate is closed every client
-/// stream is dropped unanswered, as when the service is unreachable.
 struct Gate {
     inner: Arc<dyn rocky_core::net::Transport>,
     open: Arc<std::sync::atomic::AtomicBool>,
@@ -73,8 +70,6 @@ impl rocky_core::net::Transport for Gate {
     }
 }
 
-/// `service` with a gate that takes the voters off the clients' network
-/// while it is closed.
 pub(super) async fn gated_service(
     dir: &std::path::Path,
 ) -> Result<

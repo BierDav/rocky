@@ -1,4 +1,3 @@
-//! The SDK integration suites, one test binary.
 mod activity;
 #[cfg(not(target_family = "wasm"))]
 mod admission;

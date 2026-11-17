@@ -1,6 +1,3 @@
-//! A member that is not one of the control's trusted identities claims
-//! counter values through a claim right the owner grants, until the owner
-//! revokes it.
 use super::{fixture::*, *};
 use crate::support::snapshot as snap;
 
@@ -9,12 +6,9 @@ fn denied(error: &Failure) -> bool {
 }
 use std::sync::atomic::Ordering;
 
-/// Whether `peer` holds revocations its coordination service has not
-/// acknowledged.
 async fn unpushed(peer: &Peer) -> Result<bool, Failure> {
     Ok(peer.session.status().await?.authority.revocations.unpushed)
 }
-/// An owner registered as the domain's only trusted identity on `bundle`.
 async fn owner(root: &std::path::Path, bundle: &TrustBundle) -> Result<Peer, Failure> {
     let a = Peer::start(&root.join("a"), SCHEMA, Some(bundle), None, true).await?;
     let owner = snap::value(a.session.info()).await?["principal"].clone();
@@ -115,7 +109,7 @@ async fn a_member_claims_through_its_claim_right_until_it_is_revoked() -> Result
 
     let grant = a
         .session
-        .grant_claims(&member, Some(&[b"invoices"]), 1)
+        .grant_claims(&member, rocky_sdk::ClaimCounters::Named(&[b"invoices"]), 1)
         .await?;
     assert_eq!(grant.identity, member);
     m.session.install_claims(&grant).await?;
@@ -161,8 +155,6 @@ async fn a_member_claims_through_its_claim_right_until_it_is_revoked() -> Result
     a.close().await
 }
 
-/// Granting an identity a narrower right replaces its previous one: the
-/// links of the previous grant, still unexpired, are refused at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn granting_again_revokes_the_previous_grant() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -182,7 +174,10 @@ async fn granting_again_revokes_the_previous_grant() -> Result<(), Failure> {
         counters::Name::new("invoices")?,
         counters::Name::new("credits")?,
     );
-    let wide = a.session.grant_claims(&member, None, 1).await?;
+    let wide = a
+        .session
+        .grant_claims(&member, rocky_sdk::ClaimCounters::Every, 1)
+        .await?;
     m.session.install_claims(&wide).await?;
     assert_eq!(
         m.opened
@@ -194,7 +189,7 @@ async fn granting_again_revokes_the_previous_grant() -> Result<(), Failure> {
 
     let narrow = a
         .session
-        .grant_claims(&member, Some(&[b"invoices"]), 1)
+        .grant_claims(&member, rocky_sdk::ClaimCounters::Named(&[b"invoices"]), 1)
         .await?;
     assert!(
         denied(
@@ -225,8 +220,6 @@ async fn granting_again_revokes_the_previous_grant() -> Result<(), Failure> {
     a.close().await
 }
 
-/// The issuer that granted a right goes away for good; another issuer
-/// renews the holder's link from the replicated registry and it claims on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn another_issuer_renews_a_right_after_its_granting_issuer_is_gone() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -290,7 +283,7 @@ async fn another_issuer_renews_a_right_after_its_granting_issuer_is_gone() -> Re
 
     let grant = a
         .session
-        .grant_claims(&member, Some(&[b"invoices"]), 1)
+        .grant_claims(&member, rocky_sdk::ClaimCounters::Named(&[b"invoices"]), 1)
         .await?;
     m.session.install_claims(&grant).await?;
     assert_eq!(
@@ -332,10 +325,6 @@ async fn another_issuer_renews_a_right_after_its_granting_issuer_is_gone() -> Re
     b.close().await
 }
 
-/// The owner dismisses an issuer while the coordination service is down.
-/// The issuer, not yet told, signs its holder a fresh link. Once the service
-/// is back, the next sync of a node holding the revocation pushes it, and
-/// the fresh link is refused: no one retries by hand.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revocation_pushed_while_the_service_was_down_reaches_it_at_a_later_sync()
 -> Result<(), Failure> {
@@ -363,7 +352,7 @@ async fn a_revocation_pushed_while_the_service_was_down_reaches_it_at_a_later_sy
     let invoices = counters::Name::new("invoices")?;
     let grant = b
         .session
-        .grant_claims(&member, Some(&[b"invoices"]), 1)
+        .grant_claims(&member, rocky_sdk::ClaimCounters::Named(&[b"invoices"]), 1)
         .await?;
     m.session.install_claims(&grant).await?;
     assert_eq!(
@@ -380,7 +369,7 @@ async fn a_revocation_pushed_while_the_service_was_down_reaches_it_at_a_later_sy
     assert!(unpushed(&a).await?);
     let fresh_from_dismissed_issuer = b
         .session
-        .grant_claims(&member, Some(&[b"invoices"]), 1)
+        .grant_claims(&member, rocky_sdk::ClaimCounters::Named(&[b"invoices"]), 1)
         .await?;
     m.session
         .install_claims(&fresh_from_dismissed_issuer)
@@ -412,8 +401,6 @@ async fn a_revocation_pushed_while_the_service_was_down_reaches_it_at_a_later_sy
     a.close().await
 }
 
-/// A revocation the service never acknowledged stays pending across a
-/// restart and is pushed by the reopened node's first sync.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unpushed_revocation_survives_a_restart() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -432,7 +419,7 @@ async fn an_unpushed_revocation_survives_a_restart() -> Result<(), Failure> {
     let invoices = counters::Name::new("invoices")?;
     let grant = a
         .session
-        .grant_claims(&member, Some(&[b"invoices"]), 1)
+        .grant_claims(&member, rocky_sdk::ClaimCounters::Named(&[b"invoices"]), 1)
         .await?;
     m.session.install_claims(&grant).await?;
     let first = counters::Claim::fresh()?;

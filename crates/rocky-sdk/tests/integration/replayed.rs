@@ -1,6 +1,3 @@
-//! Replayed tables through the SDK: concurrent increments both apply, and
-//! a transaction that loses its key in canonical order drops, reported to
-//! observers and through its commit token.
 use common::{Device, Failure, introduce};
 use rocky_sdk::{
     Database, DropReason, Network, Open, SqlValue, TransactionOutcome, TransactionToken,
@@ -167,10 +164,6 @@ async fn a_member_joining_later_receives_replayed_rows() -> Result<(), Failure> 
     Ok(())
 }
 
-/// An applied transaction stays provisional until a seal covers it, then
-/// reports final to its author, whose observers name it, and after a
-/// restart: what an outbox dispatcher waits for before an irreversible
-/// effect.
 #[tokio::test]
 async fn an_applied_transaction_turns_final_with_the_seal_and_stays_final() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -225,8 +218,6 @@ async fn an_applied_transaction_turns_final_with_the_seal_and_stays_final() -> R
     Ok(())
 }
 
-/// A member's drop turns final once it holds the owner's seal, without a
-/// write of its own after it.
 #[tokio::test]
 async fn a_member_holding_the_seal_reports_its_drop_final() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;

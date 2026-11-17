@@ -1,8 +1,3 @@
-//! Acceptance 6 of the mesh scope: two members in two processes on one
-//! host find each other with no trusted node reachable, discovery their
-//! only source of contacts, once over mDNS and once over the rendezvous
-//! record on a local lookup server. And the first relay run: two endpoints
-//! with no direct path converge through a local relay.
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
 use rocky_iroh::{
@@ -39,8 +34,6 @@ async fn discovered(device: &Device) -> Option<Value> {
         .find(|peer| peer["source"] == "discovery")
         .cloned()
 }
-/// An issuer and two members that each met it once. Only `a` holds the
-/// issuer's row. The issuer then stops for good and both forget it.
 async fn enrolled(root: &Path) -> Result<(), Failure> {
     let issuer = Device::create(&root.join("issuer"), Some(starter(None, false)))?;
     let a = Device::join(
@@ -75,7 +68,6 @@ async fn enrolled(root: &Path) -> Result<(), Failure> {
     tokio::join!(a.close(), b.close(), issuer.close());
     Ok(())
 }
-/// Runs member `b` in another process until it found `a` and holds its row.
 async fn second_process(root: &Path, lookup: Option<&str>, local: bool) -> Result<Value, Failure> {
     let mut command = std::process::Command::new(std::env::current_exe()?);
     command
@@ -139,8 +131,6 @@ async fn member_process() -> Result<(), Failure> {
     Ok(())
 }
 
-/// The host side of the iOS simulator check (`sdks/native/qualify-ios-discovery`):
-/// joins the domain the simulator created and finds its issuer over mDNS.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "the host process of the iOS simulator discovery check"]
 async fn simulator_peer() -> Result<(), Failure> {
@@ -316,7 +306,6 @@ async fn an_attached_endpoint_has_the_same_lookup_services_after_a_database_deta
     Ok(())
 }
 
-/// An application-owned endpoint that reaches others through `relay` only.
 async fn relayed(secret: u8, relay: &rocky_iroh::iroh::RelayMap) -> Result<Endpoint, Failure> {
     let endpoint = Endpoint::builder(presets::Minimal)
         .secret_key(SecretKey::from_bytes(&[secret; 32]))

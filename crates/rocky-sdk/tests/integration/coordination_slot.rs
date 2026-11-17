@@ -1,4 +1,3 @@
-//! The application coordinator is optional and shared independently of databases.
 use rocky_coordinator::coordinated::MemoryLog;
 use rocky_platform::fs::Scratch;
 use rocky_sdk::{

@@ -76,10 +76,6 @@ async fn real_voters_keep_branch_logs_separate_from_main() -> Result<(), Failure
     Ok(())
 }
 
-/// A trusted device whose application supplies only
-/// `rocky_coordinator::Connector` reaches the real voters the database's
-/// settings name, signed when its owner created it with them, and seals
-/// through them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_voters_are_reached_by_a_connector_from_the_database_settings() -> Result<(), Failure>
 {

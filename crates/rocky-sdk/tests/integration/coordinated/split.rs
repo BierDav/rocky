@@ -1,17 +1,9 @@
-//! The owner's database settings name its coordinator. A trusted device
-//! without a log of it skips its routine seals instead of splitting the
-//! line from coordinated devices; one with a connector reaches it from the
-//! settings alone; another coordinator is refused. A line a device split
-//! before the settings converges once it composes the coordinator, every
-//! row kept.
 use super::*;
 use reach::Reach;
 use rocky_sdk::{AlertKind, CoordinatorSlot};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// The owner, following `main` on genesis with a signed minimum of 1,
-/// composed with `log`; the switch makes `log` unreachable from it.
 async fn owner(
     directory: &Path,
     network: Option<Network>,
@@ -28,8 +20,6 @@ fn configure(owner: &Device, log: &MemoryLog) -> Result<(), Failure> {
     log.configure(domain(owner), 1)?;
     Ok(())
 }
-/// A trusted device that joined `owner`'s domain with `coordination`,
-/// linked only to it.
 async fn trusted(
     owner: &Device,
     directory: &Path,
@@ -51,8 +41,6 @@ async fn trusted(
     device.sync().await.expect("trusted sync");
     Ok(device)
 }
-/// Composes `device` with `log`; the switch makes `log` unreachable from
-/// this device alone.
 async fn compose(device: &Device, log: &MemoryLog) -> Result<Arc<AtomicBool>, Failure> {
     let (client, down) = Reach::new(Arc::new(log.client(node_key(device).await)));
     device.database.coordinate(Some(client)).await?;
@@ -92,7 +80,6 @@ async fn named(device: &Device) -> Option<String> {
 fn genesis_of(log: &MemoryLog) -> String {
     data_encoding::HEXLOWER.encode(&log.bundle().identity.genesis)
 }
-/// Writes one item per handle, each its own transaction.
 async fn import(
     device: &Device,
     handles: std::ops::RangeInclusive<u8>,
@@ -113,8 +100,6 @@ fn missing(device: &[String], expected: &[String]) -> usize {
         .count()
 }
 
-/// The field split: an importer without a coordinated log reached the
-/// routine-seal threshold while its only peer's coordinator was down.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_device_without_its_coordinated_log_skips_routine_seals_and_its_rows_keep_flowing()
 -> Result<(), Failure> {
@@ -167,12 +152,6 @@ async fn a_device_without_its_coordinated_log_skips_routine_seals_and_its_rows_k
     Ok(())
 }
 
-/// The importer sealed twice without a coordinated log before the owner's
-/// settings named the coordinator; the coordinated devices cannot reach
-/// it, and the browser's own genesis seal waits in its journal. Recovery:
-/// the owner names the coordinator in the database's settings, the
-/// importer's application composes it and syncs first, then the others
-/// sync while it is still unreachable from them, and once it answers.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_line_split_by_a_device_without_its_log_converges_once_it_composes_one()
 -> Result<(), Failure> {
@@ -282,11 +261,6 @@ async fn a_line_split_by_a_device_without_its_log_converges_once_it_composes_one
     Ok(())
 }
 
-/// A database created with a coordinator names it in its settings from
-/// the first tip. A trusted device whose application supplies only a
-/// connector reaches it from the synced settings and seals through it; a
-/// connector that cannot verify the named coordinator leaves the device
-/// refusing to seal.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_device_reaches_the_coordinator_its_database_settings_name() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
@@ -376,13 +350,6 @@ fn tip_id(hex: &str) -> Result<rocky_core::TipId, Failure> {
     ))
 }
 
-/// The other order: the coordinated devices reach the coordinator first
-/// and the browser's waiting genesis seal ends the genesis log, so the
-/// importer's seals lose. As in the field, the browser learns of them only
-/// through the owner, which relays no unconfirmed seal. Every row the
-/// importer wrote, on genesis and after each losing seal, is a late write
-/// of genesis and reaches every device; it never ends a log of its losing
-/// branch.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_line_split_converges_with_every_row_when_the_waiting_seal_wins_genesis()
 -> Result<(), Failure> {
@@ -537,9 +504,6 @@ async fn a_line_split_converges_with_every_row_when_the_waiting_seal_wins_genesi
     Ok(())
 }
 
-/// An application's explicit coordinator must be the one the database's
-/// settings name: one a device composed before they arrived neither seals
-/// nor claims counters once they do, and opening with it is refused.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_explicit_coordinator_the_settings_do_not_name_is_refused_for_counters_and_at_open()
 -> Result<(), Failure> {
@@ -589,10 +553,6 @@ async fn an_explicit_coordinator_the_settings_do_not_name_is_refused_for_counter
     Ok(())
 }
 
-/// After a revocation rotates a collection's key, a trusted device without
-/// the named coordinator's log owes members a seal over the earlier key
-/// epoch's writes: it skips it with the alert, the revocation itself is
-/// complete, and the alert clears once the device composes the log.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_skipped_members_seal_raises_the_alert_and_leaves_the_revocation_complete()
 -> Result<(), Failure> {

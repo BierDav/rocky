@@ -1,4 +1,3 @@
-//! Custody-only enrollment and staggered device availability.
 use crate::common;
 use crate::support::snapshot as snap;
 use common::{Device, Failure, introduce};
@@ -142,7 +141,6 @@ async fn configuration_enrolls_resumes_and_refuses_reading_identities() -> Resul
     Ok(())
 }
 
-/// Run after building the local image; excluded from ordinary workspace checks.
 #[tokio::test]
 #[ignore = "requires Docker and the local rocky-peer:p06 image"]
 async fn container_resumes_from_configuration_and_drains_on_sigterm() -> Result<(), Failure> {

@@ -1,7 +1,3 @@
-//! The responder side of personal sign-in: any owner device or custodian
-//! answers a passkey holder's hello, releases the bootstrap pages its
-//! authorization unlocks and persists the new device's certificate. It
-//! signs no grant and returns no plaintext key.
 use super::*;
 use crate::personal::bootstrap::{Metadata, Page};
 use rocky_credentials::{
@@ -9,24 +5,15 @@ use rocky_credentials::{
     PersonalCustodyRenewal, PersonalError, PersonalHello, PersonalPublication,
 };
 
-/// How long an issued nonce authorizes, and how many spent ones are held.
 const NONCE_LIFETIME: u64 = 300;
 const MAX_NONCES: usize = 256;
 const NONCE_TAG: &str = "rocky.personal-nonce.v1";
-/// Escrow bytes one bootstrap page carries at most, besides one record.
 const PAGE_ESCROW_BYTES: usize = 1024 * 1024;
 
-/// Responders that answer one bootstrap with another schema record, as a
-/// lying source would, by identity path.
 #[cfg(test)]
 pub(crate) static FORGED_SCHEMA: std::sync::Mutex<Vec<(std::path::PathBuf, crate::Schema)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// Nonces this responder issues: each carries its issue time and a tag
-/// keyed by this process, so an untrusted hello stores nothing and no
-/// flood of hellos evicts another sign-in's nonce. Only an authorization
-/// the root signed records the acts it spent: bounded replay state, never
-/// persisted.
 pub(crate) struct Nonces {
     key: [u8; 32],
     spent: BTreeMap<[u8; 32], (u64, Vec<PersonalAct>)>,
@@ -54,7 +41,6 @@ impl Nonces {
         nonce[16..].copy_from_slice(&tag);
         nonce
     }
-    /// Takes `act` once under a live nonce this responder issued.
     fn spend(&mut self, nonce: &[u8; 32], act: PersonalAct, time: u64) -> Result<(), Failure> {
         let unknown = || refused("the personal nonce is unknown, expired or spent");
         let (head, tag) = nonce.split_at(16);
@@ -117,8 +103,6 @@ impl Node {
         self.sign_out_everywhere_else(&Root(Some(Arc::new(root))), keep)
             .await
     }
-    /// Reads the replica too: a sync may have committed membership before the
-    /// settings absorbed it.
     pub(super) async fn personal_device_notices(
         &self,
     ) -> Result<Vec<crate::PersonalDeviceNotice>, Failure> {
@@ -176,7 +160,6 @@ impl Node {
         Ok(())
     }
 
-    /// What a personal authorization here must match.
     async fn personal_audience(&self) -> Result<(Settings, PersonalAudience), Failure> {
         let settings: Settings = (**self.settings.lock().await).clone();
         let context = settings
@@ -195,11 +178,9 @@ impl Node {
             },
         ))
     }
-    /// Whether a statement `known` holds ended the owner's `node`.
     fn personal_ended(known: &RevocationSet, owner: PublicKey, node: PublicKey) -> bool {
         known.tombstones(owner, node) || known.unfenced().ends_node_of(owner, node, false)
     }
-    /// The verified authorization's node, unless a statement ended it.
     fn personal_node(
         known: &RevocationSet,
         audience: &PersonalAudience,
@@ -215,7 +196,6 @@ impl Node {
         }
         Ok(node)
     }
-    /// This device's revocations with its own certificate and the replica's.
     async fn personal_known(&self, settings: &Settings) -> Result<RevocationSet, Failure> {
         let mut known = settings.revocations.clone();
         known.merge(
@@ -230,8 +210,6 @@ impl Node {
         Ok(known)
     }
 
-    /// An untrusted hello learns the root-signed genesis, a nonce and this
-    /// node's proof; nothing private.
     pub(super) async fn answer_personal_hello(
         &self,
         hello: PersonalHello,
@@ -251,13 +229,6 @@ impl Node {
         )?)
     }
 
-    /// One bootstrap page for a node the root, the owner and the node key
-    /// authorized: the signed descriptor, schema, owner grant, membership and
-    /// policy, and opaque root escrow. Sealed to that node alone. A node a
-    /// statement ended learns only the metadata that carries those signed
-    /// statements, never escrow: it verifies them itself and starts over as a
-    /// fresh node. Escrow records of no key epoch are unvouched and left out;
-    /// the naming root travels in the metadata as a vouched record instead.
     pub(super) async fn answer_personal_bootstrap(
         &self,
         authorization: PersonalAuthorization,
@@ -376,12 +347,6 @@ impl Node {
         Ok(authorization.answer(&rocky_credentials::encode(&page)?)?)
     }
 
-    /// Persists an owner device's independent certificate that the root, the
-    /// owner and the node authorized: idempotent by certificate ID, after the
-    /// pinned mode, owner, binding, tombstone and device limit. Owner devices
-    /// and custodians alike keep and relay it. The replica commit is retried
-    /// even if the settings kept the certificate before an interrupted
-    /// publication.
     pub(super) async fn accept_personal(
         &self,
         publication: PersonalPublication,
@@ -431,10 +396,6 @@ impl Node {
         Ok(known)
     }
 
-    /// Anchors an unwitnessed sign-in once it reconciled with `peer`,
-    /// another owner device no statement this device holds ended: that
-    /// device's durable store now witnesses this one's view, as a sign-in
-    /// from it would have. Persisted, so it survives reopening.
     pub(super) async fn witnessed_by(&self, peer: PublicKey) -> Result<(), Failure> {
         let mut current = self.settings.lock().await;
         let Some(device) = current.personal.filter(|device| device.unwitnessed) else {
@@ -461,11 +422,6 @@ impl Node {
         Ok(())
     }
 
-    /// Takes a lapsed custody link back from an owner device the passkey just
-    /// certified: the same subject, grants, partitions and delegations as the
-    /// link this custodian holds, under the same owner grant, only valid anew.
-    /// Its rights never widen. The renewed link certifies the chain this node
-    /// already holds.
     pub(super) async fn accept_custody_renewal(
         &self,
         renewal: PersonalCustodyRenewal,

@@ -1,4 +1,3 @@
-//! Transport fixtures retain keys across reopen without testing file-key fsync.
 use rocky_sdk::{SecretStore, credentials::ProviderError};
 use std::{
     collections::HashMap,

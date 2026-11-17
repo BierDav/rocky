@@ -1,5 +1,3 @@
-//! Roster-free admission on the in-process hub, including a device revoked
-//! while offline.
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
 use rocky_sdk::{Network, transport::memory::Hub};
@@ -18,9 +16,6 @@ async fn finish_issuer_bootstrap(members: &[Device]) -> Result<(), Failure> {
     Ok(())
 }
 
-/// C admits B, which it has no contact for, and refuses D in the round in
-/// which A told it of D's revocation. D, revoked while it was away, learns
-/// it from C with no issuer running, reports `revoked` and stops syncing.
 #[tokio::test]
 async fn a_member_admits_a_peer_without_a_contact_and_refuses_one_revoked_this_round()
 -> Result<(), Failure> {

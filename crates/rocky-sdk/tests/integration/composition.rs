@@ -1,6 +1,3 @@
-//! Services composed without the starter engine: a database that opens with
-//! no network, sessions sharing it, and network services that own or borrow
-//! their transport.
 use rocky_sdk::{
     Database, Engine, Network, NetworkService, Open, Opened, ServiceError, Session,
     transport::{
@@ -34,7 +31,6 @@ fn service(error: &Failure) -> Option<&ServiceError> {
     error.downcast_ref()
 }
 
-/// One session and the scope its calls name.
 struct Client {
     session: Session,
 }

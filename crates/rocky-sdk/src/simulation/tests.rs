@@ -1,7 +1,3 @@
-//! The fixed seed set of the integration tier, the e2e sweep and replay.
-//!
-//! Replay one seed with its steps:
-//! `ROCKY_SIM_SEED=<seed> cargo test -p rocky-sdk --lib simulation::tests::replay -- --ignored --nocapture`
 use super::{
     driver::{self, Report},
     schedule::{Fixture, Scenario, Wall},
@@ -9,7 +5,6 @@ use super::{
 use crate::Failure;
 use std::sync::Arc;
 
-/// The integration tier's size: inside its 2 s per-test budget.
 const INTEGRATION: Scenario = Scenario {
     nodes: 3,
     steps: 24,
@@ -17,8 +12,6 @@ const INTEGRATION: Scenario = Scenario {
     fixture: Fixture::Items,
     wall: Wall::Moving,
 };
-/// The sweep's size for `seed`: three or four nodes. The integration seeds
-/// already cover the longer scenario; the e2e sweep adds independent seeds.
 fn sweep(seed: u64) -> Scenario {
     Scenario {
         nodes: 3 + (seed % 2) as usize,
@@ -28,9 +21,6 @@ fn sweep(seed: u64) -> Scenario {
         wall: Wall::Moving,
     }
 }
-/// Seeds that do not converge, with the classes of what blocks them.
-/// Recovery drives itself, so it stays empty; safety failures are never
-/// listed.
 const KNOWN_LIVENESS: &[(u64, &[&str])] = &[];
 
 async fn simulate(seed: u64, scenario: Scenario) -> Result<Report, Failure> {
@@ -45,7 +35,6 @@ fn classes(report: &Report) -> Vec<String> {
         .flat_map(|stuck| stuck.classes.iter().cloned())
         .collect()
 }
-/// The seed's entry in `KNOWN_LIVENESS`; empty for one that converges.
 fn known(seed: u64) -> Vec<String> {
     KNOWN_LIVENESS
         .iter()
@@ -53,8 +42,6 @@ fn known(seed: u64) -> Vec<String> {
         .map(|(_, classes)| classes.iter().map(|class| class.to_string()).collect())
         .unwrap_or_default()
 }
-/// Fails on a safety violation, and on a liveness result that differs from
-/// the seed's entry in `KNOWN_LIVENESS`, so the list stays exact.
 async fn integration(seed: u64) -> Result<(), Failure> {
     let report = simulate(seed, INTEGRATION).await?;
     assert!(report.safety.is_none(), "{}", report.dump());
@@ -85,9 +72,8 @@ seeds!(
     seed_8 = 8,
 );
 
-/// Runs `ROCKY_SIM_SEED` at the sweep's size and prints its steps.
 #[tokio::test(start_paused = true)]
-#[ignore = "replays one seed on request"]
+#[ignore = "replays ROCKY_SIM_SEED with its steps: ROCKY_SIM_SEED=<seed> cargo test -p rocky-sdk --lib simulation::tests::replay -- --ignored --nocapture"]
 async fn replay() -> Result<(), Failure> {
     let seed = std::env::var("ROCKY_SIM_SEED")?.parse()?;
     let report = simulate(seed, sweep(seed)).await?;
@@ -96,9 +82,6 @@ async fn replay() -> Result<(), Failure> {
     Ok(())
 }
 
-/// How many seeds the e2e sweep runs, and where it starts; the shards
-/// split them. Bounded by default; `ROCKY_SIM_FIRST` and `ROCKY_SIM_SEEDS`
-/// widen it when investigating a seed range.
 fn sweep_range() -> std::ops::Range<u64> {
     let read = |name: &str, default: u64| {
         std::env::var(name)
@@ -111,9 +94,6 @@ fn sweep_range() -> std::ops::Range<u64> {
 }
 
 const SHARDS: u64 = 16;
-/// One shard of the sweep: fails on any safety violation and on a seed
-/// whose healing result differs from `KNOWN_LIVENESS`, listing each with
-/// what blocks it.
 async fn shard(shard: u64) -> Result<(), Failure> {
     let mut unsafe_seeds = Vec::new();
     let mut stuck = std::collections::BTreeMap::<Vec<String>, Vec<u64>>::new();
@@ -147,7 +127,7 @@ async fn shard(shard: u64) -> Result<(), Failure> {
 macro_rules! shards {
     ($($name:ident = $shard:expr),* $(,)?) => {$(
         #[tokio::test(start_paused = true)]
-        #[ignore = "the e2e sweep"]
+        #[ignore = "the e2e sweep; ROCKY_SIM_FIRST and ROCKY_SIM_SEEDS widen its seed range"]
         async fn $name() -> Result<(), Failure> {
             shard($shard).await
         }
@@ -172,8 +152,6 @@ shards!(
     sweep_15 = 15,
 );
 
-/// Twelve streams of fixed bytes through every kind of seeded fault: what
-/// crossed and what the hub injected, in order.
 async fn hub_transcript(seed: u64) -> Result<(Vec<u8>, Vec<String>), Failure> {
     use crate::transport::{
         Connector, Protocol,
@@ -251,7 +229,6 @@ async fn the_same_seed_yields_byte_identical_hub_transcripts() -> Result<(), Fai
         .await
 }
 
-/// A violation without where it happened or the run's random scope labels.
 fn masked(safety: &str) -> String {
     let what = safety.split_once(": ").map_or(safety, |(_, what)| what);
     what.split(' ')
@@ -262,11 +239,8 @@ fn masked(safety: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
-/// Shrinks the schedule of `ROCKY_SIM_SEED`'s failure, a safety violation
-/// or what keeps it from converging: drops steps one at a time while the
-/// same failure still happens, then prints it.
 #[tokio::test(start_paused = true)]
-#[ignore = "shrinks one failing seed on request"]
+#[ignore = "shrinks ROCKY_SIM_SEED's failure: ROCKY_SIM_SEED=<seed> cargo test -p rocky-sdk --lib simulation::tests::shrink -- --ignored --nocapture"]
 async fn shrink() -> Result<(), Failure> {
     let seed = std::env::var("ROCKY_SIM_SEED")?.parse()?;
     let scenario = sweep(seed);

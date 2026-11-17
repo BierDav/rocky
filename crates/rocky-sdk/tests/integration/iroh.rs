@@ -1,5 +1,3 @@
-//! A database on an iroh endpoint the application owns, next to the
-//! application's own protocol. Loopback only: no relay, no address lookup.
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
 use rocky_iroh::{
@@ -18,7 +16,6 @@ use crate::common;
 
 const ECHO: &[u8] = b"example/echo/1";
 
-/// The application's own protocol. Its traffic never reaches a database.
 #[derive(Debug)]
 struct Echo;
 impl ProtocolHandler for Echo {
@@ -48,13 +45,10 @@ async fn echo(from: &Endpoint, to: EndpointAddr) -> Result<Vec<u8>, Failure> {
     connection.close(0u32.into(), b"done");
     Ok(reply)
 }
-/// The application signals renewed reachability; explicit passes respect backoff.
 async fn signal_renewed_reachability(device: &Device) {
     snap::ok(device.session.set_networking_enabled(true)).await;
 }
 
-/// Opening a database blocks its caller while the application's runtime
-/// keeps driving the endpoint on other threads.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -206,7 +200,6 @@ async fn two_databases_share_each_endpoint_and_detach_independently() -> Result<
     Ok(())
 }
 
-/// The personal database `name`'s passkey locates in its own namespace.
 fn personal(name: &str) -> (rocky_sdk::VerifiedPasskeyPrf, rocky_sdk::PersonalNamespace) {
     let namespace = rocky_sdk::PersonalNamespace::new(format!("{name}.example"), "account root")
         .expect("namespace");

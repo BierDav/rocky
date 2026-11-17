@@ -1,6 +1,3 @@
-//! Envelope delivery between an issuer, a keyless custody mailbox and
-//! members: directly, through mailboxes, at their bounds, across crashes and
-//! after a revocation.
 use crate::test_snapshot as snap;
 use crate::{
     Database, Open, SecretStore, Session,
@@ -21,10 +18,8 @@ const SCHEMA: &str = r#"{"application":"delivery","version":1,"format":6,"tables
  {"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
  {"name":"labels","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
 const TABLES: [&str; 3] = ["notes", "parts", "labels"];
-/// The list every test shares.
 const LIST: &str = "Weekend";
 
-/// Keys in memory, kept across reopens of one directory.
 #[derive(Default)]
 struct Keys(Mutex<HashMap<String, Vec<u8>>>);
 impl SecretStore for Keys {
@@ -99,8 +94,6 @@ impl Device {
             .await
             .map(drop)
     }
-    /// Closes the database and opens it again from its directory, as after
-    /// a crash: nothing but what it saved survives.
     async fn restart(self) -> Result<Self, Failure> {
         let Self {
             database,
@@ -133,7 +126,6 @@ impl Device {
             .map(|epoch| epoch["generation"].clone())
             .collect())
     }
-    /// How this sharer sees `node`'s latest envelope.
     async fn state(&self, node: &str) -> Result<Value, Failure> {
         let status = snap::value(self.session.partition_status(
             rocky_sdk::PartitionTarget::Group {
@@ -185,8 +177,6 @@ async fn introduce(left: &Device, right: &Device) -> Result<(), Failure> {
     }
     Ok(())
 }
-/// An issuer, a keyless custody peer and a writer, which meet each other
-/// only through custody unless a test introduces them.
 struct Mesh {
     root: crate::test_directory::Directory,
     hub: Arc<Hub>,
@@ -245,7 +235,6 @@ impl Mesh {
             b,
         })
     }
-    /// A reader without a custody grant, which knows custody.
     async fn member(&self, name: &str) -> Result<Device, Failure> {
         let device = join(
             &self.root,
@@ -295,7 +284,6 @@ async fn join(
     }
     Ok(device)
 }
-/// `from` syncs while `to` is offline; custody is always online.
 async fn relay(from: &Device, to: &Device) -> Result<Value, String> {
     to.online(false).await.map_err(|error| error.to_string())?;
     from.online(true).await.map_err(|error| error.to_string())?;
@@ -318,7 +306,6 @@ async fn share(device: &Device, recipients: &[&str]) -> Result<Value, Failure> {
     ))
     .await
 }
-/// The sum of one count over every round of delivery.
 async fn delivered(device: &Device, count: &str) -> Result<u64, Failure> {
     Ok(device
         .events("envelopes_delivered")
@@ -327,8 +314,6 @@ async fn delivered(device: &Device, count: &str) -> Result<u64, Failure> {
         .filter_map(|event| event[count].as_u64())
         .sum())
 }
-/// Turns off background sync: a failed background attempt would put custody
-/// in backoff, which an explicit sync skips.
 async fn explicit_syncs_only(devices: &[&Device]) -> Result<(), Failure> {
     for device in devices {
         snap::value(device.session.set_automatic_sync(false)).await?;
@@ -628,7 +613,6 @@ async fn a_recipient_revoked_after_the_deposit_gets_nothing_and_the_deposit_is_r
 }
 
 impl Device {
-    /// Restarts the device after `change` edited its saved mailbox.
     async fn restart_with(
         self,
         change: impl FnOnce(&mut Mailbox) -> Result<(), Failure>,
@@ -651,17 +635,12 @@ impl Device {
     }
 }
 
-/// Where a sweep stops: on the sender, the mailbox or the recipient.
 #[derive(Clone, Copy)]
 enum At {
     Sender,
     Mailbox,
     Recipient,
 }
-/// Stops one device once at `stage`, restarts it from disk and goes on: B
-/// still installs the envelope once, A learns it was delivered and custody
-/// keeps nothing. `direct` runs A and B together; otherwise they meet
-/// only custody.
 async fn sweep(direct: bool, at: At, stage: fault::Stage) -> Result<(), Failure> {
     let Mesh {
         root,

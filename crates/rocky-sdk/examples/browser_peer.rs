@@ -1,14 +1,3 @@
-//! The native side of `scripts/browser-sync`: a plain-HTTP iroh relay on
-//! loopback, which a browser reaches without a trusted certificate, a public
-//! coordination service of three voters whose client lanes it reaches through
-//! that relay, and the domain owner's native node behind it. It prints the
-//! relay, an invitation and the service's bundle as one JSON line, grants the
-//! browser's identity a claim right for the `invoices` counter once it asks,
-//! never trusting it on the service, serves until a line arrives on stdin,
-//! then checks that the browser node's writes and claims reached it. Before
-//! the script sends that line, the browser node joins, syncs, asks for a
-//! claim right, claims and writes, syncing each time; granting ends early
-//! only on a failure.
 #[cfg(target_family = "wasm")]
 fn main() {}
 
@@ -112,9 +101,6 @@ mod native {
         Ok(())
     }
 
-    /// Registers the domain with the owner's identity as its one trusted
-    /// one; no later control revision trusts another. Registering without
-    /// a coordination grant needs the root.
     async fn register(
         db: &Database,
         root: &str,
@@ -147,8 +133,6 @@ mod native {
         Ok(())
     }
 
-    /// Grants each identity that writes `member <principal>` a claim right
-    /// for `invoices`, and answers `granted <principal>`.
     async fn grant_members(db: Arc<Database>) -> Result<(), Failure> {
         let mut granted = Vec::new();
         let session = db.session();
@@ -168,7 +152,7 @@ mod native {
                     continue;
                 }
                 session
-                    .grant_claims(&member, Some(&[b"invoices"]), 1)
+                    .grant_claims(&member, rocky_sdk::ClaimCounters::Named(&[b"invoices"]), 1)
                     .await?;
                 let mut tx = db.transaction().await?;
                 let id = tx.next_id("notes", vec![]).await?;
@@ -184,8 +168,6 @@ mod native {
         }
     }
 
-    /// The browser's write arrived, and this node sees the counter the
-    /// browser claimed from: its claim took 1, and the next claim here is 3.
     async fn check(db: &Database) -> Result<(), Failure> {
         let rows = db
             .query(
@@ -224,8 +206,6 @@ mod native {
         Ok(())
     }
 
-    /// Three voters of a public service with open admission, whose client
-    /// lanes a browser reaches through the relay at `relay`, and its bundle.
     async fn service(directory: &Path, relay: &str) -> Result<TrustBundle, Failure> {
         let root = PrivateKey::new();
         let admin = PrivateKey::new();

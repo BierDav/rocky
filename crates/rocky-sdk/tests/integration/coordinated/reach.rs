@@ -1,5 +1,3 @@
-//! A coordinator client one device alone cannot reach while its switch is
-//! off: the same service, unreachable from that device only.
 use rocky_core::{
     Append, Commitment, CoordinationError, CoordinationFuture, CoordinatorIdentity, DomainLog,
     LogHead, LogPending, LogResult, LogStatus, LogTerminal, NodeKey, Scope, TipLog,
@@ -15,7 +13,6 @@ pub struct Reach {
     down: Arc<AtomicBool>,
 }
 impl Reach {
-    /// `inner`, and the switch that makes it unreachable.
     pub fn new(inner: Arc<dyn rocky_sdk::Coordinator>) -> (Arc<Self>, Arc<AtomicBool>) {
         let down = Arc::new(AtomicBool::new(false));
         (

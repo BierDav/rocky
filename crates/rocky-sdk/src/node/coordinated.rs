@@ -1,14 +1,7 @@
-//! A trusted node's composed coordinated log: it ends tips' logs with
-//! their seals and acknowledges their terminal entries. Rocky orders no
-//! writes through it; applications coordinate their own.
 use super::*;
 use rocky_credentials::Coordinator;
 
 impl Node {
-    /// Makes this device a trusted node of its domain's coordinated logs, or
-    /// ends that with `None`. The log is the application's; Rocky never
-    /// closes it. One other than the coordinator the database's settings
-    /// name is refused with `coordinator_mismatch`.
     pub async fn coordinate(&self, log: Option<Arc<dyn Coordinator>>) -> Result<(), Failure> {
         let log = if let Some(client) = log {
             if let Some(named) = self.named_coordinator().await?
@@ -45,8 +38,6 @@ impl Node {
             .write()
             .unwrap_or_else(PoisonError::into_inner) = log;
     }
-    /// Lets this device reach the coordinator the database's settings name
-    /// when the application composed none; `None` stops that.
     pub(crate) fn set_connector(
         &self,
         connector: Option<Arc<dyn rocky_credentials::CoordinatorConnector>>,
@@ -56,7 +47,6 @@ impl Node {
             .write()
             .unwrap_or_else(PoisonError::into_inner) = connector;
     }
-    /// The coordinator the database's owner-signed settings name.
     pub(super) async fn named_coordinator(
         &self,
     ) -> Result<Option<rocky_credentials::CoordinatorBundle>, Failure> {
@@ -67,9 +57,6 @@ impl Node {
             .coordinator()?
             .cloned())
     }
-    /// A signing device without a composed coordinator reaches the one the
-    /// database's settings name through the application's connector, which
-    /// verifies its bundle. A failure is kept for the seal it blocks.
     pub(crate) async fn adopt_named_coordinator(&self) {
         let adopted = async {
             let Some(bundle) = self.named_coordinator().await? else {
@@ -101,8 +88,6 @@ impl Node {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = adopted.err().map(|error| error.to_string());
     }
-    /// Why this device may not seal now: the database's settings name a
-    /// coordinator and this device has no composed log of it.
     pub(super) async fn seal_blocker(&self) -> Result<Option<crate::SealSkip>, Failure> {
         let Some(named) = self.named_coordinator().await? else {
             return Ok(None);
@@ -122,9 +107,6 @@ impl Node {
             )),
         })
     }
-    /// Refuses a composed coordinator other than the one the database's
-    /// settings name: an explicit client the application passed at open,
-    /// or one composed before the settings arrived.
     pub(crate) async fn refuse_mismatched_coordinator(&self) -> Result<(), Failure> {
         if let (Some(client), Some(named)) = (self.coordinator(), self.named_coordinator().await?)
             && client.identity() != named.identity
@@ -137,16 +119,12 @@ impl Node {
         Ok(())
     }
 }
-/// A refusal with a stable call error code.
 pub(super) fn coordination_refusal(code: &'static str, message: &str) -> Failure {
     Box::new(Error::Application(Box::new(rocky_secure::Refusal {
         code,
         message: message.to_owned(),
     })))
 }
-/// Counter claims through the composed coordination service, as a trusted
-/// node or a holder of a claim right. A claim never runs inside a database
-/// transaction.
 impl Node {
     pub(super) fn coordinator(&self) -> Option<Arc<dyn Coordinator>> {
         self.coordinator
@@ -154,8 +132,6 @@ impl Node {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
-    /// The composed coordinator for counters: never another than the one
-    /// the database's settings name, whose counters are the database's.
     async fn counters(&self) -> Result<Arc<dyn Coordinator>, Failure> {
         let client = self
             .coordinator()
@@ -185,8 +161,6 @@ impl Node {
     }
 }
 impl Node {
-    /// Whether this device is a trusted node with a composed log, and the
-    /// log of the tip it follows.
     pub(super) async fn coordinated_status(&self) -> Result<crate::CoordinatedLogStatus, Failure> {
         let log = self.replica.followed_log(self.domain().scope).await;
         Ok(crate::CoordinatedLogStatus {

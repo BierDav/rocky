@@ -1,4 +1,3 @@
-//! Typed observations of database authority, storage and network resources.
 pub use rocky_core::{Blocker, BlockerKind, ClearsBy, FrameReplay, WaitReason};
 use serde::{Deserialize, Serialize};
 
@@ -106,9 +105,6 @@ pub struct Route {
 pub struct RevocationStatus {
     pub digest: String,
     pub statements: u64,
-    /// Held statements the coordination service has not acknowledged; a
-    /// node pushes them at its next sync or claim. Only meaningful on a
-    /// database composed with a coordination service.
     pub unpushed: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,28 +113,14 @@ pub struct VerifiedRevocation {
     pub statement: Vec<u8>,
     pub reason: RevocationReason,
 }
-/// Why a verified revocation ends this device.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RevocationReason {
-    /// This device's node.
     Node,
-    /// This device's identity.
     Identity,
-    /// The root marked the first trusted issuer compromised. This identity
-    /// ended by cascade and may enroll again through another trusted node.
     Cascade { trusted: String },
-    /// A root recovery that kept the trusted identity `recovered` ended
-    /// every trusted grant before its own: this device's, or that of the
-    /// trusted identity that first enrolled it. It may enroll again
-    /// through a trusted node the recovery kept or the root added since.
     Recovery { recovered: String },
-    /// The owner chose "this is everything: sign out everywhere else" on
-    /// another device: reset `reset` keeps only that device and its named
-    /// custodians. This node's operations outside the reset's fence are
-    /// discarded everywhere; sign in again as a new device.
     Reset { reset: rocky_core::Commitment },
-    /// A capability or an issuer above it.
     Capability,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,27 +165,15 @@ pub struct GenerationStatus {
     pub pending: Option<PendingGeneration>,
     pub rebuilding: Option<RebuildProgress>,
     pub application: DeclaredSchema,
-    /// A migration this device waits for or publishes.
     pub migration: Option<MigrationStatus>,
-    /// An ahead member needs an issuer's signed generation, possibly offline.
     pub waiting_for_issuer: bool,
-    /// Whether this Rocky build may replay the followed tip.
     pub engine: EngineStatus,
 }
-/// How this Rocky build's replay engine (its SQLite and replay semantics)
-/// stands to the tips this device follows. Replicas on different engines
-/// could replay the same transaction differently, so a tip names one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EngineStatus {
     Current,
-    /// The owner moved on to a tip on another engine: this device stays
-    /// read-only at the old tip until the application ships a Rocky upgrade.
     UpgradeRequired,
-    /// The followed tip names another engine: this device reads but does
-    /// not write or replay until an owner device on this build opens a tip.
-    /// Engines are not ordered, so an older build that enrolled at a newer
-    /// tip reports this too; upgrading also clears it.
     AwaitingOwner,
 }
 impl From<rocky_secure::EngineStatus> for EngineStatus {
@@ -215,28 +185,17 @@ impl From<rocky_secure::EngineStatus> for EngineStatus {
         }
     }
 }
-/// A schema migration as this device sees it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum MigrationStatus {
-    /// The application's schema has migrations this device may not run:
-    /// an issuer that reads and writes every partition must migrate first.
     FullAccessRequired,
-    /// Bundles of migrations this device ran, and how many of them, in
-    /// order, a peer holds.
     Publishing { bundles: u64, published: u64 },
 }
-/// How the schema the application declares stands to the installed
-/// generation's. An application behind or ahead of its database still
-/// opens it; its statements on what differs fail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeclaredSchema {
     Current,
-    /// Older than the database, which adopted a newer generation.
     Behind,
-    /// Newer than the database: no issuer has signed it, or this device
-    /// could not reach one yet.
     Ahead,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,9 +234,7 @@ pub struct KeyEpochStatus {
 pub struct DataStatus {
     pub revision: u64,
     pub generation: GenerationStatus,
-    /// Every reason a scope cannot read, write or import yet.
     pub blockers: Vec<Blocker>,
-    /// A summary: the bootstrap intent or a staged import remains.
     pub bootstrap_pending: bool,
     pub bootstrap: Option<BootstrapProgress>,
     pub imports: Vec<ScopeImportStatus>,
@@ -318,7 +275,6 @@ pub struct Peer {
     pub attempts: Vec<AttemptObservation>,
     pub last_authenticated_exchange_at_epoch_seconds: Option<u64>,
     pub retry: Option<RetryStatus>,
-    /// The last exchange with this peer that was not skipped.
     pub last_sync: Option<PeerReconciliation>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,34 +312,22 @@ pub struct CoordinationStatus {
     pub mode: CoordinationMode,
     pub attempts: Vec<AttemptObservation>,
 }
-/// A condition that delays or degrades replication but blocks no scope;
-/// blockers stay for scopes. Later conditions add kinds.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Alert {
     pub kind: AlertKind,
-    /// Epoch seconds since the condition holds, when known.
     pub since: Option<u64>,
 }
-/// Why a trusted node did not make a due seal.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "code", content = "detail", rename_all = "snake_case")]
 pub enum SealSkip {
-    /// The device follows no bookmark to seal.
     NoFollowedBookmark,
-    /// The device signs no tip statements: why.
     NoTipAuthority(String),
-    /// The database's owner-signed settings name a coordinator this device
-    /// has no log of: why it could not compose one.
     CoordinatorRequired(String),
-    /// The device's coordinator is not the one the settings name.
     CoordinatorMismatch,
-    /// The device's earlier seal of the tip still waits for its log entry.
     SealPending(String),
-    /// Sealing failed: the error.
     Failed(String),
 }
 impl SealSkip {
-    /// The stable code: the call error code for the refusals it mirrors.
     pub fn code(&self) -> &'static str {
         match self {
             Self::NoFollowedBookmark => "no_followed_bookmark",
@@ -406,24 +350,12 @@ impl std::fmt::Display for SealSkip {
         }
     }
 }
-/// Why a trusted node's finality pass left a seal unfinal; `tip` names the
-/// tip whose log it waits on, in hex.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum FinalityStall {
-    /// The coordinator dropped ended logs of the domain and the tip's log
-    /// reads as never ended: its seal's finality comes from a peer that
-    /// acknowledged it, or the owner recovers the tip.
     LogDropped { tip: String },
-    /// The coordinator did not take the seal that ends the tip's log.
     EndRefused { tip: String, error: String },
-    /// A received seal waits for the seal leading into its tip to end the
-    /// tip's log, and no node of that line ended it.
     EntryPending { tip: String },
-    /// This node's store holds a record another release wrote, such as the
-    /// head of its acknowledgment chain, in a format this release never
-    /// reads: the node acknowledges nothing until it is restored from a
-    /// store this release wrote.
     UnsupportedFormat { error: String },
 }
 impl FinalityStall {
@@ -454,144 +386,101 @@ impl std::fmt::Display for FinalityStall {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AlertKind {
-    /// Conflicting identity-signed links are void; the holder must link again.
-    MembershipFork { identity: String, sequence: u64 },
-    /// This device's clock is `seconds` ahead of `node`'s, more than
-    /// `MAX_CLOCK_AHEAD`: this device's changes wait on that device until
-    /// its clock catches up.
-    ClockAheadOfPeer { node: String, seconds: u64 },
-    /// `node`'s clock is `seconds` ahead of this device's, more than
-    /// `MAX_CLOCK_AHEAD`: its changes wait here until this clock catches up
-    /// (a `ClockAhead` blocker once they arrive).
-    PeerClockAhead { node: String, seconds: u64 },
-    /// The coordination service refused this device's last call because
-    /// its clock is `seconds` off the service's (`ahead` when this one
-    /// runs ahead). Clears with the next call the service accepts, or
-    /// refuses for a reason it checks after the clock.
-    CoordinatorClockSkew { seconds: u64, ahead: bool },
-    /// No voter of the coordination service answered this device's calls
-    /// for `STANDING_FAILURE` or longer. Clears with the next answer.
+    MembershipFork {
+        identity: String,
+        sequence: u64,
+    },
+    ClockAheadOfPeer {
+        node: String,
+        seconds: u64,
+    },
+    PeerClockAhead {
+        node: String,
+        seconds: u64,
+    },
+    CoordinatorClockSkew {
+        seconds: u64,
+        ahead: bool,
+    },
     CoordinatorUnreachable,
-    /// The coordination service has not acknowledged the revocations this
-    /// device holds for `STANDING_FAILURE` or longer: claim rights they end
-    /// still pass there. Clears when a push is acknowledged.
     RevocationsUnpushed,
-    /// A certified link first observed at `linked` (epoch seconds) while trusted here.
     TrustedNodeLinked {
         identity: String,
         node: String,
         linked: u64,
     },
-    /// An identity-owned unlink observed for a trusted identity here.
     TrustedNodeUnlinked {
         identity: String,
         node: String,
         unlinked: u64,
     },
-    /// On a trusted node: no node of the trusted identity `identity` was
-    /// heard from, directly or through another trusted node, for the
-    /// configured threshold (`TRUSTED_STALE_AFTER` by default) since
-    /// `last_heard_epoch_seconds`. Ask the user whether the root should
-    /// revoke it; clears once it is heard again or revoked.
     TrustedIdentityStale {
         identity: String,
         last_heard_epoch_seconds: u64,
     },
-    /// On a trusted node: a seal is due and was not made, for `reason`.
-    /// Clears with the next seal pass that has nothing left undone.
-    SealSkipped { reason: SealSkip },
-    /// On a trusted node with a composed coordinator: a seal stays unfinal
-    /// for `reason`. Clears with the next finality pass that finds none.
-    FinalityStalled { reason: FinalityStall },
-    /// A root revocation's cut left out `statements` tip statements and
-    /// `acknowledgments` terminal acknowledgments that the identity
-    /// `signer` signed through its node `node` past the kept head; this
-    /// device holds them and resolves without them.
+    SealSkipped {
+        reason: SealSkip,
+    },
+    FinalityStalled {
+        reason: FinalityStall,
+    },
     TipStatementsPastCut {
         signer: String,
         node: String,
         statements: u64,
         acknowledgments: u64,
     },
-    /// The identity `signer`'s node `node` signed two statements (or
-    /// acknowledgments) at `sequence` of its chain: its key signed a fork.
-    /// Ask the user whether the root should revoke it.
     TipChainEquivocation {
         signer: String,
         node: String,
         sequence: u64,
         acknowledgment: bool,
     },
-    /// The peer `node` carried `records` root escrow records this device
-    /// refused, the latest because `reason`: no key holder of their scope
-    /// vouched for them, or a later revocation refused the one that did.
-    /// A genuine record is never displaced by one.
     EscrowRefused {
         node: String,
         records: u64,
         reason: String,
     },
-    /// Two root recoveries met: the later, which kept the identity `kept`,
-    /// ended every trusted grant before it, the earlier recovered identity
-    /// `ended` too, whose writes every holder refuses from then on. Recover
-    /// once; a device of `ended` enrolls again through `kept`.
-    RecoveriesMet { kept: String, ended: String },
-    /// The root recovery that kept the trusted identity `recovered` ended
-    /// the trusted identity `ended`, whose grant came before it, and with
-    /// it every identity `ended` first enrolled: their devices are refused
-    /// (each reports `RevocationReason::Recovery`) and enroll again through
-    /// `recovered` or a trusted node the root added since. Reported for
-    /// every trusted identity this device knows, from the issuer registry
-    /// or the tip statements it holds, whether it learns of it before the
-    /// statement or after.
-    RecoveryEnded { recovered: String, ended: String },
+    RecoveriesMet {
+        kept: String,
+        ended: String,
+    },
+    RecoveryEnded {
+        recovered: String,
+        ended: String,
+    },
 }
-/// How long a trusted node may stay unheard before the others flag it.
 pub const TRUSTED_STALE_AFTER: std::time::Duration =
     std::time::Duration::from_secs(30 * 24 * 60 * 60);
-/// How long a coordination failure lasts before it is an alert.
 pub const STANDING_FAILURE: std::time::Duration = std::time::Duration::from_secs(300);
-/// What a device reports of its own health to the domain's trusted nodes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealthReport {
-    /// The reporting device's clock when it produced the report.
     pub produced_at_epoch_seconds: u64,
     pub alerts: Vec<Alert>,
-    /// Its blockers by kind, without their scopes.
     pub blockers: Vec<BlockerCount>,
     pub coordination_failure: Option<CoordinationFailure>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlockerCount {
-    /// The blocker kind's `type`, as `BlockerKind` names it.
     pub kind: String,
     pub count: u64,
 }
-/// The last refusal or failure of a call to the coordination service.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoordinationFailure {
-    /// `CoordinationError::category`, such as `unavailable` or `clock_skew`.
     pub code: String,
     pub at_epoch_seconds: u64,
 }
-/// One device's latest report, as a trusted node holds it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeshDevice {
     pub node: String,
     pub report: HealthReport,
-    /// When a trusted node last heard from the device, on its own clock:
-    /// a report, or its link to the device open or closing.
     pub received_at_epoch_seconds: u64,
-    /// The trusted node that forwarded it; `None` when the device sent it here.
     pub via: Option<String>,
-    /// No trusted node has heard from this device for `SILENT_AFTER`: no
-    /// link to it is open and none was since `received_at_epoch_seconds`.
     pub silent: bool,
 }
-/// How long trusted nodes may not hear from a device before it shows silent.
 pub const SILENT_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatabaseStatus {
@@ -601,18 +490,13 @@ pub struct DatabaseStatus {
     pub data: DataStatus,
     pub network: NetworkStatus,
     pub coordination: CoordinationStatus,
-    /// Each condition the application should know of that no blocker shows.
     pub alerts: Vec<Alert>,
-    /// On a trusted node, each other device's latest health report; `None`
-    /// on any other device, which sees only its own status.
     pub mesh: Option<Vec<MeshDevice>>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeReconciliationTransfer {
     pub scope: ScopeStatus,
-    /// Frames received.
     pub pulled: u64,
-    /// Frames sent.
     pub pushed: u64,
     pub received_bytes: u64,
     pub sent_bytes: u64,
@@ -627,27 +511,18 @@ pub struct PeerReconciliation {
     pub transfers: Vec<ScopeReconciliationTransfer>,
     pub refused: Vec<ScopeStatus>,
     pub waiting: Vec<ScopeStatus>,
-    /// Always false: peer discovery never upgrades the installed workspace.
     pub upgrade_required: bool,
     pub retry_pending: bool,
-    /// How each scope this exchange reached ended.
     pub scopes: Vec<ScopeOutcome>,
-    /// Failed attempts of this exchange that timed out, by kind.
     pub timeouts: Vec<TimeoutCount>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScopeSyncOutcome {
     Synced,
-    /// One side's credentials grant no whole-scope access to the other, or
-    /// the peer refused the scope's requests as not permitted.
     Refused,
-    /// The peer restores the scope from a checkpoint.
     PeerImporting,
-    /// A request of this scope failed; the exchange went on with others.
     Failed,
-    /// The exchange's session failed, by a timeout or a lost link, before
-    /// this scope finished. Nothing was refused; the next sync resumes it.
     Interrupted,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -669,7 +544,6 @@ pub struct ReconciliationReport {
     pub peers: Vec<PeerReconciliation>,
 }
 
-/// The native request boundary's stable error, without losing its code.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallFailure {
     pub code: String,

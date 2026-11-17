@@ -15,27 +15,19 @@ pub struct Schema {
     pub assertions: Vec<rocky_core::LogicalAssertion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub restrictions: Vec<rocky_core::LogicalRestriction>,
-    /// SQL the first issuer to sign the schema's generation runs once, after
-    /// signing it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub migrations: Vec<Migration>,
 }
-/// Statements leading to application schema `version`, run in order in
-/// one transaction.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Migration {
     pub version: u32,
     pub statements: Vec<MigrationStep>,
 }
-/// One statement of a migration.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum MigrationStep {
-    /// SQL run as it is.
     Sql(String),
-    /// A row of table `insert` for each row `select` returns, its columns
-    /// named like the table's, with an `id` Rocky issues.
     Insert { insert: String, select: String },
 }
 fn identifier(name: &str) -> bool {
@@ -153,7 +145,6 @@ impl Schema {
             })
             .collect()
     }
-    /// Each table follows one replayed table that follows none.
     fn validate_granted_like(&self) -> Result<(), Failure> {
         let replayed = |name: &str| {
             self.tables
@@ -191,7 +182,6 @@ impl Schema {
     }
 }
 
-/// Schema construction uses the same validated definition as every other SDK.
 pub struct SchemaBuilder(Schema);
 impl Schema {
     pub fn builder(application: impl Into<String>, version: u32) -> SchemaBuilder {
@@ -218,16 +208,11 @@ impl SchemaBuilder {
         self.0.views.push(view);
         self
     }
-    /// An invariant across rows or tables of one partition group, run at the
-    /// end of each transaction writing a table it reads.
     #[must_use]
     pub fn assertion(mut self, assertion: rocky_core::LogicalAssertion) -> Self {
         self.0.assertions.push(assertion);
         self
     }
-    /// A transition check: rows of a replayed table that match its
-    /// predicate before a transaction may not be updated or deleted by it,
-    /// at commit and on every replay. Assertions judge only final state.
     #[must_use]
     pub fn restriction(mut self, restriction: rocky_core::LogicalRestriction) -> Self {
         self.0.restrictions.push(restriction);
@@ -238,12 +223,8 @@ impl SchemaBuilder {
     }
 }
 
-/// A typed table has a Rocky-managed `id` column. Use
-/// `primary_key` to declare a natural key instead.
 pub struct Table(rocky_core::TableDefinition);
 impl Table {
-    /// Replicates each transaction's statements; replicas replay them in
-    /// canonical order and drop a transaction whose replay fails.
     pub fn replayed(name: impl Into<String>) -> Self {
         Self::of(name, rocky_core::TableClass::Replayed)
     }
@@ -281,19 +262,11 @@ impl Table {
         self.0.indexes.push(index);
         self
     }
-    /// A `CHECK` of a replayed table, using deterministic functions only.
-    /// SQLite's semantics apply: it holds after each statement, so assign
-    /// columns that must change together in one `UPDATE`, and a NULL result
-    /// passes, so add `IS NOT NULL` where absence is invalid. Arithmetic
-    /// calls `checked_add`, `checked_sub`, `checked_mul` or `checked_div`;
-    /// `+`, `-`, `*` and `/` are refused, as SQLite would turn an overflow
-    /// into a REAL.
     #[must_use]
     pub fn check(mut self, expression: impl Into<String>) -> Self {
         self.0.checks.push(expression.into());
         self
     }
-    /// Access the complete language-neutral definition for advanced schema settings.
     pub fn definition(self) -> rocky_core::TableDefinition {
         self.0
     }
@@ -304,7 +277,6 @@ impl From<Table> for rocky_core::TableDefinition {
     }
 }
 
-/// A nullable column by default; `required` adds NOT NULL.
 pub struct Column(rocky_core::ColumnDefinition);
 impl Column {
     pub fn new(name: impl Into<String>, affinity: rocky_core::Affinity) -> Self {

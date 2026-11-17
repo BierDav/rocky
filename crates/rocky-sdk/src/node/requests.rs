@@ -1,4 +1,3 @@
-//! Typed session work admitted by the database reactor.
 use super::*;
 use crate::request::Request;
 

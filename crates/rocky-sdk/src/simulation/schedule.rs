@@ -1,10 +1,7 @@
-//! Schedules: a step list that is a function of the seed alone, so a
-//! failing seed replays the same steps whatever they did the first time.
 use crate::transport::memory::{Draws, LinkFaults};
 use rocky_secure::CrashPoint;
 use std::{fmt, time::Duration};
 
-/// A schedule's size; liveness gets `rounds` sync rounds after healing.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Scenario {
     pub(super) nodes: usize,
@@ -14,21 +11,15 @@ pub(super) struct Scenario {
     pub(super) wall: Wall,
 }
 
-/// The members' shared wall clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Wall {
-    /// Moves with the task clock and between steps.
     Moving,
-    /// Stands still, as a coarse or lagging clock at its worst.
     Frozen,
 }
 
-/// The schema a run uses and the writes its schedules draw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Fixture {
-    /// `items` pairs and `parts` rows, with branches.
     Items,
-    /// Boards and cards with keys, checks and an assertion, on `main`.
     Relational,
 }
 impl Fixture {
@@ -38,7 +29,6 @@ impl Fixture {
             Self::Relational => super::relational::SCHEMA,
         }
     }
-    /// The tables an invited writer reads.
     pub(super) fn scopes(self) -> [&'static str; 2] {
         match self {
             Self::Items => ["items", "parts"],
@@ -47,7 +37,6 @@ impl Fixture {
     }
 }
 
-/// A relational write; indices pick among the rows the author reads.
 #[derive(Clone, Debug)]
 pub(super) enum Change {
     Board {
@@ -62,7 +51,6 @@ pub(super) enum Change {
         name: u8,
         points: u8,
     },
-    /// A board and a card on it, in one transaction of two members.
     Pair {
         list: String,
         code: u8,
@@ -100,83 +88,46 @@ pub(super) enum Change {
     },
 }
 
-/// Nodes are indices; node 0 created the domain and node 1 joined it
-/// before the first step. A step that cannot apply is skipped.
 #[derive(Clone, Debug)]
 pub(super) enum Action {
     Write(usize),
-    /// A write racing the node's own sync pass: the interactive probe.
     Probe(usize),
-    /// A sync pass with every peer the node can reach.
     Sync(usize),
-    /// A sync pass of the first node while only the second is reachable.
     SyncPair(usize, usize),
     Faults(usize, usize, LinkFaults),
     Sever(usize, usize),
     Heal(usize, usize),
     NetworkChange,
     Advance(Duration),
-    /// Closes the node and opens it again.
     Restart(usize),
-    /// Arms the point, runs the step that reaches it, kills the node and
-    /// opens it again; without a point it only kills and reopens.
     Crash(usize, Option<CrashPoint>),
     Seal(usize),
     Compact(usize),
-    /// Opens a tip at the latest seal and follows a new bookmark there.
     Branch(usize, String),
-    /// Follows a bookmark; `main` leaves a branch.
     Follow(usize, String),
-    /// Node 0 creates a partition of the partitioned table.
     Partition(String),
-    /// Node 0 shares a partition's key with the node.
     Share(String, usize),
-    /// A row in a partition, which only a node holding its key writes.
     WritePart(usize, String),
-    /// The first node invites the second, which joins.
     Invite(usize, usize),
-    /// Node 0 revokes the node.
     Revoke(usize),
-    /// A relational write.
     Change(usize, Change),
-    /// The node becomes partial and evicts the list's partitions.
     Evict(usize, String),
-    /// The node holds the list's partitions again.
     Hold(usize, String),
-    /// The node's networking goes off or on.
     Offline(usize),
     Online(usize),
-    /// A write by a node whose clock runs this far ahead.
     WriteAhead(usize, Duration),
-    /// Reports the node's frames waiting for its clock and its item keys.
     Ahead(usize),
-    /// The node's wall clock runs this far ahead from now on.
     Clock(usize, Duration),
-    /// Reports the node's alerts.
     Alerts(usize),
-    /// Waits in the background, by `status_after` alone, for the node's
-    /// alerts to change.
     Watch(usize),
-    /// Reports the alerts the node's watch saw them change to.
     Woken(usize),
-    /// The coordination service answers the node's call: refused for a
-    /// clock this many seconds behind it, or accepted.
     Coordinated(usize, Option<u64>),
-    /// Node 0 enrolls the node with an issuer invitation and the root
-    /// trusts its identity, which installs the grant.
     Trust(usize),
-    /// Reports the node's view of the mesh's health.
     Mesh(usize),
-    /// Waits in the background, by `status_after` alone, for the first
-    /// node's view of the second's health to change.
     WatchMesh(usize, usize),
-    /// Reports the view the node's mesh watch saw.
     WokenMesh(usize),
-    /// Reports how many health reports reached the node.
     Received(usize),
-    /// The node takes a partial role: node 0 holds what it does not.
     Partial(usize),
-    /// The trusted node flags another trusted node unheard this long.
     StaleAfter(usize, Duration),
 }
 impl fmt::Display for Action {
@@ -234,8 +185,6 @@ pub(super) fn node_name(node: usize) -> String {
     char::from(b'a' + node as u8).to_string()
 }
 
-/// Weights of the draw; the device testing's paths are favored by the
-/// follow-ups in `plan`.
 const WEIGHTS: [(Kind, u64); 20] = [
     (Kind::Write, 20),
     (Kind::Probe, 6),
@@ -282,7 +231,6 @@ enum Kind {
     Revoke,
 }
 
-/// Crash points the simulation reaches; eviction needs a partial replica.
 const POINTS: [CrashPoint; 7] = [
     CrashPoint::Import,
     CrashPoint::Switch,
@@ -431,10 +379,8 @@ fn faults(draws: &mut Draws) -> LinkFaults {
     }
 }
 
-/// Lists the relational setup creates and shares with node 1.
 pub(super) const LISTS: [&str; 2] = ["l0", "l1"];
 
-/// Weights of the relational draw: writes and the lifecycle around them.
 const RELATIONAL: [(Lifecycle, u64); 18] = [
     (Lifecycle::Change, 44),
     (Lifecycle::Sync, 14),
@@ -476,7 +422,6 @@ enum Lifecycle {
     Offline,
     Online,
 }
-/// Every crash point; those a step does not reach report so.
 const RELATIONAL_POINTS: [CrashPoint; CrashPoint::ALL.len()] = CrashPoint::ALL;
 
 fn relational(seed: u64, scenario: Scenario) -> Vec<Action> {
@@ -588,11 +533,7 @@ fn relational(seed: u64, scenario: Scenario) -> Vec<Action> {
     steps
 }
 
-/// Chance per mille that the owner signs a tip statement; other signers
-/// are mostly refused.
 const OWNER_SIGNS_PER_MILLE: u16 = 700;
-/// Board caps span `3..=13`; 13 breaks the schema's `cap BETWEEN 1 AND 12`
-/// check where it is written.
 const MIN_BOARD_CAP: u8 = 3;
 const BOARD_CAP_SPREAD: u64 = 11;
 fn change(draws: &mut Draws, lists: &[String]) -> Change {

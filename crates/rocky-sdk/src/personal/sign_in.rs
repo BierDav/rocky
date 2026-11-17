@@ -1,8 +1,3 @@
-//! Non-destructive personal sign-in: a device holding only the passkey
-//! finds the database through its discovery topic, or takes a verified
-//! backup, and installs itself as one more owner device. It never revokes,
-//! rotates or grants anything: the root opens the escrow the source holds,
-//! the owner certifies the new node, and a gap stays a reported gap.
 use super::{
     Installing, PersonalSignInError, RestoreCoverage, VerifiedBackup,
     bootstrap::{Metadata, Page},
@@ -29,38 +24,23 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Hints one attempt asks, and bootstrap pages it accepts from one source.
 const MAX_CANDIDATES: usize = 8;
 const MAX_PAGES: u32 = 4096;
 
-/// Where a personal sign-in finds the database.
 pub enum SignInSource {
-    /// Any owner device or custodian announcing under the passkey's
-    /// discovery topic on the configured network.
     Discover,
-    /// An offline backup archive: the same non-destructive install.
     Backup(VerifiedBackup),
 }
 
-/// A sign-in as the database thread receives it.
 pub(crate) struct SignIn {
-    /// Taken once.
     pub(crate) account: Mutex<Option<PersonalAccount>>,
     pub(crate) source: Mutex<Option<SignInSource>>,
-    /// How long discovery waits for a first source.
     pub(crate) wait: rocky_platform::time::Duration,
-    /// What the device restored and how far it is witnessed, for the caller.
     pub(crate) outcome: Arc<Mutex<Option<(RestoreCoverage, Freshness)>>>,
 }
 
-/// Where a backup sign-in stages the archive's files.
 pub(crate) const STAGING: &str = "restore";
 
-/// Readies `directory` for a sign-in of `account`, refusing other state
-/// untouched: only this account's unfinished sign-in continues, and what
-/// it left besides its intent and keys goes. An installed database, which
-/// may have been handed out, is never removed: one this account's sign-in
-/// saved but never handed out is returned, to open as it is.
 pub(crate) fn prepare_sign_in(
     directory: &Path,
     account: &PersonalAccount,
@@ -101,8 +81,6 @@ pub(crate) fn prepare_sign_in(
     Ok(None)
 }
 
-/// What a sign-in that left no install intent wrote goes: entries of
-/// `directory` absent from `before`, and the directory if it was new.
 pub(crate) fn tidy(directory: &Path, before: Option<&[PathBuf]>) {
     if rocky_platform::fs::exists(super::Intent::path(directory)) {
         return;
@@ -129,7 +107,6 @@ fn names(
     (locator.publisher, locator.owner, account.namespace())
 }
 
-/// The database `account` locates for `schema`'s application.
 fn database(account: &PersonalAccount, schema: &crate::Schema) -> DatabaseContext {
     let locator = account.locator();
     DatabaseContext {
@@ -138,8 +115,6 @@ fn database(account: &PersonalAccount, schema: &crate::Schema) -> DatabaseContex
     }
 }
 
-/// Whether a source refused for the owner's device limit. Its code is an
-/// unverified claim: it ends only that source's attempt.
 fn at_capacity(error: &Failure) -> bool {
     let limit = rocky_credentials::PersonalError::DeviceLimit {
         limit: rocky_credentials::MAX_PERSONAL_DEVICES,
@@ -149,18 +124,12 @@ fn at_capacity(error: &Failure) -> bool {
         .is_some_and(|error| error.code == limit.code())
 }
 
-/// A source that answered a hello with this account's genesis.
 struct Candidate {
     address: String,
     challenge: PersonalChallenge,
     genesis: SignedManifest,
 }
 
-/// Installs a sign-in: from the discovered sources over `network`, or from
-/// a verified backup. Returns the installed settings and the started link.
-/// A revoked node never signs in again: its install is discarded, so the
-/// next attempt is a fresh node, as any passkey holder's may be. Only a
-/// signed statement this device verified reports a revoked node.
 pub(crate) async fn install(
     path: &Path,
     directory: &Path,
@@ -244,12 +213,6 @@ pub(crate) async fn install(
     Ok((settings, link))
 }
 
-/// Finds this account's sources under its discovery topic: each answered
-/// a hello with the genesis the passkey's root signed for this namespace.
-/// Sources whose authenticated genesis differs are a conflict. Hints
-/// already found are asked too, so a conflict is never decided by which
-/// answered first. A responder proving another account's or database's
-/// genesis is no source of this one.
 async fn discover(
     (transport, wait): (&Connected, rocky_platform::time::Duration),
     node: &PrivateKey,
@@ -322,8 +285,6 @@ async fn discover(
     Ok(candidates)
 }
 
-/// Signs one act for `candidate` with the account's root and owner and the
-/// node key.
 fn authorize(
     account: &PersonalAccount,
     node: &PrivateKey,
@@ -340,7 +301,6 @@ fn authorize(
     )?)
 }
 
-/// Every bootstrap page `candidate` holds.
 async fn fetch(
     transport: &Connected,
     account: &PersonalAccount,
@@ -401,15 +361,6 @@ async fn fetch(
     Ok((*metadata.ok_or("missing bootstrap metadata")?, escrow))
 }
 
-/// The discovered install: find sources, fetch and verify one's bootstrap,
-/// install from it and publish the node's certificate to it. Only a source
-/// that answered makes this an install whose keys are kept, and once one
-/// did the intent stays for a retry to resume. A source's refusal or forged
-/// answer ends only its own attempt: only signed statements this device
-/// verifies end the install. Only vouched escrow records are kept, as only
-/// they name the unscoped naming root. Checkpoints come first, since the
-/// first sync brings the ciphertext; the identity is saved last, and until
-/// then the intent resumes.
 async fn discovered(
     (path, directory): (&Path, &Path),
     secrets: &Arc<dyn SecretStore>,
@@ -543,8 +494,6 @@ async fn discovered(
     Err(last.unwrap_or_else(|| PersonalSignInError::SourceUnavailable.into()))
 }
 
-/// Publishes the node's certificate to `candidate`, which keeps and relays
-/// it; returns the revocations it holds since.
 async fn publish(
     transport: &Connected,
     (account, node): (&PersonalAccount, &PrivateKey),
@@ -588,11 +537,6 @@ async fn publish(
     Ok(accepted)
 }
 
-/// Renews the custody link of a custodian `candidate` whose chain
-/// `responder` lapses within half a lifetime: the same pinned custody-only
-/// grant, signed anew under the owner by this node, which `settings`
-/// certified. An owner device, or a custodian whose link holds, is left
-/// alone. Nothing widens: the custodian takes only its own grant back.
 async fn renew_custody(
     transport: &Connected,
     (account, node): (&PersonalAccount, &PrivateKey),
@@ -652,11 +596,6 @@ async fn renew_custody(
     Ok(())
 }
 
-/// How far a bootstrap from `candidate` is witnessed: another owner device
-/// no statement it carries ended anchors it; a custodian alone does not.
-/// The responder must belong to the database the passkey's root signed,
-/// and hold a chain of it, checked before anything is kept: a forged one
-/// is no source.
 fn witness(
     metadata: &Metadata,
     account: &PersonalAccount,
@@ -696,8 +635,6 @@ fn witness(
     })
 }
 
-/// Whether `leaf` certifies an owner device no statement `known` holds
-/// ended: only such a device's durable store anchors what it serves.
 fn anchors(
     leaf: &SignedCapability,
     owner: PublicKey,
@@ -710,7 +647,6 @@ fn anchors(
     Ok(PersonalLink::of(leaf)?.is_some_and(|link| link.owner == owner))
 }
 
-/// What one source hands a sign-in.
 struct Source {
     genesis: SignedManifest,
     record: crate::tip_schemas::Record,
@@ -721,13 +657,10 @@ struct Source {
     groups: Vec<GroupRecord>,
     epoch_statements: BTreeMap<String, Vec<rocky_core::Commitment>>,
     escrow: Archived,
-    /// The vouched naming root escrow the source holds.
     naming: Option<rocky_credentials::MetadataEscrow>,
     freshness: Freshness,
 }
 
-/// Whether a refusal of one source ends the whole install: only a signed
-/// statement this device verified, or a genesis other than the pinned one.
 fn ends_install(error: &Failure) -> bool {
     matches!(
         error.downcast_ref::<PersonalSignInError>(),
@@ -735,14 +668,6 @@ fn ends_install(error: &Failure) -> bool {
     ) || super::fault::crashed(error)
 }
 
-/// Verifies `source` against the account, opens its escrow with the root,
-/// keeps the keys and pins them, and certifies the node: the settings of
-/// one more owner device, not yet saved. Nothing is revoked or rotated;
-/// an epoch no record opens is reported, never replaced. Every check runs
-/// before anything is kept, so a source refused here leaves the install as
-/// it was for the next. Each key kept is recorded in the intent before the
-/// secret store holds it, so a discarded install forgets it too. A retry
-/// publishes the certificate it kept, never another.
 fn stage(
     secrets: &Arc<dyn SecretStore>,
     account: &PersonalAccount,
@@ -894,8 +819,6 @@ fn stage(
     Ok((settings, coverage))
 }
 
-/// The group partitions a source names, keyless unless the escrow opened
-/// them.
 fn escrowed_groups(
     named: Vec<GroupRecord>,
     escrowed: BTreeMap<String, GroupRecord>,
@@ -924,15 +847,6 @@ fn escrowed_groups(
     Ok(groups)
 }
 
-/// Installs from a verified backup without any network: the archived
-/// store, rebound to this node at open, under the archived owner grant,
-/// which keeps the archived device a trusted sibling. The escrow is the
-/// signed archive's own records, an owner device's naming root included;
-/// a custodian's archive holds its vouched record instead. The device
-/// admits itself as the sources it meets later will. The restore marker
-/// is written first, as an identity without it would open as if
-/// installed; the identity last, as until it exists nothing opens the
-/// placed store and a retry removes it.
 async fn from_backup(
     path: &Path,
     directory: &Path,

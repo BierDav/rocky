@@ -1,20 +1,12 @@
-//! Counter claim rights through the call contract, and the claim chain this
-//! node presents to its coordination service. See `crate::claims`.
 use super::*;
 use crate::claims::ClaimGrant;
 use std::collections::BTreeSet;
 
-/// Seconds between a member's renewals for a claim link it lacks or that
-/// passed half its lifetime.
 const ASK_INTERVAL: u64 = 60;
-/// Seconds before a failed revocation push is retried, doubling per
-/// failure up to `PUSH_RETRY_MAX`. A newly learned statement retries at once.
 const PUSH_RETRY: u64 = 5;
 
 const PUSH_RETRY_MAX: u64 = 300;
 
-/// When this process next pushes a revocation set the coordination service
-/// refused or did not answer: kept in memory, so a restart pushes at once.
 #[derive(Default)]
 pub(super) struct PushRetry {
     digest: Option<rocky_core::Commitment>,
@@ -43,8 +35,6 @@ impl PushRetry {
 }
 
 impl Node {
-    /// The grant is recorded before it is returned, so every issuer can renew
-    /// it.
     pub(super) async fn grant_claims(
         &self,
         identity: PublicKey,
@@ -62,7 +52,12 @@ impl Node {
             delegations,
         )?;
         if !changes.is_empty() {
-            let replaced = self.registry().await?.claims.get(&identity).cloned();
+            let replaced = self
+                .registry(&*self.settings_snapshot().await)
+                .await?
+                .claims
+                .get(&identity)
+                .cloned();
             self.commit(changes).await?;
             if let Some(record) = replaced {
                 self.revoke(crate::enrollment::Revoke::Claims(record.right.grant))
@@ -103,7 +98,7 @@ impl Node {
         &self,
         identity: PublicKey,
     ) -> Result<rocky_core::Commitment, Failure> {
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let (grant, changes) = self
             .settings
             .lock()
@@ -126,13 +121,6 @@ impl Node {
 }
 
 impl Node {
-    /// Pushes the revocations this node holds to its coordination service until
-    /// it acknowledges their digest: the claim rights they end are refused from
-    /// that commit on. Any node holding a statement pushes it, at a revocation,
-    /// a sync pass or a claim; a failed push is retried with backoff and the
-    /// acknowledgment persists across restarts. One push runs at a time; a
-    /// concurrent caller leaves it to the first. Statements learned meanwhile
-    /// change the held digest and stay unpushed.
     pub(super) async fn push_revocations(&self) -> Result<(), Failure> {
         let Some(client) = self.coordinator() else {
             return Ok(());
@@ -185,9 +173,6 @@ impl Node {
         }
         Ok(())
     }
-    /// Presents this node's claim chain with its counter requests. A member
-    /// whose claim link is missing or past half its lifetime first renews
-    /// with its issuers, at most once per `ASK_INTERVAL`.
     pub(super) async fn present_claims(
         &self,
         client: &dyn rocky_credentials::Coordinator,

@@ -1,5 +1,3 @@
-//! Credential primitives through the call contract: raw grants to a device
-//! that is not an issuer.
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
@@ -23,7 +21,6 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
 fn create(root: &Path, hub: &Arc<Hub>, name: &str) -> Result<Device, Failure> {
     Device::new(Database::create(open(&root.join(name), hub, name), None)?)
 }
-/// The secret of `role` in a device's file key store, if any.
 fn secret(root: &Path, name: &str, role: &str) -> Result<bool, Failure> {
     let identity: Value =
         serde_json::from_slice(&std::fs::read(root.join(name).join("identity.json"))?)?;
@@ -264,7 +261,6 @@ async fn an_invitation_carries_raw_grants() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Installs what `supplied` carries in a fresh directory `name`.
 fn install(root: &Path, hub: &Arc<Hub>, name: &str, supplied: &Value) -> Result<Device, Failure> {
     Device::new(Database::install(
         open(&root.join(name), hub, name),
@@ -473,11 +469,8 @@ async fn a_delegate_never_holds_more_than_its_delegator() -> Result<(), Failure>
     Ok(())
 }
 
-/// How [`issue`] hands out raw grants.
 enum Issuance {
-    /// As an issuer, from the domain's authority.
     Grant,
-    /// As a delegator, one link below its own chain.
     Delegate,
 }
 

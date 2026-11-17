@@ -43,8 +43,6 @@ fn best_effort(conn: &Connection, output: &mut Value, name: &str, sql: &str) {
     };
 }
 
-/// The public parts of a device's settings. The settings object itself
-/// holds secrets and is never printed.
 struct PublicConfiguration {
     node: String,
     publisher: rocky_sdk::credentials::PublicKey,

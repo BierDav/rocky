@@ -1,7 +1,3 @@
-//! Non-destructive personal sign-in: a device holding only the passkey
-//! finds the database under its discovery topic, or takes a verified
-//! backup, and becomes one more owner device. Nothing is revoked, rotated
-//! or granted; an unreachable source creates nothing.
 use rocky_sdk::{
     Configuration, Freshness, GrantProfile, Network, PersonalNamespace, PersonalOpened,
     PersonalSignInError, Schema, SignInSource, VerifiedBackup, VerifiedPasskeyPrf,
@@ -23,7 +19,6 @@ use common::{Device, Failure};
 fn namespace() -> PersonalNamespace {
     PersonalNamespace::new("shopping.example", "account root").expect("namespace")
 }
-/// Credential `credential`'s PRF over the namespace's evaluation input.
 fn passkey(credential: u8, namespace: &PersonalNamespace) -> VerifiedPasskeyPrf {
     let input = namespace.prf_input().expect("input");
     let output = rocky_core::commitment(
@@ -81,7 +76,6 @@ fn known(directory: &Path) -> Result<rocky_credentials::RevocationSet, Failure> 
 fn identity_key() -> rocky_credentials::PublicKey {
     account().locator().owner
 }
-/// Every file under `directory`, with its bytes.
 fn files(directory: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, Failure> {
     let mut found = BTreeMap::new();
     if !directory.exists() {
@@ -97,8 +91,6 @@ fn files(directory: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, Failure> {
     }
     Ok(found)
 }
-/// An owner device's view a sign-in must leave untouched: its reader key
-/// epochs and that no statement was ever recorded.
 fn untouched(directory: &Path, keys: &Value) -> Result<(), Failure> {
     let saved = saved(directory)?;
     assert_eq!(&saved["keys"], keys, "a sign-in rotated an epoch");
@@ -107,8 +99,6 @@ fn untouched(directory: &Path, keys: &Value) -> Result<(), Failure> {
     assert!(!known.membership()?.is_forked(identity_key()));
     Ok(())
 }
-/// Waits until `name` announces under the passkey's bootstrap topic; the
-/// bound only stops a hang.
 async fn announced(hub: &Hub, name: &str) {
     let topic = *account().discovery().topic();
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
@@ -119,7 +109,6 @@ async fn announced(hub: &Hub, name: &str) {
     .await
     .expect("announced under the bootstrap topic");
 }
-/// Loses the only owner device, leaving only keyless sources.
 async fn lose_every_owner_device(owner: Device, path: &Path) -> std::io::Result<()> {
     owner.close().await;
     std::fs::remove_dir_all(path)
@@ -478,8 +467,6 @@ async fn partition_custody_receipts_and_a_keyless_backup_restore_only_retained_d
     Ok(())
 }
 
-/// An owner and a custodian holding "kept by custody", which announces
-/// under the bootstrap topic; the owner closed, its directory kept.
 async fn custody(directory: &Path, hub: &Arc<Hub>) -> Result<(PathBuf, Device), Failure> {
     let owner_path = directory.join("owner");
     let owner = create(&owner_path, hub, "owner").await?;
@@ -503,7 +490,6 @@ async fn custody(directory: &Path, hub: &Arc<Hub>) -> Result<(PathBuf, Device), 
     owner.close().await;
     Ok((owner_path, custodian))
 }
-/// The secret store entries of `directory` whose role ends in `role`.
 fn secrets_named(directory: &Path, role: &str) -> Result<usize, Failure> {
     Ok(files(&directory.join("secrets"))?
         .keys()
@@ -682,8 +668,6 @@ async fn a_wrong_passkey_or_namespace_finds_nothing_and_touches_nothing() -> Res
     Ok(())
 }
 
-/// Forwards everything; the `drop`th request's reply is lost after the
-/// responder answered it.
 struct LosingTransport {
     inner: Arc<dyn Transport>,
     requests: Arc<AtomicUsize>,
@@ -735,15 +719,11 @@ impl Transport for LosingTransport {
         self.inner.close()
     }
 }
-/// The publication request, after the hello and one bootstrap page: the
-/// owner keeps the certificate and its reply is lost.
 const LOST_PUBLICATION_REPLY: usize = 3;
 struct Losing {
     inner: Arc<dyn Connector>,
     drop: usize,
 }
-/// Writes `intent` back as a crash between saving the identity and ending
-/// the intent leaves it.
 fn leave_intent_as_after_a_crash(path: &Path, intent: &[u8]) -> std::io::Result<()> {
     std::fs::write(path.join("personal.intent"), intent)
 }
@@ -943,7 +923,6 @@ async fn a_backup_restores_offline_and_its_device_keeps_working() -> Result<(), 
     Ok(())
 }
 
-/// A schema of the same application in another version: another genesis.
 const OTHER: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1001,14 +980,11 @@ async fn independent_creates_are_a_conflict_and_both_stay() -> Result<(), Failur
     Ok(())
 }
 
-/// Which of a sign-in's requests a forging source refuses.
 #[derive(Clone, Copy, PartialEq)]
 enum Forged {
     Bootstrap,
     Publish,
 }
-/// Forwards everything, but answers the first `times` requests of `kind`
-/// with a refusal carrying `code`, as a lying source can.
 struct ForgingTransport {
     inner: Arc<dyn Transport>,
     kind: Forged,
@@ -1241,7 +1217,6 @@ async fn a_sign_in_never_takes_back_an_installed_database() -> Result<(), Failur
     Ok(())
 }
 
-/// One raw peer RPC to `address`, as an unauthenticated stranger sends it.
 async fn ask(
     transport: &Connected,
     address: &str,

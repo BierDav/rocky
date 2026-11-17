@@ -1,6 +1,3 @@
-//! A node per line: an author log continues along one line of `continue`
-//! seals, so a device on another line writes under another node of its
-//! identity. Their keys and certificates stay in the secret store.
 use super::*;
 use rocky_credentials::CredentialChain;
 
@@ -11,7 +8,6 @@ const FORMAT: u32 = 2;
 #[serde(deny_unknown_fields)]
 struct SavedNodes {
     format: u32,
-    /// In enrollment order; the newest node of a line is tried first.
     nodes: Vec<SavedNode>,
 }
 #[derive(Serialize, Deserialize)]
@@ -23,9 +19,6 @@ struct SavedNode {
 }
 
 impl Node {
-    /// Registers the saved line nodes as signers of what they wrote. An
-    /// expired or superseded author stays unusable: restoring a signer
-    /// never selects it for writes or changes its saved line.
     pub(crate) async fn restore_line_signers(&self) -> Result<(), Failure> {
         let Some(bytes) = self.vault.load_bytes(ROLE)? else {
             return Ok(());
@@ -49,36 +42,22 @@ impl Node {
         }
         Ok(())
     }
-    /// Registers a node for the followed line when writes need one: a
-    /// saved node of the line, else a newly certified one. Readers write
-    /// nothing.
     pub(crate) async fn ensure_tip_node(&self) -> Result<(), Failure> {
         self.tip_node(false).await
     }
-    /// After a schema switch a registered line node is certified again, so
-    /// its grants name the tables the installed definition adds.
     pub(crate) async fn refresh_tip_node(&self) -> Result<(), Failure> {
         self.tip_node(true).await
     }
-    /// Holds the settings lock throughout, serializing number reservations
-    /// with grants and renewals.
     async fn tip_node(&self, refresh: bool) -> Result<(), Failure> {
         let mut settings = self.settings.lock().await;
         self.line_node(&mut settings, refresh).await
     }
-    /// [`Self::refresh_tip_node`] for a caller that holds the settings.
     pub(crate) async fn refresh_line_node(
         &self,
         settings: &mut Shared<Settings>,
     ) -> Result<(), Failure> {
         self.line_node(settings, true).await
     }
-    /// Registers the newest saved node of the followed line that still
-    /// registers, certified again when a schema change granted new tables;
-    /// one that crossed a fork or expired is not reused. Otherwise a new
-    /// node is certified, except for the genesis line, which writes under
-    /// the original node. An owner's line node stands alone, like each of
-    /// its devices.
     async fn line_node(
         &self,
         settings: &mut Shared<Settings>,
@@ -216,13 +195,10 @@ impl Node {
         self.replica.register_line_node(node).await?;
         Ok(())
     }
-    /// Saves the line nodes before any is registered, so a retry reuses
-    /// the same certificates.
     fn save_line_nodes(&self, saved: &SavedNodes) -> Result<(), Failure> {
         self.vault.store_bytes(ROLE, &serde_json::to_vec(saved)?)?;
         Ok(())
     }
-    /// Background callers keep their result; writes report a missing node.
     pub(crate) async fn try_ensure_tip_node(&self) {
         if let Err(error) = self.ensure_tip_node().await {
             self.activity

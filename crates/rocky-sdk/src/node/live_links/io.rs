@@ -1,5 +1,3 @@
-//! Transport workers own framing and channel routing. Only requests cross to
-//! the database executor; a blocked replica cannot stop an active channel.
 use super::*;
 use rocky_secure::network::NativeSession;
 use tokio::sync::{mpsc, oneshot};

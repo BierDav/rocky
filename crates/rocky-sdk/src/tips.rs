@@ -1,16 +1,13 @@
-//! Seals, tips and bookmark observations.
+pub use rocky_credentials::TipAuthority;
+pub use rocky_secure::HeldSeal;
 use serde::{Deserialize, Serialize};
 
-/// The followed bookmark and tip, progress since the last seal and each
-/// peer's last reported frontier.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipStatus {
-    /// None until this device follows a bookmark.
     pub bookmark: Option<String>,
     pub pending_follow: Option<String>,
     pub tip: String,
     pub operations_since_seal: u64,
-    /// An optional estimate of what compaction would release.
     pub evidence_releasable: Option<TipEvidence>,
     pub devices: Vec<TipDevice>,
 }
@@ -19,14 +16,12 @@ pub struct TipEvidence {
     pub operations: u64,
     pub bytes: u64,
 }
-/// A peer: the tip its open link claims, if any, and its last frontiers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipDevice {
     pub node: String,
     pub tip: Option<String>,
     pub frontiers: Vec<TipScopeFrontier>,
 }
-/// A resource scope and its per-author log positions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipScopeFrontier {
     pub scope: rocky_core::ResourceScope,
@@ -38,77 +33,57 @@ pub struct TipFrontierLog {
     pub held: u64,
     pub applied: u64,
 }
-/// The last included global position of one writer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipAuthorMark {
     pub author: crate::WriterId,
     pub sequence: u64,
 }
-/// The coordinated log positions the owner's recovery seal retains and
-/// replaces.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipRecovery {
     pub retained: u64,
     pub replaced: u64,
 }
-/// A seal; a `continue` seal's id is also its successor tip.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipSeal {
     pub id: String,
     pub tip: String,
     pub frontier: Vec<TipAuthorMark>,
-    /// `continue` or `close`.
-    pub action: String,
-    /// The successor's schema of a `continue` seal.
+    pub action: TipSealAction,
     pub schema: Option<String>,
-    /// False for a concurrent seal of the same tip that lost.
     pub canonical: bool,
-    /// Who signed it: `owner`, `trusted` or `issuer`; races resolve in
-    /// that order, then by the lower digest.
-    pub authority: String,
-    /// A revocation ended its signer; it takes part in no race.
+    pub authority: TipAuthority,
     pub revoked: bool,
-    /// Its tip's coordinated log committed it and enough trusted nodes
-    /// acknowledged that: it beats every other seal of its tip.
     #[serde(rename = "final")]
     pub finalized: bool,
-    /// Checkpoints of this seal's state the graph lists, by digest.
     pub checkpoints: Vec<TipCheckpoint>,
-    /// How this device holds the seal's state: `kept`, `checkpoint` or
-    /// `live`; null when it is shallow here.
-    pub held: Option<String>,
-    /// The owner's recovery of a stuck tip; null for any other seal.
+    pub held: Option<HeldSeal>,
     pub recovery: Option<TipRecovery>,
 }
-/// The seals a device keeps, among those of the tips it follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TipSealAction {
+    Continue,
+    Close,
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeptSeals {
-    /// The seal each bookmarked tip starts from, or a closed tip's own.
     #[serde(default)]
     pub bookmarked: bool,
-    /// The latest this many kept seals.
     #[serde(default)]
     pub latest: u32,
-    /// Every seal.
     #[serde(default)]
     pub every: bool,
 }
-/// A checkpoint of one scope at a seal; its body moves only on request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipCheckpoint {
-    /// The listing record's digest.
     pub id: String,
     pub scope: rocky_core::ResourceScope,
     pub checkpoint: String,
-    /// The node that signed the checkpoint.
     pub signer: String,
-    /// Who listed it: `owner`, `trusted` or `issuer`.
-    pub authority: String,
-    /// Its size in stored rows.
+    pub authority: TipAuthority,
     pub rows: u64,
 }
-/// An opened tip; its id is the tip.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipOpening {
     pub id: String,
@@ -121,11 +96,9 @@ pub struct BookmarkMove {
     pub id: String,
     pub from: Option<String>,
     pub to: Option<String>,
-    pub authority: String,
+    pub authority: TipAuthority,
     pub revoked: bool,
 }
-/// A move that lost a race along its bookmark's path, named in the manner
-/// of jj: `main/1`, `main/2`. Its tip stays a branch.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LosingMove {
     pub name: String,
@@ -133,8 +106,6 @@ pub struct LosingMove {
     pub movement: String,
     pub tip: Option<String>,
 }
-/// A bookmark's resolved tip, none once deleted, every move of it and the
-/// moves that lost.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bookmark {
     pub name: String,
@@ -142,7 +113,6 @@ pub struct Bookmark {
     pub moves: Vec<BookmarkMove>,
     pub losers: Vec<LosingMove>,
 }
-/// What a node follows and keeps; null where this device cannot know.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipNode {
     pub node: String,
@@ -150,8 +120,6 @@ pub struct TipNode {
     pub kept_tips: Option<Vec<String>>,
     pub kept_seals: Option<Vec<String>>,
 }
-/// The owner's trusted grant to an identity: `grant` is opaque hex the
-/// identity's device installs; `capability` is what revocation names.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustGrant {
@@ -159,55 +127,79 @@ pub struct TrustGrant {
     pub capability: String,
     pub grant: String,
 }
-/// The domain's complete graph, for developers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipInspection {
     pub scope: rocky_core::Scope,
     pub genesis: String,
-    /// The genesis tip's schema digest.
     pub schema: String,
-    /// The owner's minimum of trusted acknowledgments that makes a seal on
-    /// the genesis line final; none while unsigned.
     pub genesis_minimum: Option<u32>,
-    /// The coordinator the owner's database settings name: a trusted node
-    /// then seals only through a composed log of it.
     pub coordinator: Option<TipCoordinator>,
     pub seals: Vec<TipSeal>,
     pub openings: Vec<TipOpening>,
     pub bookmarks: Vec<Bookmark>,
     pub nodes: Vec<TipNode>,
 }
-/// A coordination service the database's settings name, by its root key
-/// and certified genesis, as hex digests.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipCoordinator {
     pub root: String,
     pub genesis: String,
-    /// Where the service publishes its current bundle, when it does.
     pub url: Option<String>,
 }
-/// Where this device's compaction of the followed path stands. Seals are
-/// hex digests.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipCompaction {
-    /// The newest seal whose state this device finalized.
     pub finalized: Option<String>,
-    /// The seal the replay base sits at.
     pub compacted: Option<String>,
-    /// Finalized seals whose evidence is still retained, oldest first.
     pub uncompacted: Vec<String>,
-    /// Why the next seal of the followed path is not finalized yet.
     pub waiting: Option<String>,
-    /// The compacted seal lost a race; the base must be rebuilt at this one.
     pub rebootstrap: Option<String>,
-    /// Operations this call released; zero for status.
     pub pruned: u64,
-    /// What stopped releasing a scope's operations in this call.
     pub blocked: Vec<TipPruneBlock>,
 }
-/// A resource scope and why it kept operations.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipPruneBlock {
     pub scope: rocky_core::ResourceScope,
     pub reason: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn tip_enums_serialize_as_the_strings_inspect_tips_reported() -> Result<(), serde_json::Error> {
+        let text = |value: serde_json::Value| value.as_str().map(str::to_owned);
+        for (action, name) in [
+            (TipSealAction::Continue, "continue"),
+            (TipSealAction::Close, "close"),
+        ] {
+            assert_eq!(text(serde_json::to_value(action)?).as_deref(), Some(name));
+            assert_eq!(
+                serde_json::from_value::<TipSealAction>(name.into())?,
+                action
+            );
+        }
+        for (authority, name) in [
+            (TipAuthority::Owner, "owner"),
+            (TipAuthority::Trusted, "trusted"),
+            (TipAuthority::Issuer, "issuer"),
+        ] {
+            assert_eq!(
+                text(serde_json::to_value(authority)?).as_deref(),
+                Some(name)
+            );
+            assert_eq!(
+                serde_json::from_value::<TipAuthority>(name.into())?,
+                authority
+            );
+        }
+        for (held, name) in [
+            (HeldSeal::Kept, "kept"),
+            (HeldSeal::Checkpoint, "checkpoint"),
+            (HeldSeal::Live, "live"),
+        ] {
+            assert_eq!(text(serde_json::to_value(held)?).as_deref(), Some(name));
+            assert_eq!(serde_json::from_value::<HeldSeal>(name.into())?, held);
+        }
+        Ok(())
+    }
 }

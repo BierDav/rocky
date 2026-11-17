@@ -1,6 +1,3 @@
-//! Removal: a generation drops tables and fields on every device that
-//! follows it. A removed-and-readded name filters earlier values through
-//! the schema path; an unsent change it would split is held.
 use crate::common;
 use crate::support::snapshot as snap;
 use common::{Device, Failure, introduce};
@@ -8,13 +5,8 @@ use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
-/// Items with a uniquely indexed `category` and a `shelf` referencing
-/// `shelves`.
 const SHELVED: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true},{"name":"category","type":"text"},{"name":"shelf","type":"blob"}],"primary_key":["key"],"indexes":[{"name":"items_category","unique":true,"columns":[{"name":"category","descending":false}]}],"foreign_keys":[{"columns":["shelf"],"table":"shelves","on_delete":"set_null"}]},{"name":"shelves","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-/// `SHELVED` without `category`, its index, `shelf` and `shelves`.
 const UNSHELVED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-/// Items with a nullable `note`; the next version removes it and the one
-/// after adds it again.
 const NOTED: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 fn open<'a>(directory: &'a Path, schema: &'a str, network: Option<Network>) -> Open<'a> {
@@ -47,7 +39,6 @@ fn text(value: &str) -> rocky_sdk::SqlValue {
 async fn generation(device: &Device) -> Value {
     snap::ok(device.session.generation()).await
 }
-/// Creates a row of `collection`; returns its key.
 async fn create(device: &Device, handle: u8, collection: &str, values: Value) -> String {
     let reply = snap::ok(snap::mutate(
         &device.session,
@@ -62,13 +53,11 @@ async fn create(device: &Device, handle: u8, collection: &str, values: Value) ->
     .await;
     reply["id"].as_str().unwrap_or_default().to_owned()
 }
-/// Runs `sql` as one transaction: one frame.
 async fn write(device: &Device, _collection: &str, handle: u8, sql: &str) {
     snap::ok(device.session.execute("BEGIN", Vec::new())).await;
     snap::ok(device.session.execute(&(snap::text(&(sql))), Vec::new())).await;
     snap::ok(device.session.commit([handle; 32])).await;
 }
-/// The application tables, indexes and `items` columns of the file.
 fn schema_of(directory: &Path) -> Result<(Vec<String>, Vec<String>), Failure> {
     let file = rusqlite::Connection::open_with_flags(
         directory.join("rocky.sqlite"),
@@ -88,11 +77,6 @@ fn schema_of(directory: &Path) -> Result<(Vec<String>, Vec<String>), Failure> {
     Ok((names, columns))
 }
 
-/// A member still at the first generation writes a removed and a kept field in
-/// one frame and sends it. The signed schema opens explicitly and the sent
-/// frame keeps its authority; the member's application still declares the
-/// removed column, and its reads of it fail with an ordinary SQLite error. Each
-/// file then holds exactly the new schema.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
 -> Result<(), Failure> {
@@ -188,9 +172,6 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
     Ok(())
 }
 
-/// Schemas A (note), B (no note) and C (note again) follow by `continue` seals.
-/// `c` is a second issuer, `d` writes the note offline at A after the removal
-/// was sealed, and `e` keeps the first rows with their notes.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> Result<(), Failure>
 {
@@ -299,10 +280,6 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> 
     Ok(())
 }
 
-/// Offline, the member edits a kept table and the table the next version
-/// removes in one transaction and never sends it. Replayed in the successor,
-/// the transaction no longer compiles and drops whole, as `Schema`; the
-/// member's later edits reach the issuer.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unsent_change_naming_a_removed_table_drops_whole_in_the_successor()
 -> Result<(), Failure> {
@@ -426,7 +403,6 @@ fn files(path: &Path) -> Result<Vec<(std::path::PathBuf, String)>, Failure> {
     Ok(found)
 }
 
-/// The old schema still opens after a cancellation.
 #[tokio::test(flavor = "multi_thread")]
 async fn removing_open_changes_nothing_and_only_the_current_report_can_sign() -> Result<(), Failure>
 {
@@ -558,7 +534,6 @@ async fn a_member_cannot_confirm_an_unsigned_removal_and_waits_for_an_issuer() -
     Ok(())
 }
 
-/// A later conflicting create dropped and left no row to count.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_impact_report_counts_the_live_rows_of_all_local_partitions() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;

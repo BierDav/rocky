@@ -7,11 +7,6 @@ enum Exit {
     Close(CloseReason),
 }
 impl Node {
-    /// Runs one live link until it closes. Signal work is polled beside the
-    /// request handlers, which may hold the replica while awaiting storage,
-    /// instead of blocking them. A dead peer surfaces as a failed read or
-    /// write: the transport keeps the connection alive and times it out. The
-    /// final close is bounded, which also interrupts a blocked channel write.
     pub(super) async fn run_link(
         &self,
         service: &Link,
@@ -232,9 +227,6 @@ impl Node {
 }
 
 impl Node {
-    /// Repairs what a peer's change hint shows differs. A control hint widens
-    /// to All unless this side already holds the same state; a full batch may
-    /// have been truncated, so it always widens.
     pub(in crate::node) async fn changed_signal(
         &self,
         peer: PublicKey,
@@ -255,7 +247,6 @@ impl Node {
     }
 }
 
-/// Takes the queued batch and clears it, so it cannot hide later scopes.
 fn take_signal(changed: &watch::Sender<Option<ChangeHint>>) -> Option<ChangeHint> {
     let mut pending = None;
     changed.send_if_modified(|value| {

@@ -1,6 +1,3 @@
-//! Seals of a tip with a composed coordinated log through the JSON
-//! contract: a private close ends the source tip's log only once relayed,
-//! and its finality releases the staged migration.
 use crate::common;
 use crate::support::snapshot as snap;
 use common::{Device, Failure, introduce};
@@ -25,7 +22,6 @@ fn open<'a>(directory: &'a std::path::Path, network: Option<Network>) -> Open<'a
 fn domain(device: &Device) -> rocky_core::Scope {
     device.database.scope()
 }
-/// The log of the tip `device` follows.
 async fn tip_log(device: &Device) -> rocky_core::TipLog {
     let status = snap::ok(device.session.coordinated_status()).await;
     let tip: [u8; 32] = data_encoding::HEXLOWER
@@ -47,7 +43,6 @@ async fn node_key(device: &Device) -> rocky_sdk::credentials::PublicKey {
         .expect("node key");
     rocky_sdk::credentials::PublicKey::from_bytes(&bytes).expect("node key")
 }
-/// Writes the next numbered invoice as an ordinary transaction.
 async fn invoice(device: &Device, handle: u8) {
     snap::ok(device.session.execute("BEGIN", Vec::new())).await;
     let count = snap::ok(
@@ -72,7 +67,6 @@ async fn invoice(device: &Device, handle: u8) {
     .await;
     snap::ok(device.session.commit([handle; 32])).await;
 }
-/// The invoice numbers once every frame they depend on arrived by sync.
 async fn keys(device: &Device) -> Vec<String> {
     let query = rocky_sdk::ReadQuery::new("SELECT key FROM items ORDER BY key", 1024);
     let mut page = snap::observe(device.session.read(query.clone())).await;
@@ -93,8 +87,6 @@ async fn keys(device: &Device) -> Vec<String> {
         .collect()
 }
 
-/// Reopens the owner at [`POSITIONED`]; reopening offline stages the close,
-/// opening and move and migrates.
 fn reopen_owner_positioned(
     directory: &std::path::Path,
     log: &MemoryLog,
@@ -113,11 +105,6 @@ fn reopen_owner_positioned(
 
 const POSITIONED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],"migrations":[{"version":2,"statements":["UPDATE items SET position = title"]}]}"#;
 
-/// The owner closes, opens and migrates
-/// offline. Its stage stays private until a trusted node that follows the
-/// source tip ends that tip's log with exactly the close and acknowledges
-/// it; the owner then releases. The source tip's writes past the close
-/// replay in the successor.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;

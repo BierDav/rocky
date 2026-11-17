@@ -1,7 +1,3 @@
-//! Self-enrollment: a new node of an identity that already holds grants
-//! certifies itself with its identity provider. A node of the same identity
-//! hands it what the identity holds; no issuer and no invitation is
-//! involved. Both devices confirm the request code before the bundle is sent.
 use crate::{
     Failure,
     enrollment::{Intent, Settings, exchange, now},
@@ -20,11 +16,8 @@ use rocky_secure::{CredentialChain, PrivateKey, RevocationSet};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
-/// Clock difference a request may carry.
 const SKEW: u64 = 300;
 
-/// What a node of an identity hands another node of it, sealed to that
-/// node alone.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Bundle {
@@ -35,17 +28,13 @@ struct Bundle {
     genesis: String,
     bootstrap: crate::tip_schemas::Bootstrap,
     revocations: RevocationSet,
-    /// The identity's links: issuer links and its own capability.
     links: CredentialChain,
     profile: Profile,
     ttl: u64,
-    /// Every held epoch of each collection the identity reads.
     keys: BTreeMap<String, Vec<(rocky_core::KeyEpoch, String)>>,
     epoch_statements: BTreeMap<String, Vec<Commitment>>,
     groups: Vec<(GroupRecord, Vec<Vec<u8>>)>,
-    /// The partition naming root, hex, when the identity issues.
     naming: Option<String>,
-    /// Contacts of the issuers the answering node reaches.
     issuers: Vec<String>,
 }
 
@@ -62,7 +51,6 @@ impl Bundle {
     }
 }
 
-/// A linking request awaiting confirmation on both devices. Contains no identity signer.
 pub struct AwaitingLink {
     pub code: String,
     pub node: String,
@@ -94,9 +82,6 @@ pub(crate) struct PendingLink {
 }
 
 impl Settings {
-    /// Answers a node of this node's own identity: everything the identity
-    /// holds, sealed to that node. A request for another identity, or from
-    /// a revoked node, is refused.
     pub(crate) fn answer_identity(
         &self,
         vault: &Vault,
@@ -167,8 +152,6 @@ impl Settings {
         Ok(request.answer(&serde_json::to_vec(&bundle)?)?.to_bytes()?)
     }
 
-    /// The node keys of a new node of `provider`'s identity, saved before
-    /// anything is sent, so a retry is the same node.
     pub(crate) fn prepare_identity(
         path: &Path,
         store: &Arc<dyn crate::SecretStore>,
@@ -187,12 +170,6 @@ impl Settings {
             false,
         )
     }
-    /// Installs a new node of `provider`'s identity from a node of the
-    /// same identity that `contact` names, an issuer too when its identity's
-    /// authority is. An identity may relink through its last, now-unlinked
-    /// installation, whose sealed bundle is provisioning evidence, not a
-    /// live data peer. The answering node persists the identity's
-    /// certificate before any sync.
     pub(crate) async fn enroll_identity(
         path: &Path,
         (intent, vault): (Intent, Vault),

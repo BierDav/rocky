@@ -1,4 +1,3 @@
-//! Typed inspection and maintenance of the local database.
 use crate::{Failure, Session, request::Request};
 use rocky_core::Commitment;
 use rocky_credentials::PublicKey;
@@ -33,7 +32,6 @@ pub struct IdentityInfo {
 }
 #[derive(Clone, Debug)]
 pub struct IdentityNode {
-    /// The node key, which is also its writer identity.
     pub node: PublicKey,
     pub linked: u64,
     pub last_seen: Option<u64>,

@@ -1,14 +1,3 @@
-//! Seeds of the relational fixture: boards and cards under keys, checks
-//! and an assertion, with lifecycle events around the writes, checked at
-//! quiescence against the from-scratch reference in `relational`.
-//!
-//! Replay one seed with its steps, or shrink a failing one:
-//! `ROCKY_SIM_SEED=<seed> cargo test -p rocky-sdk --lib simulation::relational_tests::replay -- --ignored --nocapture`
-//! `ROCKY_SIM_SEED=<seed> cargo test -p rocky-sdk --lib simulation::relational_tests::shrink -- --ignored --nocapture`
-//! Set `ROCKY_SIM_INTEGRATION=1` for an integration seed's size.
-//! The soak runs `ROCKY_SIM_SEEDS` seeds (default 200) from `ROCKY_SIM_FIRST`:
-//! `ROCKY_SIM_SEEDS=300 cargo test --release -p rocky-sdk --lib simulation::relational_tests::relational_soak -- --ignored --nocapture`
-//! (`ROCKY_SIM_WALL=frozen` stops the wall clock).
 use super::{
     driver::{self, Report},
     schedule::{Action, Fixture, Scenario, Wall, plan},
@@ -16,7 +5,6 @@ use super::{
 use crate::Failure;
 use std::collections::BTreeMap;
 
-/// The integration tier's size.
 const INTEGRATION: Scenario = Scenario {
     nodes: 3,
     steps: 24,
@@ -24,16 +12,12 @@ const INTEGRATION: Scenario = Scenario {
     fixture: Fixture::Relational,
     wall: Wall::Moving,
 };
-/// The size `replay` and `shrink` use: the integration tier's with
-/// `ROCKY_SIM_INTEGRATION` set, the soak's otherwise.
 fn requested(seed: u64) -> Scenario {
     match std::env::var_os("ROCKY_SIM_INTEGRATION") {
         Some(_) => INTEGRATION,
         None => soak_size(seed),
     }
 }
-/// The soak's size for `seed`: three or four nodes, longer schedules.
-/// `ROCKY_SIM_WALL=frozen` runs it with a wall clock that stands still.
 fn soak_size(seed: u64) -> Scenario {
     let wall = match std::env::var("ROCKY_SIM_WALL").as_deref() {
         Ok("frozen") => Wall::Frozen,
@@ -54,7 +38,6 @@ fn soak_at(seed: u64, wall: Wall) -> Scenario {
 async fn simulate(seed: u64, scenario: Scenario, steps: Vec<Action>) -> Result<Report, Failure> {
     driver::run_isolated(seed, scenario, steps).await
 }
-/// A failure's text, without where it happened: what shrinking keeps.
 fn failure(report: &Report) -> Option<String> {
     match (&report.safety, &report.liveness) {
         (Some(safety), _) => Some(
@@ -70,15 +53,11 @@ fn failure(report: &Report) -> Option<String> {
         (None, None) => None,
     }
 }
-/// Fails with the seed and its steps on any safety or liveness failure.
 async fn check(seed: u64, scenario: Scenario) -> Result<Report, Failure> {
     let report = simulate(seed, scenario, plan(seed, scenario)).await?;
     assert!(failure(&report).is_none(), "{}", report.dump());
     Ok(report)
 }
-/// Gate tests for soak seeds that together reach every step kind, crash
-/// point and wait, picked from the `covers` lines `relational_soak` prints.
-/// Keep one `Frozen` seed so the gate covers a standing wall clock.
 macro_rules! seeds {
     ($($name:ident = $seed:expr, $wall:ident),* $(,)?) => {$(
         #[tokio::test(start_paused = true)]
@@ -106,9 +85,6 @@ seeds!(
     Frozen,
 );
 
-/// One seed run twice ends in the same steps, outcomes, coverage and
-/// per-member state digests: keys, nonces, lineages and the wall clock
-/// follow the seed.
 async fn replays_identically(seed: u64, scenario: Scenario) -> Result<(), Failure> {
     let first = simulate(seed, scenario, plan(seed, scenario)).await?;
     let second = simulate(seed, scenario, plan(seed, scenario)).await?;
@@ -123,14 +99,13 @@ async fn replays_identically(seed: u64, scenario: Scenario) -> Result<(), Failur
 async fn one_seed_replays_identically() -> Result<(), Failure> {
     replays_identically(3, INTEGRATION).await
 }
-/// Seed 20245 once failed only in some runs.
 #[tokio::test(start_paused = true)]
 async fn a_soak_seed_replays_identically() -> Result<(), Failure> {
     replays_identically(20245, soak_at(20245, Wall::Moving)).await
 }
 
 #[tokio::test(start_paused = true)]
-#[ignore = "replays one seed on request"]
+#[ignore = "replays ROCKY_SIM_SEED with its steps, at the integration size with ROCKY_SIM_INTEGRATION=1: ROCKY_SIM_SEED=<seed> cargo test -p rocky-sdk --lib simulation::relational_tests::replay -- --ignored --nocapture"]
 async fn replay() -> Result<(), Failure> {
     let seed = std::env::var("ROCKY_SIM_SEED")?.parse()?;
     let scenario = requested(seed);
@@ -140,9 +115,8 @@ async fn replay() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Drops steps one at a time while the same failure still happens.
 #[tokio::test(start_paused = true)]
-#[ignore = "shrinks one failing seed on request"]
+#[ignore = "shrinks ROCKY_SIM_SEED's failure, at the integration size with ROCKY_SIM_INTEGRATION=1: ROCKY_SIM_SEED=<seed> cargo test -p rocky-sdk --lib simulation::relational_tests::shrink -- --ignored --nocapture"]
 async fn shrink() -> Result<(), Failure> {
     let seed = std::env::var("ROCKY_SIM_SEED")?.parse()?;
     let scenario = requested(seed);
@@ -167,11 +141,8 @@ async fn shrink() -> Result<(), Failure> {
     Ok(())
 }
 
-/// `ROCKY_SIM_SEEDS` seeds from `ROCKY_SIM_FIRST` (default 20_000):
-/// prints every seed's replay digest, every failure with its steps and the
-/// summed coverage.
 #[tokio::test(start_paused = true)]
-#[ignore = "the relational soak"]
+#[ignore = "the relational soak of ROCKY_SIM_SEEDS seeds (200) from ROCKY_SIM_FIRST, ROCKY_SIM_WALL=frozen stopping the wall clock: ROCKY_SIM_SEEDS=300 cargo test --release -p rocky-sdk --lib simulation::relational_tests::relational_soak -- --ignored --nocapture"]
 async fn relational_soak() -> Result<(), Failure> {
     let read = |name: &str, default: u64| {
         std::env::var(name)
@@ -220,7 +191,6 @@ async fn relational_soak() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Schedules the relational fuzz found and shrank, kept as regressions.
 mod regressions {
     use super::super::schedule::{Action::*, Change};
     use super::*;
@@ -233,9 +203,6 @@ mod regressions {
         assert!(failure(&report).is_none(), "{}", report.dump());
         Ok(())
     }
-    /// Every member reaches quiescence: nothing stays waiting.
-    /// Seed 2: b's board collides with a's code, so it drops where it
-    /// replays after a's seal, and b's card on it drops with it.
     #[tokio::test(start_paused = true)]
     async fn a_card_on_a_board_that_lost_its_code_after_a_seal_audits() -> Result<(), Failure> {
         let board = |node| {
@@ -269,11 +236,6 @@ mod regressions {
         .await
     }
 
-    /// Seed 20008: b deletes a board, cascading its card, while a seals
-    /// without the delete; the delete replays after the seal, a seals it
-    /// and compacts. Compaction kept `cards`' base from the first seal,
-    /// since the second covers no `cards` member, and signed `boards` at
-    /// the second, so a rebuild brought the card back without its board.
     #[tokio::test(start_paused = true)]
     async fn a_cascade_replayed_after_a_seal_survives_the_next_seal_and_compaction()
     -> Result<(), Failure> {
@@ -315,9 +277,6 @@ mod regressions {
         .await
     }
 
-    /// Seed 20004: a partial member evicts a list right after the owner
-    /// sealed a board in it. Its full rebuild restored the evicted scope
-    /// from the rows the seal took, which eviction left behind.
     #[tokio::test(start_paused = true)]
     async fn an_eviction_after_a_seal_audits() -> Result<(), Failure> {
         holds(
@@ -338,9 +297,6 @@ mod regressions {
         .await
     }
 
-    /// Seed 20004, shrunk again once the first fix held: b evicts `l0`
-    /// before a's board reaches it. b still finalizes the owner's seals:
-    /// it places a's `l0` position like one of a scope it never held.
     #[tokio::test(start_paused = true)]
     async fn an_eviction_before_the_list_arrives_finalizes() -> Result<(), Failure> {
         holds(
@@ -360,11 +316,6 @@ mod regressions {
         .await
     }
 
-    /// Seed 20033: b, offline, is shared `l8` and evicts it before the
-    /// share reaches it. The eviction failed on the partition tuple b never
-    /// learned ("replayed scope") and left the scope evicting; a board a
-    /// wrote there later made b's identity ledger differ from its rebuild.
-    /// A partition whose tuple never arrived holds no rows to clear.
     #[tokio::test(start_paused = true)]
     async fn evicting_a_list_whose_share_never_arrived_succeeds() -> Result<(), Failure> {
         let report = simulate(
@@ -389,8 +340,6 @@ mod regressions {
         Ok(())
     }
 
-    /// Seed 20042: a writes a board and a card on it in `l1`, and b evicts
-    /// `l1`.
     #[tokio::test(start_paused = true)]
     async fn evicting_a_list_with_a_board_and_its_card_audits() -> Result<(), Failure> {
         let report = simulate(
@@ -420,9 +369,6 @@ mod regressions {
         Ok(())
     }
 
-    /// Seed 20064: b evicts `l1` after a sealed a board and its card there,
-    /// then holds it again. Its seal bounds outlived the eviction, so it
-    /// placed the sealed transaction after the seal: era 1, not 0.
     #[tokio::test(start_paused = true)]
     async fn a_list_held_again_after_eviction_keeps_sealed_eras() -> Result<(), Failure> {
         holds(
@@ -445,8 +391,6 @@ mod regressions {
         .await
     }
 
-    /// Holds at `scenario`'s size, and every holder kept every outcome it
-    /// replayed: none read `None` under a base that covers it.
     async fn keeps_outcomes(
         seed: u64,
         scenario: Scenario,
@@ -463,10 +407,6 @@ mod regressions {
         Ok(report)
     }
 
-    /// Seed 20013: a writes a board in `l0` and invites c. b, holding `l0`
-    /// with every frame, saw a seal it could not yet place author a's other
-    /// positions for, imported a's listed checkpoint and lost a's outcome.
-    /// Placements now come before a listed replacement.
     #[tokio::test(start_paused = true)]
     async fn a_listed_checkpoint_waits_for_placements() -> Result<(), Failure> {
         keeps_outcomes(
@@ -488,10 +428,6 @@ mod regressions {
         .map(drop)
     }
 
-    /// Seed 20033: b holds `l1`, where a wrote a board, and is shared `l8`.
-    /// Its new scope made the domain look unverified, and the seal
-    /// rebootstrap imported every scope before placements showed a's other
-    /// positions.
     #[tokio::test(start_paused = true)]
     async fn a_seal_rebootstrap_waits_for_placements() -> Result<(), Failure> {
         keeps_outcomes(
@@ -516,9 +452,6 @@ mod regressions {
         .map(drop)
     }
 
-    /// Seed 20067: revoking c makes b restore every scope from a checkpoint,
-    /// so b keeps a's board only in its rows: a replica keeps outcomes of
-    /// its own members alone. The oracle accepts exactly that.
     #[tokio::test(start_paused = true)]
     async fn another_authors_outcome_may_go_with_a_covering_base() -> Result<(), Failure> {
         let report = simulate(
@@ -548,9 +481,6 @@ mod regressions {
         Ok(())
     }
 
-    /// Seed 20027: b writes a board in `l1` and evicts it; a seals twice and
-    /// b holds `l1` again. Its first verification is at the second seal,
-    /// which placed the board in that seal's era, not the first's.
     #[tokio::test(start_paused = true)]
     async fn a_list_held_again_after_two_seals_keeps_the_first_seals_era() -> Result<(), Failure> {
         keeps_outcomes(
@@ -576,10 +506,6 @@ mod regressions {
         .map(drop)
     }
 
-    /// Seed 20207: b writes a board in `l0` and evicts it, keeping its
-    /// outcome as provisional; revoking c makes b restore `l0` from a base
-    /// at a seal covering the board, whose frame b no longer holds. Its own
-    /// outcome stayed provisional for good.
     #[tokio::test(start_paused = true)]
     async fn an_evicted_own_outcome_turns_final_with_a_covering_base() -> Result<(), Failure> {
         holds_at(
@@ -603,12 +529,6 @@ mod regressions {
         .await
     }
 
-    /// Seed 20135: b writes a board in `l1`, a pins a card to it and seals;
-    /// b evicts `l1`, a compacts and seals again, and `l1` is shared with b
-    /// again. b imports the base at the first seal, holding no frames under
-    /// it. Verifying the second seal counted positions from the start, so b
-    /// waited on a seal rebootstrap for good, its card cascaded away by the
-    /// import and never derived again.
     #[tokio::test(start_paused = true)]
     async fn a_base_at_an_earlier_seal_verifies_the_next_seal() -> Result<(), Failure> {
         holds_at(20135, soak_size(20135), steps_20135()).await
@@ -642,11 +562,6 @@ mod regressions {
         ]
     }
 
-    /// Seed 20135 with a wall clock that stands still: a's card on b's
-    /// board got no later clock than the board, whose stamp is ahead of a's
-    /// wall clock, as the stamp passed only the rows a write changes. A
-    /// rebuild replayed the card first and dropped it; the projection kept
-    /// it.
     #[tokio::test(start_paused = true)]
     async fn a_card_on_a_remote_board_replays_after_it_under_a_frozen_clock() -> Result<(), Failure>
     {
@@ -657,10 +572,6 @@ mod regressions {
         holds_at(20135, frozen, steps_20135()).await
     }
 
-    /// Seed 20000: c joins holding only `l1` after the owner wrote in `l0`.
-    /// c places the owner's `l0` positions by their signed headers, which
-    /// name `l0` only by its keyed scope, and finalizes the final seal; b
-    /// keeps the board's outcome.
     #[tokio::test(start_paused = true)]
     async fn a_member_holding_one_list_finalizes_seals_over_another() -> Result<(), Failure> {
         keeps_outcomes(
@@ -683,10 +594,6 @@ mod regressions {
         .map(drop)
     }
 
-    /// Seed 20080: b evicts `l0`, a writes a board there and revokes c.
-    /// The learned revocation asks b to bootstrap every granted scope, and
-    /// b imported a checkpoint into the evicted one, whose identity marks
-    /// then reached its rebuild but not its stored ledger.
     #[tokio::test(start_paused = true)]
     async fn a_revocation_imports_no_checkpoint_into_an_evicted_list() -> Result<(), Failure> {
         holds_at(
@@ -709,10 +616,6 @@ mod regressions {
         .await
     }
 
-    /// Seed 20229: c joins after a recoded b's board and sealed. Importing
-    /// a's base superseded a frame that c's own outcome record names as a
-    /// head, with no stub, so the record waited for good and blocked the
-    /// rederive after the board's clear cascaded its card away.
     #[tokio::test(start_paused = true)]
     async fn a_superseded_head_of_a_retained_frame_leaves_a_stub() -> Result<(), Failure> {
         holds_at(
@@ -753,9 +656,6 @@ mod regressions {
         .await
     }
 
-    /// Seed 20290: c writes a board and its card in `l1` while its own
-    /// earlier frames wait to apply again after a checkpoint switch. An
-    /// outcome record appended behind them forked c's log in a rebuild.
     #[tokio::test(start_paused = true)]
     async fn an_outcome_waits_for_its_authors_pending_frames() -> Result<(), Failure> {
         holds_at(
@@ -780,10 +680,6 @@ mod regressions {
         .await
     }
 
-    /// Seed 20074: partial b writes a board in `l0` while a is offline, and
-    /// evicts `l0`. The eviction waits for custody, but the driver's leave
-    /// went through and stranded b's unsynced frame, so a's seal waited for
-    /// good. Leaving needs the same custody as evicting.
     #[tokio::test(start_paused = true)]
     async fn leaving_a_list_waits_for_custody_of_own_frames() -> Result<(), Failure> {
         holds_at(
@@ -814,10 +710,6 @@ mod regressions {
         .await
     }
 
-    /// Seed 20276: c read b's frame, then b was revoked while a and c were
-    /// severed, and c's next board names b's frame as a head. a never
-    /// received b's frame, and revoked frames are never served, so a could
-    /// not tell the missing head is revoked and its seal waited for good.
     #[tokio::test(start_paused = true)]
     async fn a_head_whose_author_is_revoked_resolves_at_a_peer_that_never_saw_it()
     -> Result<(), Failure> {

@@ -1,4 +1,3 @@
-//! Verified, currently linked nodes, separate from issuer discovery records.
 #[cfg(test)]
 use rocky_core::PrincipalKind;
 #[cfg(test)]
@@ -7,24 +6,19 @@ use rocky_credentials::PublicKey;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Nodes an issuer remembers having admitted or renewed.
 pub const MAX_SEEN: usize = crate::registry::MAX_IDENTITIES * 32;
 
-/// A node an identity certified.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LinkedNode {
     pub node: PublicKey,
-    /// The earliest certificate or admission known of it, in epoch seconds.
     pub linked: u64,
 }
-/// A node an issuer admitted or renewed for `identity`, at `linked`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Seen {
     pub identity: PublicKey,
     pub linked: u64,
 }
-/// Remembers `node` of `identity`; the oldest goes at the bound.
 pub fn see(seen: &mut BTreeMap<PublicKey, Seen>, identity: PublicKey, node: PublicKey, time: u64) {
     if let Some(held) = seen.get_mut(&node) {
         held.identity = identity;
@@ -47,12 +41,9 @@ pub fn see(seen: &mut BTreeMap<PublicKey, Seen>, identity: PublicKey, node: Publ
     );
 }
 
-/// Linked nodes by identity.
 #[derive(Clone, Debug, Default)]
 pub struct Membership(BTreeMap<PublicKey, BTreeMap<PublicKey, LinkedNode>>);
 impl Membership {
-    /// The view of `chains`; chains that end at no node certificate are
-    /// skipped.
     #[cfg(test)]
     pub fn of<'a>(
         chains: impl IntoIterator<Item = &'a CredentialChain>,
@@ -108,18 +99,15 @@ impl Membership {
         }
         Ok(view)
     }
-    /// The nodes `identity` linked, by node key.
     pub fn nodes(&self, identity: &PublicKey) -> impl Iterator<Item = &LinkedNode> {
         self.0.get(identity).into_iter().flat_map(BTreeMap::values)
     }
-    /// The identity that linked `node`.
     pub fn identity_of(&self, node: &PublicKey) -> Option<PublicKey> {
         self.0
             .iter()
             .find(|(_, nodes)| nodes.contains_key(node))
             .map(|(identity, _)| *identity)
     }
-    /// Every node, with the identity that linked it.
     pub fn all(&self) -> impl Iterator<Item = (PublicKey, &LinkedNode)> {
         self.0
             .iter()
@@ -127,11 +115,9 @@ impl Membership {
     }
 }
 
-/// A database-local observation retained across sync retries and restarts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustedObservation {
-    /// First observed here, in epoch seconds.
     pub linked: u64,
     pub unlinked: Option<u64>,
     pub read: bool,
@@ -166,7 +152,6 @@ impl TrustedObservation {
     }
 }
 
-/// Only verified certificates create observations; discovery hints never do.
 pub(crate) fn observe_trusted(
     known: &rocky_credentials::RevocationSet,
     trusted: &[PublicKey],

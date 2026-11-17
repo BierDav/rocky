@@ -6,22 +6,16 @@ use rocky_sdk::{Network, transport::memory::Hub};
 use serde_json::json;
 use std::sync::Arc;
 
-/// Cuts `b`, which keeps the history `a` prunes and could catch `c` up
-/// without the base, off from `c`; only the pruned `a` may serve `c`.
 fn leave_only_the_pruned_issuer_to_serve_c(hub: &Hub) {
     hub.set_down("b", "c", true);
 }
 
-/// A checkpoint intent for key epoch 2, newer than the member's identity:
-/// a fault at the renewal durability boundary.
 const INTENT_NEWER_THAN_IDENTITY: &[u8] = b"2";
 
-/// Retrying once authority is restored must signal connectivity explicitly.
 async fn retry_after_restoring_authority(device: &Device) {
     snap::ok(device.session.set_networking_enabled(true)).await;
 }
 
-/// Going online again ends the backoff a cut caused.
 async fn end_backoff_by_going_online(device: &Device) {
     snap::ok(device.session.set_networking_enabled(false)).await;
     snap::ok(device.session.set_networking_enabled(true)).await;
@@ -185,8 +179,6 @@ async fn behind_pruned_sync_restores_the_base_and_preserves_unsent_work() -> Res
     Ok(())
 }
 
-/// Checkpoint pages take a whole frame; large rows still split so each page's
-/// plaintext fits one package.
 #[tokio::test(flavor = "multi_thread")]
 async fn join_restores_large_rows_across_checkpoint_pages() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -300,7 +292,6 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
     Ok(())
 }
 
-/// Controls sync admission independently of enrollment, without wall-clock sleeps.
 struct Gate {
     inner: Arc<dyn rocky_sdk::transport::Transport>,
     allowed: tokio::sync::watch::Sender<bool>,
@@ -456,8 +447,6 @@ async fn status_separates_bootstrap_progress_and_reconciliation_and_resumes_a_fa
     Ok(())
 }
 
-/// Envelopes shared after enrollment wait at the inviter, so another peer's
-/// checkpoint completes the import but not the join.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_join_stays_pending_until_it_meets_its_inviter() -> Result<(), Failure> {
     use rocky_sdk::transport::{Connector, Transport};
@@ -797,7 +786,6 @@ async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Fa
     Ok(())
 }
 
-/// An intent no peer offered a checkpoint for has no progress to report.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_intent_without_offers_reports_no_progress() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -814,9 +802,6 @@ async fn an_intent_without_offers_reports_no_progress() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Bootstrap progress counts the stored rows of the offered checkpoints: it
-/// only grows, with a stable total, and the pending intent clears on
-/// completion. How many snapshots an observer sees depends on timing.
 #[tokio::test(flavor = "multi_thread")]
 async fn join_progress_only_grows_to_its_total() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
@@ -866,8 +851,6 @@ async fn join_progress_only_grows_to_its_total() -> Result<(), Failure> {
     Ok(())
 }
 
-/// A join cut mid-import, with edits on both sides meanwhile, resumes at the
-/// page it reached instead of starting over, and keeps both edits.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cut_join_resumes_its_pages_and_keeps_edits_from_both_sides() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;

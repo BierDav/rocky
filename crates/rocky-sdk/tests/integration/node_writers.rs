@@ -1,5 +1,3 @@
-//! A node writes under its own key: offline, after reopening and after its
-//! credentials are supplied again, its rows keep one writer identity.
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
 use rocky_sdk::{Database, Open};

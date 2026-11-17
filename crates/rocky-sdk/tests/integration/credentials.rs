@@ -1,5 +1,3 @@
-//! Grant profiles, issuer devices, revocation with key rotation and
-//! credentials supplied from outside the SDK.
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
 use rocky_sdk::{
@@ -51,7 +49,6 @@ fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
     }
     Ok(identity)
 }
-/// The secret of `role` in a device's file key store.
 fn secret(root: &Path, name: &str, role: &str) -> Result<Option<[u8; 32]>, Failure> {
     let state: Value =
         serde_json::from_slice(&std::fs::read(root.join(name).join("identity.json"))?)?;
@@ -133,7 +130,6 @@ async fn item(device: &Device, handle: u8, title: &str) -> Result<Value, Failure
     )
     .await
 }
-/// The first column of every row `sql` selects, as text.
 async fn texts(device: &Device, sql: &str) -> Result<Vec<String>, Failure> {
     let page = snap::observe(device.session.read(rocky_sdk::ReadQuery {
         sql: snap::text(&(sql)),
@@ -160,8 +156,6 @@ async fn items(device: &Device) -> Result<Vec<String>, Failure> {
 async fn session(device: &Device) -> Value {
     snap::ok(device.session.info()).await
 }
-/// Stops each device's automatic sync, so that only the test's explicit
-/// syncs reach peers.
 async fn manual(devices: &[&Device]) {
     for device in devices {
         snap::ok(device.session.set_automatic_sync(false)).await;
@@ -617,8 +611,6 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     Ok(())
 }
 
-/// Credentials an issuer outside the SDK made for `user`, from the
-/// creator's node under its certified issuer authority.
 fn issued(
     root: &Path,
     user: rocky_sdk::credentials::PublicKey,

@@ -1,6 +1,3 @@
-//! Deterministic network faults on the in-process transport: disconnects,
-//! backpressure and inbound work over budget. Durable outgoing work
-//! survives, nothing is applied in part and resources stay bounded.
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
 use rocky_sdk::{
@@ -19,7 +16,6 @@ const ROWS: u8 = 30;
 fn memory(hub: &Arc<Hub>, name: &str) -> Network {
     Network::Owned(hub.connector(name))
 }
-/// A creator and a member that each hold `ROWS` rows the other lacks.
 async fn diverged(root: &std::path::Path, hub: &Arc<Hub>) -> Result<(Device, Device), Failure> {
     let a = Device::create(&root.join("a"), Some(memory(hub, "a")))?;
     let b = Device::join(&root.join("b"), &a.invite().await, memory(hub, "b"))?;
@@ -39,11 +35,7 @@ fn union() -> Vec<String> {
 fn holds(items: &[String], rows: &[String]) -> bool {
     rows.iter().all(|row| items.contains(row))
 }
-/// Byte offsets that cut a sync during the handshake, the push and the pull.
 const CUTS_THROUGH_HANDSHAKE_PUSH_AND_PULL: [usize; 6] = [0, 300, 3_000, 9_000, 20_000, 45_000];
-/// Stream buffer after which writers wait for the reader: far below a page
-/// of frames, yet enough for both ends' handshakes, which they send before
-/// reading as the transport contract requires.
 const SLOW_READER_CAPACITY: usize = 4096;
 
 #[tokio::test]

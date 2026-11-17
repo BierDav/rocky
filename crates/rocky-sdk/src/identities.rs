@@ -1,4 +1,3 @@
-//! Identity signers supplied for one call; installations retain only public credentials.
 use crate::{Failure, domain::Domain, enrollment::Settings, secrets::Vault};
 use rocky_credentials::{
     Authority, CredentialChain, IdentityProvider, PrivateKey, SignedCapability,
@@ -6,12 +5,9 @@ use rocky_credentials::{
 use std::sync::Arc;
 
 tokio::task_local! {
-    /// The identity one call supplied, in memory until the call ends.
     static SUPPLIED: Arc<dyn IdentityProvider>;
 }
 
-/// Runs `call` with `identity`, when given, as the identity it signs with.
-/// Work the call hands to another task does not see it.
 pub(crate) async fn supplying<T>(
     identity: Option<Arc<dyn IdentityProvider>>,
     call: impl std::future::Future<Output = T>,
@@ -22,7 +18,6 @@ pub(crate) async fn supplying<T>(
     }
 }
 
-/// Supplies an identity only while an installation operation is running.
 pub(crate) fn with_identity<T>(
     provider: Arc<dyn IdentityProvider>,
     operation: impl FnOnce() -> T,
@@ -46,36 +41,21 @@ impl Settings {
         }
         Ok(provider)
     }
-    /// This node's key: it signs everything routine under its certificate.
     pub(crate) fn node_key(vault: &Vault) -> Result<PrivateKey, Failure> {
         Ok(PrivateKey::from_bytes(&vault.get("node")?))
     }
-    /// The issuer links an issuer signs through: its capability chain from
-    /// the root's trusted grant, without its node's certificate.
     pub(crate) fn issuer_links(&self) -> CredentialChain {
         self.credentials.capabilities()
     }
-    /// The identity's chain as its issuers granted it: what a renewal
-    /// replaces and the node certificate names.
     pub(crate) fn identity_links(&self) -> CredentialChain {
         self.credentials.capabilities()
     }
-    /// What this issuer's node signs with, in every generation of the
-    /// domain; no identity key.
     pub(crate) fn authority<'a>(&self, node: &'a PrivateKey) -> Result<Authority<'a>, Failure> {
         if !self.issuer() {
             return Err("only an issuer signs for the domain".into());
         }
         Ok(Authority::issuer(node, &self.credentials)?)
     }
-    /// This node's chain under `links`, the identity's capabilities. The
-    /// node keeps the certificate it holds while it names this identity,
-    /// so a renewal needs no identity key; only a node without one asks the
-    /// identity to certify it, and a lost link acknowledgment retries the
-    /// same certified node. The node key is its writer identity. In a
-    /// personal database the root trusts only the owner, whose devices each
-    /// stand alone, with no sequence or predecessor; custody principals keep
-    /// membership links.
     pub(crate) fn certify(
         &self,
         vault: &Vault,
@@ -166,10 +146,6 @@ impl Settings {
         };
         self.chain_for(&key, links, certificate, domain)
     }
-    /// `links` completed with `certificate`, the certificate of `key`. An
-    /// issuer identity's links name authority, not grants, so `key` signs
-    /// the grants its identity holds over `domain` between them: no identity
-    /// key. The chain is verified before it returns.
     pub(crate) fn chain_for(
         &self,
         key: &PrivateKey,

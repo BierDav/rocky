@@ -1,5 +1,3 @@
-//! Mesh health: coordination failures as a device's alerts, and each
-//! device's report on the domain's trusted nodes.
 use super::{
     driver,
     schedule::{Action, Action::*, Fixture, Scenario, Wall},
@@ -30,9 +28,6 @@ async fn run(nodes: usize, steps: Vec<Action>, kinds: &[&str]) -> Result<Vec<Str
         .collect())
 }
 
-/// A coordination service that refuses this device's clock raises an
-/// alert, delivered to a `status_after` wait, that repeated refusals keep
-/// and the next accepted call clears, again through `status_after`.
 #[tokio::test(start_paused = true)]
 async fn a_coordinator_clock_skew_is_an_alert_until_a_call_is_accepted() -> Result<(), Failure> {
     let steps = vec![
@@ -54,9 +49,6 @@ async fn a_coordinator_clock_skew_is_an_alert_until_a_call_is_accepted() -> Resu
     Ok(())
 }
 
-/// The owner sees a partial device's alert and blocker once it syncs; an
-/// hour without a link shows it silent; its next sync shows it heard and
-/// both cleared, each change through `status_after`.
 #[tokio::test(start_paused = true)]
 async fn a_trusted_node_sees_a_partial_devices_alert_and_blocker_clear() -> Result<(), Failure> {
     let hour = Duration::from_secs(3600);
@@ -103,8 +95,6 @@ async fn a_trusted_node_sees_a_partial_devices_alert_and_blocker_clear() -> Resu
     Ok(())
 }
 
-/// A device that goes offline shows silent on the owner once
-/// `SILENT_AFTER` passes, which wakes a pending `status_after` by itself.
 #[tokio::test(start_paused = true)]
 async fn a_device_that_stops_reporting_shows_silent() -> Result<(), Failure> {
     let steps = vec![Sync(1), Mesh(0), WatchMesh(0, 1), Offline(1), WokenMesh(0)];
@@ -118,8 +108,6 @@ async fn a_device_that_stops_reporting_shows_silent() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Devices that are not trusted hold and receive no report of another
-/// device, though they link to each other; the owner holds both.
 #[tokio::test(start_paused = true)]
 async fn only_trusted_nodes_receive_reports() -> Result<(), Failure> {
     let mut steps = vec![Invite(0, 2)];
@@ -148,8 +136,6 @@ async fn only_trusted_nodes_receive_reports() -> Result<(), Failure> {
     Ok(())
 }
 
-/// A trusted node that never links to a device learns its report from
-/// another trusted node, the creating device here.
 #[tokio::test(start_paused = true)]
 async fn trusted_nodes_share_the_reports_they_receive() -> Result<(), Failure> {
     let steps = vec![Trust(2), Sever(1, 2), Sync(1), Sync(2), Mesh(2), Mesh(1)];
@@ -164,9 +150,6 @@ async fn trusted_nodes_share_the_reports_they_receive() -> Result<(), Failure> {
     Ok(())
 }
 
-/// A trusted node flags an identity it has not heard from for its configured
-/// threshold, through `status_after` alone; the flag survives a restart
-/// and clears once the other is heard again.
 #[tokio::test(start_paused = true)]
 async fn a_trusted_node_flags_an_identity_it_has_not_heard_from() -> Result<(), Failure> {
     let steps = vec![

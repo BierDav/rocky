@@ -1,12 +1,8 @@
-//! Migrations of replayed tables publish their program: each partition's
-//! copy replays on every member as its own transaction.
 use super::*;
 use crate::support::snapshot as snap;
 
-/// Replayed items, unpartitioned.
 const ITEMS: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-/// Requires `position`, filled from the title, and copies each item.
 const POSITIONED_ITEMS: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],
  "migrations":[{"version":2,"statements":["UPDATE items SET position = position || title",
@@ -90,24 +86,17 @@ async fn a_member_replays_the_issuers_program() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Partitions of the replayed 100k fixture: each partition's seed intent
-/// fits one pulled frame.
 const LISTS: usize = 128;
-/// Partitions of the correctness fixtures: three authoring chunks.
 const FEW_LISTS: usize = 17;
-/// The replayed fixture: items in `LISTS` partitions, seeded by an
-/// `Insert` step, then filled by an `UPDATE` step two versions later.
 const LISTED: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#;
 const LISTED_SEED: &str = r#"{"version":2,"statements":[{"insert":"items","select":"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000) SELECT printf('l%03d', i % LISTS) AS list, printf('k%06d', i) AS key, 0 AS completed, printf('item %06d', i) AS title FROM n"}]}"#;
 const LISTED_SEEDED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],
  "migrations":[SEED]}"#;
-/// `LISTED_SEEDED` with a nullable tag: an additive switch in place.
 const LISTED_TAGGED: &str = r#"{"application":"shopping","version":3,"format":6,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"tag","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],
  "migrations":[SEED]}"#;
-/// Requires `position` of every item, filled from its title.
 const LISTED_FILLED: &str = r#"{"application":"shopping","version":4,"format":6,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"position","type":"text","not_null":true,"default":""},{"name":"tag","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],
  "migrations":[SEED,{"version":4,"statements":["UPDATE items SET position = title"]}]}"#;
@@ -122,8 +111,6 @@ fn list(index: usize) -> Vec<rocky_sdk::SqlValue> {
     vec![rocky_sdk::SqlValue::Text(format!("l{index:03}"))]
 }
 
-/// An issuer and a member holding every partition, closed after the
-/// member's first sync.
 struct Listed {
     root: crate::support::Directory,
     hub: Arc<Hub>,
@@ -187,7 +174,6 @@ impl Listed {
         b.close().await;
         Ok(listed)
     }
-    /// Runs the seed and the additive switch on the issuer.
     async fn seed(&self, rows: usize) -> Result<(), Failure> {
         for schema in [LISTED_SEEDED, LISTED_TAGGED] {
             let a = Device::new(Database::open(open(
@@ -199,13 +185,10 @@ impl Listed {
         }
         Ok(())
     }
-    /// Runs the seed, the additive switch and the fill on the issuer and
-    /// returns how long the fill's open took.
     async fn migrate(&self, rows: usize) -> Result<std::time::Duration, Failure> {
         self.seed(rows).await?;
         self.fill(rows).await
     }
-    /// Opens the fill's schema on the issuer; returns how long that took.
     async fn fill(&self, rows: usize) -> Result<std::time::Duration, Failure> {
         let clock = std::time::Instant::now();
         let a = self.open("a", &listed(LISTED_FILLED, rows, self.lists))?;
@@ -214,8 +197,6 @@ impl Listed {
         a.close().await;
         Ok(filled)
     }
-    /// The member opens the fill's schema and syncs until it holds every
-    /// filled row; returns how long that took.
     async fn pull(&self, rows: usize) -> Result<std::time::Duration, Failure> {
         let schema = listed(LISTED_FILLED, rows, self.lists);
         let a = self.open("a", &schema)?;
@@ -246,7 +227,6 @@ impl Listed {
         b.close().await;
         Ok(pulled)
     }
-    /// The projection of `items` on the issuer and the member.
     async fn digests(&self) -> Result<[rocky_secure::SetSummary; 2], Failure> {
         let mut digests = Vec::new();
         for device in ["a", "b"] {
@@ -261,8 +241,6 @@ impl Listed {
     }
 }
 
-/// Each partition's member replay of the seed and the fill reproduces the
-/// issuer's rows, identities included.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_replays_each_partition_of_the_issuers_rows() -> Result<(), Failure> {
     let rows = 64;
@@ -275,7 +253,6 @@ async fn a_member_replays_each_partition_of_the_issuers_rows() -> Result<(), Fai
     Ok(())
 }
 
-/// The largest `-wal` size of `files` seen until the returned flag is set.
 fn sample_wal(
     files: Vec<std::path::PathBuf>,
 ) -> (
@@ -297,13 +274,8 @@ fn sample_wal(
     (done, sampler)
 }
 
-/// The replayed 100k fixture, three times: issuer fill, member pull, file
-/// sizes and peak WAL; the member's digest equals the issuer's. With
-/// `ROCKY_PROFILE_FILL=<file>`, macOS `sample` profiles the first fill.
-/// Diagnostic; `cargo test --release -p rocky-sdk --test migrations
-/// replayed::fill_of_100000 -- --ignored --nocapture`.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "measurement"]
+#[ignore = "release-only measurement, ROCKY_PROFILE_FILL=<file> profiling the first fill on macOS: cargo test --release -p rocky-sdk --test integration fill_of_100000 -- --ignored --nocapture"]
 async fn fill_of_100000_replayed_rows() -> Result<(), Failure> {
     if cfg!(debug_assertions) {
         return Err("run measurements with --release".into());
@@ -362,11 +334,8 @@ async fn fill_of_100000_replayed_rows() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Rows of the crash fixture: one chunk-sized run of partitions after another.
 const CRASH_ROWS: usize = 256;
 
-/// Opens the fill's schema on the issuer in `ROCKY_CRASH_DIRECTORY`; the
-/// armed `ROCKY_SQL_KILL_AT` point ends the process.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "invoked by an_interrupted_fill_resumes_and_converges"]
 async fn crash_fill_child() -> Result<(), Failure> {
@@ -380,13 +349,10 @@ async fn crash_fill_child() -> Result<(), Failure> {
     Ok(())
 }
 
-/// The issuer's publication state.
 #[derive(Debug, PartialEq)]
 struct PublicationState {
     stage: String,
-    /// The next position and the total.
     cursor: Option<(i64, i64)>,
-    /// Frames still unsent, and how many of them some bundle authored.
     unsent: (i64, i64),
 }
 
@@ -426,9 +392,6 @@ fn publication_state(path: &Path) -> Result<PublicationState, Failure> {
     })
 }
 
-/// A fill killed at each point of its publication reopens, resumes from its
-/// cursor without authoring a bundle twice, and every member converges.
-/// Nothing authored left the device before the crash.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_interrupted_fill_resumes_and_converges() -> Result<(), Failure> {
     let chunk = rocky_secure::PUBLICATION_CHUNK_BUNDLES as i64;

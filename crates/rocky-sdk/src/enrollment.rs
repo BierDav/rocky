@@ -1,11 +1,3 @@
-//! The SDK's enrollment plumbing over `rocky-credentials`: domain
-//! creation, invitations with a grant profile, supplied credentials,
-//! renewal by any issuer, and revocation with key rotation. Permissions
-//! belong to identities; an identity with issuer authority is an issuer.
-//! The publisher key is the domain's offline root: it signs the genesis,
-//! the trusted grants that make trusted nodes and their revocations, and
-//! nothing else. No device holds it. Every node signs with its own key
-//! under its identity's certificate.
 use crate::{
     Failure,
     domain::Domain,
@@ -37,35 +29,20 @@ use std::{
     sync::Arc,
 };
 
-/// Current `identity.json` format: issuer records live in the registry,
-/// revocations are a set of statements, envelopes wait in `deliveries`,
-/// join requests wait in `Issuing::requests`, a passkey-installed personal
-/// device keeps its publication ID and freshness in `personal`, and a
-/// personal custodian its vouched naming root escrow in `naming_escrow`.
 pub const VERSION: u32 = 37;
-/// Current invitation format: the issuer's node key, and a profile only
-/// when the invited device is admitted on arrival.
 const INVITE_VERSION: u32 = 7;
-/// Current format of what an issuer seals to a joining device.
 const ANSWER_FORMAT: u32 = 8;
 const CONTACT_VERSION: u32 = 3;
-/// Contacts one device keeps: routes to peers, which grant nothing.
 pub const MAX_CONTACTS: usize = 64;
-/// Contacts one sync pass dials.
 pub const MAX_DIALED: usize = 16;
-/// Issuers one device renews with: every trusted node, at most.
 const MAX_ISSUERS: usize = crate::registry::MAX_TRUSTED;
 const MAX_ROUTES: usize = 4;
 const MAX_ADDRESS: usize = 2048;
-/// Default lifetime of issued credentials.
 pub const DEFAULT_TTL: u64 = 30 * 24 * 60 * 60;
 const INVITATION_TTL: u64 = 600;
-/// Key epochs kept per collection: one per revocation that rotated it.
 pub(crate) const MAX_EPOCHS: usize = 256;
-/// Accepted clock difference between devices.
 pub(crate) const SKEW: u64 = 300;
 type GroupDelivery = (GroupRecord, Vec<Vec<u8>>);
-/// The naming root an enrollment of `profile` carries: an issuer's only.
 pub(crate) fn naming_for(vault: &Vault, profile: &Profile) -> Result<Option<String>, Failure> {
     if !profile.issues() {
         return Ok(None);
@@ -78,7 +55,6 @@ pub(crate) fn naming_for(vault: &Vault, profile: &Profile) -> Result<Option<Stri
         ),
     ))
 }
-/// Stores the naming root an issuer's enrollment carried.
 pub(crate) fn hold_naming(vault: &Vault, naming: Option<&str>) -> Result<(), Failure> {
     let root = hex32(naming.ok_or("an issuer enrollment carries the partition naming root")?)?;
     if vault
@@ -90,7 +66,6 @@ pub(crate) fn hold_naming(vault: &Vault, naming: Option<&str>) -> Result<(), Fai
     vault.put(crate::groups::NAMING_ROLE, &root)?;
     Ok(())
 }
-/// The statement that revokes this device.
 #[derive(Debug)]
 pub(crate) struct Revoked(pub SignedRevocation);
 impl std::fmt::Display for Revoked {
@@ -100,8 +75,6 @@ impl std::fmt::Display for Revoked {
 }
 impl std::error::Error for Revoked {}
 
-/// A root-only action without the root's signer, or with another key:
-/// creating the domain, granting or revoking trust, and recovery.
 #[derive(Debug)]
 pub struct PublisherRequired(pub &'static str);
 impl std::fmt::Display for PublisherRequired {
@@ -115,9 +88,6 @@ impl std::fmt::Display for PublisherRequired {
 }
 impl std::error::Error for PublisherRequired {}
 
-/// A join through `Session::invitation()` that the issuer has not admitted
-/// yet. Both devices show `code`; ask again with the same directory, keys
-/// and nonce once the issuer admitted it, before `expires_epoch_seconds`.
 #[derive(Clone)]
 pub struct AwaitingAdmission {
     pub code: String,
@@ -166,7 +136,6 @@ impl std::fmt::Display for AwaitingAdmission {
     }
 }
 impl std::error::Error for AwaitingAdmission {}
-/// The issuer refused this device's join request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JoinRefused;
 impl std::fmt::Display for JoinRefused {
@@ -175,8 +144,6 @@ impl std::fmt::Display for JoinRefused {
     }
 }
 impl std::error::Error for JoinRefused {}
-/// The root signer one call carries, checked against the pinned publisher
-/// key; never stored.
 pub(crate) fn root_signer<'a>(
     root: Option<&'a dyn IdentityProvider>,
     publisher: PublicKey,
@@ -188,7 +155,6 @@ pub(crate) fn root_signer<'a>(
     }
 }
 
-/// A revocation refused because 1,024 live statements are held.
 #[derive(Debug)]
 pub(crate) struct RevocationSetFull;
 impl std::fmt::Display for RevocationSetFull {
@@ -198,7 +164,6 @@ impl std::fmt::Display for RevocationSetFull {
 }
 impl std::error::Error for RevocationSetFull {}
 
-/// `revoked.json`: the statement that revoked this device.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Notice {
@@ -207,13 +172,10 @@ struct Notice {
 }
 const NOTICE_VERSION: u32 = 3;
 
-/// A personal database's refusal as the call reports it.
 pub(crate) fn personal_refusal(error: PersonalError) -> Failure {
     Box::new(rocky_credentials::Error::Personal(error))
 }
 
-/// The persisted identity of one installation. It holds no secret; keys
-/// are in the `SecretStore` under `installation`.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
@@ -227,44 +189,28 @@ pub struct Settings {
     pub schema: Schema,
     pub mesh: MeshId,
     pub domain: DomainId,
-    /// The pinned trust anchor: the domain's publisher key, its offline root.
     pub publisher: PublicKey,
-    /// The identity this node belongs to; never the root.
     pub identity: PublicKey,
-    /// This identity discarded its key after certifying its only node.
     pub single_use: bool,
     pub genesis: String,
     pub generation: u32,
-    /// The replay engine the installed generation's tip names.
     pub engine: rocky_core::EngineIdentity,
     pub pending: Option<crate::tip_schemas::Pending>,
     pub pending_follow: Option<String>,
     pub(crate) bootstrap: Option<crate::tip_schemas::Bootstrap>,
-    /// Every revocation statement this device verified.
     pub revocations: RevocationSet,
     pub credentials: CredentialChain,
     pub ttl: u64,
-    /// What this device was enrolled as.
     pub profile: Profile,
-    /// The key epochs held of each collection this device reads, ascending.
     pub keys: BTreeMap<String, Vec<rocky_core::KeyEpoch>>,
-    /// Group partitions known here, by group address.
     pub groups: BTreeMap<String, GroupRecord>,
-    /// Revocation statement IDs held when each epoch was sealed, by secret role.
     pub epoch_statements: BTreeMap<String, Vec<Commitment>>,
-    /// Present on a node whose identity holds issuer authority.
     pub authority: Option<Issuing>,
     pub device_revocations: BTreeMap<rocky_credentials::PeerId, crate::DeviceRevocationReceipt>,
-    /// The issuers that renew this device, by node key. Their routes are
-    /// in `peers`.
     #[serde(skip)]
     pub issuers: Vec<PublicKey>,
-    /// A fixed issuer whose pairing/renewal responses this custody node relays.
     #[serde(skip)]
     pub enrollment_upstream: Option<PublicKey>,
-    /// This device's contacts, by node key, with the routes last learned
-    /// for each. A contact is a route that grants nothing: any admitted
-    /// peer is served, and sync dials contacts.
     #[serde(skip)]
     pub peers: BTreeMap<PublicKey, Contact>,
     #[serde(skip)]
@@ -272,96 +218,71 @@ pub struct Settings {
     #[serde(skip)]
     pub enrollment_routes: BTreeMap<PublicKey, Contact>,
     pub logged_out: bool,
-    /// Envelopes this device sends, by delivery digest, until delivered.
     pub deliveries: BTreeMap<String, crate::delivery::Pending>,
-    /// This identity's counter claim right, which its node presents to the
-    /// coordination service.
     pub claims: Option<crate::claims::Holding>,
-    /// The digest of the live revocations the coordination service last
-    /// acknowledged holding. Until it matches the held set's, any node
-    /// holding them pushes them again.
     pub revocations_pushed: Option<Commitment>,
-    /// Present on a personal device a passkey installed.
     pub(crate) personal: Option<crate::personal::Device>,
-    /// A personal custodian's vouched naming root escrow, which it serves
-    /// in bootstrap pages and cannot open.
     pub(crate) naming_escrow: Option<rocky_credentials::MetadataEscrow>,
 }
-/// What an issuer keeps besides the registry: its invitation, the device
-/// that claimed it, a revocation it has begun and the keys revoked for good.
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Issuing {
     pub invitation: Option<Invitation>,
     pub invitation_label: Option<Vec<u8>>,
-    /// The device that consumed a pre-approved invitation, so its retry is
-    /// answered alike. Replaced with the invitation.
     pub claimed: Option<Claim>,
-    /// The devices that answered an approval invitation.
     pub requests: crate::join_requests::Requests,
-    /// Saved before the rotation's keys are made, so an interrupted
-    /// revocation completes at the next open.
     pub rotation: Option<Rotation>,
-    /// Every node and identity a statement this issuer learned revoked.
-    /// Kept after the statement leaves the set: no renewal for them.
     pub tombstones: BTreeSet<rocky_credentials::PeerId>,
-    /// On a trusted node: when it last heard from each linked trusted
-    /// node, saved coarsely so a restart keeps staleness.
     pub heard: BTreeMap<PublicKey, u64>,
-    /// Local, durable observations of trusted membership, including our own.
     pub trusted_nodes:
         BTreeMap<PublicKey, BTreeMap<PublicKey, crate::membership::TrustedObservation>>,
-    /// Seconds another trusted identity may stay unheard before it is
-    /// stale; `None` is `TRUSTED_STALE_AFTER`.
     pub stale_after: Option<u64>,
-    /// Nodes this issuer admitted or renewed, by node key, until the
-    /// membership view holds identities' links.
     pub seen: BTreeMap<PublicKey, crate::membership::Seen>,
 }
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Claim {
     pub node: PublicKey,
-    /// The identity the invitation granted to.
     pub user: PublicKey,
 }
-/// A begun revocation: its statement and the key epoch each collection and
-/// group partition rotates to. Signing is deterministic: the statement keeps
-/// its ID however often an interrupted rotation signs it again.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rotation {
-    /// The recorded identities it revokes, whose registry tombstones
-    /// complete it.
     pub identities: Vec<PublicKey>,
-    /// Their linked nodes, dropped as peers.
     pub nodes: Vec<PublicKey>,
     pub statement: Revocation,
-    /// The root's signature, made when it began: the root is not there to
-    /// sign when an interrupted revocation completes.
     pub signed: Option<SignedRevocation>,
     pub statements: Vec<Commitment>,
     pub keys: BTreeMap<String, u64>,
     pub groups: BTreeMap<String, u64>,
 }
-/// What an issuer's revocation ends: an identity and every node of it, or a
-/// claim right. Only the root revokes a trusted identity and chooses
-/// whether its first enrollees also end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Revoke {
     Identity(PublicKey),
     TrustedIdentity(PublicKey, rocky_credentials::RevocationMode),
-    /// A claim right, by its grant id: every link of it, whoever signed it.
     Claims(Commitment),
 }
-/// What a revoked identity or node may have read: its record's bound, or
-/// `None` for a node alone or an identity without a record, which may have
-/// read anything.
-type ReadBound = Option<Revoking>;
-/// What the registry recorded of an identity a revocation acts on.
+enum ReadBound {
+    Unbounded,
+    Recorded(Revoking),
+}
+impl ReadBound {
+    fn of(record: Option<&crate::registry::IdentityRecord>) -> Self {
+        record
+            .filter(|record| record.admitted.is_some() || !record.grants.is_empty())
+            .map_or(Self::Unbounded, |record| {
+                Self::Recorded(Revoking::of(record))
+            })
+    }
+    fn reads(&self, read: impl FnOnce(&Revoking) -> bool) -> bool {
+        match self {
+            Self::Unbounded => true,
+            Self::Recorded(record) => read(record),
+        }
+    }
+}
 struct Revoking {
     capability: Option<Commitment>,
-    /// Absent on an identity recorded only by partition grants.
     profile: Option<Profile>,
     partitions: Vec<rocky_credentials::PartitionGrant>,
 }
@@ -389,15 +310,12 @@ impl Revoking {
         })
     }
 }
-/// One way to reach a node: an address in a transport kind's format. A
-/// hint only; whoever answers must still prove the node key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Route {
     pub transport: String,
     pub address: String,
 }
-/// The routes known for one node, at most one per transport kind.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Contact {
     pub routes: Vec<Route>,
@@ -415,7 +333,6 @@ impl Contact {
         contact.learn(routes);
         Ok(contact)
     }
-    /// Replaces the routes of the kinds `routes` name and keeps the others.
     pub(crate) fn learn(&mut self, routes: Vec<Route>) {
         for route in routes {
             self.routes
@@ -425,7 +342,6 @@ impl Contact {
         let excess = self.routes.len().saturating_sub(MAX_ROUTES);
         self.routes.drain(..excess);
     }
-    /// The addresses to try over a transport of `kind`.
     pub fn addresses(&self, kind: &str) -> Vec<String> {
         self.routes
             .iter()
@@ -434,8 +350,6 @@ impl Contact {
             .collect()
     }
 }
-/// What a contact URI carries: a node of the publisher's domain and its
-/// routes. It grants nothing.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ContactRecord {
@@ -444,8 +358,6 @@ pub(crate) struct ContactRecord {
     pub(crate) database: rocky_credentials::DatabaseContext,
     pub(crate) node: PublicKey,
     pub(crate) routes: Vec<Route>,
-    /// A hint that the node renews credentials. Its answers are believed
-    /// only when the publisher key signed them.
     issuer: bool,
     enrollment_only: bool,
 }
@@ -471,7 +383,6 @@ impl ContactRecord {
         Ok(record)
     }
 }
-/// What an invitation URI carries.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Invite {
@@ -480,15 +391,11 @@ pub(crate) struct Invite {
     token: String,
     publisher: PublicKey,
     database: rocky_credentials::DatabaseContext,
-    /// The issuing node, whose key the admission code covers.
     node: PublicKey,
     expires: u64,
-    /// Absent when the issuer admits each requesting device.
     pub(crate) profile: Option<Profile>,
     via_custody: bool,
 }
-/// What an issuer seals to a joining device under a key derived from the
-/// invitation token.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Answer {
@@ -499,10 +406,7 @@ struct Answer {
 #[serde(deny_unknown_fields)]
 enum Outcome {
     Enrolled(Box<Enrollment>),
-    /// Held until an issuer admits it, at most until `expires`.
-    Awaiting {
-        expires: u64,
-    },
+    Awaiting { expires: u64 },
     Refused,
 }
 #[derive(Serialize, Deserialize)]
@@ -510,8 +414,6 @@ enum Outcome {
 struct Enrollment {
     mesh: MeshId,
     domain: DomainId,
-    /// The domain's current schema, which the device installs whatever
-    /// schema its application declares.
     record: crate::tip_schemas::Record,
     genesis: String,
     bootstrap: crate::tip_schemas::Bootstrap,
@@ -521,28 +423,16 @@ struct Enrollment {
     keys: Keys,
     groups: Vec<GroupDelivery>,
     epoch_statements: BTreeMap<String, Vec<Commitment>>,
-    /// The partition naming root, hex, for an issuer only.
     naming: Option<String>,
-    /// A personal database's bootstrap discovery capability, hex, for a
-    /// custodian only: it announces where a passkey-only device looks.
     discovery: Option<String>,
-    /// A personal database's vouched naming root escrow, for a custodian
-    /// only: it serves the record and cannot open it.
     naming_escrow: Option<rocky_credentials::MetadataEscrow>,
-    /// The enrolling issuer's node key, which sync sessions pin.
     issuer: PublicKey,
-    /// The issuer links `capability` follows; empty when the owner signed.
-    /// An issuer signs through its own chain: no key travels.
     chain: CredentialChain,
     ttl: u64,
-    /// Contacts of the other issuers the enrolling issuer reaches.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     issuers: Vec<String>,
 }
-/// Reader keys in transit: collection, key epoch, hexadecimal key.
 type Keys = BTreeMap<String, Vec<(rocky_core::KeyEpoch, String)>>;
-/// What a renewal seals to its device: reader keys and the contacts of the
-/// other issuers the answering issuer reaches.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Sealed {
@@ -551,10 +441,8 @@ struct Sealed {
     epoch_statements: BTreeMap<String, Vec<Commitment>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     issuers: Vec<String>,
-    /// A fresh claim link, when the answering issuer renews a claim right.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     claims: Option<CredentialChain>,
-    /// For a personal custodian, the vouched naming root escrow it serves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     naming: Option<rocky_credentials::MetadataEscrow>,
 }
@@ -584,12 +472,9 @@ impl Invite {
         Ok(invite)
     }
 }
-/// A pending join or installation, persisted before anything is sent, so
-/// a retry is the same device.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Intent {
-    /// The invitation a join answers; absent for supplied credentials.
     invitation: Option<Commitment>,
     pub(crate) installation: String,
     nonce: String,
@@ -604,10 +489,6 @@ impl Intent {
             "join.json"
         })
     }
-    /// The saved intent, or a new one whose device keys now exist. Another
-    /// invitation supersedes an unfinished join: its keys may already be
-    /// registered under the consumed invitation, so they are discarded.
-    /// The provider supplies only its public identity; no signing key is saved.
     pub(crate) fn resume(
         path: &Path,
         invitation: Option<Commitment>,
@@ -645,36 +526,23 @@ impl Intent {
         Ok((intent, vault))
     }
 }
-/// The public halves of a node's keys, for an issuer outside the SDK.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeKeys {
-    /// The identity the capability to issue names.
     pub identity: PublicKey,
-    /// The key that signs the node's operations.
     pub node: PublicKey,
 }
-/// Credentials and reader keys supplied to a device from outside the SDK.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Supplied {
     pub mesh: MeshId,
     pub domain: DomainId,
-    /// The signed manifest of the supplier's generation, which an
-    /// installation starts at. The credentials name no generation.
     pub manifest: SignedManifest,
-    /// The chain ends at the node's certificate, or at its identity; the
-    /// device then delegates to its own node.
     pub credentials: Credentials,
-    /// Collection, key epoch and key of every collection the grants read.
     pub keys: Vec<(String, rocky_core::KeyEpoch, [u8; 32])>,
     pub epoch_statements: BTreeMap<String, Vec<Commitment>>,
-    /// Contacts of the issuers that renew this device.
     pub issuers: Vec<String>,
 }
-/// The lifetime and further delegations of granted or delegated
-/// credentials. Absent values are this device's lifetime and 1 (the
-/// recipient reaches only its own node key).
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Terms {
@@ -690,23 +558,16 @@ impl Terms {
         Ok(ttl)
     }
 }
-/// What a renewal brought: the issuer's revocations, this device's chain
-/// and reader keys it did not hold.
 pub struct Renewed {
-    /// The issuer that answered, when renewal used a transport.
     pub contacted: Option<PublicKey>,
     pub revocations: RevocationSet,
     pub chain: CredentialChain,
     pub keys: Vec<(String, rocky_core::KeyEpoch, [u8; 32])>,
     pub epoch_statements: BTreeMap<String, Vec<Commitment>>,
     pub groups: Vec<GroupDelivery>,
-    /// What the grants amount to when they changed, as supplied ones may.
     pub profile: Option<Profile>,
-    /// Contacts of further issuers the answering issuer reaches.
     pub issuers: Vec<String>,
-    /// A renewed claim link from the answering issuer.
     pub claims: Option<CredentialChain>,
-    /// The vouched naming root escrow a personal custodian keeps.
     pub(crate) naming: Option<rocky_credentials::MetadataEscrow>,
 }
 
@@ -722,8 +583,6 @@ pub(crate) fn hex32(text: &str) -> Result<[u8; 32], Failure> {
         .try_into()
         .map_err(|_| "expected 32 bytes".into())
 }
-/// The key provider role of a collection's reader key at `epoch`. Epoch 1
-/// keeps the name it had before key epochs.
 pub(crate) fn key_role(collection: &str, epoch: rocky_core::KeyEpoch) -> String {
     format!(
         "reader.{collection}.{}.{}",
@@ -731,9 +590,6 @@ pub(crate) fn key_role(collection: &str, epoch: rocky_core::KeyEpoch) -> String 
         HEXLOWER.encode(&epoch.secret_hash)
     )
 }
-/// What a joining device expects to join.
-/// What a joining device's application is: its name, whatever version of
-/// the schema it declares.
 pub(crate) fn context(schema: &Schema, database: rocky_credentials::DatabaseContext) -> Commitment {
     commitment(
         "rocky.sdk.enrollment-context.v2",
@@ -754,9 +610,6 @@ pub(crate) fn reads(grants: &[ResourceGrant], scope: rocky_core::ResourceScope) 
             && grant.rights.contains(&Right::Read)
     })
 }
-/// The profile a set of grants amounts to: an issuer, whose grants alone
-/// write the registry, a reader, writer or custody, or raw grants. The
-/// registry grant the SDK adds is not part of the others.
 fn profile_of(grants: &[ResourceGrant], domain: &Domain) -> Profile {
     let registry = domain.registry();
     if grants
@@ -772,9 +625,6 @@ fn profile_of(grants: &[ResourceGrant], domain: &Domain) -> Profile {
         .collect();
     Profile::of(&named, &domain.resources())
 }
-/// The signed grants of `profile`: its grants over the application's
-/// collections, and the registry's for an issuer (read and write) or a
-/// custody peer (ciphertext only). No other profile names the registry.
 pub(crate) fn grants_of(profile: &Profile, domain: &Domain) -> Result<Vec<ResourceGrant>, Failure> {
     let mut grants = domain.effective(profile).grants(&domain.resources())?;
     let registry = domain.registry_resource();
@@ -790,9 +640,6 @@ pub(crate) fn grants_of(profile: &Profile, domain: &Domain) -> Result<Vec<Resour
     }
     Ok(grants)
 }
-/// `grants_of`, or none for a profile that names no collection, as one of
-/// partition grants alone does: what a renewal grants over the current
-/// generation.
 fn profile_grants(profile: &Profile, domain: &Domain) -> Result<Vec<ResourceGrant>, Failure> {
     if matches!(profile, Profile::Grants { grants } if grants.is_empty()) {
         return Ok(Vec::new());
@@ -806,8 +653,6 @@ impl Settings {
             scope: self.domain()?.scope,
         })
     }
-    /// The statement of `set` that revokes this device, once the whole set
-    /// verifies.
     pub(crate) fn revoking(
         &self,
         set: &RevocationSet,
@@ -834,7 +679,6 @@ impl Settings {
         Ok(Some(notice.statement))
     }
 
-    /// Why `statement`, which ends this device, does.
     pub(crate) fn revocation_reason(
         &self,
         statement: &SignedRevocation,
@@ -885,10 +729,6 @@ impl Settings {
         Ok(())
     }
 
-    /// Merges `set` into this identity's revocations. An issuer also
-    /// tombstones every node and identity they revoke, for good; its next
-    /// registry commit writes the records' tombstones. Returns the
-    /// statements added.
     pub(crate) fn learn_revocations(
         &mut self,
         set: &RevocationSet,
@@ -931,8 +771,6 @@ impl Settings {
         }
         Ok(added)
     }
-    /// The vouched naming root escrow a personal custodian's renewal brings,
-    /// which it serves to passkey-only devices.
     fn custodian_naming_escrow(
         &self,
         vault: &Vault,
@@ -945,18 +783,12 @@ impl Settings {
             _ => None,
         })
     }
-    /// Tombstones every node and identity the held statements revoke, as a
-    /// new issuer starts.
     fn tombstone_held_statements(&mut self) -> Result<(), Failure> {
         self.learn_revocations(&RevocationSet::new()).map(drop)
     }
-    /// Pins the genesis, which judges the node certificates and chains this
-    /// identity holds or learns.
     fn pin_genesis(&mut self) -> Result<(), Failure> {
         Ok(self.revocations.pin(&self.manifest()?, self.publisher)?)
     }
-    /// The digest and live count of the held revocations, and whether the
-    /// coordination service has yet to acknowledge them, as status shows them.
     pub(crate) fn revocation_status(&self) -> Result<crate::RevocationStatus, Failure> {
         let time = now()?;
         Ok(crate::RevocationStatus {
@@ -965,8 +797,6 @@ impl Settings {
             unpushed: self.unpushed_revocations(time)?.is_some(),
         })
     }
-    /// The held revocations and their digest at `time` while the
-    /// coordination service has not acknowledged that digest.
     pub(crate) fn unpushed_revocations(
         &self,
         time: u64,
@@ -978,7 +808,6 @@ impl Settings {
         Ok((self.revocations_pushed != Some(digest))
             .then(|| (self.revocations.pruned(time), digest)))
     }
-    /// Whether `set` holds a live statement this identity lacks.
     pub(crate) fn lacks(&self, set: &RevocationSet) -> Result<bool, Failure> {
         let time = now()?;
         let known: BTreeSet<_> = self
@@ -999,7 +828,6 @@ impl Settings {
         Ok(false)
     }
 
-    /// Loads only the current identity format, without changing the file or keys.
     pub fn load(path: &Path) -> Result<Self, Failure> {
         let value: serde_json::Value = serde_json::from_slice(&rocky_platform::fs::read(path)?)?;
         if value["version"].as_u64() != Some(u64::from(VERSION)) {
@@ -1066,7 +894,6 @@ impl Settings {
     pub fn vault(&self, store: &std::sync::Arc<dyn crate::SecretStore>) -> Vault {
         Vault::new(store.clone(), &self.installation)
     }
-    /// Whether this node's identity holds issuer authority.
     pub fn issuer(&self) -> bool {
         self.authority.is_some()
     }
@@ -1087,7 +914,6 @@ impl Settings {
             &HEXLOWER.decode(self.genesis.as_bytes())?,
         )?)
     }
-    /// The mode the root pinned in the genesis; no request changes it.
     pub(crate) fn kind(&self) -> Result<DatabaseKind, Failure> {
         let genesis = self.manifest()?;
         let (_, kind) = genesis.verify_kind(self.publisher)?;
@@ -1100,7 +926,6 @@ impl Settings {
         }
         Ok(kind.clone())
     }
-    /// What every owner device certificate here binds; `None` when shared.
     pub(crate) fn personal(&self) -> Result<Option<PersonalContext>, Failure> {
         let DatabaseKind::Personal { owner, .. } = self.kind()? else {
             return Ok(None);
@@ -1112,8 +937,6 @@ impl Settings {
             descriptor: self.manifest()?.descriptor()?,
         }))
     }
-    /// The root's trusted grant to the personal `owner` this chain holds,
-    /// which every owner device binds.
     pub(crate) fn owner_grant(&self, owner: PublicKey) -> Result<&SignedCapability, Failure> {
         self.credentials
             .0
@@ -1128,22 +951,18 @@ impl Settings {
             })
             .ok_or_else(|| personal_refusal(PersonalError::WrongOwner))
     }
-    /// A personal database admits nobody but the owner's devices and
-    /// explicitly granted custody principals.
     pub(crate) fn admits(&self, profile: Option<&Profile>) -> Result<(), Failure> {
         if self.kind()?.is_personal() && !matches!(profile, Some(Profile::Custody { .. })) {
             return Err(personal_refusal(PersonalError::OwnerOnly));
         }
         Ok(())
     }
-    /// Only the owner itself holds authority in a personal database.
     pub(crate) fn admits_identity(&self, identity: PublicKey) -> Result<(), Failure> {
         if self.kind()?.owner().is_some_and(|owner| owner != identity) {
             return Err(personal_refusal(PersonalError::OwnerOnly));
         }
         Ok(())
     }
-    /// The grants of this device's node: its chain's leaf.
     fn grants(&self, domain: &Domain) -> Vec<ResourceGrant> {
         match self.credentials.held() {
             Some(held) => domain.families.for_capability(held).map_or_else(
@@ -1153,7 +972,6 @@ impl Settings {
             None => Vec::new(),
         }
     }
-    /// The paired grants this device's selectors resolve on one partition.
     fn selected(
         &self,
         domain: &Domain,
@@ -1175,7 +993,6 @@ impl Settings {
             .filter_map(|grant| grant.resolve(*scope, tuple).ok().flatten())
             .collect()
     }
-    /// Whether this device may read a partition in whole, as its key needs.
     pub(crate) fn reads_partition(&self, domain: &Domain, member: &Member) -> bool {
         self.credentials
             .grants()
@@ -1187,8 +1004,6 @@ impl Settings {
                     && grant.rights.contains(&Right::Read)
             })
     }
-    /// Whether this device reads, inserts, updates and deletes every row
-    /// of `member`.
     pub(crate) fn owns_partition(&self, domain: &Domain, member: &Member) -> bool {
         let selected = self.selected(domain, &member.scope, &member.tuple);
         [Right::Read, Right::Insert, Right::Update, Right::Delete]
@@ -1205,14 +1020,12 @@ impl Settings {
                     })
             })
     }
-    /// The members of every known group partition under `domain`'s schema.
     pub(crate) fn partitions(&self, domain: &Domain) -> Result<Vec<GroupPartition>, Failure> {
         self.groups
             .values()
             .map(|record| GroupPartition::of(domain, record))
             .collect()
     }
-    /// Whether this device may read `scope` in whole, as a checkpoint needs.
     pub fn reads_whole(&self, domain: &Domain, scope: &rocky_core::ResourceScope) -> bool {
         let concrete = self.grants(domain).iter().any(|grant| {
             grant.scope == *scope
@@ -1227,8 +1040,6 @@ impl Settings {
                     .any(|member| member.scope == *scope && self.reads_partition(domain, member))
             })
     }
-    /// The scopes this device's credentials name: what its sessions and
-    /// its sync cover.
     pub fn granted(&self, domain: &Domain) -> Vec<rocky_core::ResourceScope> {
         let partitions = self.partitions(domain).unwrap_or_default();
         let grants = self.grants(domain);
@@ -1250,8 +1061,6 @@ impl Settings {
             )
             .collect()
     }
-    /// The peers whose credentials and frontiers the replica keeps whatever
-    /// its bound on unconfigured peers: contacts and issuers.
     pub fn kept(&self) -> Vec<PublicKey> {
         self.peers
             .keys()
@@ -1260,8 +1069,6 @@ impl Settings {
             .copied()
             .collect()
     }
-    /// The contacts a sync may dial, issuers first: those with routes and
-    /// not revoked.
     pub fn targets(&self) -> Vec<(PublicKey, Contact)> {
         let mut targets: Vec<_> = self
             .peers
@@ -1272,7 +1079,6 @@ impl Settings {
         targets.sort_by_key(|(node, _)| !self.issuers.contains(node));
         targets
     }
-    /// This node's contact URI over `transport`.
     pub async fn contact(
         &self,
         vault: &Vault,
@@ -1299,8 +1105,6 @@ impl Settings {
         );
         Ok((uri, node, routes))
     }
-    /// Configures the peer a contact URI names, or learns its new routes.
-    /// A contact that says so is also asked for renewals.
     pub fn add_peer(&mut self, vault: &Vault, uri: &str) -> Result<PublicKey, Failure> {
         let record = ContactRecord::parse(uri)?;
         if record.database != self.database_context()? {
@@ -1346,8 +1150,6 @@ impl Settings {
         }
         Ok(record.node)
     }
-    /// Forgets a peer, an issuer included: any issuer renews any device,
-    /// and a member left without issuer contact reports it.
     pub fn remove_peer(&mut self, node: PublicKey) -> Result<(), Failure> {
         let saved = self
             .contact_refs
@@ -1362,13 +1164,9 @@ impl Settings {
         self.enrollment_routes.remove(&node);
         Ok(())
     }
-    /// The earliest expiry of the node's credential chain.
     pub fn expires(&self) -> u64 {
         self.credentials.expires()
     }
-    /// The open configuration of the secure replica: the chain and every
-    /// held collection key epoch. A missing key is an error, never a new
-    /// key. Partition keys follow once their addresses are registered.
     pub fn config(&self, vault: &Vault, domain: &Domain) -> Result<SecureConfig, Failure> {
         let mut keys = Vec::new();
         for (name, scope) in domain.scopes() {
@@ -1393,7 +1191,6 @@ impl Settings {
             keys,
         })
     }
-    /// Every secret role this installation holds.
     pub fn roles(&self) -> Vec<String> {
         let mut roles: Vec<String> = [
             "node",
@@ -1453,7 +1250,6 @@ impl Settings {
         }
         roles
     }
-    /// The stable key of this node's routes.
     pub fn transport_key(vault: &Vault) -> Result<[u8; 32], Failure> {
         Ok(vault.get("transport")?)
     }
@@ -1494,8 +1290,6 @@ impl Settings {
         candidates.retain(|route| !route.routes.is_empty() || !route.enrollment_routes.is_empty());
         candidates
     }
-    /// Whether another issuer is known: a contact, another issuer identity,
-    /// or another node of this one.
     pub fn another_issuer(&self, registry: &Registry, membership: &Membership) -> bool {
         let own = self.identity;
         !self.issuers.is_empty()
@@ -1505,9 +1299,6 @@ impl Settings {
             })
     }
 
-    /// A new domain whose root `root` signs its genesis and a trusted
-    /// grant to the supplied identity, or the root's derived owner identity. The root's key is the publisher key; it is used here
-    /// and dropped, never stored.
     pub fn create(
         schema: &Schema,
         store: &std::sync::Arc<dyn crate::SecretStore>,
@@ -1517,10 +1308,6 @@ impl Settings {
     ) -> Result<Self, Failure> {
         Self::create_as(schema, store, ttl, provider, root, None)
     }
-    /// A personal database of the root's derived owner identity, pinned in
-    /// the genesis with `namespace`, which also locates its mesh and domain.
-    /// `installing` supplies the device keys and pins the reader epochs, so
-    /// an interrupted create resumes under the same node.
     pub(crate) fn create_personal(
         schema: &Schema,
         store: &std::sync::Arc<dyn crate::SecretStore>,
@@ -1630,9 +1417,6 @@ impl Settings {
         )?;
         Ok(settings)
     }
-    /// Admits a personal database's first owner device like any later one:
-    /// custodians relay its certificate, and a device restored from them
-    /// learns it is an owner device.
     fn admit_first_owner_device(&mut self) -> Result<(), Failure> {
         let Some(context) = self.personal()? else {
             return Ok(());
@@ -1648,15 +1432,6 @@ impl Settings {
         self.learn_revocations(&known)?;
         Ok(())
     }
-    /// A trusted node the root installs from the identity record of
-    /// `archived`, the node `predecessor` of the domain whose backup it
-    /// restores, any node, with the keys `recovered` opened from its
-    /// store's escrow records. A collection none opened gets a fresh key,
-    /// and a store without the naming root a fresh one. Its identity is
-    /// fresh, supplied or single-use, and in a personal database the pinned
-    /// owner; the root grants it trust. A new owner device takes the grant
-    /// every sibling binds, so the recovery ends no grant of the owner. Its
-    /// nodes write under their own keys, so nothing it creates collides.
     pub(crate) fn recover(
         store: &std::sync::Arc<dyn crate::SecretStore>,
         (archived, predecessor): (&Self, PublicKey),
@@ -1741,8 +1516,6 @@ impl Settings {
         settings.learn_contacts(archived, &[node, predecessor]);
         Ok(settings)
     }
-    /// A node of `identity` about to be installed in `domain`, holding
-    /// nothing yet: no credentials, keys, contacts or authority.
     pub(crate) fn installed(
         (installation, single_use): (String, bool),
         (publisher, identity): (PublicKey, PublicKey),
@@ -1797,8 +1570,6 @@ impl Settings {
             clock_skew: std::time::Duration::from_secs(SKEW),
         })
     }
-    /// The root's trusted grant to `identity`, a recorded issuer identity, with the registry row that tells every trusted
-    /// node: issuer authority, tip and bookmark control, and no expiry. `root` signs and is dropped.
     pub fn trust(
         &self,
         registry: &Registry,
@@ -1841,12 +1612,6 @@ impl Settings {
         )?;
         Ok((grant, changes))
     }
-    /// A recovered identity's own statements: the root ends every trusted
-    /// grant valid before this identity's, with what those identities
-    /// first enrolled, wherever a store learns of them. `cut` keeps the
-    /// held heads of the chains it ends, split over as many statements as
-    /// the cut bounds need. Returns whether they were signed now rather
-    /// than held.
     pub(crate) fn revoke_before_recovery(
         &mut self,
         root: Option<&dyn IdentityProvider>,
@@ -1903,8 +1668,6 @@ impl Settings {
         self.learn_revocations(&RevocationSet::try_from(statements)?)?;
         Ok(true)
     }
-    /// Takes `link` as this issuer identity's credentials once it is the
-    /// root's current trusted grant to it: its nodes are trusted nodes.
     pub fn install_trust(&mut self, vault: &Vault, link: SignedCapability) -> Result<(), Failure> {
         let identity = CredentialChain(vec![link.clone()]).trusted_identity(
             self.publisher,
@@ -1922,8 +1685,6 @@ impl Settings {
         self.credentials = self.certify(vault, CredentialChain(vec![link]), &domain)?;
         Ok(())
     }
-    /// The chain this identity signs tip statements through as a trusted
-    /// identity, while its grant holds: its root-signed grant.
     pub(crate) fn trusted_links(&self) -> Option<CredentialChain> {
         let chain = self.identity_links();
         chain
@@ -1937,8 +1698,6 @@ impl Settings {
             .filter(|identity| *identity == self.identity)
             .map(|_| chain)
     }
-    /// An identity capability `authority` signs for `identity`: issuer
-    /// authority, or `grants` and their whole partitions.
     fn issue(
         &self,
         authority: &Authority<'_>,
@@ -1968,8 +1727,6 @@ impl Settings {
             self.validity()?,
         )?)
     }
-    /// The origin this identity's own link names: `None` for a trusted
-    /// identity, which the root enrolled.
     pub(crate) fn link_origin(&self) -> Result<Option<PublicKey>, Failure> {
         Ok(match self.identity_links().0.last() {
             Some(link) => link
@@ -1980,7 +1737,6 @@ impl Settings {
             None => None,
         })
     }
-    /// The origin of what this identity enrolls: itself when trusted.
     pub(crate) fn issuing_origin(&self) -> Result<Option<PublicKey>, Failure> {
         Ok(match self.identity_links().0.last() {
             Some(link) if link.capability.extended()?.trusted.is_some() => {
@@ -1994,7 +1750,6 @@ impl Settings {
             .as_mut()
             .ok_or_else(|| format!("only an issuer {action}").into())
     }
-    /// The current reader key of every collection `grants` read whole.
     fn keys_for(
         &self,
         vault: &Vault,
@@ -2022,10 +1777,6 @@ impl Settings {
         Ok(keys)
     }
 
-    /// Seals the group secrets of every partition `capability` reads in
-    /// full to `node`, the current epoch only unless `all`. The envelopes
-    /// travel inside a message the issuer authenticates. Wildcard members
-    /// receive keys through explicit sharing, not renewal.
     pub(crate) fn groups_for(
         &self,
         vault: &Vault,
@@ -2153,9 +1904,6 @@ impl Settings {
         }
         Ok(())
     }
-    /// Restores group epochs the replica used but this file no longer
-    /// records, as after restoring it on its own: an epoch comes back only
-    /// when the vault still holds its secret. Returns whether any did.
     pub(crate) fn recover_groups(
         &mut self,
         vault: &Vault,
@@ -2254,9 +2002,6 @@ impl Settings {
             })
             .collect()
     }
-    /// Opens a new invitation, replacing an earlier one and ending its
-    /// join requests. With `profile` the invited device is admitted on
-    /// arrival; without, it waits for `admit`.
     pub async fn invite(
         &mut self,
         path: &Path,
@@ -2307,14 +2052,12 @@ impl Settings {
         );
         Ok((uri, expires, notes))
     }
-    /// Refuses a profile no device of this domain may be granted.
     fn check_profile(&self, profile: &Profile) -> Result<(), Failure> {
         let domain = self.domain()?;
         profile.grants(&domain.resources())?;
         grants_of(profile, &domain)?;
         Ok(())
     }
-    /// When the invitation that requests answered expired: ends them.
     pub(crate) fn expire_requests(&mut self, time: u64) -> Vec<Note> {
         let Some(issuing) = self.authority.as_mut() else {
             return Vec::new();
@@ -2329,7 +2072,6 @@ impl Settings {
             Vec::new()
         }
     }
-    /// The pending join requests and the time their invitation expires.
     pub(crate) fn pending_requests(&self) -> (Vec<crate::join_requests::Request>, u64) {
         self.authority
             .as_ref()
@@ -2344,8 +2086,6 @@ impl Settings {
             })
             .unwrap_or_default()
     }
-    /// Admits `node`'s pending request as `profile` once `code` matches
-    /// the code its device shows. It enrolls at the device's next retry.
     pub(crate) fn admit(
         &mut self,
         node: &PublicKey,
@@ -2380,7 +2120,6 @@ impl Settings {
         ))
     }
 
-    /// Checks this issuer's persisted invitation without attempting enrollment.
     pub fn invitation_open(&self, uri: &str) -> Result<bool, Failure> {
         let authority = self
             .authority
@@ -2399,9 +2138,6 @@ impl Settings {
                 .is_some_and(|invitation| invitation.is_open(&token, time)))
     }
 
-    /// Answers one pairing request with what is sealed to its device and
-    /// the registry rows to commit before it leaves. Save the identity
-    /// first, even on failure: it counts the invitation's attempts.
     pub fn pair(
         &mut self,
         vault: &Vault,
@@ -2489,8 +2225,6 @@ impl Settings {
             }
         }
     }
-    /// Answers a pre-approved invitation: its first device enrolls at once
-    /// and consumes it; that device's retry is answered alike.
     fn pair_invited(
         &mut self,
         vault: &Vault,
@@ -2540,11 +2274,6 @@ impl Settings {
         };
         Ok((sealed, changes, vec![enrolled]))
     }
-    /// What admitting a device creates: its capability as `profile`, the
-    /// enrollment that carries it and the registry rows recording it. The
-    /// one place admission makes a device's credentials. A first label
-    /// joins those rows, so it commits with the enrollment record, also
-    /// after a claimed join restarts.
     fn enroll(
         &mut self,
         vault: &Vault,
@@ -2640,11 +2369,6 @@ impl Settings {
         Ok((enrollment, changes))
     }
 
-    /// Issues `profile`, raw grants included, to the device whose public
-    /// keys `device` names: credentials and reader keys it installs with
-    /// `Database::install`, on `terms`, and the registry rows that record
-    /// it. Save the identity and commit the rows before handing them out.
-    /// The result carries reader keys: a secret.
     pub fn grant(
         &mut self,
         vault: &Vault,
@@ -2747,13 +2471,6 @@ impl Settings {
         };
         Ok((supplied, changes))
     }
-    /// Delegates `profile`, which must narrow this device's own grants, to
-    /// the device whose public keys `device` names: a link signed by this
-    /// node's identity, with the reader keys the grants read. Any device
-    /// whose capability allows a further delegation does this; the
-    /// delegate renews by being delegated to again. On an issuer the
-    /// registry rows recording the delegate come with it. An issuer's
-    /// links refuse to delegate: it grants instead.
     pub fn delegate(
         &mut self,
         vault: &Vault,
@@ -2849,10 +2566,6 @@ impl Settings {
         };
         Ok((supplied, changes))
     }
-    /// Replaces this device's credentials with supplied ones, such as a
-    /// delegator's renewed delegation. They are verified like an
-    /// installation's; keys of collections they no longer read are
-    /// dropped by the replica. An issuer renews itself instead.
     pub fn supplied_renewal(&self, vault: &Vault, supplied: &Supplied) -> Result<Renewed, Failure> {
         if self.issuer() {
             return Err("an issuer renews its own credentials".into());
@@ -2911,9 +2624,6 @@ impl Settings {
             naming: None,
         })
     }
-    /// Supplied credentials as this node's chain: a chain that ends at this
-    /// identity, or at a certificate it signed for this node, is certified
-    /// here, with this node's alias.
     fn own_chain(
         &self,
         vault: &Vault,
@@ -2950,11 +2660,6 @@ impl Settings {
         }
         Ok(chain)
     }
-    /// The rows of this issuer's own identity record: its identity entry,
-    /// current capability. Rows that exist are kept. A trusted node also
-    /// records its own grant, which only the root revokes, and every
-    /// revocation whose tombstone is still unwritten, whether it was
-    /// interrupted or learned from a statement.
     pub(crate) fn own_record(&self, registry: &Registry) -> Result<Changes, Failure> {
         let own = self.identity;
         let known = registry.get(&own);
@@ -3004,12 +2709,9 @@ impl Settings {
         Ok(changes)
     }
 
-    /// The publisher key an invitation names, before anything is stored.
     pub fn invitation_publisher(invitation: &str) -> Result<PublicKey, Failure> {
         Ok(Invite::parse(invitation)?.publisher)
     }
-    /// Adds the contacts of another identity of this domain, such as the
-    /// one a restored backup carried, without replacing known ones.
     pub fn learn_contacts(&mut self, other: &Settings, exclude: &[PublicKey]) {
         for (node, contact) in &other.peers {
             if exclude.contains(node) || self.peers.contains_key(node) {
@@ -3027,8 +2729,6 @@ impl Settings {
             }
         }
     }
-    /// Contacts of the issuers this device reaches, except `exclude`, for
-    /// a device it enrolls or renews to learn.
     pub(crate) fn issuer_contacts(&self, exclude: &[PublicKey]) -> Result<Vec<String>, Failure> {
         let mut contacts = Vec::new();
         for node in &self.issuers {
@@ -3054,9 +2754,6 @@ impl Settings {
         }
         Ok(contacts)
     }
-    /// Adds the issuers another issuer named as peers that also renew this
-    /// device. They are hints: a known peer keeps its routes, and a revoked
-    /// node, a full list or an unusable contact is skipped.
     pub(crate) fn learn_issuers(&mut self, vault: &Vault, contacts: &[String]) {
         for uri in contacts {
             let Ok(record) = ContactRecord::parse(uri) else {
@@ -3072,7 +2769,6 @@ impl Settings {
             }
         }
     }
-    /// Keeps the authenticated return route for change-driven delivery.
     fn learn_joined_peer(&mut self, node: PublicKey, routes: &[(String, String)], issuer: bool) {
         let routes = routes
             .iter()
@@ -3097,8 +2793,6 @@ impl Settings {
     fn revoked(&self, node: &PublicKey) -> bool {
         self.revocations.revokes(node)
     }
-    /// Forgets the peers and issuers a held statement revokes, such as a
-    /// lost issuer another one revoked.
     pub(crate) fn forget_revoked(&mut self) {
         self.contact_refs
             .retain(|id, entry| entry.upstream || !self.revocations.revokes_reference(id));
@@ -3116,8 +2810,6 @@ impl Settings {
             self.enrollment_routes.remove(&node);
         }
     }
-    /// Starts or resumes the join an invitation names: this device's keys
-    /// exist once it returns, and nothing was sent.
     pub fn prepare_join(
         path: &Path,
         (invitation, name): (&str, &str),
@@ -3150,8 +2842,6 @@ impl Settings {
             provider,
         })
     }
-    /// The keys of a node that will be handed credentials from outside
-    /// the SDK under the supplied identity and its node key. Asking again returns the same keys.
     pub fn prepare_install(
         path: &Path,
         store: &std::sync::Arc<dyn crate::SecretStore>,
@@ -3172,11 +2862,6 @@ impl Settings {
             node: PrivateKey::from_bytes(&vault.get("node")?).public_key(),
         })
     }
-    /// Installs supplied credentials and keys for the device
-    /// `prepare_install` made. Everything is verified first; nothing is
-    /// trusted because of where it came from. The install intent stays
-    /// until the database opens, so a failed install is retried with the
-    /// same device keys.
     pub fn install(
         path: &Path,
         schema: &Schema,
@@ -3285,7 +2970,6 @@ impl Settings {
         settings.save(path)?;
         Ok(settings)
     }
-    /// Stores a reader key and lists its epoch. A held epoch keeps its key.
     pub(crate) fn hold(
         &mut self,
         vault: &Vault,
@@ -3313,10 +2997,6 @@ impl Settings {
     }
 }
 
-/// Widens a renewed capability to its identity's profile over the current
-/// generation. A chain names no generation: tables later generations
-/// granted like one the identity holds join its grants, and nothing is
-/// narrowed. Issuer authority names no grants: it holds every one.
 fn widen_to_current_generation(
     prior: &mut rocky_credentials::Capability,
     known: Option<&registry::IdentityRecord>,
@@ -3340,7 +3020,6 @@ fn widen_to_current_generation(
     Ok(())
 }
 
-/// Refuses a revocation too large to sign, before anything is saved.
 fn refuse_oversized_revocation(
     statement: &Revocation,
     links: &CredentialChain,
@@ -3355,13 +3034,8 @@ fn refuse_oversized_revocation(
     Ok(())
 }
 
-/// Seconds a recovery's trusted grant is dated ahead, so a grant signed in
-/// the same second precedes it.
 const AFTER_SAME_SECOND_GRANTS: u64 = 1;
 
-/// The identity a recovered trusted node runs on, and whether it is single
-/// use. A personal database stays its pinned owner's: the root's derived
-/// owner identity, or a supplied provider of that same key.
 fn recovered_identity(
     owner: Option<PublicKey>,
     provider: Option<Arc<dyn IdentityProvider>>,
@@ -3380,8 +3054,6 @@ fn recovered_identity(
     })
 }
 
-/// The group partitions a recovery knows: those the escrow opened with
-/// their epochs, and those the archive named without a key, kept keyless.
 fn escrowed_groups(
     archived: &BTreeMap<String, GroupRecord>,
     escrowed: &BTreeMap<String, GroupRecord>,
@@ -3402,29 +3074,20 @@ fn escrowed_groups(
     Ok(groups)
 }
 
-/// A trusted grant's time: `time`, or later when a recovery would end a
-/// grant valid from then.
 fn after_recovery(revocations: &RevocationSet, time: u64) -> u64 {
     revocations.recovery().map_or(time, |recovery| {
         time.max(recovery.since + rocky_credentials::LIFETIME_SKEW + 1)
     })
 }
-/// A join whose keys exist and whose enrollment is still to be fetched.
 pub struct Joining {
     pub vault: Vault,
     invite: Invite,
     intent: Intent,
     token: [u8; 32],
-    /// What this device calls itself in its join request.
     name: String,
     provider: Option<Arc<dyn IdentityProvider>>,
 }
 impl Joining {
-    /// Enrolls with the issuer over `transport` and stores what it sealed,
-    /// or fails with `AwaitingAdmission` until the issuer admits this
-    /// device, or with `JoinRefused`. The identity receives what the
-    /// invitation said, or what the admitting issuer chose, no more and no
-    /// less, from the owner or an issuer through its chain.
     pub async fn enroll(
         self,
         path: &Path,
@@ -3696,8 +3359,6 @@ impl Settings {
         )?
         .to_bytes()?)
     }
-    /// Existing issuers and verified personal siblings can deliver epochs.
-    /// Custody principals and discovery hints confer no such authority.
     pub(crate) fn epoch_sources(&self) -> Result<BTreeSet<PublicKey>, Failure> {
         let mut sources: BTreeSet<_> = self.issuers.iter().copied().collect();
         if self.kind()?.owner() == Some(self.identity) {
@@ -3811,12 +3472,6 @@ impl Settings {
         }
         Err(failure)
     }
-    /// Renews this device's credentials; the root is never needed. A member
-    /// asks its issuers in turn, `first` before the others. A trusted node,
-    /// whose grant never expires, certifies its node again; with `learn` it
-    /// first asks the other issuers, which is how it hears of their
-    /// revocations. Another issuer asks issuers above it, and otherwise
-    /// certifies its node again under the identity it holds.
     pub async fn request_renewal(
         &self,
         vault: &Vault,
@@ -3962,8 +3617,6 @@ impl Settings {
             naming,
         })
     }
-    /// Whether this generation needs wider grants or newly inherited table keys.
-    /// Families resolve immediately; renewal supplies missing reader keys.
     pub(crate) fn profile_widens(&self, domain: &Domain) -> Result<bool, Failure> {
         let held = self.grants(domain);
         let wanted = profile_grants(&self.profile, domain)?;
@@ -3986,20 +3639,12 @@ impl Settings {
                     .iter()
                     .any(|wide| !held.iter().any(|grant| grant.includes(wide)))))
     }
-    /// An issuer's own chain, signed again where it can.
     fn renew_locally(&self, vault: &Vault) -> Result<CredentialChain, Failure> {
         self.issue_own(vault)
     }
-    /// An issuer's own chain for the current definition: its node certified
-    /// again under the links it holds, which a trusted grant never needs
-    /// renewed and an issuer above renews otherwise.
     pub(crate) fn issue_own(&self, vault: &Vault) -> Result<CredentialChain, Failure> {
         self.certify(vault, self.identity_links(), &self.domain()?)
     }
-    /// Whether a renewed capability is this identity's own, with the
-    /// authority it holds and the grants it holds or its profile's over
-    /// `domain`, the current generation, which tables granted like held
-    /// ones widen.
     fn renews_identity(
         &self,
         renewed: &rocky_credentials::Capability,
@@ -4028,9 +3673,6 @@ impl Settings {
             && (same(&held_grants) || same(&profile_grants))
             && renewed.extended()?.issues == held.extended()?.issues)
     }
-    /// Saves what a renewal brought before the replica learns it: the keys
-    /// in the provider, then the identity. Returns the keys now listed and
-    /// whether the identity changed.
     pub fn adopt(
         &mut self,
         path: &Path,
@@ -4076,15 +3718,6 @@ impl Settings {
         *self = draft;
         Ok((held, changed))
     }
-    /// Answers a renewal with the registry rows to commit before it
-    /// leaves. The request proves a device the publisher once issued a
-    /// chain; it receives the same grants, the revocations this issuer
-    /// holds and the reader keys those grants read. The record's tombstone
-    /// and profile count wherever the device enrolled; without a record the
-    /// presented chain is renewed and recorded, as is an identity another
-    /// issuer enrolled whose record has not arrived. A node or user a
-    /// statement revoked is refused, also after the statement left the set.
-    /// `claims` is the fresh claim link `renew_claims` signed for it.
     pub fn renew(
         &self,
         vault: &Vault,
@@ -4171,8 +3804,6 @@ impl Settings {
         )?;
         Ok((renewal.to_bytes()?, changes))
     }
-    /// Whether a key is revoked for good here: by a held statement or, on
-    /// an issuer, a tombstone.
     pub(crate) fn tombstoned(&self, key: &PublicKey) -> bool {
         self.revocations.unfenced().revokes(key)
             || self.signed_out(key)
@@ -4182,9 +3813,6 @@ impl Settings {
                     .contains(&rocky_credentials::PeerId::of(*key))
             })
     }
-    /// Whether a held reset ended `node`, a node this device knew: it signs
-    /// in again as a new node. A reset ends no identity, and a node it never
-    /// saw joins once a node standing after the reset admits it.
     pub(crate) fn signed_out(&self, node: &PublicKey) -> bool {
         self.revocations
             .reset_ends(&rocky_credentials::PeerId::of(*node))
@@ -4197,18 +3825,12 @@ impl Settings {
                     .as_ref()
                     .is_some_and(|authority| authority.seen.contains_key(node)))
     }
-    /// Whether a statement, a tombstone or the registry revoked `identity`.
     pub(crate) fn revoked_identity(&self, identity: &PublicKey, registry: &Registry) -> bool {
         self.tombstoned(identity) || registry.revoked(identity)
     }
-    /// Whether `keys` names a revoked node or identity.
     pub(crate) fn revoked_node(&self, keys: &NodeKeys, registry: &Registry) -> bool {
         self.tombstoned(&keys.node) || self.revoked_identity(&keys.identity, registry)
     }
-    /// The registry rows recording partitions granted or delegated to an
-    /// identity, committed before the chain leaves this issuer so that
-    /// revoking it rotates them. Every node the identity links reads them.
-    /// Refuses a revoked node or identity.
     pub(crate) fn holder_changes(
         &self,
         device: &NodeKeys,
@@ -4249,15 +3871,6 @@ impl Settings {
         }
         Ok(changes)
     }
-    /// Begins revoking `target`: an identity, and with it every node it
-    /// linked (as `membership` knows them), or a claim right. Fixes its
-    /// statement, from what the registry recorded of the identity, and the
-    /// key epoch each collection and group partition it could read rotates
-    /// to, the held maximum plus one. The intent is all that changes;
-    /// `rotate` signs and completes it, now or at the next open. A trusted
-    /// identity only `root` revokes: its signed mode controls the cascade,
-    /// which the root statement carries by naming the trusted identity
-    /// alone, whose origin the enrolled ones carry.
     #[cfg(test)]
     pub fn begin_revocation(
         &mut self,
@@ -4267,8 +3880,6 @@ impl Settings {
     ) -> Result<(), Failure> {
         self.begin_revocation_cut(target, (registry, membership), root, Vec::new())
     }
-    /// As `begin_revocation`; a root statement also carries `cut`, the
-    /// heads of the revoked nodes' chains of tip statements that stay valid.
     pub fn begin_revocation_cut(
         &mut self,
         target: Revoke,
@@ -4438,13 +4049,6 @@ impl Settings {
         });
         Ok(())
     }
-    /// The group secret epoch each group partition the revoked nodes could
-    /// read rotates to. The group secret is the unit: one new secret per
-    /// partition, so every member table advances together. Their profiles'
-    /// tables and their recorded partition grants count; without any
-    /// record a node may have read any known partition. A partition whose
-    /// secret this issuer never held has no epoch to follow, and is left to
-    /// an issuer that holds it.
     fn next_group_epochs(
         &self,
         domain: &Domain,
@@ -4476,7 +4080,6 @@ impl Settings {
         }
         Ok(groups)
     }
-    /// Saves a superseding generation only for uncovered revocations of readers.
     pub(crate) fn begin_exposure_rotation(&mut self, registry: &Registry) -> Result<bool, Failure> {
         if !self.issuer()
             || self
@@ -4496,21 +4099,17 @@ impl Settings {
                 .statement
                 .identities
                 .iter()
-                .map(|identity| {
-                    registry
-                        .get(identity)
-                        .filter(|record| record.admitted.is_some() || !record.grants.is_empty())
-                        .map(Revoking::of)
-                })
+                .map(|identity| ReadBound::of(registry.get(identity)))
                 .chain(signed.statement.nodes.iter().map(|node| {
-                    self.revocations
-                        .certificates()
-                        .find(|certificate| {
-                            rocky_credentials::PeerId::of(certificate.capability.subject) == *node
-                        })
-                        .and_then(|certificate| registry.get(&certificate.issuer))
-                        .filter(|record| record.admitted.is_some() || !record.grants.is_empty())
-                        .map(Revoking::of)
+                    ReadBound::of(
+                        self.revocations
+                            .certificates()
+                            .find(|certificate| {
+                                rocky_credentials::PeerId::of(certificate.capability.subject)
+                                    == *node
+                            })
+                            .and_then(|certificate| registry.get(&certificate.issuer)),
+                    )
                 }))
                 .collect();
             for (name, epochs) in &self.keys {
@@ -4521,8 +4120,8 @@ impl Settings {
                     .epoch_statements
                     .get(&key_role(name, *current))
                     .is_some_and(|ids| ids.contains(&id));
-                let read = read_bounds.iter().any(|record| {
-                    record.as_ref().is_none_or(|record| {
+                let read = read_bounds.iter().any(|bound| {
+                    bound.reads(|record| {
                         record
                             .profile
                             .as_ref()
@@ -4552,8 +4151,8 @@ impl Settings {
                     .epoch_statements
                     .get(&secret_role(&partition.record.address, current))
                     .is_some_and(|ids| ids.contains(&id));
-                let read = read_bounds.iter().any(|record| {
-                    record.as_ref().is_none_or(|record| {
+                let read = read_bounds.iter().any(|bound| {
+                    bound.reads(|record| {
                         record.profile.as_ref().is_some_and(|profile| {
                             let profile = domain.effective(profile);
                             partition
@@ -4607,17 +4206,6 @@ impl Settings {
         });
         Ok(true)
     }
-    /// Prepares a begun revocation: a fresh key epoch for every collection
-    /// and group partition it names, the signed statement joins the set and
-    /// the issuer renews its own chain. Earlier keys stay; history is not sealed
-    /// again. Repeating it after an interruption makes the same keys and
-    /// statement: the intent was saved first, so a key missing on a repeat
-    /// was never used and making it replaces none. The intent stays until
-    /// `complete_revocation` observes the committed tombstone. A shared
-    /// database also mints a fresh mesh value; a personal one's bootstrap
-    /// keeps a stable capability, so independent exposure rotations never
-    /// mint conflicting values for the same unlink. Returns the new keys,
-    /// or nothing when no revocation was begun.
     pub fn rotate(&mut self, vault: &Vault) -> Result<Option<Vec<NewKey>>, Failure> {
         let Some(Rotation {
             nodes,
@@ -4703,8 +4291,6 @@ impl Settings {
         }
         Ok(Some(keys))
     }
-    /// Discards the redo intent only after the completion transaction committed.
-    /// The rotation's envelopes are saved with it.
     pub(crate) fn complete_revocation(
         &mut self,
         vault: &Vault,
@@ -4738,9 +4324,6 @@ impl Settings {
     }
 }
 
-/// What an identity's `capability` lets its node hold, by which grants and
-/// partitions: its own, or for issuer authority, which names none, the
-/// issuer profile's over `domain` as the node's certificate carries them.
 fn held(
     capability: &rocky_credentials::Capability,
     domain: &Domain,
@@ -4767,10 +4350,8 @@ fn held(
     Ok((held, grants))
 }
 
-/// A key `rotate` made: collection, key epoch and key.
 pub type NewKey = (String, rocky_core::KeyEpoch, [u8; 32]);
 
-/// Deterministic interruptions of `rotate`, for its fault sweep.
 pub(crate) mod fault {
     use crate::Failure;
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4786,7 +4367,6 @@ pub(crate) mod fault {
     }
     #[cfg(test)]
     thread_local! {
-        /// The stage, and how many of it pass first, at which `rotate` stops.
         pub static STOP: std::cell::Cell<Option<(Stage, usize)>> = const { std::cell::Cell::new(None) };
     }
     #[cfg(test)]
@@ -4809,7 +4389,6 @@ pub(crate) mod fault {
     }
 }
 
-/// One typed request and its matching answer.
 pub(crate) async fn exchange(
     transport: &dyn Transport,
     addresses: &[String],
@@ -4836,8 +4415,6 @@ pub(crate) async fn exchange(
     }
     Ok(reply)
 }
-/// Replaces an invitation's or issuer contact's routes with a custody peer's
-/// routes. Grants, invitation token and issuer identity stay unchanged.
 pub fn route_enrollment(uri: &str, custody_contact: &str) -> Result<String, Failure> {
     fn contact(uri: &str) -> Result<ContactRecord, Failure> {
         let record = ContactRecord::parse(uri)?;
@@ -4873,8 +4450,6 @@ pub fn route_enrollment(uri: &str, custody_contact: &str) -> Result<String, Fail
     }
 }
 
-/// Every partition of each partitioned table `grants` name, as enrollment
-/// grants a profile: an `Any` selector beside the table grant.
 pub(crate) fn whole_partitions(
     domain: &Domain,
     grants: &[ResourceGrant],
@@ -4943,8 +4518,6 @@ impl Settings {
         saved.contact_refs = self.saved_contacts();
         saved
     }
-    /// The contacts `save` writes: saved ones not yet resolved, and every
-    /// known peer.
     fn saved_contacts(&self) -> BTreeMap<rocky_credentials::PeerId, StoredContact> {
         let mut saved = self.contact_refs.clone();
         saved.retain(|id, _| !self.resolved_refs.contains(id));
@@ -4962,8 +4535,6 @@ impl Settings {
         }
         saved
     }
-    /// Whether `save` writes the same identity for both, compared without
-    /// encoding it. Naming every field keeps a new one from being missed.
     pub(crate) fn persisted_eq(&self, other: &Self) -> bool {
         let Self {
             delivery_nodes: _,
@@ -5145,7 +4716,5 @@ impl Settings {
     }
 }
 
-/// Multi-node protocol suites: native transports, threads, paused clocks
-/// and native temporary directories.
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests;

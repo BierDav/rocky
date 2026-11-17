@@ -2,7 +2,6 @@ use super::*;
 use rocky_credentials::PartitionGrant;
 use serde_json::{Value, json};
 
-/// `links`, which end at `user`, completed with a certificate for `node`.
 fn member_chain(
     links: &CredentialChain,
     user: &PrivateKey,
@@ -13,23 +12,18 @@ fn member_chain(
 
 const SCHEMA: &str = r#"{"format":6,"application":"holders","version":1,"tables":[{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"}]}"#;
 
-/// Another issuer of `issuer`'s domain that granted nothing, so it renews
-/// from the registry alone.
 fn issuer_that_granted_nothing(issuer: &Settings) -> Settings {
     let mut other = issuer.clone();
     other.authority = Some(Issuing::default());
     other
 }
 
-/// Another issuer of `issuer`'s domain that never saw its devices, their
-/// records or its revocations.
 fn unaware_issuer(issuer: &Settings) -> Settings {
     let mut other = issuer_that_granted_nothing(issuer);
     other.revocations = RevocationSet::new();
     other
 }
 
-/// The registry and an empty membership view.
 fn known(registry: &Registry) -> (&Registry, &'static Membership) {
     static EMPTY: std::sync::LazyLock<Membership> = std::sync::LazyLock::new(Membership::default);
     (registry, &EMPTY)
@@ -333,7 +327,6 @@ fn registry_grants_follow_only_the_issuer_and_custody_profiles() -> Result<(), F
 
 const TWO: &str = r#"{"format":6,"application":"two","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
-/// A new issuer of `schema` with its identity saved at `path`.
 fn issuer_at(
     schema: &str,
     directory: &Path,
@@ -562,7 +555,6 @@ fn a_tombstoned_user_renews_at_no_issuer_also_after_its_statement_left_the_set()
     Ok(())
 }
 
-/// Independent issuer vaults with the same domain, without filesystem key I/O.
 #[derive(Default)]
 struct EpochKeys(std::sync::Mutex<BTreeMap<String, Vec<u8>>>);
 impl crate::SecretStore for EpochKeys {

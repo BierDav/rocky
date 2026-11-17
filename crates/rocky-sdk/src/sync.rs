@@ -1,5 +1,3 @@
-//! Synchronization with one authorized peer: a device pushes and pulls
-//! every collection over request channels of its live link with that peer.
 use crate::Failure;
 use rocky_core::{ResourceScope, TypedRows};
 use rocky_secure::{
@@ -7,15 +5,10 @@ use rocky_secure::{
     network::{NativeSession, link::channels::Handle},
 };
 
-/// Bytes of frames per page.
 const QUOTA: usize = MAX_SECURE_FRAME / 2;
-/// Request channels one sync may open when each exhausts its byte budget.
 const SESSIONS: usize = 16;
-/// Request channels one sync holds at once: a link has `CHANNELS - 2` per
-/// direction, and one stays free for live publication.
 const PARALLEL: usize = rocky_secure::network::link::CHANNELS as usize - 3;
 
-/// One device's view of a peer: the link that proved the `peer` key.
 pub(crate) struct Upstream<'a> {
     pub link: Handle,
     pub observations: &'a crate::status::Observations,
@@ -23,15 +16,10 @@ pub(crate) struct Upstream<'a> {
     pub refresh_control: bool,
     pub control_started: std::cell::Cell<bool>,
     pub contacts: Option<&'a dyn rocky_secure::network::ContactHandler>,
-    /// The revocation digest this sync started from, when it renews: a
-    /// session that changes the set ends the sync with `Learned`.
     pub renew_from: Option<rocky_core::Commitment>,
-    /// Whether an active staged import should continue with its original signer.
     pub keep: Option<&'a dyn Fn(ResourceScope, PublicKey, Option<rocky_core::Commitment>) -> bool>,
 }
 
-/// A session brought revocation statements. Rotated keys still arrive by
-/// renewal, so the sync renews before it moves rows.
 #[derive(Debug)]
 pub(crate) struct Learned;
 impl std::fmt::Display for Learned {
@@ -41,7 +29,6 @@ impl std::fmt::Display for Learned {
 }
 impl std::error::Error for Learned {}
 
-/// A bootstrap import used up its sessions; the next sync continues it.
 #[derive(Debug)]
 struct Unfinished;
 impl std::fmt::Display for Unfinished {
@@ -51,8 +38,6 @@ impl std::fmt::Display for Unfinished {
 }
 impl std::error::Error for Unfinished {}
 
-/// Whether a failed import counts toward giving its checkpoint up: a lost
-/// link, a timeout or an unfinished budget says nothing about the checkpoint.
 fn counts_against_import(error: &Failure) -> bool {
     if error.is::<Unfinished>() || error.is::<Learned>() {
         return false;
@@ -69,15 +54,12 @@ fn counts_against_checkpoint(error: &rocky_secure::Error) -> bool {
     }
 }
 
-/// What one scope exchanged with a peer during a sync.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Moved {
     pub pulled: usize,
     pub pushed: usize,
-    /// Encoded bytes received.
     pub bytes: usize,
     pub sent: usize,
-    /// The checkpoint a rebootstrap imported, with the held operations it superseded.
     pub checkpoint: Option<(rocky_core::Commitment, u64)>,
 }
 impl Moved {
@@ -92,22 +74,14 @@ impl Moved {
         self.checkpoint = other.checkpoint.or(self.checkpoint);
     }
 }
-/// What a reconcile did, by scope, in first-change order.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Transfer {
     pub repair_generation: Option<u64>,
     pub scopes: Vec<(ResourceScope, Moved)>,
-    /// Scopes the peer and this device did not exchange: one side's
-    /// credentials, as the other sees them, grant no whole-scope access.
     pub refused: Vec<ResourceScope>,
     pub held: Vec<ResourceScope>,
-    /// Scopes the peer restores from a checkpoint, as it is importing them
-    /// or behind this device's pruned prefix: no history was pushed.
     pub waiting: Vec<ResourceScope>,
-    /// Scopes whose requests failed; other scopes still finish the pass.
     pub failed: Vec<ResourceScope>,
-    /// Scopes whose requests the peer refused as not permitted; they are
-    /// also `refused`.
     pub denied: Vec<ResourceScope>,
 }
 impl Transfer {
@@ -176,11 +150,6 @@ impl Transfer {
     }
 }
 
-/// Pushes what the peer lacks and pulls what this device lacks, for every
-/// scope, until both hold the same frames.
-/// Returns whether another pass is needed and what moved. Frames outside
-/// the followed tip return an admission error and never trigger adoption.
-/// `first` is a session already open with the peer, which rows use first.
 pub(crate) async fn reconcile(
     replica: &EncryptedReplica<TypedRows>,
     upstream: &Upstream<'_>,
@@ -206,21 +175,12 @@ pub(crate) async fn reconcile(
     }
     Ok((!transfer.failed.is_empty(), transfer))
 }
-/// One scope of a bootstrap: the checkpoint its peer offered and the
-/// stored rows it holds, which progress counts.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Planned {
     pub scope: ResourceScope,
     pub checkpoint: rocky_core::Commitment,
     pub rows: u64,
 }
-/// Checkpoint-first enrollment, resumed from the runtime's staged pages.
-/// The peer's offers come first: populated scopes import smallest first,
-/// followed by empty scopes. The intent records each scope's rows for progress.
-/// A scope the peer offers no checkpoint of joins by frames, as does one
-/// whose import kept failing, or one the peer never compacted unless a
-/// revoked author's rows must go with an import. `None` when an offered
-/// import cannot start with this peer: the intent waits for another.
 pub(crate) async fn bootstrap(
     replica: &EncryptedReplica<TypedRows>,
     upstream: &Upstream<'_>,
@@ -393,9 +353,6 @@ pub(crate) async fn bootstrap(
     }
     Ok(pending.is_empty().then_some(expected))
 }
-/// Whether `scope` holds pages of another node's checkpoint than the one
-/// `offered` that should go on with that signer: two peers signing the same
-/// rows still offer different checkpoints, and switching discards the pages.
 async fn deferred(
     replica: &EncryptedReplica<TypedRows>,
     upstream: &Upstream<'_>,
@@ -416,9 +373,6 @@ async fn deferred(
         None => false,
     })
 }
-/// A request channel on the link with the upstream peer. The link handshake
-/// left `replica` holding every revocation statement the peer sent; see
-/// `Learned`.
 pub(crate) async fn session(
     replica: &EncryptedReplica<TypedRows>,
     upstream: &Upstream<'_>,
@@ -438,8 +392,6 @@ pub(crate) async fn session(
     }
     Ok(session)
 }
-/// Syncs the rows of `scopes` with the upstream peer. Row transfers take
-/// the planning channel's slot; placements reopen one.
 async fn rows(
     replica: &EncryptedReplica<TypedRows>,
     upstream: &Upstream<'_>,
@@ -531,14 +483,6 @@ async fn rows(
     }
     Ok(())
 }
-/// Syncs `scopes` frame by frame, restoring the peer's retained base
-/// before publishing local edits. A scope whose staged import is deferred
-/// goes on with that import's signer. A failed advised import retires the
-/// request channel: the next sync retries that exact checkpoint, then falls
-/// back to frames after `IMPORT_ATTEMPTS` failures counted across restarts.
-/// A scope the peer restores from a checkpoint waits while others go on.
-/// History that never arrives by frames, as a revoked author's, comes with
-/// a listed checkpoint once the scopes caught up.
 async fn rows_scope(
     replica: &EncryptedReplica<TypedRows>,
     upstream: &Upstream<'_>,

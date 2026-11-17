@@ -172,9 +172,6 @@ impl Node {
                 .clone(),
         })
     }
-    /// The status this device observes. The watch read guard is dropped before
-    /// any replica call can publish a commit. A refreshed report wakes no wait;
-    /// a changed one or silence does.
     pub(super) async fn observed_status(&self) -> Result<DatabaseStatus, Failure> {
         self.refresh_trusted_watch().await?;
         let settings = self.settings.lock().await.clone();
@@ -314,9 +311,6 @@ impl Node {
 }
 
 impl Node {
-    /// Replaces `peer`'s clock alert with the one a handshake's `offset`
-    /// (the peer's clock less this one's, in microseconds) shows: none
-    /// within `MAX_CLOCK_AHEAD`. Logs only when an alert appears or clears.
     pub(super) fn observe_peer_clock(&self, peer: PublicKey, offset: i64) {
         let node = peer.to_hex();
         let label = node.get(..12).unwrap_or_default().to_owned();
@@ -373,8 +367,6 @@ impl Node {
             self.observations.touch();
         }
     }
-    /// The replica's blockers and the bootstrap intent's: scopes it still
-    /// imports and the inviter a joined device waits for.
     pub(crate) async fn blockers(&self) -> Result<Vec<rocky_core::Blocker>, Failure> {
         use rocky_core::{Blocker, BlockerKind, ClearsBy, domain_label, scope_label};
         let mut blockers = self.replica.blockers().await?;
@@ -514,10 +506,6 @@ impl Node {
         }
         report
     }
-    /// One reconciliation pass over the reachable peers. A pass that switched
-    /// the followed tip syncs the new tip once more, since a received move may
-    /// have switched this device to another line. Statements held or learned in
-    /// the pass reach the coordination service, whatever became of the peers.
     pub(super) async fn reconciliation_pass(
         &self,
         transport: Option<&dyn Transport>,
@@ -665,9 +653,6 @@ impl Node {
     }
 }
 
-/// Each scope an exchange reached and how it ended. When the exchange's
-/// session failed, a scope it had not finished is `Interrupted`: only a
-/// scope the peer refused or whose own request failed keeps that outcome.
 fn scope_outcomes(
     transfer: &crate::sync::Transfer,
     interrupted: bool,
@@ -703,7 +688,6 @@ fn scope_outcomes(
     }
     outcomes
 }
-/// Timed-out attempts by the kind of timeout their failure names.
 fn timeouts(attempts: &[AttemptObservation]) -> Vec<TimeoutCount> {
     let mut counts: Vec<TimeoutCount> = Vec::new();
     for failure in attempts

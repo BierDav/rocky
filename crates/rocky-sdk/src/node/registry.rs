@@ -1,5 +1,3 @@
-//! The issuer's side of the registry: answers that commit their rows
-//! before they leave, the identity list and labels.
 use super::*;
 use crate::{
     membership::Membership,
@@ -7,15 +5,15 @@ use crate::{
 };
 
 impl Node {
-    /// Every record this device holds; empty on a non-issuer, which holds
-    /// no registry key. Takes the settings lock, so call it before holding them.
-    pub(crate) async fn registry(&self) -> Result<Registry, Failure> {
-        if !self.settings.lock().await.issuer() {
+    pub(crate) async fn settings_snapshot(&self) -> Shared<Settings> {
+        self.settings.lock().await.clone()
+    }
+    pub(crate) async fn registry(&self, settings: &Settings) -> Result<Registry, Failure> {
+        if !settings.issuer() {
             return Ok(Registry::default());
         }
         Box::pin(registry::read(&self.replica, self.domain().registry())).await
     }
-    /// Which nodes each identity linked, as this node knows them.
     pub(crate) async fn membership(&self) -> Result<Membership, Failure> {
         let mut known = self.replica.revocations().await;
         let settings = self.settings.lock().await;
@@ -30,7 +28,6 @@ impl Node {
         }
         Membership::replicated(&known, settings.database_context()?)
     }
-    /// Remembers that `node` of `identity` was admitted or renewed here.
     async fn see(&self, identity: PublicKey, node: PublicKey) -> Result<(), Failure> {
         let time = now()?;
         self.configure(|settings| {
@@ -42,9 +39,8 @@ impl Node {
         .await
     }
 
-    /// Commits `changes` with this issuer's own record in one transaction.
     pub(super) async fn commit(&self, mut changes: Changes) -> Result<(), Failure> {
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let own = self.settings.lock().await.own_record(&registry)?;
         changes.extend(own);
         Box::pin(registry::write(
@@ -54,7 +50,6 @@ impl Node {
         ))
         .await
     }
-    /// Brings this issuer's own record up to date, as after a renewal.
     pub(super) async fn record_self(&self) -> Result<(), Failure> {
         if !self.settings.lock().await.issuer() {
             return Ok(());
@@ -62,14 +57,12 @@ impl Node {
         self.commit(Changes::default()).await
     }
 
-    /// Answers a pairing: the claim is saved, then the record committed,
-    /// then the enrollment returned.
     pub(super) async fn answer_pair(&self, request: &[u8]) -> Result<Vec<u8>, Failure> {
         if !self.settings.lock().await.issuer() {
             return Err(refused("only an issuer enrolls devices"));
         }
         self.expire_requests().await?;
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let bootstrap = self.enrollment_bootstrap().await?;
         let held = self.replica.revocations().await;
         let (reply, changes, notes) = {
@@ -104,7 +97,6 @@ impl Node {
         self.note(&notes).await;
         Ok(reply)
     }
-    /// Surfaces join request changes as activity events.
     pub(super) async fn note(&self, notes: &[crate::join_requests::Note]) {
         let expires = self.settings.lock().await.pending_requests().1;
         for note in notes {
@@ -113,7 +105,6 @@ impl Node {
             }
         }
     }
-    /// Ends the requests of an expired invitation and reports them.
     async fn expire_requests(&self) -> Result<(), Failure> {
         let notes = self
             .configure(|settings| Ok(settings.expire_requests(now()?)))
@@ -121,7 +112,6 @@ impl Node {
         self.note(&notes).await;
         Ok(())
     }
-    /// Pending approvals and certified nodes observed in this database.
     pub(super) async fn discovered(&self) -> Result<crate::Discovered, Failure> {
         self.expire_requests().await?;
         let settings = self.settings.lock().await.clone();
@@ -138,7 +128,7 @@ impl Node {
                 code: request.code.clone(),
             })
             .collect();
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let mut known = self.replica.revocations().await;
         known.verify_in(settings.database_context()?)?;
         known.merge(
@@ -210,7 +200,7 @@ impl Node {
         }
         self.settings.lock().await.admits(Some(&admit.profile))?;
         self.expire_requests().await?;
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let notes = self
             .configure(|settings| {
                 settings.admit(&node, &admit.code, (admit.profile, admit.label), &registry)
@@ -230,9 +220,8 @@ impl Node {
         Ok(())
     }
 
-    /// Answers a renewal of any unrevoked device once its record committed.
     pub(super) async fn answer_renewal(&self, request: &[u8]) -> Result<Vec<u8>, Failure> {
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let settings = self.settings.lock().await.clone();
         let claims = settings.renew_claims(&self.vault, request, &registry, now()?)?;
         let (reply, changes) = settings.renew(&self.vault, request, &registry, claims)?;
@@ -244,8 +233,6 @@ impl Node {
         Ok(reply)
     }
 
-    /// Issues a profile to a prepared device, granted on an issuer or
-    /// delegated: identity saved, record committed, then returned.
     pub(super) async fn answer_grant(
         &self,
         device: crate::NodeKeys,
@@ -254,7 +241,7 @@ impl Node {
         contact: Option<String>,
     ) -> Result<crate::Supplied, Failure> {
         let issuer = self.settings.lock().await.issuer();
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let (supplied, changes) = if delegate {
             self.configure(|settings| {
                 settings.delegate(&self.vault, device, issued, issuer.then_some(&registry))
@@ -272,8 +259,6 @@ impl Node {
         }
         Ok(supplied)
     }
-    /// Records partitions granted or delegated on an issuer before the
-    /// chain leaves it.
     pub(super) async fn record_holder(
         &self,
         device: &crate::NodeKeys,
@@ -281,7 +266,7 @@ impl Node {
         delegations: u8,
         chain: &CredentialChain,
     ) -> Result<(), Failure> {
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let mut changes = self
             .settings
             .lock()
@@ -306,14 +291,12 @@ impl Node {
         self.commit(changes).await?;
         self.see(device.identity, device.node).await
     }
-    /// Writes the tombstone of a revoked identity.
     pub(super) async fn record_revocation(&self, identity: PublicKey) -> Result<(), Failure> {
         let mut changes = Changes::default();
         changes.revoked(&identity)?;
         self.commit(changes).await
     }
 
-    /// The tombstone is the durable completion marker; a stale intent replays safely.
     pub(crate) async fn complete_revocation(&self) -> Result<(), Failure> {
         let pending = self
             .settings
@@ -334,7 +317,7 @@ impl Node {
             self.record_revocation(identity).await?;
         }
         crate::enrollment::fault::check(crate::enrollment::fault::Stage::Committed)?;
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let membership = self.membership().await?;
         self.configure(|settings| {
             settings.complete_revocation(&self.vault, &self.domain(), (&registry, &membership))
@@ -342,14 +325,12 @@ impl Node {
         .await
     }
 
-    /// Every identity's record with its linked nodes and its trust and
-    /// claim state, on an issuer.
     pub(super) async fn identities(&self) -> Result<Vec<crate::IdentityInfo>, Failure> {
         let settings = self.settings.lock().await.clone();
         if !settings.issuer() {
             return Err(refused("only an issuer lists identities"));
         }
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let membership = self.membership().await?;
         let time = now()?;
         let trusted = registry.trusted_identities(
@@ -415,7 +396,7 @@ impl Node {
         if !self.settings.lock().await.issuer() {
             return Err(refused("only an issuer lists identities"));
         }
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let membership = self.membership().await?;
         Ok(registry
             .records
@@ -424,7 +405,6 @@ impl Node {
             .find(|(identity, _)| membership.nodes(identity).any(|linked| linked.node == node))
             .map(|(identity, _)| *identity))
     }
-    /// Sets the opaque application label of a recorded identity.
     pub(super) async fn label(&self, identity: PublicKey, label: Vec<u8>) -> Result<(), Failure> {
         if label.len() > registry::MAX_LABEL {
             return Err(refused(format!(
@@ -435,7 +415,7 @@ impl Node {
         if !self.settings.lock().await.issuer() {
             return Err(refused("only an issuer labels identities"));
         }
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         if !registry.admitted(&identity) {
             return Err(refused("the registry holds no such identity"));
         }

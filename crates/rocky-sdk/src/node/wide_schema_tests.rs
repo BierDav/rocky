@@ -1,4 +1,3 @@
-//! Wide schemas use one signed grant family and one delivered group secret.
 use crate::test_snapshot as snap;
 use crate::{
     Database, Network, NetworkService, Open, Opened, Schema, Session, enrollment::Settings,

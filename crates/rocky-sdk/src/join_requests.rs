@@ -1,19 +1,12 @@
-//! Join requests an issuer holds for its approval invitation: devices that
-//! answered `Session::invitation()` and wait until the issuer admits or
-//! refuses them. They belong to the current invitation and end with it.
 use crate::{Failure, registry::MAX_LABEL};
 use data_encoding::HEXLOWER;
 use rocky_credentials::{PairRequest, Profile};
 use rocky_secure::PublicKey;
 use serde::{Deserialize, Serialize};
 
-/// Unanswered requests one issuer node holds; the oldest is evicted past it.
 pub const MAX_PENDING: usize = 32;
-/// Admitted or refused requests kept for their device's retry.
 const MAX_ANSWERED: usize = 32;
 
-/// The 6 digits both devices show before an admission: a hash of the
-/// issuer's node key, the requesting node key and the request nonce.
 pub fn admission_code(issuer: &PublicKey, node: &PublicKey, nonce: &str) -> String {
     let digest = rocky_core::commitment(
         "rocky.sdk.admission-code.v1",
@@ -29,7 +22,6 @@ pub fn admission_code(issuer: &PublicKey, node: &PublicKey, nonce: &str) -> Stri
     format!("{:06}", u64::from_le_bytes(head) % 1_000_000)
 }
 
-/// One device's request to join through the current invitation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
@@ -39,7 +31,6 @@ pub struct Request {
     pub invitation: String,
     pub name: String,
     pub routes: Vec<(String, String)>,
-    /// Epoch seconds the issuer first received it.
     pub received: u64,
     pub code: String,
     pub state: State,
@@ -48,24 +39,18 @@ pub struct Request {
 #[serde(deny_unknown_fields)]
 pub enum State {
     Pending,
-    /// Enrolled at the device's next retry, as `profile`.
     Admitted {
         profile: Profile,
         label: Option<Vec<u8>>,
     },
     Refused,
 }
-/// Why a request left the issuer without being answered by it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dropped {
-    /// The bound was reached; the oldest pending request made room.
     Evicted,
-    /// Its invitation expired.
     Expired,
-    /// A newer invitation replaced its own.
     Replaced,
 }
-/// What the issuer's application learns from a change of its requests.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Note {
     Requested(Request),
@@ -109,12 +94,9 @@ impl Request {
     }
 }
 
-/// The current invitation's requests, oldest first.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Requests {
-    /// The digest of the invitation token they answered, as the registry
-    /// records it.
     pub invitation: Option<String>,
     requests: Vec<Request>,
 }
@@ -124,7 +106,6 @@ impl Requests {
             .iter()
             .filter(|request| request.state == State::Pending)
     }
-    /// The request `request`'s device made before, with the same keys and nonce.
     pub fn of(&self, request: &PairRequest) -> Option<&Request> {
         self.requests.iter().find(|held| {
             held.node == request.node && held.user == request.user && held.nonce == request.nonce
@@ -133,8 +114,6 @@ impl Requests {
     pub fn of_mut(&mut self, node: &PublicKey) -> Option<&mut Request> {
         self.requests.iter_mut().find(|held| held.node == *node)
     }
-    /// Holds a new request of `invitation`, evicting the oldest pending one
-    /// at the bound and any earlier request of the same node.
     pub fn receive(
         &mut self,
         invitation: &str,
@@ -184,7 +163,6 @@ impl Requests {
         notes.push(Note::Requested(held));
         Ok(notes)
     }
-    /// Marks `node`'s pending request admitted when `code` is its code.
     pub fn admit(
         &mut self,
         node: &PublicKey,
@@ -202,7 +180,6 @@ impl Requests {
         let admitted = request.clone();
         Ok(self.answered(Note::Admitted(admitted)))
     }
-    /// Refuses `node`'s pending request; its device learns at its retry.
     pub fn refuse(&mut self, node: &PublicKey) -> Result<Vec<Note>, Failure> {
         let request = self
             .of_mut(node)
@@ -212,7 +189,6 @@ impl Requests {
         let refused = request.clone();
         Ok(self.answered(Note::Refused(refused)))
     }
-    /// Keeps at most `MAX_ANSWERED` answered requests, the newest.
     fn answered(&mut self, note: Note) -> Vec<Note> {
         let mut notes = vec![note];
         while self
@@ -233,7 +209,6 @@ impl Requests {
         }
         notes
     }
-    /// Drops every request, as their invitation ended for `why`.
     pub fn end(&mut self, why: Dropped) -> Vec<Note> {
         self.invitation = None;
         self.requests
@@ -243,7 +218,6 @@ impl Requests {
     }
 }
 
-/// The digest of an invitation token, as requests and the registry name it.
 pub fn invitation_digest(token: &[u8; 32]) -> String {
     HEXLOWER.encode(&rocky_core::commitment("rocky.sdk.invitation.v1", token))
 }

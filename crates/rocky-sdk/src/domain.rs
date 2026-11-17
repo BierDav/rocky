@@ -1,4 +1,3 @@
-//! Format-2 typed secure tables of a consumer schema in one domain.
 use crate::{Failure, schema::Schema};
 use rocky_core::{
     ApplicationManifest, Commitment, DomainId, LogicalSchema, MeshId, ResourceScope,
@@ -7,11 +6,9 @@ use rocky_core::{
 use rocky_credentials::{Grant, Profile, Resource};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The reserved collection of issuer records.
 pub(crate) const REGISTRY: &str = "issuer_registry";
 
 pub(crate) struct Domain {
-    /// The typed tables.
     pub app: TypedRows,
     pub scope: Scope,
     tables: BTreeMap<String, ResourceScope>,
@@ -34,7 +31,6 @@ impl Domain {
             rocky_core::EngineIdentity::current(),
         )
     }
-    /// The domain at schema generation `generation`, replayed on `engine`.
     pub fn at(
         schema: &Schema,
         publisher: [u8; 32],
@@ -123,10 +119,6 @@ impl Domain {
             None => self.logical().table(name).is_none(),
         }
     }
-    /// Partition grants as this generation reads them: grants on tables a
-    /// later generation removed are dropped, and with the schema's
-    /// `granted_like`, a whole-row grant on a followed table also selects
-    /// the same partitions of the table following it, slot by slot.
     pub fn effective_partitions(
         &self,
         grants: &[rocky_credentials::PartitionGrant],
@@ -154,11 +146,6 @@ impl Domain {
         chain.verified_with_families(publisher, revocations, time, &self.families)
     }
 
-    /// `profile` as this generation reads it: without the tables and
-    /// columns a later generation removed, and with the schema's
-    /// `granted_like` applied: a table granted like another receives the
-    /// same rights wherever the profile names that one in whole rows and is
-    /// silent on it. Every interpretation of a profile goes through here.
     pub fn effective(&self, profile: &Profile) -> Profile {
         let profile = &self.current(profile);
         let follow = |scopes: &std::collections::BTreeSet<String>| {
@@ -208,7 +195,6 @@ impl Domain {
             }
         }
     }
-    /// Stored grants retain names; the current schema resolves only those it has.
     fn current(&self, profile: &Profile) -> Profile {
         let named = |scopes: &BTreeSet<String>| -> BTreeSet<String> {
             scopes
@@ -247,18 +233,14 @@ impl Domain {
     pub fn logical(&self) -> &LogicalSchema {
         self.app.schema()
     }
-    /// The signed definition of the tables.
     pub fn manifest(&self) -> ApplicationManifest {
         self.app.manifest()
     }
-    /// Collections and their resource scopes, in name order.
     pub fn scopes(&self) -> impl Iterator<Item = (&str, ResourceScope)> {
         self.tables
             .iter()
             .map(|(name, scope)| (name.as_str(), *scope))
     }
-    /// Whether `scope` is a partitioned table's own scope, which holds no
-    /// rows: each partition has its own scope and checkpoint.
     pub fn partitioned_table(&self, scope: &ResourceScope) -> bool {
         let logical = self.logical();
         self.scopes().any(|(name, own)| {
@@ -268,28 +250,22 @@ impl Domain {
                     .is_some_and(|table| !table.partition_by.is_empty())
         })
     }
-    /// Each table's reader scope. Reference-connected tables share one,
-    /// while their grants and encryption keys stay per table.
     pub fn readers(&self) -> BTreeMap<String, Commitment> {
         self.tables
             .iter()
             .map(|(name, scope)| (name.clone(), scope.encryption))
             .collect()
     }
-    /// The registry's resource scope.
     pub fn registry(&self) -> ResourceScope {
         self.tables[REGISTRY]
     }
 
-    /// What an issuer can grant: every application collection, its scope
-    /// and columns. The registry is no grantable resource.
     pub fn resources(&self) -> Vec<Resource> {
         self.all_resources()
             .into_iter()
             .filter(|resource| resource.name != REGISTRY)
             .collect()
     }
-    /// The registry as a resource, for the grants the SDK adds itself.
     pub fn registry_resource(&self) -> Vec<Resource> {
         self.all_resources()
             .into_iter()
@@ -313,14 +289,11 @@ impl Domain {
             .collect()
     }
 }
-/// The format-3 typed tables of `schema` under `publisher`, with the
-/// reserved registry table every SDK domain carries.
 pub(crate) fn logical(schema: &Schema, publisher: [u8; 32]) -> Result<LogicalSchema, Failure> {
     let mut definition = schema.definition(publisher)?;
     definition.tables.push(registry_table()?);
     Ok(definition.build()?)
 }
-/// One row per entry of an identity's record, keyed by identity and entry.
 pub(crate) fn registry_table() -> Result<rocky_core::TableDefinition, Failure> {
     Ok(serde_json::from_value(serde_json::json!({
         "name": REGISTRY,

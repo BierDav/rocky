@@ -1,4 +1,3 @@
-//! Typed selection and sharing of SDK-owned group partitions.
 use crate::{Failure, Session, SqlValue, request::Request};
 use rocky_credentials::{CredentialChain, PublicKey};
 use serde::Serialize;
@@ -123,10 +122,8 @@ pub struct PartitionEviction {
     pub rows: u64,
     pub operations: u64,
     pub checkpoints: u64,
-    /// At least one evicted member has no confirmed remote durable copy.
     pub recovery_unconfirmed: bool,
 }
-/// Tables left out of holding, bootstrap or eviction; a sealed name lets custody register a partition.
 #[derive(Clone, Debug, Default)]
 pub struct PartitionSelection {
     pub name: Option<rocky_core::PartitionName>,

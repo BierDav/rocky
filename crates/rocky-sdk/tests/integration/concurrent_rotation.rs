@@ -1,4 +1,3 @@
-//! Sibling histories and writer convergence through the in-process hub.
 use crate::common;
 use crate::registry_revocation::fixture;
 use crate::support::snapshot as snap;
@@ -89,8 +88,6 @@ async fn write_group(device: &Device, prefix: &str) {
     }
     snap::ok(device.session.execute("COMMIT", Vec::new())).await;
 }
-/// Seals each issuer while it is offline, so each reader imports its own
-/// issuer's post-rotation base and the two seals race until the issuers meet.
 async fn seal_each_issuer_apart(issuers: [&Device; 2]) {
     for issuer in issuers {
         snap::ok(issuer.session.set_networking_enabled(false)).await;
@@ -101,8 +98,6 @@ async fn seal_each_issuer_apart(issuers: [&Device; 2]) {
     }
 }
 
-/// Renews and syncs `reader` while the issuer that revoked it is out of
-/// reach, so the reader can only retry the other issuer.
 async fn sync_away_from_revoking_issuer(reader: &Device, revoking: &Device) -> Result<(), Failure> {
     snap::ok(revoking.session.set_networking_enabled(false)).await;
     snap::ok(async {

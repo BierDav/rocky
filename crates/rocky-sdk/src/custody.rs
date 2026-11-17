@@ -1,4 +1,3 @@
-//! Configuration-only custody peer.
 use crate::{
     Database, Failure, Network, Open, Opened,
     enrollment::{Invite, Settings},
@@ -21,13 +20,10 @@ pub struct CustodyConfiguration {
     pub enrollment_upstream: Option<String>,
 }
 
-/// A keyless, non-issuing replica, opened from typed configuration.
 pub struct CustodyPeer {
     database: Arc<Database>,
 }
 impl CustodyPeer {
-    /// Enrolls once, then resumes the persisted custody identity. Refuses
-    /// reader/writer/issuer identities before opening their runtime.
     pub fn open(config: CustodyConfiguration) -> Result<Self, Failure> {
         if config.peers.len() > crate::enrollment::MAX_CONTACTS {
             return Err("custody peer quota".into());
@@ -101,18 +97,15 @@ impl CustodyPeer {
         }
         Ok(peer)
     }
-    /// The contact to configure on devices. This grants no authority.
     pub async fn contact(&self) -> Result<String, Failure> {
         let session = self.database.session();
         let contact = session.contact().await;
         session.close().await;
         contact
     }
-    /// Creates the SDK's consistent backup archive without reader keys.
     pub async fn backup(&self, target: &Path) -> Result<crate::BackupInventory, Failure> {
         self.database.backup(target).await
     }
-    /// Drains networking, flushes custody and closes the database.
     pub async fn close(&self) -> Result<(), Failure> {
         self.database.close().await
     }

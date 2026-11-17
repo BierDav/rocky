@@ -1,7 +1,3 @@
-//! Release-only interactive write measurements on two replayed tables: L0
-//! idle, and L2 while a peer authors a small write every 20 ms that this device keeps receiving. Diagnostic;
-//! run with `cargo test --release -p rocky-sdk --test write_latency --
-//! --ignored --nocapture --test-threads=1`.
 use common::{Device, Failure, introduce};
 use rocky_sdk::{Database, Network, Open, SqlValue, transport::memory::Hub};
 use serde_json::json;
@@ -56,15 +52,12 @@ async fn seed(database: &Database, keys: &[&str]) -> Result<(), Failure> {
     Ok(())
 }
 
-/// p50, p95, p99 and max of `samples`, in milliseconds.
 fn quantiles(mut samples: Vec<Duration>) -> [f64; 4] {
     samples.sort();
     let at = |q: f64| samples[((samples.len() - 1) as f64 * q).round() as usize];
     [at(0.5), at(0.95), at(0.99), at(1.0)].map(|sample| sample.as_secs_f64() * 1e3)
 }
 
-/// Single-row interactive writes to `table` every `period`, after warm-up:
-/// commit latency, and the local observer notification after it returns.
 async fn probe(
     scenario: &str,
     database: &Database,
@@ -88,7 +81,7 @@ async fn probe(
             loop {
                 let change = events.next().await?;
                 if change.tables.iter().any(|name| name == table)
-                    && change.causes.iter().any(|cause| cause == "local")
+                    && change.causes.contains(&rocky_sdk::ChangeCause::Local)
                 {
                     return Ok::<_, Failure>(());
                 }
@@ -117,7 +110,7 @@ fn release() -> Result<(), Failure> {
 }
 
 #[tokio::test]
-#[ignore = "measurement"]
+#[ignore = "release-only measurement: cargo test --release -p rocky-sdk --test integration write_latency -- --ignored --nocapture --test-threads=1"]
 async fn l0_idle_interactive_writes() -> Result<(), Failure> {
     release()?;
     let root = tempfile::tempdir()?;
@@ -131,7 +124,7 @@ async fn l0_idle_interactive_writes() -> Result<(), Failure> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "measurement"]
+#[ignore = "release-only measurement: cargo test --release -p rocky-sdk --test integration write_latency -- --ignored --nocapture --test-threads=1"]
 async fn l2_interactive_writes_while_receiving_small_writes() -> Result<(), Failure> {
     release()?;
     let root = tempfile::tempdir()?;

@@ -1,7 +1,3 @@
-//! A notes database: `--create` makes it on the first run, which refuses
-//! to overwrite an installation; later runs open it. Creating follows the
-//! `main` bookmark, so this owner seals routinely during sync and replay
-//! drops become final.
 use rocky_sdk::{Affinity, Column, Configuration, Failure, Schema, Table, params};
 
 #[tokio::main]

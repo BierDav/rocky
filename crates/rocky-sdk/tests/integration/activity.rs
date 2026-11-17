@@ -1,4 +1,3 @@
-//! Native activity observations share the database without sharing session lifetime.
 use rocky_sdk::{
     ActivityKind, Affinity, Column, Configuration, Failure, GrantProfile, GrantTerms, IdentityKey,
     NodeKeys, ReplicaRoleConfig, Schema, ServiceError, Table,

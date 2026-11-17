@@ -1,8 +1,3 @@
-//! Root recovery: every data key epoch is escrowed to the offline root in
-//! records that travel with its frames, so the root phrase and any node's
-//! backup, a keyless custodian's too, recover the data that store holds
-//! with every trusted node and device lost, while the records give anyone
-//! else nothing.
 use crate::support::snapshot as snap;
 use rocky_credentials::{RootEscrow, RootKey};
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
@@ -16,7 +11,6 @@ const SCHEMA: &str = r#"{"format":6,"application":"recovery","version":1,"tables
 {"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},
 {"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true},{"name":"title","type":"text"}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"},
 {"name":"items","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
-/// Lists names no one but holders may learn.
 const LISTS: [&str; 3] = ["acme-payroll", "acme-board", "acme-legal"];
 
 fn open<'a>(directory: &'a Path, hub: &Arc<Hub>) -> Open<'a> {
@@ -44,7 +38,6 @@ async fn sql(device: &Device, statement: String, id: Value) {
     )
     .await;
 }
-/// Writes item `key` of `list`, creating the list's row first.
 async fn write_item(device: &Device, list: &str, key: &str) {
     let listed = snap::ok(device.session.read(rocky_sdk::ReadQuery {
         sql: snap::text(&(format!("SELECT name FROM lists WHERE name='{list}'"))),
@@ -110,7 +103,6 @@ async fn column(device: &Device, query: &str) -> Vec<String> {
         .filter_map(|row| row[0]["value"].as_str().map(String::from))
         .collect()
 }
-/// Every row as `list/key` and `note/key`.
 async fn everything(device: &Device) -> Vec<String> {
     let mut rows = column(device, "SELECT list || '/' || key FROM items ORDER BY 1").await;
     rows.extend(column(device, "SELECT 'note/' || key FROM notes ORDER BY 1").await);
@@ -121,8 +113,6 @@ fn identity(directory: &Path) -> Result<Value, Failure> {
         directory.join("identity.json"),
     )?)?)
 }
-/// The root escrow records a node's replica holds, by tag; its identity
-/// record keeps none.
 fn escrow(directory: &Path) -> Result<Vec<(String, RootEscrow)>, Failure> {
     assert!(identity(directory)?.get("escrow").is_none());
     let file = rusqlite::Connection::open_with_flags(
@@ -147,7 +137,6 @@ fn escrow(directory: &Path) -> Result<Vec<(String, RootEscrow)>, Failure> {
     })
     .collect()
 }
-/// Every 32-byte secret an installation's file key store holds.
 fn secrets(directory: &Path) -> Result<Vec<[u8; 32]>, Failure> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(directory.join("secrets"))? {
@@ -157,8 +146,6 @@ fn secrets(directory: &Path) -> Result<Vec<[u8; 32]>, Failure> {
     }
     Ok(found)
 }
-/// Revokes a device that was granted `notes` and list `list`, never
-/// installed: the revocation rotates both keys.
 async fn rotate(issuer: &Device, directory: &Path, list: &str) -> Result<(), Failure> {
     let device = common::node_keys(directory, None)?;
     snap::ok(issuer.session.grant(
@@ -454,7 +441,6 @@ async fn a_revoked_trusted_node_gains_nothing_from_escrow_records() -> Result<()
     Ok(())
 }
 
-/// The writer `device`'s rows and stamps name: its node key.
 async fn writer(device: &Device) -> String {
     snap::ok(device.session.info()).await["writer"]
         .as_str()
@@ -462,8 +448,6 @@ async fn writer(device: &Device) -> String {
         .into()
 }
 
-/// The backup predates an issuer its node enrolled: the recovered node
-/// writes under its own key, which no trusted node holds.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_recovery_writes_under_a_key_no_trusted_node_holds() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -502,8 +486,6 @@ async fn a_recovery_writes_under_a_key_no_trusted_node_holds() -> Result<(), Fai
     Ok(())
 }
 
-/// Every trusted identity the backup knows is lost with its devices: the
-/// recovery revokes each with the root, and the app learns which.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_recovery_revokes_every_lost_trusted_identity_it_knows() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -575,10 +557,6 @@ async fn a_recovery_revokes_every_lost_trusted_identity_it_knows() -> Result<(),
     Ok(())
 }
 
-/// Every device is lost but a keyless custodian of the notes and of one
-/// list: its store alone, with the root, recovers every row it holds
-/// ciphertext of, under each key epoch, the escrow records having
-/// travelled to it with the frames.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_custodians_store_and_the_root_recover_what_it_holds() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -673,11 +651,9 @@ async fn a_custodians_store_and_the_root_recover_what_it_holds() -> Result<(), F
     Ok(())
 }
 
-/// Why `device`'s status says a verified revocation ends it, if one does.
 async fn revocation_reason(device: &Device) -> Value {
     snap::ok(device.session.status()).await["authority"]["verified_revocation"]["reason"].clone()
 }
-/// Alerts of `kind` in `device`'s status.
 async fn alerts(device: &Device, kind: &str) -> Vec<Value> {
     snap::ok(device.session.status()).await["alerts"]
         .as_array()
@@ -688,9 +664,6 @@ async fn alerts(device: &Device, kind: &str) -> Vec<Value> {
         .collect()
 }
 
-/// A trusted identity promoted after the backup is in no registry the
-/// recovery reads: its statement still ends it, and the device it
-/// enrolled, once they meet any holder, and each says why.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_recovery_ends_trusted_identities_its_backup_never_knew() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -791,9 +764,6 @@ async fn a_recovery_ends_trusted_identities_its_backup_never_knew() -> Result<()
     Ok(())
 }
 
-/// Two recoveries from copies that never learned of each other: when
-/// they meet, the later keeps its trust and ends the earlier, whose writes
-/// it never takes, and both say so, naming each other.
 #[tokio::test(flavor = "multi_thread")]
 async fn of_two_recoveries_that_meet_the_later_ends_the_earlier() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -864,10 +834,6 @@ async fn of_two_recoveries_that_meet_the_later_ends_the_earlier() -> Result<(), 
     Ok(())
 }
 
-/// Each device says which trusted identities a recovery ended, those it
-/// learns of after the statement too: the recovered node and a trusted
-/// node the root adds afterwards from their registry, a member from the
-/// tip statements the lost identities signed.
 #[tokio::test(flavor = "multi_thread")]
 async fn survivors_report_the_trusted_identities_a_recovery_ended() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;

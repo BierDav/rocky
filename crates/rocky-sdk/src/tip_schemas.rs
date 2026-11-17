@@ -1,4 +1,3 @@
-//! Exact, tip-authenticated schema catalog records; the supplier grants no authority.
 use crate::{Failure, domain::Domain, enrollment::Settings, schema::Schema};
 use rocky_core::{Commitment, TipId};
 use serde::{Deserialize, Serialize};
@@ -10,7 +9,6 @@ const FORMAT: u32 = 2;
 pub(crate) struct Record {
     pub format: u32,
     pub generation: u32,
-    /// The replay engine the tip's manifest names.
     pub engine: rocky_core::EngineIdentity,
     pub schema: Schema,
 }

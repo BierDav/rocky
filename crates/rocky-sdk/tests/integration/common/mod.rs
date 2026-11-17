@@ -1,5 +1,3 @@
-//! One device of the peer, fault and iroh suites: a database, a session
-//! and the calls the suites repeat.
 use crate::support::snapshot as snap;
 use rocky_sdk::{Database, Network, NetworkService, Open, Opened, Session};
 use serde_json::{Value, json};
@@ -9,7 +7,6 @@ pub type Failure = Box<dyn std::error::Error + Send + Sync>;
 
 pub const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
-/// An application-owned test signer for multi-call external enrollment.
 pub fn external_identity(directory: &Path) -> Arc<dyn rocky_sdk::IdentityProvider> {
     Arc::new(rocky_sdk::IdentityKey::from_secret(rocky_core::commitment(
         "fixture.external-identity",
@@ -34,7 +31,6 @@ pub struct Device {
     pub network: Option<NetworkService>,
     pub session: Session,
     scope: rocky_sdk::Scope,
-    /// The creating device's root, which root-only calls name.
     root: Option<String>,
     signer: Option<Arc<dyn rocky_sdk::IdentityProvider>>,
 }
@@ -49,7 +45,6 @@ fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
     }
 }
 impl Device {
-    /// Wraps a database opened some other way.
     pub fn new(opened: Opened) -> Result<Self, Failure> {
         Ok(Self {
             session: opened.database.session(),
@@ -83,11 +78,9 @@ impl Device {
         self.signer = Some(signer);
         self
     }
-    /// The creating device's root signer.
     pub fn root(&self) -> Arc<dyn rocky_sdk::IdentityProvider> {
         self.root_signer().expect("fixture root")
     }
-    /// The database domain.
     pub fn scope(&self) -> &rocky_sdk::Scope {
         &self.scope
     }
@@ -176,7 +169,6 @@ impl Device {
             .expect("update");
         self.session.commit(handle).await.expect("commit");
     }
-    /// Deletes the item `id` in its own transaction, once per `handle`.
     pub async fn remove(&self, handle: u8, id: &str) {
         let handle = self.handle(handle).await;
         if self
@@ -276,7 +268,6 @@ impl Device {
     pub async fn sync(&self) -> Result<Value, Value> {
         snap::observe(self.sync_once()).await
     }
-    /// An invitation for a writer of the schema's one collection.
     pub async fn invite(&self) -> String {
         self.invite_as(json!({"kind": "writer", "scopes": ["items"]}))
             .await
@@ -309,7 +300,6 @@ impl Device {
         })
         .await
     }
-    /// The state the last sync left for the peer `node`.
     pub async fn peer(&self, node: &str) -> Value {
         let peers = snap::ok(async {
             let network = self.session.network().await?;
@@ -327,8 +317,6 @@ impl Device {
     pub async fn close(&self) {
         self.database.close().await.expect("close");
     }
-    /// The owner's application creates and follows `main` once; Rocky
-    /// defines no bookmark.
     pub async fn follow_main(&self) {
         self.session
             .create_bookmark("main", None)
@@ -345,7 +333,6 @@ impl Device {
         serde_json::to_value(self.session.compact(0).await.expect("compact")).expect("report")
     }
 }
-/// Configures each device as the other's peer.
 pub async fn introduce(left: &Device, right: &Device) {
     left.add_peer(&right.contact().await).await.expect("peer");
     right.add_peer(&left.contact().await).await.expect("peer");
@@ -370,7 +357,6 @@ pub fn exchange_failed(result: &Result<Value, Value>) -> bool {
     }
 }
 
-/// Confirms a removal after inspecting its report in a test.
 pub fn confirmed(open: Open<'_>) -> Result<Opened, Failure> {
     let directory = open.directory;
     let schema = open.schema;
@@ -389,7 +375,6 @@ pub fn confirmed(open: Open<'_>) -> Result<Opened, Failure> {
     Database::open_confirmed(open, &report.report.digest)
 }
 
-/// Simulates a user comparing both displayed codes before linking.
 pub async fn link(open: Open<'_>, contact: &str, responder: &Session) -> Result<Opened, Failure> {
     let config =
         rocky_sdk::Configuration::new(open.directory, &rocky_sdk::Schema::parse(open.schema)?)?;

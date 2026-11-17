@@ -1,6 +1,3 @@
-//! "This is everything: sign out everywhere else": the root ends every
-//! node but the signer and its custodians, including ones it never saw,
-//! and the fence discards what it did not hold.
 use crate::support::snapshot as snap;
 use rocky_sdk::{
     ActivityKind, CallFailure, Database, Freshness, Network, Open, ResetKeep, RestoreChoice,
@@ -58,7 +55,6 @@ async fn notes(device: &Device) -> Vec<String> {
 async fn revocation_reason(device: &Device) -> Value {
     snap::ok(device.session.status()).await["authority"]["verified_revocation"]["reason"].clone()
 }
-/// Syncs, then renews, so `device` learns what ended it.
 async fn learn_ended(device: &Device) {
     let _ = device.sync().await;
     let _ = snap::observe(async {
@@ -67,7 +63,6 @@ async fn learn_ended(device: &Device) {
     })
     .await;
 }
-/// Whether `device` recorded that reset `reset` ended it.
 async fn recorded_reset(device: &Device, reset: rocky_sdk::Commitment) -> Result<bool, Failure> {
     let mut after = 0;
     loop {
@@ -83,7 +78,6 @@ async fn recorded_reset(device: &Device, reset: rocky_sdk::Commitment) -> Result
         after = page.token;
     }
 }
-/// The refusal a reset on `device` ends with.
 async fn refusal(device: &Device, root: &Device) -> Result<CallFailure, Failure> {
     let error = device
         .session
@@ -93,7 +87,6 @@ async fn refusal(device: &Device, root: &Device) -> Result<CallFailure, Failure>
         .ok_or("the reset succeeded")?;
     Ok(CallFailure::from_failure(&error))
 }
-/// `device` refuses to reset: reset `by` already signed it out.
 async fn refuses_as_signed_out(
     device: &Device,
     root: &Device,
@@ -250,7 +243,6 @@ async fn a_device_another_enrolled_resets_and_the_root_signed_device_it_ends_can
     Ok(())
 }
 
-/// Joins `name` through `invitation`, the normal invite flow.
 fn join(directory: &Path, hub: &Arc<Hub>, invitation: &str) -> Result<Device, Failure> {
     Device::new(Database::join(open(directory, hub), invitation)?)
 }

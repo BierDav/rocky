@@ -1,4 +1,3 @@
-//! Eager local schema publication; migration programs never enter the catalog.
 use super::*;
 use crate::{
     schema::{MigrationStep, Schema},
@@ -12,11 +11,6 @@ use rocky_secure::{SchemaStage, TipStatement};
 use std::collections::BTreeSet;
 
 impl Node {
-    /// Publishes the application schema at open. A continue published at once
-    /// is live and carries no migration rows; its ordinary terminal settles
-    /// while the original workspace still follows the source. A staged switch
-    /// branches, and the local graph holds its statements, so later signing
-    /// chains after them.
     pub(crate) async fn publish_schema_at_open(
         &self,
         confirmation: Option<&str>,
@@ -32,7 +26,7 @@ impl Node {
         if settings.application(&self.declared)? != crate::DeclaredSchema::Ahead {
             return Ok(());
         }
-        let Ok(mut signer) = self.tip_signer(scope).await else {
+        let Ok(signer) = self.tip_signer(scope).await else {
             return Ok(());
         };
         if let Some(blocked) = self.seal_blocker().await? {
@@ -58,11 +52,11 @@ impl Node {
             rocky_core::EngineIdentity::current(),
         )?;
         let continues_live = !migrates && self.replica.domain_log().is_some();
-        if continues_live {
-            self.hold_chain(&mut signer, scope).await?;
+        let signer = if continues_live {
+            self.hold_chain(signer, scope).await?
         } else {
-            self.hold_stage_chain(&mut signer, scope).await?;
-        }
+            self.hold_stage_chain(signer, scope).await?
+        };
         let seal = signer.endorse::<SignedSeal>(SealStatement {
             format: SEAL_FORMAT,
             scope,
@@ -184,10 +178,6 @@ impl Node {
         self.run_staged_migration().await
     }
 
-    /// Finish publication only after the closing base is signed and listed.
-    /// Persisted graph statements and bases are the retry journal. A losing
-    /// publication first adopts the bookmark's winner: sealing its old
-    /// workspace would prevent the sync that fetches it.
     pub(super) async fn close_migrations(&self) -> Result<(), Failure> {
         let publications = self.replica.publications().await?;
         if publications.is_empty()
@@ -268,11 +258,6 @@ impl Node {
         Ok(())
     }
 
-    /// Runs the program of replayed tables once over every granted scope but
-    /// the registry, so it may read and write every partition the issuer holds;
-    /// once committed, its bundles continue from their cursor and it never runs
-    /// again. A stage none of which left the device is withdrawn, and a later
-    /// application stages its own.
     async fn run_staged_migration(&self) -> Result<(), Failure> {
         let Some((stage, committed)) = self.replica.staged_schema().await? else {
             return Ok(());
@@ -365,8 +350,6 @@ impl Node {
         Ok(())
     }
 
-    /// Switches back to the stage's source tip and its schema, saving the
-    /// intent first so a crash resumes on whichever side committed.
     async fn withdraw_stage(&self, stage: &SchemaStage) -> Result<(), Failure> {
         let manifest = self
             .replica

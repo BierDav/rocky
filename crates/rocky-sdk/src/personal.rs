@@ -1,8 +1,3 @@
-//! A personal database a passkey names: the typed outcome and refusals of
-//! creating it, and the durable install intent an interrupted create
-//! resumes from. The root, identity and PRF stay in memory for one attempt;
-//! the intent and the secret store hold only device keys, reader epochs,
-//! the discovery capability and public metadata.
 use crate::{
     Failure, Freshness, Opened,
     domain::Domain,
@@ -29,36 +24,23 @@ pub use backup::VerifiedBackup;
 pub use sign_in::SignInSource;
 pub(crate) use sign_in::{SignIn, prepare_sign_in, tidy};
 
-/// The vault role of the bootstrap discovery capability.
 pub(crate) const DISCOVERY_ROLE: &str = "personal-discovery";
-/// The one current install intent format; others are refused.
 const INTENT_VERSION: u32 = 4;
 const INTENT_FILE: &str = "personal.intent";
 const MAX_INTENT: usize = 64 * 1024;
 
-/// A personal database this device opened through its passkey.
 pub struct PersonalOpened {
     pub opened: Opened,
-    /// What this device holds of the database's keys.
     pub restored: RestoreCoverage,
     pub freshness: Freshness,
 }
 
-/// What a personal open restored: reader and partition epochs held, and
-/// any a source named that this device holds no key for. Restoring
-/// existing partitions and naming future ones are separate claims.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RestoreCoverage {
-    /// Key epochs held of each collection, ascending.
     pub readers: BTreeMap<String, Vec<KeyEpoch>>,
-    /// Key epochs held of each group partition, by address.
     pub partitions: BTreeMap<String, Vec<KeyEpoch>>,
-    /// Epochs named by a source that no held key opens.
     pub missing: Vec<(String, KeyEpoch)>,
-    /// Collections no source held a key of: reading and writing them waits
-    /// for a device that does. No replacement key is made.
     pub unkeyed: Vec<String>,
-    /// Whether this device holds the partition naming root.
     pub naming: bool,
 }
 impl RestoreCoverage {
@@ -75,41 +57,25 @@ impl RestoreCoverage {
             naming: vault.find(crate::groups::NAMING_ROLE)?.is_some(),
         })
     }
-    /// Every named epoch is held and partitions can be named.
     pub fn complete(&self) -> bool {
         self.missing.is_empty() && self.unkeyed.is_empty() && self.naming
     }
 }
 
-/// Why a personal create or sign-in refused. Unless stated otherwise,
-/// local state is unchanged.
 #[derive(Debug)]
 pub enum PersonalSignInError {
-    /// The adapter's PRF is unusable for this namespace; nothing was
-    /// derived, written or sent.
     PrfUnsupported,
-    /// The directory holds another account's database or install.
     WrongLocalAccount,
-    /// The directory already holds local state: open it, or use an empty one.
     ExistingState,
-    /// No source holding the database could be reached; nothing was created.
     SourceUnavailable,
-    /// Local or supplied state is in another format version.
     UnsupportedFormat,
-    /// An authenticated genesis differs from the one pinned here; both are kept.
     GenesisConflict,
-    /// A required escrowed key is missing; no replacement is generated.
     MissingEscrow,
-    /// The owner already holds this many live devices here.
     Capacity { limit: usize },
-    /// A permanent statement ended this node.
     RevokedNode { node: PeerId },
-    /// An unexpected local failure, such as storage. An interrupted create
-    /// keeps its install intent and resumes on the next call.
     Failed(Failure),
 }
 impl PersonalSignInError {
-    /// The stable code of the call contract.
     pub fn code(&self) -> String {
         match self {
             Self::PrfUnsupported => "prf_unsupported".into(),
@@ -124,7 +90,6 @@ impl PersonalSignInError {
             Self::Failed(error) => crate::CallFailure::from_failure(error).code().to_owned(),
         }
     }
-    /// The typed refusal inside a failure raised on the database thread.
     pub(crate) fn from_failure(error: Failure) -> Self {
         let error = match error.downcast::<Self>() {
             Ok(refusal) => return *refusal,
@@ -176,8 +141,6 @@ impl std::error::Error for PersonalSignInError {
     }
 }
 
-/// The ID under which this device's certificate is published; retries of
-/// an interrupted install reuse it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct PublicationId([u8; 16]);
 impl PublicationId {
@@ -186,18 +149,13 @@ impl PublicationId {
     }
 }
 
-/// What an installed personal device keeps besides its keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Device {
     pub(crate) publication: PublicationId,
-    /// No owner device has witnessed this install or its latest reset.
     pub(crate) unwitnessed: bool,
 }
 
-/// What a source named that the installed device holds no key of, kept
-/// with the intent once the identity is about to be saved: a sign-in
-/// resumed after that point reports the same coverage.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Gaps {
@@ -208,16 +166,11 @@ struct Gaps {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum Stage {
-    /// Node and transport keys exist; nothing else is pinned.
     Prepared,
-    /// The genesis descriptor and the reader epochs whose keys the secret
-    /// store holds are pinned.
     Pinned {
         descriptor: Commitment,
         epochs: BTreeMap<String, Vec<KeyEpoch>>,
     },
-    /// A sign-in also certified its node; every retry publishes this
-    /// certificate under the intent's publication ID.
     Certified {
         descriptor: Commitment,
         epochs: BTreeMap<String, Vec<KeyEpoch>>,
@@ -236,18 +189,13 @@ impl Stage {
     }
 }
 
-/// Which call an install intent belongs to: each resumes only its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum Origin {
-    /// An explicit first create, under the random value its genesis pins.
     Create { creation: [u8; 16] },
-    /// A sign-in to a database a source holds.
     SignIn,
 }
 
-/// The durable install intent, written before anything is sent and
-/// removed once the database is handed out. It holds no secret.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Intent {
@@ -260,10 +208,7 @@ struct Intent {
     node: PublicKey,
     publication: PublicationId,
     stage: Stage,
-    /// Partition secrets kept in the secret store, recorded before each
-    /// is stored.
     secrets: BTreeSet<(Commitment, KeyEpoch)>,
-    /// Set just before a sign-in saves its identity.
     gaps: Option<Gaps>,
 }
 impl Intent {
@@ -294,9 +239,6 @@ impl Intent {
     fn save(&self, directory: &Path) -> Result<(), Failure> {
         write_private(&Self::path(directory), &rocky_credentials::encode(self)?)
     }
-    /// The installed database this sign-in saved but never handed out: the
-    /// identity in `directory` is this account's, under this intent's
-    /// installation and node.
     fn finished(
         &self,
         directory: &Path,
@@ -338,8 +280,6 @@ impl Intent {
     fn names(&self, account: (PublicKey, PublicKey, &PersonalNamespace)) -> bool {
         (self.publisher, self.owner, &self.namespace) == account
     }
-    /// This account's intent of the same call continues; another call's is
-    /// existing state, another account's is `WrongLocalAccount`.
     fn continues(
         &self,
         account: (PublicKey, PublicKey, &PersonalNamespace),
@@ -355,8 +295,6 @@ impl Intent {
     }
 }
 
-/// Refuses a directory that holds an installed database: this account's
-/// is `ExistingState`, another's `WrongLocalAccount`. Nothing is touched.
 pub(crate) fn check_installed(
     directory: &Path,
     account: &PersonalAccount,
@@ -380,9 +318,6 @@ pub(crate) fn check_installed(
     })
 }
 
-/// Refuses, without writing anything, a create into a directory that
-/// holds state: another account's is `WrongLocalAccount`. Only this
-/// account's unfinished create continues.
 pub(crate) fn check_empty(
     directory: &Path,
     account: &PersonalAccount,
@@ -410,7 +345,6 @@ pub(crate) fn check_empty(
     }
 }
 
-/// The current settings format, or `UnsupportedFormat`.
 fn load_settings(path: &Path) -> Result<Settings, PersonalSignInError> {
     let bytes = rocky_platform::fs::read(path)
         .map_err(|error| PersonalSignInError::Failed(error.into()))?;
@@ -423,27 +357,19 @@ fn load_settings(path: &Path) -> Result<Settings, PersonalSignInError> {
     Settings::load(path).map_err(PersonalSignInError::Failed)
 }
 
-/// A personal create as the database thread receives it.
 pub(crate) struct Create {
     pub(crate) namespace: PersonalNamespace,
-    /// Taken once, with the root.
     pub(crate) discovery: std::sync::Mutex<Option<rocky_credentials::DiscoveryCapability>>,
-    /// What the device holds once its keys exist, for the caller.
     pub(crate) coverage: Arc<std::sync::Mutex<Option<RestoreCoverage>>>,
 }
 
-/// A personal create in progress: its intent, resumed or new, and the
-/// discovery capability it stores.
 pub(crate) struct Installing {
     directory: PathBuf,
     intent: Intent,
-    /// An earlier attempt's intent continues.
     resumed: bool,
     discovery: rocky_credentials::DiscoveryCapability,
 }
 impl Installing {
-    /// The account's unfinished install in `directory`, or a new one whose
-    /// node and transport keys now exist. Another account's is refused.
     pub(crate) fn resume(
         directory: &Path,
         store: &Arc<dyn SecretStore>,
@@ -502,7 +428,6 @@ impl Installing {
     pub(crate) fn resumed(&self) -> bool {
         self.resumed
     }
-    /// The random value a create's genesis pins; a retry reuses it.
     pub(crate) fn creation(&self) -> Result<[u8; 16], Failure> {
         match self.intent.origin {
             Origin::Create { creation } => Ok(creation),
@@ -515,23 +440,18 @@ impl Installing {
     pub(crate) fn directory(&self) -> &Path {
         &self.directory
     }
-    /// The device record of this install, as its source witnessed it.
     pub(crate) fn device(&self, freshness: Freshness) -> Device {
         Device {
             publication: self.intent.publication,
             unwitnessed: freshness == Freshness::Unwitnessed,
         }
     }
-    /// The naming root an earlier attempt made, or a fresh one.
     pub(crate) fn naming(&self, vault: &Vault) -> Result<(), Failure> {
         if vault.find(crate::groups::NAMING_ROLE)?.is_none() {
             vault.create(crate::groups::NAMING_ROLE)?;
         }
         Ok(())
     }
-    /// The reader epochs of `domain` under the genesis `descriptor`: those
-    /// an earlier attempt pinned, or fresh random keys, pinned before use.
-    /// A resumed install whose genesis changed is a conflict.
     pub(crate) fn pin(
         &mut self,
         vault: &Vault,
@@ -560,8 +480,6 @@ impl Installing {
         self.intent.save(&self.directory)?;
         Ok(epochs)
     }
-    /// A sign-in's unfinished install of `account`, or a new one under the
-    /// node and transport keys the attempt found a source with.
     pub(crate) fn sign_in(
         directory: &Path,
         store: &Arc<dyn SecretStore>,
@@ -611,8 +529,6 @@ impl Installing {
             discovery,
         })
     }
-    /// The node and transport keys of an unfinished install of `account`
-    /// in `directory`, if there is one.
     pub(crate) fn saved_keys(
         directory: &Path,
         store: &Arc<dyn SecretStore>,
@@ -637,19 +553,15 @@ impl Installing {
     pub(crate) fn publication(&self) -> PublicationId {
         self.intent.publication
     }
-    /// The genesis descriptor an earlier attempt pinned.
     pub(crate) fn pinned(&self) -> Option<Commitment> {
         self.intent.stage.pinned().map(|(descriptor, _)| descriptor)
     }
-    /// The certificate an earlier attempt published, or was about to.
     pub(crate) fn certificate(&self) -> Option<&SignedCapability> {
         match &self.intent.stage {
             Stage::Certified { certificate, .. } => Some(certificate),
             _ => None,
         }
     }
-    /// Pins the imported `epochs` under `descriptor`, with those an earlier
-    /// attempt imported; another genesis is a conflict.
     pub(crate) fn import(
         &mut self,
         descriptor: Commitment,
@@ -676,8 +588,6 @@ impl Installing {
         };
         self.intent.save(&self.directory)
     }
-    /// Records partition secrets before the secret store keeps them, so a
-    /// discarded install forgets them too.
     pub(crate) fn hold_secrets(
         &mut self,
         secrets: impl IntoIterator<Item = (Commitment, KeyEpoch)>,
@@ -689,7 +599,6 @@ impl Installing {
         }
         self.intent.save(&self.directory)
     }
-    /// Keeps the node's certificate before it is sent anywhere.
     pub(crate) fn certify(&mut self, certificate: SignedCapability) -> Result<(), Failure> {
         let (descriptor, epochs) = self
             .intent
@@ -704,8 +613,6 @@ impl Installing {
         };
         self.intent.save(&self.directory)
     }
-    /// Stores the discovery capability and records what `coverage` lacks:
-    /// the last step before the identity is saved.
     pub(crate) fn installed(
         mut self,
         vault: &Vault,
@@ -718,14 +625,12 @@ impl Installing {
         });
         self.intent.save(&self.directory)
     }
-    /// Stores the discovery capability and ends the attempt's hold on it.
     pub(crate) fn keep_discovery(self, vault: &Vault) -> Result<(), Failure> {
         vault.put(DISCOVERY_ROLE, self.discovery.topic())?;
         Ok(())
     }
 }
 
-/// Fresh random reader keys of every collection of `domain`, at epoch 1.
 pub(crate) fn fresh_readers(
     vault: &Vault,
     domain: &Domain,
@@ -740,8 +645,6 @@ pub(crate) fn fresh_readers(
     Ok(keys)
 }
 
-/// Ends an install whose node a permanent statement ended: its intent and
-/// the keys it pinned go, so the next attempt is a fresh node.
 pub(crate) fn discard(directory: &Path, store: &Arc<dyn SecretStore>) -> Result<(), Failure> {
     let Some(intent) = Intent::load(directory)? else {
         return Ok(());
@@ -768,8 +671,6 @@ pub(crate) fn discard(directory: &Path, store: &Arc<dyn SecretStore>) -> Result<
     finish(directory)
 }
 
-/// Ends the install intent once the database was handed out, with the
-/// staging a backup sign-in left if it stopped right after saving.
 pub(crate) fn finish(directory: &Path) -> Result<(), Failure> {
     if !rocky_platform::fs::exists(Intent::path(directory)) {
         return Ok(());
@@ -784,45 +685,30 @@ pub(crate) fn finish(directory: &Path) -> Result<(), Failure> {
     }
 }
 
-/// A sign-in that saved its identity but was never handed out: what the
-/// next sign-in of the same account reports when it opens that database.
 pub(crate) struct Finished {
     pub(crate) restored: RestoreCoverage,
     pub(crate) freshness: Freshness,
 }
 
-/// Whether `directory` holds an unfinished install: an intent without a
-/// saved identity, which only the call that wrote it continues.
 pub(crate) fn unfinished(directory: &Path) -> bool {
     rocky_platform::fs::exists(Intent::path(directory))
         && !rocky_platform::fs::exists(directory.join("identity.json"))
 }
 
-/// Deterministic crash points of a personal install. A crash stops the
-/// attempt where it is and takes back nothing it wrote, as a killed
-/// process would; the next call of the same kind resumes.
 pub(crate) mod fault {
     use crate::Failure;
     use std::path::Path;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum Stage {
-        /// The intent and node keys exist; nothing is pinned.
         Prepared,
-        /// The genesis and imported epochs are pinned; no key is stored.
         Pinned,
-        /// Some imported keys are stored, not all.
         Importing,
-        /// The node certificate is kept; nothing is published.
         Certified,
-        /// The source kept the certificate; nothing is saved here.
         Published,
-        /// A backup's files are placed; the identity is not saved.
         Placed,
-        /// The identity is saved; the database is not handed out.
         Saved,
     }
-    /// A crash injected at a stage.
     #[derive(Debug)]
     pub(crate) struct Crashed(pub(crate) Stage);
     impl std::fmt::Display for Crashed {
@@ -832,8 +718,6 @@ pub(crate) mod fault {
     }
     impl std::error::Error for Crashed {}
 
-    /// The directories and stages at which an install crashes once;
-    /// process-wide, keyed by directory.
     #[cfg(test)]
     pub(crate) static CRASHES: std::sync::Mutex<Vec<(std::path::PathBuf, Stage)>> =
         std::sync::Mutex::new(Vec::new());
@@ -855,7 +739,6 @@ pub(crate) mod fault {
     pub(crate) fn check(_: &Path, _: Stage) -> Result<(), Failure> {
         Ok(())
     }
-    /// Whether `error` is an injected crash, whose writes stay.
     pub(crate) fn crashed(error: &Failure) -> bool {
         error.is::<Crashed>()
     }

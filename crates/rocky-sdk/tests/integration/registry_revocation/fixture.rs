@@ -1,4 +1,3 @@
-//! The Phase 7 hub, registry and group-key fixtures.
 use super::{Device, Failure};
 use crate::common;
 use crate::support::snapshot as snap;
@@ -16,8 +15,6 @@ pub(crate) const SCHEMA: &str = r#"{"application":"revocation","version":1,"form
  {"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
  {"name":"labels","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
 
-/// Keys in memory: the file store syncs every key, which dominated these
-/// tests. A device keeps its keys across reopens of the same directory.
 #[derive(Default)]
 struct Keys(Mutex<HashMap<String, Vec<u8>>>);
 impl SecretStore for Keys {
@@ -43,7 +40,6 @@ impl SecretStore for Keys {
 }
 static KEYS: LazyLock<Mutex<HashMap<PathBuf, Arc<Keys>>>> = LazyLock::new(Default::default);
 
-/// The key store of the device in `directory`.
 pub(crate) fn keys(directory: &Path) -> Arc<dyn SecretStore> {
     KEYS.lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())

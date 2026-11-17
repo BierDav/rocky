@@ -1,5 +1,3 @@
-//! Seals, tips and bookmarks: the developer calls over the replica's tip
-//! graph.
 use super::*;
 use crate::tips::{
     Bookmark, BookmarkMove, KeptSeals, LosingMove, TipAuthorMark, TipCheckpoint, TipCompaction,
@@ -18,14 +16,6 @@ use rocky_secure::TipStatement;
 fn hex(digest: &rocky_core::Commitment) -> String {
     HEXLOWER.encode(digest)
 }
-fn authority(authority: rocky_credentials::TipAuthority) -> String {
-    match authority {
-        rocky_credentials::TipAuthority::Owner => "owner",
-        rocky_credentials::TipAuthority::Trusted => "trusted",
-        rocky_credentials::TipAuthority::Issuer => "issuer",
-    }
-    .into()
-}
 fn parse_digest(text: &str) -> Result<rocky_core::Commitment, Failure> {
     HEXLOWER
         .decode(text.as_bytes())
@@ -34,30 +24,29 @@ fn parse_digest(text: &str) -> Result<rocky_core::Commitment, Failure> {
         .ok_or_else(|| refused("expected a hex digest"))
 }
 
-/// Who signs tip statements: the identity and the links its authority
-/// comes through.
 pub(super) struct Signer {
     pub(super) node: PrivateKey,
     pub(super) identity: PublicKey,
     pub(super) credentials: CredentialChain,
     pub(super) links: CredentialChain,
-    /// A trusted identity, which opens tips.
     opens: bool,
-    /// While held, the next link of this node's chain: a trusted
-    /// identity's statements name it. See `Node::hold_chain`.
+}
+pub(super) struct HeldSigner {
+    signer: Signer,
     chain: Option<Chain>,
+}
+impl std::ops::Deref for HeldSigner {
+    type Target = Signer;
+    fn deref(&self) -> &Signer {
+        &self.signer
+    }
 }
 pub(super) struct Chain {
     _held: tokio::sync::OwnedMutexGuard<()>,
     next: std::sync::Mutex<rocky_credentials::ChainLink>,
-    /// This chain's statements, held or journaled: one signed again keeps
-    /// its link, so a retry has the same bytes and never takes a new place.
     known: Vec<TipStatement>,
-    /// Set by `hold_stage_chain`: the next statement, its schema seal,
-    /// opens a stage branch tagged by that seal.
     branch: std::sync::atomic::AtomicBool,
 }
-/// A signed tip statement a trusted identity chains.
 pub(super) trait Linked: Sized {
     type Statement: rocky_credentials::OpensStage;
     fn endorse_linked(
@@ -67,7 +56,6 @@ pub(super) trait Linked: Sized {
         link: Option<rocky_credentials::ChainLink>,
     ) -> Result<Self, rocky_credentials::Error>;
     fn id(&self) -> Result<rocky_core::Commitment, rocky_credentials::Error>;
-    /// The link of `known` when it is this kind of statement with `body`.
     fn known_link(
         known: &TipStatement,
         body: &Self::Statement,
@@ -107,9 +95,7 @@ linked!(
     SignedGenesisLine => GenesisLineStatement, GenesisLine,
     rocky_credentials::SignedCheckpointRecord => rocky_credentials::CheckpointRecordStatement, Checkpoint
 );
-impl Signer {
-    /// Signs `statement`; a trusted identity at its node's next link, which
-    /// `Node::hold_chain` must hold.
+impl HeldSigner {
     pub(super) fn endorse<T: Linked>(&self, statement: T::Statement) -> Result<T, Failure> {
         if let Some(link) = self.chain.as_ref().and_then(|chain| {
             chain
@@ -153,7 +139,6 @@ impl Signer {
 }
 
 impl Node {
-    /// Creates and follows a created domain's initial bookmark.
     pub(crate) async fn follow_new_bookmark(&self, name: &str) -> Result<(), Failure> {
         use crate::request::TipChange;
         let root = super::Root::default();
@@ -304,7 +289,7 @@ impl Node {
         root: &super::Root,
     ) -> Result<crate::TrustGrant, Failure> {
         self.settings.lock().await.admits_identity(identity)?;
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let (link, changes) = self
             .settings
             .lock()
@@ -484,16 +469,15 @@ impl Node {
                         })
                         .collect(),
                     action: match statement.action {
-                        SealAction::Continue { .. } => "continue",
-                        SealAction::Close => "close",
-                    }
-                    .into(),
+                        SealAction::Continue { .. } => crate::TipSealAction::Continue,
+                        SealAction::Close => crate::TipSealAction::Close,
+                    },
                     schema: match statement.action {
                         SealAction::Continue { schema } => Some(hex(&schema)),
                         SealAction::Close => None,
                     },
                     canonical: graph.seal(statement.tip)? == Some(seal),
-                    authority: authority(graph.authority(seal.endorsement())),
+                    authority: graph.authority(seal.endorsement()),
                     revoked: graph.revoked.contains(&seal.id()?),
                     finalized: graph.is_final(seal.id()?)?,
                     checkpoints: graph
@@ -505,19 +489,12 @@ impl Node {
                                 scope: record.statement.table,
                                 checkpoint: hex(&record.statement.checkpoint),
                                 signer: record.statement.signer.to_hex(),
-                                authority: authority(graph.authority(record.endorsement())),
+                                authority: graph.authority(record.endorsement()),
                                 rows: record.statement.rows,
                             })
                         })
                         .collect::<Result<_, Failure>>()?,
-                    held: held.get(&seal.id()?).map(|how| {
-                        match how {
-                            rocky_secure::HeldSeal::Kept => "kept",
-                            rocky_secure::HeldSeal::Checkpoint => "checkpoint",
-                            rocky_secure::HeldSeal::Live => "live",
-                        }
-                        .into()
-                    }),
+                    held: held.get(&seal.id()?).copied(),
                     recovery: statement.recovery.map(|recovery| TipRecovery {
                         retained: recovery.retained.position,
                         replaced: recovery.replaced.position,
@@ -556,7 +533,7 @@ impl Node {
                                 id: hex(&movement.id()?),
                                 from: movement.statement.from.map(|tip| hex(&tip.0)),
                                 to: movement.statement.to.map(|tip| hex(&tip.0)),
-                                authority: authority(graph.authority(movement.endorsement())),
+                                authority: graph.authority(movement.endorsement()),
                                 revoked: graph.revoked.contains(&movement.id()?),
                             })
                         })
@@ -612,26 +589,21 @@ impl Node {
         })
     }
 
-    /// A device on another tip syncs again soon; the next pass retries the
-    /// peers whose links refused the earlier tip.
     async fn followed_tip_changed(&self, before: TipId) {
         if self.replica.followed_tip().await != before {
             self.wake_sync();
         }
     }
 
-    /// Lists this device's checkpoints at seals in the graph when it may
-    /// sign tip statements, so devices whose compacted seal lost can
-    /// rebootstrap from them.
     pub(super) async fn list_checkpoints(&self, scope: Scope) -> Result<(), Failure> {
         let unlisted = self.replica.unlisted_checkpoints(scope).await?;
         if unlisted.is_empty() {
             return Ok(());
         }
-        let Ok(mut signer) = self.tip_signer(scope).await else {
+        let Ok(signer) = self.tip_signer(scope).await else {
             return Ok(());
         };
-        self.hold_chain(&mut signer, scope).await?;
+        let signer = self.hold_chain(signer, scope).await?;
         let records = unlisted
             .into_iter()
             .map(|statement| {
@@ -645,8 +617,6 @@ impl Node {
         Ok(())
     }
 
-    /// A trusted identity signs through its trusted grant and an issuer
-    /// through its issuer links; the root never signs tip statements here.
     pub(super) async fn tip_signer(&self, scope: Scope) -> Result<Signer, Failure> {
         let settings = self.settings.lock().await.clone();
         if let Some(statement) = settings.revocation(&self.path)? {
@@ -674,57 +644,49 @@ impl Node {
             credentials: settings.credentials.clone(),
             links,
             opens,
-            chain: None,
         })
     }
-    /// Holds this node's chain of tip statements for a trusted `signer`
-    /// until it drops: its statements take the next links after the head
-    /// the graph holds, and no other signing on this node forks them.
     pub(super) async fn hold_chain(
         &self,
-        signer: &mut Signer,
+        signer: Signer,
         scope: Scope,
-    ) -> Result<(), Failure> {
-        if !signer.opens || signer.chain.is_some() {
-            return Ok(());
+    ) -> Result<HeldSigner, Failure> {
+        if !signer.opens {
+            return Ok(HeldSigner {
+                signer,
+                chain: None,
+            });
         }
         let held = self.tip_chain.clone().lock_owned().await;
         let lane = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
         let (next, known) = self.replica.own_chain(scope, signer.identity, lane).await?;
-        signer.chain = Some(Chain {
-            _held: held,
-            next: std::sync::Mutex::new(next),
-            known,
-            branch: std::sync::atomic::AtomicBool::new(false),
-        });
-        Ok(())
+        Ok(HeldSigner {
+            signer,
+            chain: Some(Chain {
+                _held: held,
+                next: std::sync::Mutex::new(next),
+                known,
+                branch: std::sync::atomic::AtomicBool::new(false),
+            }),
+        })
     }
 
-    /// `hold_chain` for a staged schema switch: its statements take a branch
-    /// of their own off the live chain, so a withdrawn stage leaves the live
-    /// chain whole and live signing goes on while it waits.
     pub(super) async fn hold_stage_chain(
         &self,
-        signer: &mut Signer,
+        signer: Signer,
         scope: Scope,
-    ) -> Result<(), Failure> {
-        self.hold_chain(signer, scope).await?;
-        if let Some(chain) = signer.chain.as_mut() {
+    ) -> Result<HeldSigner, Failure> {
+        let mut held = self.hold_chain(signer, scope).await?;
+        if let Some(chain) = held.chain.as_mut() {
             *chain.branch.get_mut() = true;
             chain.known.clear();
         }
-        Ok(())
+        Ok(held)
     }
-    /// Publishes `statements` once they have the effect `expected` checks on
-    /// the graph they extend; a statement that would lose to a lower digest is
-    /// refused rather than published. The replica's codes, `sealed` and
-    /// `coordinator_unavailable`, stay. Once published the graph holds the
-    /// statements and later signing chains after them; a move of the followed
-    /// bookmark may have switched lines.
     async fn publish_tips(
         &self,
         scope: Scope,
-        signer: Option<Signer>,
+        signer: Option<HeldSigner>,
         statements: Vec<TipStatement>,
         expected: impl FnOnce(&TipGraph) -> Result<(), Failure>,
     ) -> Result<(), Failure> {
@@ -747,7 +709,7 @@ impl Node {
     }
 
     pub(super) fn bookmark_move(
-        signer: &Signer,
+        signer: &HeldSigner,
         scope: Scope,
         name: &str,
         from: Option<TipId>,
@@ -764,11 +726,9 @@ impl Node {
         ))
     }
 
-    /// Seals the followed tip at its locally known frontier. The tip
-    /// leaving through the move, `tip`, must be the followed one.
     async fn seal_statement(
         &self,
-        signer: &Signer,
+        signer: &HeldSigner,
         scope: Scope,
         tip: TipId,
         close: bool,
@@ -804,9 +764,6 @@ impl Node {
         })
     }
 
-    /// `continue` seals the followed tip and moves its bookmark on, in one
-    /// batch; `close` ends it and leaves the bookmark read-only. Records for
-    /// transactions only this replica holds whole let the seal cover them.
     pub(super) async fn seal_followed(&self, scope: Scope, close: bool) -> Result<(), Failure> {
         let (followed, name) = self
             .replica
@@ -820,8 +777,9 @@ impl Node {
                 "the followed bookmark no longer points to the followed tip",
             ));
         }
-        let mut signer = self.tip_signer(scope).await?;
-        self.hold_chain(&mut signer, scope).await?;
+        let signer = self
+            .hold_chain(self.tip_signer(scope).await?, scope)
+            .await?;
         self.replica.publish_missing_outcomes().await?;
         let seal = self.seal_statement(&signer, scope, tip, close).await?;
         let mut statements = vec![TipStatement::Seal(seal.clone())];
@@ -844,10 +802,6 @@ impl Node {
         .await
     }
 
-    /// Seals the followed bookmark and makes the seal this node's listed
-    /// base, after a revocation or once writes of an earlier key epoch
-    /// arrived past the last seal: members, which refuse a revoked author's
-    /// frames and get only the current epoch, import those rows with it.
     pub(super) async fn seal_for_members(&self) -> Result<(), Failure> {
         let scope = self.domain().scope;
         if self.replica.followed_bookmark().await.is_none() || self.tip_signer(scope).await.is_err()
@@ -859,9 +813,6 @@ impl Node {
         self.list_checkpoints(scope).await
     }
 
-    /// The root recovers the followed tip when no ordinary seal can end its
-    /// log: it seals the tip with `continue`, replacing the log's exact
-    /// head. Bookmarks on the tip follow the seal.
     async fn recover_followed(&self, scope: Scope, root: &super::Root) -> Result<(), Failure> {
         let settings = self.settings.lock().await.clone();
         let root = crate::enrollment::root_signer(
@@ -919,10 +870,6 @@ impl Node {
         .await
     }
 
-    /// A trusted node, or the root, signs the minimum of trusted
-    /// acknowledgments that makes a seal on the genesis line final. The
-    /// root's governs once signed; a trusted node only raises the largest
-    /// trusted one. A minimum that would not take effect is refused.
     async fn sign_genesis_minimum(
         &self,
         scope: Scope,
@@ -959,13 +906,13 @@ impl Node {
                 )
                 .await;
         }
-        let mut signer = self.tip_signer(scope).await?;
+        let signer = self.tip_signer(scope).await?;
         if !signer.opens {
             return Err(refused(
                 "only a trusted node or the root signs the genesis line's minimum",
             ));
         }
-        self.hold_chain(&mut signer, scope).await?;
+        let signer = self.hold_chain(signer, scope).await?;
         let line = signer.endorse::<SignedGenesisLine>(statement)?;
         self.publish_tips(
             scope,
@@ -976,7 +923,6 @@ impl Node {
         .await
     }
 
-    /// Publishes a revision of the owner's database settings.
     pub(crate) async fn publish_settings(
         &self,
         signed: SignedDatabaseSettings,
@@ -997,8 +943,6 @@ impl Node {
         )
         .await
     }
-    /// The root names the composed coordinator in the database's settings,
-    /// so every device learns it by sync. A database keeps its coordinator.
     pub(super) async fn declare_coordinated(
         &self,
         scope: Scope,
@@ -1060,10 +1004,6 @@ impl Node {
         Ok(())
     }
 
-    /// Finalizes the seals this device holds; then, on a trusted node with
-    /// a composed log, ends the logs of journaled seals, acknowledges the
-    /// terminal entries of its line and publishes the finality records they
-    /// reach. A failure leaves the seals to the next call.
     pub(super) async fn finalize_seals(&self) {
         if self.replica.followed_bookmark().await.is_some() {
             match self.replica.finalize_arrived(self.domain().scope).await {
@@ -1128,8 +1068,6 @@ impl Node {
         }
     }
 
-    /// Raises, keeps or clears the alert of a seal this trusted node's
-    /// finality pass left unfinal, for `reason`.
     fn finality_stalled(&self, reason: Option<crate::FinalityStall>) {
         let mut stalled = self
             .finality_stalled
@@ -1159,8 +1097,6 @@ impl Node {
         drop(stalled);
         self.observations.touch();
     }
-    /// Finality permits automatic compaction; nonfinal seals still require
-    /// the application's compact call (or migration completion).
     async fn compact_final_seal(&self) -> Result<(), Failure> {
         let scope = self.domain().scope;
         let graph = self.replica.tip_graph(scope).await?;
@@ -1182,8 +1118,6 @@ impl Node {
         Ok(())
     }
 
-    /// Opens a tip on `seal`; only the owner and trusted identities may. A
-    /// branch starts from the seal's state, which this device must hold.
     pub(super) async fn open_tip(
         &self,
         scope: Scope,
@@ -1193,11 +1127,11 @@ impl Node {
         let graph = self.replica.tip_graph(scope).await?;
         let parent = graph.seal_by_id(seal).map_err(refused)?;
         let schema = graph.schema(parent.statement.tip).map_err(refused)?;
-        let mut signer = self.tip_signer(scope).await?;
+        let signer = self.tip_signer(scope).await?;
         if !signer.opens {
             return Err(refused("only the owner or a trusted identity opens tips"));
         }
-        self.hold_chain(&mut signer, scope).await?;
+        let signer = self.hold_chain(signer, scope).await?;
         self.replica.finalize_path(scope).await?;
         if self.replica.held_seal(scope, seal).await?.is_none() {
             return Err(refused(
@@ -1222,7 +1156,6 @@ impl Node {
         Ok(tip)
     }
 
-    /// Creates `name` on `tip`, by default the followed tip.
     async fn create_bookmark(
         &self,
         scope: Scope,
@@ -1238,8 +1171,9 @@ impl Node {
             None => self.replica.followed_tip().await,
         };
         let target = graph.canonical_tip(tip).map_err(refused)?;
-        let mut signer = self.tip_signer(scope).await?;
-        self.hold_chain(&mut signer, scope).await?;
+        let signer = self
+            .hold_chain(self.tip_signer(scope).await?, scope)
+            .await?;
         let statement = Self::bookmark_move(&signer, scope, name, None, Some(tip))?;
         self.publish_tips(scope, Some(signer), vec![statement], |graph| {
             if graph.bookmark(name)? != Some(target) {
@@ -1252,8 +1186,6 @@ impl Node {
         .await
     }
 
-    /// Moves `name` to `to`, or deletes it. Moving backward or sideways
-    /// off an open tip closes that tip in the same batch.
     async fn move_bookmark(
         &self,
         scope: Scope,
@@ -1271,8 +1203,9 @@ impl Node {
         if target == Some(from) {
             return Err(refused("the bookmark already points to this tip"));
         }
-        let mut signer = self.tip_signer(scope).await?;
-        self.hold_chain(&mut signer, scope).await?;
+        let signer = self
+            .hold_chain(self.tip_signer(scope).await?, scope)
+            .await?;
         let mut statements = Vec::new();
         if let Some(to) = to
             && !graph.continues_any(from, to)?

@@ -1,4 +1,3 @@
-//! Schedules the sweep found and shrank, kept as fixed regressions.
 use super::{
     driver,
     schedule::{Action::*, Fixture, Scenario, Wall},
@@ -24,8 +23,6 @@ fn branch(name: &str) -> super::schedule::Action {
     Branch(0, name.into())
 }
 
-/// Seeds 10187 and 10096: a write or a refused opening on a branch sealed
-/// after compacting at the seal it opened from.
 #[tokio::test(start_paused = true)]
 async fn a_write_on_a_branch_sealed_after_compaction_keeps_the_ledger() -> Result<(), Failure> {
     safe(
@@ -58,8 +55,6 @@ async fn a_refused_opening_on_a_sealed_branch_keeps_the_ledger() -> Result<(), F
     )
     .await
 }
-/// Seed 10041: leaving a branch sealed and compacted after compacting
-/// its base.
 #[tokio::test(start_paused = true)]
 async fn leaving_a_branch_compacted_after_its_base_keeps_the_projection() -> Result<(), Failure> {
     safe(
@@ -76,8 +71,6 @@ async fn leaving_a_branch_compacted_after_its_base_keeps_the_projection() -> Res
     .await
 }
 
-/// Leaving a compacted branch for a line with an unsent write loses the
-/// compaction, yet scopes whose base stays on the line still rebuild.
 #[tokio::test(start_paused = true)]
 async fn leaving_a_compacted_branch_rebuilds_scopes_on_the_line() -> Result<(), Failure> {
     safe(
@@ -95,8 +88,6 @@ async fn leaving_a_compacted_branch_rebuilds_scopes_on_the_line() -> Result<(), 
     .await
 }
 
-/// Seed 10095: a member that joined while the owner followed a branch,
-/// which the owner then sealed and compacted, audits on `main`.
 #[tokio::test(start_paused = true)]
 async fn a_member_joined_on_a_compacted_branch_audits_on_main() -> Result<(), Failure> {
     safe(
@@ -123,8 +114,6 @@ async fn healed(seed: u64, steps: Vec<super::schedule::Action>) -> Result<(), Fa
     Ok(())
 }
 
-/// Seed 10335: importing a base and then leaving its path must not keep
-/// seal bounds that name positions inside the abandoned base.
 #[tokio::test(start_paused = true)]
 async fn leaving_an_imported_base_rebuilds_without_stale_seal_bounds() -> Result<(), Failure> {
     use rocky_secure::CrashPoint;
@@ -146,8 +135,6 @@ async fn leaving_an_imported_base_rebuilds_without_stale_seal_bounds() -> Result
     .await
 }
 
-/// Seed 10961: a member joined on another branch can follow the listed
-/// bases on main and recover without a restart or another write.
 #[tokio::test(start_paused = true)]
 async fn a_member_on_another_branch_recovers_from_listed_bases() -> Result<(), Failure> {
     use rocky_secure::CrashPoint;
@@ -167,8 +154,6 @@ async fn a_member_on_another_branch_recovers_from_listed_bases() -> Result<(), F
     .await
 }
 
-/// Seed 10123: earlier-epoch writes past a served base need a newer
-/// listed base once the member can no longer receive that key epoch.
 #[tokio::test(start_paused = true)]
 async fn a_member_recovers_earlier_epoch_writes_from_a_newer_base() -> Result<(), Failure> {
     use rocky_secure::CrashPoint;
@@ -187,8 +172,6 @@ async fn a_member_recovers_earlier_epoch_writes_from_a_newer_base() -> Result<()
     .await
 }
 
-/// Seed 10957: after leaving a compacted branch, local replay must run
-/// even when the last peer is revoked and no further frames can arrive.
 #[tokio::test(start_paused = true)]
 async fn a_lone_signer_recovers_after_leaving_a_compacted_branch() -> Result<(), Failure> {
     healed(
@@ -206,8 +189,6 @@ async fn a_lone_signer_recovers_after_leaving_a_compacted_branch() -> Result<(),
     .await
 }
 
-/// Seed 10532: a partition granted after the latest seal needs verified
-/// accounting there even when no frame has ever used the partition.
 #[tokio::test(start_paused = true)]
 async fn a_late_empty_partition_gets_a_verified_replay_base() -> Result<(), Failure> {
     healed(
@@ -223,9 +204,6 @@ async fn a_late_empty_partition_gets_a_verified_replay_base() -> Result<(), Fail
     .await
 }
 
-/// Seed 10730: completed pages survive a crash at their switch and must
-/// be resumed even when the next frontier exchange reports equality. c's
-/// revoked rows come only by checkpoint, so b imports one.
 #[tokio::test(start_paused = true)]
 async fn an_interrupted_checkpoint_switch_resumes_without_another_write() -> Result<(), Failure> {
     use rocky_secure::CrashPoint;
@@ -261,7 +239,6 @@ async fn an_interrupted_checkpoint_switch_resumes_without_another_write() -> Res
     Ok(())
 }
 
-/// Seed 10355: unchanged partition rows still need coverage at the new seal.
 #[tokio::test(start_paused = true)]
 async fn an_empty_partition_base_advances_to_cover_a_new_author() -> Result<(), Failure> {
     healed(
@@ -281,7 +258,6 @@ async fn an_empty_partition_base_advances_to_cover_a_new_author() -> Result<(), 
     .await
 }
 
-/// Seeds 10641 and 10834: importing on a branch keeps admitted writes of main.
 #[tokio::test(start_paused = true)]
 async fn importing_on_a_branch_preserves_an_admitted_write_of_main() -> Result<(), Failure> {
     healed(

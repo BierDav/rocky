@@ -1,20 +1,3 @@
-//! The relational fixture: `boards` and their `cards`, both partitioned by
-//! `list` in one partition group, so each list's cards live in partitions
-//! (scopes) other than its boards. A card references its board by an
-//! `ON DELETE CASCADE` key and optionally pins a second board by an
-//! `ON DELETE SET NULL` key. Codes and names are unique per list and drawn
-//! from small pools so concurrent writers collide; `CHECK`s bound caps and
-//! points, and the `board_cap` assertion bounds a board's points by its cap.
-//!
-//! The reference is independent of Rocky's replay: a plain in-memory SQLite
-//! database with hand-written DDL (the `SET NULL` key as a trigger that
-//! leaves the partition column alone, as Rocky's does) replays, from
-//! scratch, the statements the driver itself bound and committed, in
-//! canonical order `(era, stamp)`. Each transaction runs in a savepoint,
-//! with foreign keys deferred when it spans several scopes; a failing
-//! statement, a remaining foreign key violation or a violated assertion
-//! drops it. Only the order comes from the replicas: the stamp the author
-//! assigned and the era of the seal that covers it.
 use super::schedule::Change;
 use crate::{Database, Failure, SqlValue, TransactionToken};
 use rocky_core::{SecureStamp, replay::TransactionOutcome};
@@ -55,11 +38,9 @@ CREATE TRIGGER cards_unpin AFTER DELETE ON boards BEGIN
   UPDATE cards SET pinned = NULL WHERE list = OLD.list AND pinned = OLD.id; END;";
 const ASSERTION: &str = "SELECT b.id FROM boards b JOIN cards c ON c.list = b.list AND c.board = b.id GROUP BY b.list, b.id HAVING SUM(c.points) > MIN(b.cap)";
 
-/// What each list's rows are compared by.
 pub(super) const BOARDS: &str = "SELECT list, id, code, cap FROM boards WHERE list = ? ORDER BY id";
 pub(super) const CARDS: &str =
     "SELECT list, id, board, pinned, name, points FROM cards WHERE list = ? ORDER BY id";
-/// Rows of a list that break a constraint or the assertion: none may exist.
 pub(super) const VIOLATIONS: [(&str, &str); 5] = [
     (
         "orphan card",
@@ -83,19 +64,15 @@ pub(super) const VIOLATIONS: [(&str, &str); 5] = [
     ),
 ];
 
-/// One list's rows: its boards, then its cards.
 pub(super) type ListRows = (Vec<Vec<SqlValue>>, Vec<Vec<SqlValue>>);
 
-/// A transaction the driver committed, with the values it bound.
 #[derive(Clone, Debug)]
 pub(super) struct Authored {
     pub(super) token: TransactionToken,
     pub(super) node: usize,
     pub(super) step: usize,
     pub(super) statements: Vec<(String, Vec<SqlValue>)>,
-    /// Lists its statements touch, the target of a move included.
     pub(super) lists: BTreeSet<String>,
-    /// Its bundle's members, as `(table, list)`: several defer keys.
     pub(super) scopes: BTreeSet<(&'static str, String)>,
 }
 
@@ -103,7 +80,6 @@ fn text(value: &str) -> SqlValue {
     SqlValue::Text(value.into())
 }
 
-/// Ids of `table`'s rows in `list`, as the author reads them.
 async fn ids(
     transaction: &mut crate::Transaction,
     table: &str,
@@ -131,8 +107,6 @@ fn pick(ids: &[rocky_core::RowIdentity], index: u8) -> Result<rocky_core::RowIde
     }
 }
 
-/// The statements of a change with this author's values bound, run inside
-/// `transaction`; each statement is also returned for the reference.
 async fn statements(
     transaction: &mut crate::Transaction,
     change: &Change,
@@ -260,8 +234,6 @@ async fn statements(
     Ok(run)
 }
 
-/// Lists a change touches and the scopes its statements write; a delete
-/// action's effects stay in the member that caused them.
 fn touched(change: &Change) -> (BTreeSet<String>, BTreeSet<(&'static str, String)>) {
     let (lists, scopes): (Vec<&String>, Vec<(&'static str, &String)>) = match change {
         Change::Board { list, .. }
@@ -285,8 +257,6 @@ fn touched(change: &Change) -> (BTreeSet<String>, BTreeSet<(&'static str, String
     )
 }
 
-/// Authors `change` on `database`. `Ok(None)` when a statement refused it
-/// before commit; a failed commit is still returned, as uncertain.
 pub(super) async fn author(
     database: &Database,
     node: usize,
@@ -315,7 +285,6 @@ pub(super) async fn author(
     Ok((authored, committed.map(drop).map_err(Failure::from)))
 }
 
-/// One list's rows and violations on `database`.
 pub(super) async fn list_rows(database: &Database, list: &str) -> Result<ListRows, Failure> {
     let read = |sql: &'static str| async move {
         let rows = database
@@ -331,7 +300,6 @@ pub(super) async fn list_rows(database: &Database, list: &str) -> Result<ListRow
     };
     Ok((read(BOARDS).await?, read(CARDS).await?))
 }
-/// Constraint or assertion violations `database` shows in `list`.
 pub(super) async fn violations(database: &Database, list: &str) -> Result<Vec<String>, Failure> {
     let mut found = Vec::new();
     for (name, sql) in VIOLATIONS {
@@ -347,12 +315,8 @@ pub(super) async fn violations(database: &Database, list: &str) -> Result<Vec<St
     Ok(found)
 }
 
-/// A transaction's canonical position: the era of the seal that covers
-/// it, then its earliest member's stamp.
 pub(super) type Position = (i64, SecureStamp);
 
-/// The reference's result: every list's rows and every transaction's
-/// outcome.
 #[derive(Debug, Default)]
 pub(super) struct Reference {
     pub(super) lists: BTreeMap<String, ListRows>,
@@ -380,8 +344,6 @@ fn read(value: rusqlite::types::Value) -> SqlValue {
     }
 }
 
-/// Replays `transactions` from scratch in the order of `positions`; every
-/// drop is final, as the reference runs after the last seal.
 pub(super) fn replay(
     transactions: &[&Authored],
     positions: &BTreeMap<TransactionToken, Position>,

@@ -1,4 +1,3 @@
-//! Requests admitted by a session and the database lifecycle they require.
 use rocky_credentials::PublicKey;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,7 +104,6 @@ impl Lifecycle {
     }
 }
 
-/// Changes that return the resulting followed tip state.
 pub(crate) enum TipChange {
     Status,
     Seal { close: bool },

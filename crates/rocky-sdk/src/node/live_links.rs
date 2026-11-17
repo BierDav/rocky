@@ -1,4 +1,3 @@
-//! Network-service-owned links, signals and liveness.
 use super::*;
 use rocky_secure::network::link::{self, CloseReason, Frame, Message};
 use std::collections::BTreeSet;
@@ -23,13 +22,9 @@ struct Entry {
     id: u64,
     dialed: bool,
     persistent: bool,
-    /// Requests in flight that keep a link open which is not persistent.
     shorts: usize,
-    /// Delay publication back to an origin until its durable intake updates our cursor.
     receiving: usize,
-    /// A publication pass to this peer is running; others never wait for it.
     publishing: bool,
-    /// A signal arrived during that pass, so it runs once more.
     republish: bool,
     cursor_generation: u64,
     control_generation: Option<u64>,
@@ -41,7 +36,6 @@ struct Entry {
     cursors: BTreeMap<ResourceScope, rocky_secure::ScopeFrontier>,
 }
 pub(super) struct Registry {
-    /// Tests hold it to keep publication passes from starting.
     #[cfg(test)]
     pub(super) publishing: Mutex<()>,
     entries: std::sync::Mutex<BTreeMap<PublicKey, Entry>>,
@@ -100,7 +94,6 @@ impl Drop for Opening<'_> {
         self.node.link_status_changed();
     }
 }
-/// Cleanup belongs to the admitted stream, including when a duplicate replaces it.
 pub(super) struct ShortLink<'a> {
     registry: &'a Registry,
     peer: PublicKey,
@@ -111,7 +104,6 @@ impl Drop for ShortLink<'_> {
         self.registry.close_short(self.peer, self.id);
     }
 }
-/// One peer's publication pass; a slow peer holds only its own claim.
 struct Claim<'a> {
     registry: &'a Registry,
     peer: PublicKey,
@@ -119,7 +111,6 @@ struct Claim<'a> {
     held: bool,
 }
 impl Claim<'_> {
-    /// Keeps the claim for another pass when a signal arrived during this one.
     fn rerun(&mut self) -> bool {
         let mut entries = self
             .registry
@@ -206,7 +197,6 @@ impl Registry {
                 .values()
                 .any(|entry| entry.publishing || entry.receiving != 0)
     }
-    /// Claims a pass for each idle peer; a peer whose pass runs gets another after it.
     fn claim_publications(&self) -> Vec<(PublicKey, u64)> {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         entries
@@ -340,8 +330,6 @@ impl Registry {
         }
     }
 
-    /// Keeps the link with `peer` for one request. A link that is not
-    /// persistent closes when its last request ends: requests share it.
     pub fn short(&self, peer: PublicKey) -> ShortLink<'_> {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         let id = entries.get_mut(&peer).map(|entry| {
@@ -466,8 +454,6 @@ impl Node {
         self.synced(status);
     }
 
-    /// Publishes committed changes to every open link. Each peer's pass runs
-    /// as its own future, so one slow peer never delays the others.
     pub(super) async fn publish_links(self: Arc<Self>, service: Arc<Link>) {
         let mut stage = service.stage.subscribe();
         let mut frames = self.replica.observe_frames().await;
@@ -512,8 +498,6 @@ impl Node {
             }
         }
     }
-    /// Dials the peers that need a link. Reconciliation retries a failed
-    /// attempt; only a busy refusal permits native sync.
     pub(super) async fn open_links(self: &Arc<Self>, service: &Arc<Link>) {
         if !self.automatic.load(Ordering::SeqCst) || !self.online.load(Ordering::SeqCst) {
             return;
@@ -589,10 +573,6 @@ impl Node {
         tokio::pin!(attempts);
         while attempts.next().await.is_some() {}
     }
-    /// Admits an opened link and runs it until its stage closes it, which
-    /// owns cancellation even for outbound links. The first change hint asks
-    /// for no control pass: a transfer can resolve the handshake snapshot
-    /// before the hint arrives.
     pub(super) async fn admit_link(
         self: &Arc<Self>,
         service: Arc<Link>,
@@ -898,13 +878,6 @@ impl Node {
         });
         Ok(())
     }
-    /// Publishes changed scopes to one peer and records its receipt. A held
-    /// prefix below the cursor is the receiver's repair, not a resend, and
-    /// a metadata-only change still takes a scoped control pass. After a
-    /// refused preflight the hinted peer repairs the range and later edits
-    /// publish from the new frontier; its token is read after it, so commits
-    /// between the reads stay in the repair. Unsent scopes keep their old
-    /// token so the next publication sends them.
     async fn signal_link(&self, service: &Link, peer: PublicKey, id: u64) -> Result<(), Failure> {
         #[cfg(test)]
         drop(service.live.publishing.lock().await);
@@ -1028,8 +1001,6 @@ impl Node {
         }
         Ok::<_, Failure>(())
     }
-    /// Records a peer's receipt of a publication. Each scope's token is read
-    /// before its frontier, so a commit between the reads stays dirty.
     async fn received_publication(
         &self,
         service: &Link,
@@ -1119,7 +1090,6 @@ impl Node {
     }
 }
 
-/// Raises `cursor` to the acknowledged positions; it never moves back.
 fn acknowledge(
     cursor: &mut rocky_secure::ScopeFrontier,
     acknowledged: &rocky_secure::ScopeFrontier,

@@ -1,5 +1,3 @@
-//! The SQL connections a database driver uses: a writer as a secure SQL
-//! session, readers as snapshot cursors, typed values and SQLite codes.
 use crate::support;
 use rocky_sdk::{
     Connection, ConnectionOptions, Database, Network, Open, Page, Profile, SqlValue,
@@ -74,8 +72,6 @@ fn expression(sql: &str) -> Expr {
     };
     expr
 }
-/// Rewrites an insert into `lists` or `items` so each row carries an
-/// identity from the public SQL allocator, as a driver adapter would.
 async fn identity_insert(connection: &Connection, sql: &str) -> Result<String, Failure> {
     let Ok(mut statements) = Parser::parse_sql(&SQLiteDialect {}, sql) else {
         return Ok(sql.into());
@@ -154,7 +150,6 @@ const READER: ConnectionOptions = ConnectionOptions {
     binding: None,
 };
 
-/// Runs `sql` to its end and returns every row.
 async fn all(
     connection: &Connection,
     sql: &str,
@@ -210,7 +205,6 @@ async fn count(connection: &Connection, table: &str) -> Result<i64, Failure> {
         _ => Err("count".into()),
     }
 }
-/// Bundles and frames this device authored, read with ordinary SQLite.
 fn published(directory: &Path) -> Result<(i64, i64), Failure> {
     let file = rusqlite::Connection::open_with_flags(
         directory.join("rocky.sqlite"),
@@ -356,7 +350,6 @@ async fn a_writer_transaction_is_one_bundle_and_savepoints_nest() -> Result<(), 
     Ok(())
 }
 
-/// Runs `sql` as given, without the fixture's identity rewrite.
 async fn exact(
     connection: &Connection,
     sql: &str,
@@ -594,6 +587,40 @@ async fn the_write_lease_times_out_and_aborts_until_acknowledged() -> Result<(),
 }
 
 #[tokio::test]
+async fn a_transaction_timeout_of_zero_or_past_sixty_seconds_is_refused() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let database = create(open(root.path(), None), None).await?.database;
+    for refused in [Duration::ZERO, Duration::from_secs(61)] {
+        let outcome = async {
+            let writer = database
+                .connect(ConnectionOptions {
+                    transaction_timeout: Some(refused),
+                    ..WRITER
+                })
+                .await?;
+            let ran = all(&writer, "SELECT count(*) FROM lists", Vec::new()).await;
+            writer.close().await;
+            ran
+        }
+        .await;
+        assert!(
+            outcome.is_err(),
+            "a transaction timeout of {refused:?} is refused"
+        );
+    }
+    let writer = database
+        .connect(ConnectionOptions {
+            transaction_timeout: Some(Duration::from_secs(60)),
+            ..WRITER
+        })
+        .await?;
+    assert_eq!(count(&writer, "lists").await?, 0);
+    writer.close().await;
+    database.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn readers_page_snapshots_and_never_hold_the_writer() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let database = create(open(root.path(), None), None).await?.database;
@@ -758,7 +785,10 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
         vec!["items".to_string(), "lists".to_string()],
         "one change covers both tables: the bundle applies as a whole"
     );
-    assert!(change.causes.contains(&"sync".to_string()), "{change:?}");
+    assert!(
+        change.causes.contains(&rocky_sdk::ChangeCause::Sync),
+        "{change:?}"
+    );
     assert_eq!(count(&reader_b, "items").await?, 2);
 
     run(&writer_a, "UPDATE items SET key = 'i1', list = 'l1', title = 'Oat milk', completed = 0, note = NULL WHERE key = 'i1'").await?;
@@ -786,7 +816,6 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
     Ok(())
 }
 
-/// Rows of a pragma read from the file with ordinary SQLite.
 fn engine_pragma(directory: &Path, pragma: &str) -> Result<Vec<Vec<SqlValue>>, Failure> {
     let file = rusqlite::Connection::open_with_flags(
         directory.join("rocky.sqlite"),
@@ -1297,12 +1326,10 @@ async fn an_older_room_application_validates_the_schema_it_declares() -> Result<
     Ok(())
 }
 
-/// Seals the current tip to continue; a continue seal's id is its successor tip.
 async fn continue_seal_id(database: &Database) -> Result<Value, Failure> {
     Ok(snap::value(database.session().seal(false)).await?["tip"].clone())
 }
 
-/// The SQLite code `sql` fails with.
 async fn failing(connection: &Connection, sql: &str) -> Result<i32, Failure> {
     match all(connection, sql, Vec::new()).await {
         Ok(_) => Err(format!("{sql} succeeded").into()),

@@ -1,48 +1,29 @@
-//! Room 2.8.4's housekeeping statements, answered from the session
-//! catalog instead of reaching the engine, and its modification log,
-//! emulated from committed table events. Statements are matched as Room
-//! 2.8.4 writes them; anything else goes to the session, which denies
-//! pragmas and schema changes.
 use super::{Failure, Pending, code, failure};
 use rocky_core::{SqlValue, TypedRows};
 use rocky_runtime::TableObserver;
 use rocky_secure::{Describe, SecureSql};
 use std::collections::BTreeMap;
 
-/// Room's identity row and table.
 const MASTER: &str = "room_master_table";
 const LOG: &str = "room_table_modification_log";
 const TRIGGER: &str = "room_table_modification_trigger_";
 
-/// What an answer may consult.
 pub(super) struct Context<'a> {
     pub sql: &'a SecureSql<TypedRows>,
-    /// The version the application declares, which is Room's database
-    /// version whatever generation the database is at.
     pub version: u32,
-    /// Tables the application declares otherwise than the installed
-    /// generation: Room validates them as declared, and statements on what
-    /// differs fail as SQLite fails them.
     pub declared: &'a [rocky_core::LogicalTable],
     pub read_only: bool,
-    /// What `busy_timeout` reports: the writer's transaction timeout.
     pub busy_timeout: i64,
 }
 
-/// One connection's emulated Room state.
 pub(super) struct Housekeeping {
-    /// Committed changes since the log was last read; None without the
-    /// Room profile.
     observer: Option<TableObserver>,
-    /// The identity hash Room wrote this connection's life.
     identity: Option<String>,
     log: Option<Log>,
 }
 #[derive(Default)]
 struct Log {
-    /// Table ids Room tracks, and whether a commit invalidated them.
     invalidated: BTreeMap<i64, bool>,
-    /// Tracked (lowercase table, operation) and the id their trigger sets.
     triggers: BTreeMap<(String, String), i64>,
 }
 
@@ -55,9 +36,6 @@ impl Housekeeping {
         }
     }
 
-    /// The answer to a housekeeping statement, or None for one the
-    /// session runs. Room binds no parameter to any statement answered
-    /// here, so one with parameters is refused.
     pub(super) async fn answer(
         &mut self,
         sql: &str,
@@ -81,10 +59,6 @@ impl Housekeeping {
         Ok(answered)
     }
 
-    /// Answers Room's pragmas. Rocky's file is always in WAL mode, so the
-    /// journal mode Room asks for is reported back as SQLite does when a
-    /// mode cannot change. Durability belongs to Rocky, which flushes
-    /// before data leaves, so a synchronous level is accepted as is.
     async fn pragma(
         &mut self,
         words: &[&str],
@@ -165,8 +139,6 @@ impl Housekeeping {
         })
     }
 
-    /// Answers Room's catalog queries. Rocky's typed tables carry no
-    /// trigger or view an ORM declared.
     fn query(&mut self, words: &[&str], context: &Context<'_>) -> Result<Option<Pending>, Failure> {
         let rows = |columns: &[&str], rows: Vec<Vec<SqlValue>>| {
             Some(Pending::rows(
@@ -368,10 +340,6 @@ impl Housekeeping {
         })
     }
 
-    /// Answers Room's schema statements. As in SQLite, an existing table is
-    /// left as it is; Room then validates it against the catalog's answers.
-    /// The entity must still carry Rocky's identity and leave its ids to
-    /// Rocky.
     fn schema(
         &mut self,
         words: &[&str],
@@ -530,9 +498,6 @@ impl Housekeeping {
     }
 }
 
-/// Refuses an entity Room would let assign row ids, or one without the
-/// `id` field every Rocky table has. `columns` follow the
-/// opening parenthesis of Room's `CREATE TABLE`.
 fn entity(table: &str, columns: &[&str]) -> Result<(), Failure> {
     if columns
         .iter()
@@ -576,7 +541,6 @@ fn missing(table: &str) -> Failure {
     failure(code::ERROR, format!("no such table: {table}")).into()
 }
 
-/// Strips the quotes of an identifier or string literal.
 pub(super) fn unquote(word: &str) -> String {
     let quote = word.chars().next().unwrap_or(' ');
     let close = if quote == '[' { ']' } else { quote };
@@ -588,8 +552,6 @@ pub(super) fn unquote(word: &str) -> String {
     }
 }
 
-/// The statement's words: names and keywords, quoted names and literals,
-/// numbers and single punctuation, without whitespace and a final `;`.
 pub(super) fn words(sql: &str) -> Vec<String> {
     let mut chars = sql.chars().peekable();
     let mut words = Vec::new();

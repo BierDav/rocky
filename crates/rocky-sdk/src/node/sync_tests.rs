@@ -11,8 +11,6 @@ use crate::{
 
 const SCHEMA: &str = r#"{"application":"sync","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
-/// A request session of `dialer` and the session of `acceptor` answering it,
-/// on a link over an in-memory pipe that the test drives instead of a service.
 async fn link_sessions(
     dialer: &Node,
     acceptor: &Node,
@@ -143,7 +141,7 @@ async fn enrolled_schema(
     let path = root.join("identity.json");
     if let Some((issuer, profile)) = issuer {
         let link = issuer.network.read().await;
-        let registry = issuer.registry().await?;
+        let registry = issuer.registry(&*issuer.settings_snapshot().await).await?;
         let (invite, _, _) = issuer
             .settings
             .lock()
@@ -286,8 +284,6 @@ async fn idle_has_no_poll_and_a_commit_reaches_the_peer_without_time_advancing()
         .await
 }
 
-/// Requests share a link that is not persistent: it closes when the last of
-/// them ends, not under the others when the first does.
 #[tokio::test]
 async fn a_short_link_stays_open_until_its_last_request_ends() -> Result<(), Failure> {
     tokio::task::LocalSet::new()
@@ -543,9 +539,6 @@ mod change_driven;
 mod discovery;
 mod mesh;
 
-/// A renewal holds the settings while it teaches the replica. A Room write
-/// that holds the replica must not wait for the settings: that cycle lasted
-/// until the transaction timed out with code 4 on the emulator pair.
 #[tokio::test]
 async fn a_room_write_commits_while_a_renewal_waits_for_the_replica() -> Result<(), Failure> {
     use crate::connection::{Call, ConnectionOptions, Profile, Registry, Reply, serve};
@@ -592,9 +585,6 @@ async fn a_room_write_commits_while_a_renewal_waits_for_the_replica() -> Result<
     }).await
 }
 
-/// A peer importing a scope from a checkpoint takes none of its history:
-/// the frontier exchange names the scope as importing, not changed, and
-/// the session goes on.
 #[tokio::test]
 async fn a_peer_importing_a_scope_is_not_fed_its_history() -> Result<(), Failure> {
     tokio::task::LocalSet::new()

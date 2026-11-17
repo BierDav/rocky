@@ -1,4 +1,3 @@
-//! Failure-only observations of the unchanged rollback experiment.
 use super::*;
 use sha2::{Digest, Sha256};
 use std::{
@@ -92,8 +91,6 @@ impl Trace {
         log_later_public_observations(peers).await;
     }
 }
-/// Logs each peer's public status after the failure. These observations are
-/// later than the refusal and not atomic with it, and never drive progress.
 async fn log_later_public_observations(peers: &[(&str, &Peer)]) {
     for (name, peer) in peers {
         let observations = [

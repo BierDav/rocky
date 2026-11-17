@@ -1,4 +1,3 @@
-//! Consumer fixtures use definition tables and the public SQL APIs.
 pub mod secrets;
 use serde_json::Value;
 pub mod snapshot;
@@ -35,7 +34,6 @@ pub fn completed_peers(report: &Value) -> usize {
 mod directory;
 pub use directory::Directory;
 
-/// Small protocol fixtures keep real SQLite files on Linux's memory filesystem.
 pub fn small_directory() -> std::io::Result<Directory> {
     directory::small()
 }

@@ -1,12 +1,9 @@
-//! Rust SQL conveniences over the same secure connections used by the bindings.
 use crate::{
     Connection, ConnectionOptions, Database, Durability, Failure, Page, RowIdentity, SqlFailure,
     SqlValue, TransactionToken,
 };
 use std::{collections::VecDeque, sync::Arc};
 
-/// Converts a bound parameter without SQL string interpolation.
-/// REAL parameters use `SqlValue::real` to reject NaN explicitly.
 pub trait IntoSqlValue {
     fn into_sql_value(self) -> SqlValue;
 }
@@ -55,28 +52,21 @@ impl IntoSqlValue for &[u8] {
         SqlValue::Blob(self.into())
     }
 }
-/// A token binds as its 32-byte BLOB, e.g. into an application outbox row.
 impl IntoSqlValue for TransactionToken {
     fn into_sql_value(self) -> SqlValue {
         SqlValue::Blob(self.0.to_vec())
     }
 }
-/// A row identity binds as its canonical 40-byte BLOB: `id` columns and
-/// the references to them.
 impl IntoSqlValue for RowIdentity {
     fn into_sql_value(self) -> SqlValue {
         self.sql()
     }
 }
-/// A fixed-size BLOB, such as a UUID's 16 bytes in RFC 9562 order
-/// (`Uuid::as_bytes` of the `uuid` crate).
 impl<const N: usize> IntoSqlValue for [u8; N] {
     fn into_sql_value(self) -> SqlValue {
         SqlValue::Blob(self.to_vec())
     }
 }
-/// JSON binds as the compact TEXT `serde_json` writes. Rocky never
-/// rewrites it: compare documents decoded or through SQLite's `json`, not as text.
 impl IntoSqlValue for serde_json::Value {
     fn into_sql_value(self) -> SqlValue {
         SqlValue::Text(self.to_string())
@@ -92,13 +82,11 @@ impl<T: IntoSqlValue> IntoSqlValue for Option<T> {
         self.map_or(SqlValue::Null, IntoSqlValue::into_sql_value)
     }
 }
-/// Heterogeneous bound parameters: `params![42_i64, "hello", None::<String>]`.
 #[macro_export]
 macro_rules! params {
     ($($value:expr),* $(,)?) => { vec![$($crate::IntoSqlValue::into_sql_value($value)),*] };
 }
 
-/// A missing, ambiguous or incorrectly typed result column. Values are never included.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecodeError(pub String);
 impl std::fmt::Display for DecodeError {
@@ -108,7 +96,6 @@ impl std::fmt::Display for DecodeError {
 }
 impl std::error::Error for DecodeError {}
 
-/// Strict decoding: NULL requires `Option<T>` and values are never silently coerced.
 pub trait FromSqlValue: Sized {
     fn from_sql_value(value: &SqlValue) -> Result<Self, DecodeError>;
 }
@@ -163,15 +150,12 @@ impl FromSqlValue for TransactionToken {
         }
     }
 }
-/// An `id` column or a reference to one; other storage classes and
-/// lengths are refused.
 impl FromSqlValue for RowIdentity {
     fn from_sql_value(value: &SqlValue) -> Result<Self, DecodeError> {
         RowIdentity::from_sql(value)
             .map_err(|_| DecodeError("expected a 40-byte row identity BLOB".into()))
     }
 }
-/// Exactly `N` bytes of a BLOB.
 impl<const N: usize> FromSqlValue for [u8; N] {
     fn from_sql_value(value: &SqlValue) -> Result<Self, DecodeError> {
         match value {
@@ -198,9 +182,6 @@ impl FromSqlValue for Timestamp {
     }
 }
 
-/// An instant as INTEGER microseconds since 1970-01-01T00:00:00 UTC, Unix
-/// time without leap seconds. The range is `i64`, about ±292,000 years.
-/// Bind it like any value: replay never reads a clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp(i64);
 impl Timestamp {
@@ -210,7 +191,6 @@ impl Timestamp {
     pub const fn unix_micros(self) -> i64 {
         self.0
     }
-    /// `None` outside the platform's `SystemTime` range.
     pub fn system_time(self) -> Option<web_time::SystemTime> {
         let offset = std::time::Duration::from_micros(self.0.unsigned_abs());
         if self.0 < 0 {
@@ -220,8 +200,6 @@ impl Timestamp {
         }
     }
 }
-/// Rounds down to the microsecond, so a partial microsecond before the
-/// epoch rounds away from it; refuses instants outside `i64` microseconds.
 impl TryFrom<web_time::SystemTime> for Timestamp {
     type Error = DecodeError;
     fn try_from(time: web_time::SystemTime) -> Result<Self, DecodeError> {
@@ -248,7 +226,6 @@ impl<T: FromSqlValue> FromSqlValue for Option<T> {
     }
 }
 
-/// An owned row, valid after advancing or closing the query.
 #[derive(Clone, Debug)]
 pub struct Row {
     columns: Arc<Vec<String>>,
@@ -299,8 +276,6 @@ impl Source<'_> {
         }
     }
 }
-/// Paged results with bounded buffering. Dropping releases the underlying statement.
-/// Transaction results borrow the transaction, preventing commit while they are live.
 pub struct Rows<'a> {
     source: Source<'a>,
     statement: u64,
@@ -309,8 +284,6 @@ pub struct Rows<'a> {
     done: bool,
 }
 impl<'a> Rows<'a> {
-    /// Runs `sql` with this result already guarding its statement before the
-    /// first await, so a cancellation also releases the statement.
     async fn new(source: Source<'a>, sql: &str, params: Vec<SqlValue>) -> Result<Self, SqlFailure> {
         let statement = source.connection().statement();
         let mut rows = Self {
@@ -336,8 +309,6 @@ impl<'a> Rows<'a> {
     pub fn columns(&self) -> &[String] {
         &self.columns
     }
-    /// The next row. A cancelled page read retires this result rather than
-    /// skipping rows on reuse.
     pub async fn next(&mut self) -> Result<Option<Row>, SqlFailure> {
         loop {
             if let Some(values) = self.pending.pop_front() {
@@ -354,7 +325,6 @@ impl<'a> Rows<'a> {
             self.page(page);
         }
     }
-    /// Collect explicitly when the application knows the result fits in memory.
     pub async fn collect(mut self) -> Result<Vec<Row>, SqlFailure> {
         let mut rows = Vec::new();
         while let Some(row) = self.next().await? {
@@ -379,23 +349,13 @@ fn options(read_only: bool, durability: Durability) -> ConnectionOptions {
     }
 }
 impl Database {
-    /// Reads on an independent snapshot connection. No statement handles or ORM profile.
     pub async fn query(&self, sql: &str, params: Vec<SqlValue>) -> Result<Rows<'static>, Failure> {
         let connection = self.connect(options(true, Durability::Buffered)).await?;
         Ok(Rows::new(Source::Owned(connection), sql, params).await?)
     }
-    /// Starts an atomic write. Call `commit` explicitly; dropping rolls it back.
-    /// On commit return, the write is visible to readers and observers and survives
-    /// an application crash (WAL with `synchronous=NORMAL`), but not power loss.
-    /// A background flush makes it durable and publishable; sync never sends
-    /// it earlier. For power-loss durability use `transaction_with(Flushed)`
-    /// or `Database::flush` after commit.
-    /// Application callbacks are never automatically retried.
     pub async fn transaction(&self) -> Result<Transaction, Failure> {
         self.transaction_with(Durability::Buffered).await
     }
-    /// As `transaction`, acknowledging `durability` at commit:
-    /// `Flushed` returns only once the commit survives power loss.
     pub async fn transaction_with(&self, durability: Durability) -> Result<Transaction, Failure> {
         let connection = self.connect(options(false, durability)).await?;
         let token = connection.begin_identified().await?;
@@ -403,20 +363,12 @@ impl Database {
     }
 }
 
-/// An exclusive write session. Drop (including task cancellation) disconnects and rolls back.
 #[must_use = "a transaction must be committed or it rolls back"]
 pub struct Transaction {
     connection: Connection,
     token: TransactionToken,
 }
 impl Transaction {
-    /// The token this transaction commits as, fixed when it begins, so the
-    /// application can store it with its own rows (an outbox, an audit
-    /// record) atomically. `commit` returns it when replicated rows changed;
-    /// otherwise nothing publishes and it never has an outcome. After a
-    /// restart or an uncertain commit, `Database::transaction_outcome`
-    /// reports it: `None` means it did not commit here. Ordering and author
-    /// stamps are still assigned at commit.
     pub fn token(&self) -> TransactionToken {
         self.token
     }
@@ -424,7 +376,6 @@ impl Transaction {
     pub fn measurement_id(&self) -> u64 {
         self.connection.measurement_id()
     }
-    /// Runs a statement, discarding returned rows. Use `query` for RETURNING or SELECT.
     pub async fn execute(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<(), SqlFailure> {
         let rows = self.query(sql, params).await?;
         rows.source.connection().finish(rows.statement).await
@@ -445,7 +396,6 @@ impl Transaction {
         }
         Rows::new(Source::Borrowed(&self.connection), sql, params).await
     }
-    /// Allocates an identity in this transaction, optionally within a partition.
     pub async fn next_id(
         &mut self,
         table: &str,
@@ -460,10 +410,6 @@ impl Transaction {
         let row = rows.next().await?.ok_or("ID allocation returned no row")?;
         Ok(row.get_at(0)?)
     }
-    /// Waits for local durability. A commit is never retried automatically. Cancellation while committing can
-    /// leave its outcome uncertain; reconcile before repeating application work.
-    /// Returns the published transaction, whose replay outcome
-    /// `Database::transaction_outcome` reports; `None` when nothing replicated changed.
     pub async fn commit(self) -> Result<Option<TransactionToken>, SqlFailure> {
         let result = async {
             self.connection

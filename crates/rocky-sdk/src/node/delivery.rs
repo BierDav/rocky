@@ -1,5 +1,3 @@
-//! The node as owner of envelope delivery: what it hands a peer, installs,
-//! holds as a mailbox and drops on a receipt or a revocation.
 use super::*;
 use crate::{
     delivery::{
@@ -13,8 +11,6 @@ use rocky_credentials::{DeliveryReceipt, GroupSecretEnvelope, SealedDelivery};
 use rocky_secure::network::{Delivered, Deliveries, DeliveryFuture, Held, Outgoing};
 use std::collections::BTreeSet;
 
-/// The node's delivery state as a session sees it; `serving` on the side
-/// that accepted the session.
 pub(crate) struct Port<'a> {
     pub node: &'a Node,
     pub serving: bool,
@@ -32,9 +28,6 @@ impl Deliveries for Port<'_> {
     ) -> DeliveryFuture<'a, Outgoing> {
         Box::pin(async move { self.node.outgoing(peer, chain).await.map_err(secure) })
     }
-    /// Receives on a detached task: installing an epoch ends the link, and the
-    /// admitted batch still finishes when the caller loses the reply, so a
-    /// retry observes every install.
     fn receive(
         &self,
         peer: PublicKey,
@@ -98,8 +91,6 @@ impl Node {
     fn own_node(&self) -> Result<PublicKey, Failure> {
         Ok(PrivateKey::from_bytes(&self.vault.get("node")?).public_key())
     }
-    /// Any verified custody grant makes a peer a mailbox, independent of
-    /// the partition being delivered.
     fn mailbox_chain(&self, settings: &Settings, node: PublicKey, chain: &CredentialChain) -> bool {
         let Ok(time) = now() else {
             return false;
@@ -121,9 +112,6 @@ impl Node {
                         .any(|grant| grant.rights.contains(&Right::Custody))
             })
     }
-    /// Runs `change` on the mailbox after removing what expired or what a
-    /// revoked recipient was sent; saves when anything changed. The replica's
-    /// set counts too: it holds what a session's handshake just brought.
     async fn with_mailbox<T>(
         &self,
         revocations: &RevocationSet,
@@ -144,8 +132,6 @@ impl Node {
         }
         Ok(value)
     }
-    /// Drops what this device would deliver to a revoked recipient, and a
-    /// mailbox's deposits for one.
     pub(super) async fn sweep_deliveries(&self) -> Result<(), Failure> {
         let revocations = {
             let mut settings = self.settings.lock().await;
@@ -159,8 +145,6 @@ impl Node {
         };
         self.with_mailbox(&revocations, |_| Ok(((), false))).await
     }
-    /// One delivery round with the upstream peer, on a session the
-    /// exchange goes on with.
     pub(super) async fn deliver(
         &self,
         upstream: &Upstream<'_>,
@@ -263,9 +247,6 @@ impl Node {
         }
         Ok(receipts)
     }
-    /// Opens one delivery and installs its envelope as `install` did; a
-    /// shared partition this device does not hold yet starts from a peer's
-    /// checkpoint.
     async fn accept_delivery(
         &self,
         node: &PrivateKey,
@@ -401,8 +382,6 @@ impl Node {
         *settings = draft;
         Ok(())
     }
-    /// Its own envelopes for `peer` first, then deposits for it, in one
-    /// page: a refused envelope of its own starves no deposit.
     async fn held(&self, peer: PublicKey, budget: usize) -> Result<Held, Failure> {
         let mut held = Held::default();
         let mut bytes = 0;
@@ -453,8 +432,6 @@ impl Node {
         })
         .await
     }
-    /// The dialer reports its round as a whole; the serving side reports
-    /// what the receipts delivered.
     async fn acknowledged(
         &self,
         peer: PublicKey,

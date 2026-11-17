@@ -1,4 +1,3 @@
-//! Local contact hints and secret-store discovery state.
 use crate::{
     Failure,
     enrollment::{Contact, Route, Settings, now},
@@ -60,7 +59,6 @@ impl Discovery {
         Ok(())
     }
 }
-/// The owner, or an issuer through its chain, signs discovery values.
 pub(crate) type Signer<'a> = (
     rocky_credentials::Signer<'a>,
     &'a rocky_credentials::CredentialChain,
@@ -181,8 +179,6 @@ impl Settings {
         );
         Ok(true)
     }
-    /// Whether a found route or local mark is news, so that repeated
-    /// announcements cost no write.
     pub(crate) fn would_learn(
         &self,
         node: PublicKey,
@@ -204,9 +200,6 @@ impl Settings {
         });
         !(known && marked)
     }
-    /// Keeps a contact discovery found. A known contact gains the route
-    /// and, found locally, its mark; one the application added keeps its
-    /// routes.
     pub(crate) fn learn_found(
         &mut self,
         vault: &Vault,
@@ -332,7 +325,6 @@ impl Settings {
             next,
         })
     }
-    /// Current and previous topics. The previous one expires 24 hours after a change.
     pub(crate) fn discovery_topics(
         &self,
         vault: &Vault,
@@ -383,7 +375,6 @@ impl Settings {
         Ok((topic, state.previous.map(|(topic, _)| topic)))
     }
 }
-/// Bidirectional handover and paged discovery material after successful admission.
 pub(crate) async fn exchange(
     session: &mut NativeSession,
     handler: &dyn ContactHandler,

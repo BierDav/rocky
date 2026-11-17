@@ -1,6 +1,3 @@
-//! A member's backup restored from bytes under a fresh invitation, the
-//! same natively and in a browser, and a restore stopped at each step
-//! finishing under the identity it first enrolled.
 use crate::recovery::fault::{STOPS, Stage};
 use crate::{
     Affinity, Column, Configuration, Database, Failure, GrantProfile, Network, Schema, Table,
@@ -39,7 +36,6 @@ async fn invite(owner: &Database) -> Result<String, Failure> {
     };
     Ok(owner.session().invitation_with(profile).await?.uri)
 }
-/// Staged archives left in a directory.
 fn staged(directory: &Path) -> Result<Vec<String>, Failure> {
     if !rocky_platform::fs::exists(directory) {
         return Ok(Vec::new());
@@ -55,8 +51,6 @@ fn identity(directory: &Path) -> Result<serde_json::Value, Failure> {
         serde_json::from_slice(&rocky_platform::fs::read(directory.join("identity.json"))?)?;
     Ok(saved["identity"].clone())
 }
-/// An owner and a member that synced "synced" and holds "unsent", which
-/// never left it, exported as bytes, with the member's directory deleted.
 struct Lost {
     owner: Arc<Database>,
     archive: Vec<u8>,
@@ -90,8 +84,6 @@ async fn lose_a_member(hub: &Arc<Hub>, root: &Path) -> Result<Lost, Failure> {
         identity,
     })
 }
-/// The restored node holds both writes, sends the unsent one and writes
-/// `body` on its own.
 async fn restored_works(owner: &Database, restored: &Database, body: &str) -> Result<(), Failure> {
     assert_eq!(bodies(restored).await?, ["synced", "unsent"]);
     write(restored, body).await?;
@@ -193,8 +185,6 @@ async fn a_restore_stopped_at_any_step_finishes_when_restored_again_under_its_id
     lost.owner.close().await
 }
 
-/// A crash during the open that rebinds a restored file leaves its WAL
-/// behind. Restoring again replaces the file and never applies that WAL.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test]
 async fn a_restore_resumed_after_a_crashed_open_drops_its_stale_wal() -> Result<(), Failure> {

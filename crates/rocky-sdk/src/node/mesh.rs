@@ -11,8 +11,6 @@ impl ContactHandler for Node {
     }
 }
 impl Node {
-    /// Answers a contact exchange. It first keeps the statements the handshake
-    /// brought, so the pending epoch refresh survives the exchange.
     async fn answer_contacts(&self, request: ContactRequest) -> Result<ContactResponse, Failure> {
         self.absorb_revocations(None).await?;
         let mut settings = self.settings.lock().await;
@@ -63,7 +61,6 @@ impl Node {
         }
         Ok(response)
     }
-    /// Asks admitted peers for a route; the later session still proves its key.
     pub(super) async fn request_contact(
         &self,
         transport: &dyn Transport,

@@ -1,6 +1,3 @@
-//! The replicated issuer registry: records reach every issuer, any issuer
-//! renews, only issuers open it, concurrent writers converge, answers commit
-//! their record first and the bound holds.
 use crate::support::snapshot as snap;
 use common::{Device, Failure, introduce};
 use rocky_sdk::{
@@ -24,9 +21,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::common;
 
-/// How many identities, granted or invited, one registry holds.
 const REGISTRY_CAPACITY: usize = 256;
-/// The shared items collection and a partitioned one for partition grants.
 const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#;
@@ -66,8 +61,6 @@ fn identity(directory: &Path) -> Result<Value, Failure> {
 fn issuer() -> Value {
     json!({"kind": "issuer"})
 }
-/// Every other identity an issuer's registry lists, by identity key,
-/// without the nodes this issuer knows of it.
 async fn identities(issuer: &Device) -> BTreeMap<String, Value> {
     snap::ok(issuer.session.identities()).await["identities"]
         .as_array()
@@ -84,8 +77,6 @@ async fn identities(issuer: &Device) -> BTreeMap<String, Value> {
         })
         .collect()
 }
-/// Waits, by status events and without sleeping, until a device's
-/// automatic first sync has finished.
 async fn settle(device: &Device) -> Value {
     let mut status = snap::ok(device.session.status()).await;
     while status["data"]["bootstrap_pending"] == true {
@@ -96,15 +87,11 @@ async fn settle(device: &Device) -> Value {
 async fn online(device: &Device, online: bool) {
     snap::ok(device.session.set_networking_enabled(online)).await;
 }
-/// Waits out each device's first sync, so no issuer relays a record that
-/// later steps expect to stay apart.
 async fn settle_first_syncs_before_anything_else_is_recorded(devices: &[&Device]) {
     for device in devices {
         settle(device).await;
     }
 }
-/// Takes offline the issuers that tested concurrent enrollment, so none
-/// answers a renewal meant for another issuer while the first is offline.
 async fn keep_enrollment_issuers_from_renewals(issuers: &[&Device]) {
     for issuer in issuers {
         online(issuer, false).await;
@@ -116,7 +103,6 @@ async fn synced(device: &Device) -> Result<Value, Failure> {
         .await
         .map_err(|error| error.to_string().into())
 }
-/// The capability ID at the root of a device's stored chain.
 fn chain_capability(directory: &Path) -> Result<String, Failure> {
     let chain: CredentialChain =
         serde_json::from_value(identity(directory)?["credentials"].clone())?;
@@ -128,7 +114,6 @@ fn chain_capability(directory: &Path) -> Result<String, Failure> {
         .ok_or("empty chain")?;
     Ok(data_encoding::HEXLOWER.encode(&device_identity_link.id()?))
 }
-/// Rows of the registry's typed table in a device's file.
 fn registry_rows(directory: &Path, entry: &str) -> Result<i64, Failure> {
     let file = rusqlite::Connection::open_with_flags(
         directory.join("rocky.sqlite"),
@@ -208,8 +193,6 @@ async fn invitation_availability_survives_reopen_and_tracks_replacement_and_use(
     Ok(())
 }
 
-/// B stays out of reach until the member's first sync settled. The recorded
-/// partition capability can outlive the original enrollment.
 #[tokio::test]
 async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -> Result<(), Failure>
 {
@@ -291,8 +274,6 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
     Ok(())
 }
 
-/// Acceptance 4 of the mesh scope, on the in-process hub. B is out of reach
-/// while the member joins: it never meets it and never receives its record.
 #[tokio::test]
 async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() -> Result<(), Failure>
 {
@@ -359,7 +340,6 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
     Ok(())
 }
 
-/// Once the custody peer joined, the two issuers meet only through it.
 #[tokio::test]
 async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -461,8 +441,6 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
     Ok(())
 }
 
-/// Two issuers enroll an issuer each at once; then two issuers renew one device
-/// before either hears of the other.
 #[tokio::test]
 async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -563,12 +541,9 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     Ok(())
 }
 
-/// One-shot faults on a node's streams of one protocol.
 #[derive(Default)]
 struct Faults {
-    /// The next inbound stream reads its request and cannot write the answer.
     answer: Mutex<Option<Protocol>>,
-    /// The next outbound stream receives the answer, which is never read.
     receipt: Mutex<Option<Protocol>>,
 }
 impl Faults {
@@ -703,7 +678,6 @@ impl Transport for FaultyTransport {
         self.inner.close()
     }
 }
-/// The answering side stops after its work and before the answer leaves.
 struct Mute(Stream);
 impl AsyncRead for Mute {
     fn poll_read(
@@ -729,7 +703,6 @@ impl AsyncWrite for Mute {
         Poll::Ready(Ok(()))
     }
 }
-/// The requester receives the whole answer and stops before storing it.
 struct Unread(Stream);
 impl AsyncRead for Unread {
     fn poll_read(
@@ -772,11 +745,6 @@ fn faulty(hub: &Arc<Hub>, name: &str, faults: &Arc<Faults>) -> Network {
     }))
 }
 
-/// Pairing, renewal and `grant` stopped after the registry commit: before the
-/// answer is written, and after it is written but before the requester stores
-/// it. A record exists without a usable chain, and the retry is the same
-/// device. A granted bundle lost after its record committed is issued again;
-/// short-lived chains make each renewal's capability a new one.
 #[tokio::test]
 async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -929,9 +897,6 @@ fn random_device() -> Value {
     json!({"identity": PrivateKey::new().public_key(), "node": PrivateKey::new().public_key()})
 }
 
-/// A full registry refuses the 257th device and syncs to a new issuer; the
-/// enrollment guide records both times. A pending invitation and 253 granted
-/// devices make 256 identities with A and B.
 #[tokio::test]
 async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() -> Result<(), Failure>
 {
@@ -1030,9 +995,6 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
     Ok(())
 }
 
-/// A join whose answer was lost, after which the issuer replaced its
-/// invitation: the directory does not open, the spent invitation is refused,
-/// and the newer one enrolls a new device.
 #[tokio::test]
 async fn a_newer_invitation_supersedes_an_interrupted_join() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;

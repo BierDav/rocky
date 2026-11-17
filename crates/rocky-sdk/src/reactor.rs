@@ -45,14 +45,12 @@ mod qualification {
 
     #[derive(Debug, Default)]
     pub struct ReactorSnapshot {
-        /// Polls longer than 1 ms, in microseconds, grouped by spawn-site name.
         pub polls: BTreeMap<String, Vec<u64>>,
         pub calls: BTreeMap<u64, Vec<SqlCallTiming>>,
     }
 
     #[derive(Debug)]
     pub struct SqlCallTiming {
-        /// Process-local bounds for measuring overlapping calls as one interval.
         pub queued_at: Instant,
         pub replied_at: Instant,
         pub queue_us: u64,

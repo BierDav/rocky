@@ -1,7 +1,3 @@
-//! The replicated issuer registry: one record per identity in the reserved
-//! collection, read and written only by issuers. Each entry is its own row,
-//! so records merge by row identity. It holds no nodes: an identity's linked
-//! nodes come from the membership view (`crate::membership`).
 use crate::{Failure, domain::REGISTRY};
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use rocky_core::{Commitment, SqlValue, TypedRows};
@@ -10,18 +6,12 @@ use rocky_secure::{EncryptedReplica, PublicKey, SecureSql, SqlOptions};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
 
-/// Identity records one domain holds.
 pub const MAX_IDENTITIES: usize = 256;
-/// Bytes of an application's opaque identity label.
 pub const MAX_LABEL: usize = 256;
-/// Partition grants recorded per identity.
 const MAX_GRANTS: usize = 256;
-/// Identities holding a recorded claim right.
 pub const MAX_CLAIM_RIGHTS: usize = 256;
-/// Live trusted identities: the coordinator's trusted list holds as many.
 pub const MAX_TRUSTED: usize = 32;
 
-/// The named refusal of a write that would add the 257th identity.
 #[derive(Debug)]
 pub struct RegistryFull;
 impl std::fmt::Display for RegistryFull {
@@ -34,7 +24,6 @@ impl std::fmt::Display for RegistryFull {
 }
 impl std::error::Error for RegistryFull {}
 
-/// How the identity's record began.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
@@ -45,25 +34,16 @@ pub enum Kind {
     Partition,
     Renewed,
 }
-/// How and by whom an identity was admitted: the record's `identity` row.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Admitted {
     pub kind: Kind,
-    /// Absent when only partition grants of the identity are known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<Profile>,
-    /// The issuer identity that wrote the record first.
     pub issuer: PublicKey,
-    /// The trusted identity that first enrolled this identity, as its
-    /// capability names it; a compromised root revocation of that identity
-    /// revokes this one too. `None` for a trusted identity.
     pub origin: Option<PublicKey>,
     pub enrolled: u64,
-    /// Stable invitation digest; retained independently of later invitations.
     pub invitation: Option<String>,
-    /// Whether the identity can never link another node: known for an
-    /// issuer's own identity until admission reports it.
     pub single_use: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,19 +59,14 @@ pub struct Grant {
     pub grant: PartitionGrant,
     pub delegations: u8,
 }
-/// A counter claim right an issuer granted an identity: any issuer renews
-/// its short-lived link while the row stands and its grant is unrevoked.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimRecord {
     pub right: rocky_credentials::ClaimRight,
     pub delegations: u8,
-    /// The issuer that granted it.
     pub issuer: PublicKey,
     pub granted: u64,
 }
-/// A trusted identity's root-signed grant, so every trusted node knows the
-/// whole trusted set and whom it last heard from.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustedRecord {
@@ -107,18 +82,15 @@ struct Label {
 #[serde(deny_unknown_fields)]
 struct Tombstone {}
 
-/// One identity's record: its rows merged by the registry's rules.
 #[derive(Clone, Debug, Default)]
 pub struct IdentityRecord {
     pub admitted: Option<Admitted>,
     pub revoked: bool,
-    /// Every recorded capability; the latest expiry is the current one.
     pub capabilities: Vec<Capability>,
     pub grants: Vec<Grant>,
     pub label: Option<Vec<u8>>,
 }
 impl IdentityRecord {
-    /// The capability with the latest expiry.
     pub fn capability(&self) -> Option<Capability> {
         self.capabilities
             .iter()
@@ -132,43 +104,32 @@ impl IdentityRecord {
     }
 }
 
-/// Every identity record an issuer has received, with the claim rights and
-/// trusted grants, all by identity.
 #[derive(Clone, Debug, Default)]
 pub struct Registry {
     pub records: BTreeMap<PublicKey, IdentityRecord>,
     pub claims: BTreeMap<PublicKey, ClaimRecord>,
-    /// Root-signed trusted grants, by identity, revoked ones included.
     pub trusted: BTreeMap<PublicKey, TrustedRecord>,
 }
 impl Registry {
     pub fn get(&self, identity: &PublicKey) -> Option<&IdentityRecord> {
         self.records.get(identity)
     }
-    /// Records holding an `identity` entry: what the bound counts.
     pub fn identities(&self) -> usize {
         self.records
             .values()
             .filter(|record| record.admitted.is_some())
             .count()
     }
-    /// Whether `identity` holds an `identity` entry.
     pub fn admitted(&self, identity: &PublicKey) -> bool {
         self.get(identity)
             .is_some_and(|record| record.admitted.is_some())
     }
-    /// Whether admitting `identity` would exceed `MAX_IDENTITIES`; an
-    /// identity already admitted always fits.
     pub(crate) fn full_for(&self, identity: &PublicKey) -> bool {
         !self.admitted(identity) && self.identities() >= MAX_IDENTITIES
     }
     pub fn revoked(&self, identity: &PublicKey) -> bool {
         self.get(identity).is_some_and(|record| record.revoked)
     }
-    /// The identities the trusted identity `origin` first enrolled, itself
-    /// or through issuers below it: what a compromised root revocation of `origin`
-    /// ends, wherever they renewed since. A trusted identity is the root's
-    /// own enrollment, whoever enrolled it first.
     pub fn enrolled_by(&self, origin: PublicKey) -> std::collections::BTreeSet<PublicKey> {
         self.records
             .iter()
@@ -182,7 +143,6 @@ impl Registry {
             .filter(|identity| !self.trusted.contains_key(identity))
             .collect()
     }
-    /// Root-verified, database-local trusted identities whose grants still stand.
     pub fn trusted_identities(
         &self,
         database: rocky_credentials::DatabaseContext,
@@ -245,7 +205,6 @@ impl Registry {
 }
 #[cfg(test)]
 impl Registry {
-    /// Applies `changes` as `write` would, over rows held in memory.
     pub fn merged(
         rows: &mut BTreeMap<(String, String), String>,
         changes: &Changes,
@@ -288,10 +247,8 @@ mod hex32 {
     }
 }
 
-/// How a change meets a row that exists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
-    /// Insert-only entries keep the row they find.
     Keep,
     Replace,
     Delete,
@@ -303,7 +260,6 @@ struct Change {
     value: String,
     mode: Mode,
 }
-/// The rows one answer commits, in one transaction.
 #[derive(Clone, Debug, Default)]
 pub struct Changes(Vec<Change>);
 impl Changes {
@@ -328,7 +284,6 @@ impl Changes {
         });
         Ok(())
     }
-    /// The identity entry, kept when one exists unless `replace`.
     pub fn admitted(
         &mut self,
         identity: &PublicKey,
@@ -341,7 +296,6 @@ impl Changes {
     pub fn revoked(&mut self, identity: &PublicKey) -> Result<(), Failure> {
         self.push(identity, "revoked".into(), &Tombstone {}, Mode::Keep)
     }
-    /// A new capability; those of `prior` with an earlier expiry go.
     pub fn capability(
         &mut self,
         identity: &PublicKey,
@@ -380,15 +334,12 @@ impl Changes {
         )
     }
 
-    /// `identity`'s claim right, replacing an earlier grant.
     pub fn claims(&mut self, identity: &PublicKey, record: &ClaimRecord) -> Result<(), Failure> {
         self.push(identity, CLAIMS.into(), record, Mode::Replace)
     }
-    /// The root's trusted grant to `identity`.
     pub fn trusted(&mut self, identity: &PublicKey, record: &TrustedRecord) -> Result<(), Failure> {
         self.push(identity, TRUSTED.into(), record, Mode::Replace)
     }
-    /// Ends the renewals of `identity`'s claim right.
     pub fn unclaim(&mut self, identity: &PublicKey) -> Result<(), Failure> {
         self.push(identity, CLAIMS.into(), &Tombstone {}, Mode::Delete)
     }
@@ -415,7 +366,6 @@ fn text(value: &SqlValue) -> Result<&str, Failure> {
         _ => Err("registry rows hold text".into()),
     }
 }
-/// Rows of `entry`, inside the writing transaction.
 async fn count(sql: &SecureSql<TypedRows>, entry: &str) -> Result<usize, Failure> {
     let count = format!("SELECT COUNT(*) FROM {REGISTRY} WHERE entry = ?");
     match sql
@@ -429,7 +379,6 @@ async fn count(sql: &SecureSql<TypedRows>, entry: &str) -> Result<usize, Failure
         _ => Err("invalid registry count".into()),
     }
 }
-/// Every record this issuer holds.
 pub async fn read(
     replica: &EncryptedReplica<TypedRows>,
     scope: rocky_core::ResourceScope,
@@ -451,10 +400,6 @@ pub async fn read(
     }
     Ok(registry)
 }
-/// Commits `changes` as one secure transaction, or nothing. A change that
-/// would add an identity beyond the bound refuses the whole transaction.
-/// Replay may meet another issuer's concurrent insert of an entry: it keeps
-/// or replaces that entry rather than dropping the whole record.
 pub async fn write(
     replica: &EncryptedReplica<TypedRows>,
     scope: rocky_core::ResourceScope,

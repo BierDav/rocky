@@ -1,7 +1,3 @@
-//! An in-process transport for tests and deterministic faults: named
-//! nodes on a hub joined by bounded pipes. The hub counts what is asked of
-//! it and injects stalls, disconnects and backpressure, and per link the
-//! seeded faults of [`LinkFaults`].
 mod faults;
 use super::{
     BoxFuture, Connected, Connector, Discovery, Failure, Found, Incoming, LOCAL_PATH, PathState,
@@ -22,11 +18,9 @@ use tokio::{
     sync::mpsc,
 };
 
-/// Inbound streams a node has not taken yet; further dials are refused.
 pub const PENDING: usize = 8;
 
 type Inbound = Incoming;
-/// A node's queue and whether a service takes from it.
 #[derive(Clone)]
 struct Listener {
     sender: mpsc::Sender<Inbound>,
@@ -53,16 +47,12 @@ impl Drop for RpcSlot {
         self.changed.send_replace(());
     }
 }
-/// The network: who listens, every start, dial and close so far, and the
-/// faults to inject.
 pub struct Hub {
     listeners: Mutex<HashMap<String, Listener>>,
     pub starts: AtomicUsize,
     pub dials: AtomicUsize,
     pub closes: AtomicUsize,
-    /// While set, a dial never completes.
     pub stalled: AtomicBool,
-    /// Bytes each pipe buffers before its writer waits.
     pub capacity: AtomicUsize,
     cut: Mutex<Option<usize>>,
     cut_waiters: Mutex<Vec<Waker>>,
@@ -70,30 +60,19 @@ pub struct Hub {
     peer_dials: Mutex<HashMap<String, usize>>,
     protocol_dials: Mutex<HashMap<(String, String, Protocol), usize>>,
     link_messages: Mutex<HashMap<String, usize>>,
-    /// Open pipes by their two nodes, for `sever_links` and `set_down`.
     links: Mutex<Vec<OpenPipe>>,
     dial_events: tokio::sync::watch::Sender<()>,
     written: tokio::sync::watch::Sender<usize>,
-    /// At the cut, hold the stream instead of disconnecting it.
     pub hold_cut: AtomicBool,
     connectivity: tokio::sync::watch::Sender<()>,
     admissions: tokio::sync::watch::Sender<()>,
-    /// What every stream of a recorded node carried, both ways.
     transcripts: Mutex<HashMap<String, Tap>>,
-    /// Whether nodes started from now on can discover.
     pub discovery: AtomicBool,
-    /// Who announces under which topics, and where each node hears of it.
-    /// Ordered: hints go out in one order every run.
     announced: Mutex<BTreeMap<String, Announcement>>,
-    /// Where every fault draw starts.
     seed: u64,
-    /// Faults by the sorted names of a link's two nodes.
     faults: Mutex<HashMap<[String; 2], LinkFaults>>,
-    /// Links that refuse dials until healed.
     down: Mutex<HashSet<[String; 2]>>,
-    /// Streams dialed so far per direction and protocol.
     ordinals: Mutex<HashMap<(String, String, Protocol), u64>>,
-    /// One line per stream opened or refused and per fault injected.
     events: Mutex<Vec<String>>,
 }
 struct Announcement {
@@ -141,22 +120,18 @@ fn pair(a: &str, b: &str) -> [String; 2] {
     pair
 }
 impl Hub {
-    /// A hub whose link faults draw from `seed`.
     pub fn seeded(seed: u64) -> Self {
         Self {
             seed,
             ..Self::default()
         }
     }
-    /// Faults of later streams between `a` and `b`, both ways.
     pub fn set_faults(&self, a: &str, b: &str, faults: LinkFaults) {
         self.faults
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(pair(a, b), faults);
     }
-    /// While down, dials between `a` and `b` are refused; going down
-    /// fails their open streams.
     pub fn set_down(&self, a: &str, b: &str, down: bool) {
         let link = pair(a, b);
         let changed = {
@@ -185,7 +160,6 @@ impl Hub {
             .unwrap_or_else(PoisonError::into_inner)
             .contains(&pair(a, b))
     }
-    /// What the hub opened, refused and injected so far, one line each.
     pub fn events(&self) -> Vec<String> {
         self.events
             .lock()
@@ -211,7 +185,6 @@ impl Hub {
             true
         });
     }
-    /// Complete length-prefixed link messages written by this node, including its handshake.
     pub fn link_messages(&self, node: &str) -> usize {
         self.link_messages
             .lock()
@@ -221,14 +194,12 @@ impl Hub {
             .unwrap_or_default()
     }
 
-    /// A connector for the node `name`, which is also its address.
     pub fn connector(self: &Arc<Self>, name: &str) -> Arc<Memory> {
         Arc::new(Memory {
             hub: self.clone(),
             name: name.into(),
         })
     }
-    /// Applies hub faults and counters to a real transport for qualification.
     pub fn wrap(self: &Arc<Self>, name: &str, transport: Connected) -> Connected {
         Connected {
             discovery: transport.discovery,
@@ -240,7 +211,6 @@ impl Hub {
             }),
         }
     }
-    /// Records the bytes of every later stream `name` dials or accepts.
     pub fn record(&self, name: &str) {
         self.transcripts
             .lock()
@@ -248,7 +218,6 @@ impl Hub {
             .entry(name.into())
             .or_default();
     }
-    /// What the streams of a recorded node carried so far.
     pub fn transcript(&self, name: &str) -> Vec<u8> {
         self.transcripts
             .lock()
@@ -266,7 +235,6 @@ impl Hub {
             .filter_map(|end| transcripts.get(*end).cloned())
             .collect()
     }
-    /// The topics `name` announces under, the current one first.
     pub fn topics(&self, name: &str) -> Vec<[u8; 32]> {
         self.announced
             .lock()
@@ -275,8 +243,6 @@ impl Hub {
             .map(|announcement| announcement.topics.clone())
             .unwrap_or_default()
     }
-    /// The nodes that announce under a topic `name` announces under: whom
-    /// it finds, and who finds it.
     pub fn discoverable(&self, name: &str) -> Vec<String> {
         let announced = self
             .announced
@@ -299,7 +265,6 @@ impl Hub {
         names.sort();
         names
     }
-    /// Holds dials to just this address; does not signal connectivity.
     pub fn stall_peer(&self, address: &str, stalled: bool) {
         let mut peers = self
             .stalled_peers
@@ -339,11 +304,9 @@ impl Hub {
             }
         }
     }
-    /// Total bytes written, and an event for deterministic stream cuts.
     pub fn written(&self) -> tokio::sync::watch::Receiver<usize> {
         self.written.subscribe()
     }
-    /// Signals a controllable network transition, without advancing time.
     pub fn network_changed(&self) {
         self.connectivity.send_replace(());
     }
@@ -364,19 +327,14 @@ impl Hub {
     pub fn admission_changes(&self) -> tokio::sync::watch::Receiver<()> {
         self.admissions.subscribe()
     }
-    /// Starts, dials and closes so far.
     pub fn counts(&self) -> [usize; 3] {
         [&self.starts, &self.dials, &self.closes].map(|count| count.load(Ordering::SeqCst))
     }
-    /// Fails the open link streams of `node`, as a transport's idle timeout
-    /// ends a connection to a vanished peer. Later links are unaffected.
     pub fn sever_links(&self, node: &str) {
         self.sever(|nodes, protocol| {
             protocol == Protocol::Link && nodes.iter().any(|name| name == node)
         });
     }
-    /// Breaks every stream once `bytes` more have been written across the
-    /// hub; `None` heals it for later writes.
     pub fn cut_after(&self, bytes: Option<usize>) {
         *self.cut.lock().unwrap_or_else(PoisonError::into_inner) = bytes;
         for waker in self
@@ -401,7 +359,6 @@ impl Hub {
         }
         Poll::Pending
     }
-    /// How many of `wanted` bytes may still cross; `None` once cut.
     fn allow(&self, wanted: usize) -> Option<usize> {
         match *self.cut.lock().unwrap_or_else(PoisonError::into_inner) {
             None => Some(wanted),
@@ -417,12 +374,10 @@ impl Hub {
     }
 }
 
-/// Shared by both ends of one pipe: once set, both fail.
 #[derive(Default)]
 struct Severed {
     set: AtomicBool,
     wakers: Mutex<Vec<Waker>>,
-    /// The seeded cut: bytes both ends may still carry together.
     budget: Mutex<Option<usize>>,
 }
 impl Severed {
@@ -432,14 +387,12 @@ impl Severed {
             ..Self::default()
         }
     }
-    /// How many of `wanted` bytes may cross before the seeded cut.
     fn allow(&self, wanted: usize) -> usize {
         self.budget
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .map_or(wanted, |left| wanted.min(left))
     }
-    /// Spends `carried` bytes; true once that reaches the cut.
     fn carry(&self, carried: usize) -> bool {
         let mut budget = self.budget.lock().unwrap_or_else(PoisonError::into_inner);
         match &mut *budget {
@@ -461,7 +414,6 @@ impl Severed {
             waker.wake();
         }
     }
-    /// Fails once severed; otherwise wakes `cx` when it is.
     fn check(&self, cx: &Context<'_>) -> std::io::Result<()> {
         let mut wakers = self.wakers.lock().unwrap_or_else(PoisonError::into_inner);
         if self.set.load(Ordering::SeqCst) {
@@ -474,7 +426,6 @@ impl Severed {
     }
 }
 
-/// One end of a pipe, subject to the hub's cut.
 #[derive(Default)]
 struct MessageCounter {
     header: [u8; 4],
@@ -519,11 +470,8 @@ struct Pipe {
     protocol: Protocol,
     faults: LinkFaults,
     draws: Draws,
-    /// The stream in the hub's events.
     label: String,
-    /// The drawn wait before the current write crosses.
     delay: Option<Pin<Box<rocky_platform::time::Sleep>>>,
-    /// The current write already waited.
     paced: bool,
 }
 fn cut() -> std::io::Error {
@@ -604,7 +552,6 @@ impl AsyncWrite for Pipe {
     }
 }
 
-/// Starts the node `name` on `hub`.
 pub struct Memory {
     pub hub: Arc<Hub>,
     pub name: String,
@@ -617,8 +564,6 @@ struct Node {
     scope: Arc<Mutex<Option<rocky_core::Scope>>>,
     closed: tokio::sync::watch::Sender<bool>,
 }
-/// The hub's discovery: every node announcing under a shared topic is
-/// found at once, as on a local network.
 struct Finder {
     hub: Arc<Hub>,
     name: String,

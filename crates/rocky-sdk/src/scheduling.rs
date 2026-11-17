@@ -1,4 +1,3 @@
-//! Retry deadlines use Tokio's clock; successful idle peers have no deadline.
 use rocky_platform::time::{Duration, Instant};
 
 pub(crate) struct Retry {
@@ -26,8 +25,6 @@ impl Retry {
             epoch_millis: None,
         }
     }
-    /// Backs off after a failure, with jitter from a SplitMix64 stream that
-    /// stays reproducible for each node and peer pair.
     pub fn failed(&mut self) {
         let seconds = (1_u64 << self.failures.min(6)).min(60);
         self.failures = self.failures.saturating_add(1);
@@ -40,8 +37,6 @@ impl Retry {
         self.deadline = Some(Instant::now() + Duration::from_millis(millis));
         self.epoch_millis = crate::status::epoch_millis().map(|time| time.saturating_add(millis));
     }
-    /// Work that failed after it made progress retries shortly, without
-    /// growing the backoff.
     pub fn soon(&mut self) {
         self.deadline = Some(Instant::now() + Duration::from_secs(1));
         self.epoch_millis = crate::status::epoch_millis().map(|time| time.saturating_add(1000));

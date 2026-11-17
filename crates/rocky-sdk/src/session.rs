@@ -1,43 +1,30 @@
 use crate::request::Request;
 use crate::{Failure, GrantProfile, Session};
 
-/// An enrollment invitation. Treat its URI as a secret.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Invitation {
     pub uri: String,
     pub expires_at_epoch_seconds: u64,
-    /// What the invited device is admitted as on arrival; `None` when an
-    /// issuer admits each requesting device.
     pub profile: Option<GrantProfile>,
     pub id: String,
     pub sequence: u64,
 }
-/// A device that answered an approval invitation and waits for `admit`.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct JoinRequest {
-    /// The requesting node's key, hexadecimal.
     pub node: String,
     pub nonce: String,
-    /// The digest of the invitation this request answered.
     pub invitation: String,
-    /// What the device calls itself; nobody verified it.
     pub name: String,
     pub received_epoch_seconds: u64,
-    /// When the request ends with its invitation.
     pub expires_epoch_seconds: u64,
-    /// The code the requesting device shows; `admit` needs it.
     pub code: String,
 }
-/// The devices this node knows of without having enrolled them.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Discovered {
-    /// Join requests waiting on this issuer node, oldest first; empty on
-    /// any other node.
     pub pending: Vec<JoinRequest>,
     pub seen: Vec<SeenDevice>,
     pub links: Vec<LinkRequest>,
 }
-/// Certified evidence observed in this database; it grants no authority.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SeenDevice {
     pub node: String,
@@ -48,7 +35,6 @@ pub struct SeenDevice {
     pub revoked: bool,
     pub unlinked: bool,
 }
-/// A same-identity link waiting for this device's confirmation.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LinkRequest {
     pub node: String,
@@ -56,18 +42,13 @@ pub struct LinkRequest {
     pub received: u64,
     pub confirmed: bool,
 }
-/// An issuer's admission of a pending join request.
 #[derive(Clone)]
 pub struct Admit {
-    /// The requesting node's key, hexadecimal.
     pub node: String,
-    /// The code the requesting device shows, as the user confirmed it.
     pub code: String,
     pub profile: GrantProfile,
-    /// The registry label of the admitted identity.
     pub label: Option<Vec<u8>>,
 }
-/// The issuer's current state for one invitation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InvitationState {
     pub id: String,
@@ -76,7 +57,6 @@ pub struct InvitationState {
     pub enrolled: Option<String>,
 }
 
-/// A contact advertises routes without granting authority.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ContactInfo {
     pub uri: String,
@@ -84,7 +64,6 @@ pub struct ContactInfo {
     pub routes: Vec<crate::Route>,
 }
 
-/// The statement and key rotation committed by a revocation.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RevocationResult {
     pub statement: String,
@@ -98,7 +77,6 @@ pub struct DroppedStage {
     pub head: String,
 }
 
-/// A bounded read; a returned cursor resumes this query on the same session.
 #[derive(Clone, Debug)]
 pub struct ReadQuery {
     pub sql: String,
@@ -139,7 +117,6 @@ pub struct CommitSummary {
     pub frames: usize,
 }
 
-/// The authenticated device's authority and SQL access.
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
     pub principal: crate::credentials::PublicKey,
@@ -151,7 +128,6 @@ pub struct SessionInfo {
     pub transport: String,
     pub readable: usize,
     pub writable: usize,
-    /// This node's writer identity: its row identities and stamps name it.
     pub writer: crate::WriterId,
 }
 
@@ -168,7 +144,6 @@ impl Session {
         .await
     }
 
-    /// Follows a bookmark, certifying this identity's node if the target starts another line.
     pub async fn follow_with_identity(
         &self,
         name: &str,
@@ -180,7 +155,6 @@ impl Session {
         )
         .await
     }
-    /// Supplies the identity when moving the followed bookmark certifies another writer node.
     pub async fn move_bookmark_with_identity(
         &self,
         name: &str,
@@ -288,7 +262,6 @@ impl Session {
             .await
     }
 
-    /// The identity signer is held only until this unlink finishes.
     pub async fn unlink(
         &self,
         node: crate::PeerId,
@@ -303,7 +276,6 @@ impl Session {
     pub async fn invitation_with(&self, profile: GrantProfile) -> Result<Invitation, Failure> {
         self.invite(Some(profile), None).await
     }
-    /// Replaces this issuer's invitation, optionally labeling the admitted identity.
     pub async fn invite(
         &self,
         profile: Option<GrantProfile>,

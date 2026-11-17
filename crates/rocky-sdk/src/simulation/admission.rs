@@ -1,6 +1,3 @@
-//! Approval invitations: a joining device waits until an issuer confirms
-//! the code both devices show, and every request that ends unadmitted is
-//! reported to the issuer's application.
 use super::cluster::{Member, SCHEMA};
 use crate::{AwaitingAdmission, Failure, JoinRefused, transport::memory::Hub};
 
@@ -27,7 +24,6 @@ async fn events(
 async fn pending(issuer: &Member) -> Result<Vec<crate::JoinRequest>, Failure> {
     Ok(issuer.session()?.discovered().await?.pending)
 }
-/// Joins and expects to wait: the code the device shows.
 async fn awaiting(device: &mut Member, hub: &Arc<Hub>, uri: &str) -> Result<String, Failure> {
     let error = device
         .join(hub, uri)
@@ -41,8 +37,6 @@ async fn awaiting(device: &mut Member, hub: &Arc<Hub>, uri: &str) -> Result<Stri
         .clone())
 }
 
-/// Fails if `admit` skips the code comparison, or if a request outlives its
-/// expired invitation.
 #[tokio::test(start_paused = true)]
 async fn a_requested_join_waits_for_admission_with_the_code_both_devices_show()
 -> Result<(), Failure> {

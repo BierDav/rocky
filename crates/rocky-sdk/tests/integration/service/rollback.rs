@@ -5,7 +5,6 @@ mod diagnostics;
 #[path = "rollback/evidence.rs"]
 mod evidence;
 
-/// The SDK's retention window; compaction releases only operations past it.
 const SDK_RETENTION_WINDOW_OPERATIONS: u32 = 256;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -1,4 +1,3 @@
-//! Seals, tips and bookmarks through the JSON contract and `Session`.
 use crate::common;
 mod schema_changes;
 use crate::support::snapshot as snap;
@@ -10,7 +9,6 @@ use std::sync::Arc;
 fn message(error: Value) -> String {
     error["message"].as_str().unwrap_or_default().to_owned()
 }
-/// The owner's first bookmark, on the genesis tip, followed.
 async fn main(device: &Device) -> Value {
     snap::ok(device.session.create_bookmark("main", None)).await;
     snap::ok(device.follow("main")).await
@@ -488,8 +486,6 @@ async fn bookmark_operations_work_through_a_native_offline_session() -> Result<(
     Ok(())
 }
 
-/// Coordinated seals: a seal or a move off an open tip ends that tip's log
-/// first.
 mod coordinated {
     use super::*;
     use rocky_coordinator::coordinated::MemoryLog;
@@ -500,8 +496,6 @@ mod coordinated {
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::Notify;
 
-    /// A client whose next `seal` waits until the test releases it, so
-    /// another node can end the log in between.
     struct Gated {
         inner: Arc<dyn rocky_sdk::Coordinator>,
         armed: Arc<AtomicBool>,
@@ -706,9 +700,6 @@ mod coordinated {
         Ok(())
     }
 
-    /// The owner may name only the coordinator the database's finality
-    /// records name: settings naming another would make its final seals,
-    /// compacted ones too, non-final everywhere.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_owner_names_only_the_coordinator_its_finality_records_name() -> Result<(), Failure>
     {
@@ -991,8 +982,6 @@ mod coordinated {
     }
 }
 
-/// A trusted identity through the SDK: the owner grants it, its device
-/// installs the grant, and it opens tips and moves bookmarks back.
 mod trusted {
     use super::*;
 
@@ -1001,10 +990,6 @@ mod trusted {
         owner: Device,
         devices: Vec<Device>,
     }
-    /// The owner on `main` and `count` devices following it, every pair
-    /// introduced, then one row and a seal. Only the first device is an
-    /// issuer. Devices join before any row, because a device that imported a
-    /// checkpoint neither seals nor switches tips.
     async fn household(count: usize) -> Result<Household, Failure> {
         let root = tempfile::tempdir()?;
         let hub = Arc::new(Hub::default());
@@ -1054,7 +1039,6 @@ mod trusted {
             .unwrap_or_default()
             .to_owned()
     }
-    /// The owner grants `device`'s identity trust and the device installs it.
     async fn trust(owner: &Device, device: &Device) -> Value {
         let granted = snap::ok(owner.session.trust(
             &(snap::text(&(identity(device).await))),
@@ -1069,7 +1053,6 @@ mod trusted {
         .await;
         granted
     }
-    /// Syncs every device until the last round moved nothing new.
     async fn settle(devices: &[&Device]) {
         for _ in 0..3 {
             for device in devices {
@@ -1146,8 +1129,6 @@ mod trusted {
         Ok(())
     }
 
-    /// A device that compacted, and released history, at main's seal still
-    /// drops a branch it wrote on: its base holds no frame of the branch.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_compacted_device_drops_a_branch_it_wrote_on() -> Result<(), Failure> {
         let house = household(2).await?;
@@ -1311,8 +1292,6 @@ mod trusted {
     }
 }
 
-/// Races between trusted identities resolve by authority, then digest;
-/// revocation resolves them again. The issuer variants run in `rocky-secure`.
 mod races {
     use super::*;
 
@@ -1324,8 +1303,6 @@ mod races {
         member: Device,
         grants: [Value; 2],
     }
-    /// The owner, two trusted identities and a writer, all on `main` after
-    /// one row and a seal. They join before any row.
     async fn household() -> Result<Household, Failure> {
         let root = tempfile::tempdir()?;
         let hub = Arc::new(Hub::default());
@@ -1411,8 +1388,6 @@ mod races {
             }
         }
     }
-    /// Stop once the observable tip and rows converge, with the same
-    /// three-round bound as `settle`.
     async fn settle_on(devices: &[&Device], tip: &Value, titles: &[&str]) {
         for _ in 0..3 {
             for device in devices {
@@ -1542,7 +1517,6 @@ mod races {
         Ok(())
     }
 
-    /// Alerts of `kind` in `device`'s status.
     async fn alerts(device: &Device, kind: &str) -> Vec<Value> {
         snap::ok(device.session.status()).await["alerts"]
             .as_array()
@@ -1647,7 +1621,6 @@ mod races {
         }
         Ok(())
     }
-    /// Cuts `t0` off from every other device, or reconnects it.
     fn isolate_t0(hub: &Hub, down: bool) {
         for other in ["owner", "t1", "m"] {
             hub.set_down("t0", other, down);

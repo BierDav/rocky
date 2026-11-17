@@ -39,8 +39,6 @@ fn only_an_owner_device_no_statement_ended_anchors() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Whole sign-ins on the in-memory hub, with crashes and lying sources
-/// injected at fixed points.
 #[cfg(not(target_family = "wasm"))]
 mod installs {
     use super::account;
@@ -61,7 +59,6 @@ mod installs {
             .table(Table::replayed("notes").column(Column::new("body", Affinity::Text).required()))
             .build()
     }
-    /// The same application with another table: another manifest.
     fn forged() -> Result<Schema, Failure> {
         Schema::builder("notes", 1)
             .table(
@@ -142,8 +139,6 @@ mod installs {
             .expect("faults")
             .push((directory.to_path_buf(), stage));
     }
-    /// Signs in once with a crash injected at `stage`, then checks that the
-    /// crashed state opens as nothing and the next sign-in resumes it.
     async fn crashed_then_resumed(
         directory: &Path,
         hub: Option<&Arc<Hub>>,

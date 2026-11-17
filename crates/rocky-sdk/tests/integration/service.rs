@@ -1,4 +1,3 @@
-//! Ordinary rows, seal finality, staged publication and rollback over real voters.
 use crate::support;
 use rocky_coordinator::{certified::*, service::NetworkCoordinator};
 use rocky_core::{MeshId, net::Protocol};

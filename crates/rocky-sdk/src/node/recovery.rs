@@ -1,27 +1,15 @@
-//! Local recovery runs without a peer: at open, after keys, grants,
-//! schemas or the tip graph change, after a commit while a blocker remains,
-//! every `TICK` while local work clears one and when a received frame
-//! waiting for this clock is due. Never inside a network call or a peer
-//! session.
 use super::*;
 use rocky_core::{Blocker, ClearsBy};
 use rocky_secure::EarlierEpochWrites;
 
-/// How often local recovery runs again while local work clears a blocker.
 const TICK: Duration = Duration::from_secs(30);
-/// The least time between two runs a commit triggered.
 const SPACING: Duration = Duration::from_secs(1);
 
-/// Marks `watch` seen before a recovery pass: a change during the pass
-/// wakes the next one rather than being swallowed after it completes.
 fn seen_before_pass<T>(watch: &mut watch::Receiver<T>) {
     watch.borrow_and_update();
 }
 
 impl Node {
-    /// One local recovery pass, then the blockers left. Sealing for
-    /// members publishes statements, so a due seal wakes the sync pass,
-    /// which runs it with the network.
     pub(crate) async fn recover_locally(&self) -> Result<Vec<Blocker>, Failure> {
         let recovered = self.replica.recover_locally().await;
         if self.replica.earlier_epoch_due().await && self.signs_for_members().await {
@@ -31,14 +19,6 @@ impl Node {
         self.complete_pending_follow().await?;
         self.blockers().await
     }
-    /// In a sync pass, before the exchanges: a signer seals for members
-    /// when writes of an earlier key epoch arrived past the last seal, and
-    /// lists the bases it holds, so a scope only a listed checkpoint
-    /// restores finds a peer that serves it. After a revocation members
-    /// restore rows only from a served base: a lost one is made again at the
-    /// newest finalized seal, one of an earlier epoch signed again, and one
-    /// that misses sealed writes of an earlier epoch moves to a later seal.
-    /// Returns why a due member seal was not made.
     pub(super) async fn publish_for_members(&self) -> Option<crate::SealSkip> {
         if !self.signs_for_members().await {
             return None;
@@ -77,12 +57,6 @@ impl Node {
         }
         skipped
     }
-    /// A trusted node seals the followed tip once it holds
-    /// `ROUTINE_SEAL_TRANSACTIONS` unsealed replayed transactions, so a
-    /// rewind never undoes more; finalizing the seal ends their rewinds.
-    /// The root is never needed, and a log another trusted node's seal
-    /// already ended is left for sync to bring. Returns why a due seal was
-    /// not made.
     pub(super) async fn seal_routinely(&self) -> Option<crate::SealSkip> {
         self.settings.lock().await.trusted_links()?;
         let scope = self.domain().scope;
@@ -128,8 +102,6 @@ impl Node {
             Some(crate::SealSkip::Failed(error.to_string()))
         })
     }
-    /// Raises, keeps or clears the alert of a seal this trusted node
-    /// should make and did not, for `reason`.
     pub(super) fn seal_skipped(&self, reason: Option<crate::SealSkip>) {
         let mut skipped = self
             .seal_skipped
@@ -167,14 +139,10 @@ impl Node {
             self.observations.touch();
         }
     }
-    /// Whether this node seals for members: it signs tip statements and
-    /// follows a bookmark.
     async fn signs_for_members(&self) -> bool {
         self.replica.followed_bookmark().await.is_some()
             && self.tip_signer(self.domain().scope).await.is_ok()
     }
-    /// Drives local recovery until the database closes. Sync passes,
-    /// explicit ones too, and tip changes wake it.
     pub(crate) async fn drive_recovery(self: Arc<Self>) {
         let mut context = self.replica.observe_recovery().await;
         let mut revisions = self.replica.observe_revision();

@@ -1,5 +1,3 @@
-//! An application on the async SDK, the same on every target: natively and
-//! as a browser node in a dedicated Worker, whose files live in OPFS.
 use rocky_platform::fs::Scratch;
 use rocky_sdk::{Affinity, Column, Configuration, Failure, Schema, Table, params};
 use wasm_bindgen_test::wasm_bindgen_test;
@@ -272,8 +270,6 @@ async fn a_created_database_follows_a_bookmark_and_seals_routinely() -> Result<(
     db.close().await
 }
 
-/// A trusted node with a seal due but no followed bookmark raises an
-/// alert instead of skipping silently; following one seals and clears it.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test]
 async fn a_due_seal_a_trusted_node_cannot_make_is_an_alert() -> Result<(), Failure> {
@@ -432,9 +428,6 @@ async fn transactions_choose_durability_and_buffered_commits_can_be_flushed() ->
     db.close().await
 }
 
-/// Every device is lost: the root and a backup archive recover the
-/// installation, in a browser as natively, its archive a file in Rocky's
-/// storage there.
 #[wasm_bindgen_test(unsupported = tokio::test)]
 async fn the_root_and_a_backup_recover_a_lost_installation() -> Result<(), Failure> {
     let directory = Scratch::new().await;
@@ -478,4 +471,91 @@ async fn the_root_and_a_backup_recover_a_lost_installation() -> Result<(), Failu
         .collect::<Result<_, _>>()?;
     assert_eq!(bodies, ["kept", "recovered"]);
     db.close().await
+}
+
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn the_crate_quickstart_writes_reads_and_closes_a_note() -> Result<(), Failure> {
+    let directory = Scratch::new().await;
+    let schema = Schema::builder("notes", 1)
+        .table(Table::replayed("notes").column(Column::new("body", Affinity::Text).required()))
+        .build()?;
+    let configuration = Configuration::new(directory.path(), &schema)?;
+    let database = configuration.create().await?.database;
+    let mut transaction = database.transaction().await?;
+    let id = transaction.next_id("notes", params![]).await?;
+    transaction
+        .execute(
+            "INSERT INTO notes(id,body) VALUES(?,?)",
+            params![id, "Hello Rocky"],
+        )
+        .await?;
+    transaction.commit().await?;
+    let mut rows = database
+        .query("SELECT body FROM notes WHERE id=?", params![id])
+        .await?;
+    let row = rows.next().await?.ok_or("the note was written")?;
+    assert_eq!(row.get::<String>("body")?, "Hello Rocky");
+    drop(rows);
+    database.close().await
+}
+
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_join_refuses_a_device_name_over_256_bytes_before_spending_the_invitation()
+-> Result<(), Failure> {
+    use rocky_sdk::{GrantProfile, Network, transport::memory::Hub};
+    use std::sync::Arc;
+    let hub = Arc::new(Hub::default());
+    let issuer_directory = Scratch::new().await;
+    let member_directory = Scratch::new().await;
+    let issuer = Configuration::new(issuer_directory.path(), &schema()?)?
+        .network(Network::Owned(hub.connector("issuer")))
+        .create()
+        .await?
+        .database;
+    let invitation = issuer
+        .session()
+        .invitation_with(GrantProfile::Writer {
+            scopes: ["notes".into()].into(),
+        })
+        .await?;
+    let member = Configuration::new(member_directory.path(), &schema()?)?
+        .network(Network::Owned(hub.connector("member")));
+    let refused = member
+        .clone()
+        .name("x".repeat(257))
+        .join(&invitation.uri)
+        .await
+        .err()
+        .ok_or("a 257-byte device name is refused")?;
+    assert!(
+        refused.to_string().contains("at most 256 bytes"),
+        "{refused}"
+    );
+    let joined = member
+        .name("x".repeat(256))
+        .join(&invitation.uri)
+        .await?
+        .database;
+    joined.close().await?;
+    issuer.close().await
+}
+
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn trusted_staleness_is_set_between_a_minute_and_ten_years() -> Result<(), Failure> {
+    let directory = Scratch::new().await;
+    let database = Configuration::new(directory.path(), &schema()?)?
+        .create()
+        .await?
+        .database;
+    let session = database.session();
+    let ten_years = 10 * 366 * 24 * 60 * 60;
+    for refused in [0, 59, ten_years + 1] {
+        assert!(
+            session.set_trusted_stale_after(refused).await.is_err(),
+            "a staleness threshold of {refused} s is refused"
+        );
+    }
+    session.set_trusted_stale_after(60).await?;
+    session.set_trusted_stale_after(ten_years).await?;
+    database.close().await
 }

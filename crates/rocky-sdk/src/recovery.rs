@@ -1,8 +1,3 @@
-//! Root recovery of a domain from a backup archive: the root opens the
-//! escrow records the archived store holds and installs a fresh trusted
-//! node holding those keys. It resumes after a crash at any step: the
-//! marker (`backup::Marker::recovery`) records how far it got, and only
-//! `Configuration::recover` with the same archive finishes it.
 use crate::{
     Failure, SecretStore,
     backup::{MARKER, Marker, Recovery},
@@ -11,7 +6,6 @@ use crate::{
 use rocky_secure::EncryptedReplica;
 use std::{path::Path, sync::Arc};
 
-/// The recovery unfinished in `directory`, if any.
 pub(crate) fn unfinished(directory: &Path) -> Result<Option<Marker>, Failure> {
     let marker = directory.join(MARKER);
     if !rocky_platform::fs::exists(&marker) {
@@ -20,8 +14,6 @@ pub(crate) fn unfinished(directory: &Path) -> Result<Option<Marker>, Failure> {
     let saved: Marker = serde_json::from_slice(&rocky_platform::fs::read(&marker)?)?;
     Ok(saved.recovery.is_some().then_some(saved))
 }
-/// An open of a directory whose recovery is unfinished is refused: the
-/// store holds no keys yet, and only the root revokes the lost nodes.
 pub(crate) fn refuse_unfinished(directory: &Path) -> Result<(), Failure> {
     if unfinished(directory)?.is_some() {
         return Err(
@@ -38,17 +30,6 @@ pub(crate) fn mark(directory: &Path, marker: &Marker) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Verifies the archive, opens the escrow records its store holds with the
-/// root, saves a fresh trusted identity holding those keys and puts the
-/// archive's files in place, behind the marker that rebinds them at open.
-/// Nothing is written until every key opened. A recovery of the same
-/// archive left unfinished continues under the identity it saved; a marker
-/// saved without its identity is a recovery not yet begun. The marker is
-/// written before the identity, which without it would open as if
-/// installed. Files not yet placed were never opened, so they are put in
-/// place again. Returns the saved identity and the archived identity
-/// record, whose revocations say which trusted identities the recovery
-/// revokes.
 pub(crate) async fn recover(
     path: &Path,
     directory: &Path,
@@ -125,44 +106,24 @@ pub(crate) async fn recover(
     Ok((settings, opened.identity))
 }
 
-/// Deterministic interruptions of a recovery or a restore, for their crash
-/// sweeps. A restore stops at `Enrolled` and at the stages from `Rebound`
-/// to `Attached`, which both open; any installation at `Started`.
 pub(crate) mod fault {
     use crate::Failure;
     use std::path::Path;
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Stage {
-        /// A restore enrolled and saved its identity; its files are not
-        /// placed.
         Enrolled,
-        /// The marker is saved, the identity not.
         Marked,
-        /// The identity is saved, the files not placed.
         Saved,
-        /// The files are placed, the marker not advanced.
         Moved,
-        /// The marker says placed; the store was never opened.
         Placed,
-        /// The store is rebound to the recovered node, without its tables.
         Rebound,
-        /// The store holds its tables, not its keys.
         Attached,
-        /// The store took one of its keys.
         Keyed,
-        /// The marker says keyed; the root revoked no lost identity yet.
         Revoking,
-        /// The root revoked the lost identities the store names, not yet
-        /// those granted before the recovery that it does not.
         Named,
-        /// A created database's settings are signed, not published yet.
         SettingsSigned,
-        /// The node started; the database is not handed out yet.
         Started,
     }
-    /// The directories and stages at which a recovery stops once.
-    /// Process-wide, since each database runs on a thread of its own;
-    /// keyed by directory, so concurrent tests do not meet each other's.
     #[cfg(test)]
     pub static STOPS: std::sync::Mutex<Vec<(std::path::PathBuf, Stage)>> =
         std::sync::Mutex::new(Vec::new());

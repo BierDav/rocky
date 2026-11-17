@@ -1,5 +1,3 @@
-//! The database owner and the handles composed on it: sessions and an
-//! optional network service.
 #[cfg(test)]
 #[cfg(test)]
 #[cfg(test)]
@@ -23,52 +21,27 @@ use std::{
 };
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 
-/// What opening a database takes. Without `secrets`, keys are owner-only
-/// files in the data directory. Identity providers are used only during
-/// installation. Without `network`, nothing is
-/// dialed or listened on.
 pub struct Open<'a> {
     pub directory: &'a Path,
     pub schema: &'a str,
     pub secrets: Option<Arc<dyn SecretStore>>,
-    /// The identity signer for this installation call; opening needs no signer.
     pub identity: Option<Arc<dyn crate::IdentityProvider>>,
     pub network: Option<Network>,
-    /// Application-owned coordinator; local storage works without one.
     pub coordination: Option<CoordinatorSlot>,
 }
-/// How a database reaches its coordination service; the application owns
-/// both and their transport. An explicit client must be the coordinator
-/// the database's owner-signed settings name: another is refused with
-/// `coordinator_mismatch`. A connector reaches whichever one they name,
-/// once a sync brings the settings.
 #[derive(Clone)]
 pub enum CoordinatorSlot {
     Client(Arc<dyn rocky_credentials::Coordinator>),
     Connector(Arc<dyn rocky_credentials::CoordinatorConnector>),
 }
-/// An open database and the network service it opened with, if any.
 pub struct Opened {
     pub database: Arc<Database>,
     pub network: Option<NetworkService>,
-    /// The root key a create without one made. Show its phrase to the user
-    /// once, or keep its secret behind a passkey: Rocky keeps no copy, and
-    /// only it adds or revokes trusted nodes and recovers the domain.
     pub root: Option<crate::RootKey>,
-    /// A generated linkable identity's phrase, returned once.
     pub identity: Option<String>,
-    /// The lost trusted identities a recovery revoked with the root, with
-    /// the identities each first enrolled, whose devices enroll again; every
-    /// key rotated. All of them, also those an interrupted attempt revoked.
-    /// Empty for any other open. A trusted identity the backup never knew
-    /// is not named here: the recovery statement ends it, and devices that
-    /// know it report `AlertKind::RecoveryEnded`.
     pub revoked: Vec<rocky_credentials::PublicKey>,
 }
 
-/// How a database is installed or opened. The blocking constructors make
-/// every variant; a browser makes create, join, restore, recover and open
-/// through `Configuration`.
 #[cfg_attr(
     target_family = "wasm",
     expect(dead_code, reason = "blocking installation variants are native only")
@@ -76,50 +49,32 @@ pub struct Opened {
 pub(crate) enum Install {
     Create {
         ttl: u64,
-        /// Taken once, when the domain is written.
         root: std::sync::Mutex<Option<Arc<dyn crate::IdentityProvider>>>,
-        /// The bookmark the creating device makes and follows before the
-        /// database is handed out.
         bookmark: Option<&'static str>,
-        /// A personal database of the root's owner identity, whose
-        /// interrupted create resumes from its install intent.
         personal: Option<Box<crate::personal::Create>>,
     },
     Join {
         invitation: String,
-        /// What the device calls itself in its join request.
         name: String,
     },
     Supplied(Box<Supplied>),
-    /// Another node of the identity `open.identity` supplies, from a node
-    /// of that identity.
     Identity {
         contact: String,
         confirmed: Option<Arc<crate::AwaitingLink>>,
     },
     Installed,
-    /// One more owner device of a personal database, signed in with the
-    /// passkey; its interrupted install resumes from its intent.
     SignIn(Box<crate::personal::SignIn>),
-    /// A backup archive, under a fresh identity the invitation enrolls.
     Restore {
         archive: PathBuf,
         invitation: String,
     },
-    /// A trusted node's backup archive, under a fresh trusted identity the
-    /// root grants, with the keys the root opens from its escrow.
     Recover {
         archive: PathBuf,
-        /// Copied when the installation is written and taken once the
-        /// lost trusted identities are revoked.
         root: std::sync::Mutex<Option<Box<crate::RootKey>>>,
-        /// The archived identity record, once the archive is opened.
         archived: std::sync::Mutex<Option<Box<Settings>>>,
     },
 }
 impl Install {
-    /// A restore interrupted after it enrolled continues, as does a
-    /// recovery interrupted after it saved its identity.
     fn resumes_interrupted(&self, directory: &Path) -> Result<bool, Failure> {
         Ok(match self {
             Self::Restore { .. } => {
@@ -129,21 +84,15 @@ impl Install {
             _ => false,
         })
     }
-    /// A join or another node of an identity bootstraps from a checkpoint.
     fn bootstraps_from_checkpoint(&self) -> bool {
         matches!(self, Self::Join { .. } | Self::Identity { .. })
     }
-    /// A create, sign-in or supplied install takes back what it wrote when
-    /// it fails before it is handed out; see `unwind`.
     fn unwinds_on_failure(&self) -> bool {
         matches!(
             self,
             Self::Create { .. } | Self::SignIn(_) | Self::Supplied(_)
         )
     }
-    /// A personal install's intent ends once it is handed out; until then a
-    /// retry resumes it. An open ends one an interrupted install left beside
-    /// its saved identity, so no later sign-in takes that store back.
     fn ends_personal_intent(&self) -> bool {
         matches!(
             self,
@@ -154,9 +103,6 @@ impl Install {
                 | Self::Installed
         )
     }
-    /// A shared create that fails takes its secrets back. A personal
-    /// create keeps its device keys and pinned epochs for the retry its
-    /// install intent resumes.
     fn discards_secrets(&self) -> bool {
         matches!(self, Self::Create { personal: None, .. })
     }
@@ -168,11 +114,8 @@ struct Setup {
     identity: Option<Arc<dyn crate::IdentityProvider>>,
     install: Install,
     coordination: Option<CoordinatorSlot>,
-    /// The settings a create with a coordinator client signs with the root,
-    /// published before the database is handed out.
     created_settings: std::sync::Mutex<Option<rocky_credentials::SignedDatabaseSettings>>,
     confirmation: Option<String>,
-    /// Where a hosted database hands out its node.
     #[cfg(test)]
     expose: Option<std::sync::mpsc::Sender<std::sync::Weak<Node>>>,
 }
@@ -188,7 +131,6 @@ enum Command {
         std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
     ),
     End(u64, oneshot::Sender<()>),
-    /// A backup archive, as bytes.
     Export(oneshot::Sender<Result<Vec<u8>, Failure>>),
     Attach(Network, oneshot::Sender<Result<u64, Failure>>),
     Detach(u64, oneshot::Sender<()>),
@@ -248,15 +190,11 @@ enum Command {
     ),
 }
 type Greeting = Result<Ready, Failure>;
-/// The scope and the network service a database opened with, and the
-/// identities its recovery revoked.
 type Ready = (
     rocky_core::Scope,
     Option<u64>,
     Vec<rocky_credentials::PublicKey>,
 );
-/// Where `run` reports how opening went: to the opener blocked on the
-/// database's thread, or to an opener that awaits it.
 enum Hello {
     #[cfg(not(target_family = "wasm"))]
     Thread(std::sync::mpsc::SyncSender<Greeting>),
@@ -281,7 +219,6 @@ impl Hello {
     }
 }
 
-/// Calls a database serves at once; one more is refused.
 const ACTIVE_CALL_QUOTA: usize = 128;
 
 struct Shared {
@@ -305,35 +242,26 @@ impl Shared {
     }
 }
 
-/// Owns one secure database: its file, its installed credentials and the
-/// reactor thread that serves its sessions. It owns no network.
 pub struct Database {
     shared: Arc<Shared>,
     scope: rocky_core::Scope,
     worker: Mutex<Option<Worker>>,
 }
-/// What serves a database: its own thread natively, or a task on the
-/// caller's thread in a browser Worker and in a simulation.
 enum Worker {
     #[cfg(not(target_family = "wasm"))]
     Thread {
         thread: std::thread::JoinHandle<()>,
-        /// Fires once the thread's runtime, and the replica with it, dropped.
         ended: oneshot::Receiver<()>,
     },
     #[cfg(any(test, target_family = "wasm"))]
     Task(rocky_platform::task::JoinHandle<()>),
 }
-/// Before a database thread signals its end, it reports reaching it and
-/// waits for the release, so a test sees whether a closer still yields.
 #[cfg(all(test, not(target_family = "wasm")))]
 type HeldEnd = (oneshot::Sender<()>, std::sync::mpsc::Receiver<()>);
-/// Bounds a test's hang only: a closer blocking its executor never releases.
 #[cfg(all(test, not(target_family = "wasm")))]
 const HELD_END_HANG_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(all(test, not(target_family = "wasm")))]
 thread_local! {
-    /// Taken by the next database thread this thread starts.
     static HOLD_END: std::cell::RefCell<Option<HeldEnd>> = const { std::cell::RefCell::new(None) };
 }
 impl Worker {
@@ -356,9 +284,6 @@ impl Worker {
             })?;
         Ok(Self::Thread { thread, ended })
     }
-    /// Waits for the worker to end without blocking the caller's executor.
-    /// A thread that signalled its end has only its exit left, so it is
-    /// detached rather than joined.
     async fn join(self) -> Result<(), Failure> {
         match self {
             #[cfg(not(target_family = "wasm"))]
@@ -370,8 +295,6 @@ impl Worker {
         }
         Ok(())
     }
-    /// Waits for the worker's end from a synchronous opener. A task needs
-    /// no wait: it ends with the error it sent.
     #[cfg(not(target_family = "wasm"))]
     fn release(self) {
         match self {
@@ -381,14 +304,8 @@ impl Worker {
         }
     }
 }
-/// Blocking installs and opens, native only: each blocks the caller until
-/// the database is open, which a browser cannot; `Configuration` opens
-/// without blocking.
 #[cfg(not(target_family = "wasm"))]
 impl Database {
-    /// Creates a domain in an empty directory under a fresh root key, which
-    /// `Opened::root` hands back once; see `create_with_root`. Credentials
-    /// last `credential_ttl` seconds, 30 days by default.
     pub fn create(open: Open<'_>, credential_ttl: Option<u64>) -> Result<Opened, Failure> {
         let root = crate::RootKey::generate();
         let created = crate::RootKey::from_secret(root.secret());
@@ -399,10 +316,6 @@ impl Database {
         opened.root = Some(created);
         Ok(opened)
     }
-    /// Creates a domain in an empty directory whose root `root` signs it:
-    /// the genesis and a trusted grant to this device's own identity, which
-    /// it runs on from then on. The root is dropped when the domain is
-    /// written and never stored; renewing and sealing never need it.
     pub fn create_with_root(
         open: Open<'_>,
         credential_ttl: Option<u64>,
@@ -413,16 +326,10 @@ impl Database {
             Self::create_install(credential_ttl, root, None, None)?,
         )
     }
-    /// Enrolls this device with the issuer an invitation names, as the
-    /// grant profile it names, over `open.network`, which stays attached.
     pub fn join(open: Open<'_>, invitation: &str) -> Result<Opened, Failure> {
         let install = Self::join_install(&open, invitation, "")?;
         Self::start(open, install)
     }
-    /// Installs another node of the identity `open.identity` supplies: a
-    /// node of that identity, which `contact` names, hands it what the
-    /// identity holds over `open.network`, and its provider certifies this
-    /// node. No issuer and no invitation is involved.
     pub fn enroll_identity(open: Open<'_>, contact: &str) -> Result<Opened, Failure> {
         if open.network.is_none() {
             return Err(ServiceError::NetworkRequired("enroll an identity's node").into());
@@ -438,38 +345,19 @@ impl Database {
             },
         )
     }
-    /// Installs credentials and reader keys supplied for the device that
-    /// `device` prepared. They are verified like any others; no issuer is
-    /// contacted and no network is needed.
     pub fn install(open: Open<'_>, supplied: Supplied) -> Result<Opened, Failure> {
         Self::start(open, Install::Supplied(Box::new(supplied)))
     }
-    /// Opens the domain installed in the directory. A member whose
-    /// credentials expired renews them over `open.network` first.
     pub fn open(open: Open<'_>) -> Result<Opened, Failure> {
         Self::start(open, Install::Installed)
     }
-    /// Opens after the application confirms the exact removal impact report.
     pub fn open_confirmed(open: Open<'_>, digest: &str) -> Result<Opened, Failure> {
         Self::start_confirmed(open, Install::Installed, Some(digest.into()))
     }
-    /// Restores a backup archive into an empty directory under a fresh
-    /// signing identity, which `invitation` enrolls over `open.network`.
-    /// The archive's operations, handles, tickets, results and effects keep
-    /// their original identities; nothing is sent again as new work. An
-    /// interrupted restore continues when called again.
-    /// `Configuration::restore` does the same without blocking.
     pub fn restore(open: Open<'_>, archive: &Path, invitation: &str) -> Result<Opened, Failure> {
         let install = Self::restore_install(&open, archive, invitation)?;
         Self::start(open, install)
     }
-    /// The root recovers a domain from a backup archive of one of its
-    /// trusted nodes with every trusted node and device lost: into an empty
-    /// directory, under a fresh trusted identity the root grants, with every
-    /// key the archived node held opened from its root escrow. A key the
-    /// escrow lacks fails the recovery and is named. The root revokes the
-    /// lost trusted identities (`Opened::revoked`), then is dropped. See
-    /// `Configuration::recover`.
     pub fn recover(
         open: Open<'_>,
         archive: &Path,
@@ -502,7 +390,6 @@ impl Database {
     }
 }
 impl Database {
-    /// Replica-local measurement support for release qualification probes.
     #[cfg(feature = "qualification")]
     pub async fn lock_measurements(&self) -> Result<rocky_secure::LockMeasurements, Failure> {
         Ok(self.shared.request(Command::LockMeasurements).await?)
@@ -521,7 +408,7 @@ impl Database {
         personal: Option<Box<crate::personal::Create>>,
     ) -> Result<Install, Failure> {
         let ttl = credential_ttl.unwrap_or(DEFAULT_TTL);
-        if !(60..=366 * 24 * 60 * 60).contains(&ttl) {
+        if !CREDENTIAL_TTL_SECONDS.contains(&ttl) {
             return Err("credential lifetime must be between a minute and a year".into());
         }
         Ok(Install::Create {
@@ -540,8 +427,6 @@ impl Database {
             name: name.into(),
         })
     }
-    /// Prepares public node keys for external enrollment under an explicit identity.
-    /// Keep the provider outside Rocky and supply it again when installing the answer.
     pub fn node_keys_of(
         directory: &Path,
         secrets: Option<Arc<dyn SecretStore>>,
@@ -591,7 +476,6 @@ impl Database {
             archived: std::sync::Mutex::new(None),
         }
     }
-    /// Writes a signed, consistent archive and returns its inventory.
     pub async fn backup(&self, target: &Path) -> Result<crate::BackupInventory, Failure> {
         let session = self.session();
         let result = session
@@ -600,15 +484,9 @@ impl Database {
         session.close().await;
         result
     }
-    /// A signed backup archive of this database as bytes, for the app to
-    /// save or a browser to download; `backup` writes the same archive to
-    /// a file. `Configuration::recover_archive` takes the bytes back.
     pub async fn export_backup(&self) -> Result<Vec<u8>, Failure> {
         self.shared.request(Command::Export).await?
     }
-    /// Opens without blocking the caller: natively the database gets its
-    /// own thread, as `start` gives it; in a browser it is a task on the
-    /// Worker's event loop.
     async fn launch(
         open: Open<'_>,
         install: Install,
@@ -674,7 +552,6 @@ impl Database {
         )
         .await
     }
-    /// Completes linking after both devices confirm the displayed code.
     #[cfg(not(target_family = "wasm"))]
     pub fn confirm_link(
         open: Open<'_>,
@@ -752,12 +629,9 @@ impl Database {
             }),
         }
     }
-    /// The database domain.
     pub fn scope(&self) -> rocky_core::Scope {
         self.scope
     }
-    /// A session on this database. Sessions are independent: each has its
-    /// own subscriptions, and closing one leaves the others open.
     pub fn session(&self) -> Session {
         Session {
             shared: self.shared.clone(),
@@ -765,8 +639,6 @@ impl Database {
             closed: Arc::new(AtomicBool::new(false)),
         }
     }
-    /// Attaches a network service: enrollment, renewal and sync use it, and
-    /// the creator serves its peers on it. One can be attached at a time.
     pub async fn attach(&self, network: Network) -> Result<NetworkService, Failure> {
         let id = self
             .shared
@@ -774,11 +646,6 @@ impl Database {
             .await??;
         Ok(NetworkService::new(&self.shared, id))
     }
-    /// Makes this device a trusted node of its domain's coordinated logs,
-    /// which it ends with seals and whose terminal entries it acknowledges;
-    /// `None` ends that. The log is the application's and
-    /// is never closed by Rocky. The coordinator also handles claims and
-    /// revocation push.
     pub async fn coordinate(
         &self,
         log: Option<Arc<dyn rocky_credentials::Coordinator>>,
@@ -788,9 +655,6 @@ impl Database {
             .await??;
         Ok(())
     }
-    /// Reaches whichever coordinator the database's owner-signed settings
-    /// name through `connector` while no coordinator is composed; `None`
-    /// stops that.
     pub async fn connect_coordinator(
         &self,
         connector: Option<Arc<dyn rocky_credentials::CoordinatorConnector>>,
@@ -800,21 +664,6 @@ impl Database {
             .await?;
         Ok(())
     }
-    /// The value `claim` takes from the domain's `counter` on the composed
-    /// coordination service: the next one, or the one it already took.
-    /// Values are unique and strictly increasing across every trusted node,
-    /// and a value is consumed once claimed: an abandoned one is a gap.
-    ///
-    /// A claim is a coordinator decision, never part of a transaction. Store
-    /// the [`counters::Claim`](crate::counters::Claim) in the application's
-    /// own pending row before the first attempt, then use the value in an
-    /// ordinary transaction that also settles that row. After an uncertain
-    /// result (`CoordinationError::Unavailable`) or a restart, claim again
-    /// with the stored claim: it answers the same value within
-    /// `counters::CLAIM_WINDOW` of its issue time and the counter's latest
-    /// `CLAIM_RECORDS` claims; beyond that it is refused with `Expired` and
-    /// never takes a second value. The domain's trusted nodes claim, and so
-    /// do holders of a claim right (`grant_claims`) for that counter.
     pub async fn claim(
         &self,
         counter: crate::counters::Name,
@@ -824,8 +673,6 @@ impl Database {
             .request(|reply| Command::Claim(counter, claim, reply))
             .await?
     }
-    /// `counter`'s last claimed value and, for `claim`, what it took: a
-    /// linearizable read for reconciliation after a restart.
     pub async fn counter(
         &self,
         counter: crate::counters::Name,
@@ -835,8 +682,6 @@ impl Database {
             .request(|reply| Command::Counter(counter, claim, reply))
             .await?
     }
-    /// A SQL connection for a database driver: the writer is a secure SQL
-    /// session, a reader steps snapshot cursors.
     pub async fn connect(&self, options: ConnectionOptions) -> Result<Connection, Failure> {
         self.shared
             .request(|reply| Command::Connect {
@@ -848,10 +693,6 @@ impl Database {
             })
             .await?
     }
-    /// How a committed transaction with replayed writes stands here:
-    /// `None` until one of its writes replayed. A local commit stays
-    /// visible until replay drops it. `Applied` and `Dropped` are final
-    /// (`sealed`) once a seal covers the transaction.
     pub async fn transaction_outcome(
         &self,
         token: rocky_core::TransactionToken,
@@ -860,16 +701,9 @@ impl Database {
             .request(|reply| Command::Outcome(token, reply))
             .await?
     }
-    /// Returns once every transaction committed before the call is durable
-    /// against power loss, as `Durability::Flushed` acknowledges at commit.
-    /// Durability is a prefix of the local log, so a buffered transaction
-    /// whose `commit` returned (its token included) is covered. Use it
-    /// before an irreversible external effect of buffered work.
     pub async fn flush(&self) -> Result<(), Failure> {
         self.shared.request(Command::Flush).await?
     }
-    /// Committed changes of `tables`, or of every table. Register before
-    /// reading what the changes invalidate.
     pub async fn observe_tables(
         &self,
         tables: Option<Vec<String>>,
@@ -880,9 +714,6 @@ impl Database {
             .await??;
         Ok(TableEvents::new(observer))
     }
-    /// Ends every session, detaches the network service, flushes and
-    /// closes the file. Admitted calls finish first. Closing again does
-    /// nothing.
     pub async fn close(&self) -> Result<(), Failure> {
         let mut worker = self.worker.lock().await;
         if let Some(worker) = worker.take() {
@@ -897,20 +728,13 @@ impl Database {
     }
 }
 
-/// A database a simulation serves on its own thread, and its node.
 #[cfg(test)]
 pub(crate) struct Hosted {
     pub(crate) opened: Opened,
-    /// Upgrade only for a check; a held node outlives a crash.
     pub(crate) node: std::sync::Weak<Node>,
 }
 #[cfg(test)]
 impl Database {
-    /// Serves the database on a `LocalSet` of the calling task's thread
-    /// instead of its own thread, so a paused clock and one thread drive
-    /// every node of a simulation. Call it inside a `LocalSet`. While
-    /// `ahead` holds seconds, the database's local tasks see this thread's
-    /// clock that far ahead, as a device whose wall clock runs ahead does.
     pub(crate) async fn host(
         open: Open<'_>,
         install: Install,
@@ -951,8 +775,6 @@ impl Database {
             .map_err(|_| "the database exposed no node")?;
         Ok(Hosted { opened, node })
     }
-    /// Ends a hosted database at once: its tasks are dropped mid-step, as
-    /// a process death would stop them; nothing flushes or closes first.
     pub(crate) async fn crash(&self) {
         self.shared.closed.store(true, Ordering::SeqCst);
         if let Some(Worker::Task(task)) = self.worker.lock().await.take() {
@@ -962,8 +784,6 @@ impl Database {
     }
 }
 
-/// One SQL connection of a database. Statements are numbered by the
-/// caller's handles; each keeps the undelivered rest of its result.
 pub struct Connection {
     shared: Arc<Shared>,
     id: u64,
@@ -975,7 +795,6 @@ impl Connection {
     pub fn measurement_id(&self) -> u64 {
         self.id
     }
-    /// A number for a new statement handle of this connection.
     pub fn statement(&self) -> u64 {
         self.statements.fetch_add(1, Ordering::Relaxed)
     }
@@ -998,8 +817,6 @@ impl Connection {
             .await
             .map_err(|error| connection::failure(connection::code::MISUSE, error.to_string()))?
     }
-    /// Runs `sql` as statement `statement` and returns its first page; a
-    /// result `statement` still held is dropped first.
     pub async fn execute(
         &self,
         statement: u64,
@@ -1018,7 +835,6 @@ impl Connection {
             _ => Err(connection::failure(connection::code::MISUSE, "no page")),
         }
     }
-    /// The next page of `statement`'s result.
     pub async fn next(&self, statement: u64) -> Result<Page, SqlFailure> {
         match self.call(connection::Call::Next { statement }).await? {
             connection::Reply::Page(page) => Ok(page),
@@ -1034,22 +850,17 @@ impl Connection {
             reply: oneshot::channel().0,
         });
     }
-    /// Drops the rest of `statement`'s result.
     pub async fn finish(&self, statement: u64) -> Result<(), SqlFailure> {
         self.call(connection::Call::Finish { statement })
             .await
             .map(drop)
     }
-    /// The transaction this connection's last `COMMIT` published, as
-    /// `Database::transaction_outcome` and table changes name it; `None`
-    /// when it published nothing.
     pub async fn committed(&self) -> Result<Option<rocky_core::TransactionToken>, SqlFailure> {
         match self.call(connection::Call::Committed).await? {
             connection::Reply::Token(token) => Ok(token),
             _ => Err(connection::failure(connection::code::MISUSE, "no token")),
         }
     }
-    /// `BEGIN` under a handle chosen now: the token its commit publishes.
     pub(crate) async fn begin_identified(
         &self,
     ) -> Result<rocky_core::TransactionToken, SqlFailure> {
@@ -1064,8 +875,6 @@ impl Connection {
             _ => Err(connection::failure(connection::code::MISUSE, "no state")),
         }
     }
-    /// Closes the connection: an open transaction rolls back, its cursors
-    /// end. Closing again does nothing.
     pub async fn close(&self) {
         if !self.closed.swap(true, Ordering::SeqCst) {
             let _ = self
@@ -1093,7 +902,6 @@ impl Drop for Connection {
     }
 }
 
-/// One caller's independent waits and requests on a shared database.
 pub struct Session {
     shared: Arc<Shared>,
     id: u64,
@@ -1145,20 +953,16 @@ impl Session {
     pub async fn discovery(&self) -> Result<crate::DiscoveryStatus, Failure> {
         Ok(self.network().await?.discovery)
     }
-    /// Observes owned runtime facts without dialing or starting a worker.
     pub async fn status(&self) -> Result<crate::DatabaseStatus, Failure> {
         self.send(crate::request::Request::Status).await
     }
-    /// Waits for a changed snapshot; closing this session ends only its waits.
     pub async fn status_after(&self, token: String) -> Result<crate::DatabaseStatus, Failure> {
         self.send(|reply| crate::request::Request::StatusAfter(token, reply))
             .await
     }
-    /// Reconciles selected peers and preserves each attempt's outcome.
     pub async fn sync_once(&self) -> Result<crate::ReconciliationReport, Failure> {
         self.send(crate::request::Request::Sync).await
     }
-    /// Supplies the identity only for this sync, including certification after a tip change.
     pub async fn sync_once_with_identity(
         &self,
         identity: Arc<dyn crate::IdentityProvider>,
@@ -1174,15 +978,12 @@ impl Session {
         self.send(|reply| crate::request::Request::AutomaticSync(enabled, reply))
             .await
     }
-    /// Resumes networking after the application enters the foreground.
     pub async fn enter_foreground(&self) -> Result<(), Failure> {
         self.send(crate::request::Request::Foreground).await
     }
-    /// Suspends background networking and drains its live links.
     pub async fn enter_background(&self) -> Result<(), Failure> {
         self.send(crate::request::Request::Background).await
     }
-    /// Ends this device's authority, optionally removing its local data at close.
     pub async fn logout(&self, purge_on_close: bool) -> Result<(), Failure> {
         self.send(|reply| crate::request::Request::Logout(purge_on_close, reply))
             .await
@@ -1195,7 +996,6 @@ impl Session {
         self.send(|reply| crate::request::Request::ChangeTip(change, node::Root(root), reply))
             .await
     }
-    /// The followed bookmark, tip, and peer progress.
     pub async fn tip_status(&self) -> Result<crate::TipStatus, Failure> {
         self.change_tip(crate::request::TipChange::Status, None)
             .await
@@ -1207,7 +1007,6 @@ impl Session {
         self.change_tip(crate::request::TipChange::Seal { close }, None)
             .await
     }
-    /// The root recovers the followed tip's stuck coordinated log.
     pub async fn recover(
         &self,
         root: Arc<dyn crate::IdentityProvider>,
@@ -1236,9 +1035,6 @@ impl Session {
         )
         .await
     }
-    /// The owner declares the domain coordinated, once: every device
-    /// learns it by sync, and a trusted node without a composed coordinated
-    /// log then refuses to seal with `coordinator_required`.
     pub async fn declare_coordinated(
         &self,
         root: Arc<dyn crate::IdentityProvider>,
@@ -1270,7 +1066,6 @@ impl Session {
     pub async fn open_tip(&self, seal: &str, minimum_in_sync: u32) -> Result<String, Failure> {
         self.open_tip_signed(seal, minimum_in_sync, None).await
     }
-    /// Supplies the identity when opening starts another local writer chain.
     pub async fn open_tip_with_identity(
         &self,
         seal: &str,
@@ -1340,7 +1135,6 @@ impl Session {
         )
         .await
     }
-    /// The root grants trust to an issuer identity.
     pub async fn trust(
         &self,
         identity: &str,
@@ -1350,8 +1144,6 @@ impl Session {
         self.send(|reply| crate::request::Request::Trust(identity, node::Root(Some(root)), reply))
             .await
     }
-    /// Ends a trusted identity. Lost lets its first enrollees renew elsewhere;
-    /// Compromised ends them too. A merged compromise cannot be undone by loss.
     pub async fn revoke_trusted(
         &self,
         identity: &str,
@@ -1361,13 +1153,6 @@ impl Session {
         self.revoke_identity_with_root(identity, mode, Some(root), true)
             .await
     }
-    /// "This is everything: sign out everywhere else." The root ends every
-    /// node except this one and those `keep` names, including nodes this
-    /// store never saw, and keeps their operations only up to what this
-    /// replica applied: anything not on this device now is discarded on
-    /// every replica. A later reset follows this one; resets signed
-    /// concurrently end each other's devices. Devices a kept device admits
-    /// afterwards stay. Fails on a device a reset already ended.
     pub async fn sign_out_everywhere_else(
         &self,
         root: Arc<dyn crate::IdentityProvider>,
@@ -1378,7 +1163,6 @@ impl Session {
         })
         .await
     }
-    /// Whether an owner reset fenced this device's view.
     pub async fn freshness(&self) -> Result<crate::Freshness, Failure> {
         self.send(crate::request::Request::Freshness).await
     }
@@ -1394,7 +1178,6 @@ impl Session {
         )
         .await
     }
-    /// Root revocations optionally retain tip statements through the local heads.
     pub async fn revoke_identity_with_root(
         &self,
         identity: &str,
@@ -1417,15 +1200,14 @@ impl Session {
         )
         .await
     }
-    /// Grants counter claim rights; `None` covers every counter.
     pub async fn grant_claims(
         &self,
         identity: &str,
-        counters: Option<&[&[u8]]>,
+        counters: crate::ClaimCounters<'_>,
         delegations: u8,
     ) -> Result<crate::ClaimGrant, Failure> {
         let identity = identity.parse()?;
-        let counters = counters.map(|names| names.iter().map(|name| name.to_vec()).collect());
+        let counters = counters.names();
         self.send(|reply| {
             crate::request::Request::GrantClaims(identity, counters, delegations, reply)
         })
@@ -1448,8 +1230,6 @@ impl Session {
             .await
     }
 
-    /// Ends this session: its waits stop and its subscriptions are
-    /// released. The database and its other sessions stay open.
     pub async fn close(&self) {
         if !self.closed.swap(true, Ordering::SeqCst) {
             let _ = self
@@ -1470,8 +1250,6 @@ impl Drop for Session {
     }
 }
 
-/// The network service attached to a database. Dropping the handle leaves
-/// it attached until the database closes.
 pub struct NetworkService {
     shared: Arc<Shared>,
     id: u64,
@@ -1485,10 +1263,6 @@ impl NetworkService {
             closed: AtomicBool::new(false),
         }
     }
-    /// Stops serving and syncing. Admitted work has a few seconds to
-    /// finish; what remains is cancelled and is safe to repeat. A transport
-    /// the service started is closed, a borrowed one is not. The database
-    /// stays open. Closing again does nothing.
     pub async fn close(&self) {
         if !self.closed.swap(true, Ordering::SeqCst) {
             let _ = self
@@ -1501,8 +1275,6 @@ impl NetworkService {
 
 type Link = (crate::transport::Connected, bool);
 
-/// The installation of the data directory, created, joined or loaded, and
-/// the started transport of `network`.
 async fn identity(
     path: &Path,
     setup: &Setup,
@@ -1745,8 +1517,6 @@ async fn identity(
     }
 }
 
-/// Readies an opened replica for this identity: its readable tables,
-/// group keys and the node credential.
 pub(crate) async fn attach(
     replica: &EncryptedReplica<rocky_core::TypedRows>,
     settings: &mut Settings,
@@ -1772,9 +1542,6 @@ pub(crate) async fn attach(
     crate::escrow::keep(replica, settings, vault, domain).await
 }
 
-/// Registers the granted members of every group partition and installs
-/// each readable member's keys, which derive from its group secret, also
-/// for a table that joined the group in a later generation.
 async fn install_group_keys(
     replica: &EncryptedReplica<rocky_core::TypedRows>,
     settings: &Settings,
@@ -1802,8 +1569,6 @@ async fn install_group_keys(
     Ok(())
 }
 
-/// On a partial replica, holds a table that joined a group in a later
-/// generation wherever its group partition is held.
 async fn hold_late_group_members(
     replica: &EncryptedReplica<rocky_core::TypedRows>,
     settings: &Settings,
@@ -1826,7 +1591,6 @@ async fn hold_late_group_members(
     Ok(())
 }
 
-/// Gives every granted scope without one the default retention policy.
 pub(crate) async fn retain(
     replica: &EncryptedReplica<rocky_core::TypedRows>,
     settings: &Settings,
@@ -1849,13 +1613,8 @@ pub(crate) async fn retain(
     Ok(())
 }
 
-/// Rows one statement inserts into a replayed table: its intent carries
-/// them as bound values, and a partition's intent holds at most
-/// `MAX_INTENT_STATEMENTS` statements.
 const REPLAYED_INSERT_ROWS: usize = 1024;
 
-/// Inserts a row of `table` for each row of `select`, with the next id of
-/// its partition, inside the open transaction.
 pub(crate) async fn insert_rows(
     sql: &rocky_secure::SecureSql<rocky_core::TypedRows>,
     schema: &rocky_core::LogicalSchema,
@@ -1918,9 +1677,6 @@ pub(crate) async fn insert_rows(
     }
     Ok(())
 }
-/// Verifies the archive, enrolls a fresh identity with the invitation's
-/// issuer and puts the archive's files in place. The marker, written
-/// before enrolling, names the predecessor whose file is rebound at open.
 async fn restore(
     path: &Path,
     directory: &Path,
@@ -2004,15 +1760,10 @@ async fn restore(
     Ok((settings, Some(link)))
 }
 
-/// Records the durable intent to bootstrap from a checkpoint, as before
-/// enrollment can persist the identity or when rows of a newly revoked
-/// author arrive by checkpoint only.
 fn record_checkpoint_bootstrap(directory: &Path) -> Result<(), Failure> {
     rocky_credentials::write_private(&directory.join("bootstrap.json"), b"true")
 }
 
-/// Envelopes shared after enrollment wait at the inviter: the bootstrap
-/// intent stays until one exchange with it.
 fn record_inviter_bootstrap(
     directory: &Path,
     inviter: &rocky_credentials::PublicKey,
@@ -2023,8 +1774,6 @@ fn record_inviter_bootstrap(
     )
 }
 
-/// Confirms a removal the installed schema implies before the network
-/// starts or anything changes.
 async fn confirm_removals(setup: &Setup, directory: &Path, path: &Path) -> Result<(), Failure> {
     let settings = Settings::load(path)?;
     let has_tip_schema = rocky_secure::installed_tip_schema(
@@ -2047,8 +1796,6 @@ async fn confirm_removals(setup: &Setup, directory: &Path, path: &Path) -> Resul
     Ok(())
 }
 
-/// Adopts a pending schema the replica already committed. The commit may
-/// also have advanced the bookmark past the pending tip on the same schema.
 async fn adopt_committed_pending_schema(
     settings: &mut Settings,
     vault: &crate::secrets::Vault,
@@ -2088,11 +1835,6 @@ async fn adopt_committed_pending_schema(
     Ok(())
 }
 
-/// The marker of a restore whose open steps are unfinished. A restored
-/// file is rebound to this device's identity first; the marker goes once
-/// the file holds its tables and keys, a recovery's once the root revoked
-/// the lost identities too, and until then each open repeats these steps.
-/// A recovery whose store took its keys opens as installed.
 fn unfinished_restore(marker: &Path) -> Result<Option<crate::backup::Marker>, Failure> {
     if !rocky_platform::fs::exists(marker) {
         return Ok(None);
@@ -2101,9 +1843,6 @@ fn unfinished_restore(marker: &Path) -> Result<Option<crate::backup::Marker>, Fa
     Ok((saved.recovery != Some(crate::backup::Recovery::Keyed)).then_some(saved))
 }
 
-/// Drains the work of migration commits, which precede the revision
-/// subscription, before enrollment or the first reconciliation can
-/// trigger it instead.
 async fn drain_migration_work(
     replica: &EncryptedReplica<rocky_core::TypedRows>,
     scope: rocky_core::Scope,
@@ -2114,9 +1853,6 @@ async fn drain_migration_work(
     Ok(())
 }
 
-/// Recovery is for lost trusted nodes: the root revokes them before anyone
-/// writes, and is dropped. The marker stays until the revocations are
-/// applied, so until then the directory opens only by recovering again.
 async fn revoke_lost_trusted(
     node: &Node,
     root: &std::sync::Mutex<Option<Box<crate::RootKey>>>,
@@ -2147,8 +1883,6 @@ async fn revoke_lost_trusted(
     Ok(revoked)
 }
 
-/// Serves a database on the calling thread: its tasks stay on it, and
-/// transports run theirs on two workers.
 #[cfg(not(target_family = "wasm"))]
 fn serve_on_thread(
     setup: Setup,
@@ -2688,10 +2422,6 @@ async fn run_inner(
     }
     Ok(())
 }
-/// Ends everything that uses the file before it closes: sessions end, open
-/// transactions roll back and cursors end, and calls that use the network
-/// end within its drain bound. An attach still pending once the tasks are
-/// joined is detached by the second pass.
 async fn end_users_of_file(
     node: &Node,
     connections: &connection::Registry,
@@ -2703,21 +2433,12 @@ async fn end_users_of_file(
     while tasks.join_next().await.is_some() {}
     node.detach(None).await;
 }
-/// Flushes and optimizes the replica, then drops this last handle, which
-/// closes the file.
 async fn close_file(replica: EncryptedReplica<rocky_core::TypedRows>) -> Result<(), String> {
     let flushed = replica.flush().await.map(drop).map_err(|e| e.to_string());
     replica.optimize().await;
     drop(replica);
     flushed
 }
-/// Flushes buffered SQL commits and runs their queued maintenance after
-/// they answer. The flush runs on a blocking thread and covers every
-/// commit that arrived during the previous flush. A flush failure surfaces
-/// at the next call that exposes data, which flushes itself. Failed background
-/// flushes retain maintenance and retry with backoff. Maintenance left over
-/// retries soon: a concurrent commit leaves its revision pending too, and
-/// the timer also covers work present before this driver's subscription.
 async fn settle_commits(replica: EncryptedReplica<rocky_core::TypedRows>) {
     let mut revisions = replica.observe_revision();
     revisions.mark_changed();
@@ -2743,8 +2464,6 @@ async fn settle_commits(replica: EncryptedReplica<rocky_core::TypedRows>) {
         }
     }
 }
-/// Removes the installation's files and secrets; a later join in
-/// `directory` starts clean.
 fn purge_directory(directory: &Path) -> Result<(), Failure> {
     remove_installation(directory)?;
     match rocky_platform::fs::remove_dir_all(directory.join("secrets")) {
@@ -2752,29 +2471,28 @@ fn purge_directory(directory: &Path) -> Result<(), Failure> {
         _ => Ok(()),
     }
 }
-/// Removes the installation's files, the identity first: what a crash
-/// leaves is no domain, which a later create or install replaces.
+const INSTALLATION_IDENTITY_FILE: &str = "identity.json";
+const INSTALLATION_DATA_FILES: [&str; 6] = [
+    "rocky.sqlite",
+    "rocky.sqlite-wal",
+    "rocky.sqlite-shm",
+    "revoked.json",
+    "bootstrap.json",
+    "mailbox.json",
+];
+fn remove_if_present(path: &Path) -> Result<(), Failure> {
+    match rocky_platform::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+        _ => Ok(()),
+    }
+}
 fn remove_installation(directory: &Path) -> Result<(), Failure> {
-    for name in [
-        "identity.json",
-        "rocky.sqlite",
-        "rocky.sqlite-wal",
-        "rocky.sqlite-shm",
-        "revoked.json",
-        "bootstrap.json",
-        "mailbox.json",
-    ] {
-        match rocky_platform::fs::remove_file(directory.join(name)) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
-            _ => {}
-        }
+    remove_if_present(&directory.join(INSTALLATION_IDENTITY_FILE))?;
+    for name in INSTALLATION_DATA_FILES {
+        remove_if_present(&directory.join(name))?;
     }
     Ok(())
 }
-/// Takes back a create, sign-in or supplied install that failed before it
-/// was handed out, so the directory takes a retry: its files go, and a
-/// created domain's secrets, whose root was never handed out either. A
-/// supplied or personal install keeps the device keys it is retried with.
 fn unwind(
     directory: &Path,
     created: Option<(&crate::secrets::Vault, Vec<String>)>,
@@ -2794,8 +2512,6 @@ fn unwind(
         }
     }
 }
-/// As `unwind`, once the node started: it lets go of its network and file
-/// first.
 async fn discard(
     node: Arc<Node>,
     replica: EncryptedReplica<rocky_core::TypedRows>,
@@ -2811,13 +2527,56 @@ async fn discard(
     let created = install.discards_secrets().then_some((&vault, roles));
     unwind(directory, created, error)
 }
+const CREDENTIAL_TTL_SECONDS: std::ops::RangeInclusive<u64> = 60..=366 * 24 * 60 * 60;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A first open that cannot publish the settings its creation signed
-    /// discards the database whole: none is left without them, and creating
-    /// it again signs them anew.
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn a_removal_that_fails_on_a_data_file_already_removed_the_identity() -> Result<(), Failure> {
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join(INSTALLATION_IDENTITY_FILE), b"{}")?;
+        let unremovable = directory.path().join(INSTALLATION_DATA_FILES[0]);
+        std::fs::create_dir(&unremovable)?;
+        std::fs::write(unremovable.join("held"), b"")?;
+        assert!(
+            remove_installation(directory.path()).is_err(),
+            "a data file that cannot be removed fails the removal"
+        );
+        assert!(
+            !directory.path().join(INSTALLATION_IDENTITY_FILE).exists(),
+            "the identity goes before any data file, so a crash leaves no domain"
+        );
+        Ok(())
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_create_without_a_credential_ttl_issues_thirty_days_and_refuses_one_outside_a_minute_to_a_year()
+    -> Result<(), Failure> {
+        let ttl_of = |credential_ttl| match Database::create_install(
+            credential_ttl,
+            Arc::new(crate::RootKey::generate()),
+            None,
+            None,
+        )? {
+            Install::Create { ttl, .. } => Ok::<_, Failure>(ttl),
+            _ => Err("a create installs as a create".into()),
+        };
+        assert_eq!(ttl_of(None)?, 30 * 24 * 60 * 60);
+        assert_eq!(ttl_of(None)?, DEFAULT_TTL);
+        assert_eq!(ttl_of(Some(60))?, 60);
+        assert_eq!(ttl_of(Some(366 * 24 * 60 * 60))?, 366 * 24 * 60 * 60);
+        for refused in [0, 59, 366 * 24 * 60 * 60 + 1] {
+            assert!(
+                ttl_of(Some(refused)).is_err(),
+                "a credential ttl of {refused} s is refused"
+            );
+        }
+        Ok(())
+    }
+
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_create_that_cannot_publish_its_settings_leaves_no_database() -> Result<(), Failure> {
@@ -2875,8 +2634,6 @@ mod tests {
         created.database.close().await
     }
 
-    /// Close awaits the database thread's end instead of joining it, so
-    /// the closer's single-threaded executor runs other tasks meanwhile.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
     async fn close_yields_while_the_database_thread_ends() -> Result<(), Failure> {
@@ -3076,8 +2833,6 @@ mod tests {
             .build()
     }
 
-    /// The root of a create that fails is never handed out: the domain it
-    /// signed goes with it, and creating again succeeds.
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn a_create_failing_before_it_is_handed_out_leaves_the_directory_for_a_retry()
     -> Result<(), Failure> {
@@ -3092,8 +2847,6 @@ mod tests {
         created.database.close().await
     }
 
-    /// A supplied install that fails keeps the prepared device keys, so the
-    /// same credentials install on a retry.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_supplied_install_failing_before_it_is_handed_out_installs_on_a_retry()

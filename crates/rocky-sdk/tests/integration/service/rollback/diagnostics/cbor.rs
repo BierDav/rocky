@@ -1,4 +1,3 @@
-//! Read-only current-header inspection; never used for protocol admission.
 use super::*;
 use serde::{Deserialize, Serialize, de, ser};
 use std::fmt;

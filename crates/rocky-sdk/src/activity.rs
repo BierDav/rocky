@@ -1,4 +1,3 @@
-//! Bounded in-memory observations of background work.
 use rocky_credentials::PublicKey;
 use std::collections::VecDeque;
 use tokio::sync::watch;
@@ -42,7 +41,6 @@ pub enum ActivityKind {
         identity: PublicKey,
         node: PublicKey,
     },
-    /// An owner reset that does not keep this node ended it.
     NodeReset {
         node: PublicKey,
         reset: rocky_core::Commitment,

@@ -1,13 +1,9 @@
-//! A recovery stopped at each step: opening the directory is refused, and
-//! recovering again finishes it under the identity, and so the author slot,
-//! it first saved.
 use super::fault::{STOPS, Stage};
 use crate::{Affinity, Column, Configuration, Failure, Schema, Table, params};
 use rocky_platform::fs::Scratch;
 use serde_json::Value;
 use std::path::Path;
 
-/// Two collections, two keys: a stop after the first leaves one missing.
 fn schema() -> Result<Schema, Failure> {
     Schema::builder("recovery_faults", 1)
         .table(Table::replayed("notes").column(Column::new("body", Affinity::Text).required()))
@@ -40,8 +36,6 @@ async fn rows(database: &crate::Database) -> Result<Vec<String>, Failure> {
         .map(|row| row.get::<String>("row"))
         .collect::<Result<_, _>>()?)
 }
-/// Grants a reader device, which records the creator's own trusted grant
-/// in its registry, the record a recovery revokes it by.
 async fn grant(database: &crate::Database, directory: &Path) -> Result<(), Failure> {
     let device = crate::Database::node_keys_of(
         directory,
@@ -61,7 +55,6 @@ async fn grant(database: &crate::Database, directory: &Path) -> Result<(), Failu
     session.close().await;
     Ok(())
 }
-/// The recovered identity.
 fn slot(directory: &Path) -> Result<Option<Value>, Failure> {
     let path = directory.join("identity.json");
     if !rocky_platform::fs::exists(&path) {
@@ -157,8 +150,6 @@ async fn a_recovery_stopped_at_any_step_finishes_when_recovered_again_in_one_slo
     Ok(())
 }
 
-/// An archive goes out and comes back as bytes, the same way in a browser
-/// and natively, leaving no file behind on either side.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_backup_exported_as_bytes_recovers_the_domain() -> Result<(), Failure> {
     let root = Scratch::new().await;

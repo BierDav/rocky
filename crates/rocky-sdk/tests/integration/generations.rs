@@ -1,6 +1,3 @@
-//! Schema changes as seals: an issuer publishes the schema its application
-//! declares on the followed bookmark, and every device switches when its
-//! bookmark reaches it.
 use crate::common;
 use crate::support::snapshot as snap;
 use common::{Device, Failure, SCHEMA, introduce};
@@ -8,20 +5,13 @@ use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
-/// The shopping schema with a nullable note and a tags collection.
 const SECOND: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","granted_like":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-/// The second schema, with `tags` granted like `items`.
 const GRANTED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","granted_like":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-/// Requires `position`, which a migration computes from the titles.
 const REQUIRED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],"migrations":[{"version":2,"statements":["UPDATE items SET position = printf('%04d', (SELECT count(*) FROM items AS earlier WHERE earlier.title < items.title))"]}]}"#;
-/// `position` nullable, and `BARE` requiring it without a migration.
 const NULLABLE: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 const BARE: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-/// Titles are unique, the later write winning: requiring a field rebuilds
-/// a constrained projection.
 const UNIQUE: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"indexes":[{"name":"items_title","unique":true,"columns":[{"name":"title","descending":false}]}]}]}"#;
 const UNIQUE_REQUIRED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"indexes":[{"name":"items_title","unique":true,"columns":[{"name":"title","descending":false}]}]}],"migrations":[{"version":2,"statements":["UPDATE items SET position = upper(title)"]}]}"#;
-/// The second schema with a nullable `rank`.
 const THIRD: &str = r#"{"application":"shopping","version":3,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"rank","type":"integer","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","granted_like":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 fn reopen(options: Open<'_>) -> Result<Device, Failure> {
@@ -57,11 +47,9 @@ fn text(value: &str) -> rocky_sdk::SqlValue {
     rocky_sdk::SqlValue::Text(snap::text(&(value)))
 }
 
-/// Hex of the followed tip a device reports.
 async fn tip(device: &Device) -> Value {
     snap::ok(device.session.tip_status()).await["tip"].clone()
 }
-/// Mutates a `tags` row of `label`.
 async fn tag(device: &Device, handle: u8, label: &str) {
     snap::ok(snap::mutate(
         &device.session,
@@ -529,9 +517,7 @@ async fn a_local_schema_change_rebuilds_tables_and_keeps_the_generation() -> Res
     Ok(())
 }
 
-/// The first schema with `title` an integer: the same name, another type.
 const RETYPED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
-/// The first schema with `title` renamed `label`: another field.
 const RENAMED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -613,10 +599,7 @@ async fn an_older_application_follows_two_published_schemas_and_keeps_its_unsent
     Ok(())
 }
 
-/// The first schema with a nullable note: a switch that changes no grant.
 const NOTED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-/// Makes `device` follow a `dev` tip it opens on its own canonical trusted
-/// seal, so it holds that unrelated tip's state live.
 async fn follow_dev_opened_on_own_seal(device: &Device) -> Result<(), Failure> {
     snap::ok(device.session.seal(false)).await;
     let inspected = snap::ok(device.session.inspect_tips()).await;
@@ -644,7 +627,6 @@ async fn follow_dev_opened_on_own_seal(device: &Device) -> Result<(), Failure> {
     snap::ok(device.follow("dev")).await;
     Ok(())
 }
-/// Copies the replica's files of `from` to `to`.
 fn copy_replica(from: &Path, to: &Path) -> Result<(), Failure> {
     for name in ["rocky.sqlite", "rocky.sqlite-wal", "rocky.sqlite-shm"] {
         let _ = std::fs::remove_file(to.join(name));
@@ -654,8 +636,6 @@ fn copy_replica(from: &Path, to: &Path) -> Result<(), Failure> {
     }
     Ok(())
 }
-/// `identity.json` with a pending switch to `tip` and `manifest`, as the
-/// follower saves it before switching.
 fn with_pending(identity: &[u8], tip: &Value, manifest: &Value) -> Result<Vec<u8>, Failure> {
     let bytes = |hex: &Value| -> Result<Value, Failure> {
         Ok(json!(
@@ -666,8 +646,6 @@ fn with_pending(identity: &[u8], tip: &Value, manifest: &Value) -> Result<Vec<u8
     saved["pending"] = json!({"tip": bytes(tip)?, "manifest": bytes(manifest)?});
     Ok(serde_json::to_vec(&saved)?)
 }
-/// Leaves `directory` as a device that saved its intent to switch to
-/// `target` (tip, manifest) and stopped before saving its settings.
 fn stop_after_saving_switch_intent(
     directory: &Path,
     identity: &[u8],
@@ -848,7 +826,6 @@ async fn an_older_application_joins_at_the_households_generation() -> Result<(),
     Ok(())
 }
 
-/// The credential chain a device's identity holds.
 fn chain(directory: &Path) -> Result<Value, Failure> {
     let identity: Value = serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)?;
     Ok(identity["credentials"].clone())
@@ -1208,9 +1185,6 @@ async fn an_issuer_migrating_offline_publishes_on_reconnect_and_meanwhile_writes
     Ok(())
 }
 
-/// A node that keeps every seal migrates its database: the history of a
-/// table the migration adds a field to gains the field, and the kept seal
-/// still reads the table as it was.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_node_keeping_every_seal_publishes_a_migration_adding_a_field() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
@@ -1248,13 +1222,8 @@ async fn a_node_keeping_every_seal_publishes_a_migration_adding_a_field() -> Res
     Ok(())
 }
 
-/// The second schema with a nullable `rank` instead of `note` and `tags`:
-/// another version 2 an issuer may publish at the same time.
 const RIVAL: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"rank","type":"integer","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
-/// Issuers that publish different schemas apart end on one tip: the losing
-/// issuer's database switches to the winner's schema, which its own
-/// application does not declare.
 #[tokio::test(flavor = "multi_thread")]
 async fn issuers_that_publish_different_schemas_apart_end_on_the_winners() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
@@ -1302,9 +1271,6 @@ async fn issuers_that_publish_different_schemas_apart_end_on_the_winners() -> Re
     Ok(())
 }
 
-/// An owner tries a migration on a branch, returns to `main` and keeps
-/// sealing and compacting there: finalizing replays only frames on the
-/// seal's own path.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_owner_returns_from_a_migrated_branch_and_compacts_main() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;

@@ -1,5 +1,3 @@
-//! A node whose clock runs ahead: its peer holds its frames until its own
-//! clock is near them, woken by local recovery's timer alone.
 use super::{
     driver,
     schedule::{Action::*, Fixture, Scenario, Wall},
@@ -54,10 +52,6 @@ async fn frames_from_a_clock_ahead_apply_when_this_clock_is_near_them() -> Resul
     Ok(())
 }
 
-/// A device whose clock runs an hour ahead learns from its next link that
-/// its changes wait on its peer, and the peer learns why they will; both
-/// alerts clear with the next link after the clock is right again, and a
-/// skew within `MAX_CLOCK_AHEAD` raises none.
 #[tokio::test(start_paused = true)]
 async fn a_link_tells_both_devices_when_one_clock_runs_ahead() -> Result<(), Failure> {
     let hour = Duration::from_secs(3600);

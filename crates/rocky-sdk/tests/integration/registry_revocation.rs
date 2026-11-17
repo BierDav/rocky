@@ -1,5 +1,3 @@
-//! Phase 7 acceptance on the in-process hub: precise recorded access and
-//! the explicit full-rotation fallback for unrecorded devices.
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
 use rocky_sdk::{Database, credentials::CredentialChain, transport::memory::Hub};

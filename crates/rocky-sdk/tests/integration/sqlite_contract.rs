@@ -1,5 +1,3 @@
-//! Qualifies the scalar and key contracts of `rocky-core` against the pinned
-//! SQLite: getter conversions, storage classes and key equality.
 use rocky_core::{Affinity, Collation, KeyColumn, SqlValue, key_components};
 use rusqlite::{Connection, types::Value};
 
@@ -159,10 +157,6 @@ fn columns_store_the_class_their_affinity_names() {
     assert_eq!(class, "null", "NaN is not a REAL: the engine stores NULL");
 }
 
-/// Whether the engine's text of `real` is exactly ours: fifteen digits
-/// identify most doubles. Otherwise, and for subnormals, both texts only
-/// read back as the same double, since the engine's last digit is not
-/// always the nearest.
 fn engine_text_is_exact(real: f64) -> bool {
     !real.is_subnormal() && format!("{real:.14e}").parse() == Ok(real)
 }

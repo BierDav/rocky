@@ -1,5 +1,3 @@
-//! Runs one seed: setup, the schedule with safety checked after every
-//! step, then healing and the liveness rounds.
 use super::{
     cluster::Member,
     relational::{self, Authored, Position},
@@ -14,38 +12,22 @@ use std::{
     sync::Arc,
 };
 
-/// Wall time between two steps, so a later user action stamps its writes later.
 const STEP_TIME: std::time::Duration = std::time::Duration::from_millis(1);
-/// Bounds a status watch; every wake is a changed token, so it never hangs.
 const MAX_STATUS_WAKES: usize = 1000;
-/// Only stops a hung alert watch: a paused clock reaches it once idle.
 const ALERT_WATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
-/// Only stops a hung mesh watch: a paused clock reaches it once idle.
 const MESH_WATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
-/// Paused-clock time for the autonomous recovery driver's spacing and timer
-/// to run without a new frame or a restart.
 const RECOVERY_DRIVER_SETTLE: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// How one seed ended.
 pub(super) struct Report {
     pub(super) seed: u64,
     pub(super) steps: Vec<String>,
-    /// A broken invariant: the run fails.
     pub(super) safety: Option<String>,
-    /// What still blocked convergence after the liveness rounds.
     pub(super) liveness: Option<Stuck>,
-    /// Writes accepted while another scope of the domain waited for a
-    /// rebootstrap or an import, which a domain-wide gate refused.
     pub(super) scope_local: usize,
-    /// What the run reached: fired crash points, imports, rebootstraps,
-    /// evictions, drops, by name.
     pub(super) coverage: BTreeMap<String, usize>,
-    /// Each open member's final state: its node key, and per granted scope
-    /// its frontier, rows and replayed positions, digested.
     pub(super) states: Vec<String>,
 }
 impl Report {
-    /// The steps, outcomes, coverage and member states, digested.
     pub(super) fn digest(&self) -> String {
         let text = format!("{}{:?}{:?}", self.dump(), self.coverage, self.states);
         data_encoding::HEXLOWER.encode(&rocky_core::commitment(
@@ -53,7 +35,6 @@ impl Report {
             text.as_bytes(),
         ))
     }
-    /// The seed, its steps and what failed, for a failure message.
     pub(super) fn dump(&self) -> String {
         let mut text = format!("seed {}\n", self.seed);
         for step in &self.steps {
@@ -77,40 +58,24 @@ struct Simulation {
     hub: Arc<Hub>,
     fixture: Fixture,
     members: Vec<Member>,
-    /// Members that ran a sync pass since they last opened.
     synced: Vec<bool>,
     scope_local: usize,
-    /// Relational: the lists created, what was authored, and canonical
-    /// positions as replicas reported them.
     lists: Vec<String>,
     authored: Vec<Authored>,
-    /// Authored transactions a crash or revocation of their author may
-    /// have lost before any peer received them.
     may_vanish: BTreeSet<TransactionToken>,
     positions: BTreeMap<TransactionToken, (Position, bool)>,
     partial: Vec<bool>,
-    /// Lists shared with each member: holding one needs its key.
     shared: BTreeSet<(usize, String)>,
     coverage: BTreeMap<String, usize>,
-    /// Each node's pending `Watch`: the alerts it saw change to.
     watches: BTreeMap<usize, tokio::task::JoinHandle<Result<Vec<crate::Alert>, Failure>>>,
-    /// Each node's pending `WatchMesh`: the view it saw change to.
     mesh_watches: BTreeMap<usize, tokio::task::JoinHandle<Result<MeshView, Failure>>>,
-    /// Member names by identity, for trusted identities.
     identities: BTreeMap<String, String>,
 }
-/// A node's mesh view; `None` where it has none.
 type MeshView = Option<Vec<crate::MeshDevice>>;
 
-/// Runs `seed` on a current-thread runtime with a paused clock; call it
-/// inside a `LocalSet`.
 pub(super) async fn run(seed: u64, scenario: Scenario) -> Result<Report, Failure> {
     run_steps(seed, scenario, plan(seed, scenario)).await
 }
-/// Runs a given schedule on a current-thread runtime of its own, with a
-/// paused clock. Built with `--cfg tokio_unstable`, the runtime's own
-/// randomness, which picks among ready `select!` branches, follows the
-/// seed too; otherwise it is the one source a replay does not fix.
 pub(super) async fn run_isolated(
     seed: u64,
     scenario: Scenario,
@@ -131,7 +96,6 @@ pub(super) async fn run_isolated(
         Err(panic) => std::panic::resume_unwind(panic),
     }
 }
-/// Runs a given schedule; the seed still draws the hub's faults.
 pub(super) async fn run_steps(
     seed: u64,
     scenario: Scenario,
@@ -217,7 +181,6 @@ fn short(message: &str) -> String {
 }
 
 impl Simulation {
-    /// Node `a` creates the domain and follows `main`; `b` joins it.
     async fn setup(&mut self) -> Result<(), Failure> {
         self.members[0].create(&self.hub).await?;
         self.members[0]
@@ -662,8 +625,6 @@ impl Simulation {
             .database
             .clone())
     }
-    /// What `node` authored may be gone with it: buffered commits that no
-    /// peer received do not survive a crash or a revocation.
     fn lose_unsent(&mut self, node: usize) {
         for authored in &self.authored {
             if authored.node == node {
@@ -671,8 +632,6 @@ impl Simulation {
             }
         }
     }
-    /// Authors `change` on `node`, logging what it bound; a commit that
-    /// failed is logged as uncertain.
     async fn change(
         &mut self,
         node: usize,
@@ -691,8 +650,6 @@ impl Simulation {
             }
         }
     }
-    /// Whether a scope of `node` waits for a rebootstrap or an unsealed
-    /// import: a write that succeeds then is accepted by a scope-local gate.
     async fn waits_elsewhere(&self, node: usize) -> bool {
         let Some(running) = self.members[node]
             .running
@@ -714,8 +671,6 @@ impl Simulation {
                 )
             })
     }
-    /// Each reporting device by name: its alerts, blockers by kind,
-    /// whether it is silent and which node forwarded its report.
     fn mesh(&self, mesh: &Option<Vec<crate::MeshDevice>>) -> String {
         let Some(devices) = mesh else {
             return "mesh none".into();
@@ -749,7 +704,6 @@ impl Simulation {
             .find(|member| member.node_key.as_deref() == Some(key))
             .map_or("?".into(), |member| member.name.clone())
     }
-    /// Alerts with node names for keys and whole minutes.
     fn alerts(&self, alerts: &[crate::Alert]) -> String {
         let name = |key: &str| {
             self.members
@@ -864,7 +818,6 @@ impl Simulation {
         self.follow(node, bookmark).await?;
         Ok(format!("following {}", short_hash(&tip)))
     }
-    /// Arms `point` and runs the step that reaches it.
     async fn crash_at(
         &mut self,
         node: usize,
@@ -947,7 +900,6 @@ impl Simulation {
         self.introduce(node).await;
         Ok("joined".into())
     }
-    /// Makes `node` and every running member each other's peers.
     async fn introduce(&mut self, node: usize) {
         let Ok(contact) = self.members[node].contact().await else {
             return;
@@ -977,7 +929,6 @@ impl Simulation {
         self.members[node].open(&hub).await?;
         Ok("reopened".into())
     }
-    /// Each open member's state digest, for replay comparison.
     async fn states(&self) -> Vec<String> {
         let mut states = Vec::new();
         for member in &self.members {
@@ -1032,7 +983,6 @@ impl Simulation {
         }
     }
 
-    /// The invariants that hold after every step on every open node.
     async fn safety(&mut self) -> Result<(), String> {
         if self.fixture == Fixture::Relational {
             self.harvest().await?;
@@ -1085,8 +1035,6 @@ impl Simulation {
         Ok(())
     }
 
-    /// Heals every link, reopens every member, follows `main` everywhere
-    /// and runs sync rounds. `Ok(Some(_))` is what still blocks.
     async fn heal(&mut self, rounds: usize) -> Result<Option<Stuck>, String> {
         let names: Vec<String> = (0..self.members.len()).map(node_name).collect();
         for a in &names {
@@ -1148,8 +1096,6 @@ impl Simulation {
         }
         Ok(last)
     }
-    /// Once converged nothing blocks, so every scope on every node audits,
-    /// also those written while another scope waited.
     async fn audited(&self, live: &[usize]) -> Result<(), String> {
         for node in live {
             let member = &self.members[*node];
@@ -1166,8 +1112,6 @@ impl Simulation {
         }
         Ok(())
     }
-    /// How far from converged: blockers, bootstrap markers and differing
-    /// tables.
     async fn convergence(&self, live: &[usize]) -> Stuck {
         let mut stuck = Stuck::default();
         let mut tables: Vec<(String, Vec<String>)> = Vec::new();
@@ -1259,7 +1203,6 @@ impl Simulation {
 }
 
 impl Simulation {
-    /// The lists `node` holds whole: every table of the group held.
     async fn holdings(&self, node: usize) -> Result<BTreeSet<String>, Failure> {
         let member = self.running(node)?;
         let mut held = BTreeSet::new();
@@ -1282,8 +1225,6 @@ impl Simulation {
         }
         Ok(held)
     }
-    /// Whether `node`'s installed bases cover every member scope of
-    /// `authored`, at the canonical position replicas reported for it.
     async fn under_base(&self, node: usize, authored: &Authored) -> Result<bool, Failure> {
         let Some(((_, stamp), _)) = self.positions.get(&authored.token) else {
             return Ok(false);
@@ -1318,7 +1259,6 @@ impl Simulation {
         }
         Ok(true)
     }
-    /// Rows of every list `node` holds.
     async fn snapshot(
         &self,
         node: usize,
@@ -1331,8 +1271,6 @@ impl Simulation {
         }
         Ok(lists)
     }
-    /// The canonical seals `node` knows, by short id; inspection lists
-    /// them in no defined order.
     async fn canonical_seals(&self, node: usize) -> Result<BTreeSet<String>, Failure> {
         let inspection = self.running(node)?.session()?.inspect_tips().await?;
         Ok(inspection
@@ -1342,8 +1280,6 @@ impl Simulation {
             .map(|seal| short_hash(&seal.id))
             .collect())
     }
-    /// Merges every open replica's canonical positions. A position a seal
-    /// covers never changes; two replicas never disagree on one.
     async fn harvest(&mut self) -> Result<(), String> {
         for node in 0..self.members.len() {
             let Some(running) = self.members[node]
@@ -1392,7 +1328,6 @@ impl Simulation {
         }
         Ok(())
     }
-    /// No open replica shows a row that breaks a key, check or assertion.
     async fn relational_safety(&self) -> Result<(), String> {
         for node in 0..self.members.len() {
             let Ok(database) = self.database(node) else {
@@ -1411,8 +1346,6 @@ impl Simulation {
         }
         Ok(())
     }
-    /// After healing: node 0 seals, everyone converges at that seal, then
-    /// every member restarts and converges again. Then the invariants.
     async fn quiesce(&mut self, rounds: usize) -> Result<Option<Stuck>, String> {
         if self.members[0].running.is_some() && !self.members[0].revoked {
             let sealed = self
@@ -1447,9 +1380,6 @@ impl Simulation {
             .filter(|node| self.members[*node].node_key.is_some() && !self.members[*node].revoked)
             .collect()
     }
-    /// Rows and outcomes against the reference: every holder of a list has
-    /// the reference's rows of it, every holder of all of a transaction's
-    /// lists its outcome, and every author an outcome for what it wrote.
     async fn invariants(&mut self, live: &[usize]) -> Result<(), String> {
         let text = |error: Failure| error.to_string();
         let mut outcomes: BTreeMap<(usize, TransactionToken), Option<TransactionOutcome>> =
@@ -1547,11 +1477,9 @@ impl Simulation {
     }
 }
 
-/// What kept a seed from converging after healing.
 #[derive(Default)]
 pub(super) struct Stuck {
     count: usize,
-    /// Kinds of what blocks, without hashes: comparable across runs.
     pub(super) classes: BTreeSet<String>,
     pub(super) described: String,
 }
@@ -1563,8 +1491,6 @@ impl Stuck {
     }
 }
 
-/// Audits every scope together, and each one alone when the batch is
-/// blocked, so a blocked scope never hides an invalid sibling.
 async fn audit_node(
     node: &crate::node::Node,
     allow_blocked: bool,
@@ -1589,12 +1515,10 @@ async fn audit_node(
     }
 }
 
-/// An audit a blocker refuses is not a violation; any other failure is.
 fn tolerated(error: &rocky_secure::Error) -> bool {
     matches!(error, rocky_secure::Error::Blocked(_))
 }
 
-/// An enum value's variant name.
 fn variant(value: &impl std::fmt::Debug) -> String {
     let debug = format!("{value:?}");
     debug

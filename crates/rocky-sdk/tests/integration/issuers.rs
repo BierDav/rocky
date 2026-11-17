@@ -1,5 +1,3 @@
-//! Issuer recovery: a second issuer keeps a domain enrolling, renewing and
-//! revoking after its creator is lost; compromise ends its first enrollees.
 use common::{Device, Failure};
 use rocky_sdk::{
     CallFailure, Database, GrantProfile, Network, Open, ReconciliationReport, RevocationMode,
@@ -37,7 +35,6 @@ fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
 fn peer_id(node: &str) -> Result<String, Failure> {
     Ok(rocky_credentials::PeerId::of(node.parse()?).to_hex())
 }
-/// Persisted renewal contacts are indexed by opaque peer references.
 fn assert_issuers(root: &Path, name: &str, nodes: &[&str]) -> Result<(), Failure> {
     let saved = identity(root, name)?;
     let actual: BTreeSet<_> = saved["contact_refs"]
@@ -66,8 +63,6 @@ fn reconciled_with(report: &ReconciliationReport, node: &str) -> bool {
             })
     })
 }
-/// Syncs until `device` reads its rows: a fresh member first renews with
-/// the keys, then fetches the rows. Bounded; never a sleep.
 async fn synced_titles(device: &Device) -> Result<Vec<String>, Failure> {
     let read = rocky_sdk::ReadQuery::new("SELECT title FROM items", 1);
     for _ in 0..4 {
@@ -82,7 +77,6 @@ async fn synced_titles(device: &Device) -> Result<Vec<String>, Failure> {
 async fn session(device: &Device) -> rocky_sdk::SessionInfo {
     device.session().info().await.expect("session")
 }
-/// Closes `device` and deletes its directory `name`, as when it is lost.
 async fn destroy(root: &Path, name: &str, device: Device) -> Result<(), Failure> {
     device.close().await;
     drop(device);
@@ -387,11 +381,6 @@ async fn a_granted_credential_close_to_expiry_renews_through_the_second_issuer()
     Ok(())
 }
 
-/// The root marks a second trusted identity compromised: every identity it
-/// first enrolled loses access, even one the creator renewed since, and its
-/// status says why; a device the creator enrolled keeps working, and the
-/// cut-off user enrolls again through the honest trusted node. The second
-/// node signed no tip statement, which its revocation would drop.
 #[tokio::test]
 async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;

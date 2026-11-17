@@ -1,8 +1,3 @@
-//! Mesh health: standing coordination failures as this device's alerts,
-//! and each device's signed report to the domain's trusted nodes over its
-//! live links to them. Trusted nodes forward what they receive to each
-//! other. Reports stay in memory; a restarted trusted node learns them again
-//! within `REFRESH`.
 use super::*;
 use crate::status::{
     Alert, AlertKind, BlockerCount, CoordinationFailure, HealthReport, MeshDevice, SILENT_AFTER,
@@ -13,30 +8,21 @@ use rocky_core::CoordinationError;
 use rocky_credentials::Signature;
 use rocky_secure::network::link::{self, Frame, HEALTH_BYTES};
 
-/// Devices whose reports a trusted node holds; the oldest is dropped first.
 const MAX_DEVICES: usize = 256;
-/// Trusted nodes refresh each other this often on what they hold, so one
-/// that links to a device keeps it heard on the others.
 pub(super) const REFRESH: Duration = Duration::from_secs(60);
-/// Alerts and blocker kinds one report carries.
 const MAX_ITEMS: usize = 32;
-/// Changes that arrive together become one report.
 const SETTLE: Duration = Duration::from_secs(1);
 const VERSION: u32 = 3;
 
-/// Coordination failures that stand, from every call to the service.
 #[derive(Default)]
 struct Standing {
     skew: Option<Alert>,
-    /// When the current run of unanswered calls began.
     unanswered: Option<u64>,
     unreachable: Option<Alert>,
-    /// When the current run of failed revocation pushes began.
     failing_push: Option<u64>,
     unpushed: Option<Alert>,
     failure: Option<CoordinationFailure>,
 }
-/// What the coordination service's answers show; shared with its client.
 pub(crate) struct Coordination {
     state: std::sync::Mutex<Standing>,
     observations: crate::status::Observations,
@@ -48,7 +34,6 @@ impl Coordination {
             observations,
         }
     }
-    /// The client's observer of every call's outcome.
     pub(crate) fn observer(self: &Arc<Self>) -> rocky_credentials::CoordinationObserver {
         let coordination = Arc::downgrade(self);
         Arc::new(move |result| {
@@ -57,10 +42,6 @@ impl Coordination {
             }
         })
     }
-    /// A clock skew refusal raises its alert; an answer past the voter's clock
-    /// check clears it. Unanswered calls raise one once they last
-    /// `STANDING_FAILURE`; any answer clears it. Logs only transitions. The
-    /// voter authenticates a request before it checks the clock.
     pub(crate) fn observe(&self, result: Result<(), &CoordinationError>, time: u64) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let mut changed = false;
@@ -119,9 +100,6 @@ impl Coordination {
             self.observations.touch();
         }
     }
-    /// A failed push of held revocations raises its alert once failures
-    /// last `STANDING_FAILURE`; an acknowledged one, or none left to push,
-    /// clears it.
     pub(crate) fn observe_push(&self, pushed: bool, time: u64) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let mut changed = false;
@@ -168,21 +146,15 @@ impl Coordination {
     }
 }
 
-/// A trusted node's view of the other trusted identities: when each was
-/// granted and last heard, through any of its nodes.
 #[derive(Default)]
 pub(super) struct TrustedWatch {
-    /// The other live trusted identities and their grant times; empty
-    /// unless this device is a trusted node.
     granted: BTreeMap<PublicKey, u64>,
-    /// Node keys of those identities.
     nodes: BTreeMap<PublicKey, PublicKey>,
     heard: BTreeMap<PublicKey, u64>,
     stale_after: u64,
     membership_alerts: Vec<Alert>,
 }
-/// A last-heard time is saved once it moved this far, or an eighth of
-/// the threshold, so reports and links do not write the settings each time.
+const TRUSTED_STALE_AFTER_SECONDS: std::ops::RangeInclusive<u64> = 60..=10 * 366 * 24 * 60 * 60;
 const HEARD_SAVE: u64 = 3600;
 impl TrustedWatch {
     fn hear(&mut self, node: &PublicKey, at: u64) {
@@ -191,7 +163,6 @@ impl TrustedWatch {
             *heard = (*heard).max(at);
         }
     }
-    /// Each identity's last sign of life: heard, or else granted.
     fn last(&self) -> impl Iterator<Item = (PublicKey, u64)> + '_ {
         self.granted.iter().map(|(identity, granted)| {
             let heard = self
@@ -224,7 +195,6 @@ impl TrustedWatch {
     }
 }
 
-/// One health message on a live link.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Wire {
@@ -233,16 +203,12 @@ struct Wire {
 }
 #[derive(Serialize, Deserialize)]
 enum HealthMessage {
-    /// The sender collects reports: its admitted chain shows a trusted node.
     Collector,
-    /// A device's report; `received` is when a trusted node got it from the
-    /// device, present only when one forwards it.
     Report {
         report: Box<SignedReport>,
         received: Option<u64>,
     },
 }
-/// A report as its device signed it, for this domain.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SignedReport {
@@ -251,14 +217,12 @@ struct SignedReport {
     body: Vec<u8>,
     signature: Signature,
 }
-/// A device's latest report on a trusted node.
 pub(super) struct Held {
     signed: SignedReport,
     report: HealthReport,
     received: u64,
     via: Option<PublicKey>,
 }
-/// A report without its production time, to tell a change from a refresh.
 fn content(report: &HealthReport) -> HealthReport {
     HealthReport {
         produced_at_epoch_seconds: 0,
@@ -280,16 +244,12 @@ fn label(node: &PublicKey) -> String {
 }
 
 impl Node {
-    /// Feeds one coordination outcome to this device, as its client does.
     #[cfg(test)]
     pub(crate) fn observe_coordination(&self, result: Result<(), &CoordinationError>) {
         if let Ok(time) = self.status_time() {
             self.coordination.observe(result, time);
         }
     }
-    /// This device's alerts: clocks its peers disagree with, standing
-    /// coordination failures and, on a trusted node, stale trusted identities
-    /// and a skipped seal.
     pub(super) fn alerts(&self) -> Vec<Alert> {
         let time = self.status_time().unwrap_or_default();
         let stale: Vec<Alert> = self
@@ -329,11 +289,6 @@ impl Node {
         alerts.sort();
         alerts
     }
-    /// What a root revocation's cut left out of the domain's tip graph, held,
-    /// refused or pruned, per signing node, and each fork of a node's chain the
-    /// graph holds. Before the domain's graph is installed there is nothing to
-    /// judge. A statement refused on arrival or pruned is no longer held, but
-    /// still counted.
     pub(super) async fn tip_chain_alerts(&self) -> Result<Vec<Alert>, Failure> {
         let graph = match self.replica.tip_graph(self.domain().scope).await {
             Ok(graph) => graph,
@@ -379,7 +334,6 @@ impl Node {
             .map(|kind| Alert { kind, since: None })
             .collect())
     }
-    /// The carried root escrow records this replica refused, by peer.
     pub(super) async fn escrow_alerts(&self) -> Result<Vec<Alert>, Failure> {
         Ok(self
             .replica
@@ -396,17 +350,12 @@ impl Node {
             })
             .collect())
     }
-    /// Root recoveries that met: the latest ended the others. And every other
-    /// trusted identity known here, from the registry or the tip graph, whose
-    /// grant the latest recovery ended. Recovered identities are reported as
-    /// recoveries that met, and this device's own end as its revocation reason.
-    /// The graph is read before the settings are held, since reading takes
-    /// their lock.
     pub(super) async fn recovery_alerts(&self) -> Result<Vec<Alert>, Failure> {
-        if self.settings.lock().await.revocations.recovery().is_none() {
+        let snapshot = self.settings_snapshot().await;
+        if snapshot.revocations.recovery().is_none() {
             return Ok(Vec::new());
         }
-        let registry = self.registry().await?;
+        let registry = self.registry(&snapshot).await?;
         let mut known_trusted_grant_times: BTreeMap<PublicKey, u64> =
             match self.replica.tip_graph(self.domain().scope).await {
                 Ok(graph) => graph.trusted_grants().map_err(refused)?,
@@ -449,14 +398,9 @@ impl Node {
             .map(|kind| Alert { kind, since: None })
             .collect())
     }
-    /// Reloads the other trusted identities from the registry, merges the saved
-    /// last-heard times and saves those that moved `HEARD_SAVE`. Verifies
-    /// against a snapshot, never under the settings lock. It writes only over
-    /// the authority state the snapshot read: a concurrent refresh's stays, and
-    /// the next one recomputes.
     pub(super) async fn refresh_trusted_watch(&self) -> Result<(), Failure> {
         let registry = if self.collects().await {
-            Some(self.registry().await?)
+            Some(self.registry(&*self.settings_snapshot().await).await?)
         } else {
             None
         };
@@ -594,14 +538,12 @@ impl Node {
         }
         Ok(())
     }
-    /// Counts a verification that runs while anyone holds the settings lock.
     #[cfg(test)]
     fn probe_settings_lock(&self) {
         if self.settings.try_lock().is_err() {
             self.verified_under_settings.fetch_add(1, Ordering::Relaxed);
         }
     }
-    /// A sign of life from `node` at `at`, if it is another trusted node's.
     fn hear_trusted(&self, node: &PublicKey, at: u64) {
         let mut watch = self
             .trusted_watch
@@ -616,10 +558,8 @@ impl Node {
             self.observations.touch();
         }
     }
-    /// Sets how long another trusted identity may stay unheard before this
-    /// trusted node flags it.
     pub(super) async fn set_trusted_stale_after(&self, seconds: u64) -> Result<(), Failure> {
-        if !(60..=10 * 366 * 24 * 60 * 60).contains(&seconds) {
+        if !TRUSTED_STALE_AFTER_SECONDS.contains(&seconds) {
             return Err(Box::new(crate::node::Refused(
                 "stale_after must be a minute to ten years".into(),
             )));
@@ -644,22 +584,15 @@ impl Node {
         self.observations.touch();
         Ok(())
     }
-    /// The next time, after `time`, another trusted identity turns stale.
     pub(super) fn stale_deadline(&self, time: u64) -> Option<u64> {
         self.trusted_watch
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .deadline(time)
     }
-    /// Whether this device collects health reports: a trusted node, whose
-    /// identity holds the root's trusted grant.
     pub(super) async fn collects(&self) -> bool {
         self.settings.lock().await.trusted_links().is_some()
     }
-    /// Whether `peer`, admitted with `chain`, is a trusted node: a node of an
-    /// identity the root's unrevoked trusted grant names. Link credentials
-    /// include the issuer self-link so the peer can use its grants; the proof
-    /// checks the compact trusted-grant plus node-certificate form.
     fn proves_collector(
         &self,
         settings: &Settings,
@@ -738,7 +671,6 @@ impl Node {
             signature,
         })
     }
-    /// Logs the first failure to report after a success, and the recovery.
     fn reported(&self, result: Result<(), &Failure>) {
         let failing = result.is_err();
         if self.report_failing.swap(failing, Ordering::Relaxed) != failing {
@@ -749,12 +681,6 @@ impl Node {
         }
     }
 
-    /// Sends this device's health over a link to `peer`: first that this device
-    /// collects, if it does; then, once `collector` shows the peer does, its
-    /// own report on each change and every `REFRESH`, and on a trusted node
-    /// what it holds of other devices. Never ends with an error: replication
-    /// goes on whatever becomes of reports. Reports flow between trusted nodes
-    /// alone: a device's idle link writes nothing.
     pub(super) async fn link_health(
         &self,
         peer: PublicKey,
@@ -833,9 +759,6 @@ impl Node {
             rocky_platform::time::sleep(SETTLE).await;
         }
     }
-    /// What a trusted node forwards to the trusted node `peer`: each
-    /// report newer than the one it sent; at a refresh, `now`, a device it
-    /// links to as heard then.
     fn forwards(
         &self,
         peer: PublicKey,
@@ -857,9 +780,6 @@ impl Node {
             .filter(|(node, _, heard)| forwarded.get(node).is_none_or(|sent| sent < heard))
             .collect()
     }
-    /// Whether a live link to `node` is open here.
-    /// When `node` was last heard here: now while linked, or its latest
-    /// health report on a trusted node.
     pub(super) fn last_seen(&self, node: PublicKey, time: u64) -> Option<u64> {
         if self.linked(node) {
             return Some(time);
@@ -874,7 +794,6 @@ impl Node {
         self.current()
             .is_some_and(|service| service.live.contains(node))
     }
-    /// A device was heard until its link here closed.
     pub(super) fn link_ended(&self, node: PublicKey) {
         let Ok(time) = self.status_time() else {
             return;
@@ -908,8 +827,6 @@ impl Node {
             .send(Frame::new(direction, link::Message::Health(bytes)))
             .await
     }
-    /// A last report before a link to a trusted node closes, so a device
-    /// that syncs on short links reports what its exchange left.
     pub(super) async fn final_report(&self, writer: &Writer, direction: bool) {
         let result = async {
             let report = self.sign_report(&self.health_report().await?).await?;
@@ -926,8 +843,6 @@ impl Node {
         .await;
         self.reported(result.as_ref().map(drop));
     }
-    /// Takes one health message from `peer`, admitted with `chain`. A
-    /// refused one is logged and changes nothing; it never ends the link.
     pub(super) async fn receive_health(
         &self,
         peer: PublicKey,
@@ -1037,7 +952,6 @@ impl Node {
     fn silent(&self, received: u64, time: u64) -> bool {
         time.saturating_sub(received) >= SILENT_AFTER.as_secs()
     }
-    /// Each device's latest report on a trusted node; `None` elsewhere.
     pub(super) async fn mesh_status(&self) -> Result<Option<Vec<MeshDevice>>, Failure> {
         if !self.collects().await {
             return Ok(None);
@@ -1058,7 +972,6 @@ impl Node {
                 .collect(),
         ))
     }
-    /// The next time, in epoch seconds after `time`, a device turns silent.
     pub(super) fn health_deadline(&self, time: u64) -> Option<u64> {
         self.mesh
             .lock()
@@ -1150,9 +1063,6 @@ mod tests {
         assert_eq!(ordinary_database.alerts(1000).count(), 0);
     }
 
-    /// Unanswered calls and failed pushes become alerts only once they
-    /// last `STANDING_FAILURE`, keep their start as `since`, and clear with
-    /// an answer or an acknowledged push; a skew keeps its first `since`.
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn standing_failures_raise_alerts_after_their_bound_and_clear_by_events() {
         let observations = crate::status::Observations::default();

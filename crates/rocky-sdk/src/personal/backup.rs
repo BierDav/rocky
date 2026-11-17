@@ -1,4 +1,3 @@
-//! A personal backup archive, verified before a sign-in installs from it.
 use super::PersonalSignInError;
 use crate::enrollment::Settings;
 use rocky_core::Commitment;
@@ -8,13 +7,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// A signed backup of one owner device of a personal database, verified
-/// without extracting it: the signature of the device that made it, every
-/// file's digest, the identity record's format and provenance, and the
-/// root-signed personal genesis. It carries the genesis descriptor, the
-/// membership and tombstones the device held, and in its store the root
-/// escrow inventory and the verified log heads; signing in from it adds a
-/// device and ends none.
 pub struct VerifiedBackup(Box<Verified>);
 struct Verified {
     archive: PathBuf,
@@ -25,9 +17,6 @@ struct Verified {
 }
 
 impl VerifiedBackup {
-    /// Verifies the archive at `archive` (in a browser, a file in Rocky's
-    /// storage). Another format version is `UnsupportedFormat`; a shared
-    /// database's backup is no personal source.
     pub fn open(archive: impl Into<PathBuf>) -> Result<Self, PersonalSignInError> {
         let archive = archive.into();
         let (inventory, identity, id) = crate::backup::inspect(&archive).map_err(|error| {
@@ -54,7 +43,6 @@ impl VerifiedBackup {
             identity,
         })))
     }
-    /// The genesis descriptor every device of the database binds.
     pub fn descriptor(&self) -> Result<Commitment, PersonalSignInError> {
         self.0
             .identity
@@ -62,7 +50,6 @@ impl VerifiedBackup {
             .and_then(|manifest| Ok(manifest.descriptor()?))
             .map_err(PersonalSignInError::Failed)
     }
-    /// The owner devices the archived device knew live, itself included.
     pub fn devices(&self) -> Result<BTreeSet<PublicKey>, PersonalSignInError> {
         let mut known = self.0.identity.revocations.clone();
         if let Some(certificate) = self.0.identity.credentials.certificate() {
@@ -82,14 +69,12 @@ impl VerifiedBackup {
             .personal_devices(owner)
             .map_err(|error| PersonalSignInError::Failed(error.into()))
     }
-    /// Whether a permanent statement the archive holds ended `node`.
     pub fn tombstones(&self, node: PublicKey) -> bool {
         self.0
             .identity
             .revocations
             .tombstones(self.0.identity.identity, node)
     }
-    /// The node key of the device that made the archive.
     pub fn node(&self) -> PublicKey {
         self.0.node
     }
@@ -102,9 +87,6 @@ impl VerifiedBackup {
     pub(crate) fn id(&self) -> &str {
         &self.0.id
     }
-    /// The archive is the personal database `account` locates at `database`:
-    /// its root, owner, namespace and location. Another account's archive
-    /// holds no source of this one.
     pub(crate) fn check(
         &self,
         account: &PersonalAccount,

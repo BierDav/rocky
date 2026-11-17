@@ -1,6 +1,3 @@
-//! Exact values through the SDK: integer overflow in a replayed statement,
-//! a `CHECK` and an assertion fails the author's commit and drops with the
-//! same reason wherever it replays; UUIDs, timestamps and JSON round-trip.
 use common::{Device, Failure, introduce};
 use rocky_sdk::{
     Database, DropReason, Network, Open, SqlValue, Timestamp, TransactionOutcome, TransactionToken,
@@ -40,7 +37,6 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     }
 }
 
-/// Runs one statement as its own transaction.
 async fn write(
     database: &Database,
     sql: &str,
@@ -84,7 +80,6 @@ async fn balances(database: &Database) -> Result<Vec<(String, i64, i64, i64)>, F
         .collect()
 }
 
-/// The error of a write that must fail, as text.
 async fn refused(database: &Database, sql: &str, params: Vec<SqlValue>) -> String {
     match write(database, sql, params).await {
         Ok(_) => panic!("{sql} committed"),

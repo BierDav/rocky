@@ -1,6 +1,3 @@
-//! Identities through the SDK: further nodes of an enrolled identity join
-//! without an issuer, and revoking one node or the identity stops exactly
-//! those nodes.
 use crate::support::snapshot as snap;
 use common::{Device, Failure};
 use rocky_sdk::{
@@ -27,7 +24,6 @@ fn open<'a>(
         coordination: None,
     }
 }
-/// The identity in `directory`, as each of its node processes opens it.
 fn person(directory: &Path) -> Result<Arc<dyn IdentityProvider>, Failure> {
     Ok(Arc::new(FileIdentityProvider::open(directory)?))
 }
@@ -36,7 +32,6 @@ fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
         root.join(name).join("identity.json"),
     )?)?)
 }
-/// Whether `device` holds any secret of `role` in its file key store.
 fn holds(root: &Path, name: &str, role: &str) -> Result<bool, Failure> {
     let installation = identity(root, name)?["installation"]
         .as_str()
@@ -51,9 +46,6 @@ fn holds(root: &Path, name: &str, role: &str) -> Result<bool, Failure> {
     )
 }
 
-/// The owner, a member identity invited once, and two further nodes of that
-/// identity, each certified by its provider from a node of the same
-/// identity while no issuer is reachable.
 struct Household {
     _root: tempfile::TempDir,
     hub: Arc<Hub>,
@@ -256,7 +248,9 @@ async fn routine_issuer_calls_need_no_identity_and_do_not_retain_a_supplied_one(
     let database = Database::open(open(&path, &hub, "a", None))?.database;
     let member = IdentityKey::generate().public_key().to_hex();
     let session = database.session();
-    session.grant_claims(&member, None, 1).await?;
+    session
+        .grant_claims(&member, rocky_sdk::ClaimCounters::Every, 1)
+        .await?;
     session.sync_once_with_identity(key).await?;
     assert!(
         weak.upgrade().is_none(),
@@ -267,7 +261,6 @@ async fn routine_issuer_calls_need_no_identity_and_do_not_retain_a_supplied_one(
     Ok(())
 }
 
-/// Scans persisted settings and every vault role for a supplied identity secret.
 fn no_identity_secret(directory: &std::path::Path, secrets: &[[u8; 32]]) -> Result<(), Failure> {
     let settings = std::fs::read(directory.join("identity.json"))?;
     let value: Value = serde_json::from_slice(&settings)?;

@@ -1,5 +1,3 @@
-//! Group partitions: one secret per group partition and key epoch, every
-//! member table's key derived from it and the holding rule.
 use crate::{Failure, domain::Domain, secrets::Vault};
 use data_encoding::HEXLOWER;
 use rocky_core::{
@@ -10,29 +8,21 @@ use rocky_secure::KeyMaterial;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// Secret epochs kept per group partition: one per revocation that rotated it.
 pub(crate) const MAX_GROUP_EPOCHS: usize = 256;
 
-/// A group partition this installation knows, by its group address.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupRecord {
     pub group: String,
-    /// Canonical slot values in declaration order.
     pub values: Vec<PartitionValue>,
     pub address: Commitment,
-    /// The partition's naming secret: it keys every member's scope, so
-    /// only holders and custodians can compute or recognize those scopes.
     pub name: rocky_core::PartitionName,
-    /// Secret epochs held, ascending; empty for an address registered
-    /// without a key.
     pub epochs: Vec<rocky_core::KeyEpoch>,
 }
 impl GroupRecord {
     pub fn current(&self) -> Option<rocky_core::KeyEpoch> {
         self.epochs.last().copied()
     }
-    /// Adds an epoch; refused at capacity before any secret is stored.
     pub fn admit(&self, epoch: rocky_core::KeyEpoch) -> Result<(), Failure> {
         if !epoch.valid() {
             return Err("invalid group secret epoch".into());
@@ -51,12 +41,7 @@ impl GroupRecord {
         Ok(())
     }
 }
-/// The vault role of the domain's partition naming root. Only issuers,
-/// the domain's partition authorities, hold it: independent issuers
-/// creating one partition name it alike.
 pub(crate) const NAMING_ROLE: &str = "partition-naming";
-/// The key this device names partitions it creates with: the naming root
-/// on an issuer, so every issuer names them alike, else its node key.
 pub(crate) fn naming_key(vault: &Vault) -> Result<[u8; 32], Failure> {
     match vault.find(NAMING_ROLE)? {
         Some(root) => Ok(root),
@@ -66,7 +51,6 @@ pub(crate) fn naming_key(vault: &Vault) -> Result<[u8; 32], Failure> {
 pub(crate) fn record_key(address: &Commitment) -> String {
     HEXLOWER.encode(address)
 }
-/// The installation vault's role of a group secret epoch.
 pub(crate) fn secret_role(address: &Commitment, epoch: rocky_core::KeyEpoch) -> String {
     format!(
         "group.{}.{}.{}",
@@ -76,25 +60,19 @@ pub(crate) fn secret_role(address: &Commitment, epoch: rocky_core::KeyEpoch) -> 
     )
 }
 
-/// One member table's partition of a group partition.
 #[derive(Clone, Debug)]
 pub(crate) struct Member {
     pub table: String,
     pub scope: ResourceScope,
     pub tuple: PartitionTuple,
-    /// In-group tables this member references.
     pub parents: Vec<String>,
 }
-/// A group partition resolved against the current schema generation, so a
-/// table that joined the group later is a member too.
 #[derive(Clone)]
 pub(crate) struct GroupPartition {
     pub record: GroupRecord,
     pub members: Vec<Member>,
 }
 impl GroupPartition {
-    /// Resolves a group, or the group of `table`, at positional values;
-    /// `name` gives the naming secret of the group address.
     pub fn resolve(
         domain: &Domain,
         group: Option<&str>,
@@ -126,8 +104,6 @@ impl GroupPartition {
         };
         Self::members(domain, record, found)
     }
-    /// The group partition of a stored record under the current schema;
-    /// generation admission keeps a group's slots and members.
     pub fn of(domain: &Domain, record: &GroupRecord) -> Result<Self, Failure> {
         let groups = domain.logical().partition_groups()?;
         let group = groups
@@ -181,9 +157,6 @@ impl GroupPartition {
     pub fn member(&self, table: &str) -> Option<&Member> {
         self.members.iter().find(|member| member.table == table)
     }
-    /// The members an operation covers when the named tables are left out.
-    /// A table left out must not be referenced by one the operation keeps:
-    /// that child could never resolve its parent.
     pub fn covered(&self, omit: &BTreeSet<String>) -> Result<Vec<&Member>, Failure> {
         if let Some(unknown) = omit.iter().find(|name| self.member(name).is_none()) {
             return Err(format!("{unknown} is no table of group {}", self.record.group).into());
@@ -207,8 +180,6 @@ impl GroupPartition {
         }
         Ok(covered)
     }
-    /// The tables that stay held when the covered ones are released: none
-    /// may reference a released table.
     pub fn released(&self, keep: &BTreeSet<String>) -> Result<Vec<&Member>, Failure> {
         if let Some(unknown) = keep.iter().find(|name| self.member(name).is_none()) {
             return Err(format!("{unknown} is no table of group {}", self.record.group).into());
@@ -232,7 +203,6 @@ impl GroupPartition {
             .filter(|member| !keep.contains(&member.table))
             .collect())
     }
-    /// A member's key at one epoch, derived from the held secret.
     pub fn key(
         &self,
         vault: &Vault,

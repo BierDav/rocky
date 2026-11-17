@@ -1,20 +1,8 @@
-//! The owner reset: "this is everything, sign out everywhere else".
 use super::*;
 use rocky_credentials::{PeerId, Reset, Revocation, RevocationSet, RootDecision};
 use std::collections::BTreeSet;
 
 impl Node {
-    /// Ends every node but this one and those `keep` names, including nodes
-    /// this store never saw, and fences their data at what this replica
-    /// applied. The fence is captured and the statement merged under one
-    /// replica lock; the receipt is returned after the local commit. The
-    /// statement that ended this device is recorded, never held. A personal
-    /// reset keeps only the signer and verified custody principals: another
-    /// full reader could hold unfenced data. The held heads of every ended
-    /// lane's tip statements stay, as on a revocation by name; lanes past the
-    /// bound keep none. Standing and heads come from the replica's set, under
-    /// the lock that installs the reset, and the replica refuses a reset ending
-    /// this node.
     pub(super) async fn sign_out_everywhere_else(
         &self,
         root: &Root,
@@ -154,11 +142,8 @@ impl Node {
             pushed,
         })
     }
-    /// The nodes of every custody identity the registry names that no statement
-    /// ended: the servers and custodians a reset keeps unless told otherwise.
-    /// Nodes this issuer admitted count before their certificates arrive.
     async fn known_custodians(&self) -> Result<BTreeSet<PeerId>, Failure> {
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let membership = self.membership().await?;
         let custody: BTreeSet<PublicKey> = registry
             .records
@@ -187,10 +172,6 @@ impl Node {
             .map(PeerId::of)
             .collect())
     }
-    /// Whether an owner reset fenced this device's view, or no other owner
-    /// device witnessed it yet; see [`crate::Freshness`]. No owner fence
-    /// vouches for an ended device's view; the newest unfollowed reset that
-    /// keeps this node fences the rest.
     pub(super) async fn freshness(&self) -> Result<crate::Freshness, Failure> {
         let own = PeerId::of(PrivateKey::from_bytes(&self.vault.get("node")?).public_key());
         let settings = self.settings.lock().await;

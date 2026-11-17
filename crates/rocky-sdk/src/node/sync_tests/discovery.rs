@@ -1,4 +1,3 @@
-//! Discovery on the hub's deterministic capability.
 use super::*;
 use crate::test_snapshot as snap;
 
@@ -16,7 +15,6 @@ async fn pass(node: &Node) -> Result<Value, Failure> {
 fn key(node: &Node) -> Result<PublicKey, Failure> {
     Ok(PrivateKey::from_bytes(&node.vault.get("node")?).public_key())
 }
-/// Lets the discovery workers run until `done` holds.
 async fn until(mut done: impl AsyncFnMut() -> bool) -> Result<(), Failure> {
     tokio::time::timeout(WAIT, async {
         while !done().await {

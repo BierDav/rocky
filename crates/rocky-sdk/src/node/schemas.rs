@@ -1,4 +1,3 @@
-//! Bounded exact catalog acquisition, independent of the provider's followed tip.
 use super::*;
 use crate::tip_schemas::Record;
 use rocky_core::Commitment;
@@ -12,10 +11,6 @@ pub(super) struct Acquisition {
 }
 
 impl Node {
-    /// Fetches the schemas the tip graph requires from peers. An authority
-    /// change cancels a request in flight, whose bytes grant nothing. The graph
-    /// can change while dialing: the replica checks the exact required pair
-    /// again in the transaction that saves the record.
     pub(super) async fn acquire_schemas(&self, transport: &dyn Transport) -> Result<bool, Failure> {
         let Ok(_active) = self.schema_fetch.try_lock() else {
             return Ok(false);
@@ -300,7 +295,6 @@ impl Node {
         Ok(false)
     }
 
-    /// A tip on another engine waits for an upgrade, which the status reports.
     pub(super) async fn follow_schema(&self) -> Result<bool, Failure> {
         let Some(pending) = self.replica.pending_schema().await? else {
             return Ok(false);

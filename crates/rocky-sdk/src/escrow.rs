@@ -1,14 +1,3 @@
-//! Root escrow of the data keys an installation holds: every collection
-//! key epoch and group secret epoch (with its partition's naming secret)
-//! is sealed to the domain's offline root and kept in the replica beside
-//! the frames of that epoch, which carry it to every holder of the scope,
-//! keyless custody too. An issuer's partition naming root stays local,
-//! except in a personal database: there an owner device vouches for its
-//! record, bound to the genesis descriptor, which custodians receive at
-//! enrollment and renewal and serve in bootstrap pages, unable to open it.
-//! The root alone then recovers the data of any node's backup, with every
-//! trusted node and device lost (`Configuration::recover`). Records are
-//! opaque: see `rocky_credentials::RootEscrow`.
 use crate::{
     Failure,
     domain::Domain,
@@ -21,22 +10,17 @@ use rocky_credentials::{DatabaseKind, MetadataEscrow, RootEscrow, RootKey, escro
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The key epoch a record travels with, or none for the naming root.
 pub(crate) type Slot = Option<(ResourceScope, KeyEpoch)>;
-/// A store's records and the key epochs of the ciphertext it holds.
 pub(crate) type Archived = (Vec<(Slot, RootEscrow)>, BTreeSet<(ResourceScope, KeyEpoch)>);
 
-/// What one record seals.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum Escrowed {
-    /// A collection's key epoch.
     Reader {
         collection: String,
         epoch: KeyEpoch,
         key: [u8; 32],
     },
-    /// A group partition's secret epoch and the partition it keys.
     Group {
         group: String,
         values: Vec<PartitionValue>,
@@ -45,8 +29,9 @@ pub(crate) enum Escrowed {
         epoch: KeyEpoch,
         secret: [u8; 32],
     },
-    /// An issuer's partition naming root.
-    Naming { root: [u8; 32] },
+    Naming {
+        root: [u8; 32],
+    },
 }
 impl Escrowed {
     fn secret(&self) -> &[u8; 32] {
@@ -60,14 +45,9 @@ impl Escrowed {
 
 #[cfg(test)]
 thread_local! {
-    /// Keys `seal` considered on this thread: the work of every escrow pass.
     pub(crate) static CONSIDERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Seals every key `settings` holds that `held`, the replica's records by
-/// slot and tag, lacks: each collection key epoch under its scope, each
-/// group secret epoch under every member table's scope, and the naming
-/// root of an issuer.
 fn seal(
     settings: &Settings,
     vault: &Vault,
@@ -119,9 +99,6 @@ fn seal(
     Ok(sealed)
 }
 
-/// Seals into `replica` what it lacks of the keys `settings` holds. The
-/// records derive from the vault, so the next call completes one an
-/// interruption cut short.
 pub(crate) async fn keep(
     replica: &rocky_secure::EncryptedReplica<rocky_core::TypedRows>,
     settings: &Settings,
@@ -149,9 +126,6 @@ pub(crate) async fn keep(
     Ok(())
 }
 
-/// This owner device's partition naming root, sealed to the root and
-/// vouched for under its chain, bound to the personal database's genesis;
-/// none on a device without one, or outside a personal database.
 pub(crate) fn seal_naming(
     settings: &Settings,
     vault: &Vault,
@@ -177,10 +151,6 @@ pub(crate) fn seal_naming(
     )?))
 }
 
-/// Refuses a naming root record unless an owner device of `settings`'s
-/// personal database, which no statement it holds ended, vouched for it
-/// under this genesis. Anyone can seal to the root; only an owner device
-/// holds the naming root.
 fn judge_naming(
     record: &MetadataEscrow,
     settings: &Settings,
@@ -217,8 +187,6 @@ fn judge_naming(
     Ok(())
 }
 
-/// Keeps `record` as a personal custodian's naming root escrow once it
-/// judged it; a record is never replaced by another device's.
 pub(crate) fn keep_naming(
     settings: &mut Settings,
     record: Option<MetadataEscrow>,
@@ -236,9 +204,6 @@ pub(crate) fn keep_naming(
     Ok(())
 }
 
-/// The naming root `record` escrows, opened with `root`; none for a record
-/// no owner device of this genesis vouched for, or that opens to no key of
-/// its tag. A missing root is reported, never replaced.
 pub(crate) fn open_naming(
     record: &MetadataEscrow,
     settings: &Settings,
@@ -263,21 +228,14 @@ pub(crate) fn open_naming(
         }))
 }
 
-/// Keys a root opened from a store's escrow records.
 #[derive(Default)]
 pub(crate) struct Recovered {
     pub readers: BTreeMap<(String, KeyEpoch), [u8; 32]>,
-    /// Group partitions by record key, with the epochs recovered.
     pub groups: BTreeMap<String, GroupRecord>,
-    /// Group secrets by group address and epoch.
     pub secrets: BTreeMap<(Commitment, KeyEpoch), [u8; 32]>,
     pub naming: Option<[u8; 32]>,
 }
 impl Recovered {
-    /// Opens the `records` of a store of `archived`'s domain with `root`.
-    /// Anyone can seal to the root, so a record that opens to no key of
-    /// its slot is skipped; every key epoch in `held`, those the store
-    /// holds ciphertext of, must be opened, or the recovery fails naming it.
     pub fn open(
         archived: &Settings,
         (records, held): Archived,
@@ -298,9 +256,6 @@ impl Recovered {
         }
         Ok(recovered)
     }
-    /// Opens what it can of `records` with `root`, as `open` does, and
-    /// returns the key epochs in `held` that no record opened: a gap to
-    /// report, never a key to replace.
     pub fn import(
         domain: &Domain,
         (records, held): Archived,
@@ -350,9 +305,6 @@ impl Recovered {
             .collect();
         Ok((recovered, missing))
     }
-    /// Takes a group secret sealed for `scope` at `epoch` if it is that
-    /// epoch's and the partition it names has `scope` as a member; returns
-    /// the epoch's slots of every member.
     fn group(
         &mut self,
         domain: &Domain,

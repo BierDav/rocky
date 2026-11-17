@@ -1,7 +1,3 @@
-//! Group secrets: one envelope shares every table of a group partition and
-//! reaches its recipient by sync, revocation rotates the group as one unit,
-//! and the holding rule keeps a group partition whole unless a table is
-//! left out explicitly.
 use crate::common;
 use crate::support::snapshot as snap;
 use rocky_sdk::{
@@ -24,8 +20,6 @@ const SCHEMA: &str = r#"{"format":6,"application":"groupsecrets","version":1,"ta
 {"name":"attachments","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"bytes","type":"blob"}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
 const TABLES: [&str; 3] = ["lists", "items", "attachments"];
 
-/// An in-memory key provider that fails every operation once its budget
-/// of operations is spent, to interrupt a rotation at each step.
 #[derive(Default)]
 struct Store {
     secrets: Mutex<BTreeMap<String, Vec<u8>>>,
@@ -81,8 +75,6 @@ struct Peer {
     store: Arc<Store>,
     hub: Arc<Hub>,
 }
-/// Every peer reaches the others of its test through `hub`, by its
-/// directory's name.
 fn open<'a>(directory: &'a Path, schema: &'a str, store: &Arc<Store>, hub: &Arc<Hub>) -> Open<'a> {
     let name = directory.file_name().unwrap().to_str().unwrap();
     Open {
@@ -138,7 +130,6 @@ impl Peer {
         )
         .await
     }
-    /// The held secret epochs and each table's installed key epochs.
     async fn epochs(&self, list: &str) -> (Value, BTreeMap<String, Value>) {
         let status = self.status(list).await;
         let tables = status["tables"]
@@ -171,7 +162,6 @@ impl Peer {
             tables,
         )
     }
-    /// Selector grants of whole-row `rights` on list `list` of `tables`.
     async fn grants(&self, list: &str, tables: &[&str], rights: &[&str]) -> Value {
         let mut grants = Vec::new();
         for table in tables {
@@ -217,7 +207,6 @@ impl Peer {
         )
         .await
     }
-    /// Syncs with `from`, which hands over what it holds for this peer.
     async fn fetch(&self, from: &Peer) -> Result<Value, String> {
         let contact = snap::ok(from.session.contact_info()).await;
         snap::string(async {
@@ -230,8 +219,6 @@ impl Peer {
         .await?;
         snap::string(self.session.sync_once()).await
     }
-    /// How the sharer sees each recipient of list `list`'s latest epoch
-    /// sent to it, by node.
     async fn recipients(&self, list: &str) -> BTreeMap<String, Value> {
         let mut recipients = self.status(list).await["recipients"]
             .as_array()
@@ -248,7 +235,6 @@ impl Peer {
             })
             .collect()
     }
-    /// Every activity event of `kind`.
     async fn events(&self, kind: &str) -> Vec<Value> {
         snap::ok(self.session.activity(0)).await["events"]
             .as_array()
@@ -265,7 +251,6 @@ fn values(list: &str) -> Vec<rocky_sdk::SqlValue> {
 fn uniform(tables: &BTreeMap<String, Value>, epochs: Value) -> bool {
     tables.len() == TABLES.len() && tables.values().all(|held| *held == epochs)
 }
-/// A device prepared for supplied credentials, without a network.
 fn prepare(directory: &Path) -> (Arc<Store>, NodeKeys) {
     let store = Arc::new(Store::default());
     let device = common::node_keys(directory, Some(store.clone() as Arc<dyn SecretStore>)).unwrap();
@@ -280,7 +265,6 @@ fn install(directory: &Path, store: Arc<Store>, supplied: Value, hub: &Arc<Hub>)
     .database;
     Peer::new(database, store, hub.clone())
 }
-/// A reader granted `rights` on list `list` of `tables`, holding no secret.
 async fn granted(
     issuer: &Peer,
     directory: &Path,
@@ -848,7 +832,6 @@ async fn a_phone_holds_a_list_and_its_items_while_leaving_out_attachments() {
     issuer.database.close().await.unwrap();
 }
 
-/// Writes one row of list A.
 async fn write(peer: &Peer, table: &str, key: &str) {
     snap::ok(peer.session.execute("BEGIN", Vec::new())).await;
     let updates_the_one_row_per_list = table == "lists" && key != "before";
@@ -877,7 +860,6 @@ async fn write(peer: &Peer, table: &str, key: &str) {
     .await;
     snap::ok(peer.session.execute("COMMIT", Vec::new())).await;
 }
-/// The keys of list A's rows in every table of the group, in table order.
 async fn rows(peer: &Peer) -> Vec<Vec<String>> {
     let mut all = Vec::new();
     for (table, column) in [("lists", "title"), ("items", "key"), ("attachments", "key")] {
@@ -997,8 +979,6 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
     issuer.database.close().await.unwrap();
 }
 
-/// A settings file restored on its own from before a list's key arrived:
-/// opening recovers the group from the replica and the vault.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_identity_file_older_than_the_replica_recovers_its_groups() {
     let root = tempfile::tempdir().unwrap();
@@ -1088,8 +1068,6 @@ async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants(
     issuer.database.close().await.unwrap();
 }
 
-/// Copies the issuer's field rights onto each granted table: a writer needs
-/// them paired with rights on its selected rows.
 fn pair_field_rights(issuer_directory: &std::path::Path, grants: &mut Value) {
     let identity: Value =
         serde_json::from_slice(&std::fs::read(issuer_directory.join("identity.json")).unwrap())
@@ -1176,9 +1154,6 @@ async fn a_member_with_a_delegated_grant_shares_without_issuer_authority() {
     }
 }
 
-/// A partition granted to an identity reaches a node that identity links
-/// later, from a node of it, with no further grant; the issuer lists the
-/// grant on the identity's record.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
     let root = support::small_directory().unwrap();

@@ -1,5 +1,3 @@
-//! The simulated nodes: databases hosted on the simulation's thread, each
-//! with its directory, its secrets and its name on the hub.
 use crate::SqlValue;
 use crate::{
     Database, Failure, Network, Open, SecretStore, Session, database::Install,
@@ -17,7 +15,6 @@ fn text(value: &str) -> SqlValue {
 
 pub(super) const SCHEMA: &str = r#"{"application":"simulation","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
 
-/// Keys in memory, kept across restarts and crashes of one node.
 #[derive(Default)]
 pub(super) struct Keys(Mutex<BTreeMap<String, Vec<u8>>>);
 impl SecretStore for Keys {
@@ -45,26 +42,20 @@ impl SecretStore for Keys {
     }
 }
 
-/// An open node.
 pub(super) struct Running {
     pub(super) database: Arc<Database>,
     session: Session,
     pub(super) node: Weak<Node>,
 }
-/// One simulated device, open or not.
 pub(super) struct Member {
     pub(super) name: String,
     pub(super) directory: PathBuf,
     keys: Arc<Keys>,
     pub(super) running: Option<Running>,
-    /// Its node key, once known.
     pub(super) node_key: Option<String>,
-    /// Revoked members never open again.
     pub(super) revoked: bool,
     schema: &'static str,
-    /// Seconds this device's wall clock runs ahead, across restarts.
     pub(super) ahead: Arc<std::sync::atomic::AtomicU64>,
-    /// The offline root of the domain this member created: its user holds it.
     pub(super) root: Option<Arc<crate::RootKey>>,
     pending_join: Option<crate::AwaitingAdmission>,
 }
@@ -84,7 +75,6 @@ impl Member {
             pending_join: None,
         }
     }
-    /// Starts the node: creating, joining or opening its directory.
     pub(super) async fn start(&mut self, hub: &Arc<Hub>, install: Install) -> Result<(), Failure> {
         let secrets: Arc<dyn SecretStore> = self.keys.clone();
         let hosted = Database::host(
@@ -151,7 +141,6 @@ impl Member {
     pub(super) async fn open(&mut self, hub: &Arc<Hub>) -> Result<(), Failure> {
         self.start(hub, Install::Installed).await
     }
-    /// Closes the node as an application does.
     pub(super) async fn close(&mut self) -> Result<(), Failure> {
         if let Some(running) = self.running.take() {
             running.session.close().await;
@@ -159,7 +148,6 @@ impl Member {
         }
         Ok(())
     }
-    /// Stops the node as a process death does.
     pub(super) async fn crash(&mut self) {
         if let Some(running) = self.running.take() {
             running.database.crash().await;
@@ -192,13 +180,10 @@ impl Member {
             None => self.session()?.follow(name).await,
         }
     }
-    /// One transaction of two rows, `key-a` and `key-b`, under a handle
-    /// that makes a retry safe.
     pub(super) async fn write(&self, key: &str, handle: u64) -> Result<(), Failure> {
         let rows = ["a", "b"].map(|half| vec![text(&format!("{key}-{half}")), text(key)]);
         self.insert("items", "key, title", &rows, handle, 0).await
     }
-    /// One row of the partition `list`.
     pub(super) async fn write_part(
         &self,
         list: &str,
@@ -214,8 +199,6 @@ impl Member {
         )
         .await
     }
-    /// Inserts `rows` of `table` in one transaction; `kind` keeps the
-    /// handles of different writes of one step apart.
     async fn insert(
         &self,
         table: &str,
@@ -249,7 +232,6 @@ impl Member {
         }
         result.map(drop)
     }
-    /// Every item key, sorted.
     pub(super) async fn keys(&self) -> Result<Vec<String>, Failure> {
         let mut keys = Vec::new();
         let mut after = String::new();

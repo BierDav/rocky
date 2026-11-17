@@ -1,5 +1,3 @@
-//! Direct sync between admitted peers, and identities that do not depend
-//! on routes or transport kinds.
 use crate::support::snapshot as snap;
 use common::{Device, Failure, introduce};
 use data_encoding::BASE64URL_NOPAD;
@@ -18,7 +16,6 @@ fn memory(hub: &Arc<Hub>, name: &str) -> Network {
 fn iroh() -> Network {
     Network::Owned(Arc::new(rocky_iroh::Options::isolated("127.0.0.1:0")))
 }
-/// A creator and members named `b`, `c`, … enrolled over `hub`.
 async fn enroll(root: &Path, hub: &Arc<Hub>, members: &[&str]) -> Result<Vec<Device>, Failure> {
     let creator = Device::create(&root.join("a"), Some(memory(hub, "a")))?;
     let mut devices = Vec::new();
@@ -310,16 +307,11 @@ async fn a_domain_survives_a_change_of_routes_and_transport_kind() -> Result<(),
     Ok(())
 }
 
-/// Whether `path` is the database, where signed node chains and durable
-/// number bindings belong.
 fn is_database_file(path: &Path) -> bool {
     path.file_name()
         .is_some_and(|name| name.to_string_lossy().starts_with("rocky.sqlite"))
 }
 
-/// The identity file without its verified signed authority: node-signed
-/// capabilities carry their issuer's certificate, and permanent signed
-/// membership is authority, not a stored route key.
 fn identity_without_signed_authority(bytes: &[u8]) -> Result<Vec<u8>, Failure> {
     let mut settings: Value = serde_json::from_slice(bytes)?;
     let chain: rocky_sdk::credentials::CredentialChain =
@@ -340,8 +332,6 @@ fn identity_without_signed_authority(bytes: &[u8]) -> Result<Vec<u8>, Failure> {
     Ok(serde_json::to_vec(&settings)?)
 }
 
-/// A discovery secret without the endorsements that carry the signing
-/// node's certificate.
 fn discovery_without_endorsements(bytes: &[u8]) -> Result<Vec<u8>, Failure> {
     let mut discovery: Value = serde_json::from_slice(bytes)?;
     if let Some(root) = discovery["root"].as_object_mut() {

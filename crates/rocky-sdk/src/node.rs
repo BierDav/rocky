@@ -1,4 +1,3 @@
-//! One open secure database: its replica, identity, sessions and optional network service.
 mod repair;
 mod requests;
 use repair::RepairWork;
@@ -62,18 +61,11 @@ const MAX_ROWS: usize = 1024;
 const MAX_SQL: usize = 64 * 1024;
 const MAX_SUBSCRIPTIONS: usize = 64;
 const MAX_SESSIONS: usize = 64;
-/// Concurrent inbound streams a node serves; more are dropped.
 const INBOUND: usize = 32;
-/// Peers met without a contact that `peers` lists.
 const MET: usize = 64;
-/// How long a closing network service lets its work finish before it
-/// cancels what remains.
 const DRAIN: Duration = Duration::from_secs(5);
-/// How long a staged checkpoint import waits for its linked signer without
-/// a new page before another peer may restart it from its own checkpoint.
 const IMPORT_SOURCE: Duration = Duration::from_secs(180);
 
-/// A definite refusal: retrying the same call cannot succeed.
 #[derive(Debug)]
 pub struct Refused(pub String);
 impl std::fmt::Display for Refused {
@@ -85,7 +77,6 @@ impl std::error::Error for Refused {}
 fn refused(error: impl std::fmt::Display) -> Failure {
     Box::new(Refused(error.to_string()))
 }
-/// A refusal that keeps a named error, such as a full registry.
 fn named(error: Failure) -> Failure {
     if error.is::<crate::registry::RegistryFull>() {
         error
@@ -142,7 +133,6 @@ impl SyncStatus {
     }
 }
 
-/// One session's reader and subscriptions. Sessions share the database.
 pub(crate) struct Client {
     reader: Mutex<Option<Reader>>,
     cursor_key: [u8; 32],
@@ -164,25 +154,20 @@ impl Client {
 #[derive(Clone, Copy, PartialEq)]
 enum Stage {
     Open,
-    /// Accepts nothing new; admitted work finishes.
     Draining,
     Cancelled,
 }
-/// The attached network service.
 struct Link {
     id: u64,
     transport: Arc<dyn Transport>,
     owned: bool,
     stage: watch::Sender<Stage>,
-    /// The accept loop, which holds the transport's inbound queue until it ends.
     server: std::sync::Mutex<Option<rocky_platform::task::JoinHandle<()>>>,
     synchronizer: std::sync::Mutex<Option<rocky_platform::task::JoinHandle<()>>>,
     publisher: std::sync::Mutex<Option<rocky_platform::task::JoinHandle<()>>>,
-    /// What the transport finds peers with, and the worker announcing on it.
     discovery: Option<Arc<dyn crate::transport::Discovery>>,
     changes: Option<watch::Receiver<()>>,
     discoverer: std::sync::Mutex<Option<rocky_platform::task::JoinHandle<()>>>,
-    /// Inbound streams being served, served so far and dropped over budget.
     active: Arc<Semaphore>,
     peer_admission: [Semaphore; 3],
     live_budget: Arc<Semaphore>,
@@ -191,7 +176,6 @@ struct Link {
     served: AtomicU64,
     refused: AtomicU64,
 }
-/// Signals when an automatic pass has been dropped.
 struct WorkerActivity(watch::Sender<bool>);
 impl Drop for WorkerActivity {
     fn drop(&mut self) {
@@ -217,9 +201,7 @@ struct PeerRetry {
     pending: RepairWork,
     link: bool,
     link_retry: crate::scheduling::Retry,
-    /// Bumped when the retry resets, invalidating completions begun before.
     generation: u64,
-    /// Bumped when new work is hinted, invalidating completions that missed it.
     work_generation: u64,
 }
 struct SyncFailure {
@@ -229,19 +211,13 @@ struct SyncFailure {
 struct Reached {
     at: u64,
     error: Option<String>,
-    /// Scopes the last successful sync with the peer did not exchange.
     refused: Vec<ResourceScope>,
-    /// Scopes the peer restores from a checkpoint instead of this device's history.
     waiting: Vec<ResourceScope>,
     held: Vec<ResourceScope>,
 }
 
-/// How long the sync worker lets a committed change settle before its pass:
-/// local observers read first on the shared reactor, and a burst of commits
-/// becomes one pass. The crate's own tests freeze the clock and run without it.
 const LOCAL_SETTLE: std::time::Duration =
     std::time::Duration::from_millis(if cfg!(test) { 0 } else { 20 });
-/// Waits `LOCAL_SETTLE`; with none there is no timer at all.
 async fn settle() {
     if !LOCAL_SETTLE.is_zero() {
         rocky_platform::time::sleep(LOCAL_SETTLE).await;
@@ -251,10 +227,7 @@ async fn settle() {
 pub(crate) struct Node {
     owner: std::sync::OnceLock<std::sync::Weak<Node>>,
     pub replica: EncryptedReplica<TypedRows>,
-    /// The installed generation's domain; replaced when the database adopts
-    /// a newer generation.
     domain: std::sync::RwLock<Arc<Domain>>,
-    /// The scopes this device's credentials name. A renewal keeps them.
     granted: std::sync::Mutex<Vec<ResourceScope>>,
     pub vault: Vault,
     pub settings: Mutex<Shared<Settings>>,
@@ -262,11 +235,8 @@ pub(crate) struct Node {
     schema_acquisition: std::sync::Mutex<schemas::Acquisition>,
     pub path: PathBuf,
     pub online: AtomicBool,
-    /// Set by logout; `purge` also removes local data at close.
     pub lifecycle: Mutex<Lifecycle>,
-    /// Calls that use the network hold it shared; attach and detach replace it.
     network: RwLock<Option<Arc<Link>>>,
-    /// The attached link for status calls, which never wait for the network.
     current: std::sync::Mutex<Option<Arc<Link>>>,
     detaching: Mutex<()>,
     links: AtomicU64,
@@ -275,7 +245,6 @@ pub(crate) struct Node {
     bootstrap: Mutex<()>,
     retry_seed: u64,
     retries: std::sync::Mutex<BTreeMap<PublicKey, PeerRetry>>,
-    /// The followed tip the peers' backoff was earned on.
     backoff_tip: std::sync::Mutex<Option<rocky_core::TipId>>,
     resolution_retries:
         std::sync::Mutex<BTreeMap<rocky_credentials::PeerId, crate::scheduling::Retry>>,
@@ -290,48 +259,27 @@ pub(crate) struct Node {
     link_events: watch::Sender<()>,
     sync_status: watch::Sender<SyncStatus>,
     link_revision: AtomicU64,
-    /// What the node did in the background, for applications to show.
     pub(crate) activity: crate::activity::Activity,
     backups: Mutex<()>,
     reached: std::sync::Mutex<BTreeMap<PublicKey, Reached>>,
-    /// Peers whose sessions this device served, with the last time; at
-    /// most `MET` are kept.
     met: std::sync::Mutex<BTreeMap<PublicKey, u64>>,
     link_requests: std::sync::Mutex<BTreeMap<PublicKey, crate::self_enrollment::PendingLink>>,
-    /// Nonces this node issued to personal sign-ins.
     personal_nonces: std::sync::Mutex<personal::Nonces>,
-    /// Peers whose clock the last handshake found more than
-    /// `MAX_CLOCK_AHEAD` apart from this one's, as alerts; at most `MET`.
     clocks: std::sync::Mutex<BTreeMap<PublicKey, crate::Alert>>,
-    /// Standing failures of calls to the coordination service.
     coordination: Arc<health::Coordination>,
-    /// On a trusted node, each other device's latest health report.
     mesh: std::sync::Mutex<BTreeMap<PublicKey, health::Held>>,
-    /// On a trusted node, the other trusted identities and when each was
-    /// last heard.
     trusted_watch: std::sync::Mutex<health::TrustedWatch>,
-    /// Held while this node signs chained tip statements.
     tip_chain: Arc<tokio::sync::Mutex<()>>,
-    /// On a trusted node, the seal it should have made and did not.
     seal_skipped: std::sync::Mutex<Option<crate::Alert>>,
-    /// On a trusted node, why its last finality pass left a seal unfinal.
     finality_stalled: std::sync::Mutex<Option<crate::Alert>>,
-    /// Moves whenever `mesh` takes a report, for links that forward them.
     mesh_revision: watch::Sender<u64>,
-    /// The last attempt to report this device's health failed.
     report_failing: AtomicBool,
-    /// Health reports that reached this device.
     #[cfg(test)]
     pub(crate) reports_received: AtomicU64,
-    /// Revocation verifications that ran under the settings lock.
     #[cfg(test)]
     pub(crate) verified_under_settings: AtomicU64,
-    /// A session brought statements since the last renewal. Rotated keys
-    /// still arrive by renewal, so the next sync pass renews once.
     learned: AtomicBool,
     handover: std::sync::Mutex<std::collections::BTreeSet<PublicKey>>,
-    /// By scope, the last staged row of an import another peer would
-    /// restart and when it was last seen to move.
     import_sources: std::sync::Mutex<
         BTreeMap<
             ResourceScope,
@@ -343,11 +291,8 @@ pub(crate) struct Node {
     >,
     sync_failures: std::sync::Mutex<BTreeMap<(PublicKey, ResourceScope), SyncFailure>>,
     choices: std::sync::Mutex<BTreeMap<PublicKey, &'static str>>,
-    /// Signals that the discovery topics may have changed.
     topics: watch::Sender<u64>,
-    /// Whether this device announces under a topic now.
     announcing: AtomicBool,
-    /// Moves the discovery clock forward, for the topic window.
     #[cfg(test)]
     pub(crate) discovery_skew: AtomicU64,
     observations: crate::status::Observations,
@@ -355,33 +300,20 @@ pub(crate) struct Node {
     #[cfg(test)]
     status_clock: std::sync::Mutex<Option<(u64, rocky_platform::time::Instant)>>,
     last_reconciliation: std::sync::Mutex<Option<crate::ReconciliationReport>>,
-    /// Each peer's last exchange that was not skipped.
     last_syncs: std::sync::Mutex<BTreeMap<String, crate::PeerReconciliation>>,
-    /// The coordination service this database is composed with, for its owner.
     coordinator: std::sync::RwLock<Option<Arc<dyn rocky_credentials::Coordinator>>>,
-    /// Reaches the coordinator the database's settings name when the
-    /// application composed none.
     connector: std::sync::RwLock<Option<Arc<dyn rocky_credentials::CoordinatorConnector>>>,
-    /// Why reaching the coordinator the settings name last failed.
     connect_failure: std::sync::Mutex<Option<String>>,
-    /// Deposits held as a mailbox, loaded at first use.
     mailbox: Mutex<Option<crate::delivery::Mailbox>>,
-    /// The schema the application declares, which may be older or newer
-    /// than the installed generation's.
     declared: crate::schema::Schema,
-    /// Generations whose wider profile grants this process asked an issuer
-    /// for once.
     widened: std::sync::Mutex<std::collections::BTreeSet<String>>,
-    /// When this member last asked an issuer for a claim link it lacked.
     claims_asked: std::sync::Mutex<u64>,
-    /// Held while revocations are pushed to the coordination service.
     revocations_pushing: Mutex<()>,
 
     push_retry: std::sync::Mutex<claims::PushRetry>,
 }
 
 impl Node {
-    /// The domain of the installed generation.
     pub fn domain(&self) -> Arc<Domain> {
         self.domain
             .read()
@@ -482,17 +414,13 @@ impl Node {
             push_retry: Default::default(),
         }
     }
-    /// The schema the application declared at open.
     pub fn with_declared(mut self, schema: crate::schema::Schema) -> Self {
         self.declared = schema;
         self
     }
-    /// The version the application declares: Room's database version.
     pub fn declared_version(&self) -> u32 {
         self.declared.version
     }
-    /// The tables the application declares differently from the installed
-    /// generation, as it declares them; none while they are the same.
     pub fn declared_differences(&self) -> Result<Vec<rocky_core::LogicalTable>, Failure> {
         let domain = self.domain();
         let installed = domain.logical();
@@ -503,15 +431,12 @@ impl Node {
             .filter(|table| installed.table(&table.sql_name) != Some(table))
             .collect())
     }
-    /// How the application's schema stands to the installed generation's.
     pub async fn application(&self, settings: &Settings) -> Result<crate::DeclaredSchema, Failure> {
         if self.replica.followed_bookmark().await.is_none() {
             return Ok(crate::DeclaredSchema::Ahead);
         }
         settings.application(&self.declared)
     }
-    /// The migration this device publishes, or waits for while the
-    /// application declares migrations it may not run.
     pub(crate) async fn migration(
         &self,
         settings: &Settings,
@@ -543,15 +468,12 @@ impl Node {
             .then_some(crate::MigrationStatus::FullAccessRequired),
         )
     }
-    /// Every granted scope, the registry's included: what sync covers.
     pub(crate) fn scopes(&self) -> Vec<ResourceScope> {
         self.granted
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
-    /// The granted scopes the application's sessions open: the registry is
-    /// the SDK's own.
     fn app_scopes(&self) -> Vec<ResourceScope> {
         let registry = self.domain().registry();
         self.scopes()
@@ -568,8 +490,6 @@ impl Node {
             .cloned()
             .collect()
     }
-    /// The state of session `id`, created by its first call. Resolved as
-    /// a call arrives, so a session's end never precedes its earlier calls.
     pub fn client(&self, id: u64) -> Result<Arc<Client>, Failure> {
         let mut clients = self.clients.lock().map_err(|_| "sessions poisoned")?;
         if let Some(client) = clients.get(&id) {
@@ -589,8 +509,6 @@ impl Node {
         clients.insert(id, client.clone());
         Ok(client)
     }
-    /// Ends session `id`, or every session: pending waits stop, admitted
-    /// calls finish. Other sessions and the database stay open.
     pub fn end_sessions(&self, id: Option<u64>) {
         let mut clients = self.clients.lock().unwrap_or_else(PoisonError::into_inner);
         let ended: Vec<_> = match id {
@@ -601,8 +519,6 @@ impl Node {
             client.closing.send_replace(true);
         }
     }
-    /// A session over every collection, opened again after an authority
-    /// change ended the previous one.
     async fn reader(&self, client: &Client) -> Result<Reader, Failure> {
         let mut cached = client.reader.lock().await;
         if let Some(reader) = &*cached
@@ -618,7 +534,6 @@ impl Node {
         *cached = Some(reader.clone());
         Ok(reader)
     }
-    /// A SQL session over every granted table, for a driver connection.
     pub(crate) async fn sql_session(
         &self,
         options: SqlOptions,
@@ -638,7 +553,6 @@ impl Node {
         }
     }
 
-    /// Serves `transport` as the network service in the empty `slot`.
     fn install(
         self: &Arc<Self>,
         slot: &mut Option<Arc<Link>>,
@@ -696,7 +610,6 @@ impl Node {
         self.wake_sync();
         Ok(id)
     }
-    /// Installs the transport the database opened with.
     pub async fn link(
         self: &Arc<Self>,
         transport: impl Into<crate::transport::Connected>,
@@ -704,8 +617,6 @@ impl Node {
     ) -> Result<u64, Failure> {
         self.install(&mut *self.network.write().await, transport.into(), owned)
     }
-    /// Attaches a network service of any transport kind: routes of that
-    /// kind are dialed, and the domain's identity does not depend on it.
     pub async fn attach(self: &Arc<Self>, network: Network) -> Result<u64, Failure> {
         let mut slot = self.network.write().await;
         if slot.is_some() {
@@ -719,9 +630,6 @@ impl Node {
         let (transport, owned) = network.start(issuer, key).await?;
         self.install(&mut slot, transport, owned)
     }
-    /// Detaches network service `id`, or whichever is attached. Admitted
-    /// work has `DRAIN` to finish; an owned transport is then closed, a
-    /// borrowed one is left as it was. Does nothing once detached.
     pub async fn detach(&self, id: Option<u64>) {
         let _detaching = self.detaching.lock().await;
         let attached = self.network.read().await.clone();
@@ -778,7 +686,6 @@ impl Node {
             link.transport.close().await;
         }
     }
-    /// Serves inbound streams until the service drains or the transport ends.
     async fn accept(self: Arc<Self>, link: Arc<Link>) {
         let mut tasks = rocky_platform::task::JoinSet::new();
         let mut stage = link.stage.subscribe();
@@ -831,7 +738,6 @@ impl Node {
         .await;
         tasks.shutdown().await;
     }
-    /// Cancellation belongs to the attached service; its read guard holds the attachment.
     async fn networked<T>(
         attached: Option<&Link>,
         work: impl std::future::Future<Output = Result<T, Failure>>,
@@ -864,7 +770,7 @@ impl Node {
                 .as_ref()
                 .ok_or(ServiceError::NetworkRequired("an invitation"))?
                 .transport;
-            let registry = self.registry().await?;
+            let registry = self.registry(&*self.settings_snapshot().await).await?;
             let (uri, expires, notes) = self
                 .settings
                 .lock()
@@ -935,7 +841,7 @@ impl Node {
     async fn invitation_state(&self, uri: &str) -> Result<crate::InvitationState, Failure> {
         let (id, expires) = Settings::invitation_identity(uri)?;
         let open = self.settings.lock().await.invitation_open(uri)?;
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let enrolled = registry
             .records
             .iter()
@@ -977,7 +883,7 @@ impl Node {
     }
 
     async fn add_peer(&self, contact: &str) -> Result<String, Failure> {
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let node = self
             .configure(|settings| {
                 let node = settings.add_peer(&self.vault, contact)?;
@@ -1045,8 +951,6 @@ impl Node {
             .lock()
             .map_err(|_| "peer status poisoned".into())
     }
-    /// Applies a change of the configured peers, saving it when what is
-    /// persisted changed.
     async fn configure<T>(
         &self,
         change: impl FnOnce(&mut Settings) -> Result<T, Failure>,
@@ -1062,9 +966,6 @@ impl Node {
         self.observations.touch();
         Ok(result)
     }
-    /// Issues raw grants or a profile to a prepared device, as the
-    /// credentials it installs: signed by the publisher on an issuer, or
-    /// delegated from this device's own chain.
     async fn grant(
         &self,
         device: crate::NodeKeys,
@@ -1083,15 +984,12 @@ impl Node {
         Box::pin(self.answer_grant(device, (profile, terms), delegate, contact)).await
     }
 
-    /// Replaces this device's credentials with supplied ones and teaches
-    /// the replica, as a renewal does. New grants may make more members of
-    /// a held group readable.
     async fn install_supplied(&self, supplied: crate::Supplied) -> Result<(), Failure> {
         let current = self.settings.lock().await.clone();
         let renewed = current
             .supplied_renewal(&self.vault, &supplied)
             .map_err(refused)?;
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let mut settings = self.settings.lock().await;
         let (mut keys, _) = settings.adopt(&self.path, &self.vault, &renewed)?;
         if settings.begin_exposure_rotation(&registry)? {
@@ -1124,14 +1022,11 @@ impl Node {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
-    /// The attached network's transport kind, empty without one.
     fn kind(&self) -> String {
         self.current()
             .map(|link| link.transport.kind().to_owned())
             .unwrap_or_default()
     }
-    /// Sets and reports a scope's retention. A base forms only at a seal,
-    /// through `compact`; maintenance here prunes behind it.
     async fn retention(
         &self,
         collection: &str,
@@ -1174,8 +1069,6 @@ impl Node {
             writer: crate::WriterId::from_bytes(*status.node.as_bytes()),
         })
     }
-    /// How far the bootstrap intent has imported, in the stored rows of the
-    /// checkpoints its peer offered; `null` until a peer offered one.
     async fn bootstrap_progress(&self) -> Result<Option<crate::BootstrapProgress>, Failure> {
         let intent: Value =
             match rocky_platform::fs::read(self.path.with_file_name("bootstrap.json")) {
@@ -1213,7 +1106,6 @@ impl Node {
             scopes_total: totals.len() as u64,
         }))
     }
-    /// The status once it differs from the one `after` named.
     async fn readiness_after(
         &self,
         client: &Client,
@@ -1271,9 +1163,6 @@ impl Node {
             }
         }
     }
-    /// Writes a signed backup archive to `target`: a coherent copy of the
-    /// file and the identity, which holds no key. In a browser `target` is a
-    /// file in Rocky's storage (`rocky_platform::fs`).
     async fn backup(&self, target: &std::path::Path) -> Result<crate::BackupInventory, Failure> {
         let _backup = self.backups.lock().await;
         if rocky_platform::fs::exists(target) {
@@ -1321,8 +1210,6 @@ impl Node {
         let _ = rocky_platform::fs::remove_dir_all(&staging);
         result
     }
-    /// A backup archive as bytes: written to a file of its own in the data
-    /// directory, read and removed.
     pub(crate) async fn export_backup(&self) -> Result<Vec<u8>, Failure> {
         let directory = self
             .path
@@ -1344,8 +1231,6 @@ impl Node {
         }
         exported
     }
-    /// The definition generation, the earlier ones still admitted and a
-    /// table rebuild under way.
     async fn domain_info(&self) -> Result<crate::DomainInfo, Failure> {
         let settings = self.settings.lock().await;
         Ok(crate::DomainInfo {
@@ -1389,8 +1274,6 @@ impl Node {
     ) -> Result<crate::RevocationResult, Failure> {
         self.revoke_with(target, &Root::default(), false).await
     }
-    /// Records that `signed` ended this node: alone, as an unlink, by an
-    /// owner reset, or with its identity.
     fn record_ended(
         &self,
         signed: &rocky_credentials::SignedRevocation,
@@ -1419,19 +1302,13 @@ impl Node {
         }
         Ok(())
     }
-    /// A recovery's root revokes every other trusted identity this node
-    /// knows, lost with its devices, with the identities it first enrolled;
-    /// every key rotates. Returns, in order, every identity the recovery
-    /// revokes by name, those an interrupted attempt revoked too: the
-    /// registry's trusted identities the `archived` identity record had
-    /// not ended.
     pub(crate) async fn revoke_lost(
         &self,
         root: Arc<dyn rocky_credentials::IdentityProvider>,
         archived: &Settings,
     ) -> Result<Vec<PublicKey>, Failure> {
         let root = Root(Some(root));
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let own = self.settings.lock().await.identity;
         let lost: Vec<PublicKey> = registry
             .trusted
@@ -1468,10 +1345,6 @@ impl Node {
         self.revoke_before_recovery(&root).await?;
         Ok(lost)
     }
-    /// The recovery's own root statements, for the trusted identities its
-    /// store never named: each keeps the heads this node holds of the
-    /// chains it ends, as a revocation by name does. Sent like any
-    /// revocation once applied.
     async fn revoke_before_recovery(&self, root: &Root) -> Result<(), Failure> {
         let graph = self.replica.tip_graph(self.domain().scope).await?;
         let mut settings = self.settings.lock().await;
@@ -1515,10 +1388,6 @@ impl Node {
         }
         Ok(())
     }
-    /// The cut a root revocation of `target` carries: for each node of the
-    /// revoked trusted identity, or the revoked node, the latest heads of
-    /// its chains this node's tip graph holds, and the stage-branch heads
-    /// left out to fit (see `TipGraph::proposed_cut`).
     async fn revocation_cut(
         &self,
         target: crate::enrollment::Revoke,
@@ -1545,18 +1414,13 @@ impl Node {
         cut.sort_by_key(|cut| (cut.identity, cut.lane));
         Ok((cut, dropped))
     }
-    /// Revokes `target`, rotating keys before completing the revocation so
-    /// the statement refuses the device even if completion fails. Members
-    /// then refuse the revoked author's frames and no longer open the earlier
-    /// epoch's; a checkpoint at a later seal carries those rows. Stage-branch
-    /// heads a full cut left out are past the cut with all they signed.
     async fn revoke_with(
         &self,
         target: crate::enrollment::Revoke,
         root: &Root,
         keep: bool,
     ) -> Result<crate::RevocationResult, Failure> {
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let membership = self.membership().await?;
         let (cut, dropped) = if keep && root.signer().is_some() {
             self.revocation_cut(target, &membership).await?
@@ -1641,10 +1505,6 @@ impl Node {
             cut_dropped_stages: dropped,
         })
     }
-    /// Teaches the replica what the identity already records: the
-    /// revocations, this device's chain and new key epochs, earlier ones
-    /// first. The line node is certified again from the renewed identity
-    /// links, under the settings the caller holds.
     pub(super) async fn apply(
         &self,
         settings: &mut Shared<Settings>,
@@ -1680,13 +1540,6 @@ impl Node {
         }
         crate::escrow::keep(&self.replica, settings, &self.vault, &self.domain()).await
     }
-    /// Renews this device's credentials: from its issuers on a member,
-    /// self-signed on an issuer, which asks the other issuers first when
-    /// `learn` is set. New reader keys arrive with the renewal; a table
-    /// granted like a held one is projected, and held where its group
-    /// partitions are. A member restores newly revoked authors by
-    /// checkpoint, however it learned of them. Returns whether anything
-    /// changed.
     async fn renew(
         &self,
         transport: Option<&dyn Transport>,
@@ -1767,7 +1620,7 @@ impl Node {
         }
         if settings.issuer() {
             drop(settings);
-            let registry = self.registry().await?;
+            let registry = self.registry(&*self.settings_snapshot().await).await?;
             settings = self.settings.lock().await;
             if settings.begin_exposure_rotation(&registry)? {
                 changed = true;
@@ -1801,7 +1654,7 @@ impl Node {
         Ok(true)
     }
     async fn logout(&self, purge: bool) -> Result<(), Failure> {
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let membership = self.membership().await?;
         let mut settings = self.settings.lock().await;
         if settings.issuer() && !settings.another_issuer(&registry, &membership) {
@@ -1838,8 +1691,6 @@ impl Node {
         }
     }
 
-    /// Records a peer's reachability when it changed, not on every sync,
-    /// and what a sync moved.
     fn record_reach(
         &self,
         peer: PublicKey,
@@ -1932,8 +1783,6 @@ impl Node {
             }
         }
     }
-    /// A scope as events name it: its table, and for a partition its
-    /// encryption commitment, which `partition_address` also reports.
     fn scope_label(&self, scope: &ResourceScope) -> crate::ActivityScope {
         let domain = self.domain();
         let own = domain.scopes().find(|(_, own)| own.table == scope.table);
@@ -2067,7 +1916,6 @@ impl Node {
             )
             .min()
     }
-    /// One worker per link; only pending work has a retry timer.
     async fn synchronize(self: Arc<Self>, link: Arc<Link>) {
         let mut stage = link.stage.subscribe();
         let mut events = self.sync_events.subscribe();
@@ -2153,7 +2001,6 @@ impl Node {
         }
     }
 
-    /// Reconciles selected peers and records each attempted exchange.
     async fn sync_optional(
         &self,
         transport: Option<&dyn Transport>,
@@ -2178,20 +2025,6 @@ impl Node {
             .await
             .map(|(_, status, retry)| (status, retry))
     }
-    /// One sync pass. Seals and finality records come first, so they reach
-    /// peers in this pass's graph exchange. Adopting a generation renews
-    /// nothing: a table it granted like a held one joins the grants at a
-    /// renewal asked for once per generation. Learned statements, or frames
-    /// waiting for an unheld key epoch, renew for the rotated keys before
-    /// rows move; without a renewal rows still move and the keys wait.
-    /// Following another tip retries refused links at once, and a pass the
-    /// app asked for skips every backoff. Coverage by other peers never
-    /// replaces the exchange owed to the inviter, nor, after a renewal, the
-    /// pass under the new authority. Old-authority sessions finish before
-    /// the one renewal, and even their successes are judged again against
-    /// the learned revocations. A failure renewal cannot repair, see
-    /// [`renewal_cannot_repair`], leaves other links alone. A pass that fails
-    /// after importing checkpoint pages goes on soon.
     async fn run_sync_pass(
         &self,
         transport: &dyn Transport,
@@ -2594,8 +2427,6 @@ impl Node {
             )),
         }
     }
-    /// Local routes, observed holdings and trusted contacts, with backed-off
-    /// peers last unless `backoff` is false, as for a sync the app asked for.
     fn dialed(&self, settings: &Settings, backoff: bool) -> Vec<(PublicKey, Contact)> {
         let reached = self.reached.lock().unwrap_or_else(PoisonError::into_inner);
         let retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2644,18 +2475,13 @@ impl Node {
         targets.truncate(crate::enrollment::MAX_DIALED);
         targets
     }
-    /// Keeps the statements the replica learned in sessions in this
-    /// identity. One that revokes this device, which the replica does not
-    /// keep, is recorded as after a refused renewal; rows of a newly revoked
-    /// author arrive by checkpoint, which membership evidence alone does not
-    /// require.
     async fn absorb_revocations(&self, outcome: Option<&Failure>) -> Result<(), Failure> {
         let rotates_locally = {
             let settings = self.settings.lock().await;
             settings.issuer() && settings.issuers.is_empty()
         };
         let registry = if rotates_locally {
-            Some(self.registry().await?)
+            Some(self.registry(&*self.settings_snapshot().await).await?)
         } else {
             None
         };
@@ -2706,7 +2532,6 @@ impl Node {
         self.refresh_importing().await?;
         self.sweep_deliveries().await
     }
-    /// The scopes a bootstrap intent still imports from a checkpoint.
     async fn bootstrap_pending(&self, intent: &Value) -> Result<Vec<ResourceScope>, Failure> {
         let token = intent.get("intent").unwrap_or(intent);
         if token != &json!(true) {
@@ -2727,25 +2552,19 @@ impl Node {
         };
         Ok(pending.into_iter().filter(imports_checkpoint).collect())
     }
-    /// Fails with [`crate::enrollment::Revoked`] once a statement ends this device.
     async fn ensure_not_revoked(&self) -> Result<(), Failure> {
         match self.settings.lock().await.revocation(&self.path)? {
             Some(statement) => Err(Box::new(crate::enrollment::Revoked(statement))),
             None => Ok(()),
         }
     }
-    /// Marks that the next sync imports a checkpoint, which restores rows
-    /// of newly revoked authors however this device learned of them.
     fn request_checkpoint_import(&self) -> Result<(), Failure> {
         rocky_credentials::write_private(&self.path.with_file_name("bootstrap.json"), b"true")?;
         Ok(())
     }
-    /// Whether to renew for rotated keys before moving rows: a served session
-    /// brought statements, or frames wait for a key epoch this device lacks.
     async fn awaits_rotated_keys(&self) -> bool {
         self.learned.load(Ordering::SeqCst) || self.awaits_key_epoch().await
     }
-    /// Whether received frames wait for a key epoch this device lacks.
     async fn awaits_key_epoch(&self) -> bool {
         self.replica.blockers().await.is_ok_and(|blockers| {
             blockers.iter().any(|blocker| {
@@ -2759,7 +2578,6 @@ impl Node {
             })
         })
     }
-    /// The inviter a joined device still owes one exchange, if any.
     fn awaited_inviter(&self) -> Option<PublicKey> {
         let bytes = rocky_platform::fs::read(self.path.with_file_name("bootstrap.json")).ok()?;
         serde_json::from_slice::<Value>(&bytes)
@@ -2769,9 +2587,6 @@ impl Node {
             .parse()
             .ok()
     }
-    /// The intent to keep instead of clearing a completed `intent` with
-    /// `peer`: a joined device waits for one exchange with its inviter, which
-    /// holds the envelopes shared with it after enrollment, unless revoked.
     async fn awaits_inviter(
         &self,
         peer: PublicKey,
@@ -2788,9 +2603,6 @@ impl Node {
         intent["pending"] = json!([]);
         Ok(Some(serde_json::to_vec(&intent)?))
     }
-    /// Tells the replica which scopes the bootstrap intent imports, so
-    /// peers hold back their history for them. An intent the bootstrap
-    /// refuses holds nothing back; the bootstrap reports it.
     pub(crate) async fn refresh_importing(&self) -> Result<(), Failure> {
         let pending = match rocky_platform::fs::read(self.path.with_file_name("bootstrap.json")) {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
@@ -2805,10 +2617,6 @@ impl Node {
             .await;
         Ok(())
     }
-    /// Whether a staged import of `signer`'s checkpoint, at `cursor`, goes on
-    /// with that signer rather than restarting from another peer's
-    /// checkpoint: while the signer is linked and the import moved within
-    /// `IMPORT_SOURCE`.
     fn keeps_import_source(
         &self,
         scope: ResourceScope,
@@ -2833,8 +2641,6 @@ impl Node {
         }
         now.duration_since(seen.1) < IMPORT_SOURCE
     }
-    /// Syncs with one peer, then keeps the revocations its sessions brought.
-    /// A scope the peer refuses to share was never its to serve.
     async fn reconcile(
         &self,
         transport: &dyn Transport,
@@ -2893,10 +2699,6 @@ impl Node {
         }
         result
     }
-    /// Whether another exchange with `peer` is owed: a blocker that this
-    /// peer or any permitted peer clears remains for a scope the peer
-    /// served, or for the domain whose scopes it served. The backoff spaces
-    /// the retries.
     async fn owes_retry(&self, peer: PublicKey, transfer: &sync::Transfer) -> bool {
         use rocky_core::{ClearsBy, domain_label, scope_label};
         let Ok(blockers) = self.blockers().await else {
@@ -3018,8 +2820,6 @@ impl Node {
         }
         result
     }
-    /// Requests a link to `peer`. A refusal, a full link budget included,
-    /// backs off; nothing else syncs.
     async fn request_link_observed(
         &self,
         transport: &dyn Transport,
@@ -3117,16 +2917,6 @@ impl Node {
         span.record("outcome", if result.is_ok() { "ok" } else { "error" });
         result
     }
-    /// Delivers envelopes before taking the shared checkpoint import slot and
-    /// releases the slot before draining, so neither a stalled dial nor the
-    /// peer's reverse exchange through another peer waits on it. Delivery
-    /// runs on the exchange's first session, so a list it opens syncs in
-    /// this exchange. The pass covers admission's full repair; later hints
-    /// stay pending. A bootstrap learns its ancestor schemas first, or it
-    /// would back off a usable peer, and shares the staged checkpoint state
-    /// with recovery during ordinary sync; a peer without a checkpoint
-    /// leaves the intent for another. Only concrete holdings sync: table
-    /// roots stay in the SQL catalog.
     async fn exchange_inner(
         &self,
         transport: &dyn Transport,
@@ -3317,7 +3107,6 @@ impl Node {
         }
         Ok((retry || bootstrap_retry, bootstrapped))
     }
-    /// Serves the peer RPC contract; live links have separate admission.
     pub async fn serve(&self, request: rocky_core::net::Request) -> Result<(), Failure> {
         let mut enrolled = false;
         let result = async {
@@ -3360,10 +3149,6 @@ impl Node {
         Ok(())
     }
 
-    /// Answers a peer. Enrollment and its policy lookup may be forwarded;
-    /// schema, resolution and membership messages are answered here. As in a
-    /// session, a requester may carry the statement that ends this node: it
-    /// is recorded, never held.
     async fn answer_peer(&self, request: PeerRequest) -> Result<PeerReply, Failure> {
         if !matches!(
             request,
@@ -3412,7 +3197,7 @@ impl Node {
                     settings.publisher,
                     (now()?, 300),
                 )?;
-                let registry = self.registry().await?;
+                let registry = self.registry(&*self.settings_snapshot().await).await?;
                 let mut current = self.settings.lock().await;
                 if let Some(statement) = current.revoking(&request.revocations)? {
                     if current.revocation(&self.path)?.is_none() {
@@ -3505,7 +3290,6 @@ impl Node {
         }
     }
 
-    /// Relays bytes only; the issuer and caller still verify the original request/answer.
     async fn forward_enrollment(
         &self,
         request: &PeerRequest,
@@ -3549,9 +3333,6 @@ impl Node {
         ))
     }
 
-    /// Signs the coordinator tenant's grant and, with a coordinator
-    /// composed, names it in the database's settings: the owner sets
-    /// coordination up once.
     async fn sign_coordination_grant(
         &self,
         tenant: PublicKey,
@@ -3773,8 +3554,6 @@ impl Node {
         })
     }
 
-    /// The first page of a subscription's query once the committed
-    /// revision differs from the one it last delivered.
     async fn next(&self, client: &Client, id: u64) -> Result<crate::ReadPage, Failure> {
         let mut revisions = self.replica.observe_revision();
         let mut closing = client.closing.subscribe();
@@ -3808,11 +3587,9 @@ impl Node {
     }
 }
 
-/// The secure handle of a mutation handle.
 fn secure_handle(handle: &[u8; 32]) -> rocky_core::Commitment {
     commitment("rocky.sdk.mutation.v1", handle)
 }
-/// A call-scoped root signer, dropped when the operation ends.
 #[derive(Default)]
 pub(crate) struct Root(pub(crate) Option<Arc<dyn rocky_credentials::IdentityProvider>>);
 impl Root {
@@ -3820,7 +3597,6 @@ impl Root {
         self.0.as_deref()
     }
 }
-/// The statement that revokes this device, when a session ended on it.
 fn revoked_by(error: &Failure) -> Option<rocky_credentials::SignedRevocation> {
     match error.downcast_ref::<Error>()? {
         Error::Application(error) => error
@@ -3829,17 +3605,12 @@ fn revoked_by(error: &Failure) -> Option<rocky_credentials::SignedRevocation> {
         _ => None,
     }
 }
-/// A replica refusal that names its own code: `sealed`,
-/// `coordinator_unavailable`, `behind`, `stale_recovery`, `abandoned`,
-/// `chain_pending` and `migration_pending`.
 fn replica_refusal(error: &Failure) -> Option<&rocky_secure::Refusal> {
     match error.downcast_ref::<Error>()? {
         Error::Application(error) => error.downcast_ref(),
         _ => None,
     }
 }
-/// Whether `error` is a broken or stalled stream or a replaced checkpoint,
-/// which renewing cannot repair and would only cancel other active links for.
 fn renewal_cannot_repair(error: &Failure) -> bool {
     match error.downcast_ref::<Error>() {
         Some(Error::Io(_)) => true,
@@ -3861,8 +3632,6 @@ fn is_authority(error: &Failure) -> bool {
     )
 }
 
-/// The error object of a failed call: its code and whether retrying the
-/// same call may succeed.
 pub(crate) fn call_failure(error: &Failure) -> crate::CallFailure {
     if let Some(error) = error.downcast_ref::<crate::CallFailure>() {
         return error.clone();
@@ -3955,7 +3724,6 @@ pub(crate) fn call_failure(error: &Failure) -> crate::CallFailure {
         blockers,
     }
 }
-/// JSON snapshots used by the existing failure-classification tests.
 #[cfg(test)]
 pub(crate) fn error(error: &Failure) -> Value {
     let failure = call_failure(error);
@@ -3969,7 +3737,6 @@ pub(crate) fn error(error: &Failure) -> Value {
     }
     value
 }
-/// A coordination service's refusal as a call's error code.
 fn coordination_code(error: &rocky_core::CoordinationError) -> (&'static str, bool) {
     use rocky_core::CoordinationError::{Backpressure, Denied, Sealed, Unavailable};
     match error {
@@ -3982,7 +3749,6 @@ fn coordination_code(error: &rocky_core::CoordinationError) -> (&'static str, bo
     }
 }
 
-/// A proposed cut and the stage-branch heads it left out, by node.
 type RevocationCut = (
     Vec<rocky_credentials::Cut>,
     Vec<(PublicKey, rocky_credentials::Head)>,

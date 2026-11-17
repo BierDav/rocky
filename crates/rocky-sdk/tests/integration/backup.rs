@@ -1,5 +1,3 @@
-//! Signed backup archives restored into a fresh signing identity through
-//! the blocking constructor; `backup::tests` covers `Configuration`.
 use crate::common;
 use crate::support::snapshot as snap;
 use common::{Device, Failure, SCHEMA, introduce};

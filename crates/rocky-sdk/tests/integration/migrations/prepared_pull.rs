@@ -1,4 +1,3 @@
-//! Closed, relocatable input for repeated member-pull measurements.
 use super::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -60,8 +59,6 @@ async fn retain(fixture: MemberFixture, destination: &Path) -> Result<(), Failur
     )
 }
 
-/// Checkpoints `database` into its main file before copying, including
-/// when SQLite retained an empty WAL.
 fn truncate_wal(database: &Path) -> Result<(), Failure> {
     let db = rusqlite::Connection::open(database)?;
     let busy: i64 = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
@@ -71,8 +68,6 @@ fn truncate_wal(database: &Path) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Marks a prepared fixture complete. It is written last, so a partial
-/// preparation has no manifest and is never accepted for replay.
 fn write_manifest(destination: &Path, manifest: &Manifest) -> Result<(), Failure> {
     fs::write(
         destination.join("fixture.json"),

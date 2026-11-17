@@ -1,6 +1,3 @@
-//! The starter composition: one database, one session and a network
-//! service the engine owns, selected by typed options. It adds no behaviour
-//! to the services it composes.
 use crate::{
     Failure,
     database::{Database, NetworkService, Open, Opened, Session},
@@ -25,7 +22,6 @@ pub struct EngineOptions {
     pub mode: EngineMode,
 }
 
-/// A database with the network it starts and owns.
 pub struct Engine {
     database: Arc<Database>,
     session: Session,
@@ -33,8 +29,6 @@ pub struct Engine {
     root: std::sync::Mutex<Option<crate::RootKey>>,
 }
 impl Engine {
-    /// Opens a database. Without `secrets`, keys are owner-only files in
-    /// the data directory.
     pub fn open(
         options: EngineOptions,
         schema: &crate::Schema,
@@ -42,8 +36,6 @@ impl Engine {
     ) -> Result<Arc<Self>, Failure> {
         Self::open_with(options, schema, secrets, None)
     }
-    /// Opens a database over `network` instead of the transport `options`
-    /// name. A borrowed network stays open when the engine closes.
     pub fn open_with(
         options: EngineOptions,
         schema: &crate::Schema,
@@ -52,7 +44,6 @@ impl Engine {
     ) -> Result<Arc<Self>, Failure> {
         Self::open_composed(options, schema, secrets, network, None)
     }
-    /// Opens with an application-owned metadata log or service.
     pub fn open_composed(
         options: EngineOptions,
         schema: &crate::Schema,
@@ -96,16 +87,12 @@ impl Engine {
     pub fn scope(&self) -> crate::Scope {
         self.database.scope()
     }
-    /// This engine's typed application session.
     pub fn session(&self) -> &Session {
         &self.session
     }
-    /// Opens additional typed sessions and SQL connections.
     pub fn database(&self) -> &Arc<Database> {
         &self.database
     }
-    /// The root key a create without a root signer made, once: show its
-    /// phrase to the user. Rocky keeps no copy.
     pub fn take_root(&self) -> Option<crate::RootKey> {
         self.root
             .lock()

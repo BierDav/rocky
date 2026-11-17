@@ -1,10 +1,6 @@
-//! Announces this device under the domain's discovery topics on a transport
-//! that can, and keeps what it finds as contacts.
 use super::*;
 use crate::transport::{Discovery, Found, LOCAL_PATH, PathState, TOPIC_PATH};
 
-/// The topics are derived again at least this often, so the previous one
-/// stops being answered once its window ends.
 const TOPIC_CHECK: Duration = Duration::from_secs(600);
 
 impl Node {
@@ -14,11 +10,6 @@ impl Node {
         #[cfg(not(test))]
         now()
     }
-    /// The current topic and, within its window, the previous one. None
-    /// before an admitted session handed over the root, and none once this
-    /// device knows it is revoked or logged out. A personal database's
-    /// devices and custodians also announce under the passkey's stable
-    /// bootstrap topic, which a device holding only the passkey derives.
     pub(super) async fn discovery_topics(&self) -> Vec<[u8; 32]> {
         if self.lifecycle.lock().await.is_logged_out() {
             return Vec::new();
@@ -42,7 +33,6 @@ impl Node {
         };
         shared.into_iter().chain(personal).collect()
     }
-    /// Announces under the topics this device derives now.
     pub(super) async fn announce(&self, discovery: &dyn Discovery) {
         let topics = self.discovery_topics().await;
         let Ok(node) = self.vault.get("node") else {
@@ -52,8 +42,6 @@ impl Node {
         let announced = discovery.announce(node, &topics).await.is_ok() && !topics.is_empty();
         self.announcing.store(announced, Ordering::SeqCst);
     }
-    /// Keeps a found contact. It is a hint: the session it leads to
-    /// authenticates the peer, and a revoked node is never kept.
     pub(super) async fn learn_found(&self, kind: &str, found: Found) -> Result<(), Failure> {
         let node = PublicKey::from_bytes(&found.node)?;
         {
@@ -73,14 +61,10 @@ impl Node {
         }
         Ok(())
     }
-    /// Announces an empty topic set: a borrowed transport outlives this
-    /// service, so stopping must withdraw what it announced.
     async fn withdraw_announcements(&self, discovery: &dyn Discovery) {
         let _ = discovery.announce([0; 32], &[]).await;
         self.announcing.store(false, Ordering::SeqCst);
     }
-    /// One worker per link whose transport can discover. It first clears
-    /// the local marks: one describes the network this device is on now.
     pub(super) async fn discover(self: Arc<Self>, link: Arc<Link>, discovery: Arc<dyn Discovery>) {
         let mut stage = link.stage.subscribe();
         let mut topics = self.topics.subscribe();
@@ -124,13 +108,10 @@ impl Node {
             }
         }
     }
-    /// A sync or a served session may have changed the revocation set, and
-    /// with it the topic.
     pub(super) fn topics_changed(&self) {
         self.topics
             .send_modify(|event| *event = event.wrapping_add(1));
     }
-    /// Each discovery path as on, off or unavailable with its reason.
     pub(super) fn discovery_status(&self) -> crate::DiscoveryStatus {
         let link = self.current();
         let paths = match link.as_ref().map(|link| (link, &link.discovery)) {
@@ -166,7 +147,6 @@ impl Node {
             topic: path(TOPIC_PATH),
         }
     }
-    /// Stops or resumes the paths that need the application in front.
     pub(super) async fn discovery_foreground(&self, foreground: bool) {
         if let Some(discovery) = self.current().and_then(|link| link.discovery.clone()) {
             discovery.foreground(foreground);

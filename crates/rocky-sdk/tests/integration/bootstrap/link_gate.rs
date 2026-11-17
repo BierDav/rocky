@@ -1,4 +1,3 @@
-//! The bootstrap fault boundary is a logical request channel, not a new dial.
 use super::*;
 use std::{
     future::Future,

@@ -1,9 +1,3 @@
-//! Counter claim rights: an issuer grants an identity the right to claim
-//! the domain's counters on its coordination service without being one of
-//! the control's trusted identities. The right is a link that lives at most
-//! `rocky_credentials::CLAIM_LIFETIME`. The grant is a row of the
-//! replicated issuer registry, so any current issuer renews the link with
-//! the holder's credentials until the right's grant is revoked.
 use crate::{
     Failure,
     enrollment::{Settings, now, random},
@@ -17,18 +11,27 @@ use rocky_credentials::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// Request clock difference a renewal allows, as credential renewal does.
 const SKEW: u64 = 300;
 
-/// A claim right granted to an identity: `grant` is opaque hex its device
-/// installs (`Database::install_claims`); `issuer` is the issuer node its
-/// holder asks first, none for a delegated right, which its delegator
-/// grants again. Any issuer renews a right an issuer granted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaimCounters<'a> {
+    Every,
+    Named(&'a [&'a [u8]]),
+}
+
+impl ClaimCounters<'_> {
+    pub(crate) fn names(self) -> Option<std::collections::BTreeSet<Vec<u8>>> {
+        match self {
+            Self::Every => None,
+            Self::Named(names) => Some(names.iter().map(|name| name.to_vec()).collect()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimGrant {
     pub identity: String,
-    /// Counter names, as hex; every counter when absent.
     pub counters: Option<Vec<String>>,
     pub grant: String,
     pub issuer: Option<String>,
@@ -64,22 +67,14 @@ impl ClaimGrant {
     }
 }
 
-/// This identity's claim link and the issuer node it asks first: the one
-/// that last renewed it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Holding {
-    /// From the publisher to the claim link; no node certificate.
     pub links: CredentialChain,
     pub issuer: Option<PublicKey>,
 }
 
 impl Settings {
-    /// Grants `identity` the right to claim `counters` of this domain, or
-    /// every counter, under a fresh grant ID: an issuer signs it and returns
-    /// the registry row that lets every issuer renew it; another holder of
-    /// a delegable right delegates within its own. Returns the links the
-    /// identity installs.
     pub(crate) fn grant_claims(
         &self,
         vault: &Vault,
@@ -134,17 +129,12 @@ impl Settings {
         };
         Ok((ClaimGrant::of(identity, &links, issuer)?, changes))
     }
-    /// The claim right this identity holds, as a grant its other devices
-    /// install.
     pub(crate) fn held_claims(&self) -> Result<Option<ClaimGrant>, Failure> {
         self.claims
             .as_ref()
             .map(|held| ClaimGrant::of(self.identity, &held.links, held.issuer))
             .transpose()
     }
-    /// Ends every issuer's renewals of `identity`'s right. Returns its grant
-    /// ID, which a revocation names to end its live links, and the registry
-    /// change.
     pub(crate) fn revoke_claims(
         &self,
         identity: PublicKey,
@@ -161,9 +151,6 @@ impl Settings {
         changes.unclaim(&identity)?;
         Ok((record.right.grant, changes))
     }
-    /// A fresh claim link at `time` for the identity whose node sent the
-    /// renewal `request`, when the registry records a right for it whose
-    /// grant no held statement revoked, nor the identity.
     pub(crate) fn renew_claims(
         &self,
         vault: &Vault,
@@ -196,8 +183,6 @@ impl Settings {
         )?;
         Ok(Some(authority.chain_of(link)))
     }
-    /// Keeps `links` as this identity's claim right, renewed by `issuer`,
-    /// once they verify as a current right of this domain.
     pub(crate) fn hold_claims(
         &mut self,
         links: CredentialChain,
@@ -210,8 +195,6 @@ impl Settings {
         self.claims = Some(Holding { links, issuer });
         Ok(())
     }
-    /// The claim chain this node presents: its certificate under the held
-    /// claim link, while that link is current.
     pub(crate) fn claim_chain(&self, _vault: &Vault) -> Result<Option<CredentialChain>, Failure> {
         let Some(held) = &self.claims else {
             return Ok(None);
@@ -226,8 +209,6 @@ impl Settings {
             .clone();
         Ok(Some(held.links.with_certificate(certificate)))
     }
-    /// Whether a member should ask its issuer for a claim link: it holds
-    /// none, or one past half its lifetime.
     pub(crate) fn claims_due(&self, time: u64) -> bool {
         !self.issuer()
             && self

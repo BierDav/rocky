@@ -1,4 +1,3 @@
-//! Application classification and the keys needed by a tip schema.
 use crate::{
     Failure,
     domain::Domain,
@@ -77,8 +76,6 @@ impl Settings {
         self.credentials = self.issue_own(vault)?;
         Ok(())
     }
-    /// The registry's current key: its highest epoch, the lowest of
-    /// siblings, as writers choose it.
     fn registry_key(&self, vault: &Vault) -> Result<[u8; 32], Failure> {
         let epoch = self
             .keys

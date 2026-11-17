@@ -1,17 +1,13 @@
-//! Application-confirmed removal before an issuer changes its installation.
 use crate::{Failure, enrollment::Settings, schema::Schema};
 use data_encoding::HEXLOWER;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// A removed table or `table.field`, and the number of live stored local rows
-/// affected (including NULL fields). Counts never describe other devices.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemovalImpact {
     pub name: String,
     pub rows: u64,
 }
-/// The complete report an application confirms by its digest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RolloutImpact {
     pub domain: String,
@@ -21,8 +17,6 @@ pub struct RolloutImpact {
     pub fields: Vec<RemovalImpact>,
     pub digest: String,
 }
-/// Opening stopped before signing or changing data. A stale confirmation
-/// returns the current report with `mismatch` set.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RolloutConfirmationRequired {
     pub report: RolloutImpact,
@@ -39,10 +33,6 @@ impl std::fmt::Display for RolloutConfirmationRequired {
 }
 impl std::error::Error for RolloutConfirmationRequired {}
 
-/// Refuses an issuer's schema rollout that removes data until the
-/// application confirms its exact removal impact, and one that would
-/// silently change what grants issued before mean: a `granted_like` entry
-/// goes only with its table, or with the table it followed.
 pub(crate) async fn confirm(
     settings: &Settings,
     path: &Path,

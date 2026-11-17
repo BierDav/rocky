@@ -1,5 +1,3 @@
-//! One sync pass between two nodes as a tree of spans whose fields name no
-//! row value, key or invitation.
 #![cfg(not(target_family = "wasm"))]
 #[expect(
     dead_code,
@@ -82,7 +80,6 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Recorder {
         }
     }
 }
-/// Whether `id` lies under a span named `ancestor`.
 fn under(spans: &BTreeMap<u64, Span>, mut id: u64, ancestor: &str) -> bool {
     while let Some(parent) = spans.get(&id).and_then(|span| span.parent) {
         if spans.get(&parent).is_some_and(|span| span.name == ancestor) {
@@ -92,7 +89,6 @@ fn under(spans: &BTreeMap<u64, Span>, mut id: u64, ancestor: &str) -> bool {
     }
     false
 }
-/// Every small file the devices keep: their secrets among them.
 fn secrets(directory: &Path, found: &mut Vec<Vec<u8>>) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;

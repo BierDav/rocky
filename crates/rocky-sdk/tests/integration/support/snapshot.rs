@@ -1,4 +1,3 @@
-//! Assertion snapshots of native results. No request decoding or dispatch lives here.
 #![expect(
     dead_code,
     reason = "the SDK's unit and integration tests each use a subset"
@@ -165,7 +164,6 @@ impl Snapshot for Vec<sdk::HeldChange> {
         json!({"count":self.len(),"changes":self.into_iter().map(|change|json!({"id":data_encoding::HEXLOWER.encode(&change.id),"time":change.time,"rows":change.rows.into_iter().map(|row|json!({"table":row.table,"removed":row.removed,"row":data_encoding::HEXLOWER.encode(&row.row),"kind":match row.kind { sdk::HeldKind::Insert=>"insert",sdk::HeldKind::Update=>"update",sdk::HeldKind::Delete=>"delete" },"fields":row.fields.into_iter().map(|field|json!({"name":field.name,"value":decoded(&field.value),"written":field.written,"removed":field.removed,"current":field.current.map(|current|json!({"value":current.value.as_deref().map(decoded),"time":current.time,"author":current.author}))})).collect::<Vec<_>>()})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
     }
 }
-/// Explicit conversions of assertion values used again as scalar SQL bindings.
 pub trait Scalar {
     fn text(&self) -> String;
 }
@@ -208,7 +206,6 @@ pub fn text(value: &impl Scalar) -> String {
 pub fn integer(value: &impl Scalar) -> i64 {
     value.text().parse().expect("integer fixture")
 }
-/// A snapshot cell's value, a row identity's blob as the identity's text.
 pub fn cell_value(cell: &Value) -> Value {
     let bytes = (cell["type"] == "blob")
         .then(|| serde_json::from_value::<Vec<u8>>(cell["value"].clone()).ok())
@@ -218,12 +215,10 @@ pub fn cell_value(cell: &Value) -> Value {
         None => cell["value"].clone(),
     }
 }
-/// The row identity a snapshot cell holds as its blob.
 pub fn cell_id(cell: &Value) -> sdk::RowIdentity {
     let bytes: Vec<u8> = serde_json::from_value(cell["value"].clone()).expect("blob cell");
     sdk::RowIdentity::from_bytes(&bytes).expect("row identity cell")
 }
-/// A row identity from its snapshot text, bound as its blob.
 pub fn row_id(value: &impl Scalar) -> sdk::SqlValue {
     value
         .text()

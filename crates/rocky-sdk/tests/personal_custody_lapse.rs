@@ -1,6 +1,3 @@
-//! A keyless custodian whose custody grant lapsed while every owner device
-//! was gone still restores a passkey-only device, under the same grant
-//! renewed. A binary of its own: it skips the whole process's wall clock.
 #![cfg(not(target_family = "wasm"))]
 use rocky_sdk::{
     Configuration, Freshness, GrantProfile, Network, PersonalNamespace, Schema, SignInSource,
@@ -36,7 +33,6 @@ fn config(directory: &Path, hub: &Arc<Hub>, name: &str) -> Result<Configuration,
             .network(Network::Owned(hub.connector(name))),
     )
 }
-/// The custody link of the custodian's saved chain: its identity link.
 fn custody_link(directory: &Path) -> Result<rocky_credentials::SignedCapability, Failure> {
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)?;

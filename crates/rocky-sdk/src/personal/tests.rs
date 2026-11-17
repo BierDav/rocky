@@ -3,7 +3,6 @@ use super::*;
 use crate::{Affinity, Column, Configuration, Schema, Table, VerifiedPasskeyPrf};
 use std::sync::Mutex;
 
-/// An in-memory secret store whose writes of names ending in `fail` fail once.
 #[derive(Default)]
 struct Store {
     secrets: Mutex<BTreeMap<String, Vec<u8>>>,

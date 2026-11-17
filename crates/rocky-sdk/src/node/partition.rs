@@ -1,18 +1,12 @@
-//! SDK-owned group partitions: addresses, the group secret in the external
-//! vault, derived table keys, sharing and the holding rule.
 use super::*;
 use crate::groups::{GroupPartition, record_key, secret_role};
 use rocky_core::TableClass;
 use rocky_credentials::{GroupSecretEnvelope, PartitionGrant};
 use std::collections::BTreeSet;
-/// How a request names a group partition's scopes.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Naming {
-    /// Only a partition this device knows: its record holds the name.
     Known,
-    /// One this device creates: `groups::naming_key` names it.
     Create,
-    /// The name an envelope sealed.
     Sealed(rocky_core::PartitionName),
 }
 impl Node {
@@ -35,9 +29,6 @@ impl Node {
         }
         Ok(name)
     }
-    /// Resolves the group partition `target` names, under its known name, a
-    /// sealed or created one, or the one a custody offer names. Issuers derive
-    /// the same name for every partition an issuer creates.
     async fn group_partition(
         &self,
         target: &crate::PartitionTarget,
@@ -70,8 +61,6 @@ impl Node {
             }
         })
     }
-    /// A requested partition this device does not know; its scopes stay
-    /// unnamed and must not be used.
     async fn unknown_partition(
         &self,
         target: &crate::PartitionTarget,
@@ -94,8 +83,6 @@ impl Node {
         };
         Ok((!offered).then_some(unnamed))
     }
-    /// The partition's naming secret an envelope seals, opened as
-    /// `install_envelope` opens it.
     pub(super) async fn envelope_name(
         &self,
         envelope: &GroupSecretEnvelope,
@@ -142,8 +129,6 @@ impl Node {
             name: partition.record.name,
         })
     }
-    /// Verifies whole-partition read on every member, as a group secret
-    /// reveals every member's key.
     fn reads_group(&self, settings: &Settings, partition: &GroupPartition) -> Result<(), Failure> {
         let node = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
         let time = now()?;
@@ -170,10 +155,6 @@ impl Node {
         }
         Ok(())
     }
-    /// Registers the readable members of `partitions` and installs every
-    /// held epoch's derived key; installing an installed key again does
-    /// nothing. Escrow is kept once for all of them: each pass covers
-    /// every key `settings` holds.
     pub(super) async fn hold_keys(
         &self,
         settings: &Settings,
@@ -198,7 +179,6 @@ impl Node {
         }
         crate::escrow::keep(&self.replica, settings, &self.vault, &domain).await
     }
-    /// Records the group partition, without a key unless it holds one.
     async fn know(&self, partition: &GroupPartition) -> Result<(), Failure> {
         let key = record_key(&partition.record.address);
         if self.settings.lock().await.groups.contains_key(&key) {
@@ -211,8 +191,6 @@ impl Node {
         })
         .await
     }
-    /// An issuer grants and delegates through its authority, and records the
-    /// holder durably before the chain leaves it.
     pub(super) async fn issue_partitions(
         &self,
         device: crate::NodeKeys,
@@ -220,7 +198,7 @@ impl Node {
         delegations: u8,
         delegate: bool,
     ) -> Result<crate::Supplied, Failure> {
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let settings = self.settings.lock().await.clone();
         let validity = rocky_credentials::Validity {
             issued_at: now()?,
@@ -296,9 +274,6 @@ impl Node {
         };
         Ok(supplied)
     }
-    /// Prepares the group secret after issuer or own-id insert authorization:
-    /// the current epoch of a known partition, otherwise the first. Sessions
-    /// name the partition only once the replica grants it.
     async fn create_group(
         &self,
         partition: GroupPartition,
@@ -351,10 +326,6 @@ impl Node {
             name: data_encoding::HEXLOWER.encode(&record.name),
         })
     }
-    /// Accepts one group envelope after it opens and the device reads every
-    /// member in whole; only then is anything registered or stored. Returns
-    /// whether it was new: an epoch already held installs nothing again.
-    /// Sessions name the partition only once the replica grants it.
     pub(super) async fn install_envelope(
         &self,
         partition: GroupPartition,
@@ -456,16 +427,13 @@ impl Node {
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = granted;
         Ok(true)
     }
-    /// Seals the current epoch's group secret to each recipient and saves the
-    /// deliveries before any network call; sync delivers them. Every sharer, an
-    /// issuer too, signs with its node key under its chain.
     async fn share(
         &self,
         partition: GroupPartition,
         recipients: BTreeSet<PublicKey>,
         epoch: Option<rocky_core::KeyEpoch>,
     ) -> Result<crate::PartitionShare, Failure> {
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let membership = self.membership().await?;
         let mut settings = self.settings.lock().await;
         self.reads_group(&settings, &partition)?;
@@ -863,8 +831,6 @@ impl Node {
         }
         Ok(evicted)
     }
-    /// Holds the group partition but the tables left out; with `bootstrap`
-    /// it starts from a peer's checkpoint at the next sync.
     pub(super) async fn hold(
         &self,
         partition: &GroupPartition,
@@ -894,10 +860,6 @@ impl Node {
             Ok(())
         }
     }
-    /// Saves a checkpoint-first intent for the covered members this device
-    /// reads; the next sync imports them before catching up. Later partitions
-    /// join a pending intent; one without a scope list covers every granted
-    /// scope.
     async fn bootstrap_partition(&self, covered: &[&crate::groups::Member]) -> Result<(), Failure> {
         let domain = self.domain();
         let added: Vec<ResourceScope> = {

@@ -1,4 +1,3 @@
-//! SDK error classification for the storage-independent peer contract.
 pub(crate) use rocky_credentials::{
     PEER_RPC_VERSION as VERSION, PeerError, PeerReply, PeerReplyFrame as ReplyFrame, PeerRequest,
     PeerRequestFrame as RequestFrame,

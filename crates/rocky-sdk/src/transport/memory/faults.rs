@@ -1,26 +1,15 @@
-//! Seeded link faults: every draw comes from the hub's seed and the
-//! stream's identity, never from the wall clock or the order streams of
-//! other links opened in.
 use super::Protocol;
 use std::time::Duration;
 
-/// Faults of the streams between two nodes. Chances are per mille.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LinkFaults {
-    /// Added before each write crosses.
     pub latency: Duration,
-    /// Up to this much more per write.
     pub jitter: Duration,
-    /// Bytes a stream carries per millisecond; `None` is unlimited.
     pub bandwidth: Option<usize>,
-    /// Chance that a write first stalls for `stall`.
     pub stalls: u16,
     pub stall: Duration,
-    /// Chance that a stream is cut after a drawn count of at most
-    /// `cut_within` bytes, both ways together.
     pub cuts: u16,
     pub cut_within: usize,
-    /// Chance that a dial is refused.
     pub refusals: u16,
 }
 impl LinkFaults {
@@ -32,14 +21,12 @@ impl LinkFaults {
     }
 }
 
-/// SplitMix64: one fixed sequence per seed on every platform.
 #[derive(Clone, Debug)]
 pub struct Draws(u64);
 impl Draws {
     pub fn new(seed: u64) -> Self {
         Self(seed)
     }
-    /// The draws of one named stream of `seed`.
     pub(super) fn stream(
         seed: u64,
         from: &str,
@@ -63,7 +50,6 @@ impl Draws {
         z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         z ^ (z >> 31)
     }
-    /// Uniform in `0..bound`; zero when `bound` is zero.
     pub fn below(&mut self, bound: u64) -> u64 {
         match bound {
             0 => 0,
@@ -73,12 +59,9 @@ impl Draws {
     pub fn chance(&mut self, per_mille: u16) -> bool {
         self.below(1000) < u64::from(per_mille)
     }
-    /// An independent sequence for one end of a stream.
     pub(super) fn fork(&mut self) -> Self {
         Self(self.draw())
     }
-    /// How long a write of `bytes` waits before it crosses, and whether
-    /// that includes a stall.
     pub(super) fn delay(&mut self, faults: &LinkFaults, bytes: usize) -> (Duration, bool) {
         let jitter = u64::try_from(faults.jitter.as_micros()).unwrap_or(u64::MAX);
         let mut delay =

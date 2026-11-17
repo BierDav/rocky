@@ -1,7 +1,3 @@
-//! The shopping release gate on the group schema: two phones that are never
-//! online together share lists through a keyless custody peer. A duplicate
-//! title converges by policy, a deleted list cascades, a deleted category
-//! nulls only its reference, and a moved item keeps an offline tick.
 use crate::support::snapshot as snap;
 use rocky_sdk::{Database, Network, Open, Session, transport::memory::Hub};
 use serde_json::{Value, json};
@@ -77,7 +73,6 @@ impl Peer {
         }
         Ok(())
     }
-    /// Inserts one row in one transaction; `?` is the next own id.
     async fn insert(&self, table: &str, list: Option<&str>, sql: &str) -> Result<String, Failure> {
         snap::value(self.session.execute("BEGIN", Vec::new())).await?;
         let id = match list {
@@ -118,8 +113,6 @@ impl Peer {
         )
         .await
     }
-    /// Moves item `id` to list `to` in one transaction: a new row there
-    /// with the values read here, and the old one deleted.
     async fn move_item(&self, from: &str, id: &str, to: &str) -> Result<String, Failure> {
         snap::value(self.session.execute("BEGIN", Vec::new())).await?;
         let moved = snap::value(
@@ -162,12 +155,10 @@ impl Peer {
             })
             .collect())
     }
-    /// `(list, title, completed, category)` of every visible item.
     async fn items(&self) -> Result<Vec<Vec<Value>>, Failure> {
         self.rows("SELECT list,title,completed,category FROM items ORDER BY list,title")
             .await
     }
-    /// Saves `list`'s envelope for `reader`; a later sync delivers it.
     async fn share(&self, list: &str, reader: &Peer) -> Result<(), Failure> {
         snap::value(
             self.session.share_partition(
@@ -215,7 +206,6 @@ async fn introduce(left: &Peer, right: &Peer) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Phone A issues; B is an enrolled writer; custody holds frames without keys.
 struct Topology {
     _root: tempfile::TempDir,
     hub: Arc<Hub>,
@@ -256,7 +246,6 @@ async fn topology() -> Result<Topology, Failure> {
         custody,
     })
 }
-/// `from` publishes to custody while `to` is offline, then the reverse.
 async fn relay(from: &Peer, to: &Peer) -> Result<(), Failure> {
     to.online(false).await?;
     from.online(true).await?;

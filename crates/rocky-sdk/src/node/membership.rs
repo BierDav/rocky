@@ -1,18 +1,11 @@
-//! Identity-owned links and unlinks; signing happens outside replica transactions.
 use super::*;
 
 impl Node {
-    /// Unlinks `target` from this identity. A permanent unlink is the retry
-    /// key, including one learned from another device; its certificate
-    /// survives in its signed evidence. The statement, its receipt and the
-    /// rotation intent are saved before any key is made; an unlink of this
-    /// node keeps its self-ending evidence in the notice, outside the active
-    /// set.
     pub(super) async fn unlink(
         &self,
         target: rocky_credentials::PeerId,
     ) -> Result<crate::DeviceRevocationReceipt, Failure> {
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let graph = self.replica.tip_graph(self.domain().scope).await?;
         let mut settings = self.settings.lock().await;
         let identity = settings.identity()?;
@@ -170,10 +163,6 @@ impl Node {
             .cloned()
             .ok_or_else(|| "missing device revocation receipt".into())
     }
-    /// Delivery uses signed evidence, even after either endpoint lost live
-    /// trust. Failed deliveries stay durable and are retried at sync. Each
-    /// recipient backs off on its own on the monotonic clock, its jittered
-    /// delay capped by the retry policy.
     pub(super) async fn deliver_unlinks(&self) -> Result<(), Failure> {
         let _delivery = self.unlink_delivery.lock().await;
         if !self.online.load(Ordering::SeqCst) || !self.foreground.load(Ordering::SeqCst) {
@@ -281,15 +270,12 @@ impl Node {
             .retain(|peer, _| pending.contains(peer));
         Ok(())
     }
-    /// Adopts a received unlink. One that ends this device keeps its
-    /// replica readable for status: as on a refused handshake, its cause is
-    /// recorded without adopting its end.
     pub(super) async fn accept_unlink(
         &self,
         known: RevocationSet,
     ) -> Result<RevocationSet, Failure> {
         known.verify_in(self.settings.lock().await.database_context()?)?;
-        let registry = self.registry().await?;
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
         let mut settings = self.settings.lock().await;
         known.verify_in(settings.database_context()?)?;
         if !known
@@ -337,10 +323,6 @@ impl Node {
         self.wake_sync();
         Ok(known)
     }
-    /// Records a membership link this identity signed. An owner device
-    /// needs no predecessor: its binding, tombstone and the device limit
-    /// decide, and refusals store nothing. Fork evidence is saved too, so
-    /// arrival order never chooses a winner.
     pub(super) async fn accept_link(
         &self,
         certificate: rocky_credentials::SignedCapability,

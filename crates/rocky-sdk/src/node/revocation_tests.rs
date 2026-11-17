@@ -1,4 +1,3 @@
-//! Deterministic recovery through the tombstone transaction and intent cleanup.
 use super::*;
 use crate::{enrollment::fault, schema::Schema};
 use rocky_credentials::ProviderError;
@@ -17,8 +16,6 @@ fn list_partition(list: impl Into<String>) -> crate::PartitionTarget {
     }
 }
 
-/// Keys in memory: the file store syncs every key, which dominated this test.
-/// A copy carries the template's keys to one stop.
 #[derive(Clone, Default)]
 struct Keys(Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>);
 impl Keys {
@@ -98,7 +95,6 @@ async fn issuer_with_root(
     node.record_self().await?;
     Ok(node)
 }
-/// Opens the issuer `issuer` left in `directory`, without recording it again.
 async fn reload(
     directory: &std::path::Path,
     store: Arc<dyn crate::SecretStore>,
@@ -317,7 +313,6 @@ fn reopen_at_revocation_boundaries(stops: &[(fault::Stage, usize)]) -> Result<()
     })
 }
 
-/// Revokes on a copy of `template` until `stop`, then reopens it twice.
 async fn stop_at(
     template: &std::path::Path,
     keys: &Keys,

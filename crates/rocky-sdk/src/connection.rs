@@ -1,8 +1,3 @@
-//! SQL connections for a database driver. A writer is a secure SQL
-//! session: one transaction is one commit and one signed bundle. A reader
-//! steps snapshot cursors and never holds the writer. Values cross typed,
-//! never as JSON; a compatibility profile answers an ORM's housekeeping
-//! statements.
 use crate::{Failure, node::Node};
 use rocky_core::{SqlValue, TypedRows};
 use rocky_runtime::{CursorLimits, SnapshotCursor, SqlControl, TableObserver, classify_sql};
@@ -15,18 +10,12 @@ use tokio::sync::Mutex;
 
 mod room;
 
-/// Rows of one page a statement result is delivered in.
 const PAGE_ROWS: usize = 256;
-/// Value bytes of one page; a larger single row is a page of its own.
 const PAGE_BYTES: usize = 1024 * 1024;
-/// Statements with an undelivered result on one connection.
 const MAX_RESULTS: usize = 64;
 
-/// The statements of one ORM version a connection answers itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Profile {
-    /// Room 2.8.4 with androidx.sqlite 2.6.2: its connection setup, schema
-    /// validation, identity table and invalidation tracker.
     Room284,
 }
 impl std::str::FromStr for Profile {
@@ -38,43 +27,25 @@ impl std::str::FromStr for Profile {
         }
     }
 }
-/// The sealed state a read-only connection reads instead of the live
-/// tables.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Binding {
-    /// A seal this device keeps.
     Seal(rocky_core::Commitment),
-    /// The seal a bookmark shows: its tip's own once sealed, else the one
-    /// its tip starts from. It is resolved when the connection opens.
     Bookmark(String),
 }
-/// What a successful commit acknowledges.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Durability {
-    /// Locally committed; the background flush makes it durable before sync sends it.
     Buffered,
-    /// Wait for the local durability flush before returning success.
     Flushed,
 }
-/// What a connection is for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConnectionOptions {
-    /// A reader steps snapshot cursors and refuses writes. `PRAGMA
-    /// query_only` switches the kind outside a transaction.
     pub read_only: bool,
     pub durability: Durability,
-    /// Answers this ORM's housekeeping statements; without it they are
-    /// denied like any pragma.
     pub profile: Option<Profile>,
-    /// How long a write transaction may hold the replica; 5 s by default,
-    /// at most 60 s.
     pub transaction_timeout: Option<std::time::Duration>,
-    /// Binds the connection to a kept seal's state, read only.
     pub binding: Option<Binding>,
 }
 impl ConnectionOptions {
-    /// The session options of this connection. A driver never hands frames
-    /// out: sync flushes before it sends them.
     fn sql(&self) -> rocky_secure::SqlOptions {
         let mut options = rocky_secure::SqlOptions {
             acknowledge: match self.durability {
@@ -90,22 +61,17 @@ impl ConnectionOptions {
     }
 }
 
-/// One page of a statement's result. Columns are known before any row.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Page {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<SqlValue>>,
-    /// No further page follows.
     pub done: bool,
 }
 
-/// A failed statement with SQLite's result code, so a driver can raise
-/// what the engine would have raised.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SqlFailure {
     pub code: i32,
     pub message: String,
-    /// A fresh read may succeed after local recovery, key delivery or a new session.
     pub retryable: bool,
 }
 impl std::fmt::Display for SqlFailure {
@@ -115,7 +81,6 @@ impl std::fmt::Display for SqlFailure {
 }
 impl std::error::Error for SqlFailure {}
 
-/// SQLite result codes this layer reports.
 pub(crate) mod code {
     pub const ERROR: i32 = 1;
     pub const ABORT: i32 = 4;
@@ -132,7 +97,6 @@ pub(crate) fn failure(code: i32, message: impl Into<String>) -> SqlFailure {
         retryable: false,
     }
 }
-/// The code and message of a runtime failure.
 pub(crate) fn sql_failure(error: Failure) -> SqlFailure {
     let error = match error.downcast::<SqlFailure>() {
         Ok(failure) => return *failure,
@@ -177,29 +141,31 @@ pub(crate) fn sql_failure(error: Failure) -> SqlFailure {
     }
 }
 
-/// `PRAGMA query_only`: Some(None) reads it, Some(Some(on)) sets it.
-fn query_only(sql: &str) -> Option<Option<bool>> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueryOnly {
+    Read,
+    Set(bool),
+}
+
+fn query_only(sql: &str) -> Option<QueryOnly> {
     let spaced = sql.trim().trim_end_matches(';').replace('=', " = ");
     let words: Vec<String> = spaced
         .split_whitespace()
         .map(str::to_ascii_lowercase)
         .collect();
     match words.iter().map(String::as_str).collect::<Vec<_>>()[..] {
-        ["pragma", "query_only"] => Some(None),
+        ["pragma", "query_only"] => Some(QueryOnly::Read),
         ["pragma", "query_only", "=", value] => match value {
-            "1" | "on" | "true" | "yes" => Some(Some(true)),
-            "0" | "off" | "false" | "no" => Some(Some(false)),
+            "1" | "on" | "true" | "yes" => Some(QueryOnly::Set(true)),
+            "0" | "off" | "false" | "no" => Some(QueryOnly::Set(false)),
             _ => None,
         },
         _ => None,
     }
 }
 
-/// The statement that reserves a row id before its insert.
 const NEXT_ID: &str = "rocky_next_id";
 
-/// The table of `SELECT rocky_next_id('table')` or `SELECT
-/// rocky_next_id(?)`; refuses other calls and leaves unrelated SQL alone.
 fn next_id(sql: &str, params: &[SqlValue]) -> Result<Option<(String, Vec<SqlValue>)>, Failure> {
     let words = room::words(sql);
     let function =
@@ -272,7 +238,6 @@ fn next_id(sql: &str, params: &[SqlValue]) -> Result<Option<(String, Vec<SqlValu
     Ok(Some((table.clone(), args[1..].to_vec())))
 }
 
-/// What remains of an executed statement's result.
 enum Pending {
     Rows {
         columns: Vec<String>,
@@ -334,43 +299,27 @@ fn names(cursor: &SnapshotCursor) -> Vec<String> {
         .collect()
 }
 
-/// A reader's transaction: statements share one snapshot, taken by the
-/// first of them, as SQLite's deferred transaction does.
 #[derive(Default)]
 struct Reading {
     snapshot: Option<SnapshotCursor>,
     savepoints: Vec<String>,
-    /// A `SAVEPOINT` began it; releasing that savepoint ends it.
     implicit: bool,
 }
 
-/// One connection's state on the database's reactor.
 pub(crate) struct State {
     options: ConnectionOptions,
-    /// The connection is a reader now; see `query_only`.
     read_only: bool,
     node: Arc<Node>,
     opened: Option<SecureSql<TypedRows>>,
-    /// A writer's `BEGIN` not yet sent: the session takes the writer only
-    /// once a statement needs the file.
     begin: Option<&'static str>,
-    /// The writer's transaction has not ended.
     open: bool,
     reading: Option<Reading>,
     results: BTreeMap<u64, Pending>,
     room: room::Housekeeping,
-    /// The version the application declares, which Room checks whatever
-    /// generation the database is at.
     version: u32,
-    /// The tables the application declares otherwise than the installed
-    /// generation, as Room validates them; read between transactions.
     declared: Vec<rocky_core::LogicalTable>,
-    /// The kept seal a bound connection reads, resolved once.
     seal: Option<rocky_core::Commitment>,
-    /// The transaction the last `COMMIT` published, as outcomes name it.
     committed: Option<rocky_core::TransactionToken>,
-    /// The handle the open transaction commits under, chosen when it
-    /// begins so its token is known before `COMMIT`.
     handle: Option<rocky_core::Commitment>,
 }
 impl State {
@@ -426,8 +375,6 @@ impl State {
                 .as_ref()
                 .is_some_and(|reading| reading.snapshot.is_some())
     }
-    /// The connection's session; a new one once the old one lost its
-    /// authority outside a transaction.
     async fn sql(&mut self) -> Result<&SecureSql<TypedRows>, Failure> {
         let current = match &self.opened {
             Some(opened) => self.authority_pinned() || opened.status().await.is_ok(),
@@ -445,7 +392,6 @@ impl State {
             .ok_or_else(|| "connection has no session".into())
     }
 
-    /// Runs one statement and returns the first page of its result.
     pub(crate) async fn execute(
         &mut self,
         statement: u64,
@@ -471,7 +417,6 @@ impl State {
         }
         Ok(page)
     }
-    /// The next page of `statement`'s result.
     pub(crate) async fn next(&mut self, statement: u64) -> Result<Page, Failure> {
         let mut pending = self
             .results
@@ -483,21 +428,15 @@ impl State {
         }
         Ok(page)
     }
-    /// Drops the rest of `statement`'s result; its cursor ends.
     pub(crate) fn finish(&mut self, statement: u64) {
         self.results.remove(&statement);
     }
     pub(crate) fn in_transaction(&self) -> bool {
         self.active()
     }
-    /// What the last `COMMIT` published; `None` when it published nothing.
     pub(crate) fn committed(&self) -> Option<rocky_core::TransactionToken> {
         self.committed
     }
-    /// Begins a write transaction under a fresh handle and returns the
-    /// token its `COMMIT` publishes, if it changes replicated rows. The
-    /// token derives only from this node and the handle; ordering and
-    /// stamps are still assigned at commit.
     pub(crate) async fn begin_identified(
         &mut self,
     ) -> Result<rocky_core::TransactionToken, Failure> {
@@ -511,29 +450,24 @@ impl State {
         Ok(token)
     }
 
-    /// `PRAGMA query_only` as SQLite keeps it per connection: a writer
-    /// holds nothing until it begins, so the kind can change between
-    /// transactions.
-    fn query_only(&mut self, set: Option<bool>) -> Result<Pending, Failure> {
-        match set {
-            None => Ok(Pending::rows(
+    fn query_only(&mut self, pragma: QueryOnly) -> Result<Pending, Failure> {
+        match pragma {
+            QueryOnly::Read => Ok(Pending::rows(
                 vec!["query_only".into()],
                 vec![vec![SqlValue::Integer(i64::from(self.read_only))]],
             )),
-            Some(_) if self.active() => {
+            QueryOnly::Set(_) if self.active() => {
                 Err(failure(code::ERROR, "query_only cannot change inside a transaction").into())
             }
-            Some(false) if self.seal.is_some() => {
+            QueryOnly::Set(false) if self.seal.is_some() => {
                 Err(failure(code::READONLY, "a connection bound to a seal is read-only").into())
             }
-            Some(read_only) => {
+            QueryOnly::Set(read_only) => {
                 self.read_only = read_only;
                 Ok(Pending::rows(Vec::new(), Vec::new()))
             }
         }
     }
-    /// Answers Room's schema statements, once more on a fresh session when
-    /// a schema read raced a key install after the status check.
     async fn room_answer(
         &mut self,
         sql: &str,
@@ -556,10 +490,6 @@ impl State {
         }
         answer
     }
-    /// Room's identity lives on the connection, so a bound connection keeps
-    /// it as a writer does. The session of an idle connection may have lost
-    /// its authority, and the installed generation with it: both are read
-    /// again.
     async fn room_answer_once(
         &mut self,
         sql: &str,
@@ -597,7 +527,6 @@ impl State {
         .await
     }
 
-    /// Sends a pending `BEGIN`: the transaction now holds the replica.
     async fn begun(&mut self) -> Result<(), Failure> {
         if let Some(mode) = self.begin.take() {
             self.sql()
@@ -609,9 +538,6 @@ impl State {
         Ok(())
     }
 
-    /// `SELECT rocky_next_id(table)`: reserves the row id the next insert
-    /// into `table` uses, inside the writer's transaction; a rollback
-    /// releases it.
     async fn next_id(&mut self, table: &str, values: &[SqlValue]) -> Result<Pending, Failure> {
         if self.read_only {
             return Err(failure(
@@ -636,11 +562,6 @@ impl State {
         Ok(Pending::rows(vec![NEXT_ID.into()], vec![vec![id.sql()]]))
     }
 
-    /// Runs a statement on a writable connection. A transaction begins
-    /// lazily: until a statement reaches the session, ending it is local. A
-    /// failed commit, an engine rollback or the release of the outermost
-    /// savepoint ends the transaction in the session; an abort stays open
-    /// until it is acknowledged.
     async fn write(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<Pending, Failure> {
         let control = classify_sql(sql).map_err(Error::Sql)?;
         match control {
@@ -696,10 +617,6 @@ impl State {
         Ok(Pending::rows(rows.columns, rows.rows))
     }
 
-    /// Runs a statement on a read-only connection. A bound connection reads
-    /// in any transaction its ORM begins; its writes fail as statements. A
-    /// session that lost its authority is replaced by a new one, which may
-    /// read.
     async fn read(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<Pending, Failure> {
         let control = classify_sql(sql).map_err(Error::Sql)?;
         let none = || Ok(Pending::rows(Vec::new(), Vec::new()));
@@ -804,7 +721,6 @@ impl State {
     }
 }
 
-/// The connections of one database, served on its reactor.
 #[derive(Default)]
 pub(crate) struct Registry {
     connections: StdMutex<BTreeMap<u64, Arc<Mutex<State>>>>,
@@ -838,8 +754,6 @@ impl Registry {
             .cloned()
             .ok_or_else(|| failure(code::MISUSE, "the connection is closed").into())
     }
-    /// Closes `id`, or every connection: an open transaction rolls back
-    /// and cursors end.
     pub(crate) fn close(&self, id: Option<u64>) {
         if let Ok(mut connections) = self.connections.lock() {
             match id {
@@ -850,7 +764,6 @@ impl Registry {
     }
 }
 
-/// A call on one connection, served on the reactor.
 pub(crate) enum Call {
     Execute {
         statement: u64,
@@ -865,7 +778,6 @@ pub(crate) enum Call {
     },
     InTransaction,
     Committed,
-    /// `BEGIN` under a handle chosen now; replies with its token.
     Begin,
 }
 pub(crate) enum Reply {
@@ -900,27 +812,34 @@ pub(crate) async fn serve(state: Arc<Mutex<State>>, call: Call) -> Result<Reply,
     reply.map_err(sql_failure)
 }
 
-/// Committed changes of a database's tables, for a driver to invalidate
-/// what it read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum ChangeCause {
+    Local,
+    Sync,
+    Rebuild,
+    Authority,
+}
+impl From<rocky_storage::observe::Cause> for ChangeCause {
+    fn from(cause: rocky_storage::observe::Cause) -> Self {
+        match cause {
+            rocky_storage::observe::Cause::Local => Self::Local,
+            rocky_storage::observe::Cause::Sync => Self::Sync,
+            rocky_storage::observe::Cause::Rebuild => Self::Rebuild,
+            rocky_storage::observe::Cause::Authority => Self::Authority,
+        }
+    }
+}
+
 pub struct TableEvents {
     observer: Mutex<TableObserver>,
 }
-/// Tables whose committed rows may differ, and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableChange {
-    /// Lowercase table names.
     pub tables: Vec<String>,
-    /// `local`, `sync`, `confirmed`, `rebuild` or `authority`.
-    pub causes: Vec<String>,
-    /// Committed transactions a replay here dropped since the last change.
-    /// Their writes are gone; `Database::transaction_outcome` says why.
+    pub causes: Vec<ChangeCause>,
     pub dropped: Vec<rocky_core::TransactionToken>,
-    /// This installation's transactions a seal or checkpoint may have made
-    /// final since the last change; `Database::transaction_outcome` says.
     pub sealed: Vec<rocky_core::TransactionToken>,
-    /// More outcomes changed than one change names: `dropped` and `sealed`
-    /// are empty, and every transaction awaiting its outcome must be read
-    /// again through `Database::transaction_outcome`.
     pub reconcile: bool,
 }
 impl TableEvents {
@@ -929,16 +848,11 @@ impl TableEvents {
             observer: Mutex::new(observer),
         }
     }
-    /// Waits for the next change; after the database closed, an error.
     pub async fn next(&self) -> Result<TableChange, Failure> {
         let change = self.observer.lock().await.next().await?;
         Ok(TableChange {
             tables: change.tables.into_iter().collect(),
-            causes: change
-                .causes
-                .into_iter()
-                .map(|cause| format!("{cause:?}").to_ascii_lowercase())
-                .collect(),
+            causes: change.causes.into_iter().map(ChangeCause::from).collect(),
             dropped: change
                 .dropped
                 .into_iter()

@@ -1,23 +1,16 @@
-//! What composed services own, and the structured refusals of combinations
-//! that cannot work.
 use crate::{
     Failure,
     transport::{Connected, Connector, Transport},
 };
 use std::sync::Arc;
 
-/// The network a service uses and who owns it.
 #[derive(Clone)]
 pub enum Network {
-    /// Rocky starts the transport and closes it with the service.
     Owned(Arc<dyn Connector>),
-    /// A transport the application started. Rocky never closes it.
     Borrowed(Arc<dyn Transport>),
-    /// An application-owned transport with optional discovery and change signals.
     Attached(Connected),
 }
 impl Network {
-    /// The transport and whether the service owns it.
     pub(crate) async fn start(
         self,
         accepts: bool,
@@ -31,27 +24,17 @@ impl Network {
     }
 }
 
-/// A combination of services that cannot work, refused before side effects,
-/// or a call on something already closed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServiceError {
-    /// The operation needs a network service and none is attached.
     NetworkRequired(&'static str),
-    /// One network service is attached already; close it first.
     NetworkAttached,
-    /// No route of the attached network's kind is known for `peer`.
     NoRoute { peer: &'static str, network: String },
-    /// No known route answered; a later attempt may succeed.
     Unreachable(String),
-    /// A dial exceeded its deadline; no global reachability conclusion follows.
     TimedOut(String),
-    /// A member's credentials expired: open with a network to renew them.
     CredentialsExpired,
-    /// The named handle was closed.
     Closed(&'static str),
 }
 impl ServiceError {
-    /// The stable code of the call contract.
     pub fn code(&self) -> &'static str {
         match self {
             Self::NetworkRequired(_) | Self::CredentialsExpired => "network_required",
@@ -60,7 +43,6 @@ impl ServiceError {
             Self::Closed(_) => "closed",
         }
     }
-    /// Whether the same call may succeed later without reconfiguration.
     pub fn retryable(&self) -> bool {
         matches!(self, Self::Unreachable(_) | Self::TimedOut(_))
     }

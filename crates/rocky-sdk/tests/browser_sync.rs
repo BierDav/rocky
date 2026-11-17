@@ -1,10 +1,3 @@
-//! A browser node syncs with a native node over a local iroh relay, which is
-//! the only path a browser has, and claims invoice numbers from the
-//! coordination service the native side runs, through a claim right the
-//! owner grants: the browser is never one of the control's trusted nodes.
-//! `scripts/browser-sync` starts the native side (`examples/browser_peer.rs`)
-//! and passes its relay, invitation and service bundle here at build time;
-//! the native side then checks that this node's write and claims reached it.
 #![cfg(target_family = "wasm")]
 use rocky_coordinator::certified::TrustBundle;
 use rocky_platform::{fs::Scratch, time};

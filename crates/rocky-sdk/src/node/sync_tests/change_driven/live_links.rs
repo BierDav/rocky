@@ -732,7 +732,6 @@ async fn simultaneous_short_requests_use_the_admitted_link_before_remote_reconci
         .await
 }
 
-/// Ends link handshakes after receiving their hello; renewal remains available.
 struct EofLinks(Arc<dyn Transport>);
 impl Transport for EofLinks {
     fn request<'a>(
@@ -1057,9 +1056,6 @@ async fn iroh_reverse_gate() -> Result<(), Failure> {
     real_reverse_gate().await
 }
 
-/// Stops both workers before either endpoint closes, so neither redials a closing peer.
-/// Pauses time once reconciliation is done: real QUIC needs its ACK timers
-/// while reconciling, so only the idle interval under test is frozen.
 fn freeze_idle_interval() {
     tokio::time::pause();
 }
@@ -1330,8 +1326,6 @@ async fn a_busy_link_backs_off_without_another_sync_path_and_reopens_when_a_slot
         .await
 }
 
-/// Injects a verified incoming statement against the peer's identity,
-/// without renewal or key installation.
 async fn learn_revocation(node: &Node, peer: PublicKey) -> Result<(), Failure> {
     let identity = node
         .membership()

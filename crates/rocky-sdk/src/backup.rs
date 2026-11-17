@@ -1,11 +1,6 @@
-//! Signed backup archives of one database: a coherent copy of its file,
-//! and its identity record, which holds no key. An archive is restored only into a fresh
-//! signing identity enrolled with an issuer (`Configuration::restore`), or
-//! recovered by the root (`Configuration::recover`).
 use rocky_credentials::PublicKey;
 use serde::{Deserialize, Serialize};
 
-/// Written before a restore enrolls: the restored file's predecessor.
 pub(crate) const MARKER: &str = "restore.json";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -15,51 +10,34 @@ pub struct Entry {
     pub length: u64,
     pub sha256: String,
 }
-/// What an archive holds and who made it. Its exact bytes are signed.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Inventory {
     pub format: u32,
     pub created: u64,
     pub publisher: PublicKey,
-    /// The domain this archive belongs to.
     pub scope: rocky_core::Scope,
-    /// The hash of the signed manifest the file is installed with.
     pub manifest: String,
-    /// The node key of the device that made it; it signs the archive.
     pub node: PublicKey,
-    /// The database revision the copy holds.
     pub revision: u64,
     pub files: Vec<Entry>,
 }
-/// The restore or recovery in progress in a directory. It goes once the
-/// restored file is rebound and holds its keys.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Marker {
     pub predecessor: PublicKey,
     pub archive: String,
-    /// How far a recovery got; `None` for a restore.
     pub recovery: Option<Recovery>,
 }
-/// A recovery's progress. Its identity is saved first, so resuming never
-/// takes another author slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Recovery {
-    /// The identity is saved; the archive's files may not be in place.
     Placing,
-    /// The files are in place; the store opens without its keys, takes its
-    /// tables, then its keys.
     Placed,
-    /// The store holds its tables and keys; the root has yet to revoke the
-    /// lost trusted identities.
     Keyed,
 }
 
 pub(crate) use archive::{Unsupported, inspect, open, place, write};
-/// Archives are files a user moves elsewhere: natively streamed from disk;
-/// in a browser, whole files in Rocky's storage (`rocky_platform::fs`).
 mod archive {
     use super::*;
     use crate::{Failure, enrollment::Settings};
@@ -71,15 +49,12 @@ mod archive {
         path::{Path, PathBuf},
     };
 
-    /// Reads an archive or a staged file.
     fn reader(path: &Path) -> Result<impl Read, Failure> {
         #[cfg(not(target_family = "wasm"))]
         return Ok(std::io::BufReader::new(std::fs::File::open(path)?));
         #[cfg(target_family = "wasm")]
         return Ok(std::io::Cursor::new(rocky_platform::fs::read(path)?));
     }
-    /// A file written whole, durable on `finish`. A browser buffers it, and
-    /// puts a database where SQLite opens it.
     struct Sink {
         #[cfg(not(target_family = "wasm"))]
         out: std::io::BufWriter<std::fs::File>,
@@ -133,11 +108,9 @@ mod archive {
         }
     }
 
-    /// The archive format follows the identity format it carries.
     const MAGIC: &[u8] = b"rocky.backup.v4\n";
     const FORMAT: u32 = 4;
     const MAX_HEADER: usize = 256 * 1024;
-    /// The files an archive carries, in order. The database is required.
     const DATABASE: &str = "rocky.sqlite";
     const IDENTITY: &str = "identity.json";
 
@@ -157,9 +130,6 @@ mod archive {
         }
     }
 
-    /// Writes the archive of `directory`'s staged files to `target` and signs
-    /// it with `node`. `staged` names each file's copy; it is written to a
-    /// temporary file first and renamed into place.
     pub(crate) fn write(
         target: &Path,
         staged: &[(&str, PathBuf)],
@@ -204,16 +174,12 @@ mod archive {
         Ok(inventory)
     }
 
-    /// A verified archive: its inventory, the identity record it carries and
-    /// where its files were extracted.
     pub(crate) struct Opened {
         pub inventory: Inventory,
         pub identity: Settings,
         pub files: Vec<(String, PathBuf)>,
-        /// A digest of the signed inventory, naming this archive.
         pub id: String,
     }
-    /// An archive or identity record in another format version.
     #[derive(Debug)]
     pub(crate) struct Unsupported(&'static str);
     impl std::fmt::Display for Unsupported {
@@ -222,7 +188,6 @@ mod archive {
         }
     }
     impl std::error::Error for Unsupported {}
-    /// The signed inventory at the start of `input`, with its bytes.
     fn header(input: &mut impl Read) -> Result<(Inventory, Vec<u8>), Failure> {
         let mut magic = vec![0; MAGIC.len()];
         input.read_exact(&mut magic)?;
@@ -259,7 +224,6 @@ mod archive {
         }
         Ok((inventory, header))
     }
-    /// The identity record an archive carries, checked against its inventory.
     fn identity(inventory: &Inventory, bytes: &[u8]) -> Result<Settings, Failure> {
         let record: serde_json::Value = serde_json::from_slice(bytes)?;
         if record["version"].as_u64() != Some(u64::from(crate::enrollment::VERSION)) {
@@ -279,8 +243,6 @@ mod archive {
         )?;
         Ok(identity)
     }
-    /// Verifies `archive` as `open` does without extracting it: its
-    /// inventory, its identity record and its ID.
     pub(crate) fn inspect(archive: &Path) -> Result<(Inventory, Settings, String), Failure> {
         let mut input = reader(archive)?;
         let (inventory, header) = header(&mut input)?;
@@ -316,9 +278,6 @@ mod archive {
         Ok((inventory, identity, id))
     }
 
-    /// Reads and verifies `archive`, extracting its files into `staging`.
-    /// The signature must be the exporter's, whose credentials the publisher
-    /// issued for the manifest; every file must match its digest.
     pub(crate) fn open(archive: &Path, staging: &Path) -> Result<Opened, Failure> {
         let mut input = reader(archive)?;
         let (inventory, header) = header(&mut input)?;
@@ -346,11 +305,6 @@ mod archive {
         })
     }
 
-    /// Puts the archive's files in `directory`, the identity record aside.
-    /// An earlier open of the database leaves its WAL and index, which must
-    /// never apply to the archive's file: the previous file and both go
-    /// first, durably. Until it is placed there is no database, and the
-    /// directory opens only by restoring or recovering again.
     pub(crate) fn place(opened: &Opened, directory: &Path) -> Result<(), Failure> {
         for (name, staged) in &opened.files {
             if name == IDENTITY {

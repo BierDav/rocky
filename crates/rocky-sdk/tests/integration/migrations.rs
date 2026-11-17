@@ -1,6 +1,3 @@
-//! Schema migrations of any size: the issuer signs the generation, runs its
-//! migrations in one local transaction and publishes the result as many
-//! bundles.
 use crate::common;
 mod prepared_pull;
 mod replayed;
@@ -10,21 +7,15 @@ use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
-/// Requires `position`, which the migration fills from the title, and adds
-/// `tags`, keyed by name, with one row per item. Running it twice would
-/// double each position.
 const POSITIONED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"tags","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}],
  "migrations":[{"version":2,"statements":["UPDATE items SET position = position || title",
   {"insert":"tags","select":"SELECT 'tag-' || key AS key, title AS label FROM items"}]}]}"#;
-/// `POSITIONED` whose migration asks for an id, which no migration may.
 const ASKS_FOR_IDS: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"tags","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}],
  "migrations":[{"version":2,"statements":["UPDATE items SET position = rocky_next_id('items')"]}]}"#;
-/// The fixed release after `ASKS_FOR_IDS`: the same tables, the version 2
-/// migration of `POSITIONED`.
 const FIXED: &str = r#"{"application":"shopping","version":3,"format":6,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"tags","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}],
@@ -79,15 +70,12 @@ fn text(value: &str) -> rocky_sdk::SqlValue {
 const POSITIONS: &str = "SELECT title, position FROM items ORDER BY title";
 const TAGS: &str = "SELECT key, label FROM tags ORDER BY key";
 
-/// `POSITIONED` whose migration inserts one tag key twice: it fails while
-/// it runs, after the seal and opening were signed and staged.
 const DUPLICATES: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"tags","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}],
  "migrations":[{"version":2,"statements":["UPDATE items SET position = position || title",
   {"insert":"tags","select":"SELECT 'same' AS key, title AS label FROM items"}]}]}"#;
 
-/// The followed tip and the number of seals in the graph.
 async fn graph(device: &Device) -> (Value, usize) {
     let tip = snap::ok(device.session.tip_status()).await["tip"].clone();
     let seals = snap::ok(device.session.inspect_tips()).await["seals"]
@@ -242,13 +230,11 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
 const LISTS: &str = r#"{"format":6,"application":"lists","version":1,"tables":[
  {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"}]}"#;
-/// Requires `position` of every list, which a migration fills.
 const POSITIONED_LISTS: &str = r#"{"format":6,"application":"lists","version":2,"tables":[
  {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true},{"name":"position","type":"text","not_null":true,"default":""}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"}],
  "migrations":[{"version":2,"statements":["UPDATE lists SET position = title"]}]}"#;
 
-/// Creates a list in its own partition; returns its id.
 async fn list(device: &Device, title: &str) -> Result<String, Failure> {
     snap::ok(device.session.next_partition("lists")).await;
     snap::ok(device.session.execute("BEGIN", Vec::new())).await;
@@ -351,15 +337,12 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     Ok(())
 }
 
-/// Adds a nullable note and seeds `LARGE` items with a migration.
 const SEEDED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],
  "migrations":[{"version":2,"statements":[{"insert":"items","select":"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000) SELECT printf('k%06d', i) AS key, 0 AS completed, printf('item %06d', i) AS title FROM n"}]}]}"#;
-/// `SEEDED` with a nullable tag: an additive switch in place.
 const TAGGED: &str = r#"{"application":"shopping","version":3,"format":6,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"tag","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],
  "migrations":[{"version":2,"statements":[{"insert":"items","select":"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000) SELECT printf('k%06d', i) AS key, 0 AS completed, printf('item %06d', i) AS title FROM n"}]}]}"#;
-/// Requires `position` of every item, filled from its title.
 const FILLED: &str = r#"{"application":"shopping","version":4,"format":6,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"position","type":"text","not_null":true,"default":""},{"name":"tag","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],
  "migrations":[{"version":2,"statements":[{"insert":"items","select":"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000) SELECT printf('k%06d', i) AS key, 0 AS completed, printf('item %06d', i) AS title FROM n"}]},
@@ -367,21 +350,16 @@ const FILLED: &str = r#"{"application":"shopping","version":4,"format":6,"tables
 const FILLED_COUNT: &str =
     "SELECT count(*), count(CASE WHEN position = title THEN 1 END) FROM items";
 
-/// The member needs the first migration's frames, signed under the
-/// generation before the one both devices open, to apply the second's.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_two_step_migration_converges_on_every_member() -> Result<(), Failure> {
     converges_on_every_member(8, 0).await
 }
 
-/// A returning member reaches the issuer's newest listed base.
 #[tokio::test(flavor = "multi_thread")]
 async fn returning_member_reaches_the_newest_base_after_a_migration() -> Result<(), Failure> {
     converges_on_every_member(UNPARTITIONED_SEED_ROWS, 2).await
 }
 
-/// An unpartitioned seed intent must fit one pulled frame, about 1,100 rows
-/// of this shape; `replayed.rs` seeds larger tables by partition.
 const UNPARTITIONED_SEED_ROWS: usize = 512;
 
 struct MemberFixture {
@@ -397,12 +375,6 @@ async fn converges_on_every_member(large: usize, history: usize) -> Result<(), F
     pull_member_fixture(prepare_member_fixture(large, history).await?).await
 }
 
-/// Prepares a returning member that crosses a bundle boundary; `history == 0`
-/// exercises the additive switch and a second migration as well. With history
-/// the empty historical states are finished before the migration is authored:
-/// their seals and listed records remain on the returning member's path. One
-/// publication peer durably acknowledges the migration bundles before the
-/// measured member pulls what it lacks.
 async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFixture, Failure> {
     let root = crate::support::small_directory()?;
     let multi_step = history == 0;

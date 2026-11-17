@@ -18,7 +18,6 @@ async fn pass(node: &Node) -> Result<Value, Failure> {
     let link = node.network.read().await;
     Ok(node.sync(&*link.as_ref().ok_or("link")?.transport).await?.0)
 }
-/// A background pass, as the scheduler runs one.
 async fn background(node: &Node) -> Result<Value, Failure> {
     let link = node.network.read().await;
     let transport = &*link.as_ref().ok_or("link")?.transport;
@@ -142,7 +141,6 @@ async fn a_sufficient_local_peer_is_the_only_dial_and_reports_the_skipped_issuer
         })
         .await
 }
-/// A node whose one contact, `gone`, never answers.
 async fn unreachable(root: &std::path::Path, hub: &Arc<Hub>) -> Result<Arc<Node>, Failure> {
     let a = enrolled(&root.join("a"), hub, "a", None).await?;
     let key = PrivateKey::new().public_key();

@@ -1,6 +1,3 @@
-//! A list shared with an enrolled writer: one envelope, delivered by sync,
-//! opens the list, its categories and items, which then bootstrap from a
-//! checkpoint and sync.
 use crate::support;
 use rocky_sdk::{Database, Network, Open, Session, transport::memory::Hub};
 use serde_json::{Value, json};
@@ -22,8 +19,6 @@ const SCHEMA: &str = r#"{"format":6,"application":"lists","version":1,"tables":[
    {"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}
 ]}"#;
 const TABLES: [&str; 3] = ["lists", "categories", "items"];
-/// Version 2: ordered items in any number of categories, migrated from one
-/// category per item, as the shopping example's version 7.
 const ORDERED: &str = r#"{"format":6,"application":"lists","version":2,"tables":[
  {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
@@ -62,8 +57,6 @@ struct Peer {
     database: Arc<Database>,
     session: Session,
 }
-/// Turns off background sync so only explicit syncs exchange: a failed
-/// background attempt would put a peer in backoff, which an explicit sync skips.
 async fn only_explicit_syncs(peers: &[&Peer]) -> Result<(), Failure> {
     for peer in peers {
         snap::value(peer.session.set_automatic_sync(false)).await?;
@@ -99,7 +92,6 @@ impl Peer {
             None => self.session.follow(name).await,
         }
     }
-    /// Inserts one row in one transaction; `id` reserves the next own id.
     async fn insert(&self, table: &str, list: Option<&str>, sql: &str) -> Result<String, Failure> {
         snap::value(self.session.execute("BEGIN", Vec::new())).await?;
         let id = match list {
@@ -496,7 +488,6 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
     Ok(())
 }
 
-/// The scopes of the latest `scopes_refused` event, if any.
 async fn refused(peer: &Peer) -> Result<Option<Vec<Value>>, Failure> {
     let activity = snap::value(peer.session.activity(0)).await?;
     Ok(activity["events"]
@@ -633,9 +624,6 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
     Ok(())
 }
 
-/// A shared list's history follows its collection's retention policy:
-/// compacting at a seal releases the operations behind it, including the
-/// deleted row's, once another device acknowledged them.
 #[tokio::test]
 async fn compacting_releases_a_shared_lists_history_under_its_collections_policy()
 -> Result<(), Failure> {
@@ -717,9 +705,6 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
     Ok(())
 }
 
-/// An issuer that keeps every seal migrates its lists: the constrained
-/// switch records its own history difference, and the rebuild inside it
-/// records nothing into history tables the new schema has not installed.
 #[tokio::test]
 async fn an_issuer_keeping_every_seal_migrates_its_lists() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -912,17 +897,12 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
     Ok(())
 }
 
-/// Syncs each issuer once. The first session may refuse a tuple the other
-/// never saw; the issuer exchange installs it and retries within that sync,
-/// and the other issuer learns this one's tuple on its own sync.
 async fn sync_each_learning_the_others_tuple(peers: &[&Peer]) -> Result<(), Failure> {
     for peer in peers {
         snap::value(peer.sync_once()).await?;
     }
     Ok(())
 }
-/// Each issuer shares its list with the other; whichever side dials hands
-/// over or collects the envelope.
 #[tokio::test]
 async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Result<(), Failure> {
     let root = support::small_directory()?;

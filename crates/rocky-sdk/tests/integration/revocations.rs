@@ -1,5 +1,3 @@
-//! Concurrent revocations by two issuers merge into one grow-only set, on
-//! the in-process hub.
 use common::{Device, Failure};
 use rocky_sdk::{
     Database, GrantProfile, Network, Open, ReadQuery, RevocationStatus, SqlValue,
@@ -87,16 +85,11 @@ async fn texts(device: &Device, sql: &str) -> Vec<String> {
         .collect()
 }
 
-/// Issuers A and B, each enrolling a reader it later revokes and a writer
-/// of both collections; the readers read disjoint collections.
 struct Domain {
     a: Device,
     b: Device,
-    /// Reads `items`; A revokes it.
     x: Device,
-    /// Reads `notes`; B revokes it.
     y: Device,
-    /// Writers enrolled by A and by B, each the other's peer.
     m: Device,
     n: Device,
 }
@@ -129,9 +122,6 @@ impl Domain {
     }
 }
 
-/// Two issuers, partitioned, each revoke a device; they meet with
-/// `a_first` choosing who syncs first. Every remaining device ends with both
-/// statements and one digest, and no device refuses either statement.
 async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let root = root.path();
@@ -253,8 +243,6 @@ async fn partitioned_issuers_revocations_merge_when_b_syncs_first() -> Result<()
     partitioned_revocations_merge(false).await
 }
 
-/// Partitioned trusted issuers sign conflicting modes for the same creator.
-/// Both statements survive; the cascade and digest agree in either sync order.
 async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure> {
     use rocky_sdk::{CallFailure, GrantProfile, RevocationMode, RevocationReason};
 

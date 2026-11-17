@@ -3,8 +3,6 @@ mod cancellation;
 use super::*;
 use std::future::Future;
 
-/// Runs `future` on a paused clock that advances only where the test says,
-/// parking between polls so SQLite's own threads get the host CPU.
 pub(super) fn frozen<F: Future>(future: F) -> impl Future<Output = F::Output> {
     let mut future = Box::pin(future);
     async move {

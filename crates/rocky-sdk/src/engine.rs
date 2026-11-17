@@ -58,7 +58,7 @@ impl Engine {
         schema: &crate::Schema,
         secrets: Option<Arc<dyn SecretStore>>,
         network: Option<Network>,
-        coordination: Option<Arc<dyn rocky_credentials::Coordinator>>,
+        coordination: Option<crate::CoordinatorSlot>,
     ) -> Result<Arc<Self>, Failure> {
         let network = network.unwrap_or_else(|| Network::Owned(options.transport.clone()));
         let open = Open {

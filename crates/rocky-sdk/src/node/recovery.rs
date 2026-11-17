@@ -39,18 +39,21 @@ impl Node {
     /// newest finalized seal, one of an earlier epoch signed again, and one
     /// that misses sealed writes of an earlier epoch moves to a later seal.
     /// Returns why a due member seal was not made.
-    pub(super) async fn publish_for_members(&self) -> Option<String> {
+    pub(super) async fn publish_for_members(&self) -> Option<crate::SealSkip> {
         if !self.signs_for_members().await {
             return None;
         }
-        let mut sealing = false;
+        let (mut sealing, mut skipped) = (false, None);
         let scope = self.domain().scope;
         let published = async {
             match self.replica.earlier_epoch_writes(scope).await? {
-                EarlierEpochWrites::Unsealed => {
-                    sealing = true;
-                    return self.seal_for_members().await;
-                }
+                EarlierEpochWrites::Unsealed => match self.seal_blocker().await? {
+                    Some(blocked) => skipped = Some(blocked),
+                    None => {
+                        sealing = true;
+                        return self.seal_for_members().await;
+                    }
+                },
                 EarlierEpochWrites::Unbased => {
                     self.replica.compact(scope, 0).await?;
                 }
@@ -69,10 +72,10 @@ impl Node {
                     error: (error.to_string()).to_owned(),
                 });
             if sealing {
-                return Some(format!("failed: {error}"));
+                return Some(crate::SealSkip::Failed(error.to_string()));
             }
         }
-        None
+        skipped
     }
     /// A trusted node seals the followed tip once it holds
     /// `ROUTINE_SEAL_TRANSACTIONS` unsealed replayed transactions, so a
@@ -80,7 +83,7 @@ impl Node {
     /// The root is never needed, and a log another trusted node's seal
     /// already ended is left for sync to bring. Returns why a due seal was
     /// not made.
-    pub(super) async fn seal_routinely(&self) -> Option<String> {
+    pub(super) async fn seal_routinely(&self) -> Option<crate::SealSkip> {
         self.settings.lock().await.trusted_links()?;
         let scope = self.domain().scope;
         let sealed = async {
@@ -88,16 +91,22 @@ impl Node {
                 >= rocky_secure::ROUTINE_SEAL_TRANSACTIONS
                 || self.replica.earlier_epoch_due().await;
             if self.replica.followed_bookmark().await.is_none() {
-                return Ok(due.then(|| "no_followed_bookmark".to_owned()));
+                return Ok(due.then_some(crate::SealSkip::NoFollowedBookmark));
             }
             if let Err(error) = self.tip_signer(scope).await {
-                return Ok(due.then(|| format!("no_tip_authority: {error}")));
+                return Ok(due.then(|| crate::SealSkip::NoTipAuthority(error.to_string())));
+            }
+            if let Some(blocked) = self.seal_blocker().await? {
+                return Ok(due.then_some(blocked));
             }
             if self.replica.unsealed_replayed_transactions().await?
                 >= rocky_secure::ROUTINE_SEAL_TRANSACTIONS
             {
                 match self.seal_followed(scope, false).await {
                     Err(error) if call_failure(&error).code == "sealed" => {}
+                    Err(error) if call_failure(&error).code == "seal_pending" => {
+                        return Ok(Some(crate::SealSkip::SealPending(error.to_string())));
+                    }
                     sealed => sealed?,
                 }
             }
@@ -116,12 +125,12 @@ impl Node {
                 .record_changed(crate::ActivityKind::RoutineSealFailed {
                     error: (error.to_string()).to_owned(),
                 });
-            Some(format!("failed: {error}"))
+            Some(crate::SealSkip::Failed(error.to_string()))
         })
     }
     /// Raises, keeps or clears the alert of a seal this trusted node
     /// should make and did not, for `reason`.
-    pub(super) fn seal_skipped(&self, reason: Option<String>) {
+    pub(super) fn seal_skipped(&self, reason: Option<crate::SealSkip>) {
         let mut skipped = self
             .seal_skipped
             .lock()

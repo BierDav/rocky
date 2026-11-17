@@ -31,6 +31,8 @@ pub struct NetworkCoordinator {
     route: Option<Arc<dyn Transport>>,
     preferred: Mutex<(Option<u64>, Option<u64>)>,
     observer: Mutex<Option<Observer>>,
+    /// The service the genesis certifies.
+    identity: CoordinatorIdentity,
 }
 /// Sees how each call ended: `Ok` once the service answered it, or the
 /// refusal; `Unavailable` when no voter answered.
@@ -62,7 +64,13 @@ impl NetworkCoordinator {
         route: Option<Arc<dyn Transport>>,
     ) -> Result<Self, CoordinationError> {
         genesis.verify(root, mesh)?;
+        let identity = CoordinatorIdentity {
+            root: *root.as_bytes(),
+            mesh,
+            genesis: genesis.id()?,
+        };
         Ok(Self {
+            identity,
             genesis,
             key,
             certificate: Mutex::new(None),
@@ -508,6 +516,9 @@ impl DomainLog for NetworkCoordinator {
     fn node(&self) -> NodeKey {
         *self.key.public_key().as_bytes()
     }
+    fn identity(&self) -> CoordinatorIdentity {
+        self.identity
+    }
     fn log_head(&self, log: TipLog) -> CoordinationFuture<'_, LogHead> {
         Box::pin(async move { Ok(self.coordinated_head(log).await?.port()) })
     }
@@ -603,6 +614,13 @@ impl DomainLog for NetworkCoordinator {
 mod tests;
 
 impl rocky_credentials::Coordinator for NetworkCoordinator {
+    fn bundle(&self) -> Result<rocky_credentials::CoordinatorBundle, CoordinationError> {
+        Ok(rocky_credentials::CoordinatorBundle {
+            identity: self.identity,
+            certified: self.genesis.to_bytes()?,
+            url: None,
+        })
+    }
     fn bind(
         &self,
         key: PrivateKey,

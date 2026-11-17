@@ -289,7 +289,7 @@ impl Request {
     }
     fn signing_bytes(&self) -> Result<Vec<u8>, CoordinationError> {
         bytes(
-            "rocky.coordination-request.v7",
+            "rocky.coordination-request.v8",
             &(
                 self.genesis,
                 self.key,

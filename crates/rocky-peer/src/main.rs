@@ -47,7 +47,7 @@ fn main() -> Result<(), Failure> {
         })
         .transpose()?;
     let peer = CustodyPeer::open(rocky_sdk::CustodyConfiguration {
-        coordination,
+        coordination: coordination.map(rocky_sdk::CoordinatorSlot::Client),
         directory: config.directory,
         schema: config.schema,
         transport: std::sync::Arc::new(config.transport),

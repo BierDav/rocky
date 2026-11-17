@@ -319,6 +319,12 @@ impl Node {
                     .unwrap_or_else(PoisonError::into_inner)
                     .clone(),
             )
+            .chain(
+                self.finality_stalled
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone(),
+            )
             .collect();
         alerts.sort();
         alerts

@@ -15,7 +15,7 @@ pub struct CustodyConfiguration {
     pub directory: PathBuf,
     pub schema: crate::Schema,
     pub transport: Arc<dyn rocky_core::net::Connector>,
-    pub coordination: Option<Arc<dyn rocky_credentials::Coordinator>>,
+    pub coordination: Option<crate::CoordinatorSlot>,
     pub invitation: Option<String>,
     pub peers: Vec<String>,
     pub enrollment_upstream: Option<String>,

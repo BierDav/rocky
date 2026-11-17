@@ -87,13 +87,21 @@ async fn a_seal_its_log_ended_becomes_final_and_beats_a_later_owner_seal() {
     );
 
     assert_eq!(
-        tess.1.finalize_seals(fixture.lineage.domain).await.unwrap(),
+        tess.1
+            .finalize_seals(fixture.lineage.domain)
+            .await
+            .unwrap()
+            .admitted,
         0,
         "one acknowledgment is below the genesis line's minimum of two"
     );
     share(&tess.1, &tom.1).await;
     assert_eq!(
-        tom.1.finalize_seals(fixture.lineage.domain).await.unwrap(),
+        tom.1
+            .finalize_seals(fixture.lineage.domain)
+            .await
+            .unwrap()
+            .admitted,
         1
     );
     assert_eq!(
@@ -105,7 +113,8 @@ async fn a_seal_its_log_ended_becomes_final_and_beats_a_later_owner_seal() {
             .1
             .finalize_seals(fixture.lineage.domain)
             .await
-            .unwrap(),
+            .unwrap()
+            .admitted,
         0,
         "a node outside the trusted identities acknowledges nothing"
     );
@@ -134,6 +143,25 @@ async fn a_seal_its_log_ended_becomes_final_and_beats_a_later_owner_seal() {
     );
     share(&tom.1, &alice.1).await;
     let leaves_uncompacted = 5;
+    let report = alice
+        .1
+        .compact(fixture.lineage.domain, leaves_uncompacted)
+        .await
+        .unwrap();
+    assert_ne!(
+        report.compacted,
+        Some(committed.id().unwrap()),
+        "finality compacts only once the owner's settings name its coordinator"
+    );
+    super::declared::receive_each(
+        &alice.1,
+        &[super::declared::coordinated_by(
+            &fixture.lineage,
+            1,
+            &fixture.mesh.log,
+        )],
+    )
+    .await;
     let report = alice
         .1
         .compact(fixture.lineage.domain, leaves_uncompacted)
@@ -204,7 +232,11 @@ async fn a_held_cut_strips_a_revoked_nodes_acknowledgments_and_the_seal_stays_fi
         .await
         .unwrap();
     assert_eq!(
-        tess.1.finalize_seals(fixture.lineage.domain).await.unwrap(),
+        tess.1
+            .finalize_seals(fixture.lineage.domain)
+            .await
+            .unwrap()
+            .admitted,
         0
     );
     share(&tess.1, &tom.1).await;

@@ -364,6 +364,93 @@ pub struct Alert {
     /// Epoch seconds since the condition holds, when known.
     pub since: Option<u64>,
 }
+/// Why a trusted node did not make a due seal.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "code", content = "detail", rename_all = "snake_case")]
+pub enum SealSkip {
+    /// The device follows no bookmark to seal.
+    NoFollowedBookmark,
+    /// The device signs no tip statements: why.
+    NoTipAuthority(String),
+    /// The database's owner-signed settings name a coordinator this device
+    /// has no log of: why it could not compose one.
+    CoordinatorRequired(String),
+    /// The device's coordinator is not the one the settings name.
+    CoordinatorMismatch,
+    /// The device's earlier seal of the tip still waits for its log entry.
+    SealPending(String),
+    /// Sealing failed: the error.
+    Failed(String),
+}
+impl SealSkip {
+    /// The stable code: the call error code for the refusals it mirrors.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NoFollowedBookmark => "no_followed_bookmark",
+            Self::NoTipAuthority(_) => "no_tip_authority",
+            Self::CoordinatorRequired(_) => rocky_secure::COORDINATOR_REQUIRED,
+            Self::CoordinatorMismatch => rocky_secure::COORDINATOR_MISMATCH,
+            Self::SealPending(_) => "seal_pending",
+            Self::Failed(_) => "failed",
+        }
+    }
+}
+impl std::fmt::Display for SealSkip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoFollowedBookmark | Self::CoordinatorMismatch => f.write_str(self.code()),
+            Self::NoTipAuthority(detail)
+            | Self::CoordinatorRequired(detail)
+            | Self::SealPending(detail)
+            | Self::Failed(detail) => write!(f, "{}: {detail}", self.code()),
+        }
+    }
+}
+/// Why a trusted node's finality pass left a seal unfinal; `tip` names the
+/// tip whose log it waits on, in hex.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum FinalityStall {
+    /// The coordinator dropped ended logs of the domain and the tip's log
+    /// reads as never ended: its seal's finality comes from a peer that
+    /// acknowledged it, or the owner recovers the tip.
+    LogDropped { tip: String },
+    /// The coordinator did not take the seal that ends the tip's log.
+    EndRefused { tip: String, error: String },
+    /// A received seal waits for the seal leading into its tip to end the
+    /// tip's log, and no node of that line ended it.
+    EntryPending { tip: String },
+    /// This node's store holds a record another release wrote, such as the
+    /// head of its acknowledgment chain, in a format this release never
+    /// reads: the node acknowledges nothing until it is restored from a
+    /// store this release wrote.
+    UnsupportedFormat { error: String },
+}
+impl FinalityStall {
+    pub(crate) fn of(stall: rocky_secure::FinalityStall) -> Self {
+        let hex = |tip: rocky_core::TipId| data_encoding::HEXLOWER.encode(&tip.0);
+        match stall {
+            rocky_secure::FinalityStall::LogDropped { tip } => Self::LogDropped { tip: hex(tip) },
+            rocky_secure::FinalityStall::EndRefused { tip, error } => Self::EndRefused {
+                tip: hex(tip),
+                error,
+            },
+            rocky_secure::FinalityStall::EntryPending { tip } => {
+                Self::EntryPending { tip: hex(tip) }
+            }
+        }
+    }
+}
+impl std::fmt::Display for FinalityStall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LogDropped { tip } => write!(f, "log_dropped at {tip}"),
+            Self::EndRefused { tip, error } => write!(f, "end_refused at {tip}: {error}"),
+            Self::EntryPending { tip } => write!(f, "entry_pending at {tip}"),
+            Self::UnsupportedFormat { error } => write!(f, "unsupported_format: {error}"),
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AlertKind {
@@ -410,10 +497,12 @@ pub enum AlertKind {
         identity: String,
         last_heard_epoch_seconds: u64,
     },
-    /// On a trusted node: a seal is due and was not made, for `reason`:
-    /// `no_followed_bookmark`, `no_tip_authority: …` or `failed: …`.
+    /// On a trusted node: a seal is due and was not made, for `reason`.
     /// Clears with the next seal pass that has nothing left undone.
-    SealSkipped { reason: String },
+    SealSkipped { reason: SealSkip },
+    /// On a trusted node with a composed coordinator: a seal stays unfinal
+    /// for `reason`. Clears with the next finality pass that finds none.
+    FinalityStalled { reason: FinalityStall },
     /// A root revocation's cut left out `statements` tip statements and
     /// `acknowledgments` terminal acknowledgments that the identity
     /// `signer` signed through its node `node` past the kept head; this

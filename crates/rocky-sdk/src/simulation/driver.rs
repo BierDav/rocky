@@ -775,6 +775,9 @@ impl Simulation {
                 }
                 crate::AlertKind::RevocationsUnpushed => "revocations unpushed".into(),
                 crate::AlertKind::SealSkipped { reason } => format!("seal skipped {reason}"),
+                crate::AlertKind::FinalityStalled { reason } => {
+                    format!("finality stalled {reason}")
+                }
                 crate::AlertKind::TipStatementsPastCut {
                     node,
                     statements,

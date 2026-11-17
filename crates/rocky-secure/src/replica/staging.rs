@@ -62,6 +62,7 @@ impl<A: RowApplication> Inner<A> {
         {
             return Err(denied("source line requires an authenticated minimum"));
         }
+        refuse_uncoordinated_stage(stage, graph)?;
 
         let close = stage
             .statements
@@ -134,6 +135,7 @@ impl<A: RowApplication> Inner<A> {
             return Ok(());
         };
         let stage: SchemaStage = decode(bytes)?;
+        refuse_uncoordinated_stage(&stage, self.graph_for(stage.scope)?)?;
         self.conn.execute("UPDATE secure_staged_schema SET state='committed' WHERE publication=? AND state='staged'", [publication.to_vec()]).await?;
         if !stage.coordinated
             && !stage
@@ -173,6 +175,14 @@ impl<A: RowApplication> Inner<A> {
         graph
             .exclude_revoked(&self.config.revocations)
             .map_err(credential)?;
+        if let Some(proof) = proof
+            && !graph.is_final(proof.seal).map_err(credential)?
+        {
+            return Err(super::coordinated::refusal(
+                super::coordinated::COORDINATOR_MISMATCH,
+                "the staged close's finality was acknowledged at another coordinator than the database's settings name: the close is not final",
+            ));
+        }
         for statement in &stage.statements {
             statement.verify(
                 self.config.publisher,
@@ -238,6 +248,13 @@ impl<A: RowApplication> Inner<A> {
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Stages a local candidate; all signatures are prepared before this call.
     pub async fn stage_schema(&self, stage: SchemaStage) -> Result<(), Error> {
+        let graph = self.tip_graph(stage.scope).await?;
+        if let Some(refused) = self.named_log_refusal(&graph)? {
+            return Err(refused);
+        }
+        if stage.coordinated && self.usable_log(&graph)?.is_none() {
+            return Err(denied("a coordinated schema stage needs a composed log"));
+        }
         self.inner
             .lock(crate::replica::Class::Background)
             .await
@@ -326,6 +343,22 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner = flush_guard(inner, &self.inner).await?;
         inner.publish_revision().await
     }
+}
+
+/// A stage released without finality would enter a coordinated database's
+/// graph unended: refused once its settings name a coordinator, also for a
+/// stage made before they arrived.
+pub(super) fn refuse_uncoordinated_stage(
+    stage: &SchemaStage,
+    graph: &rocky_credentials::TipGraph,
+) -> Result<(), Error> {
+    if !stage.coordinated && graph.coordinator().map_err(credential)?.is_some() {
+        return Err(super::coordinated::refusal(
+            super::coordinated::COORDINATOR_REQUIRED,
+            "the owner's database settings name a coordinator: a schema stage made without its log is never released unended",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

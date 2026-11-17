@@ -121,6 +121,9 @@ pub struct Head {
     pub acknowledgments: Vec<Acknowledgment>,
     /// Set as read: the owner closed the domain, so the log takes no write.
     pub closed: bool,
+    /// Set as read: the domain dropped ended logs beyond `ENDED_LOGS`, so a
+    /// log at its genesis may be one that ended and was dropped.
+    pub ended_dropped: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Acknowledgment {
@@ -177,6 +180,7 @@ impl Log {
                 terminal: None,
                 acknowledgments: Vec::new(),
                 closed: false,
+                ended_dropped: false,
             },
             retries: Vec::new(),
             minute: 0,
@@ -240,6 +244,7 @@ impl Log {
         let terminal = LogTerminal {
             digest: signed.id().map_err(|_| CoordinationError::Denied)?,
             continuation: signed.successor().map_err(|_| CoordinationError::Denied)?,
+            confirms: false,
         };
         if let Some(result) = self.ended(terminal)? {
             return Ok(result);
@@ -337,6 +342,7 @@ impl Log {
             || statement.running != self.head.running_hash
             || statement.seal != terminal.digest
             || statement.continuation != terminal.continuation
+            || statement.confirms != terminal.confirms
         {
             return Err(CoordinationError::Denied);
         }
@@ -574,6 +580,8 @@ pub(crate) struct Logs {
     minimum: usize,
     /// Oldest first.
     logs: Vec<(TipId, Log)>,
+    /// Whether `store` dropped an ended log.
+    dropped: bool,
 }
 impl Logs {
     pub fn new(scope: Scope, configuration: Configuration) -> Self {
@@ -582,6 +590,7 @@ impl Logs {
             configuration,
             minimum: 1,
             logs: Vec::new(),
+            dropped: false,
         }
     }
     pub fn get(&self, tip: TipId) -> Option<&Log> {
@@ -603,10 +612,14 @@ impl Logs {
         };
         Log::new(log, self.configuration, self.minimum)
     }
-    /// The head of `tip`'s log; an unopened one is at its genesis.
+    /// The head of `tip`'s log; an unopened or dropped one is at its
+    /// genesis.
     pub fn head(&self, tip: TipId) -> Head {
-        self.get(tip)
-            .map_or_else(|| self.fresh(tip).head, |log| log.head.clone())
+        let mut head = self
+            .get(tip)
+            .map_or_else(|| self.fresh(tip).head, |log| log.head.clone());
+        head.ended_dropped = self.dropped;
+        head
     }
     /// Sets the domain's default minimum before any node joined a log.
     pub fn configure(&mut self, minimum: usize) -> std::result::Result<Result, CoordinationError> {
@@ -672,6 +685,7 @@ impl Logs {
         while self.logs.iter().filter(|(_, l)| !l.open()).count() > ENDED_LOGS {
             if let Some(index) = self.logs.iter().position(|(_, l)| !l.open()) {
                 self.logs.remove(index);
+                self.dropped = true;
             }
         }
     }
@@ -902,6 +916,7 @@ impl Head {
                 .map(|ack| ack.record.clone())
                 .collect(),
             closed: self.closed,
+            ended_dropped: self.ended_dropped,
         }
     }
 }
@@ -910,9 +925,26 @@ impl Head {
 /// machine, acknowledgments and deadline resolution, for tests and
 /// single-process composition. Deadlines resolve on the next call after
 /// them, as the service's leader timer does.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct MemoryLog {
     state: std::sync::Arc<std::sync::Mutex<MemoryLogs>>,
+    /// A fresh identity per log, so two logs are two services.
+    identity: rocky_core::CoordinatorIdentity,
+}
+/// What a memory log's bundle certifies: its root key after this label.
+const MEMORY_BUNDLE: &[u8] = b"rocky.memory-log.v1";
+impl Default for MemoryLog {
+    fn default() -> Self {
+        let root = *p2panda_core::PrivateKey::new().public_key().as_bytes();
+        Self {
+            state: Default::default(),
+            identity: rocky_core::CoordinatorIdentity {
+                root,
+                mesh: rocky_core::MeshId([0; 16]),
+                genesis: commitment("rocky.memory-log.v1", &root),
+            },
+        }
+    }
 }
 type Acknowledged = std::collections::BTreeMap<TipId, Vec<PublicKey>>;
 #[derive(Default)]
@@ -929,6 +961,16 @@ struct MemoryLogs {
 impl MemoryLog {
     pub fn new() -> Self {
         Self::default()
+    }
+    /// The bundle naming this log in a database's settings.
+    pub fn bundle(&self) -> rocky_credentials::CoordinatorBundle {
+        let mut certified = MEMORY_BUNDLE.to_vec();
+        certified.extend(self.identity.root);
+        rocky_credentials::CoordinatorBundle {
+            identity: self.identity,
+            certified,
+            url: None,
+        }
     }
     /// A trusted node's client of these logs.
     pub fn client(&self, key: PublicKey) -> MemoryLogClient {
@@ -1058,6 +1100,9 @@ impl rocky_core::DomainLog for MemoryLogClient {
     }
     fn node(&self) -> rocky_core::NodeKey {
         *self.key.as_bytes()
+    }
+    fn identity(&self) -> rocky_core::CoordinatorIdentity {
+        self.logs.identity
     }
     fn log_head(&self, log: TipLog) -> rocky_core::CoordinationFuture<'_, rocky_core::LogHead> {
         Box::pin(async move { self.logs.head(log).map(|head| head.port()) })
@@ -1227,7 +1272,27 @@ fn committed(
     }
 }
 
+/// Connects only to this log, when a bundle names it exactly.
+impl rocky_credentials::CoordinatorConnector for MemoryLog {
+    fn connect(
+        &self,
+        bundle: &rocky_credentials::CoordinatorBundle,
+    ) -> std::result::Result<std::sync::Arc<dyn rocky_credentials::Coordinator>, CoordinationError>
+    {
+        if *bundle != self.bundle() {
+            return Err(CoordinationError::Denied);
+        }
+        let key =
+            PublicKey::from_bytes(&self.identity.root).map_err(|_| CoordinationError::Denied)?;
+        Ok(std::sync::Arc::new(self.client(key)))
+    }
+}
 impl rocky_credentials::Coordinator for MemoryLogClient {
+    fn bundle(
+        &self,
+    ) -> std::result::Result<rocky_credentials::CoordinatorBundle, CoordinationError> {
+        Ok(self.logs.bundle())
+    }
     fn bind(
         &self,
         key: rocky_credentials::PrivateKey,

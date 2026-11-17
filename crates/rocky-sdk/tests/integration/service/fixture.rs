@@ -13,6 +13,14 @@ pub(super) struct Peer {
     pub session: Session,
     pub scope: rocky_sdk::Scope,
 }
+/// How a fixture peer reaches the voters: an explicit client of a bundle,
+/// or only a connector that reaches the coordinator its synced database
+/// settings name.
+#[derive(Clone, Copy)]
+pub(super) enum Reach<'a> {
+    Client(&'a TrustBundle),
+    Connector,
+}
 impl Peer {
     pub async fn start(
         directory: &Path,
@@ -21,9 +29,29 @@ impl Peer {
         invitation: Option<String>,
         create: bool,
     ) -> Result<Self, Failure> {
+        Self::start_reaching(
+            directory,
+            schema,
+            bundle.map(Reach::Client),
+            invitation,
+            create,
+        )
+        .await
+    }
+    pub async fn start_reaching(
+        directory: &Path,
+        schema: &str,
+        reach: Option<Reach<'_>>,
+        invitation: Option<String>,
+        create: bool,
+    ) -> Result<Self, Failure> {
+        let bundle = match reach {
+            Some(Reach::Client(bundle)) => Some(bundle),
+            _ => None,
+        };
         let directory = directory.to_owned();
         let schema = schema.to_owned();
-        let coordinator_transport = if bundle.is_some() {
+        let coordinator_transport = if reach.is_some() {
             Some(
                 starter()
                     .start(*PrivateKey::new().as_bytes())
@@ -33,12 +61,19 @@ impl Peer {
         } else {
             None
         };
-        let coordination = bundle
-            .zip(coordinator_transport.as_ref())
-            .map(|(bundle, transport)| {
-                rocky_coordinator::Client::connect(bundle, transport.clone())
-            })
-            .transpose()?;
+        let coordination = match (reach, coordinator_transport.as_ref()) {
+            (Some(Reach::Client(bundle)), Some(transport)) => {
+                Some(rocky_sdk::CoordinatorSlot::Client(
+                    rocky_coordinator::Client::connect(bundle, transport.clone())?,
+                ))
+            }
+            (Some(Reach::Connector), Some(transport)) => {
+                Some(rocky_sdk::CoordinatorSlot::Connector(Arc::new(
+                    rocky_coordinator::Connector::new(transport.clone()),
+                )))
+            }
+            _ => None,
+        };
         let control = bundle
             .zip(coordinator_transport.as_ref())
             .map(|(bundle, transport)| {
@@ -210,6 +245,14 @@ pub(super) async fn introduce(a: &Peer, t: &Peer) -> Result<(), Failure> {
     Ok(())
 }
 pub(super) async fn household(root: &Path, bundle: &TrustBundle) -> Result<(Peer, Peer), Failure> {
+    household_reaching(root, bundle, Reach::Client(bundle)).await
+}
+/// `household`, its trusted peer reaching the voters as `trusted_reach` says.
+pub(super) async fn household_reaching(
+    root: &Path,
+    bundle: &TrustBundle,
+    trusted_reach: Reach<'_>,
+) -> Result<(Peer, Peer), Failure> {
     let a = Peer::start(&root.join("a"), SCHEMA, Some(bundle), None, true).await?;
     snap::value(a.session.create_bookmark("main", None)).await?;
     snap::value(a.session.follow("main")).await?;
@@ -221,10 +264,10 @@ pub(super) async fn household(root: &Path, bundle: &TrustBundle) -> Result<(Peer
         ),
     )
     .await?;
-    let t = Peer::start(
+    let t = Peer::start_reaching(
         &root.join("t"),
         SCHEMA,
-        Some(bundle),
+        Some(trusted_reach),
         Some(a.invite("issuer").await?),
         false,
     )

@@ -5,12 +5,12 @@ use crate::{
     ChainLink, CredentialChain, Error, PrivateKey, PublicKey, RevocationSet, Signature,
     decode_bounded, denied, encode, signing_bytes,
 };
-use rocky_core::{Commitment, PrincipalKind, Scope, TipId};
+use rocky_core::{Commitment, CoordinatorIdentity, PrincipalKind, Scope, TipId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const TERMINAL_ACK_FORMAT: u32 = 2;
-pub const SEAL_FINALITY_FORMAT: u32 = 1;
+pub const TERMINAL_ACK_FORMAT: u32 = 4;
+pub const SEAL_FINALITY_FORMAT: u32 = 2;
 /// The coordinator's in-sync cap: no record needs more acknowledgments.
 pub const MAX_FINALITY_ACKS: usize = 15;
 /// Largest encoded acknowledgment, its node chain included.
@@ -18,18 +18,51 @@ pub const MAX_TERMINAL_ACK_BYTES: usize = 16 * 1024;
 /// Largest encoded finality record.
 pub const MAX_FINALITY_BYTES: usize = MAX_FINALITY_ACKS * MAX_TERMINAL_ACK_BYTES + 1024;
 
-/// What a trusted node read from the coordinator's head of `(scope, tip)`'s
+/// The format field of a versioned record, read without the rest of its
+/// shape, which another release's record need not have.
+#[derive(Deserialize)]
+pub struct NamedFormat {
+    pub format: u32,
+}
+/// An acknowledgment's statement format, read the same way.
+#[derive(Deserialize)]
+struct NamedAckFormat {
+    statement: NamedFormat,
+}
+fn unsupported_ack(format: u32) -> Error {
+    Error::UnsupportedFormat {
+        record: "terminal acknowledgment",
+        format,
+        supported: TERMINAL_ACK_FORMAT,
+    }
+}
+/// The refusal of a finality record of `format`, another release's.
+pub fn unsupported_finality(format: u32) -> Error {
+    Error::UnsupportedFormat {
+        record: "seal finality record",
+        format,
+        supported: SEAL_FINALITY_FORMAT,
+    }
+}
+
+/// What a trusted node read from `coordinator`'s head of `(scope, tip)`'s
 /// ended log: the terminal entry's position and running hash, the seal it
 /// committed and that seal's continuation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalAckStatement {
     pub format: u32,
+    /// The coordination service whose log ended: a record counts only for
+    /// the coordinator the database's settings name.
+    pub coordinator: CoordinatorIdentity,
     pub scope: Scope,
     pub tip: TipId,
     pub position: u64,
     pub running: Commitment,
     pub seal: Commitment,
     pub continuation: Option<TipId>,
+    /// The terminal entry confirms a seal tip graphs held before it, as
+    /// `rocky_core::LogTerminal::confirms` says.
+    pub confirms: bool,
 }
 
 /// A terminal acknowledgment signed by a trusted node under its chain.
@@ -42,7 +75,7 @@ pub struct TerminalAck {
     pub link: ChainLink,
     signature: Signature,
 }
-const TERMINAL_ACK: &str = "rocky.terminal-ack.v2";
+const TERMINAL_ACK: &str = "rocky.terminal-ack.v4";
 impl TerminalAck {
     /// `node` acknowledges at `link` of its own chain.
     pub fn sign(
@@ -122,10 +155,19 @@ impl TerminalAck {
         }
         Ok(bytes)
     }
+    /// Decodes an acknowledgment, refusing one of another format by the
+    /// format it names, whether or not its shape is this release's.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        let ack: Self = decode_bounded(bytes, MAX_TERMINAL_ACK_BYTES)?;
+        let ack: Self = decode_bounded(bytes, MAX_TERMINAL_ACK_BYTES).map_err(|error| {
+            match p2panda_core::cbor::decode_cbor::<NamedAckFormat, _>(bytes) {
+                Ok(named) if named.statement.format != TERMINAL_ACK_FORMAT => {
+                    unsupported_ack(named.statement.format)
+                }
+                _ => error,
+            }
+        })?;
         if ack.statement.format != TERMINAL_ACK_FORMAT {
-            return Err(denied("unsupported terminal acknowledgment format"));
+            return Err(unsupported_ack(ack.statement.format));
         }
         Ok(ack)
     }
@@ -156,7 +198,7 @@ impl SealFinality {
     }
     pub fn validate(&self) -> Result<(), Error> {
         if self.format != SEAL_FINALITY_FORMAT {
-            return Err(denied("unsupported seal finality format"));
+            return Err(unsupported_finality(self.format));
         }
         if self.acknowledgments.is_empty()
             || self.acknowledgments.len() > MAX_FINALITY_ACKS
@@ -171,16 +213,32 @@ impl SealFinality {
         for ack in &self.acknowledgments {
             let statement = &ack.statement;
             if statement.scope != self.scope
+                || statement.coordinator != first.coordinator
                 || statement.seal != self.seal
                 || statement.tip != first.tip
                 || statement.position != first.position
                 || statement.running != first.running
                 || statement.continuation != first.continuation
+                || statement.confirms != first.confirms
             {
                 return Err(denied("seal finality acknowledgments disagree"));
             }
         }
         Ok(())
+    }
+    /// The coordination service every acknowledgment names.
+    pub fn coordinator(&self) -> Option<CoordinatorIdentity> {
+        self.acknowledgments
+            .first()
+            .map(|ack| ack.statement.coordinator)
+    }
+    /// Whether the coordinator's log decided the seal: its terminal entry
+    /// ended the log with a seal no graph held yet, instead of confirming a
+    /// choice graphs had made.
+    pub fn decided(&self) -> bool {
+        self.acknowledgments
+            .first()
+            .is_some_and(|ack| !ack.statement.confirms)
     }
     /// The tip and continuation every acknowledgment names.
     pub fn terminal(&self) -> Option<(TipId, Option<TipId>)> {
@@ -218,8 +276,17 @@ impl SealFinality {
         }
         Ok(bytes)
     }
+    /// Decodes a record, refusing one of another format by the format it
+    /// names, whether or not its shape is this release's.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        let record: Self = decode_bounded(bytes, MAX_FINALITY_BYTES)?;
+        let record: Self = decode_bounded(bytes, MAX_FINALITY_BYTES).map_err(|error| {
+            match p2panda_core::cbor::decode_cbor::<NamedFormat, _>(bytes) {
+                Ok(named) if named.format != SEAL_FINALITY_FORMAT => {
+                    unsupported_finality(named.format)
+                }
+                _ => error,
+            }
+        })?;
         record.validate()?;
         Ok(record)
     }

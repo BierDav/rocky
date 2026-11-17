@@ -83,29 +83,35 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn relay_staged_close(&self, bytes: &[u8]) -> Result<StagedCloseStatus, Error> {
         let seal = SignedSeal::from_bytes(bytes).map_err(credential)?;
         let id = seal.id().map_err(credential)?;
-        {
+        let graph = {
             let inner = self.inner.lock(crate::replica::Class::Background).await;
-            let graph = inner.relay_graph(&seal).await?;
-            if graph
-                .line_minimum(seal.statement.tip)
-                .map_err(credential)?
-                .is_none()
-            {
-                return Ok(StagedCloseStatus::Pending);
-            }
+            inner.relay_graph(&seal).await?
+        };
+        if graph
+            .line_minimum(seal.statement.tip)
+            .map_err(credential)?
+            .is_none()
+        {
+            return Ok(StagedCloseStatus::Pending);
         }
         let known = self.staged_close_finality(bytes).await?;
         if !matches!(known, StagedCloseStatus::Pending) {
             return Ok(known);
         }
-        let Some(coordinator) = self.domain_log() else {
+        let Some(coordinator) = self.usable_log(&graph)? else {
             return Ok(StagedCloseStatus::Pending);
         };
         let log = TipLog {
             scope: seal.statement.scope,
             tip: seal.statement.tip,
         };
-        if log != self.followed_log(log.scope).await {
+        if log != self.followed_log(log.scope).await
+            || !matches!(
+                self.entry_standing(&graph, &seal, coordinator.as_ref())
+                    .await?,
+                super::statements::Entry::Won
+            )
+        {
             return Ok(StagedCloseStatus::Pending);
         }
         {
@@ -209,6 +215,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 rocky_core::LogTerminal {
                     digest: id,
                     continuation: None,
+                    confirms: false,
                 },
             )
             .await;
@@ -217,6 +224,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
 
     /// Acknowledges only an exact committed terminal, without admitting its seal.
     /// A verified rival proof is evidence of conflict; a reply alone is not.
+    /// Only finality at the coordinator the settings name answers.
     pub async fn staged_close_finality(&self, bytes: &[u8]) -> Result<StagedCloseStatus, Error> {
         let seal = SignedSeal::from_bytes(bytes).map_err(credential)?;
         let id = seal.id().map_err(credential)?;
@@ -234,7 +242,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             )
             .await?;
             let stored = match records.first().map(Vec::as_slice) {
-                Some([SqlValue::Blob(bytes)]) => Some(decode::<SealFinality>(bytes)?),
+                Some([SqlValue::Blob(bytes)]) => {
+                    Some(SealFinality::from_bytes(bytes).map_err(credential)?)
+                }
                 _ => None,
             };
             if let Some(proof) = &stored {
@@ -246,12 +256,18 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     )
                     .map_err(credential)?;
             }
+            let stored = match stored {
+                Some(proof) if graph.counts_finality(&proof).map_err(credential)? => Some(proof),
+                _ => None,
+            };
             (graph, stored)
         };
         if let Some(proof) = stored {
             return Ok(StagedCloseStatus::Finality(proof));
         }
-        if let Some(proof) = public_finality(&graph, id)? {
+        if let Some(proof) = public_finality(&graph, id)?
+            && graph.counts_finality(&proof).map_err(credential)?
+        {
             let mut inner = self.inner.lock(crate::replica::Class::Background).await;
             graph
                 .verify_finality(
@@ -264,7 +280,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             drop(flush_guard(inner, &self.inner).await?);
             return Ok(StagedCloseStatus::Finality(proof));
         }
-        let Some(coordinator) = self.domain_log() else {
+        let Some(coordinator) = self.usable_log(&graph)? else {
             return Ok(StagedCloseStatus::Pending);
         };
         if let Some(proof) = self

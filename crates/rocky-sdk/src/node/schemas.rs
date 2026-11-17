@@ -243,6 +243,7 @@ impl Node {
                             Some((&settings.revocations, now()?)),
                         )
                         .is_err()
+                        || !graph.counts_finality(&proof)?
                     {
                         continue;
                     }
@@ -279,6 +280,7 @@ impl Node {
                             Some((&settings.revocations, now()?)),
                         )
                         .is_ok()
+                        && graph.counts_finality(&finality)?
                     {
                         self.activity
                             .record(crate::ActivityKind::SchemaPublicationConflict {

@@ -9,7 +9,11 @@ mod claims;
 mod coordination;
 mod coordinator;
 pub mod counters;
-pub use coordinator::{CoordinationObserver, Coordinator};
+pub use coordinator::{CoordinationObserver, Coordinator, CoordinatorConnector};
+pub use settings::{
+    Coordination, CoordinatorBundle, DATABASE_SETTINGS_FORMAT, DatabaseSettingsStatement,
+    MAX_BUNDLE_URL, MAX_COORDINATOR_BUNDLE, SignedDatabaseSettings,
+};
 mod delivery;
 mod discovery;
 mod enroll;
@@ -37,6 +41,7 @@ mod phrase_key;
 mod reset;
 mod revocation;
 mod root;
+mod settings;
 mod signed;
 mod tips;
 
@@ -67,8 +72,9 @@ pub use existence_base::{
 pub use extension::{DatabaseContext, Extended, Extension, Origin};
 pub use families::GrantFamilies;
 pub use finality::{
-    MAX_FINALITY_ACKS, MAX_FINALITY_BYTES, MAX_TERMINAL_ACK_BYTES, SEAL_FINALITY_FORMAT,
-    SealFinality, TERMINAL_ACK_FORMAT, TerminalAck, TerminalAckStatement,
+    MAX_FINALITY_ACKS, MAX_FINALITY_BYTES, MAX_TERMINAL_ACK_BYTES, NamedFormat,
+    SEAL_FINALITY_FORMAT, SealFinality, TERMINAL_ACK_FORMAT, TerminalAck, TerminalAckStatement,
+    unsupported_finality,
 };
 pub use group::{GROUP_SECRET_LEN, GroupSecretEnvelope, GroupSecrets, derive_table_key};
 pub use identity::{
@@ -138,6 +144,13 @@ pub enum Error {
     Provider(ProviderError),
     /// A personal database's mode, owner or device rules refused.
     Personal(PersonalError),
+    /// A record another release wrote: it names a format this release
+    /// never reads, and no reader for it exists.
+    UnsupportedFormat {
+        record: &'static str,
+        format: u32,
+        supported: u32,
+    },
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -146,6 +159,14 @@ impl std::fmt::Display for Error {
             Self::Protocol(error) => write!(f, "{error}"),
             Self::Provider(error) => write!(f, "{error}"),
             Self::Personal(error) => write!(f, "{error}"),
+            Self::UnsupportedFormat {
+                record,
+                format,
+                supported,
+            } => write!(
+                f,
+                "a {record} of format {format}, written by another release: this release reads only format {supported}"
+            ),
         }
     }
 }

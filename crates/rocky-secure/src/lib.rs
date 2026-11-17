@@ -14,9 +14,10 @@ pub use replica::CHUNK_PAGES;
 #[cfg(any(test, feature = "qualification"))]
 pub use replica::CrashPoint;
 pub use replica::{
-    AuditReport, Buffered, CheckpointPage, CheckpointState, CheckpointStatement, CheckpointStatus,
-    CiphertextPage, CompactReport, CompactionStatus, Companion, CoveredMark, CurrentValue,
-    CustodySummary, Describe, EarlierEpochWrites, EncryptedReplica, EngineStatus, EvictReport,
+    AuditReport, Buffered, COORDINATOR_MISMATCH, COORDINATOR_REQUIRED, CheckpointPage,
+    CheckpointState, CheckpointStatement, CheckpointStatus, CiphertextPage, CompactReport,
+    CompactionStatus, Companion, CoveredMark, CurrentValue, CustodySummary, Describe,
+    EarlierEpochWrites, EncryptedReplica, EngineStatus, EvictReport, FinalityStall, Finalization,
     FrameReplay, FrontierLog, GenerationStatus, HeldChange, HeldField, HeldKind, HeldRow, HeldSeal,
     Holding, InstalledTipSchema, KeptSeals, KeyMaterial, LineNode, LogPosition, MAX_BUNDLE_BYTES,
     MAX_BUNDLE_FRAMES, MAX_BUNDLE_ROWS, MAX_CHECKPOINT_LOGS, MAX_PLACEMENTS, MAX_SEALED_OUTCOMES,
@@ -89,6 +90,9 @@ fn denied(message: &str) -> Error {
 fn credential(error: rocky_credentials::Error) -> Error {
     match error {
         rocky_credentials::Error::Protocol(error) => Error::Protocol(error),
+        unsupported @ rocky_credentials::Error::UnsupportedFormat { .. } => {
+            Error::Incompatible(format!("this store or peer holds {unsupported}"))
+        }
         other => Error::Rejected(other.to_string()),
     }
 }

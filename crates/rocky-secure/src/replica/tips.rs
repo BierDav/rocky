@@ -3,8 +3,8 @@ use super::*;
 pub(super) mod refresh;
 use rocky_core::Scope;
 use rocky_credentials::{
-    SealFinality, SignedBookmarkMove, SignedCheckpointRecord, SignedGenesisLine, SignedSeal,
-    SignedTipOpening, TerminalAck, TipGraph,
+    SealFinality, SignedBookmarkMove, SignedCheckpointRecord, SignedDatabaseSettings,
+    SignedGenesisLine, SignedSeal, SignedTipOpening, TerminalAck, TipGraph,
 };
 use std::collections::BTreeMap;
 
@@ -34,6 +34,7 @@ pub(super) fn graph_statements(graph: &TipGraph) -> Vec<TipStatement> {
                 .cloned()
                 .map(|record| TipStatement::Checkpoint(Box::new(record))),
         )
+        .chain(graph.settings.iter().cloned().map(TipStatement::Settings))
         .collect()
 }
 
@@ -54,6 +55,33 @@ pub(super) const SCHEMA: &[&str] = &[
 /// Past-cut statements recorded per chain; more count no further.
 const MAX_PAST_CUT_RECORDS: i64 = 256;
 
+/// A stored statement or batch, read only as far as a finality record's
+/// format, which another release's record names in a shape this one lacks.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum NamedFormats {
+    One(BTreeMap<String, OptionalFormat>),
+    Batch(Vec<BTreeMap<String, OptionalFormat>>),
+}
+#[derive(Deserialize)]
+struct OptionalFormat {
+    #[serde(default)]
+    format: Option<u32>,
+}
+/// The refusal of stored `bytes` that failed to decode because they hold a
+/// finality record another release wrote, named by its format.
+pub(in crate::replica) fn foreign_finality(bytes: &[u8]) -> Option<Error> {
+    let statements = match p2panda_core::cbor::decode_cbor::<NamedFormats, _>(bytes).ok()? {
+        NamedFormats::One(statement) => vec![statement],
+        NamedFormats::Batch(statements) => statements,
+    };
+    statements
+        .iter()
+        .filter_map(|statement| statement.get("Finality")?.format)
+        .find(|format| *format != rocky_credentials::SEAL_FINALITY_FORMAT)
+        .map(|format| credential(rocky_credentials::unsupported_finality(format)))
+}
+
 /// A graph record is always exchanged independently of row subscriptions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TipStatement {
@@ -63,6 +91,8 @@ pub enum TipStatement {
     GenesisLine(SignedGenesisLine),
     Finality(SealFinality),
     Checkpoint(Box<SignedCheckpointRecord>),
+    /// One revision of the owner's database settings.
+    Settings(SignedDatabaseSettings),
 }
 impl TipStatement {
     pub fn id(&self) -> Result<Commitment, Error> {
@@ -79,6 +109,7 @@ impl TipStatement {
             Self::GenesisLine(s) => s.id(),
             Self::Finality(s) => s.id(),
             Self::Checkpoint(s) => s.id(),
+            Self::Settings(s) => s.id(),
         }
         .map_err(credential)
     }
@@ -90,6 +121,7 @@ impl TipStatement {
             Self::GenesisLine(s) => s.statement.scope,
             Self::Finality(s) => s.scope,
             Self::Checkpoint(s) => s.statement.scope,
+            Self::Settings(s) => s.statement.scope,
         }
     }
     /// The trusted identity and chain link of a chained statement.
@@ -100,6 +132,7 @@ impl TipStatement {
             Self::Bookmark(s) => (s.link, &s.endorsement().chain),
             Self::GenesisLine(s) => (s.link, &s.endorsement().chain),
             Self::Checkpoint(s) => (s.link, &s.endorsement().chain),
+            Self::Settings(s) => (s.link, &s.endorsement().chain),
             Self::Finality(_) => return None,
         };
         Some((rocky_credentials::Endorsement::signer_of(chain)?, link?))
@@ -112,6 +145,7 @@ impl TipStatement {
             Self::GenesisLine(s) => graph.genesis_lines.push(s.clone()),
             Self::Finality(s) => graph.finalities.push(s.clone()),
             Self::Checkpoint(s) => graph.checkpoints.push((**s).clone()),
+            Self::Settings(s) => graph.settings.push(s.clone()),
         }
     }
     pub(in crate::replica) fn verify(
@@ -126,11 +160,13 @@ impl TipStatement {
             (Self::Bookmark(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
             (Self::GenesisLine(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
             (Self::Checkpoint(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
+            (Self::Settings(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
             (Self::Seal(s), None) => s.verify(publisher, graph),
             (Self::Opening(s), None) => s.verify(publisher, graph),
             (Self::Bookmark(s), None) => s.verify(publisher, graph),
             (Self::GenesisLine(s), None) => s.verify(publisher, graph),
             (Self::Checkpoint(s), None) => s.verify(publisher, graph),
+            (Self::Settings(s), None) => s.verify(publisher, graph),
             (Self::Finality(s), current) => graph.verify_finality(s, publisher, current),
         }
         .map_err(credential)
@@ -247,10 +283,17 @@ impl<A: RowApplication> Inner<A> {
         mut context: Option<&mut refresh::RefreshGraphContext<'_>>,
     ) -> Result<FrameReach, Error> {
         let graph = self.graph_for(scope)?;
-        let active = match context.as_mut() {
+        let mut active = match context.as_mut() {
             Some(context) => context.schema_ok(scope, tip, true)?,
             None => graph.schema(tip).is_ok(),
         };
+        let mut tip = tip;
+        if !active {
+            let anchor = graph.late_anchor(tip).map_err(credential)?;
+            if anchor != tip {
+                (tip, active) = (anchor, true);
+            }
+        }
         if !active
             && match context.as_mut() {
                 Some(context) => context.schema_ok(scope, tip, false)?,
@@ -454,8 +497,9 @@ impl<A: RowApplication> Inner<A> {
         Self::walk_frame_path(graph, source, seal.statement.tip, bounds, false)?
             .admits(author, sequence)
     }
-    /// The walk back from `target` to `source`. With `canonical`, a
-    /// continuation of a seal that does not win its tip hides the frame.
+    /// The walk back from `target` to `source`, or to the tip whose late
+    /// writes `source`'s are ([`TipGraph::late_anchor`]). With `canonical`,
+    /// a continuation of a seal that does not win its tip hides the frame.
     fn walk_frame_path(
         graph: &TipGraph,
         source: TipId,
@@ -463,8 +507,9 @@ impl<A: RowApplication> Inner<A> {
         bounds: Vec<Vec<rocky_credentials::AuthorMark>>,
         canonical: bool,
     ) -> Result<FramePath, Error> {
+        let anchor = graph.late_anchor(source).map_err(credential)?;
         Self::walk_back(graph, target, bounds, canonical, |cursor, _| {
-            cursor == source
+            cursor == source || cursor == anchor
         })
     }
     /// What visibility gives a domain's replay ledgers at workspace `tip`,
@@ -731,7 +776,8 @@ impl<A: RowApplication> Inner<A> {
             let [SqlValue::Blob(digest), SqlValue::Blob(bytes)] = record.as_slice() else {
                 return Err(Error::Corrupt("tip statement".into()));
             };
-            let statement: TipStatement = decode_bounded(bytes, MAX_TIP_STATEMENT_BYTES)?;
+            let statement: TipStatement = decode_bounded(bytes, MAX_TIP_STATEMENT_BYTES)
+                .map_err(|error| foreign_finality(bytes).unwrap_or(error))?;
             if statement.id()?.as_slice() != digest {
                 return Err(Error::Corrupt("tip statement digest".into()));
             }
@@ -2103,14 +2149,59 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// With a composed log the batch is journaled, flushed, before its seals
     /// reach the coordinator, and kept after a reply that may have been lost,
     /// so `settle_tip_statements` sends the same bytes again.
+    /// Refuses, before anything is journaled, own statements that seal a
+    /// tip or chain after a waiting seal while the settings of their
+    /// database name a coordinator this node has no log of: they could only
+    /// wait in the journal, hiding why.
+    async fn refuse_without_named_log(&self, statements: &[TipStatement]) -> Result<(), Error> {
+        let seals = statements
+            .iter()
+            .any(|s| matches!(s, TipStatement::Seal(seal) if seal.statement.recovery.is_none()));
+        if !seals && !self.after_pending(statements).await? {
+            return Ok(());
+        }
+        for scope in statements
+            .iter()
+            .map(TipStatement::scope)
+            .collect::<BTreeSet<_>>()
+        {
+            let graph = self.tip_graph(scope).await?;
+            if let Some(refused) = self.named_log_refusal(&graph)? {
+                return Err(refused);
+            }
+        }
+        Ok(())
+    }
+    /// Whether no database of `statements` names a coordinator other than
+    /// the composed log's.
+    async fn named_log_free(&self, statements: &[TipStatement]) -> Result<bool, Error> {
+        for scope in statements
+            .iter()
+            .map(TipStatement::scope)
+            .collect::<BTreeSet<_>>()
+        {
+            let graph = self.tip_graph(scope).await?;
+            if self.usable_log(&graph)?.is_none() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
     pub async fn publish_tip_statements(
         &self,
         statements: &[TipStatement],
     ) -> Result<usize, Error> {
         self.refuse_after_stage(statements).await?;
-        if self.after_pending(statements).await? {
+        self.refuse_without_named_log(statements).await?;
+        if self.reseals_waiting_tip(statements).await? || self.after_pending(statements).await? {
             if let Err(error) = self.settle_tip_statements().await {
                 tracing::debug!(%error, "settling earlier statements failed");
+            }
+            if self.reseals_waiting_tip(statements).await? {
+                return Err(coordinated::refusal(
+                    "seal_pending",
+                    "this node's earlier seal of the tip waits for its coordinated log entry; the tip is not sealed again meanwhile",
+                ));
             }
             if self.after_pending(statements).await? {
                 self.check_statements_over(statements, true).await?;
@@ -2122,6 +2213,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         }
         let journaled = match self.domain_log().is_some()
+            && self.named_log_free(statements).await?
             && statements
                 .iter()
                 .any(|s| matches!(s, TipStatement::Seal(_)))
@@ -2143,9 +2235,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     Error::Application(inner) => inner.downcast_ref::<coordinated::Unconfirmed>(),
                     _ => None,
                 };
-                let log_ended_by_another_seal = matches!(&error, Error::Application(inner)
-                    if inner.downcast_ref::<coordinated::Refusal>().is_some_and(|refusal| refusal.code == "sealed"));
-                if log_ended_by_another_seal && let Some(batch) = journaled {
+                let never_committed = matches!(&error, Error::Application(inner)
+                    if inner.downcast_ref::<coordinated::Refusal>().is_some());
+                if never_committed && let Some(batch) = journaled {
                     self.forget_own_batch(batch).await?;
                 }
                 return Err(match unconfirmed {

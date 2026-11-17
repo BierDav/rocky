@@ -856,12 +856,18 @@ fn ack(
     rocky_credentials::TerminalAck::sign(
         rocky_credentials::TerminalAckStatement {
             format: rocky_credentials::TERMINAL_ACK_FORMAT,
+            coordinator: rocky_core::CoordinatorIdentity {
+                root: [1; 32],
+                mesh: rocky_core::MeshId([0; 16]),
+                genesis: [2; 32],
+            },
             scope: graph.scope,
             tip: seal.statement.tip,
             position: 4,
             running: [9; 32],
             seal: seal.id().unwrap(),
             continuation: seal.successor().unwrap(),
+            confirms: false,
         },
         node,
         chain.clone(),
@@ -2196,5 +2202,73 @@ fn the_roots_genesis_minimum_governs_and_a_revoked_nodes_raise_stops_counting() 
         graph.line_minimum(genesis).unwrap(),
         Some(3),
         "without revoking anyone, the root's own minimum governs and trusted lines no longer count"
+    );
+}
+
+/// What an earlier release wrote: a finality record of format 1 whose
+/// acknowledgments are of format 2, without this release's fields.
+#[derive(serde::Serialize)]
+struct EarlierFinality {
+    format: u32,
+    seal: [u8; 32],
+    acknowledgments: Vec<EarlierAck>,
+}
+#[derive(serde::Serialize)]
+struct EarlierAck {
+    statement: EarlierAckStatement,
+}
+#[derive(serde::Serialize)]
+struct EarlierAckStatement {
+    format: u32,
+    position: u64,
+}
+
+#[test]
+fn records_another_release_wrote_are_refused_by_the_format_they_name() {
+    let ack = EarlierAck {
+        statement: EarlierAckStatement {
+            format: 2,
+            position: 1,
+        },
+    };
+    match rocky_credentials::TerminalAck::from_bytes(&encode(&ack).unwrap()) {
+        Err(rocky_credentials::Error::UnsupportedFormat {
+            record,
+            format: 2,
+            supported: rocky_credentials::TERMINAL_ACK_FORMAT,
+        }) => assert_eq!(record, "terminal acknowledgment"),
+        other => panic!("an earlier acknowledgment is refused by its format: {other:?}"),
+    }
+    let finality = EarlierFinality {
+        format: 1,
+        seal: [9; 32],
+        acknowledgments: vec![ack],
+    };
+    let refused =
+        rocky_credentials::SealFinality::from_bytes(&encode(&finality).unwrap()).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            rocky_credentials::Error::UnsupportedFormat {
+                format: 1,
+                supported: rocky_credentials::SEAL_FINALITY_FORMAT,
+                ..
+            }
+        ),
+        "{refused}"
+    );
+    assert!(
+        refused
+            .to_string()
+            .contains("format 1, written by another release"),
+        "the refusal names the format and why: {refused}"
+    );
+    let unversioned = encode(&[1u8, 2, 3]).unwrap();
+    assert!(
+        matches!(
+            rocky_credentials::SealFinality::from_bytes(&unversioned),
+            Err(rocky_credentials::Error::Denied(_))
+        ),
+        "bytes naming no format stay an ordinary decoding refusal"
     );
 }

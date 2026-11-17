@@ -55,7 +55,7 @@ impl Envelope {
     }
     fn signing_bytes(&self) -> Result<Vec<u8>, CoordinationError> {
         bytes(
-            "rocky.coordination-wire.v3",
+            "rocky.coordination-wire.v4",
             &(self.genesis, self.key, self.nonce, self.time, &self.body),
         )
     }

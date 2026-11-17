@@ -176,6 +176,30 @@ impl Device {
             .expect("update");
         self.session.commit(handle).await.expect("commit");
     }
+    /// Deletes the item `id` in its own transaction, once per `handle`.
+    pub async fn remove(&self, handle: u8, id: &str) {
+        let handle = self.handle(handle).await;
+        if self
+            .session
+            .mutation_committed(handle)
+            .await
+            .expect("committed")
+        {
+            return;
+        }
+        self.session
+            .execute("BEGIN", Vec::new())
+            .await
+            .expect("begin");
+        self.session
+            .execute(
+                "DELETE FROM items WHERE key=?",
+                vec![rocky_sdk::SqlValue::Text(id.into())],
+            )
+            .await
+            .expect("delete");
+        self.session.commit(handle).await.expect("commit");
+    }
     pub async fn items(&self) -> Vec<String> {
         let page = self
             .session

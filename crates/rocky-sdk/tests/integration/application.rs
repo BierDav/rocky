@@ -296,7 +296,7 @@ async fn a_due_seal_a_trusted_node_cannot_make_is_an_alert() -> Result<(), Failu
     .database;
     let session = db.session();
     session.set_automatic_sync(false).await?;
-    let skipped = |alerts: &[rocky_sdk::Alert]| -> Vec<String> {
+    let skipped = |alerts: &[rocky_sdk::Alert]| -> Vec<rocky_sdk::SealSkip> {
         alerts
             .iter()
             .filter_map(|alert| match &alert.kind {
@@ -318,7 +318,7 @@ async fn a_due_seal_a_trusted_node_cannot_make_is_an_alert() -> Result<(), Failu
     session.sync_once().await?;
     assert_eq!(
         skipped(&session.status().await?.alerts),
-        ["no_followed_bookmark"]
+        [rocky_sdk::SealSkip::NoFollowedBookmark]
     );
     let genesis = session.tip_status().await?.tip;
     session

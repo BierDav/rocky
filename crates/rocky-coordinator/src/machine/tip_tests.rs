@@ -217,6 +217,7 @@ fn sealing(digest: u8, continuation: Option<TipId>) -> Action {
         terminal: LogTerminal {
             digest: [digest; 32],
             continuation,
+            confirms: false,
         },
     }
 }
@@ -252,6 +253,7 @@ fn a_terminal_entry_aborts_the_pending_one_and_ends_the_log() {
         Some(LogTerminal {
             digest: [9; 32],
             continuation: Some(dev()),
+            confirms: false,
         })
     );
     assert_eq!(
@@ -335,12 +337,18 @@ fn terminal_ack(
     rocky_credentials::TerminalAck::sign(
         rocky_credentials::TerminalAckStatement {
             format: rocky_credentials::TERMINAL_ACK_FORMAT,
+            coordinator: rocky_core::CoordinatorIdentity {
+                root: [1; 32],
+                mesh: rocky_core::MeshId([0; 16]),
+                genesis: [2; 32],
+            },
             scope: log.scope,
             tip: log.tip,
             position: head.commit,
             running: head.running_hash,
             seal: [seal; 32],
             continuation: Some(dev()),
+            confirms: false,
         },
         key,
         Default::default(),

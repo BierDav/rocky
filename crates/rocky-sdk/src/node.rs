@@ -314,6 +314,8 @@ pub(crate) struct Node {
     tip_chain: Arc<tokio::sync::Mutex<()>>,
     /// On a trusted node, the seal it should have made and did not.
     seal_skipped: std::sync::Mutex<Option<crate::Alert>>,
+    /// On a trusted node, why its last finality pass left a seal unfinal.
+    finality_stalled: std::sync::Mutex<Option<crate::Alert>>,
     /// Moves whenever `mesh` takes a report, for links that forward them.
     mesh_revision: watch::Sender<u64>,
     /// The last attempt to report this device's health failed.
@@ -357,6 +359,11 @@ pub(crate) struct Node {
     last_syncs: std::sync::Mutex<BTreeMap<String, crate::PeerReconciliation>>,
     /// The coordination service this database is composed with, for its owner.
     coordinator: std::sync::RwLock<Option<Arc<dyn rocky_credentials::Coordinator>>>,
+    /// Reaches the coordinator the database's settings name when the
+    /// application composed none.
+    connector: std::sync::RwLock<Option<Arc<dyn rocky_credentials::CoordinatorConnector>>>,
+    /// Why reaching the coordinator the settings name last failed.
+    connect_failure: std::sync::Mutex<Option<String>>,
     /// Deposits held as a mailbox, loaded at first use.
     mailbox: Mutex<Option<crate::delivery::Mailbox>>,
     /// The schema the application declares, which may be older or newer
@@ -406,6 +413,7 @@ impl Node {
             mesh_revision: watch::channel(0).0,
             trusted_watch: Default::default(),
             seal_skipped: Default::default(),
+            finality_stalled: Default::default(),
             tip_chain: Default::default(),
             report_failing: AtomicBool::new(false),
             #[cfg(test)]
@@ -459,6 +467,8 @@ impl Node {
             #[cfg(test)]
             discovery_skew: AtomicU64::new(0),
             coordinator: Default::default(),
+            connector: Default::default(),
+            connect_failure: Default::default(),
             mailbox: Mutex::new(None),
             declared: settings_schema,
             schema_fetch: Mutex::new(()),
@@ -2229,6 +2239,7 @@ impl Node {
         }
         let _activity = SyncActivity(self.sync_state.clone());
         self.sync_state.send_replace(SyncActivityState::Syncing);
+        self.adopt_named_coordinator().await;
         let routine = self.seal_routinely().await;
         self.finalize_seals().await;
         let members = self.publish_for_members().await;
@@ -2528,6 +2539,7 @@ impl Node {
         }
         let catalog_changed = self.acquire_schemas(transport).await?;
         let schema_changed = self.follow_schema().await?;
+        self.adopt_named_coordinator().await;
         self.finalize_seals().await;
         self.close_migrations().await?;
         let (mut connected, mut first, mut retry) = (0, None, catalog_changed || schema_changed);
@@ -3537,6 +3549,9 @@ impl Node {
         ))
     }
 
+    /// Signs the coordinator tenant's grant and, with a coordinator
+    /// composed, names it in the database's settings: the owner sets
+    /// coordination up once.
     async fn sign_coordination_grant(
         &self,
         tenant: PublicKey,
@@ -3553,7 +3568,7 @@ impl Node {
             return Err(refused("lifetime must be 1 s to 366 days"));
         }
         let time = now()?;
-        Ok(rocky_credentials::SignedCoordinationGrant::sign(
+        let grant = rocky_credentials::SignedCoordinationGrant::sign(
             rocky_credentials::CoordinationGrant {
                 publisher: rocky_credentials::Publisher(owner.public_key()?),
                 application: self.domain().manifest().name,
@@ -3562,7 +3577,11 @@ impl Node {
                 expires: time.saturating_add(lifetime),
             },
             owner,
-        )?)
+        )?;
+        if self.coordinator().is_some() {
+            self.declare_coordinated(self.domain().scope, root).await?;
+        }
+        Ok(grant)
     }
     async fn sql_reader(&self, client: &Client) -> Result<Reader, Failure> {
         let cached = client.reader.lock().await.clone();
@@ -3874,7 +3893,12 @@ pub(crate) fn call_failure(error: &Failure) -> crate::CallFailure {
             refusal.code,
             matches!(
                 refusal.code,
-                "coordinator_unavailable" | "behind" | "recovery_pending" | "chain_pending"
+                "coordinator_unavailable"
+                    | "behind"
+                    | "recovery_pending"
+                    | "chain_pending"
+                    | "seal_pending"
+                    | "entry_pending"
             ),
         )
     } else if let Some(coordination) = error.downcast_ref::<rocky_core::CoordinationError>() {

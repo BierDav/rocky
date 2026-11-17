@@ -169,10 +169,22 @@ pub struct TipInspection {
     /// The owner's minimum of trusted acknowledgments that makes a seal on
     /// the genesis line final; none while unsigned.
     pub genesis_minimum: Option<u32>,
+    /// The coordinator the owner's database settings name: a trusted node
+    /// then seals only through a composed log of it.
+    pub coordinator: Option<TipCoordinator>,
     pub seals: Vec<TipSeal>,
     pub openings: Vec<TipOpening>,
     pub bookmarks: Vec<Bookmark>,
     pub nodes: Vec<TipNode>,
+}
+/// A coordination service the database's settings name, by its root key
+/// and certified genesis, as hex digests.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TipCoordinator {
+    pub root: String,
+    pub genesis: String,
+    /// Where the service publishes its current bundle, when it does.
+    pub url: Option<String>,
 }
 /// Where this device's compaction of the followed path stands. Seals are
 /// hex digests.

@@ -191,6 +191,7 @@ async fn an_unknown_rival_terminal_never_certifies_the_private_candidate() {
             rocky_core::LogTerminal {
                 digest: rival.id().unwrap(),
                 continuation: None,
+                confirms: false,
             },
         )
         .await
@@ -347,5 +348,121 @@ async fn a_pending_relay_uses_the_raised_signed_minimum_and_distinct_acknowledge
             .unwrap()
             .seals
             .is_empty()
+    );
+}
+
+/// A relay holding the client of a coordinator the settings do not name
+/// ends no log with it, and a proof it took from that log before the
+/// settings arrived no longer answers.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_relay_answers_a_staged_close_only_with_finality_at_the_named_coordinator() {
+    let fixture = Fixture::new(1).await;
+    seals::follow_main(&fixture).await;
+    let relay = trusted(&fixture, "named").await;
+    let close = close(&fixture).await;
+    let bytes = close.to_bytes().unwrap();
+    let elsewhere = super::declared::coordinated_by(&fixture.lineage, 1, &MemoryLog::new());
+    let fresh = trusted(&fixture, "fresh").await;
+    super::declared::receive_each(&fresh.1, std::slice::from_ref(&elsewhere)).await;
+    assert!(matches!(
+        fresh.1.relay_staged_close(&bytes).await.unwrap(),
+        StagedCloseStatus::Pending
+    ));
+    assert_eq!(
+        fixture
+            .mesh
+            .log
+            .head(tip_log(&fixture.lineage))
+            .unwrap()
+            .terminal,
+        None,
+        "the relay ends no log of a coordinator the settings do not name"
+    );
+
+    let proof = match relay.1.relay_staged_close(&bytes).await.unwrap() {
+        StagedCloseStatus::Finality(proof) => proof,
+        other => panic!("{other:?}"),
+    };
+    super::declared::receive_each(&relay.1, &[elsewhere]).await;
+    let graph = relay.1.tip_graph(fixture.lineage.domain).await.unwrap();
+    assert!(!graph.counts_finality(&proof).unwrap());
+    for status in [
+        relay.1.staged_close_finality(&bytes).await.unwrap(),
+        relay.1.relay_staged_close(&bytes).await.unwrap(),
+    ] {
+        assert!(
+            matches!(status, StagedCloseStatus::Pending),
+            "the stored proof of the other log no longer answers: {status:?}"
+        );
+    }
+}
+
+/// A relay that admitted a seal before it composed a log follows a tip
+/// whose parent's log no node ended: it ends that tip's log for a close
+/// only once the seal leading into the tip ended its parent's.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_relay_never_ends_a_tips_log_before_the_seal_leading_into_it_ended_its_parent() {
+    let fixture = Fixture::new(1).await;
+    seals::follow_main(&fixture).await;
+    let main = tip_log(&fixture.lineage);
+    let (identity, node) = (PrivateKey::new(), PrivateKey::new());
+    let lagging = fixture
+        .lineage
+        .open_trusted(
+            &fixture.dir.path().join("lagging.db"),
+            (&identity, &node),
+            3,
+            None,
+        )
+        .await
+        .unwrap();
+    let lagging = (node, lagging);
+    seals::share(&fixture.alice.1, &lagging.1).await;
+    lagging
+        .1
+        .follow_bookmark(fixture.lineage.domain, "main")
+        .await
+        .unwrap();
+    let entering = seals::seal(&fixture.lineage, &fixture.alice.1, main.tip).await;
+    let next = entering.successor().unwrap().unwrap();
+    lagging
+        .1
+        .receive_tip_statements(&[
+            TipStatement::Seal(entering),
+            seals::bookmark(&fixture.lineage, "main", Some(main.tip), Some(next)),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(
+        lagging.1.followed_log(fixture.lineage.domain).await.tip,
+        next
+    );
+    assert_eq!(
+        fixture.mesh.log.head(main).unwrap().terminal,
+        None,
+        "no node ended the parent's log"
+    );
+    seals::compose(&fixture, &lagging);
+    let mut statement = seals::seal(&fixture.lineage, &lagging.1, next)
+        .await
+        .statement;
+    statement.action = SealAction::Close;
+    let close = SignedSeal::sign(statement, fixture.lineage.publisher()).unwrap();
+    assert!(matches!(
+        lagging
+            .1
+            .relay_staged_close(&close.to_bytes().unwrap())
+            .await
+            .unwrap(),
+        StagedCloseStatus::Pending
+    ));
+    let child = TipLog {
+        scope: fixture.lineage.domain,
+        tip: next,
+    };
+    assert_eq!(
+        fixture.mesh.log.head(child).unwrap().terminal,
+        None,
+        "the child's log stays open while its parent's is"
     );
 }

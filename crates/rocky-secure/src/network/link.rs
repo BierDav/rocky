@@ -3,7 +3,7 @@ use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
 /// The handshake's version; its signing label carries it, so another is refused.
-pub(super) const HANDSHAKE_VERSION: u32 = 29;
+pub(super) const HANDSHAKE_VERSION: u32 = 30;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
 mod lanes;
@@ -460,6 +460,9 @@ pub async fn scope_token<A: RowApplication>(
             for checkpoint in &graph.checkpoints {
                 metadata.push(checkpoint.id().map_err(credential)?);
             }
+            for settings in &graph.settings {
+                metadata.push(settings.id().map_err(credential)?);
+            }
         }
         for (_, batch) in inner.pending_tips(None).await? {
             for statement in batch.iter().filter(|s| s.scope() == scope.domain) {
@@ -816,7 +819,7 @@ mod tests {
     fn only_current_link_name_and_handshake_label() {
         assert_eq!(
             session_label(HANDSHAKE_VERSION),
-            "rocky.link.v29",
+            "rocky.link.v30",
             "the cryptographic handshake accepts one current version"
         );
     }

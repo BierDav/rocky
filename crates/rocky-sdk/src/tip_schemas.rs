@@ -139,6 +139,9 @@ impl Bootstrap {
         for checkpoint in &self.graph.checkpoints {
             checkpoint.verify(settings.publisher, &self.graph)?;
         }
+        for signed in &self.graph.settings {
+            signed.verify(settings.publisher, &self.graph)?;
+        }
         let mut graph = self.graph.clone();
         graph.exclude_revoked(&settings.revocations)?;
         let tip = match &self.followed {

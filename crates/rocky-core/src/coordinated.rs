@@ -1,9 +1,20 @@
 //! The metadata port of a tip's coordinated log: the order and commit of
 //! entries trusted nodes store, never their data.
-use crate::{Commitment, Configuration, CoordinationFuture, Scope, TipId, commitment};
+use crate::{Commitment, Configuration, CoordinationFuture, MeshId, Scope, TipId, commitment};
 
 /// A trusted node's key as its 32 bytes.
 pub type NodeKey = [u8; 32];
+
+/// What identifies a coordination service: the root key its certified
+/// genesis verifies against, the mesh it certifies and that genesis's ID.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct CoordinatorIdentity {
+    pub root: NodeKey,
+    pub mesh: MeshId,
+    pub genesis: Commitment,
+}
 
 /// One coordinated log: a domain's log of one tip.
 #[derive(
@@ -20,6 +31,10 @@ pub struct TipLog {
 pub struct LogTerminal {
     pub digest: Commitment,
     pub continuation: Option<TipId>,
+    /// The seal entered tip graphs before this entry ended its log: the
+    /// log confirms a choice graphs made, where without it the log decided
+    /// between the tip's seals.
+    pub confirms: bool,
 }
 
 /// The one assigned, uncommitted entry of a log.
@@ -59,6 +74,9 @@ pub struct LogHead {
     pub acknowledgments: Vec<Vec<u8>>,
     /// The owner closed the domain: the log takes no further write.
     pub closed: bool,
+    /// The coordinator dropped ended logs of the domain beyond those it
+    /// retains: a log at its genesis may have ended and been dropped.
+    pub ended_dropped: bool,
 }
 impl LogHead {
     /// The committed hash at `position`, while the window still holds it.
@@ -126,6 +144,8 @@ impl LogHead {
 pub trait DomainLog: Send + Sync {
     /// This client's node key.
     fn node(&self) -> NodeKey;
+    /// The coordination service this client reaches.
+    fn identity(&self) -> CoordinatorIdentity;
     fn log_head(&self, log: TipLog) -> CoordinationFuture<'_, LogHead>;
     /// Reads one entry without transferring the committed hash window.
     fn pending_status(

@@ -75,3 +75,28 @@ async fn real_voters_keep_branch_logs_separate_from_main() -> Result<(), Failure
     a.close().await?;
     Ok(())
 }
+
+/// A trusted device whose application supplies only
+/// `rocky_coordinator::Connector` reaches the real voters the database's
+/// settings name, signed when its owner created it with them, and seals
+/// through them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_voters_are_reached_by_a_connector_from_the_database_settings() -> Result<(), Failure>
+{
+    let root = tempfile::tempdir()?;
+    let (bundle, _admin) = service(root.path()).await?;
+    let (a, t) = household_reaching(root.path(), &bundle, Reach::Connector).await?;
+    let named = snap::value(t.session.inspect_tips()).await?["coordinator"]["genesis"].clone();
+    assert_eq!(
+        named,
+        json!(data_encoding::HEXLOWER.encode(&bundle.genesis()?.id()?)),
+        "the settings signed at creation name the voters"
+    );
+    assert!(!t.write("through the connector", 31).await?["committed"].is_null());
+    let sealed = snap::value(t.session.seal(false)).await?["tip"].clone();
+    final_on_both(&a, &t, &sealed).await?;
+    assert_eq!(a.keys().await?, t.keys().await?);
+    t.close().await?;
+    a.close().await?;
+    Ok(())
+}

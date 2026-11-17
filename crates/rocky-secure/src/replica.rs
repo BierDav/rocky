@@ -134,7 +134,10 @@ pub use checkpoint::{
     PruneReport, PrunedPage, RebootstrapReport, RetentionLimits, RetentionPolicy, SealedOutcome,
     SealedOutcomes, SealedTransaction, SetSummary, SignedCheckpoint,
 };
-pub use coordinated::{Refusal, StagedCloseStatus};
+pub use coordinated::{
+    COORDINATOR_MISMATCH, COORDINATOR_REQUIRED, FinalityStall, Finalization, Refusal,
+    StagedCloseStatus,
+};
 pub use evict::EvictReport;
 pub use generation::{EngineStatus, GenerationStatus};
 pub use held::{CurrentValue, HeldChange, HeldField, HeldKind, HeldRow, SignedVoid};

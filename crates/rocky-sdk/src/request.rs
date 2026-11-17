@@ -112,6 +112,7 @@ pub(crate) enum TipChange {
     Recover,
     Pull { seal: String },
     GenesisMinimum { minimum_in_sync: u32 },
+    DeclareCoordinated,
     Create { name: String, tip: Option<String> },
     Move { name: String, tip: String },
     Delete { name: String },

@@ -517,6 +517,9 @@ mod coordinated {
         ) -> CoordinationFuture<'_, rocky_core::LogStatus> {
             Box::pin(async move { Ok(self.log_head(log).await?.status(position, hash)) })
         }
+        fn identity(&self) -> rocky_core::CoordinatorIdentity {
+            self.inner.identity()
+        }
         fn node(&self) -> NodeKey {
             self.inner.node()
         }
@@ -567,6 +570,9 @@ mod coordinated {
     }
 
     impl rocky_sdk::Coordinator for Gated {
+        fn bundle(&self) -> Result<rocky_sdk::CoordinatorBundle, rocky_core::CoordinationError> {
+            self.inner.bundle()
+        }
         fn bind(
             &self,
             key: rocky_sdk::credentials::PrivateKey,
@@ -651,6 +657,7 @@ mod coordinated {
         a.database
             .coordinate(Some(Arc::new(log.client(node_key(&a).await))))
             .await?;
+        snap::ok(a.session.declare_coordinated(a.root())).await;
         a.add(1, "base").await;
         let b = Device::join(
             &root.path().join("b"),
@@ -696,6 +703,62 @@ mod coordinated {
         for peer in [&a, &b, &c] {
             peer.close().await;
         }
+        Ok(())
+    }
+
+    /// The owner may name only the coordinator the database's finality
+    /// records name: settings naming another would make its final seals,
+    /// compacted ones too, non-final everywhere.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_owner_names_only_the_coordinator_its_finality_records_name() -> Result<(), Failure>
+    {
+        let root = tempfile::tempdir()?;
+        let hub = Arc::new(Hub::default());
+        let a = Device::create(
+            &root.path().join("a"),
+            Some(Network::Owned(hub.connector("a"))),
+        )?;
+        main(&a).await;
+        snap::ok(a.session.set_genesis_minimum(1)).await;
+        let log = MemoryLog::new();
+        log.configure(domain(&a), 1)?;
+        a.database
+            .coordinate(Some(Arc::new(log.client(node_key(&a).await))))
+            .await?;
+        a.add(1, "base").await;
+        snap::ok(a.session.seal(false)).await;
+        a.sync().await.map_err(|error| error.to_string())?;
+        let final_seals = |inspection: rocky_sdk::TipInspection| {
+            inspection
+                .seals
+                .into_iter()
+                .filter(|seal| seal.finalized)
+                .count()
+        };
+        assert_eq!(final_seals(a.session.inspect_tips().await?), 1);
+
+        let other = MemoryLog::new();
+        other.configure(domain(&a), 1)?;
+        a.database
+            .coordinate(Some(Arc::new(other.client(node_key(&a).await))))
+            .await?;
+        let refused = a.session.declare_coordinated(a.root()).await.unwrap_err();
+        assert_eq!(
+            rocky_sdk::CallFailure::from_failure(&refused).code(),
+            rocky_secure::COORDINATOR_MISMATCH
+        );
+        let inspection = a.session.inspect_tips().await?;
+        assert!(inspection.coordinator.is_none(), "nothing was signed");
+        assert_eq!(final_seals(inspection), 1);
+
+        a.database
+            .coordinate(Some(Arc::new(log.client(node_key(&a).await))))
+            .await?;
+        snap::ok(a.session.declare_coordinated(a.root())).await;
+        let inspection = a.session.inspect_tips().await?;
+        assert!(inspection.coordinator.is_some());
+        assert_eq!(final_seals(inspection), 1, "the seal stays final");
+        a.close().await;
         Ok(())
     }
 
@@ -876,18 +939,18 @@ mod coordinated {
         a.add(1, "milk").await;
 
         log.set_available(false);
-        let first_waits_and_later_ones_chain_behind_it = [
+        let first_waits_and_later_seals_of_its_tip_are_not_journaled = [
             (
                 snap::observe(a.session.seal(false)).await,
                 "coordinator_unavailable",
             ),
-            (snap::observe(a.session.seal(true)).await, "chain_pending"),
+            (snap::observe(a.session.seal(true)).await, "seal_pending"),
             (
                 snap::observe(a.move_bookmark("main", &snap::text(&genesis))).await,
-                "chain_pending",
+                "seal_pending",
             ),
         ];
-        for (result, code) in first_waits_and_later_ones_chain_behind_it {
+        for (result, code) in first_waits_and_later_seals_of_its_tip_are_not_journaled {
             let refused = result.expect_err("unconfirmed");
             assert_eq!(refused["code"], code, "{refused}");
             assert_eq!(refused["retryable"], true);
@@ -912,7 +975,7 @@ mod coordinated {
         assert_eq!(a.titles().await, ["milk"]);
         let inspection = snap::ok(a.session.inspect_tips()).await;
         let only_the_retried_seal_was_published =
-            "the close seal and the move chained after it lost the log and were dropped";
+            "the close seal and the move off the waiting tip were refused, never journaled";
         assert_eq!(
             inspection["seals"].as_array().map(Vec::len),
             Some(2),

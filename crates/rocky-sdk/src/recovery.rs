@@ -155,6 +155,8 @@ pub(crate) mod fault {
         /// The root revoked the lost identities the store names, not yet
         /// those granted before the recovery that it does not.
         Named,
+        /// A created database's settings are signed, not published yet.
+        SettingsSigned,
         /// The node started; the database is not handed out yet.
         Started,
     }

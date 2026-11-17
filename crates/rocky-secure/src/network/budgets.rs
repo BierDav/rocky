@@ -56,12 +56,18 @@ fn ack(credentials: CredentialChain) -> Result<TerminalAck, rocky_credentials::E
     TerminalAck::sign(
         TerminalAckStatement {
             format: rocky_credentials::TERMINAL_ACK_FORMAT,
+            coordinator: rocky_core::CoordinatorIdentity {
+                root: [255; 32],
+                mesh: MeshId([255; 16]),
+                genesis: [255; 32],
+            },
             scope: scope(1).domain,
             tip: TipId([255; 32]),
             position: u64::MAX,
             running: [255; 32],
             seal: [255; 32],
             continuation: Some(TipId([255; 32])),
+            confirms: true,
         },
         &PrivateKey::from_bytes(&[7; 32]),
         credentials,

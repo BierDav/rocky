@@ -40,6 +40,7 @@ fn terminal(seal: &SignedSeal) -> LogTerminal {
     LogTerminal {
         digest: seal.id().unwrap(),
         continuation: seal.successor().unwrap(),
+        confirms: false,
     }
 }
 impl Fixture {
@@ -111,6 +112,7 @@ fn the_owners_recovery_ends_the_exact_head_without_the_in_sync_set_and_retries_i
         terminal: LogTerminal {
             digest: [7; 32],
             continuation: None,
+            confirms: false,
         },
     };
     assert_eq!(f.run(1, ordinary, T + 4), Err(CoordinationError::Sealed));
@@ -241,6 +243,7 @@ fn only_a_node_of_the_in_sync_set_ends_a_log_with_an_ordinary_seal() {
     let terminal = LogTerminal {
         digest: [7; 32],
         continuation: None,
+        confirms: false,
     };
     let join = |log: &Log| Action::Join {
         position: log.head.commit,
@@ -297,6 +300,7 @@ fn only_a_node_of_the_in_sync_set_ends_a_log_with_an_ordinary_seal() {
             LogTerminal {
                 digest: [8; 32],
                 continuation: None,
+                confirms: false,
             }
         ),
         Err(CoordinationError::Sealed)

@@ -572,3 +572,43 @@ async fn application_client_bindings_keep_node_authority_and_observers_independe
     assert_eq!(trusted_calls.load(Ordering::SeqCst), 2);
     assert_eq!(stranger_calls.load(Ordering::SeqCst), 1);
 }
+
+/// The connector reaches the service a database's settings name only when
+/// the settings' certified genesis verifies against their identity.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_connector_reaches_only_the_coordinator_its_bundle_certifies() {
+    use rocky_credentials::{Coordinator, CoordinatorConnector};
+    let certified = genesis(&PrivateKey::new());
+    let memory = Arc::new(Memory {
+        genesis: certified.id().unwrap(),
+        key: PrivateKey::new(),
+        state: Arc::new(Mutex::new(Metadata::new(certified.clone()).unwrap())),
+        streams: AtomicUsize::new(0),
+        ahead: Default::default(),
+    });
+    let lane = Arc::new(Lane(memory, KIND));
+    let named = NetworkCoordinator::connect(
+        &TrustBundle::new(&certified).unwrap(),
+        PrivateKey::new(),
+        lane.clone(),
+    )
+    .unwrap()
+    .bundle()
+    .unwrap();
+    let connector = crate::Connector::new(lane);
+    let reached = connector.connect(&named).unwrap();
+    assert_eq!(reached.identity(), named.identity);
+
+    let mut forged = named.clone();
+    forged.certified = genesis(&PrivateKey::new()).to_bytes().unwrap();
+    assert!(
+        connector.connect(&forged).is_err(),
+        "another service's genesis does not verify against the named identity"
+    );
+    let mut renamed = named;
+    renamed.identity.genesis = [9; 32];
+    assert!(
+        connector.connect(&renamed).is_err(),
+        "a genesis other than the named one is refused"
+    );
+}

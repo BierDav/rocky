@@ -35,6 +35,10 @@ impl Node {
         let Ok(mut signer) = self.tip_signer(scope).await else {
             return Ok(());
         };
+        if let Some(blocked) = self.seal_blocker().await? {
+            tracing::warn!(%blocked, "the declared schema waits for the database's coordinator");
+            return Ok(());
+        }
         let source = self.replica.followed_tip().await;
         let graph = self.replica.tip_graph(scope).await?;
         if graph.bookmark(&bookmark)? != Some(source) || graph.seal(source)?.is_some() {

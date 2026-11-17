@@ -9,6 +9,9 @@ pub type CoordinationObserver = Arc<dyn Fn(Result<(), &CoordinationError>) + Sen
 /// database transactions. Binding returns an independent client for one database node, including its
 /// certificate, claims and observer state.
 pub trait Coordinator: DomainLog {
+    /// The bundle that names this service in a database's settings: its
+    /// identity and the certified bootstrap its connector verifies.
+    fn bundle(&self) -> Result<crate::CoordinatorBundle, CoordinationError>;
     fn bind(
         &self,
         key: PrivateKey,
@@ -36,4 +39,14 @@ pub trait Coordinator: DomainLog {
         scope: Scope,
         revocations: RevocationSet,
     ) -> CoordinationFuture<'_, Commitment>;
+}
+
+/// Reaches the coordination service a database's signed settings name. The
+/// application supplies one for every database; it verifies the bundle's
+/// certified bootstrap against its identity and owns the transport.
+pub trait CoordinatorConnector: Send + Sync {
+    fn connect(
+        &self,
+        bundle: &crate::CoordinatorBundle,
+    ) -> Result<Arc<dyn Coordinator>, CoordinationError>;
 }

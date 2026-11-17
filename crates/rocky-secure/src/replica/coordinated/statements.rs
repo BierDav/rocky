@@ -31,6 +31,16 @@ enum Ending {
     /// Not confirmed yet; the coordinator may have committed it after a lost reply.
     Unconfirmed { code: &'static str, reason: String },
 }
+/// Where the seal that leads into a tip stands at the coordinator.
+pub(super) enum Entry {
+    Won,
+    Lost,
+    /// Not known yet: retried later.
+    Waiting {
+        code: &'static str,
+        reason: String,
+    },
+}
 /// What coordinating a batch decided.
 pub(in crate::replica) struct Coordinated {
     /// May enter the graph now.
@@ -41,14 +51,19 @@ pub(in crate::replica) struct Coordinated {
 
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Splits `statements` into those that may enter the graph and those
-    /// that wait. A recovery on every device waits for verified finality;
-    /// ordinary seals without a composed log enter immediately. Every
-    /// new ordinary seal is verified and its tip's log ended first; a seal whose log
-    /// the coordinator did not confirm ended waits with what depends on it,
-    /// and a recovery the log did not commit is dropped with its
-    /// dependents. `strict`, for this node's own publication, fails
-    /// instead, and also when another seal ended the log first, so nothing
-    /// is published.
+    /// that wait. A recovery on every device waits for verified finality,
+    /// and a seal its finality record proves enters without the coordinator.
+    /// Only a composed log of the coordinator the owner's settings name
+    /// counts. Without one, received ordinary seals enter immediately and
+    /// this node's own seals do too unless the settings name a coordinator:
+    /// then `strict` refuses them with `coordinator_required`, or
+    /// `coordinator_mismatch` beside another log, and a journaled one waits. Every new ordinary seal is verified and
+    /// its tip's log ended first; a seal whose log the coordinator did not
+    /// confirm ended waits with what depends on it, and a recovery the log
+    /// did not commit is dropped with its dependents, as is this node's own
+    /// seal once another seal of its tip is final. `strict`, for this node's
+    /// own publication, fails instead, and also when another seal ended the
+    /// log first, so nothing is published.
     pub(in crate::replica) async fn coordinate_tip_statements(
         &self,
         statements: &[TipStatement],
@@ -72,25 +87,22 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.check_statements(&fresh).await?;
         let (mut deferred, mut dropped) = (BTreeSet::new(), BTreeSet::new());
         let mut proofs = Vec::new();
+        let mut graphs = BTreeMap::new();
         for statement in &fresh {
             let TipStatement::Seal(seal) = statement else {
                 continue;
             };
+            let scope = seal.statement.scope;
+            if let std::collections::btree_map::Entry::Vacant(entry) = graphs.entry(scope) {
+                entry.insert(self.batch_graph(scope, statements).await?);
+            }
+            let graph = &graphs[&scope];
+            let named = graph.coordinator().map_err(credential)?.is_some();
+            let usable = match coordinator.as_deref() {
+                Some(log) if graph_names(graph, log)? => Some(log),
+                _ => None,
+            };
             if seal.statement.recovery.is_some() {
-                let graph = {
-                    let inner = self.inner.lock(crate::replica::Class::Background).await;
-                    let mut graph = Arc::unwrap_or_clone(inner.scope_graph(seal.statement.scope)?);
-                    for statement in statements
-                        .iter()
-                        .filter(|s| s.scope() == seal.statement.scope)
-                    {
-                        statement.append(&mut graph);
-                    }
-                    graph
-                        .exclude_revoked(&inner.config.revocations)
-                        .map_err(credential)?;
-                    graph
-                };
                 if graph
                     .line_minimum(seal.statement.tip)
                     .map_err(credential)?
@@ -111,7 +123,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 {
                     continue;
                 }
-                let ending = match coordinator.as_deref() {
+                let ending = match usable {
                     Some(coordinator) => self.end_log(seal, coordinator, own).await?,
                     None => Ending::Unconfirmed {
                         code: "recovery_pending",
@@ -119,8 +131,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     },
                 };
                 if matches!(ending, Ending::Ended)
-                    && let Some(coordinator) = coordinator.as_deref()
-                    && let Some(proof) = self.terminal_finality(seal, &graph, coordinator).await?
+                    && let Some(coordinator) = usable
+                    && let Some(proof) = self.terminal_finality(seal, graph, coordinator).await?
                 {
                     proofs.push(TipStatement::Finality(proof));
                     continue;
@@ -136,9 +148,54 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 }
                 continue;
             }
-            let Some(coordinator) = coordinator.as_deref() else {
+            let id = seal.id().map_err(credential)?;
+            if graph.is_final(id).map_err(credential)? {
+                continue;
+            }
+            if own && another_seal_is_final(graph, seal)? {
+                if strict {
+                    return Err(refusal("sealed", "another seal of the tip is final"));
+                }
+                dropped.insert(statement.id()?);
+                continue;
+            }
+            let Some(coordinator) = usable else {
+                if !named {
+                    continue;
+                }
+                if strict && let Some(refused) = self.named_log_refusal(graph)? {
+                    return Err(refused);
+                }
+                if own {
+                    deferred.insert(statement.id()?);
+                }
                 continue;
             };
+            match self.entry_standing(graph, seal, coordinator).await? {
+                Entry::Won => {}
+                Entry::Lost if strict => {
+                    return Err(refusal(
+                        "sealed",
+                        "the seal that leads into the tip lost its own log: the tip is on a losing branch",
+                    ));
+                }
+                Entry::Lost => {
+                    if own {
+                        dropped.insert(statement.id()?);
+                    }
+                    continue;
+                }
+                Entry::Waiting { code, reason } if strict => {
+                    return Err(Error::Application(Box::new(Unconfirmed {
+                        code,
+                        message: reason,
+                    })));
+                }
+                Entry::Waiting { .. } => {
+                    deferred.insert(statement.id()?);
+                    continue;
+                }
+            }
             match self.end_log(seal, coordinator, own).await? {
                 Ending::Ended => {}
                 Ending::Lost if strict => {
@@ -198,6 +255,92 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(coordinated)
     }
+    /// The composed log when it may end `graph`'s tip logs: the settings
+    /// name its coordinator, or name none.
+    pub(in crate::replica) fn usable_log(
+        &self,
+        graph: &rocky_credentials::TipGraph,
+    ) -> Result<Option<Arc<dyn DomainLog>>, Error> {
+        let Some(log) = self.domain_log() else {
+            return Ok(None);
+        };
+        Ok(graph_names(graph, log.as_ref())?.then_some(log))
+    }
+    /// Why this node may not seal `graph`'s tips: its settings name a
+    /// coordinator and the composed log is none or another service's.
+    pub(in crate::replica) fn named_log_refusal(
+        &self,
+        graph: &rocky_credentials::TipGraph,
+    ) -> Result<Option<Error>, Error> {
+        if graph.coordinator().map_err(credential)?.is_none() {
+            return Ok(None);
+        }
+        Ok(match self.domain_log() {
+            Some(log) if graph_names(graph, log.as_ref())? => None,
+            Some(_) => Some(refusal(
+                COORDINATOR_MISMATCH,
+                "this node's coordinated log is not the coordinator the owner's database settings name",
+            )),
+            None => Some(refusal(
+                COORDINATOR_REQUIRED,
+                "the owner's database settings name a coordinator: compose this node's coordinated log before it seals a tip, moves a bookmark off one or publishes a schema",
+            )),
+        })
+    }
+    /// `scope`'s graph with `statements` of a batch added, revoked
+    /// statements left out: what coordinating the batch judges seals by.
+    pub(super) async fn batch_graph(
+        &self,
+        scope: rocky_core::Scope,
+        statements: &[TipStatement],
+    ) -> Result<rocky_credentials::TipGraph, Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        let mut graph = Arc::unwrap_or_clone(inner.scope_graph(scope)?);
+        for statement in statements.iter().filter(|s| s.scope() == scope) {
+            statement.append(&mut graph);
+        }
+        graph
+            .exclude_revoked(&inner.config.revocations)
+            .map_err(credential)?;
+        Ok(graph)
+    }
+    /// Where the seal that leads into `seal`'s tip stands: won when final
+    /// or the terminal entry of its own tip's log; lost when another seal
+    /// ended that log, so the tip is on a losing branch whose log is never
+    /// ended; waiting while that log is unended or unreachable. A line's
+    /// first tip has no such seal.
+    pub(super) async fn entry_standing(
+        &self,
+        graph: &rocky_credentials::TipGraph,
+        seal: &SignedSeal,
+        coordinator: &dyn DomainLog,
+    ) -> Result<Entry, Error> {
+        let Some(entered) = super::finality::entered_by(graph, seal.statement.tip)? else {
+            return Ok(Entry::Won);
+        };
+        if graph.is_final(entered).map_err(credential)? {
+            return Ok(Entry::Won);
+        }
+        let parent = graph.seal_by_id(entered).map_err(credential)?.statement.tip;
+        let log = TipLog {
+            scope: seal.statement.scope,
+            tip: parent,
+        };
+        Ok(match coordinator.log_head(log).await {
+            Ok(head) => match head.terminal {
+                Some(terminal) if terminal.digest == entered => Entry::Won,
+                Some(_) => Entry::Lost,
+                None => Entry::Waiting {
+                    code: "entry_pending",
+                    reason: "the seal that leads into the tip has not ended its own log yet".into(),
+                },
+            },
+            Err(error) => Entry::Waiting {
+                code: "coordinator_unavailable",
+                reason: format!("the tip's coordinated log did not confirm the seal: {error}"),
+            },
+        })
+    }
     /// Ends `seal`'s tip log with it unless it ended already. A recovery, and
     /// this node's `own` seal, is confirmed only by the exact terminal entry
     /// it is.
@@ -214,6 +357,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let terminal = LogTerminal {
             digest: seal.id().map_err(credential)?,
             continuation: seal.successor().map_err(credential)?,
+            confirms: false,
         };
         let unavailable = |error: CoordinationError| Ending::Unconfirmed {
             code: "coordinator_unavailable",
@@ -585,6 +729,34 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(false)
     }
+    /// Whether `statements` seal, ordinarily, a tip this node's journaled
+    /// seal still waits to end: a second seal could only lose to it, so
+    /// journaling one per attempt would only grow the journal and the
+    /// coordinator's load. The owner's recovery ends a stuck log regardless.
+    pub(in crate::replica) async fn reseals_waiting_tip(
+        &self,
+        statements: &[TipStatement],
+    ) -> Result<bool, Error> {
+        let inner = self.inner.lock(crate::replica::Class::Background).await;
+        let published = statements
+            .iter()
+            .map(TipStatement::id)
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let mut waiting = BTreeSet::new();
+        for (_, batch) in inner.pending_tips(Some(true)).await? {
+            for statement in batch {
+                if let TipStatement::Seal(seal) = &statement
+                    && !published.contains(&statement.id()?)
+                {
+                    waiting.insert(seal.statement.tip);
+                }
+            }
+        }
+        Ok(statements.iter().any(|statement| {
+            matches!(statement, TipStatement::Seal(seal)
+                if seal.statement.recovery.is_none() && waiting.contains(&seal.statement.tip))
+        }))
+    }
     /// Refuses own statements chained after a staged one: the stage may be
     /// withdrawn and never published.
     pub(in crate::replica) async fn refuse_after_stage(
@@ -718,7 +890,9 @@ impl<A: RowApplication> Inner<A> {
                         .as_slice()
                         .try_into()
                         .map_err(|_| Error::Corrupt("pending tip batch".into()))?,
-                    decode_bounded(statements, MAX_SECURE_BYTES)?,
+                    decode_bounded(statements, MAX_SECURE_BYTES).map_err(|error| {
+                        super::super::tips::foreign_finality(statements).unwrap_or(error)
+                    })?,
                 ));
             }
         }
@@ -776,6 +950,39 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 }
+/// The refusal code of a node without a log of the coordinator its
+/// database's settings name.
+pub const COORDINATOR_REQUIRED: &str = "coordinator_required";
+/// The refusal code of a node whose log is another coordinator's than the
+/// one its database's settings name.
+pub const COORDINATOR_MISMATCH: &str = "coordinator_mismatch";
+/// Whether `log` may end `graph`'s tip logs: the settings name its
+/// coordinator, or name none.
+fn graph_names(graph: &rocky_credentials::TipGraph, log: &dyn DomainLog) -> Result<bool, Error> {
+    Ok(graph
+        .coordinator()
+        .map_err(credential)?
+        .is_none_or(|bundle| bundle.identity == log.identity()))
+}
+/// Whether a seal of `seal`'s tip other than `seal` is final: its log
+/// ended with that seal, so `seal` never can.
+fn another_seal_is_final(
+    graph: &rocky_credentials::TipGraph,
+    seal: &SignedSeal,
+) -> Result<bool, Error> {
+    let id = seal.id().map_err(credential)?;
+    for other in graph
+        .seals
+        .iter()
+        .filter(|other| other.statement.tip == seal.statement.tip)
+    {
+        let other = other.id().map_err(credential)?;
+        if other != id && graph.is_final(other).map_err(credential)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 /// Extends `refused` with every statement of `statements` that depends on
 /// one in it: an opening on a refused seal, a move off a refused seal's tip
 /// or naming a tip a refused statement identifies, and so on transitively.
@@ -800,7 +1007,8 @@ fn dependents(
                 TipStatement::Bookmark(_)
                 | TipStatement::GenesisLine(_)
                 | TipStatement::Finality(_)
-                | TipStatement::Checkpoint(_) => {}
+                | TipStatement::Checkpoint(_)
+                | TipStatement::Settings(_) => {}
             }
         }
         let before = refused.len();
@@ -810,7 +1018,7 @@ fn dependents(
                 TipStatement::Opening(opening) => refused.contains(&opening.statement.seal),
                 TipStatement::Finality(record) => refused.contains(&record.seal),
                 TipStatement::Checkpoint(record) => refused.contains(&record.statement.seal),
-                TipStatement::GenesisLine(_) => false,
+                TipStatement::GenesisLine(_) | TipStatement::Settings(_) => false,
                 TipStatement::Bookmark(movement) => {
                     movement
                         .statement

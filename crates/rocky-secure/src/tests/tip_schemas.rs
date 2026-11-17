@@ -6,6 +6,8 @@ use rocky_credentials::{SealAction, SignedSeal};
 
 mod employees;
 mod engine;
+#[cfg(not(target_family = "wasm"))]
+mod named_coordinator;
 mod source_availability;
 pub(in crate::tests) mod source_validation;
 mod staging;

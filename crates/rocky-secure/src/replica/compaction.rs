@@ -1400,7 +1400,9 @@ impl<A: RowApplication> Inner<A> {
             else {
                 break;
             };
-            if graph.is_final(known.seal).map_err(credential)? || path.len() - 1 - index >= keep {
+            if graph.compacts_final(known.seal).map_err(credential)?
+                || path.len() - 1 - index >= keep
+            {
                 let stop = kept.contains(&known.seal);
                 target = Some((known, path[index].clone()));
                 if stop {

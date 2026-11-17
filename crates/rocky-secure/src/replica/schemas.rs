@@ -333,12 +333,13 @@ impl<A: RowApplication> Inner<A> {
             return Ok(fields);
         }
         let graph = self.graph_for(scope)?;
+        let anchor = graph.late_anchor(source).map_err(credential)?;
         let mut path = Vec::new();
         let mut cursor = target;
         let mut visited = BTreeSet::new();
         while visited.insert(cursor) {
             path.push(cursor);
-            if cursor == source {
+            if cursor == source || cursor == anchor {
                 break;
             }
             let Some((parent, _)) = Self::tip_parent(graph, cursor)? else {
@@ -346,7 +347,7 @@ impl<A: RowApplication> Inner<A> {
             };
             cursor = parent;
         }
-        if path.last() != Some(&source) {
+        if path.last() != Some(&source) && path.last() != Some(&anchor) {
             return Err(denied("cyclic tip path"));
         }
         let mut fields = PathFields::of(&self.definition);

@@ -162,6 +162,7 @@ async fn an_ordinary_terminal_cannot_confirm_a_recovery_at_another_head() {
             rocky_core::LogTerminal {
                 digest: seal.id().unwrap(),
                 continuation: seal.successor().unwrap(),
+                confirms: false,
             },
         )
         .await

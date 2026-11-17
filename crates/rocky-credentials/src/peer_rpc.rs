@@ -170,7 +170,7 @@ pub enum StagedCloseStatus {
     },
 }
 
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 pub const MAX_MESSAGE: usize = 3 * crate::MAX_REVOCATION_SET_BYTES;
 
 #[derive(Serialize, Deserialize)]

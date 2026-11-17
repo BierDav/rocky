@@ -9,6 +9,9 @@ use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::json;
 use std::sync::Arc;
 
+mod reach;
+mod split;
+
 fn open<'a>(directory: &'a std::path::Path, network: Option<Network>) -> Open<'a> {
     Open {
         identity: Some(common::external_identity(directory)),
@@ -100,7 +103,9 @@ fn reopen_owner_positioned(
 ) -> Result<Device, Failure> {
     Ok(Device::new(Database::open(Open {
         schema: POSITIONED,
-        coordination: Some(Arc::new(log.client(node))),
+        coordination: Some(rocky_sdk::CoordinatorSlot::Client(Arc::new(
+            log.client(node),
+        ))),
         ..open(directory, network)
     })?)?
     .with_identity(common::external_identity(directory)))

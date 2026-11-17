@@ -348,6 +348,7 @@ impl<A: RowApplication> Inner<A> {
                 graph.genesis_lines.len(),
                 graph.finalities.len(),
                 graph.checkpoints.len(),
+                graph.settings.len(),
                 &graph.revoked,
             ))?,
         );

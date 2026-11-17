@@ -8,10 +8,10 @@ use crate::tips::{
 };
 use rocky_core::{Scope, TipId};
 use rocky_credentials::{
-    BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, CredentialChain, GENESIS_LINE_FORMAT,
-    GenesisLineStatement, SEAL_FORMAT, SealAction, SealStatement, SignedBookmarkMove,
-    SignedGenesisLine, SignedSeal, SignedTipOpening, TIP_OPENING_FORMAT, TipGraph,
-    TipOpeningStatement,
+    BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, Coordination, CredentialChain,
+    GENESIS_LINE_FORMAT, GenesisLineStatement, SEAL_FORMAT, SealAction, SealStatement,
+    SignedBookmarkMove, SignedDatabaseSettings, SignedGenesisLine, SignedSeal, SignedTipOpening,
+    TIP_OPENING_FORMAT, TipGraph, TipOpeningStatement,
 };
 use rocky_secure::TipStatement;
 
@@ -192,6 +192,7 @@ impl Node {
                 self.sign_genesis_minimum(scope, minimum_in_sync, root)
                     .await?;
             }
+            TipChange::DeclareCoordinated => self.declare_coordinated(scope, root).await?,
             TipChange::Create { name, tip } => {
                 let tip = tip.as_deref().map(parse_digest).transpose()?.map(TipId);
                 self.create_bookmark(scope, &name, tip).await?;
@@ -597,6 +598,13 @@ impl Node {
             genesis_minimum: graph
                 .line_minimum(graph.genesis())?
                 .and_then(|minimum| u32::try_from(minimum).ok()),
+            coordinator: graph
+                .coordinator()?
+                .map(|bundle| crate::tips::TipCoordinator {
+                    root: HEXLOWER.encode(&bundle.identity.root),
+                    genesis: hex(&bundle.identity.genesis),
+                    url: bundle.url.clone(),
+                }),
             seals,
             openings,
             bookmarks,
@@ -968,6 +976,71 @@ impl Node {
         .await
     }
 
+    /// Publishes a revision of the owner's database settings.
+    pub(crate) async fn publish_settings(
+        &self,
+        signed: SignedDatabaseSettings,
+    ) -> Result<(), Failure> {
+        let id = signed.id()?;
+        self.publish_tips(
+            self.domain().scope,
+            None,
+            vec![TipStatement::Settings(signed)],
+            |graph| match graph
+                .settings
+                .iter()
+                .any(|held| held.id().is_ok_and(|held| held == id))
+            {
+                true => Ok(()),
+                false => Err(refused("the database settings did not take effect")),
+            },
+        )
+        .await
+    }
+    /// The root names the composed coordinator in the database's settings,
+    /// so every device learns it by sync. A database keeps its coordinator.
+    pub(super) async fn declare_coordinated(
+        &self,
+        scope: Scope,
+        root: &super::Root,
+    ) -> Result<(), Failure> {
+        let coordinator = self.coordinator().ok_or_else(|| {
+            refused("compose the coordinator before naming it in the database's settings")
+        })?;
+        let bundle = coordinator.bundle()?;
+        let graph = self.replica.tip_graph(scope).await?;
+        if graph
+            .coordinator()?
+            .is_some_and(|named| named.identity != bundle.identity)
+        {
+            return Err(super::coordinated::coordination_refusal(
+                rocky_secure::COORDINATOR_MISMATCH,
+                "the database's settings name another coordinator; changing it is not supported",
+            ));
+        }
+        if graph.coordinator()?.is_none()
+            && graph
+                .finality_coordinators()?
+                .iter()
+                .any(|named| *named != bundle.identity)
+        {
+            return Err(super::coordinated::coordination_refusal(
+                rocky_secure::COORDINATOR_MISMATCH,
+                "the database's finality records name another coordinator; compose and name that one",
+            ));
+        }
+        let Some(statement) = graph.next_settings(Coordination::Coordinated { bundle })? else {
+            return Ok(());
+        };
+        let settings = self.settings.lock().await.clone();
+        let root = crate::enrollment::root_signer(
+            root.signer(),
+            settings.publisher,
+            "signing the database's settings",
+        )?;
+        let signed = SignedDatabaseSettings::sign(statement, root)?;
+        self.publish_settings(signed).await
+    }
     async fn prepare_terminal_credentials(&self) -> Result<(), Failure> {
         if self.replica.domain_log().is_none() {
             return Ok(());
@@ -1031,8 +1104,15 @@ impl Node {
                 }
             }
             match self.replica.finalize_seals(self.domain().scope).await {
-                Ok(0) => {}
-                Ok(_) => self.observations.touch(),
+                Ok(finalization) => {
+                    if finalization.admitted > 0 {
+                        self.observations.touch();
+                    }
+                    self.finality_stalled(finalization.stalled.map(crate::FinalityStall::of));
+                }
+                Err(rocky_secure::Error::Incompatible(error)) => {
+                    self.finality_stalled(Some(crate::FinalityStall::UnsupportedFormat { error }));
+                }
                 Err(error) => {
                     self.activity.record(crate::ActivityKind::FinalityFailed {
                         error: (error.to_string()).to_owned(),
@@ -1048,6 +1128,37 @@ impl Node {
         }
     }
 
+    /// Raises, keeps or clears the alert of a seal this trusted node's
+    /// finality pass left unfinal, for `reason`.
+    fn finality_stalled(&self, reason: Option<crate::FinalityStall>) {
+        let mut stalled = self
+            .finality_stalled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let same = match (&*stalled, &reason) {
+            (None, None) => true,
+            (
+                Some(crate::Alert {
+                    kind: crate::AlertKind::FinalityStalled { reason: held },
+                    ..
+                }),
+                Some(reason),
+            ) => held == reason,
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        *stalled = reason.map(|reason| {
+            tracing::warn!(%reason, "a seal stays unfinal");
+            crate::Alert {
+                kind: crate::AlertKind::FinalityStalled { reason },
+                since: self.status_time().ok(),
+            }
+        });
+        drop(stalled);
+        self.observations.touch();
+    }
     /// Finality permits automatic compaction; nonfinal seals still require
     /// the application's compact call (or migration completion).
     async fn compact_final_seal(&self) -> Result<(), Failure> {
@@ -1061,7 +1172,7 @@ impl Node {
         let Some(seal) = status.finalized else {
             return Ok(());
         };
-        if !graph.is_final(seal)? {
+        if !graph.compacts_final(seal)? {
             return Ok(());
         }
         if status.compacted != Some(seal) || self.replica.needs_base_at(scope, seal).await? {

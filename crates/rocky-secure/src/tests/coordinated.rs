@@ -7,7 +7,11 @@ use rocky_coordinator::coordinated::{MemoryLog, MemoryLogClient};
 use rocky_core::{DomainLog, Scope, SqlValue, TipLog, TypedRows};
 use std::sync::Arc;
 
+mod carried;
+mod declared;
+mod dropped;
 mod finality;
+mod formats;
 mod recovery;
 mod relay;
 mod seals;
@@ -101,6 +105,7 @@ async fn a_seal_ends_its_log_once_and_a_retry_answers_the_same_position() {
     let terminal = rocky_core::LogTerminal {
         digest: [5; 32],
         continuation: None,
+        confirms: false,
     };
     let position = fixture
         .alice
@@ -121,6 +126,7 @@ async fn a_seal_ends_its_log_once_and_a_retry_answers_the_same_position() {
     let other = rocky_core::LogTerminal {
         digest: [6; 32],
         continuation: None,
+        confirms: false,
     };
     assert!(matches!(
         fixture

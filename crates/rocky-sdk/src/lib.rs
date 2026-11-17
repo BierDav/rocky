@@ -210,7 +210,7 @@ pub use connection::{
 };
 #[cfg(not(target_family = "wasm"))]
 pub use custody::{CustodyConfiguration, CustodyPeer};
-pub use database::{Connection, Database, NetworkService, Open, Opened, Session};
+pub use database::{Connection, CoordinatorSlot, Database, NetworkService, Open, Opened, Session};
 pub use delivery::State as DeliveryState;
 #[cfg(not(target_family = "wasm"))]
 pub use engine::{Engine, EngineMode, EngineOptions};
@@ -231,8 +231,8 @@ pub use registry::{
 };
 pub(crate) use reset::ResetRefused;
 pub use reset::{Freshness, ResetKeep, ResetReceipt, RestoreChoice};
-pub use rocky_credentials::Coordinator;
 pub use rocky_credentials::counters;
+pub use rocky_credentials::{Coordinator, CoordinatorBundle, CoordinatorConnector};
 
 /// An operation requiring coordination was called without an application coordinator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

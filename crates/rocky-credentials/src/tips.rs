@@ -4,7 +4,7 @@ use crate::{
     CredentialChain, Endorsement, Error, IdentityProvider, PublicKey, RevocationSet, SealFinality,
     SignedCheckpointRecord, TerminalAck, decode_bounded, denied, encode,
 };
-use rocky_core::{Commitment, Scope, TipId};
+use rocky_core::{Commitment, CoordinatorIdentity, Scope, TipId};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Reverse,
@@ -622,7 +622,7 @@ struct ChainIndex(Mutex<Places>);
 struct Places {
     /// Per list, finality records last: how many it indexed, and the last
     /// one's ID.
-    built: [(usize, Option<Commitment>); 6],
+    built: [(usize, Option<Commitment>); 7],
     /// Each chained statement's identity and link, by ID.
     links: BTreeMap<Commitment, (PublicKey, ChainLink)>,
     /// Each acknowledgment's identity and link, by ID.
@@ -639,6 +639,13 @@ struct Places {
     seals: BTreeMap<Commitment, usize>,
     /// The finality records naming each seal, by seal.
     finals: BTreeMap<Commitment, BTreeSet<Commitment>>,
+    /// The coordination service each finality record's acknowledgments name.
+    final_coordinators: BTreeMap<Commitment, CoordinatorIdentity>,
+    /// The finality records whose log decided their seal.
+    decided: BTreeSet<Commitment>,
+    /// Per scope, the coordinator the earliest coordinated settings revision
+    /// names, by revision and then the lower digest: the database's for good.
+    founding: BTreeMap<Scope, ((u64, Commitment), CoordinatorIdentity)>,
 }
 impl Places {
     fn refer(&mut self, id: Commitment, refs: Vec<Commitment>) {
@@ -724,10 +731,31 @@ indexed_statement!(
     SignedGenesisLine => |_s| Vec::new(),
     SignedCheckpointRecord => |s| vec![s.statement.seal],
 );
+impl Indexed for crate::SignedDatabaseSettings {
+    fn index(&self, id: Commitment, _: usize, places: &mut Places) -> Result<(), Error> {
+        if let Some(bundle) = self.statement.coordinator() {
+            let key = (self.statement.revision, id);
+            let founding = places
+                .founding
+                .entry(self.statement.scope)
+                .or_insert((key, bundle.identity));
+            if key < founding.0 {
+                *founding = (key, bundle.identity);
+            }
+        }
+        Ok(())
+    }
+}
 impl Indexed for SealFinality {
     fn index(&self, id: Commitment, _: usize, places: &mut Places) -> Result<(), Error> {
         places.refer(id, vec![self.seal]);
         places.finals.entry(self.seal).or_default().insert(id);
+        if let Some(coordinator) = self.coordinator() {
+            places.final_coordinators.insert(id, coordinator);
+        }
+        if self.decided() {
+            places.decided.insert(id);
+        }
         for ack in &self.acknowledgments {
             if let Some(identity) = ack.identity() {
                 places.acks.insert(ack.id()?, (identity, ack.link));
@@ -778,6 +806,8 @@ pub struct TipGraph {
     pub genesis_lines: Vec<SignedGenesisLine>,
     pub finalities: Vec<SealFinality>,
     pub checkpoints: Vec<SignedCheckpointRecord>,
+    /// The owner's signed settings of the database, every revision.
+    pub settings: Vec<crate::SignedDatabaseSettings>,
     /// Seals, moves and checkpoint records a revocation ended the signer of, and finality
     /// records it left below their line's minimum: kept, inspectable, and
     /// left out of resolution. See [`Self::exclude_revoked`].
@@ -818,6 +848,7 @@ impl TipGraph {
             genesis_lines: Vec::new(),
             finalities: Vec::new(),
             checkpoints: Vec::new(),
+            settings: Vec::new(),
             revoked: BTreeSet::new(),
             past_cut: BTreeSet::new(),
             equivocations: BTreeSet::new(),
@@ -887,7 +918,7 @@ impl TipGraph {
                 )*
             };
         }
-        lists!(0 seals, 1 openings, 2 moves, 3 genesis_lines, 4 checkpoints, 5 finalities);
+        lists!(0 seals, 1 openings, 2 moves, 3 genesis_lines, 4 checkpoints, 5 finalities, 6 settings);
         Ok(index)
     }
     /// Every signed statement: a lazy ID, its chain and its link.
@@ -1381,14 +1412,65 @@ impl TipGraph {
     ) -> (Reverse<TipAuthority>, Commitment) {
         (Reverse(TipAuthority::of(endorsement, self.scope)), id)
     }
-    /// Whether a finality record that revocation left whole names `seal`.
-    /// Admission verified the record against its line's minimum.
+    /// Whether a finality record that revocation left whole names `seal`,
+    /// acknowledged at the coordinator the settings name when they name
+    /// one: another service's records never make a seal final, whenever
+    /// they arrived. Admission verified the record against its line's
+    /// minimum.
     pub fn is_final(&self, seal: Commitment) -> Result<bool, Error> {
-        Ok(self
+        self.final_by(seal, false)
+    }
+    /// Whether `record` counts toward finality here: acknowledged at the
+    /// coordinator the settings name, or at any while they name none.
+    /// A verified record that does not count proves nothing final.
+    pub fn counts_finality(&self, record: &SealFinality) -> Result<bool, Error> {
+        let named = self
             .indexed()?
-            .finals
-            .get(&seal)
-            .is_some_and(|records| records.iter().any(|id| !self.revoked.contains(id))))
+            .founding
+            .get(&self.scope)
+            .map(|(_, identity)| *identity);
+        Ok(named.is_none_or(|named| record.coordinator() == Some(named)))
+    }
+    /// The coordination services this scope's finality records that no
+    /// revocation ended name.
+    pub fn finality_coordinators(&self) -> Result<BTreeSet<CoordinatorIdentity>, Error> {
+        let mut named = BTreeSet::new();
+        for record in &self.finalities {
+            if record.scope == self.scope
+                && !self.revoked.contains(&record.id()?)
+                && let Some(coordinator) = record.coordinator()
+            {
+                named.insert(coordinator);
+            }
+        }
+        Ok(named)
+    }
+    /// Whether finality lets `seal` be compacted: it is final at the
+    /// coordinator the settings name. Without settings any coordinator's
+    /// record counts as final, and settings arriving later could name
+    /// another and undo it, so compaction waits for them.
+    pub fn compacts_final(&self, seal: Commitment) -> Result<bool, Error> {
+        Ok(self.indexed()?.founding.contains_key(&self.scope) && self.is_final(seal)?)
+    }
+    /// Whether `seal` is final through a finality record of the named
+    /// coordinator whose log decided it, and was not told of it by graphs
+    /// that held it first; false while the settings name none.
+    pub fn decided_by_named(&self, seal: Commitment) -> Result<bool, Error> {
+        Ok(self.indexed()?.founding.contains_key(&self.scope) && self.final_by(seal, true)?)
+    }
+    fn final_by(&self, seal: Commitment, decided: bool) -> Result<bool, Error> {
+        let index = self.indexed()?;
+        let named = index
+            .founding
+            .get(&self.scope)
+            .map(|(_, identity)| *identity);
+        Ok(index.finals.get(&seal).is_some_and(|records| {
+            records.iter().any(|id| {
+                !self.revoked.contains(id)
+                    && (!decided || index.decided.contains(id))
+                    && named.is_none_or(|named| index.final_coordinators.get(id) == Some(&named))
+            })
+        }))
     }
     /// The checkpoints listed at `seal` that no revocation ended.
     pub fn checkpoints_at(&self, seal: Commitment) -> Result<Vec<&SignedCheckpointRecord>, Error> {
@@ -1399,6 +1481,105 @@ impl TipGraph {
             }
         }
         Ok(listed)
+    }
+    /// The owner's governing settings of the database. Once a revision
+    /// names a coordinator, the database's coordinator is that of its
+    /// earliest coordinated revision (the lower digest between two of one
+    /// revision) and the highest revision naming that coordinator governs;
+    /// revisions that uncoordinate it or name another are held and ignored.
+    /// Before, the highest revision governs. Every order of receipt
+    /// resolves alike.
+    pub fn settings(&self) -> Result<Option<&crate::DatabaseSettingsStatement>, Error> {
+        Ok(self.governing_settings()?.map(|signed| &signed.statement))
+    }
+    /// The coordinator the governing settings name: once coordinated, a
+    /// database stays so, by one coordinator. Every seal of the database
+    /// then ends its tip's log there first.
+    pub fn coordinator(&self) -> Result<Option<&crate::CoordinatorBundle>, Error> {
+        Ok(self
+            .governing_settings()?
+            .and_then(|signed| signed.statement.coordinator()))
+    }
+    fn governing_settings(&self) -> Result<Option<&crate::SignedDatabaseSettings>, Error> {
+        let founding = self
+            .indexed()?
+            .founding
+            .get(&self.scope)
+            .map(|(_, identity)| *identity);
+        let mut governing: Option<((u64, Reverse<Commitment>), &crate::SignedDatabaseSettings)> =
+            None;
+        for signed in self.settings.iter().filter(|s| {
+            s.statement.scope == self.scope
+                && founding.is_none_or(|founding| {
+                    s.statement
+                        .coordinator()
+                        .is_some_and(|bundle| bundle.identity == founding)
+                })
+        }) {
+            let key = (signed.statement.revision, Reverse(signed.id()?));
+            if governing.as_ref().is_none_or(|(current, _)| key > *current) {
+                governing = Some((key, signed));
+            }
+        }
+        Ok(governing.map(|(_, signed)| signed))
+    }
+    /// The owner's next settings revision with `coordination`; None when
+    /// the governing settings already say exactly that. Refuses a revision
+    /// that would uncoordinate a coordinated database or change its
+    /// coordinator, and a first coordinated one naming another coordinator
+    /// than this scope's finality records: the seals they made final would
+    /// stop being final, compacted ones too. The owner's devices check
+    /// before they sign, since the graph admits every signed revision.
+    pub fn next_settings(
+        &self,
+        coordination: crate::Coordination,
+    ) -> Result<Option<crate::DatabaseSettingsStatement>, Error> {
+        if let crate::Coordination::Coordinated { bundle } = &coordination
+            && self.coordinator()?.is_none()
+            && self
+                .finality_coordinators()?
+                .iter()
+                .any(|named| *named != bundle.identity)
+        {
+            return Err(denied(
+                "the database's finality records name another coordinator: name that one",
+            ));
+        }
+        if let Some(held) = self.coordinator()? {
+            match &coordination {
+                crate::Coordination::Uncoordinated => {
+                    return Err(denied(
+                        "a coordinated database stays coordinated: its settings never uncoordinate it",
+                    ));
+                }
+                crate::Coordination::Coordinated { bundle } if bundle.identity != held.identity => {
+                    return Err(denied(
+                        "a coordinated database keeps its coordinator: changing it is not supported",
+                    ));
+                }
+                crate::Coordination::Coordinated { .. } => {}
+            }
+        }
+        if self
+            .settings()?
+            .is_some_and(|governing| governing.coordination == coordination)
+        {
+            return Ok(None);
+        }
+        let revision = self
+            .settings
+            .iter()
+            .filter(|s| s.statement.scope == self.scope)
+            .map(|s| s.statement.revision)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        Ok(Some(crate::DatabaseSettingsStatement {
+            format: crate::DATABASE_SETTINGS_FORMAT,
+            scope: self.scope,
+            revision,
+            coordination,
+        }))
     }
     /// The minimum of distinct trusted nodes a seal of `tip` needs to be
     /// final: its line's opening's, or on the genesis line
@@ -1637,6 +1818,49 @@ impl TipGraph {
             }
             cursor = parent.ok_or_else(|| denied("unknown tip"))?;
         }
+    }
+    /// The tip a frame written on `tip` counts as written on: `tip` while
+    /// it is active. In a database whose settings name a coordinator, on the
+    /// continuations of a seal that lost its tip at that coordinator's log,
+    /// the nearest active tip they continue under one schema: that log
+    /// decided the tip for the winner, so writes made after the losing seal
+    /// are the tip's late writes and walk on to the winning line instead of
+    /// being lost with it. A loss the log only confirmed, because graphs
+    /// held the winner first, a loss before the settings, or one through a
+    /// revoked seal stays as it was: two seals of a tip are both real and a
+    /// losing continuation's writes are held for re-authoring. Graph state
+    /// alone decides, so every replica resolves a frame alike.
+    pub fn late_anchor(&self, tip: TipId) -> Result<TipId, Error> {
+        if !self.indexed()?.founding.contains_key(&self.scope) || self.schema(tip).is_ok() {
+            return Ok(tip);
+        }
+        let Ok(schema) = self.schema_any(tip) else {
+            return Ok(tip);
+        };
+        let continuations = self.seals_by_continuation();
+        let mut cursor = tip;
+        let mut visited = BTreeSet::new();
+        while visited.insert(cursor) {
+            let Some(seal) = continuations.get(&cursor) else {
+                return Ok(tip);
+            };
+            if self.revoked.contains(&seal.id()?) {
+                return Ok(tip);
+            }
+            cursor = seal.statement.tip;
+            if let Ok(active) = self.schema(cursor) {
+                let decided = match self.seal(cursor)? {
+                    Some(winner) => self.decided_by_named(winner.id()?)?,
+                    None => false,
+                };
+                return Ok(if active == schema && decided {
+                    cursor
+                } else {
+                    tip
+                });
+            }
+        }
+        Err(denied("cyclic tip graph"))
     }
     /// Whether `to` follows one or more canonical continue seals from `from`.
     pub fn continues(&self, from: TipId, to: TipId) -> Result<bool, Error> {

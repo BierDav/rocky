@@ -40,6 +40,37 @@ pub mod counters;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod native_tests;
 
+/// Reaches the voters a database's signed settings name, through the
+/// application's transport, once their certified genesis verifies against
+/// the settings' identity.
+pub struct Connector {
+    transport: std::sync::Arc<dyn rocky_core::net::Transport>,
+}
+impl Connector {
+    pub fn new(transport: std::sync::Arc<dyn rocky_core::net::Transport>) -> Self {
+        Self { transport }
+    }
+}
+impl rocky_credentials::CoordinatorConnector for Connector {
+    fn connect(
+        &self,
+        bundle: &rocky_credentials::CoordinatorBundle,
+    ) -> Result<std::sync::Arc<dyn rocky_credentials::Coordinator>, rocky_core::CoordinationError>
+    {
+        let genesis = certified::CertifiedGenesis::from_bytes(&bundle.certified)?;
+        let root = rocky_credentials::PublicKey::from_bytes(&bundle.identity.root)
+            .map_err(|_| rocky_core::CoordinationError::Denied)?;
+        genesis.verify(root, bundle.identity.mesh)?;
+        if genesis.id()? != bundle.identity.genesis {
+            return Err(rocky_core::CoordinationError::Denied);
+        }
+        Ok(std::sync::Arc::new(service::NetworkCoordinator::connect(
+            &certified::TrustBundle::new(&genesis)?,
+            rocky_credentials::PrivateKey::new(),
+            self.transport.clone(),
+        )?))
+    }
+}
 /// Application-owned voter client; Rocky binds an independent node session at open.
 pub struct Client;
 impl Client {

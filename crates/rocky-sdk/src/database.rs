@@ -35,7 +35,17 @@ pub struct Open<'a> {
     pub identity: Option<Arc<dyn crate::IdentityProvider>>,
     pub network: Option<Network>,
     /// Application-owned coordinator; local storage works without one.
-    pub coordination: Option<Arc<dyn rocky_credentials::Coordinator>>,
+    pub coordination: Option<CoordinatorSlot>,
+}
+/// How a database reaches its coordination service; the application owns
+/// both and their transport. An explicit client must be the coordinator
+/// the database's owner-signed settings name: another is refused with
+/// `coordinator_mismatch`. A connector reaches whichever one they name,
+/// once a sync brings the settings.
+#[derive(Clone)]
+pub enum CoordinatorSlot {
+    Client(Arc<dyn rocky_credentials::Coordinator>),
+    Connector(Arc<dyn rocky_credentials::CoordinatorConnector>),
 }
 /// An open database and the network service it opened with, if any.
 pub struct Opened {
@@ -157,7 +167,10 @@ struct Setup {
     secrets: Arc<dyn SecretStore>,
     identity: Option<Arc<dyn crate::IdentityProvider>>,
     install: Install,
-    coordination: Option<Arc<dyn rocky_credentials::Coordinator>>,
+    coordination: Option<CoordinatorSlot>,
+    /// The settings a create with a coordinator client signs with the root,
+    /// published before the database is handed out.
+    created_settings: std::sync::Mutex<Option<rocky_credentials::SignedDatabaseSettings>>,
     confirmation: Option<String>,
     /// Where a hosted database hands out its node.
     #[cfg(test)]
@@ -203,6 +216,10 @@ enum Command {
     Coordinate(
         Option<Arc<dyn rocky_credentials::Coordinator>>,
         oneshot::Sender<Result<(), Failure>>,
+    ),
+    Connector(
+        Option<Arc<dyn rocky_credentials::CoordinatorConnector>>,
+        oneshot::Sender<()>,
     ),
     #[cfg(feature = "qualification")]
     LockMeasurements(oneshot::Sender<rocky_secure::LockMeasurements>),
@@ -703,6 +720,7 @@ impl Database {
             directory,
             install,
             coordination: open.coordination,
+            created_settings: std::sync::Mutex::new(None),
             confirmation,
             #[cfg(test)]
             expose: None,
@@ -768,6 +786,18 @@ impl Database {
         self.shared
             .request(|reply| Command::Coordinate(log, reply))
             .await??;
+        Ok(())
+    }
+    /// Reaches whichever coordinator the database's owner-signed settings
+    /// name through `connector` while no coordinator is composed; `None`
+    /// stops that.
+    pub async fn connect_coordinator(
+        &self,
+        connector: Option<Arc<dyn rocky_credentials::CoordinatorConnector>>,
+    ) -> Result<(), Failure> {
+        self.shared
+            .request(|reply| Command::Connector(connector, reply))
+            .await?;
         Ok(())
     }
     /// The value `claim` takes from the domain's `counter` on the composed
@@ -1206,6 +1236,16 @@ impl Session {
         )
         .await
     }
+    /// The owner declares the domain coordinated, once: every device
+    /// learns it by sync, and a trusted node without a composed coordinated
+    /// log then refuses to seal with `coordinator_required`.
+    pub async fn declare_coordinated(
+        &self,
+        root: Arc<dyn crate::IdentityProvider>,
+    ) -> Result<crate::TipStatus, Failure> {
+        self.change_tip(crate::request::TipChange::DeclareCoordinated, Some(root))
+            .await
+    }
     pub async fn compact(&self, keep: usize) -> Result<crate::TipCompaction, Failure> {
         self.send(|reply| crate::request::Request::Compact(keep, reply))
             .await
@@ -1543,6 +1583,23 @@ async fn identity(
                 }
                 None => Settings::create(schema, secrets, *ttl, setup.identity.clone(), &*root)?,
             };
+            if let Some(CoordinatorSlot::Client(client)) = &setup.coordination {
+                *setup
+                    .created_settings
+                    .lock()
+                    .map_err(|_| "created settings poisoned")? =
+                    Some(rocky_credentials::SignedDatabaseSettings::sign(
+                        rocky_credentials::DatabaseSettingsStatement {
+                            format: rocky_credentials::DATABASE_SETTINGS_FORMAT,
+                            scope: settings.domain()?.scope,
+                            revision: 1,
+                            coordination: rocky_credentials::Coordination::Coordinated {
+                                bundle: client.bundle()?,
+                            },
+                        },
+                        &*root,
+                    )?);
+            }
             drop(root);
             let vault = settings.vault(secrets);
             let started = async {
@@ -2277,19 +2334,20 @@ async fn run_inner(
             .await?;
         settings.bootstrap = None;
         retain(&replica, &settings, &domain).await?;
-        let coordinator = setup
-            .coordination
-            .as_ref()
-            .map(|client| {
-                let key = rocky_credentials::PrivateKey::from_bytes(&vault.get("node")?);
-                let certificate = settings
-                    .credentials
-                    .certificate()
-                    .ok_or("missing node certificate")?
-                    .clone();
-                client.bind(key, certificate).map_err(Failure::from)
-            })
-            .transpose()?;
+        let coordinator = match &setup.coordination {
+            Some(CoordinatorSlot::Client(client)) => Some(client),
+            Some(CoordinatorSlot::Connector(_)) | None => None,
+        }
+        .map(|client| {
+            let key = rocky_credentials::PrivateKey::from_bytes(&vault.get("node")?);
+            let certificate = settings
+                .credentials
+                .certificate()
+                .ok_or("missing node certificate")?
+                .clone();
+            client.bind(key, certificate).map_err(Failure::from)
+        })
+        .transpose()?;
         settings.save(&path)?;
         Ok::<_, Failure>((domain, replica, coordinator))
     }
@@ -2320,7 +2378,11 @@ async fn run_inner(
         let _ = expose.send(Arc::downgrade(&node));
     }
     node.coordinate_bound(coordinator);
+    if let Some(CoordinatorSlot::Connector(connector)) = &setup.coordination {
+        node.set_connector(Some(connector.clone()));
+    }
     let started = async {
+        node.refuse_mismatched_coordinator().await?;
         crate::identities::supplying(startup_identity, async {
             node.restore_line_signers().await?;
             node.complete_revocation().await?;
@@ -2333,6 +2395,18 @@ async fn run_inner(
             Ok::<_, Failure>(())
         })
         .await?;
+        let created = setup
+            .created_settings
+            .lock()
+            .map_err(|_| "created settings poisoned")?
+            .take();
+        if let Some(signed) = created {
+            crate::recovery::fault::check(
+                &directory,
+                crate::recovery::fault::Stage::SettingsSigned,
+            )?;
+            node.publish_settings(signed).await?;
+        }
         if let Install::Create {
             bookmark: Some(name),
             ..
@@ -2541,6 +2615,11 @@ async fn run_inner(
             Command::Coordinate(log, reply) => {
                 let _ = reply.send(node.coordinate(log).await);
             }
+            Command::Connector(connector, reply) => {
+                node.set_connector(connector);
+                node.adopt_named_coordinator().await;
+                let _ = reply.send(());
+            }
             #[cfg(feature = "qualification")]
             Command::LockMeasurements(reply) => {
                 let _ = reply.send(node.replica.lock_measurements());
@@ -2735,6 +2814,66 @@ async fn discard(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A first open that cannot publish the settings its creation signed
+    /// discards the database whole: none is left without them, and creating
+    /// it again signs them anew.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_create_that_cannot_publish_its_settings_leaves_no_database() -> Result<(), Failure> {
+        let directory = rocky_platform::fs::Scratch::new().await;
+        let schema = serde_json::to_string(
+            &crate::Schema::builder("settled", 1)
+                .table(
+                    crate::Table::replayed("items")
+                        .column(crate::Column::new("title", crate::Affinity::Text)),
+                )
+                .build()?,
+        )?;
+        let log = rocky_coordinator::coordinated::MemoryLog::new();
+        let options = || Open {
+            directory: directory.path(),
+            schema: &schema,
+            secrets: None,
+            identity: None,
+            network: None,
+            coordination: Some(CoordinatorSlot::Client(Arc::new(
+                log.client(rocky_credentials::PrivateKey::new().public_key()),
+            ))),
+        };
+        crate::recovery::fault::STOPS
+            .lock()
+            .map_err(|_| "poisoned fault")?
+            .push((
+                directory.path().to_owned(),
+                crate::recovery::fault::Stage::SettingsSigned,
+            ));
+        let failed = Database::create(options(), None)
+            .err()
+            .ok_or("the create published no settings yet succeeded")?;
+        assert!(failed.to_string().contains("SettingsSigned"), "{failed}");
+        assert!(
+            Database::open(Open {
+                coordination: None,
+                ..options()
+            })
+            .is_err(),
+            "nothing is left to open"
+        );
+        let created = Database::create(options(), None)?;
+        let named = created
+            .database
+            .session()
+            .inspect_tips()
+            .await?
+            .coordinator
+            .ok_or("the settings name no coordinator")?;
+        assert_eq!(
+            named.genesis,
+            data_encoding::HEXLOWER.encode(&log.bundle().identity.genesis)
+        );
+        created.database.close().await
+    }
 
     /// Close awaits the database thread's end instead of joining it, so
     /// the closer's single-threaded executor runs other tasks meanwhile.

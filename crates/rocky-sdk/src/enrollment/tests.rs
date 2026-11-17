@@ -1019,6 +1019,38 @@ fn forged_tip_schema_records_are_refused_without_changing_the_installation() -> 
 }
 
 #[test]
+fn an_enrollment_graph_carries_only_settings_its_owner_signed() -> Result<(), Failure> {
+    use rocky_credentials::{
+        Coordination, DATABASE_SETTINGS_FORMAT, DatabaseSettingsStatement, SignedDatabaseSettings,
+    };
+    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(EpochKeys::default());
+    let root = rocky_credentials::RootKey::generate();
+    let installed = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL, None, &root)?;
+    let statement = DatabaseSettingsStatement {
+        format: DATABASE_SETTINGS_FORMAT,
+        scope: installed.domain()?.scope,
+        revision: 1,
+        coordination: Coordination::Uncoordinated,
+    };
+    let with = |signed: SignedDatabaseSettings| -> Result<crate::tip_schemas::Bootstrap, Failure> {
+        let mut bootstrap = installed.schema_bootstrap()?;
+        bootstrap.graph.settings.push(signed);
+        Ok(bootstrap)
+    };
+    with(SignedDatabaseSettings::sign(statement.clone(), &root)?)?.verify(&installed)?;
+    let forged =
+        SignedDatabaseSettings::sign(statement.clone(), &rocky_credentials::RootKey::generate())?;
+    assert!(
+        with(forged)?.verify(&installed).is_err(),
+        "settings another root signed never enter an enrolling device's graph"
+    );
+    let mut tampered = SignedDatabaseSettings::sign(statement, &root)?;
+    tampered.statement.revision = 2;
+    assert!(with(tampered)?.verify(&installed).is_err());
+    Ok(())
+}
+
+#[test]
 fn an_issuer_without_the_key_of_a_known_partition_may_not_migrate() -> Result<(), Failure> {
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(EpochKeys::default());
     let mut issuer = Settings::create(

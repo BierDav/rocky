@@ -42,7 +42,7 @@ use std::{
 /// join requests wait in `Issuing::requests`, a passkey-installed personal
 /// device keeps its publication ID and freshness in `personal`, and a
 /// personal custodian its vouched naming root escrow in `naming_escrow`.
-pub const VERSION: u32 = 36;
+pub const VERSION: u32 = 37;
 /// Current invitation format: the issuer's node key, and a profile only
 /// when the invited device is admitted on arrival.
 const INVITE_VERSION: u32 = 7;

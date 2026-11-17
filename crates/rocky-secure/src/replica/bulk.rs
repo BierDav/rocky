@@ -398,6 +398,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if state != "committed" || stage.coordinated {
             return Err(denied("schema publication requires terminal finality"));
         }
+        super::staging::refuse_uncoordinated_stage(&stage, inner.graph_for(stage.scope)?)?;
         inner.release_and_reload(&stage, None).await?;
         inner = flush_guard(inner, &self.inner).await?;
         inner.publish_revision().await

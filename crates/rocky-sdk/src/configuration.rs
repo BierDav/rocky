@@ -9,7 +9,7 @@ pub struct Configuration {
     secrets: Option<Arc<dyn SecretStore>>,
     identity: Option<Arc<dyn IdentityProvider>>,
     network: Option<Network>,
-    coordination: Option<Arc<dyn rocky_credentials::Coordinator>>,
+    coordination: Option<crate::CoordinatorSlot>,
     name: String,
     sign_in_wait: std::time::Duration,
 }
@@ -62,9 +62,22 @@ impl Configuration {
         self.sign_in_wait = wait;
         self
     }
+    /// An explicit coordinator client. Creating with one names it in the
+    /// database's owner-signed settings, so the database is coordinated from
+    /// its first tip; a database whose settings name another refuses it.
     #[must_use]
     pub fn coordination(mut self, coordination: Arc<dyn rocky_credentials::Coordinator>) -> Self {
-        self.coordination = Some(coordination);
+        self.coordination = Some(crate::CoordinatorSlot::Client(coordination));
+        self
+    }
+    /// Reaches whichever coordinator the database's owner-signed settings
+    /// name, once a sync brings them, instead of an explicit client.
+    #[must_use]
+    pub fn coordinator_connector(
+        mut self,
+        connector: Arc<dyn rocky_credentials::CoordinatorConnector>,
+    ) -> Self {
+        self.coordination = Some(crate::CoordinatorSlot::Connector(connector));
         self
     }
     fn options(&self) -> Open<'_> {

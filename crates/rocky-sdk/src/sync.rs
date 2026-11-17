@@ -64,9 +64,7 @@ fn counts_against_import(error: &Failure) -> bool {
 fn counts_against_checkpoint(error: &rocky_secure::Error) -> bool {
     match error {
         rocky_secure::Error::Io(_) | rocky_secure::Error::Closed => false,
-        rocky_secure::Error::Rejected(reason) => {
-            !reason.starts_with("link ") && !reason.ends_with(" timeout")
-        }
+        rocky_secure::Error::Rejected(reason) => !reason.starts_with("link "),
         _ => true,
     }
 }

@@ -466,7 +466,7 @@ impl NativeSession {
             SessionIo::Channel(channel) => channel.close().await,
             SessionIo::Native(stream) => timeout(TIMEOUT, stream.shutdown())
                 .await
-                .map_err(|_| denied("native write timeout"))?
+                .map_err(|_| link::timed_out("native write timeout"))?
                 .map_err(Error::Io),
         }
     }
@@ -576,7 +576,7 @@ impl NativeSession {
         let bytes = match &mut self.stream {
             SessionIo::Channel(channel) if idle => channel.receive_with_idle(true).await,
             SessionIo::Channel(channel) => channel.receive().await,
-            SessionIo::Native(stream) => read_frame_with_idle(stream, idle).await,
+            SessionIo::Native(stream) => read_frame(stream).await,
         };
         let bytes = match bytes {
             Ok(bytes) => bytes,
@@ -838,7 +838,7 @@ async fn write_frame(stream: &mut impl SessionStream, bytes: &[u8]) -> Result<()
     if bytes.len() > MAX_SECURE_FRAME {
         return Err(denied("native frame quota"));
     }
-    let expired = || denied("native write timeout");
+    let expired = || link::timed_out("native write timeout");
     write_progress(stream, &(bytes.len() as u32).to_be_bytes(), expired).await?;
     write_progress(stream, bytes, expired).await?;
     timeout(TIMEOUT, stream.flush())
@@ -846,24 +846,18 @@ async fn write_frame(stream: &mut impl SessionStream, bytes: &[u8]) -> Result<()
         .map_err(|_| expired())?
         .map_err(Error::Io)
 }
+/// The peer's next admission frame. The peer may be working before it
+/// answers, as a browser replica busy with storage is, so the wait for a
+/// frame's first byte has no deadline of its own: `ADMISSION_LIMIT` bounds
+/// the whole admission. A started frame must keep making chunk progress.
 async fn read_frame(stream: &mut impl SessionStream) -> Result<Vec<u8>, Error> {
-    read_frame_with_idle(stream, false).await
-}
-async fn read_frame_with_idle(
-    stream: &mut impl SessionStream,
-    idle: bool,
-) -> Result<Vec<u8>, Error> {
-    let expired = || denied("native read timeout");
+    let expired = || link::timed_out("native read timeout");
     let mut header = [0; 4];
-    if idle {
-        stream
-            .read_exact(&mut header[..1])
-            .await
-            .map_err(Error::Io)?;
-        read_progress(stream, &mut header[1..], expired).await?;
-    } else {
-        read_progress(stream, &mut header, expired).await?;
-    }
+    stream
+        .read_exact(&mut header[..1])
+        .await
+        .map_err(Error::Io)?;
+    read_progress(stream, &mut header[1..], expired).await?;
     let length = u32::from_be_bytes(header) as usize;
     if length == 0 || length > MAX_SECURE_FRAME {
         return Err(denied("native frame quota"));
@@ -879,19 +873,19 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
-    async fn native_requests_wait_while_the_peer_applies_its_answer() {
+    async fn admission_waits_while_the_peer_works_before_its_next_frame() {
         let (mut near, mut far) = tokio::io::duplex(64);
         let deliver = async {
             rocky_platform::time::sleep(TIMEOUT * 2).await;
             write_frame(&mut far, &[7]).await.unwrap();
         };
-        let (received, ()) = tokio::join!(read_frame_with_idle(&mut near, true), deliver);
+        let (received, ()) = tokio::join!(read_frame(&mut near), deliver);
         assert_eq!(received.unwrap(), vec![7]);
     }
 
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
-    async fn native_requests_bound_a_started_header_after_idle() {
+    async fn a_started_admission_header_must_keep_making_progress() {
         let (mut near, mut far) = tokio::io::duplex(64);
         let start = rocky_platform::time::Instant::now();
         let deliver = async {
@@ -901,14 +895,19 @@ mod tests {
         };
         tokio::pin!(deliver);
         let received = tokio::select! {
-            received = read_frame_with_idle(&mut near, true) => received,
+            received = read_frame(&mut near) => received,
             () = &mut deliver => unreachable!(),
         };
+        let error = received.unwrap_err();
+        assert!(error.to_string().contains("native read timeout"));
         assert!(
-            received
-                .unwrap_err()
-                .to_string()
-                .contains("native read timeout")
+            matches!(&error, Error::Io(io) if io.kind() == std::io::ErrorKind::TimedOut),
+            "a stalled peer is a timeout, not a rejection: {error:?}"
+        );
+        assert_eq!(
+            RequestRefusal::of(&error),
+            RequestRefusal::Unavailable,
+            "a peer whose own link timed out does not refuse as not permitted"
         );
         assert_eq!(start.elapsed(), TIMEOUT * 3);
     }

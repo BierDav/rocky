@@ -504,7 +504,7 @@ impl Node {
                     superseded: moved.checkpoint.map(|(_, rows)| rows),
                 })
                 .collect();
-            report.scopes = scope_outcomes(transfer)
+            report.scopes = scope_outcomes(transfer, result.is_err())
                 .into_iter()
                 .map(|(scope, outcome)| ScopeOutcome {
                     scope: self.observed_scope(scope),
@@ -665,8 +665,13 @@ impl Node {
     }
 }
 
-/// Each scope an exchange reached and how it ended.
-fn scope_outcomes(transfer: &crate::sync::Transfer) -> Vec<(ResourceScope, ScopeSyncOutcome)> {
+/// Each scope an exchange reached and how it ended. When the exchange's
+/// session failed, a scope it had not finished is `Interrupted`: only a
+/// scope the peer refused or whose own request failed keeps that outcome.
+fn scope_outcomes(
+    transfer: &crate::sync::Transfer,
+    interrupted: bool,
+) -> Vec<(ResourceScope, ScopeSyncOutcome)> {
     let mut outcomes: Vec<(ResourceScope, ScopeSyncOutcome)> = Vec::new();
     let mut set = |scope: ResourceScope, outcome: ScopeSyncOutcome| match outcomes
         .iter_mut()
@@ -675,12 +680,17 @@ fn scope_outcomes(transfer: &crate::sync::Transfer) -> Vec<(ResourceScope, Scope
         Some((_, known)) => *known = outcome,
         None => outcomes.push((scope, outcome)),
     };
+    let reached = if interrupted {
+        ScopeSyncOutcome::Interrupted
+    } else {
+        ScopeSyncOutcome::Synced
+    };
     for scope in transfer
         .held
         .iter()
         .chain(transfer.scopes.iter().map(|(scope, _)| scope))
     {
-        set(*scope, ScopeSyncOutcome::Synced);
+        set(*scope, reached.clone());
     }
     for scope in &transfer.refused {
         set(*scope, ScopeSyncOutcome::Refused);
@@ -716,4 +726,52 @@ fn timeouts(attempts: &[AttemptObservation]) -> Vec<TimeoutCount> {
         }
     }
     counts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scope(n: u8) -> ResourceScope {
+        ResourceScope {
+            domain: rocky_core::Scope {
+                mesh: rocky_core::MeshId([1; 16]),
+                app: rocky_core::AppId([2; 16]),
+                domain: rocky_core::DomainId([3; 16]),
+            },
+            encryption: [n; 32],
+            table: [n; 32],
+        }
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_failed_session_leaves_its_unfinished_scopes_interrupted_not_refused() {
+        let transfer = crate::sync::Transfer {
+            held: vec![scope(1)],
+            scopes: vec![(
+                scope(2),
+                crate::sync::Moved {
+                    pushed: 32,
+                    ..Default::default()
+                },
+            )],
+            refused: vec![scope(3)],
+            failed: vec![scope(4)],
+            ..Default::default()
+        };
+        let outcome = |interrupted, n| {
+            scope_outcomes(&transfer, interrupted)
+                .into_iter()
+                .find(|(known, _)| *known == scope(n))
+                .map(|(_, outcome)| outcome)
+        };
+        for n in [1, 2] {
+            assert_eq!(outcome(true, n), Some(ScopeSyncOutcome::Interrupted));
+            assert_eq!(outcome(false, n), Some(ScopeSyncOutcome::Synced));
+        }
+        for interrupted in [true, false] {
+            assert_eq!(outcome(interrupted, 3), Some(ScopeSyncOutcome::Refused));
+            assert_eq!(outcome(interrupted, 4), Some(ScopeSyncOutcome::Failed));
+        }
+    }
 }

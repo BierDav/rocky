@@ -550,12 +550,16 @@ pub struct PeerReconciliation {
 #[serde(rename_all = "snake_case")]
 pub enum ScopeSyncOutcome {
     Synced,
-    /// One side's credentials grant no whole-scope access to the other.
+    /// One side's credentials grant no whole-scope access to the other, or
+    /// the peer refused the scope's requests as not permitted.
     Refused,
     /// The peer restores the scope from a checkpoint.
     PeerImporting,
-    /// The exchange failed while this scope was syncing.
+    /// A request of this scope failed; the exchange went on with others.
     Failed,
+    /// The exchange's session failed, by a timeout or a lost link, before
+    /// this scope finished. Nothing was refused; the next sync resumes it.
+    Interrupted,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeOutcome {

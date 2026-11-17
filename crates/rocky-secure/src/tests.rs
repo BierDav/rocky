@@ -1680,6 +1680,8 @@ mod reset;
 pub(crate) mod revocations;
 mod roles;
 mod rotation;
+#[cfg(not(target_family = "wasm"))]
+mod slow_peer;
 mod sql;
 mod tip_drop;
 mod tip_network;

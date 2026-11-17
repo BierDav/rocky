@@ -10,9 +10,10 @@ mod lanes;
 pub use lanes::{Reader, Writer};
 pub const FRAME_BYTES: usize = 64 * 1024;
 pub const SIGNAL_SCOPES: usize = 64;
-/// The whole handshake and admission: per-chunk read deadlines alone let a
-/// trickling peer hold an admission slot for hours.
-const ADMISSION_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// The whole handshake and admission, which may wait on a peer busy with
+/// its storage between frames; per-chunk read deadlines alone would let a
+/// trickling peer hold an admission slot for hours. As long as one request.
+const ADMISSION_LIMIT: std::time::Duration = REQUEST_LIMIT;
 /// Bytes of one health message; its owner encodes and bounds it.
 pub const HEALTH_BYTES: usize = 8 * 1024;
 

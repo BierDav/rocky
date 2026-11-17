@@ -6,21 +6,14 @@ pub struct BoundQuery {
     pub sql: String,
     pub values: Vec<SqlValue>,
 }
-/// Bounds of one page. A result longer than `max_rows` rows or `max_bytes`
-/// bytes ends early and reports a cursor in `ReadSnapshot::next`. What the
-/// following page costs depends on the cursor's `CursorKind`.
 #[derive(Clone, Debug)]
 pub struct ReadOptions {
     pub scope: Scope,
-    /// 1 to 1,024.
     pub max_rows: usize,
-    /// 1 to 1 MiB; one row larger than this is a quota error.
     pub max_bytes: usize,
-    /// `ReadSnapshot::next` of the previous page of the same query.
     pub cursor: Option<ReadCursor>,
 }
 impl ReadOptions {
-    /// The first page, bounded by `max_rows` and 1 MiB.
     pub fn new(scope: Scope, max_rows: usize) -> Self {
         Self {
             scope,
@@ -29,7 +22,6 @@ impl ReadOptions {
             cursor: None,
         }
     }
-    /// The page after the one that reported `cursor`.
     pub fn after(self, cursor: ReadCursor) -> Self {
         Self {
             cursor: Some(cursor),
@@ -37,26 +29,15 @@ impl ReadOptions {
         }
     }
 }
-/// How a cursor continues its query, and so what the next page costs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorKind {
-    /// Seeks to the last row read. The next page costs about the same at any
-    /// depth, and rows written between pages are neither repeated nor skipped.
     Keyset,
-    /// Skips the rows already read. The cost grows with the depth, and rows
-    /// inserted or deleted before the position shift later pages.
     Offset,
 }
-/// Continues one bound query in one scope; any other query rejects it. The
-/// runtime issues a keyset cursor when the view declares a key and the query
-/// is a plain column list ordered by plain columns in one direction, and an
-/// offset cursor otherwise; `kind` tells which. Pages can come from different
-/// revisions: each reports its own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadCursor {
     pub(crate) binding: rocky_core::Commitment,
     pub(crate) offset: u64,
-    /// The ordering values of the last row read.
     pub(crate) key: Option<Vec<SqlValue>>,
 }
 fn hex(bytes: &[u8], text: &mut String) {
@@ -81,8 +62,6 @@ impl ReadCursor {
             CursorKind::Offset
         }
     }
-    /// Text form for transports. A key never holds NULL (see
-    /// `read::Reads::snapshot`); `n` keeps the encoding total.
     pub fn encode(&self) -> String {
         let mut text = format!("{}:", self.offset);
         hex(&self.binding, &mut text);
@@ -140,7 +119,6 @@ impl ReadCursor {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Completeness {
-    /// Applied local subset, including this retained dependency backlog.
     Local { pending_operations: usize },
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,7 +127,6 @@ pub struct ReadSnapshot {
     pub scope: Scope,
     pub revision: LocalRevision,
     pub completeness: Completeness,
-    /// Set when the result has more rows than this page holds.
     pub next: Option<ReadCursor>,
 }
 #[derive(Clone, Debug)]
@@ -160,7 +137,6 @@ pub struct TypedSnapshot<R> {
     pub completeness: Completeness,
     pub next: Option<ReadCursor>,
 }
-/// Application-owned decoding; UI code uses this facade without engine values.
 pub trait TypedQuery {
     type Row;
     fn query(&self) -> BoundQuery;
@@ -172,9 +148,6 @@ where
     A::State: Clone,
     A::Policy: Send + 'static,
 {
-    /// One page of a bound query over the domain's authorized views, read
-    /// from committed stored rows beside the writer. Work that is queued but
-    /// not yet committed is not visible.
     pub async fn read(
         &self,
         query: BoundQuery,
@@ -182,8 +155,6 @@ where
     ) -> Result<ReadSnapshot, Error> {
         self.inner.reads()?.read(query, options).await
     }
-    /// The engine's query plan for `read(query, options)`, one step per line,
-    /// to verify that a read uses a declared index.
     pub async fn explain_read(
         &self,
         query: BoundQuery,
@@ -206,8 +177,6 @@ where
             next: snapshot.next,
         })
     }
-    /// Registers before its first read. `next` returns again once a table the
-    /// query reads or the dependency backlog changed.
     pub fn observe_read(
         &self,
         query: BoundQuery,
@@ -233,9 +202,7 @@ pub struct ReadObserver<R> {
     _budget: tokio::sync::OwnedSemaphorePermit,
     reads: Arc<crate::read::Reads>,
     shared: Arc<crate::read::SharedRead>,
-    /// Change counter of the view the query reads; none if it names no view.
     view: Option<watch::Receiver<u64>>,
-    /// Advances when completeness may have changed.
     meta: watch::Receiver<u64>,
     query: BoundQuery,
     options: ReadOptions,
@@ -243,8 +210,6 @@ pub struct ReadObserver<R> {
     row: std::marker::PhantomData<fn() -> R>,
 }
 impl<R> ReadObserver<R> {
-    /// Changes between two calls coalesce into one snapshot. Observers of the
-    /// same query share one execution per change.
     pub async fn next(&mut self) -> Result<ReadSnapshot, Error> {
         loop {
             let current = (

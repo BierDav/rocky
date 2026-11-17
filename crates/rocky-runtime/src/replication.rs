@@ -3,25 +3,16 @@ use rocky_core::{AppliedFrontier, NodeId, OperationId, StoredApplication};
 use tokio::sync::oneshot;
 
 pub const TRANSFER_PAGE_SIZE: usize = 32;
-/// Operations above the held frontier a `SyncState` lists.
 pub const MAX_SYNC_EXCEPTIONS: usize = 256;
 
-/// What a replica holds, in size independent of history: per-author
-/// frontiers plus a bounded list of operations received out of order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncState {
-    /// Per author, the contiguous prefix this replica holds: behind its
-    /// pruned prefix, applied, received or rejected.
     pub held: AppliedFrontier,
-    /// Retained operations above `held`, including dependency-pending ones,
-    /// lowest first. At most `MAX_SYNC_EXCEPTIONS`; a longer gap is resent.
     pub received: Vec<OperationId>,
     pub applied: AppliedFrontier,
-    /// Everything at or before it is applied and no longer listed or sent.
     pub pruned_prefix: AppliedFrontier,
 }
 impl SyncState {
-    /// Whether the replica holds `id`, as far as this state shows.
     pub fn holds(&self, id: OperationId) -> bool {
         self.held
             .0
@@ -38,7 +29,6 @@ pub struct Acknowledgment {
 #[derive(Clone, Debug)]
 pub struct TransferPage {
     pub records: Vec<Vec<u8>>,
-    /// Where a range request continues; `None` ends the pass.
     pub next: Option<OperationId>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -50,7 +40,6 @@ pub struct PeerProgress {
 }
 pub(crate) enum Request {
     Receive(Vec<u8>),
-    /// One bounded batch: receipt of each record and one application pass.
     ReceivePage(Vec<Vec<u8>>),
     Process,
     State,
@@ -60,21 +49,15 @@ pub(crate) enum Request {
     Acknowledge(NodeId, Acknowledgment),
     Progress(NodeId),
     PeerAcknowledgments(NodeId),
-    /// One operation's acknowledgment by a peer, if recorded; None only
-    /// checks that the peer is a delivery target.
     PeerAcknowledgment(NodeId, Option<OperationId>),
 }
 impl Request {
-    /// Receipt, application and acknowledgment write; the others only read.
     pub(crate) fn writes(&self) -> bool {
         matches!(
             self,
             Self::Receive(_) | Self::ReceivePage(_) | Self::Process | Self::Acknowledge(..)
         )
     }
-    /// Replies a peer may see: operations, our receipt set and frontier, and
-    /// the acknowledgment on which a sender drops its outbox entry. Recording
-    /// a peer's acknowledgment stays local: if it is lost, we resend.
     pub(crate) fn exposes(&self) -> bool {
         matches!(
             self,
@@ -125,26 +108,16 @@ where
             _ => Err(Error::Corrupt("operation lookup".into())),
         }
     }
-    /// Returns only after receipt commits. Applying dependencies is a separate step.
     pub async fn receive(&self, bytes: Vec<u8>) -> Result<Acknowledgment, Error> {
         match self.sync_request(Request::Receive(bytes)).await? {
             Response::Ack(ack) => Ok(ack),
             _ => Err(Error::Corrupt("unexpected receipt response".into())),
         }
     }
-    /// Receives a page of operations in bounded batches of at most
-    /// `TRANSFER_PAGE_SIZE` records and one frame of bytes. Each batch is one
-    /// commit and one flush: every record is received in its own savepoint,
-    /// then one application pass runs. The results are in input order. A
-    /// refused record fails alone; an accepted one reports whether it is
-    /// applied, and stays pending while a dependency is missing. An outer
-    /// error means the batch it names did not commit; resending is safe.
-    /// Call `process_pending` for work the single pass left.
     pub async fn receive_page(
         &self,
         records: Vec<Vec<u8>>,
     ) -> Result<Vec<Result<Acknowledgment, Error>>, Error> {
-        /// Leaves room for the queue's fixed weight within one frame.
         const BATCH_BYTES: usize = crate::MAX_FRAME_BYTES - 1024;
         let mut results: Vec<Option<Result<Acknowledgment, Error>>> = Vec::new();
         let mut batch = Vec::new();
@@ -193,7 +166,6 @@ where
         }
         Ok(())
     }
-    /// Yields between bounded passes until no ready pending work remains.
     pub async fn process_pending(&self) -> Result<(), Error> {
         loop {
             match self.sync_request(Request::Process).await? {

@@ -1,4 +1,3 @@
-//! Example resource policy: public employee names and private payroll companions.
 use rocky_core::{
     ApplicationManifest, AuthorLogScope, Commitment, DefinitionItem, DomainId, DomainRule, MeshId,
     ResourceScope, RowApplication, RowChange, RowFields, Scope,
@@ -13,7 +12,6 @@ impl Employees {
     pub fn new(publisher: [u8; 32]) -> Self {
         Self::in_domain(publisher, DomainId([1; 16]))
     }
-    /// The same application in `domain`, such as a personal database's.
     pub fn in_domain(publisher: [u8; 32], domain: DomainId) -> Self {
         Self { publisher, domain }
     }

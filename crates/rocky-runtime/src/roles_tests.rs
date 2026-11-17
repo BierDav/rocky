@@ -1,4 +1,3 @@
-//! Range reconciliation and full-node custody on the trusted path.
 use super::*;
 use crate::tests::{create, mutation};
 use rocky_core::fixtures;
@@ -15,7 +14,9 @@ fn config(node: NodeId, full_nodes: &[NodeId]) -> RuntimeConfig {
         full_nodes: full_nodes.to_vec(),
     }
 }
-fn manual(custody: usize) -> RuntimeOptions {
+const ONE_FULL_NODE: PrunedPrefixCustody =
+    PrunedPrefixCustody::FullNodesApplied(std::num::NonZeroUsize::MIN);
+fn manual(custody: PrunedPrefixCustody) -> RuntimeOptions {
     RuntimeOptions {
         retention: RetentionPolicy {
             window: 0,
@@ -30,7 +31,7 @@ async fn open(
     dir: &Scratch,
     node: NodeId,
     full_nodes: &[NodeId],
-    custody: usize,
+    custody: PrunedPrefixCustody,
 ) -> Replica<TodoApp> {
     Replica::open_with_options(
         dir.path().join(format!("{:02x}.db", node.0[0])),
@@ -46,8 +47,6 @@ async fn open(
     .await
     .unwrap()
 }
-/// One range pass from `from` to `to`; returns the pages and records sent,
-/// or `None` when `to` is behind the pruned_prefix.
 async fn pass(
     from: &Replica<TodoApp>,
     to: &Replica<TodoApp>,
@@ -92,9 +91,21 @@ fn at(frontier: &rocky_core::AppliedFrontier, node: NodeId) -> u64 {
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn range_reconciliation_exchanges_frontiers_not_receipt_sets() {
     let dir = Scratch::new().await;
-    let laptop = open(&dir, fixtures::LAPTOP, &[], 0).await;
-    let phone = open(&dir, fixtures::PHONE, &[], 0).await;
-    let server = open(&dir, SERVER, &[], 0).await;
+    let laptop = open(
+        &dir,
+        fixtures::LAPTOP,
+        &[],
+        PrunedPrefixCustody::EveryDeliveryTarget,
+    )
+    .await;
+    let phone = open(
+        &dir,
+        fixtures::PHONE,
+        &[],
+        PrunedPrefixCustody::EveryDeliveryTarget,
+    )
+    .await;
+    let server = open(&dir, SERVER, &[], PrunedPrefixCustody::EveryDeliveryTarget).await;
     let mut created = Vec::new();
     for batch in (0..300).step_by(8) {
         let pending: Vec<_> = (batch..(batch + 8).min(300))
@@ -178,9 +189,9 @@ async fn range_reconciliation_exchanges_frontiers_not_receipt_sets() {
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn full_node_custody_moves_the_pruned_prefix_without_waiting_for_devices() {
     let dir = Scratch::new().await;
-    let laptop = open(&dir, fixtures::LAPTOP, &[SERVER], 1).await;
-    let phone = open(&dir, fixtures::PHONE, &[SERVER], 1).await;
-    let server = open(&dir, SERVER, &[], 0).await;
+    let laptop = open(&dir, fixtures::LAPTOP, &[SERVER], ONE_FULL_NODE).await;
+    let phone = open(&dir, fixtures::PHONE, &[SERVER], ONE_FULL_NODE).await;
+    let server = open(&dir, SERVER, &[], PrunedPrefixCustody::EveryDeliveryTarget).await;
     let first = create(&laptop, "first").await;
     for index in 0..40 {
         create(&laptop, &format!("todo {index}")).await;
@@ -240,7 +251,7 @@ async fn full_node_custody_moves_the_pruned_prefix_without_waiting_for_devices()
             ..crate::tests::identity()
         },
         config(fixtures::PHONE, &[SERVER]),
-        manual(1),
+        manual(ONE_FULL_NODE),
     )
     .await
     .unwrap();
@@ -283,7 +294,7 @@ async fn custody_needs_configured_full_nodes() {
         StaticPolicy::default(),
         crate::tests::identity(),
         config(fixtures::LAPTOP, &[]),
-        manual(1),
+        manual(ONE_FULL_NODE),
     )
     .await;
     assert!(matches!(result, Err(Error::Incompatible(_))));
@@ -295,20 +306,23 @@ async fn custody_needs_configured_full_nodes() {
         StaticPolicy::default(),
         crate::tests::identity(),
         stray,
-        manual(0),
+        manual(PrunedPrefixCustody::EveryDeliveryTarget),
     )
     .await;
     assert!(matches!(result, Err(Error::Incompatible(_))));
 }
 
-/// A reported frontier clears only the outgoing entries it newly covers:
-/// while another target holds every entry back, reporting one more
-/// operation costs the same however long the outbox is.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_reported_frontier_clears_only_the_outbox_range_it_newly_covers() {
     let dir = Scratch::new().await;
-    let laptop = open(&dir, fixtures::LAPTOP, &[], 0).await;
-    let server = open(&dir, SERVER, &[], 0).await;
+    let laptop = open(
+        &dir,
+        fixtures::LAPTOP,
+        &[],
+        PrunedPrefixCustody::EveryDeliveryTarget,
+    )
+    .await;
+    let server = open(&dir, SERVER, &[], PrunedPrefixCustody::EveryDeliveryTarget).await;
     let mut cost = Vec::new();
     for backlog in [1, 200] {
         for index in 0..backlog {

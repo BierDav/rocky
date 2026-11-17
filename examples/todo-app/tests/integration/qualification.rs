@@ -1,7 +1,3 @@
-//! Convergence scenarios on the todo app, over an in-process link: devices at one seal hold the same rows and the same
-//! drop map, offline edits continue in the successor tip, buffered
-//! commits survive a process kill, and the open tip may grow while no
-//! owner is online. Printed timings are diagnostic only.
 use crate::common;
 
 use common::{World, sync, titles};
@@ -14,8 +10,6 @@ use std::{
 };
 use todo_app::{Role, TODOS, Todo, Todos, configuration, position, roles};
 
-/// What replicas at one seal must agree on: every todo, and how each
-/// transaction of `tokens` stands.
 async fn state(
     device: &Todos,
     tokens: &[TransactionToken],
@@ -27,8 +21,6 @@ async fn state(
     Ok((device.all_todos().await?, outcomes))
 }
 
-/// Asserts that every device holds the trusted device's state, and
-/// returns it.
 async fn converged(
     devices: &[&Todos],
     tokens: &[TransactionToken],
@@ -40,7 +32,6 @@ async fn converged(
     Ok(expected)
 }
 
-/// The trusted device seals, then everyone syncs; returns the new tip.
 async fn seal(world: &World) -> Result<String, Failure> {
     let tip = world.trusted().database().session().seal(false).await?.tip;
     world.sync().await?;
@@ -50,7 +41,6 @@ async fn seal(world: &World) -> Result<String, Failure> {
     Ok(tip)
 }
 
-/// Waits until `events` names `token` as dropped.
 async fn notified(events: &TableEvents, token: TransactionToken) -> Result<(), Failure> {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
@@ -74,8 +64,6 @@ fn token(token: Option<TransactionToken>) -> Result<TransactionToken, Failure> {
     Ok(token.ok_or("a replayed write publishes a transaction")?)
 }
 
-/// Three devices edit one list at once: two moves into one gap,
-/// three raises of one priority and two adds of one title.
 #[tokio::test(flavor = "multi_thread")]
 async fn three_devices_editing_one_list_converge_at_the_next_seal() -> Result<(), Failure> {
     let mut world = World::new().await?;
@@ -173,8 +161,6 @@ async fn three_devices_editing_one_list_converge_at_the_next_seal() -> Result<()
     world.close().await
 }
 
-/// A device edits offline across a routine seal of another,
-/// then reconnects; its late transactions replay in the successor tip.
 #[tokio::test(flavor = "multi_thread")]
 async fn offline_edits_across_a_routine_seal_replay_in_the_successor_tip() -> Result<(), Failure> {
     let mut world = World::new().await?;
@@ -256,9 +242,6 @@ async fn offline_edits_across_a_routine_seal_replay_in_the_successor_tip() -> Re
     world.close().await
 }
 
-/// With the only owner offline, two members grow the open tip to
-/// four routine seals' worth of interleaved transactions; once the owner
-/// returns and seals, all three converge.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_open_tip_grows_while_no_owner_is_online_and_converges() -> Result<(), Failure> {
     let mut world = World::new().await?;
@@ -336,19 +319,14 @@ async fn the_open_tip_grows_while_no_owner_is_online_and_converges() -> Result<(
     world.close().await
 }
 
-/// Transactions each member writes apart per round before they sync, so
-/// half of each side's arrivals order before the other's writes.
 const WRITES_APART_PER_ROUND: usize = 16;
 
-/// Unsealed replayed transactions at which an owner seals routinely.
 fn rocky_secure_routine() -> usize {
     rocky_secure::ROUTINE_SEAL_TRANSACTIONS as usize
 }
 
 const CHILD: &str = "TODO_QUALIFICATION_CHILD";
 
-/// The child side of `a_killed_app_reopens_offline_with_whole_transactions`:
-/// writes into the installation `CHILD` names and is killed by the parent.
 #[tokio::test(flavor = "multi_thread")]
 async fn qualification_child() -> Result<(), Failure> {
     let Ok(spec) = std::env::var(CHILD) else {
@@ -387,7 +365,6 @@ async fn qualification_child() -> Result<(), Failure> {
     }
 }
 
-/// Ends at once: nothing closes or flushes.
 fn end_as_a_killed_app_does() -> ! {
     std::process::abort()
 }
@@ -406,7 +383,6 @@ fn child(mode: &str, directory: &Path) -> Result<std::process::Child, Failure> {
         .spawn()?)
 }
 
-/// The child's reports, skipping the test harness's own output.
 fn reports(child: &mut std::process::Child) -> Result<impl Iterator<Item = String>, Failure> {
     let stdout = child.stdout.take().ok_or("the child's stdout")?;
     Ok(BufReader::new(stdout)
@@ -416,8 +392,6 @@ fn reports(child: &mut std::process::Child) -> Result<impl Iterator<Item = Strin
 }
 const REPORT: &str = "qualification: ";
 
-/// A write whose buffered commit returned survives a kill; one
-/// killed before `commit()` returns is absent or complete.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_killed_app_reopens_offline_with_whole_transactions() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;

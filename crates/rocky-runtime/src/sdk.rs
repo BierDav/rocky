@@ -1,4 +1,3 @@
-//! JSON v1 transport contract.
 use crate::*;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -15,8 +14,6 @@ struct Subscriptions<R> {
     next: u64,
     entries: BTreeMap<u64, Arc<Subscription<R>>>,
 }
-/// The host supplies an already authorized domain; this session cannot open files
-/// or install applications. Dropping it cancels subscriptions, not admitted writes.
 pub struct Session<A: StoredApplication> {
     replica: Replica<A>,
     subscriptions: Mutex<Subscriptions<A::Row>>,
@@ -70,9 +67,6 @@ where
             },
         }
     }
-    /// Answers one JSON request. A reply past the frame budget becomes a
-    /// quota error; a subscription update that cannot be sent ends the
-    /// subscription, so the consumer learns it and subscribes again to resync.
     pub async fn dispatch_json(&self, bytes: &[u8]) -> Vec<u8> {
         let mut next = None;
         let reply = if bytes.len() > MAX_FRAME_BYTES {
@@ -108,7 +102,6 @@ where
             _ => br#"{"status":"error","version":1,"error":{"code":"quota","retryable":false,"message":"SDK response exceeds frame budget"}}"#.to_vec(),
         }
     }
-    /// Ends a subscription; its waiting `next` answers closed.
     fn end(&self, subscription: &str) -> Result<(), Error> {
         let id = subscription
             .parse::<u64>()
@@ -233,8 +226,6 @@ where
 fn operation(id: OperationId) -> Value {
     json!({"node":id.node.0,"sequence":id.sequence.get().to_string()})
 }
-/// A read page as JSON; `next_kind` tells the consumer what the following
-/// page costs.
 fn snapshot(result: ReadSnapshot) -> Value {
     let completeness = match result.completeness {
         Completeness::Local { pending_operations } => {

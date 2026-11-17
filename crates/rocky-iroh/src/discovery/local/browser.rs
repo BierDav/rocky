@@ -1,5 +1,3 @@
-//! A browser has no multicast sockets: asking for local discovery reports
-//! the path unavailable, and peers are found through the topic instead.
 use super::{Candidate, Failure, Properties};
 use iroh::EndpointAddr;
 

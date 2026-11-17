@@ -1,12 +1,3 @@
-//! Device roles. Rocky separates authority (issuer or writer grants) from
-//! what a replica holds (full or partial); the app combines them into three
-//! roles and records each device's role in the replicated `devices` table,
-//! so every list holder knows whom to share new lists with.
-//!
-//! - **Trusted**: an issuer. Invites devices, seals and shares lists.
-//! - **Full**: a writer holding every list; trusted and full devices share
-//!   each list with it.
-//! - **Partial**: a writer holding only the lists shared with it.
 use crate::{Configuration, DEVICES, LIST_GROUP, LISTS, TODOS, TodoError, Todos};
 use rocky_sdk::{
     Failure, GrantProfile, PartitionTarget, ReplicaRole, ReplicaRoleConfig, RowIdentity, params,
@@ -31,7 +22,6 @@ impl Role {
     pub fn parse(text: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|role| role.as_str() == text)
     }
-    /// Receives every list.
     pub fn holds_all(self) -> bool {
         self != Self::Partial
     }
@@ -50,7 +40,6 @@ impl std::fmt::Display for Role {
     }
 }
 
-/// A device as the `devices` table records it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Member {
     pub node: String,
@@ -58,8 +47,6 @@ pub struct Member {
     pub name: String,
 }
 
-/// An invitation code is the role, a colon and Rocky's invitation URI.
-/// Treat it as a secret.
 pub fn parse_invitation(code: &str) -> Result<(Role, &str), Failure> {
     let code = code.trim();
     let (role, uri) = code
@@ -69,15 +56,12 @@ pub fn parse_invitation(code: &str) -> Result<(Role, &str), Failure> {
     Ok((role, uri))
 }
 
-/// Creates the first device, which is trusted. `Configuration::create`
-/// follows its bookmark, so this device seals routinely and drops become final.
 pub async fn create(configuration: &Configuration, name: &str) -> Result<Todos, Failure> {
     let todos = Todos::new(configuration.create().await?.database);
     todos.register(Role::Trusted, name).await?;
     Ok(todos)
 }
 
-/// Joins with an invitation code and records this device's role.
 pub async fn join(configuration: &Configuration, code: &str, name: &str) -> Result<Todos, Failure> {
     let (role, uri) = parse_invitation(code)?;
     let todos = Todos::new(configuration.join(uri).await?.database);
@@ -95,12 +79,9 @@ pub async fn join(configuration: &Configuration, code: &str, name: &str) -> Resu
 }
 
 impl Todos {
-    /// This device's node key.
     pub async fn node(&self) -> Result<String, Failure> {
         Ok(self.database.session().status().await?.authority.node)
     }
-    /// An invitation code for a new device with `role`; only trusted
-    /// devices invite.
     pub async fn invite(&self, role: Role) -> Result<String, Failure> {
         let invitation = self
             .database
@@ -109,7 +90,6 @@ impl Todos {
             .await?;
         Ok(format!("{role}:{}", invitation.uri))
     }
-    /// Records this device's role and name.
     pub async fn register(&self, role: Role, name: &str) -> Result<(), Failure> {
         let node = self.node().await?;
         let name = crate::title(name)?;
@@ -138,10 +118,6 @@ impl Todos {
         transaction.commit().await?;
         Ok(())
     }
-    /// Revokes another device and forgets it: its credentials stop
-    /// working on every device that learns the revocation, and lists are
-    /// no longer shared with it. Only trusted devices revoke. A device that
-    /// was never a configured peer has no peer entry to remove.
     pub async fn remove_device(&self, node: &str) -> Result<(), Failure> {
         if node == self.node().await? {
             return Err("a device cannot remove itself; reset it instead".into());
@@ -160,7 +136,6 @@ impl Todos {
         let _ = self.database.session().remove_peer(node).await;
         Ok(())
     }
-    /// This device's recorded role.
     pub async fn role(&self) -> Result<Option<Role>, Failure> {
         let node = self.node().await?;
         Ok(self
@@ -191,7 +166,6 @@ impl Todos {
             })
             .collect()
     }
-    /// Devices this device shared `list` with.
     pub async fn shared_with(&self, list: RowIdentity) -> Result<BTreeSet<String>, Failure> {
         Ok(self
             .database
@@ -202,7 +176,6 @@ impl Todos {
             .map(|node| node.to_hex())
             .collect())
     }
-    /// Delivers `list`'s key to `nodes`; they hold it after their next sync.
     pub async fn share(&self, list: RowIdentity, nodes: &[String]) -> Result<(), Failure> {
         if nodes.is_empty() {
             return Ok(());
@@ -218,8 +191,6 @@ impl Todos {
             .map(drop)
     }
 
-    /// Shares `list` with every trusted and full device not yet sent it
-    /// from here.
     pub async fn share_with_members(&self, list: RowIdentity) -> Result<(), Failure> {
         let own = self.node().await?;
         let shared = self.shared_with(list).await?;
@@ -234,9 +205,6 @@ impl Todos {
             .collect();
         self.share(list, &missing).await
     }
-    /// Shares every list held here with the trusted and full devices; run
-    /// when a device joins. Partial devices hold no list's whole group, so
-    /// they share nothing.
     pub async fn share_lists_with_members(&self) -> Result<(), Failure> {
         if !self.role().await?.is_some_and(Role::holds_all) {
             return Ok(());

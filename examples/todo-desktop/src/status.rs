@@ -1,15 +1,10 @@
-//! A device's sync status: networking, each peer's link and last exchange,
-//! and what still blocks local data. It also drives periodic sync passes.
 use crate::{Shared, short};
 use dioxus::prelude::*;
 use rocky_sdk::DatabaseStatus;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use todo_app::Member;
 
-/// How often the status refreshes and an online device syncs.
 const REFRESH: Duration = Duration::from_secs(1);
-/// Status refreshes between sync passes. Peers on the in-process link are
-/// dialed only by a pass.
 const SYNC_EVERY: u32 = 3;
 
 #[component]

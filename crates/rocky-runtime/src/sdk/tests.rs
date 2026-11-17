@@ -262,9 +262,6 @@ async fn noisy_session_quota_and_close_preserve_other_sessions() {
     new.close().unwrap();
     replica.close().await.unwrap();
 }
-/// An update too large for a frame once encoded ends its subscription
-/// rather than being skipped while the subscription waits on: the next
-/// `next` answers closed, and subscribing again reads current rows.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_update_larger_than_a_frame_ends_its_subscription() {
     let dir = Scratch::new().await;

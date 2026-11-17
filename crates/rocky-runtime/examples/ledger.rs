@@ -1,4 +1,3 @@
-//! Merge-only application with two tables and state-aware admission.
 #[path = "support/ledger_app.rs"]
 mod ledger_app;
 use ledger_app::{LedgerApp, payload};

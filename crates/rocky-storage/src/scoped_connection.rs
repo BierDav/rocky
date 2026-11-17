@@ -3,17 +3,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Logical to physical names of one domain's tables and indexes.
 #[derive(Clone)]
 pub struct Names {
     names: Arc<HashMap<String, String>>,
     scoped: bool,
     namespace: Option<String>,
 }
-/// Rewritten texts kept before the cache starts over, bounding
-/// caller-generated SQL independently of application width.
 const MAX_REWRITTEN_SQL: usize = 256;
-/// Protocol tables and indexes every domain owns in its namespace.
 const PROTOCOL: &[&str] = &[
     "rocky_replica",
     "rocky_additive_indexes",
@@ -29,7 +25,6 @@ const PROTOCOL: &[&str] = &[
     "rocky_sql_transactions",
     "rocky_sql_transactions_first",
 ];
-/// Tables a schema creates, and whether each is `WITHOUT ROWID`.
 pub fn tables(schema: &[impl AsRef<str>]) -> Vec<(String, bool)> {
     let mut tables = Vec::new();
     for sql in schema {
@@ -69,7 +64,6 @@ pub fn tables(schema: &[impl AsRef<str>]) -> Vec<(String, bool)> {
     tables
 }
 impl Names {
-    /// Without a namespace every name maps to itself.
     pub fn new(namespace: Option<&str>, schema: &[impl AsRef<str>]) -> Self {
         let mut names = HashMap::new();
         let physical = |name: &str| match namespace {
@@ -110,7 +104,6 @@ impl Names {
             namespace: namespace.map(str::to_string),
         }
     }
-    /// Exactly these names, lowercase, to physical tables of several domains.
     pub fn bound(names: HashMap<String, String>) -> Self {
         Self {
             names: Arc::new(names),
@@ -121,7 +114,6 @@ impl Names {
     pub fn namespace(&self) -> Option<&str> {
         self.namespace.as_deref()
     }
-    /// The name a statement uses for a physical table, if it may name it.
     pub fn visible(&self, physical: &str) -> Option<String> {
         if !self.scoped {
             return Some(physical.to_ascii_lowercase());
@@ -131,7 +123,6 @@ impl Names {
             .find(|(_, candidate)| candidate.eq_ignore_ascii_case(physical))
             .map(|(logical, _)| logical.clone())
     }
-    /// The physical name of an application table or index.
     pub fn physical(&self, logical: &str) -> Option<&str> {
         self.names
             .get(&logical.to_ascii_lowercase())
@@ -234,8 +225,6 @@ impl Names {
             .collect()
     }
 }
-/// Physical table namespaces isolate domain conflicts and revision hot rows.
-/// Several scoped views may share one connection, such as a file's writer.
 pub struct ScopedConnection {
     raw: Arc<crate::sqlite::Connection>,
     names: Names,
@@ -249,7 +238,6 @@ impl ScopedConnection {
     ) -> Self {
         Self::shared(Arc::new(raw), namespace, schema)
     }
-    /// The same namespace over another connection.
     pub fn with_connection(&self, raw: Arc<crate::sqlite::Connection>) -> Self {
         Self {
             raw,
@@ -260,11 +248,9 @@ impl ScopedConnection {
     pub fn connection(&self) -> &crate::sqlite::Connection {
         &self.raw
     }
-    /// Another namespace over the same connection.
     pub fn rescoped(&self, namespace: Option<&str>, schema: &[impl AsRef<str>]) -> Self {
         Self::shared(self.raw.clone(), namespace, schema)
     }
-    /// The connection, once no other scoped view shares it.
     pub fn into_connection(self) -> Result<crate::sqlite::Connection, crate::Error> {
         Arc::try_unwrap(self.raw)
             .map_err(|_| crate::Error::Corrupt("connection is still shared".into()))
@@ -322,7 +308,6 @@ impl ScopedConnection {
         self.raw.is_autocommit()
     }
 }
-/// Preserve literal strings and quoted identifiers during private SQL rewriting.
 pub fn tokens(sql: &str) -> Vec<String> {
     let mut chars = sql.chars().peekable();
     let mut result = Vec::new();

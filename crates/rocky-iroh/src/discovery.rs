@@ -1,5 +1,3 @@
-//! Finding admitted peers through standard DNS-SD and sealed rendezvous records.
-//! Neither path changes the endpoint's own lookup services.
 use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
     aead::{Aead, KeyInit, Payload},
@@ -29,58 +27,38 @@ use tokio::sync::{Mutex, mpsc, watch};
 mod local;
 pub use local::LOCAL_SERVICE;
 
-/// A member merges its contact into the rendezvous record this often.
 pub const RENDEZVOUS_INTERVAL: Duration = Duration::from_secs(300);
-/// Contacts the rendezvous record holds at most, newest first.
 pub const RENDEZVOUS_CONTACTS: usize = 6;
-/// Plaintext bytes of the record; sealed and encoded it fits the lookup
-/// service's 1,000-byte packet.
 pub const RENDEZVOUS_BYTES: usize = 560;
-/// A contact nobody republished for this long leaves the record.
 pub const RENDEZVOUS_AGE: u64 = 3600;
-/// The record's layout version, its first plaintext byte.
 const RECORD_VERSION: u8 = 1;
 const RECORD_NAME: &str = "_rocky";
 const RECORD_TTL: u32 = 30;
-/// Bytes of one TXT string of the record. TXT answers are a set, so each
-/// chunk carries its index as `index=text`.
 const TXT_CHUNK: usize = 200;
 const REQUEST: Duration = Duration::from_secs(15);
 const FOUND: usize = 64;
-/// Local discovery retries this long after failing, as permission or
-/// network changes may recover without a new endpoint.
 const LOCAL_RETRY: Duration = Duration::from_secs(30);
-/// Members spread their rendezvous writes over up to this much past the
-/// interval instead of writing together.
 const RENDEZVOUS_JITTER: Duration = Duration::from_secs(30);
 
-/// The public address-lookup service whose pkarr relay holds the record.
 pub const DEFAULT_RENDEZVOUS: &str = iroh::address_lookup::N0_DNS_PKARR_RELAY_PROD;
 
-/// Whether a path was asked for.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Topic {
     #[default]
     Off,
-    /// The pkarr relay that holds the rendezvous record.
     On(String),
-    /// Asked for but impossible with these options.
     Unavailable(String),
 }
 
-/// What an attachment is asked to find peers with. The default asks for
-/// nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Discover {
     pub topic: Topic,
-    /// mDNS on the local network.
     pub local: bool,
 }
 
 fn derive(label: &str, topic: &[u8; 32]) -> [u8; 32] {
     commitment(label, topic)
 }
-/// The key whose public half names the rendezvous record of `topic`.
 pub fn rendezvous_key(topic: &[u8; 32]) -> SecretKey {
     SecretKey::from_bytes(&derive("rocky.discovery-rendezvous-key.v1", topic))
 }
@@ -102,16 +80,13 @@ fn open(cipher: &ChaCha20Poly1305, sealed: &[u8], aad: &[u8]) -> Option<Vec<u8>>
         .ok()
 }
 
-/// One contact of the rendezvous record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Entry {
     pub node: [u8; 32],
     pub address: EndpointAddr,
-    /// When its owner last merged it, in seconds.
     pub seen: u64,
 }
 impl Entry {
-    /// At most 176 bytes: one relay URL of up to 64 bytes and two sockets.
     fn encode(&self, out: &mut Vec<u8>) {
         out.extend(self.node);
         out.extend(self.address.id.as_bytes());
@@ -196,8 +171,6 @@ impl Entry {
     }
 }
 
-/// Puts `own` first, then the other live contacts newest first, as many
-/// as the record's bounds hold.
 pub(crate) fn merge(own: Entry, held: Vec<Entry>, time: u64) -> Vec<Entry> {
     let mut others: Vec<Entry> = held
         .into_iter()
@@ -223,7 +196,6 @@ pub(crate) fn merge(own: Entry, held: Vec<Entry>, time: u64) -> Vec<Entry> {
     }
     kept
 }
-/// The signed packet holding `entries`, sealed to `topic`.
 pub(crate) fn record(topic: &[u8; 32], entries: &[Entry]) -> Result<SignedPacket, Failure> {
     let mut plain = vec![RECORD_VERSION];
     for entry in entries {
@@ -252,8 +224,6 @@ pub(crate) fn record(topic: &[u8; 32], entries: &[Entry]) -> Result<SignedPacket
         RECORD_TTL,
     )?)
 }
-/// The contacts of a record of `topic`. A record of another version, or
-/// one this topic does not open, holds none.
 pub(crate) fn entries(topic: &[u8; 32], packet: &SignedPacket) -> Vec<Entry> {
     let key = rendezvous_key(topic).public();
     if packet.public_key() != key {
@@ -295,7 +265,6 @@ pub(crate) fn entries(topic: &[u8; 32], packet: &SignedPacket) -> Vec<Entry> {
     entries
 }
 
-/// Whether a lookup failed because the service holds no record.
 fn absent(error: &(dyn std::error::Error + 'static)) -> bool {
     let mut cause = Some(error);
     while let Some(error) = cause {
@@ -312,7 +281,6 @@ fn absent(error: &(dyn std::error::Error + 'static)) -> bool {
     false
 }
 
-/// Natively the endpoint's TLS and DNS; a browser's `fetch` has its own.
 #[cfg(not(target_family = "wasm"))]
 fn relay_client(endpoint: &Endpoint, relay: &str) -> Result<PkarrRelayClient, Failure> {
     Ok(PkarrRelayClient::new(
@@ -350,10 +318,8 @@ struct Inner {
     found: Mutex<mpsc::Receiver<Found>>,
     foreground: AtomicBool,
     closed: watch::Sender<bool>,
-    /// Why a path that was asked for does not run, by path.
     failed: std::sync::Mutex<[Option<String>; 2]>,
 }
-/// The discovery of one attachment.
 #[derive(Clone)]
 pub(crate) struct Finder(Arc<Inner>);
 impl Finder {
@@ -370,7 +336,6 @@ impl Finder {
             failed: std::sync::Mutex::default(),
         }))
     }
-    /// Stops every path for good; the endpoint is its owner's.
     pub(crate) fn close(&self) {
         self.0.closed.send_replace(true);
         self.start(None);
@@ -381,7 +346,6 @@ impl Finder {
     fn local_runs(&self) -> bool {
         self.0.asked.local && self.0.foreground.load(Ordering::SeqCst)
     }
-    /// Replaces what is announced and the tasks announcing it.
     fn start(&self, announce: Option<([u8; 32], Vec<[u8; 32]>)>) {
         let mut announced = self
             .0
@@ -430,8 +394,6 @@ impl Finder {
         }
     }
 
-    /// Announces this endpoint with sealed topic claims and reports the
-    /// members that answer. A replaced endpoint is announced anew.
     async fn local(self, node: [u8; 32], topics: Vec<[u8; 32]>) {
         let mut endpoints = self.0.endpoint.clone();
         loop {
@@ -450,8 +412,6 @@ impl Finder {
             }
         }
     }
-    /// Queues a found peer. A full queue drops the hint; the path reports
-    /// it again.
     fn report(&self, node: [u8; 32], address: &EndpointAddr, path: &str, local: bool) {
         if let Ok(address) = serde_json::to_string(address) {
             let _ = self.0.sender.try_send(Found {
@@ -463,8 +423,6 @@ impl Finder {
         }
     }
 
-    /// Reads the record of every topic, reports its contacts and merges
-    /// this endpoint's own into it, now and at every interval.
     async fn rendezvous(self, node: [u8; 32], topics: Vec<[u8; 32]>, relay: String) {
         let mut endpoints = self.0.endpoint.clone();
         loop {
@@ -492,8 +450,6 @@ impl Finder {
             }
         }
     }
-    /// A record that could not be read is never overwritten, since the
-    /// last writer wins.
     async fn rendezvous_once(
         &self,
         endpoint: &Endpoint,

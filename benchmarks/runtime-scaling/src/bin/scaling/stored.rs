@@ -1,6 +1,3 @@
-//! The phase 3 gate: one domain of the wide schema loaded to a target row
-//! count, then write, read, paging, observer and memory figures on it.
-//! Checkpoints and pruning run beside the load with the default policy.
 use super::wide::{commit, open, scope};
 use super::wide_schema::WideSchema;
 use super::{Failure, NODE, futures, line, resident_mib};
@@ -14,7 +11,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// One row in every `SAMPLE` created is remembered for reads and edits.
 const SAMPLE: usize = 997;
 const LOADERS: usize = 16;
 
@@ -24,7 +20,6 @@ struct Domain {
     created: AtomicUsize,
 }
 impl Domain {
-    /// Row `index` goes to table `index % tables` with `a = index`.
     async fn create(&self) -> Result<(usize, Envelope), Error> {
         let index = self.created.fetch_add(1, Ordering::Relaxed);
         let payload = WideSchema::create(
@@ -81,7 +76,6 @@ async fn timed<T>(
     line(label, timings, started.elapsed());
     Ok(sorted[sorted.len() / 2])
 }
-/// Sequential writes while `observers` wait on `query`; returns writes/s.
 async fn observed(
     domain: &Domain,
     label: &str,
@@ -127,16 +121,6 @@ async fn observed(
     }
     Ok(WRITES as f64 / elapsed.as_secs_f64())
 }
-/// The phase 3 gate over `rows` rows in `tables` tables, kept in `keep` for a
-/// second run from a fresh process.
-///
-/// Operation `index + 1` created row `index` only for the sequential first
-/// writes, so sampled rows are found through the index on `a`, which is
-/// restored after the edits move it. Table 0 holds the rows whose `a` is a
-/// multiple of the table count. Range pages of one table continue by cursor,
-/// then with the last key bound into the predicate; the ordered query
-/// continues by key, while a `LIMIT` makes it ineligible, so its cursor is a
-/// row offset.
 pub async fn run(rows: usize, tables: u16, keep: Option<PathBuf>) -> Result<(), Failure> {
     let tag = format!("stored rows={rows} tables={tables}");
     let options = RuntimeOptions::default();

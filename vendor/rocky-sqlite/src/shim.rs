@@ -1,5 +1,3 @@
-//! This module fills in the external functions needed to link to `sqlite.o`
-
 use core::ffi::{c_char, c_int, c_long, c_longlong, c_void};
 use core::ptr;
 use core::time::Duration;
@@ -12,14 +10,12 @@ use wasm_bindgen::prelude::wasm_bindgen;
 pub struct WasmOsCallback;
 
 impl OsCallback for WasmOsCallback {
-    /// thread::sleep is available when atomics is enabled
     #[cfg(target_feature = "atomics")]
     fn sleep(dur: Duration) {
         let mut nanos = dur.as_nanos();
         while nanos > 0 {
             let amt = core::cmp::min(i64::MAX as u128, nanos);
             let mut x = 0;
-            // memory_atomic_wait32 returns 2 on timeout; loop until elapsed.
             let val = unsafe { core::arch::wasm32::memory_atomic_wait32(&mut x, 0, amt as i64) };
             debug_assert_eq!(val, 2);
             nanos -= amt;
@@ -31,7 +27,6 @@ impl OsCallback for WasmOsCallback {
 
     fn random(buf: &mut [u8]) {
         fn fallback(buf: &mut [u8]) {
-            // Non-cryptographic fallback when crypto.getRandomValues is unavailable.
             for b in buf {
                 *b = (Math::random() * 255000.0) as u32 as u8;
             }
@@ -62,7 +57,6 @@ type c_time_t = c_longlong;
 
 #[wasm_bindgen]
 extern "C" {
-    // crypto.getRandomValues()
     #[cfg(not(target_feature = "atomics"))]
     #[wasm_bindgen(js_namespace = ["globalThis", "crypto"], js_name = getRandomValues, catch)]
     fn get_random_values(buf: &mut [u8]) -> Result<(), JsValue>;
@@ -89,10 +83,6 @@ fn yday_from_date(date: &Date) -> u32 {
     month_days_cumulative[date.get_month() as usize] + date.get_date() - 1
 }
 
-/// https://github.com/emscripten-core/emscripten/blob/df69e2ccc287beab6f580f33b33e6b5692f5d20b/system/lib/libc/emscripten_internal.h#L42
-///
-/// https://github.com/sqlite/sqlite-wasm/blob/7c1b309c3bd07d8e6d92f82344108cebbd14f161/sqlite-wasm/jswasm/sqlite3-bundler-friendly.mjs#L3404
-// Mirrors emscripten/sqlite-wasm localtime handling, including DST logic.
 unsafe fn localtime_js(t: c_time_t, tm: *mut tm) {
     let date = Date::new(&Number::from((t * 1000) as f64).into());
 
@@ -116,7 +106,6 @@ unsafe fn localtime_js(t: c_time_t, tm: *mut tm) {
     (*tm).tm_gmtoff = -(tz_offset * 60.0) as _;
 }
 
-/// https://github.com/emscripten-core/emscripten/blob/df69e2ccc287beab6f580f33b33e6b5692f5d20b/system/lib/libc/musl/include/time.h#L40
 #[repr(C)]
 pub struct tm {
     pub tm_sec: c_int,
@@ -132,13 +121,11 @@ pub struct tm {
     pub tm_zone: *mut c_char,
 }
 
-/// https://github.com/emscripten-core/emscripten/blob/df69e2ccc287beab6f580f33b33e6b5692f5d20b/system/include/wasi/api.h#L2652
 #[no_mangle]
 pub unsafe extern "C" fn rust_sqlite_wasm_getentropy(
     buf: *mut u8,
     buf_len: c_size_t,
 ) -> core::ffi::c_ushort {
-    // https://github.com/WebAssembly/wasi-libc/blob/e9524a0980b9bb6bb92e87a41ed1055bdda5bb86/libc-bottom-half/headers/public/wasi/api.h#L373
     const FUNCTION_NOT_SUPPORT: core::ffi::c_ushort = 52;
 
     #[cfg(target_feature = "atomics")]
@@ -176,11 +163,9 @@ pub unsafe extern "C" fn rust_sqlite_wasm_abort() {
     core::unreachable!();
 }
 
-/// See <https://github.com/emscripten-core/emscripten/blob/089590d17eeb705424bf32f8a1afe34a034b4682/system/lib/libc/mktime.c#L28>.
 #[no_mangle]
 pub unsafe extern "C" fn rust_sqlite_wasm_localtime(t: *const c_time_t) -> *mut tm {
-    // Single shared buffer, matches libc behavior; assumes no concurrent callers.
-    static mut TM: tm = tm {
+    static mut SHARED_RESULT_LIKE_LIBC: tm = tm {
         tm_sec: 0,
         tm_min: 0,
         tm_hour: 0,
@@ -193,34 +178,52 @@ pub unsafe extern "C" fn rust_sqlite_wasm_localtime(t: *const c_time_t) -> *mut 
         tm_gmtoff: 0,
         tm_zone: ptr::null_mut(),
     };
-    localtime_js(*t, ptr::addr_of_mut!(TM));
-    ptr::addr_of_mut!(TM)
+    localtime_js(*t, ptr::addr_of_mut!(SHARED_RESULT_LIKE_LIBC));
+    ptr::addr_of_mut!(SHARED_RESULT_LIKE_LIBC)
 }
 
-// https://github.com/alexcrichton/dlmalloc-rs/blob/fb116603713825b43b113cc734bb7d663cb64be9/src/dlmalloc.rs#L141
 const ALIGN: usize = core::mem::size_of::<usize>() * 2;
+
+fn layout_with_size_header(size: c_size_t) -> Option<core::alloc::Layout> {
+    core::alloc::Layout::from_size_align(size.checked_add(ALIGN)?, ALIGN).ok()
+}
+
+unsafe fn allocation_of(ptr: *mut c_void) -> (*mut u8, core::alloc::Layout) {
+    debug_assert!(
+        !ptr.is_null() && (ptr as usize).is_multiple_of(ALIGN) && ptr as usize >= ALIGN,
+        "only pointers rust_sqlite_wasm_malloc or realloc returned may be freed or reallocated"
+    );
+    let ptr: *mut u8 = ptr.sub(ALIGN).cast();
+    let size = *(ptr.cast::<usize>());
+    let layout = layout_with_size_header(size);
+    debug_assert!(
+        layout.is_some(),
+        "the size header of a pointer rust_sqlite_wasm_malloc returned fits a layout"
+    );
+    (
+        ptr,
+        layout.unwrap_or_else(|| {
+            core::alloc::Layout::from_size_align_unchecked(size.wrapping_add(ALIGN), ALIGN)
+        }),
+    )
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn rust_sqlite_wasm_malloc(size: c_size_t) -> *mut c_void {
-    let layout = core::alloc::Layout::from_size_align_unchecked(size + ALIGN, ALIGN);
+    let Some(layout) = layout_with_size_header(size) else {
+        return ptr::null_mut();
+    };
     let ptr = alloc::alloc::alloc(layout);
-
     if ptr.is_null() {
         return ptr::null_mut();
     }
-    // Store size for free/realloc; pointer returned is offset by ALIGN.
     *ptr.cast::<usize>() = size;
-
     ptr.add(ALIGN).cast()
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rust_sqlite_wasm_free(ptr: *mut c_void) {
-    // Only accepts pointers allocated by rust_sqlite_wasm_malloc/realloc.
-    let ptr: *mut u8 = ptr.sub(ALIGN).cast();
-    let size = *(ptr.cast::<usize>());
-
-    let layout = core::alloc::Layout::from_size_align_unchecked(size + ALIGN, ALIGN);
+    let (ptr, layout) = allocation_of(ptr);
     alloc::alloc::dealloc(ptr, layout);
 }
 
@@ -229,24 +232,23 @@ pub unsafe extern "C" fn rust_sqlite_wasm_realloc(
     ptr: *mut c_void,
     new_size: c_size_t,
 ) -> *mut c_void {
-    // Only accepts pointers allocated by rust_sqlite_wasm_malloc/realloc.
-    let ptr: *mut u8 = ptr.sub(ALIGN).cast();
-    let size = *(ptr.cast::<usize>());
-
-    let layout = core::alloc::Layout::from_size_align_unchecked(size + ALIGN, ALIGN);
-    let ptr = alloc::alloc::realloc(ptr, layout, new_size + ALIGN);
-
+    let Some(new_layout) = layout_with_size_header(new_size) else {
+        return ptr::null_mut();
+    };
+    let (ptr, layout) = allocation_of(ptr);
+    let ptr = alloc::alloc::realloc(ptr, layout, new_layout.size());
     if ptr.is_null() {
         return ptr::null_mut();
     }
     *ptr.cast::<usize>() = new_size;
-
     ptr.add(ALIGN).cast()
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rust_sqlite_wasm_calloc(num: c_size_t, size: c_size_t) -> *mut c_void {
-    let total = num * size;
+    let Some(total) = num.checked_mul(size) else {
+        return ptr::null_mut();
+    };
     let ptr: *mut u8 = rust_sqlite_wasm_malloc(total).cast();
     if !ptr.is_null() {
         ptr::write_bytes(ptr, 0, total);
@@ -254,20 +256,12 @@ pub unsafe extern "C" fn rust_sqlite_wasm_calloc(num: c_size_t, size: c_size_t) 
     ptr.cast()
 }
 
-/// SQLite OS initialization entry point.
-///
-/// This function is called by SQLite when it is initialized. It sets up the
-/// default VFS for the environment, which in this case is the in-memory VFS.
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_os_init() -> core::ffi::c_int {
     rsqlite_vfs::memvfs::install::<WasmOsCallback>();
     rusqlite::ffi::SQLITE_OK
 }
 
-/// SQLite OS shutdown entry point.
-///
-/// This function is called by SQLite when it is shut down. It cleans up
-/// any resources allocated by `sqlite3_os_init`.
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_os_end() -> core::ffi::c_int {
     rsqlite_vfs::memvfs::uninstall();

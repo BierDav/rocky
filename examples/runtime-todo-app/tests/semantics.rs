@@ -65,8 +65,6 @@ fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
     }
     result
 }
-/// Drains only ready work after each delivery, exercising real reducer order
-/// independently of replay's canonical topological schedule.
 fn delivered(order: &[Envelope]) -> Replay {
     let mut state = TodoState::default();
     let mut history = AppliedOperations::new(fixtures::SCOPE);

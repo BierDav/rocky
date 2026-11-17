@@ -1,5 +1,3 @@
-//! Wide-schema sweep: load one domain towards today's quotas and report every
-//! cost on the way. A refusal is printed as a result, never raised.
 use super::wide_schema::{Policy, WideSchema};
 use super::{CALLER, Failure, NODE, futures, line, resident_mib};
 use rocky_core::*;
@@ -57,7 +55,6 @@ pub(super) async fn commit(
         }
     }
 }
-/// Times `count` steps. A refused step ends the batch and is reported.
 async fn timed(
     label: &str,
     count: usize,
@@ -81,7 +78,6 @@ async fn timed(
 struct Load {
     replica: Replica<WideSchema>,
     tables: u16,
-    /// Live rows as (table, entity).
     live: Vec<(u16, OperationId)>,
     created: usize,
     operations: usize,
@@ -133,7 +129,6 @@ impl Load {
             values: vec![SqlValue::Integer(0), SqlValue::Integer(i64::MAX)],
         }
     }
-    /// Observers of one row while that row is edited `writes` times.
     async fn observe(&mut self, tag: &str, count: usize, writes: usize) -> Result<(), Error> {
         let options = ReadOptions::new(scope(), 1);
         let mut watchers = Vec::new();
@@ -285,8 +280,6 @@ pub async fn run(tables: u16, checkpoints: &[usize]) -> Result<(), Failure> {
 mod tests {
     use super::*;
 
-    /// The probe's point and range reads are served by the stored tables'
-    /// primary key and declared index, through the view that hides tombstones.
     #[tokio::test]
     async fn point_and_range_reads_use_the_declared_indexes() {
         let dir = tempfile::tempdir().unwrap();

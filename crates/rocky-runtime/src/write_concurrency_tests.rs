@@ -1,11 +1,9 @@
-//! Grouped incoming pages and the awaiting submit.
 use super::*;
 use crate::scaling_option_tests::{NODE, PEER, grouped, note, open_node, pause, scope};
 use crate::worker::{Fault, GroupLog};
 use inventory_app::InventoryApp;
 use rocky_platform::fs::Scratch;
 
-/// Encoded operations of `PEER` in domain 1, in author order.
 pub(super) async fn peer_operations(dir: &Path, count: u8) -> Vec<Vec<u8>> {
     let source = open_node(&dir.join("peer.db"), PEER, RuntimeOptions::default()).await;
     let replica = source.domain(scope(1)).unwrap();
@@ -80,7 +78,18 @@ async fn a_refused_or_pending_record_leaves_the_rest_of_its_page_committed() {
         3,
         "each page was one step of one group: one commit and one flush"
     );
-    assert!(groups.iter().all(|group| group.len() == 1));
+    assert!(
+        groups
+            .iter()
+            .all(|group| group.len() == 1 && group[0].queue_weight > 0)
+    );
+    let receiving_domain = 0;
+    assert!(
+        groups
+            .iter()
+            .all(|group| group[0].domain == receiving_domain),
+        "every page was a step of scope 1, the file's first domain in scope order"
+    );
     runtime.close().await.unwrap();
     let runtime = open_node(&dir.path().join("node.db"), NODE, grouped()).await;
     assert_eq!(rows(&runtime.domain(scope(1)).unwrap()).await, 4);

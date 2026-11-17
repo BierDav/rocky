@@ -1,4 +1,3 @@
-//! Composition and UI-author use of the typed inventory SDK.
 #[path = "support/inventory_client.rs"]
 mod inventory_client;
 use inventory_app::{InventoryApp, Policy};

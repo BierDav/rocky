@@ -1,6 +1,3 @@
-//! Engine-only probes for the SQLite runtime switch: synchronous switching on
-//! one connection, and one batched writer per file with clients waiting for
-//! acknowledgements. See the README for the commands.
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
@@ -99,7 +96,6 @@ fn open(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Sets and reads back `synchronous` (1 NORMAL, 2 FULL) with fullfsync on.
 fn set_sync(conn: &Connection, level: i64) -> Result<()> {
     conn.pragma_update(None, "synchronous", level)?;
     let (actual, full) = (
@@ -112,7 +108,6 @@ fn set_sync(conn: &Connection, level: i64) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------- sync-switch
 
 const NORMAL: i64 = 1;
 const FULL: i64 = 2;
@@ -129,13 +124,11 @@ fn sync_switch(dir: &Path) -> Result<()> {
     let mut out = Out::new("sync-switch", "")?;
     let path = dir.join("switch.sqlite");
     let conn = open(&path)?;
-    // The WAL is truncated at each reset, so its length is the bytes written since.
     conn.pragma_update(None, "journal_size_limit", 0)?;
     conn.execute_batch("CREATE TABLE kv(id INTEGER PRIMARY KEY, v BLOB)")?;
     let payload = vec![7u8; OP_BYTES];
     let mut id = 0i64;
 
-    // (a) Changes between transactions read back.
     let mut readback = Vec::new();
     for level in [NORMAL, FULL, NORMAL, FULL, NORMAL] {
         conn.pragma_update(None, "synchronous", level)?;
@@ -147,7 +140,6 @@ fn sync_switch(dir: &Path) -> Result<()> {
         format!("\"set\":[1,2,1,2,1],\"read\":{readback:?}"),
     );
 
-    // Inside an open transaction or savepoint.
     for (label, begin, end) in [
         ("inside_begin", "BEGIN IMMEDIATE", "COMMIT"),
         ("inside_savepoint", "SAVEPOINT s", "RELEASE s"),
@@ -167,7 +159,6 @@ fn sync_switch(dir: &Path) -> Result<()> {
             format!("\"error\":{error:?},\"read_inside\":{inside},\"read_after\":{after}"),
         );
     }
-    // fullfsync is accepted inside a transaction; reported as read back.
     set_sync(&conn, FULL)?;
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let attempt = conn.pragma_update(None, "fullfsync", 0);
@@ -184,7 +175,6 @@ fn sync_switch(dir: &Path) -> Result<()> {
     conn.pragma_update(None, "fullfsync", 1)?;
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
 
-    // (b) Alternating commits on one connection: per-commit latency per setting.
     let commits = env_u64("SWITCH_COMMITS", 1000);
     let (mut normal, mut full) = (Vec::new(), Vec::new());
     for i in 0..commits {
@@ -200,7 +190,6 @@ fn sync_switch(dir: &Path) -> Result<()> {
     out.latency("alternating_normal_commit", normal);
     out.latency("alternating_full_commit", full);
 
-    // Blocks of one setting, plus FULL with plain fsync for reference.
     for (label, level, fullfsync) in [
         ("normal", NORMAL, 1),
         ("full", FULL, 1),
@@ -216,9 +205,6 @@ fn sync_switch(dir: &Path) -> Result<()> {
     }
     conn.pragma_update(None, "fullfsync", 1)?;
 
-    // A FULL commit after k unflushed NORMAL commits. The checkpoint first
-    // flushes everything and resets the WAL; the first commit after a reset
-    // syncs the WAL header even at NORMAL, so it is reported separately.
     let reps = env_u64("SWITCH_REPS", 20);
     for k in [0u64, 1, 10, 100, 1000] {
         let (mut first, mut rest, mut flush, mut pending) =
@@ -260,7 +246,6 @@ fn sync_switch(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------- batched writer
 
 struct Request {
     domain: u64,
@@ -320,7 +305,6 @@ fn create_domain(conn: &Connection, domain: u64, tables: u64, rows: u64) -> rusq
     ))
 }
 
-/// The same four statements as the sqlite-engine `mutation`, without its transaction.
 fn apply(conn: &Connection, r: &Request) -> rusqlite::Result<()> {
     let (d, t, row) = (r.domain, r.table, &r.row);
     conn.prepare_cached(&format!(
@@ -353,7 +337,6 @@ fn apply(conn: &Connection, r: &Request) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// One group: each mutation in its own savepoint, one commit, then acknowledgements.
 fn commit_group(conn: &Connection, group: &mut Vec<Request>) -> rusqlite::Result<()> {
     conn.prepare_cached("BEGIN IMMEDIATE")?.execute([])?;
     let mut results = Vec::with_capacity(group.len());
@@ -390,7 +373,6 @@ fn writer(
     ready.wait();
     let conn = conn?;
     set_sync(&conn, level)?;
-    // Truncate the WAL at each reset so its length measures content, not history.
     conn.pragma_update(None, "journal_size_limit", 0)?;
     conn.set_prepared_statement_cache_capacity(4096);
     let max_count = env_u64("WRITER_MAX_GROUP", 64) as usize;
@@ -399,7 +381,6 @@ fn writer(
     let mut stats = WriterStats::default();
     let mut group = Vec::with_capacity(max_count);
     loop {
-        // Block for the first; take whatever else is already waiting, no delay.
         match requests.recv() {
             Ok(request) => group.push(request),
             Err(_) => break,
@@ -488,7 +469,6 @@ fn batched(dir: &Path, shape: Shape) -> Result<()> {
         "ms",
     );
 
-    // Writers and clients open first; the clock starts when all are ready.
     let ready = Arc::new(Barrier::new((files + domains + 1) as usize));
     let run = Duration::from_secs(seconds);
     let mut senders: Vec<Sender<Request>> = Vec::new();
@@ -571,7 +551,6 @@ fn batched(dir: &Path, shape: Shape) -> Result<()> {
     out.latency("group_commit", stats.commit_micros);
     out.latency("passive_checkpoint", stats.checkpoint_micros);
     out.value("max_wal_kib", stats.max_wal / 1024, "KiB");
-    // Committed rows match acknowledgements in every file.
     let mut ops = 0u64;
     for (f, path) in paths.iter().enumerate() {
         let conn = Connection::open(path)?;

@@ -1,22 +1,3 @@
-//! Scaling sweeps for the local runtime.
-//! Run a release build: `cargo run --release -p rocky-runtime-bench --bin scaling_probe -- all`.
-//!
-//! Sections outside `all`, which take minutes:
-//! - `wide [tables]`: resident memory is process-wide, so one table count per
-//!   process gives the clean figure.
-//! - `stored [rows] [tables] [directory]`: the phase 3 gate over 500,000 rows.
-//!   With a directory the file is kept, and a second run measures it from a
-//!   fresh process.
-//! - `checkpoints [operations] [rows] [tables] [directory]`: the phase 4 gate
-//!   over two million operations.
-//! - `gate [seconds] [files] [checkpoint_frames] [group] [directory]`: the
-//!   phase 5 gate; the qualifying run takes ten minutes.
-//! - `erp-open-loop`, `erp-bulk`, `erp-attrib`: fixed-rate, full-durability
-//!   local writes; `erp-overhead` and `erp-instrument-overhead` run matched
-//!   control/measured pairs to bound collection cost.
-//! - `erp-sync [rate] [seconds] [tables] [backlog] [directory]`: same-file
-//!   authoring while a preloaded peer backlog is applied to another domain.
-//! - `roles [rows] [behind]`: the phase 7 gate over native TCP.
 use inventory_app::{InventoryApp, Policy};
 use rocky_core::*;
 use rocky_runtime::{
@@ -54,8 +35,6 @@ mod wide_schema;
 
 type Failure = Box<dyn std::error::Error>;
 
-/// A fixture credential's validity: from a day ago for 300 days, inside the
-/// longest a chain may live.
 fn lifetime() -> (u64, u64) {
     let time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -66,7 +45,6 @@ fn lifetime() -> (u64, u64) {
     )
 }
 
-/// Inventory semantics with a manifest that declares more than two domains.
 #[derive(Clone, Copy)]
 struct Wide(u8, Option<&'static [&'static str]>, u16);
 impl Application for Wide {
@@ -196,7 +174,6 @@ async fn shared(
     )
     .await?)
 }
-/// `clients` closed-loop writers share one replica; each awaits its commit.
 async fn write(
     replica: &Replica<Wide>,
     clients: usize,
@@ -259,9 +236,6 @@ fn line(label: &str, mut timings: Vec<Duration>, elapsed: Duration) {
         timings.last().map_or(0, Duration::as_micros)
     );
 }
-/// Each file writer groups waiting writes across its domains by default;
-/// `+single` commits each step alone. `buffered` is the default durability;
-/// `full` flushes every group.
 fn profiles() -> Vec<(&'static str, RuntimeOptions)> {
     let buffered = RuntimeOptions::default();
     let full = RuntimeOptions {
@@ -279,7 +253,6 @@ fn profiles() -> Vec<(&'static str, RuntimeOptions)> {
         ("full+single", single(full)),
     ]
 }
-/// Same-file domains, one closed-loop client per domain.
 async fn domains(clients: usize) -> Result<(), Failure> {
     for (profile, options) in profiles() {
         let options = RuntimeOptions {
@@ -309,8 +282,6 @@ async fn domains(clients: usize) -> Result<(), Failure> {
     }
     Ok(())
 }
-/// Sixteen domains of one runtime spread over 1 or 4 files, each file with
-/// its own writer, at both durabilities; `clients` writers per domain.
 async fn layouts(clients: usize) -> Result<(), Failure> {
     for (profile, durability) in [
         ("buffered", Durability::Buffered),
@@ -344,7 +315,6 @@ async fn layouts(clients: usize) -> Result<(), Failure> {
     }
     Ok(())
 }
-/// One runtime, and so one file and writer, per domain.
 async fn files() -> Result<(), Failure> {
     for count in [1u8, 2, 4, 8, 16] {
         let dir = tempfile::tempdir()?;
@@ -383,7 +353,6 @@ async fn files() -> Result<(), Failure> {
     }
     Ok(())
 }
-/// One domain, many concurrent clients: what batching can and cannot recover.
 async fn clients() -> Result<(), Failure> {
     for (profile, options) in profiles() {
         for count in [1usize, 8, 32] {
@@ -402,7 +371,6 @@ async fn clients() -> Result<(), Failure> {
     }
     Ok(())
 }
-/// Cost of a write, read and reopen as retained history and state grow.
 async fn history() -> Result<(), Failure> {
     let options = RuntimeOptions::default();
     let dir = tempfile::tempdir()?;
@@ -454,7 +422,6 @@ async fn history() -> Result<(), Failure> {
     runtime.close().await?;
     Ok(())
 }
-/// Observer fan-out: observers of one query share one read per change.
 async fn observers() -> Result<(), Failure> {
     for rows in [100usize, 2000] {
         for count in [1usize, 8, 32, 120] {
@@ -524,8 +491,6 @@ fn resident_mib() -> u64 {
         .and_then(|text| text.trim().parse::<u64>().ok())
         .map_or(0, |kib| kib / 1024)
 }
-/// Growth to 100,000 operations, where the former 4,096-operation quota
-/// stood: checkpoints and pruning now run beside the writes.
 async fn retention() -> Result<(), Failure> {
     let options = RuntimeOptions::default();
     let dir = tempfile::tempdir()?;
@@ -561,9 +526,39 @@ async fn retention() -> Result<(), Failure> {
     runtime.close().await?;
     Ok(())
 }
+const USAGE: &str = "\
+Scaling sweeps for the local runtime. Run a release build:
+  cargo run --release -p runtime-scaling --bin scaling_probe -- all
+
+Sections outside `all`, which take minutes:
+  wide [tables]
+      resident memory is process-wide, so one table count per process gives
+      the clean figure
+  stored [rows] [tables] [directory]
+      the phase 3 gate over 500,000 rows; with a directory the file is kept,
+      and a second run measures it from a fresh process
+  checkpoints [operations] [rows] [tables] [directory]
+      the phase 4 gate over two million operations
+  gate [seconds] [files] [checkpoint_frames] [group] [directory]
+      the phase 5 gate; the qualifying run takes ten minutes
+  erp-open-loop, erp-bulk, erp-attrib
+      fixed-rate, full-durability local writes; erp-overhead and
+      erp-instrument-overhead run matched control/measured pairs to bound
+      collection cost
+  erp-sync [rate] [seconds] [tables] [backlog] [directory]
+      same-file authoring while a preloaded peer backlog is applied to
+      another domain
+  roles [rows] [behind]
+      the phase 7 gate over native TCP
+";
+
 #[tokio::main]
 async fn main() -> Result<(), Failure> {
     let section = std::env::args().nth(1).unwrap_or_else(|| "all".into());
+    if matches!(section.as_str(), "help" | "--help" | "-h") {
+        print!("{USAGE}");
+        return Ok(());
+    }
     if section == "soak" {
         return soak::run(soak::Config::parse(std::env::args().skip(2))?).await;
     }

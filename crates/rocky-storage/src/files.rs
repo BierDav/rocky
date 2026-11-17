@@ -1,8 +1,5 @@
-//! How SQLite opens database files: through the filesystem natively, and
-//! through Rocky's OPFS pool in a browser (`rocky_platform::fs`).
 use std::path::Path;
 
-/// A raw engine connection to `path` for tests, through the same VFS.
 #[cfg(any(test, feature = "test-support"))]
 pub fn raw(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
     connect(path, rusqlite::OpenFlags::default())
@@ -22,7 +19,6 @@ pub(crate) fn connect(
     );
 }
 
-/// The same SQLite locking and WAL behavior on every target.
 #[cfg(test)]
 mod tests {
     use crate::{sqlite::Connection, storage::collect_rows};

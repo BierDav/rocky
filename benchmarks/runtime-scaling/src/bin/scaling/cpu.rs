@@ -1,9 +1,5 @@
-//! Safe process- and thread-CPU sampling for probes. No unsafe code: Linux
-//! reads `/proc`, macOS shells out to `ps`. CPU time is independent of wall
-//! time, so the difference is what the run actually burned on processors.
 use std::time::Duration;
 
-/// Total CPU time (user + system) consumed by this process so far.
 pub(super) fn process() -> Option<Duration> {
     #[cfg(target_os = "linux")]
     {
@@ -19,9 +15,6 @@ pub(super) fn process() -> Option<Duration> {
     }
 }
 
-/// CPU time of every thread whose name starts with `prefix`, summed. Names are
-/// readable only on Linux (`/proc/self/task/*/comm`); elsewhere this returns
-/// `None` rather than guess from unordered per-thread rows.
 pub(super) fn threads(prefix: &str) -> Option<Duration> {
     #[cfg(target_os = "linux")]
     {
@@ -34,7 +27,6 @@ pub(super) fn threads(prefix: &str) -> Option<Duration> {
     }
 }
 
-/// Parses the macOS `ps -o time=` format: `[D-]HH:MM:SS[.ff]` or `MM:SS.ff`.
 #[cfg(any(target_os = "macos", test))]
 fn parse_ps_time(text: &str) -> Option<Duration> {
     let text = text.trim();
@@ -57,10 +49,6 @@ fn parse_ps_time(text: &str) -> Option<Duration> {
     ))
 }
 
-/// Parses the CPU fields of `/proc/<pid>/stat` or `/proc/self/task/<tid>/stat`
-/// (fields 14 and 15, user and system ticks) at the standard 100 Hz USER_HZ.
-/// The comm field is parenthesized and may hold spaces, so fields resume
-/// after the last ')', with field 3 (state) first.
 #[cfg(any(target_os = "linux", test))]
 fn parse_stat_cpu(stat: &str) -> Option<Duration> {
     let after_comm = stat.rsplit_once(')')?.1;

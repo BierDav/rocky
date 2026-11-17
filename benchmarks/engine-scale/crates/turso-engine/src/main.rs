@@ -1,4 +1,3 @@
-//! Turso 0.8.1 in MVCC mode, as Rocky uses it.
 mod adapter;
 
 const NAME: &str = "turso";

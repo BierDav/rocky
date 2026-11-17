@@ -1,5 +1,3 @@
-//! An operation-model todo application: rocky-runtime's tests replicate it.
-//! Unpublished test fixture; the todo example lives in `todo-app`.
 mod payload;
 mod policy;
 mod reducer;

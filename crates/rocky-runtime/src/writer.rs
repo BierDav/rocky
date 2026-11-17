@@ -1,13 +1,3 @@
-//! One writer per file. A single thread owns the file's only write connection
-//! and every domain's worker in the file; the writes waiting across those
-//! domains commit in one transaction. Each step runs in its own savepoint,
-//! and nothing is published before the group's `COMMIT` returns.
-//!
-//! Groups commit at `synchronous=NORMAL` unless `Durability::Full` is set. A
-//! group that commits at FULL is a flush and advances the file's durable
-//! watermark. Nothing leaves the device above that watermark: a request whose
-//! reply is exposed (`Command::exposes`) waits until its domain is clean, and
-//! the writer then flushes once for every waiting exposure.
 use crate::{
     Command, Durability, QueuedCommand, Reply, RuntimeOptions,
     database::DatabaseOwner,
@@ -28,88 +18,49 @@ use std::{
 use tokio::sync::mpsc;
 use web_time::Instant;
 
-/// Queue bytes one group may hold. With `RuntimeOptions::group_commit` this
-/// bounds the work and memory between two commits.
 pub(crate) const MAX_GROUP_BYTES: usize = 4 * crate::MAX_FRAME_BYTES;
-/// Default of `RuntimeOptions::checkpoint_frames`: WAL frames (32 MiB at
-/// 4 KiB pages) after which the writer runs a passive checkpoint between
-/// groups. A mutation logs tens of KiB, so a 4 MiB bound halved buffered
-/// throughput. A checkpoint holds the writer for 25 to 160 ms, longer as
-/// the file grows, so a larger bound trades WAL size for fewer stalls.
 pub(crate) const CHECKPOINT_FRAMES: u32 = 8_192;
-/// Bytes the WAL file is cut back to whenever a checkpoint resets it.
 const WAL_SIZE_LIMIT: i64 = 4 * 1024 * 1024;
-/// The writer's page cache, negative as SQLite counts KiB.
 #[cfg(target_os = "android")]
 const WRITER_CACHE_KIB: i64 = -8 * 1024;
 #[cfg(not(target_os = "android"))]
 const WRITER_CACHE_KIB: i64 = -32 * 1024;
-/// Longest wait of a resetting checkpoint for readers of the old log.
 const RESET_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
-/// Most groups between two resets that wait for readers while one pins the log.
 const MAX_RESET_BACKOFF: u32 = 64;
 
-/// What one file writer has done since open. Times are microseconds on the
-/// writer thread; whatever is left of wall time was spent idle.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WriterStats {
-    /// Committed groups and the writing steps they held.
     pub groups: u64,
     pub steps: u64,
-    /// Commits that were a full device flush.
     pub flushes: u64,
-    /// Admission, reduction, encoding and statements of the steps.
     pub step_micros: u64,
-    /// `COMMIT`, including the flush where the group had one.
     pub commit_micros: u64,
-    /// Requests answered outside groups, on the writer thread.
     pub read_micros: u64,
-    /// Mutation step subphases, collected only when `RuntimeOptions::instrument`
-    /// is set; zero otherwise. `admission` is application validation and
-    /// candidate admission; `reduction` reads the reducer's rows and applies
-    /// the transition; `encoding` serializes the operation and projects its
-    /// statements; `sql` executes every SQLite statement of the write.
     pub admission_micros: u64,
     pub reduction_micros: u64,
     pub encoding_micros: u64,
     pub sql_micros: u64,
-    /// Writer step time split by the kind of request that ran, collected only
-    /// when `RuntimeOptions::instrument` is set. `authoring` counts local
-    /// mutations; `incoming` counts page receipts and pending application; the
-    /// rest of `step_micros` is strong commands, retention and other writes.
     pub authoring_steps: u64,
     pub incoming_steps: u64,
     pub authoring_step_micros: u64,
     pub incoming_step_micros: u64,
-    /// WAL checkpoints run between groups, and how long they held the writer.
     pub checkpoints: u64,
     pub checkpoint_micros: u64,
     pub checkpoint_max_micros: u64,
-    /// Of the passive checkpoints: the flush of the WAL before the copy,
-    /// copying pages into the database file, and its flush after.
     pub checkpoint_wal_flush_micros: u64,
     pub checkpoint_copy_micros: u64,
     pub checkpoint_flush_micros: u64,
-    /// Truncating checkpoints, included above, and their time.
     pub truncations: u64,
     pub truncate_micros: u64,
-    /// Truncating checkpoints that waited for readers of the old log.
     pub truncate_waits: u64,
-    /// WAL frames after the latest commit, and the most seen.
     pub wal_frames: u64,
     pub wal_frames_max: u64,
-    /// Follow-up passes that failed after their mutation committed; the
-    /// next pass derives the follow-ups again.
     pub deferred_follows: u64,
 }
-/// The kind of request a writer step ran, for `WriterStats` attribution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StepKind {
-    /// A local mutation authored through this runtime.
     Authoring,
-    /// A page receipt or pending application from a peer.
     Incoming,
-    /// Strong commands, retention and other writes.
     Other,
 }
 #[derive(Default)]
@@ -140,12 +91,8 @@ pub(crate) struct Metrics {
     wal_frames: AtomicU64,
     wal_frames_max: AtomicU64,
     deferred_follows: AtomicU64,
-    /// Bounded record of the most recent checkpoint intervals, plus how many
-    /// intervals were dropped once the bound filled.
     checkpoint_log: std::sync::Mutex<CheckpointLog>,
 }
-/// Upper bound on retained checkpoint intervals; older ones are dropped and
-/// counted so callers know the log is truncated.
 pub(crate) const MAX_CHECKPOINT_INTERVALS: usize = 4096;
 #[derive(Default)]
 struct CheckpointLog {
@@ -153,9 +100,6 @@ struct CheckpointLog {
     dropped: u64,
 }
 impl Metrics {
-    /// Accumulate the four mutation-step subphases from the worker thread.
-    /// Nanoseconds are kept so a phase faster than a microsecond is not
-    /// truncated to zero; the snapshot reports microseconds.
     pub(crate) fn add_admission(&self, nanos: u64) {
         self.admission_nanos.fetch_add(nanos, Relaxed);
     }
@@ -171,7 +115,6 @@ impl Metrics {
     pub(crate) fn deferred_follow(&self) {
         self.deferred_follows.fetch_add(1, Relaxed);
     }
-    /// Attribute one writer step to the kind of request it ran.
     pub(crate) fn add_step(&self, kind: StepKind, micros: u64) {
         match kind {
             StepKind::Authoring => {
@@ -215,8 +158,6 @@ impl Metrics {
             deferred_follows: self.deferred_follows.load(Relaxed),
         }
     }
-    /// Records one completed checkpoint interval, dropping the oldest when the
-    /// bound is reached and counting it so callers know the log is truncated.
     pub(crate) fn record_checkpoint(&self, interval: CheckpointInterval) {
         let Ok(mut log) = self.checkpoint_log.lock() else {
             return;
@@ -227,8 +168,6 @@ impl Metrics {
         }
         log.intervals.push_back(interval);
     }
-    /// The retained checkpoint intervals in completion order, and how many were
-    /// dropped from the front of the log after it filled.
     pub(crate) fn checkpoint_intervals(&self) -> (Vec<CheckpointInterval>, u64) {
         let Ok(log) = self.checkpoint_log.lock() else {
             return (Vec::new(), 0);
@@ -236,45 +175,28 @@ impl Metrics {
         (log.intervals.iter().copied().collect(), log.dropped)
     }
 }
-/// Which kind of WAL checkpoint an interval records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckpointKind {
-    /// A `PASSIVE` checkpoint past `checkpoint_frames` frames.
     Passive,
-    /// A resetting `TRUNCATE` checkpoint past twice `checkpoint_frames`.
     Truncate,
 }
-/// One WAL checkpoint with monotonic start/end timestamps, so a caller can
-/// correlate individual write latencies with the checkpoints they overlapped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CheckpointInterval {
-    /// Monotonic clock when the checkpoint started.
     pub start: Instant,
-    /// Monotonic clock when the checkpoint completed.
     pub end: Instant,
     pub kind: CheckpointKind,
-    /// Time spent copying WAL pages into the database file.
     pub copy_micros: u64,
-    /// Time spent flushing the database file to the device.
     pub flush_micros: u64,
 }
 pub(crate) fn micros(since: Instant) -> u64 {
     since.elapsed().as_micros() as u64
 }
-/// For subphases: whole-microsecond truncation would hide phases that run
-/// faster than a microsecond on fast hardware.
 pub(crate) fn nanos(since: Instant) -> u64 {
     since.elapsed().as_nanos() as u64
 }
 
-/// `fullfsync` and `checkpoint_fullfsync`: flushes and checkpoints reach the
-/// device, not only its cache.
 const FLUSH_TO_DEVICE: i64 = 1;
-/// `wal_autocheckpoint`: off, since the writer checkpoints between groups;
-/// see `Writer::checkpoint`.
 const NO_AUTOCHECKPOINT: i64 = 0;
-/// Sets and verifies durability and checkpoint pragmas on the write connection.
-/// `fullfsync` is fixed here: SQLite refuses these inside a transaction.
 pub(crate) async fn configure(
     conn: &ScopedConnection,
     durability: Durability,
@@ -330,11 +252,8 @@ pub(crate) async fn configure(
     Ok(())
 }
 
-/// A reply held until the group's outcome is known.
 pub(crate) trait Answer {
-    /// The step could not roll back; the connection state is unknown.
     fn fatal(&self) -> bool;
-    /// `flushed`: the group's commit was a full flush.
     fn send(self: Box<Self>, flushed: bool);
     fn fail(self: Box<Self>, error: Error);
 }
@@ -353,7 +272,6 @@ impl<T> Answer for Answered<T> {
         let _ = self.reply.send(Err(error));
     }
 }
-/// A mutation's reply, which reports the class its commit reached.
 pub(crate) struct Committing {
     pub(crate) reply: Reply<crate::CommittedMutation>,
     pub(crate) result: Result<crate::CommittedMutation, Error>,
@@ -375,7 +293,6 @@ impl Answer for Committing {
         let _ = self.reply.send(Err(error));
     }
 }
-/// A step that answered its caller itself.
 pub(crate) struct Unanswered;
 impl Answer for Unanswered {
     fn fatal(&self) -> bool {
@@ -386,19 +303,15 @@ impl Answer for Unanswered {
 }
 
 struct Slot<A: StoredApplication> {
-    /// None once the domain is closed.
     worker: Option<Worker<A>>,
     receiver: mpsc::Receiver<QueuedCommand<A::Row>>,
-    /// Taken from the queue but not yet run, in queue order.
     deferred: VecDeque<QueuedCommand<A::Row>>,
-    /// The queue is closed and empty.
     drained: bool,
     closing: Option<Reply<()>>,
 }
 struct File {
     conn: Arc<sqlite::Connection>,
     _owner: DatabaseOwner,
-    /// Read connections beside this writer; closed before the file is.
     pool: Arc<crate::read::ReadPool>,
 }
 pub(crate) struct Writer<A: StoredApplication> {
@@ -407,29 +320,21 @@ pub(crate) struct Writer<A: StoredApplication> {
     group: usize,
     cursor: usize,
     durability: Durability,
-    /// An exposure waits for the next flush, or what survived a restart may
-    /// still sit unflushed in the OS cache.
     flush_wanted: bool,
-    /// Domains whose first deferred request waits for that flush.
     waiting: Vec<usize>,
     checkpoint_frames: i64,
-    /// While a reader keeps the log from being reset: groups between resets
-    /// that wait for it, and the groups left before the next one.
     reset_backoff: u32,
     reset_skip: u32,
-    /// Whether subphase timing and checkpoint-interval recording are on.
     instrument: bool,
     metrics: Arc<Metrics>,
     #[cfg(test)]
     fault: Option<crate::worker::Fault>,
     #[cfg(test)]
     groups: Option<crate::worker::GroupLog>,
-    /// Test hook: copy the file and its WAL here after every flush.
     #[cfg(test)]
     snapshots: Option<std::path::PathBuf>,
 }
 type Work<R> = (usize, QueuedCommand<R>);
-/// A domain's worker and its command queue.
 pub(crate) type Domain<A> = (
     Worker<A>,
     mpsc::Receiver<QueuedCommand<<A as StoredApplication>::Row>>,
@@ -440,8 +345,6 @@ where
     A: StoredApplication,
     A::State: Clone,
 {
-    /// Must follow the write connection putting the file in WAL mode: the
-    /// domains' shared reader is opened here.
     pub(crate) fn new(
         owner: DatabaseOwner,
         conn: Arc<sqlite::Connection>,
@@ -491,10 +394,6 @@ where
             snapshots: None,
         })
     }
-    /// Runs groups until every domain retired or a fatal error stopped the
-    /// writer, which then stops every domain so queued callers see `Closed`.
-    /// It starts with a flush: what survived a restart may sit unflushed in
-    /// the OS cache.
     pub(crate) async fn run(mut self) {
         let mut stopped = self.flush().await;
         while !stopped {
@@ -523,7 +422,6 @@ where
         self.close_file().await;
         drop(notifications);
     }
-    /// Waits, without polling for more, until any domain has work.
     async fn wait(&mut self) {
         std::future::poll_fn(|context| {
             let mut ready = true;
@@ -569,13 +467,6 @@ where
             Err(mpsc::error::TryRecvError::Empty) => None,
         }
     }
-    /// Takes what is already queued, one write per domain per pass, starting
-    /// at a rotating domain, until the group is full. Never waits for more.
-    /// A domain's requests that precede its first write run at once, outside
-    /// the group; a later one waits for the commit so queue order holds.
-    /// Also returns whether a write in the group exposes its reply, so the
-    /// group must be a flush. An exposing request of a domain with buffered
-    /// commits waits for the next flush instead.
     async fn collect(&mut self) -> (Vec<Work<A::Row>>, bool) {
         let count = self.slots.len();
         let start = self.cursor % count;
@@ -628,8 +519,6 @@ where
             }
         }
     }
-    /// Reads, closes and test faults, which never join a group. A close stops
-    /// admission; work admitted before it still runs.
     async fn serve(&mut self, index: usize, command: Command<A::Row>) {
         let closing = self.slots[index].closing.is_some();
         match command {
@@ -688,8 +577,6 @@ where
         self.durability == Durability::Buffered
             && self.slots[index].worker.as_ref().is_some_and(Worker::dirty)
     }
-    /// Groups that flush run at FULL; SQLite refuses the switch inside a
-    /// transaction, so it happens between groups.
     async fn synchronous(&self, conn: &sqlite::Connection, full: bool) -> Result<(), Error> {
         if self.durability == Durability::Full {
             return Ok(());
@@ -703,7 +590,6 @@ where
             .await?;
         Ok(())
     }
-    /// After a flush every domain of the file is at the watermark.
     fn flushed(&mut self) {
         self.flush_wanted = false;
         self.waiting.clear();
@@ -717,7 +603,6 @@ where
         #[cfg(test)]
         self.snapshot();
     }
-    /// A flush failed: the exposures waiting for it fail too.
     fn flush_failed(&mut self, error: &Error) {
         self.flush_wanted = false;
         for index in std::mem::take(&mut self.waiting) {
@@ -726,8 +611,6 @@ where
             }
         }
     }
-    /// A flush with no group to carry it: one FULL commit that writes only
-    /// the file header's counter. Returns true when the writer must stop.
     async fn flush(&mut self) -> bool {
         let Some(conn) = self.conn() else {
             return true;
@@ -771,8 +654,6 @@ where
     fn conn(&self) -> Option<Arc<sqlite::Connection>> {
         self.file.as_ref().map(|file| file.conn.clone())
     }
-    /// `BEGIN IMMEDIATE`, retried with backoff while another connection or
-    /// process holds the file. This writer is the only one in the process.
     async fn begin(&self, conn: &sqlite::Connection) -> Result<(), Error> {
         self.begin_as(conn, "BEGIN IMMEDIATE").await
     }
@@ -793,11 +674,6 @@ where
         }
         Err(Error::RetryExhausted)
     }
-    /// Runs one group; `full` makes its commit a flush. Domains the group
-    /// wrote to also run their due checkpoint and prune steps in it. If the
-    /// commit fails nothing of the group is durable: every touched domain
-    /// rebuilds its memory from storage and every waiter fails. Returns true
-    /// when the writer must stop.
     async fn commit(&mut self, group: Vec<Work<A::Row>>, full: bool) -> bool {
         let Some(conn) = self.conn() else {
             for (_, queued) in group {
@@ -821,7 +697,10 @@ where
         #[cfg(test)]
         let composition: Vec<_> = group
             .iter()
-            .map(|(index, queued)| (*index, queued._budget.num_permits()))
+            .map(|(index, queued)| crate::worker::LoggedStep {
+                domain: *index,
+                queue_weight: queued._budget.num_permits(),
+            })
             .collect();
         if let Err(error) = self.begin(&conn).await {
             let _ = self.synchronous(&conn, false).await;
@@ -982,11 +861,6 @@ where
             }
         }
     }
-    /// Between groups, keep the WAL bounded: a passive checkpoint past
-    /// `CHECKPOINT_FRAMES`, and a resetting `TRUNCATE` past twice that when
-    /// readers kept passive ones from completing. A checkpoint that
-    /// cannot finish now is retried after a later group. Returns true when
-    /// the writer must stop.
     async fn checkpoint(&mut self, conn: &sqlite::Connection) -> bool {
         let frames = sqlite::wal_frames();
         self.metrics.wal_frames.store(frames.max(0) as u64, Relaxed);
@@ -1035,9 +909,6 @@ where
         }
         stop
     }
-    /// A resetting checkpoint, which must wait for readers of the old log. It
-    /// first tries without waiting; while a reader pins the log, the bounded
-    /// wait backs off over groups instead of stalling every one.
     async fn reset(&mut self, conn: &sqlite::Connection) {
         let mut reset = truncate(conn).await;
         if !reset && self.reset_skip > 0 {
@@ -1058,13 +929,6 @@ where
             self.reset_skip = 0;
         }
     }
-    /// A passive checkpoint with SQLite's flushes taken out and issued here,
-    /// in its order, so their time is measured apart from the page copy:
-    /// the WAL before the copy, the database file after it. Nothing else
-    /// writes between the copy and the second flush. Returns whether the
-    /// writer must stop, because the copy could not be flushed (the log may
-    /// be reused once copied) or the flush level not restored, plus the copy
-    /// and database-file flush time of this checkpoint.
     async fn passive(&self, conn: &sqlite::Connection) -> (bool, u64, u64) {
         let Some(file) = &self.file else {
             return (false, 0, 0);
@@ -1112,9 +976,6 @@ where
             let _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", ()).await;
         }
     }
-    /// Retires domains whose queues are closed and drained. The last one
-    /// closes the file before its observers stop and its closer is answered,
-    /// so a caller that saw the close can reopen the file at once.
     async fn retire(&mut self) {
         let ready: Vec<_> = (0..self.slots.len())
             .filter(|index| {
@@ -1142,9 +1003,6 @@ where
             }
         }
     }
-    /// Closes the read pool, whose readers would keep the log from being
-    /// reset, checkpoints and truncates the WAL, then releases the connection
-    /// and lock.
     async fn close_file(&mut self) {
         if let Some(file) = self.file.take() {
             file.pool.close();
@@ -1157,13 +1015,9 @@ where
         }
     }
 }
-/// Whether the connection changed rows since its counter read `before`; an
-/// unreadable counter counts as a change.
 fn changed_since(conn: &sqlite::Connection, before: Option<u64>) -> bool {
     before.is_none() || before != conn.total_changes().ok()
 }
-/// Changes the file header's counter: a changed header page guarantees a WAL
-/// frame for a flush to sync.
 async fn change_header_page(conn: &sqlite::Connection) -> Result<(), Error> {
     let current = rows_raw(conn, "PRAGMA user_version").await?;
     let next = match current.first().map(Vec::as_slice) {
@@ -1174,8 +1028,6 @@ async fn change_header_page(conn: &sqlite::Connection) -> Result<(), Error> {
         .await?;
     Ok(())
 }
-/// A resetting checkpoint; whether it reset the log. Busy readers make it
-/// copy what it can, as a passive one does.
 async fn truncate(conn: &sqlite::Connection) -> bool {
     matches!(
         rows_raw(conn, "PRAGMA wal_checkpoint(TRUNCATE)").await.as_deref(),
@@ -1185,14 +1037,12 @@ async fn truncate(conn: &sqlite::Connection) -> bool {
 async fn rows_raw(conn: &sqlite::Connection, sql: &str) -> Result<Vec<Vec<SqlValue>>, Error> {
     storage::collect_rows(conn.query(sql, ()).await?).await
 }
-/// Answers commands that never ran because their group could not begin.
 fn fail<R>(commands: Vec<Command<R>>, error: Error) {
     let mut errors = copies(error, commands.len());
     for command in commands {
         command.refuse(errors.pop().unwrap_or(Error::Closed));
     }
 }
-/// One error per waiter; the first popped is the original.
 fn copies(error: Error, count: usize) -> Vec<Error> {
     let mut errors: Vec<_> = (1..count.max(1))
         .map(|_| storage::group_error(&error))

@@ -1,8 +1,5 @@
-#![doc = include_str!("../README.md")]
-
 mod locks;
 
-/// Origin Private File System (OPFS) VFS implementation using `SyncAccessHandle`.
 #[expect(
     non_snake_case,
     reason = "VFS callbacks retain SQLite's C ABI names and parameter names."

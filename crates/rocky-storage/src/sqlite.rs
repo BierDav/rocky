@@ -1,6 +1,3 @@
-//! Private SQLite adapter. Calls are synchronous and complete before they
-//! return; the `async` signatures only let storage code share one shape with
-//! its async callers.
 use std::{cell::Cell, collections::VecDeque, path::Path, sync::Mutex};
 use web_time::Instant;
 
@@ -8,30 +5,17 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
 pub enum Error {
-    /// The file is held by another connection; the whole transaction may retry.
     Busy(String),
-    /// A read transaction outlived its deadline and was interrupted.
     Deadline,
-    /// A statement reached beyond the tables its read may use.
     Denied,
-    /// A statement outside the supported surface; it was never compiled.
     Unsupported(String),
-    /// A shared group commit failed; the original error went to one waiter.
     Group(String),
-    /// The linked SQLite is not the build Rocky bundles.
     Build(String),
     Sqlite(rusqlite::Error),
     Type(String),
 }
-/// The source of the SQLite Rocky bundles on every target
-/// (`rocky_core::BUNDLED_SQLITE_VERSION`), natively through `rusqlite` and in
-/// a browser through `rocky-sqlite`.
 pub const SQLITE_SOURCE_ID: &str =
     "2026-06-03 19:12:13 d6e03d8c777cfa2d35e3b60d8ec3e0187f3e9f99d8e2ee9cac695fd6fcdf1a24";
-/// Replay results and the engine identity tips commit depend on the SQLite
-/// build, so another one is refused at open instead of diverging. A wasm32
-/// application whose own rusqlite enables `ffi-sqlite-wasm-rs` (a default
-/// feature) links upstream's SQLite and fails here.
 fn check_build(raw: &rusqlite::Connection) -> Result<()> {
     static CHECKED: std::sync::OnceLock<std::result::Result<(), String>> =
         std::sync::OnceLock::new();
@@ -56,20 +40,16 @@ fn bundled(version: &str, source: &str) -> std::result::Result<(), String> {
          default-features = false, since its ffi-sqlite-wasm-rs links another SQLite"
     ))
 }
-/// The SQLite library this build runs, as replicas report it.
 pub fn engine() -> String {
     format!("sqlite {}", rusqlite::version())
 }
 
 impl Error {
-    /// The engine refused a statement for violating a constraint.
-    /// An integer overflow counts: exact values may not leave `i64`.
     pub fn is_constraint(&self) -> bool {
         matches!(self, Self::Sqlite(error)
             if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation))
             || self.is_overflow()
     }
-    /// A `checked_*` function, `sum` or `abs` left `i64`.
     pub fn is_overflow(&self) -> bool {
         matches!(self, Self::Sqlite(rusqlite::Error::SqliteFailure(failure, Some(message)))
             if failure.code == rusqlite::ErrorCode::Unknown && message == crate::exact::OVERFLOW)
@@ -174,7 +154,6 @@ impl<A: Into<Value>, B: Into<Value>, C: Into<Value>> IntoParams for (A, B, C) {
         vec![self.0.into(), self.1.into(), self.2.into()]
     }
 }
-/// Positional parameters of mixed types.
 #[macro_export]
 macro_rules! params {
     ($($value:expr),* $(,)?) => {
@@ -212,7 +191,6 @@ impl FromValue for Vec<u8> {
 }
 
 impl Value {
-    /// Bytes a value counts towards a result's byte limit.
     pub fn weight(&self) -> usize {
         match self {
             Self::Text(text) => text.len(),
@@ -221,12 +199,9 @@ impl Value {
         }
     }
 }
-/// One bounded page of a result.
 pub struct Page {
     pub rows: Vec<Vec<Value>>,
-    /// The statement had at least one more row.
     pub more: bool,
-    /// The first row alone exceeds the byte limit; `rows` is empty.
     pub oversized: bool,
 }
 pub struct Row(Vec<Value>);
@@ -244,8 +219,6 @@ impl Row {
         T::from_value(self.get_value(column)?)
     }
 }
-/// A fully read result. The statement is reset before `query` returns, so no
-/// cursor outlives the call or pins a read snapshot.
 pub struct Rows(VecDeque<Row>);
 impl Rows {
     pub async fn next(&mut self) -> Result<Option<Row>> {
@@ -253,20 +226,14 @@ impl Rows {
     }
 }
 
-/// The row hook's consumers: checkpoint digests, session capture and
-/// watched-table counts.
 #[derive(Clone)]
 struct Hooks {
     tracker: std::sync::Arc<Mutex<crate::digest::Tracker>>,
     capture: std::sync::Arc<Mutex<crate::capture::Sink>>,
     writes: std::sync::Arc<Writes>,
 }
-/// Counts row changes to watched tables of `main`, so a cache derived from
-/// them can tell it is stale, also inside one transaction.
 #[derive(Default)]
 pub struct Writes {
-    /// Each table, and whether an update counts or only rows added or
-    /// removed.
     tables: std::sync::RwLock<Vec<(String, bool)>>,
     count: std::sync::atomic::AtomicU64,
     counts: Mutex<std::collections::HashMap<String, TableCount>>,
@@ -291,8 +258,6 @@ type WatchedInteger = (
     i64,
     std::sync::Arc<std::sync::atomic::AtomicU64>,
 );
-/// Changes to physical rows selected by integer columns, including rolled
-/// back writes. Unrelated keys do not invalidate the watch.
 pub struct RowWrites {
     keys: Vec<WatchedInteger>,
     owner: std::sync::Arc<Writes>,
@@ -335,15 +300,12 @@ impl Drop for RowWrites {
     }
 }
 impl Writes {
-    /// Changes so far; it only grows.
     pub fn count(&self) -> u64 {
         self.count.load(std::sync::atomic::Ordering::Acquire)
     }
-    /// Changes to one watched table, including changes within a transaction.
     pub fn table_count(&self, table: &str) -> u64 {
         self.selected_count([(table, true)])
     }
-    /// A watch's own table/mutation selection, independent of other consumers.
     pub fn selected_count<'a>(&self, tables: impl IntoIterator<Item = (&'a str, bool)>) -> u64 {
         let counts = self
             .counts
@@ -411,42 +373,30 @@ impl Writes {
         }
     }
 }
-/// What a session statement observes of its own earlier statements. The
-/// runtime's protocol writes share the connection and must not show here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Observed {
     pub changes: i64,
     pub last_insert_rowid: i64,
     pub total_changes: i64,
 }
-/// Session state of a write connection: its authorizer and what the SQL
-/// functions `changes`, `total_changes` and `last_insert_rowid` return.
-/// Once installed they shadow the engine's counts for every statement on
-/// the connection; runtime code reads those through [`Connection::total_changes`].
 #[derive(Clone)]
 pub struct Session {
     pub gate: std::sync::Arc<Mutex<crate::capture::Gate>>,
     pub observed: std::sync::Arc<Mutex<Observed>>,
 }
-/// A session statement's result.
 pub struct Ran {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
     pub read_only: bool,
     pub changes: u64,
-    /// Rows this statement changed, triggers included.
     pub total_changes: u64,
     pub last_insert_rowid: i64,
 }
 pub enum Run {
     Done(Ran),
-    /// The statement writes and was not stepped.
     Writes,
-    /// The result exceeded its byte bound; `true` if the statement writes,
-    /// in which case its changes are in place.
     Oversized(bool),
 }
-/// What compiling a session statement reports, without stepping it.
 pub struct Described {
     pub columns: Vec<String>,
     pub parameters: usize,
@@ -456,17 +406,10 @@ pub struct Connection(
     Mutex<rusqlite::Connection>,
     std::sync::OnceLock<Hooks>,
     std::sync::OnceLock<Session>,
-    /// The session gate.
     std::sync::Arc<Mutex<crate::capture::Gate>>,
 );
-/// No busy wait: busy files are retried by whole transactions with bounded
-/// backoff.
 const WHOLE_TRANSACTIONS_RETRY_BUSY_FILES: std::time::Duration = std::time::Duration::ZERO;
-/// The name prefix of the runtime's history triggers, which a session's
-/// statements fire. They write what a session's change replaces, so the
-/// session gate allows them although the session never names their tables.
 pub const HISTORY_TRIGGERS: &str = "secure_kept_";
-/// The name prefix of the history tables those triggers write.
 pub const HISTORY_TABLES: &str = "secure_history_";
 impl Connection {
     pub fn open(path: &Path) -> Result<Self> {
@@ -482,14 +425,10 @@ impl Connection {
         connection.load_schema()?;
         Ok(connection)
     }
-    /// Loads the file's schema, which SQLite does lazily, during connection
-    /// setup rather than after a bounded application snapshot starts its
-    /// deadline.
     fn load_schema(&self) -> Result<()> {
         self.rows("SELECT name FROM sqlite_schema LIMIT 0", ())
             .map(drop)
     }
-    /// A private database that lives as long as the connection.
     pub fn open_in_memory() -> Result<Self> {
         Self::configure(rusqlite::Connection::open_in_memory()?)
     }
@@ -505,17 +444,12 @@ impl Connection {
             Default::default(),
         ))
     }
-    /// The connection's row tracker. The first call installs the engine hook
-    /// that feeds it; connections that never ask pay nothing.
     pub fn tracker(&self) -> Result<std::sync::Arc<Mutex<crate::digest::Tracker>>> {
         Ok(self.hooks()?.tracker)
     }
-    /// The capture sink fed by the same hook as the tracker.
     pub fn capture(&self) -> Result<std::sync::Arc<Mutex<crate::capture::Sink>>> {
         Ok(self.hooks()?.capture)
     }
-    /// Adds physical `tables` to the watched set and returns its counter;
-    /// each table counts updates too, or only rows added or removed.
     pub fn watch_writes(
         &self,
         tables: impl IntoIterator<Item = (String, bool)>,
@@ -536,8 +470,6 @@ impl Connection {
         }
         Ok(writes)
     }
-    /// Watches physical rows with any matching (table, zero-based integer
-    /// column, value). Counters include triggers and rolled back writes.
     pub fn watch_integer_rows(
         &self,
         keys: impl IntoIterator<Item = (String, i32, i64)>,
@@ -573,8 +505,6 @@ impl Connection {
             owner: writes,
         }))
     }
-    /// One hook per connection: it reads a changed row once and hands it to
-    /// the digest tracker and to the capture sink.
     fn hooks(&self) -> Result<Hooks> {
         use rocky_sqlite::Change;
         if let Some(hooks) = self.1.get() {
@@ -651,8 +581,6 @@ impl Connection {
         )?;
         Ok(self.1.get_or_init(|| hooks).clone())
     }
-    /// The connection's session state. The first call installs the statement
-    /// authorizer and the SQL functions that report a session's own counts.
     pub fn session(&self) -> Result<Session> {
         use rusqlite::functions::FunctionFlags;
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
@@ -714,10 +642,6 @@ impl Connection {
         drop(raw);
         Ok(self.2.get_or_init(|| session).clone())
     }
-    /// Compiles a session statement under the armed gate. The engine reports
-    /// a table from which no column is read, as in `count(*)`, by a bare
-    /// name that may also be a common table expression or a subquery. Such
-    /// a name must not be any stored table, or the statement is refused.
     fn compile<'c>(
         &self,
         raw: &'c rusqlite::Connection,
@@ -743,7 +667,6 @@ impl Connection {
         }
         Ok(statement)
     }
-    /// Compiles a session statement under the armed gate without stepping it.
     pub fn describe(&self, sql: &str) -> Result<Described> {
         let raw = self.raw()?;
         let statement = self.compile(&raw, sql)?;
@@ -757,9 +680,6 @@ impl Connection {
             read_only: statement.readonly(),
         })
     }
-    /// Compiles and steps one session statement. It is compiled anew, so the
-    /// armed gate authorizes this text and reports its assignments. With
-    /// `write` unset a writing statement is not stepped.
     pub fn session_run(
         &self,
         sql: &str,
@@ -804,7 +724,6 @@ impl Connection {
             last_insert_rowid: raw.last_insert_rowid(),
         }))
     }
-    /// Interrupts statements once `deadline` passes or `cancelled` is set.
     pub fn set_interrupt(
         &self,
         deadline: Instant,
@@ -818,8 +737,6 @@ impl Connection {
         )?;
         Ok(())
     }
-    /// Steps a statement and hands each row to `visit` without collecting
-    /// the result.
     pub fn scan(
         &self,
         sql: &str,
@@ -849,8 +766,6 @@ impl Connection {
         }
         Ok(())
     }
-    /// The engine connection. A cursor's worker holds it for the cursor's
-    /// whole life, across the awaits between pages.
     pub(crate) fn hold(&self) -> Result<std::sync::MutexGuard<'_, rusqlite::Connection>> {
         self.raw()
     }
@@ -859,8 +774,6 @@ impl Connection {
             .lock()
             .map_err(|_| Error::Type("connection poisoned".into()))
     }
-    /// Interrupts statements once `deadline` passes, so an open reader cannot
-    /// pin the WAL indefinitely. `None` removes the bound.
     pub fn set_deadline(&self, deadline: Option<Instant>) -> Result<()> {
         let raw = self.raw()?;
         match deadline {
@@ -879,7 +792,6 @@ impl Connection {
         self.raw()?.pragma_update(None, "query_only", 1)?;
         Ok(())
     }
-    /// Records the WAL size after each commit on this thread; see `wal_frames`.
     pub fn track_wal(&self) -> Result<()> {
         fn record(_: &rusqlite::hooks::Wal, frames: std::ffi::c_int) -> rusqlite::Result<()> {
             WAL_FRAMES.with(|cell| cell.set(i64::from(frames)));
@@ -888,7 +800,6 @@ impl Connection {
         self.raw()?.wal_hook(Some(record));
         Ok(())
     }
-    /// Qualification hook: exit from SQLite's callback while COMMIT is executing.
     #[cfg(feature = "qualification")]
     pub fn qualification_exit_in_commit(&self) -> Result<()> {
         let raw = self.raw()?;
@@ -900,7 +811,6 @@ impl Connection {
             "qualification COMMIT returned without invoking its callback".into(),
         ))
     }
-    /// Test hook: kill the process when SQLite would wait for another connection.
     #[cfg(any(test, feature = "test-support"))]
     pub fn abort_when_busy(&self) -> Result<()> {
         fn abort(_: i32) -> bool {
@@ -909,8 +819,6 @@ impl Connection {
         self.raw()?.busy_handler(Some(abort))?;
         Ok(())
     }
-    /// While `tables` is set, statements compile only if they are plain
-    /// `SELECT`s that read no table outside it. `None` lifts the restriction.
     pub fn restrict_reads(&self, tables: Option<Vec<String>>) -> Result<()> {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
         let raw = self.raw()?;
@@ -930,10 +838,6 @@ impl Connection {
         }
         Ok(())
     }
-    /// Steps a statement until `max_rows` rows or `max_bytes` bytes are read
-    /// and reports whether a further row exists. The last `unweighed` columns
-    /// of a row do not count towards the bytes. The statement is reset before
-    /// returning.
     pub fn page(
         &self,
         sql: &str,
@@ -984,12 +888,10 @@ impl Connection {
         count_steps(&statement);
         Ok(page)
     }
-    /// `query` for callers outside an async context.
     pub fn rows(&self, sql: &str, params: impl IntoParams) -> Result<Vec<Vec<Value>>> {
         let (rows, _) = self.run(sql, params.into_params())?;
         Ok(rows.into_iter().map(|row| row.0).collect())
     }
-    /// `execute` for callers outside an async context.
     pub fn run_now(&self, sql: &str) -> Result<()> {
         self.run(sql, Vec::new()).map(|_| ())
     }
@@ -1024,14 +926,12 @@ impl Connection {
     pub async fn query(&self, sql: impl AsRef<str>, params: impl IntoParams) -> Result<Rows> {
         Ok(Rows(self.run(sql.as_ref(), params.into_params())?.0))
     }
-    /// Returns the rows changed by the statement.
     pub async fn execute(&self, sql: impl AsRef<str>, params: impl IntoParams) -> Result<u64> {
         Ok(self.run(sql.as_ref(), params.into_params())?.1)
     }
     pub fn is_autocommit(&self) -> Result<bool> {
         Ok(self.raw()?.is_autocommit())
     }
-    /// Rows inserted, updated or deleted on this connection since it opened.
     pub fn total_changes(&self) -> Result<u64> {
         Ok(self.raw()?.total_changes())
     }
@@ -1053,8 +953,6 @@ pub(crate) fn value(value: rusqlite::types::ValueRef<'_>) -> Result<Value> {
 }
 
 thread_local! {
-    /// WAL frames after the latest commit on this thread. The file writer owns
-    /// its connection on one thread, so the value belongs to that file.
     static WAL_FRAMES: Cell<i64> = const { Cell::new(0) };
 }
 pub fn wal_frames() -> i64 {
@@ -1066,7 +964,6 @@ thread_local! {
     static STATEMENTS: Cell<u64> = const { Cell::new(0) };
     static STATEMENT_TRACE: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
 }
-/// Statements prepared on this thread, for tests that count them per row.
 #[cfg(any(test, feature = "test-support"))]
 pub fn statements() -> u64 {
     STATEMENTS.with(Cell::get)
@@ -1076,14 +973,11 @@ fn count_steps(statement: &rusqlite::Statement<'_>) {
     let steps = statement.reset_status(rusqlite::StatementStatus::VmStep);
     VM_STEPS.with(|cell| cell.set(cell.get() + steps.max(0) as u64));
 }
-/// Virtual machine steps of the statements this thread ran, for tests that
-/// bound the work of a pass independently of the stored rows.
 #[cfg(any(test, feature = "test-support"))]
 pub fn vm_steps() -> u64 {
     VM_STEPS.with(Cell::get)
 }
 
-/// Starts or stops collecting statement text on this test thread; returns the previous trace.
 #[cfg(any(test, feature = "test-support"))]
 pub fn trace_statements(enabled: bool) -> Vec<String> {
     STATEMENT_TRACE.with(|trace| trace.replace(enabled.then(Vec::new)).unwrap_or_default())
@@ -1093,11 +987,6 @@ pub fn trace_statements(enabled: bool) -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// Replay results depend on the SQLite build, so every target links the
-    /// same amalgamation with the same semantics. Only options that cannot
-    /// change a result differ: threads, mutexes, allocation, mmap, where
-    /// temporary tables live, the OS layer and extension loading (replay
-    /// refuses `load_extension`).
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn every_target_links_the_same_sqlite() {
         const TARGET_ONLY: &[&str] = &[

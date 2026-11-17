@@ -1,5 +1,3 @@
-//! redb: one file, copy-on-write B-trees, tables and indexes built by hand.
-//! `KV_LAYOUT=prefixed` keeps all rows in one tree and all index entries in another.
 use std::sync::Arc;
 
 use harness::{Config, Conn, DOMAINS, Engine, NODE, Result, Row};
@@ -14,7 +12,6 @@ const SIGN: u64 = 1 << 63;
 const PK: usize = 24;
 const INDEX_A: u8 = 0;
 const INDEX_B: u8 = 1;
-/// Row value: node, seq, a, b, lamport, stamp_node, stamp_seq, c length, c.
 const A_AT: usize = 24;
 const B_AT: usize = 32;
 const C_AT: usize = 76;
@@ -61,7 +58,6 @@ fn text(value: &[u8]) -> Result<String> {
     Ok(std::str::from_utf8(value.get(C_AT..C_AT + length).ok_or("short row")?)?.to_owned())
 }
 
-/// Where a data table lives: tree names and the key prefixes inside them.
 struct Place {
     rows: String,
     index_a: String,
@@ -110,12 +106,10 @@ impl Place {
     }
 }
 
-/// The trees of one data table inside a write transaction.
 struct Open<'txn> {
     place: Place,
     rows: Tree<'txn>,
     index_a: Tree<'txn>,
-    /// `None` when both indexes share one tree.
     index_b: Option<Tree<'txn>>,
 }
 impl<'txn> Open<'txn> {
@@ -153,7 +147,6 @@ impl<'txn> Open<'txn> {
         self.index(index).insert(key.as_slice(), [].as_slice())?;
         Ok(())
     }
-    /// Write a row and its index entries; `unique` rejects an existing primary key.
     fn put(&mut self, row: &Row, stamp_seq: i64, unique: bool) -> Result<()> {
         let pk = pk(row.seq);
         let key = self.place.row_key(&pk);
@@ -200,7 +193,6 @@ impl Redb {
     }
 }
 
-/// Commit an empty durable transaction, which also persists earlier non-durable commits.
 fn sync(db: &Database) -> Result<()> {
     let mut tx = db.begin_write()?;
     tx.set_durability(Durability::Immediate)?;
@@ -262,7 +254,6 @@ impl Engine for Redb {
 }
 
 impl RedbConn {
-    /// One write transaction; redb blocks here until the previous writer has finished.
     fn write<T>(&mut self, body: impl FnOnce(&WriteTransaction) -> Result<T>) -> Result<T> {
         let mut tx = self.db.begin_write()?;
         tx.set_durability(self.durability)?;
@@ -271,7 +262,6 @@ impl RedbConn {
         Ok(value)
     }
 
-    /// Scan index keys in `low..=high`, fetch each row by primary key, decode `(seq, c)`.
     fn through_index(
         &mut self,
         table: u64,
@@ -397,7 +387,6 @@ impl Conn for RedbConn {
         })
     }
 
-    /// redb has no journal; a durable commit is the only step that reaches stable storage.
     fn checkpoint(&mut self) -> Result<()> {
         sync(&self.db)
     }

@@ -1,5 +1,3 @@
-//! Seeded random fault schedule over trusted, full and partial nodes, then a
-//! heal phase that checks the system recovers. `fuzz <seed> <steps>`.
 use crate::cluster::{Node, mesh};
 use crate::scenarios::{
     Failure, ITEMS, LISTS, NOTES, Slot, finding, integrity, root, short, status_data, writer_all,
@@ -22,14 +20,12 @@ struct Member {
     slot: Slot,
     kind: Kind,
     node: String,
-    /// Lists whose key this member was sent.
     lists: BTreeSet<String>,
 }
 struct World {
     rng: StdRng,
     members: Vec<Member>,
     lists: Vec<String>,
-    /// Note keys whose insert was acknowledged, and keys deleted since.
     acked: BTreeSet<String>,
     deleted: BTreeSet<String>,
     next: usize,
@@ -65,7 +61,6 @@ async fn join(world: &mut World, name: &str, kind: Kind) -> Result<(), Failure> 
         writer_all()
     };
     let mut slot = Slot::new(name, &world.members[0].slot.root);
-    // Inviting can be refused transiently (issuer registry still importing).
     let invitation = issuer
         .call(json!({"type": "invitation","profile":profile}))
         .await
@@ -127,9 +122,7 @@ pub async fn run(args: &[String]) -> Result<(), Failure> {
         next: 0,
         log: Vec::new(),
     };
-    // Seed data, so later joins bootstrap something.
     let issuer = world.members[0].slot.n().clone();
-    // Within one transaction's statement and frame byte quotas.
     for start in (0..300).step_by(50) {
         issuer
             .add_notes_batch("seed", start, 50, 400)
@@ -139,7 +132,6 @@ pub async fn run(args: &[String]) -> Result<(), Failure> {
     for i in 0..300 {
         world.acked.insert(format!("seed{i}"));
     }
-    // Seals, branches and compaction work on the owner's `main` bookmark.
     for action in ["create", "follow"] {
         issuer
             .call(json!({"type":"tips","action":action,"name":"main"}))
@@ -163,7 +155,6 @@ pub async fn run(args: &[String]) -> Result<(), Failure> {
     let mut joined = 0;
 
     for step in 0..steps {
-        // Keep the schedule meaningful: two live nodes, one of them an issuer.
         while world.alive().len() < 2 || world.issuer().is_none() {
             let dead: Vec<usize> = (0..world.members.len())
                 .filter(|i| world.members[*i].slot.node.is_none())
@@ -261,7 +252,6 @@ async fn op_note(world: &mut World) -> Result<String, String> {
                     json!([{"type":"text","value":k}]),
                 )
                 .await;
-            // A delete may land even if the reply is lost; count it as possibly deleted.
             world.deleted.insert(k.clone());
             Ok(format!("{} delete {k}: {}", node.name, short(&r.is_ok())))
         }
@@ -306,7 +296,6 @@ async fn op_list(world: &mut World) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     world.lists.push(id.clone());
     world.members[i].lists.insert(id.clone());
-    // Share with every non-partial member; a dead one only learns it later.
     let targets: Vec<(usize, String)> = world
         .members
         .iter()
@@ -362,7 +351,6 @@ async fn op_sync(world: &mut World) -> Result<String, String> {
 
 async fn op_kill(world: &mut World) -> Result<String, String> {
     let i = world.pick_alive().ok_or("none alive")?;
-    // Keep at least one issuer alive most of the time.
     world.members[i].slot.kill().await;
     Ok(format!("{} SIGKILL", world.members[i].slot.name))
 }
@@ -389,7 +377,6 @@ async fn op_restart(world: &mut World) -> Result<String, String> {
 async fn op_close(world: &mut World) -> Result<String, String> {
     let i = world.pick_alive().ok_or("none alive")?;
     let node = world.members[i].slot.n().clone();
-    // Close while something is in flight.
     let busy = node.clone();
     let task = tokio::spawn(async move { busy.sync().await });
     tokio::time::sleep(Duration::from_millis(world.rng.gen_range(0..30))).await;
@@ -466,7 +453,6 @@ async fn op_burst(world: &mut World) -> Result<String, String> {
     ))
 }
 
-/// A new full member joins; it is SIGKILLed early in its bootstrap.
 async fn op_join_and_kill(world: &mut World, n: usize) -> Result<String, String> {
     let name = format!("j{n}");
     join(world, &name, Kind::Full)
@@ -516,7 +502,6 @@ async fn op_compact(world: &mut World) -> Result<String, String> {
     ))
 }
 
-/// Opens a tip at the newest seal and follows a new bookmark there.
 async fn op_branch(world: &mut World, step: usize) -> Result<String, String> {
     let issuer = world.issuer().ok_or("no live issuer")?;
     let name = format!("dev{step}");
@@ -550,8 +535,6 @@ async fn op_branch(world: &mut World, step: usize) -> Result<String, String> {
     ))
 }
 
-/// Follows `main` or the newest branch on any live node: leaving or
-/// joining a bookmark.
 async fn op_follow(world: &mut World) -> Result<String, String> {
     let i = world.pick_alive().ok_or("none alive")?;
     let node = world.members[i].slot.n().clone();
@@ -597,7 +580,6 @@ async fn op_hostile(world: &mut World) -> Result<String, String> {
             Duration::from_secs(20),
         )
         .await;
-    // Half the time, leave the transaction open across other operations.
     if world.rng.gen_bool(0.5) {
         let _ = node.sql("ROLLBACK", json!([])).await;
     }
@@ -605,7 +587,6 @@ async fn op_hostile(world: &mut World) -> Result<String, String> {
         || sql.starts_with("DELETE FROM notes")
         || sql.starts_with("UPDATE notes SET key")
     {
-        // Unknown which keys changed: stop counting acked keys as must-exist.
         world.deleted.extend(world.acked.iter().cloned());
     }
     Ok(format!(
@@ -653,8 +634,6 @@ async fn heal_and_check(world: &mut World, root: &std::path::Path) -> Result<(),
     let full: Vec<&Node> = full_nodes.iter().map(|n| n.as_ref()).collect();
     let mut converged = false;
     for round in 0..12 {
-        // Every full/trusted member gets every list, from whichever trusted
-        // member holds its secret by now (envelopes arrive by sync).
         for list in world.lists.clone() {
             let ids: Vec<String> = world
                 .members
@@ -708,7 +687,6 @@ async fn heal_and_check(world: &mut World, root: &std::path::Path) -> Result<(),
             crate::scenarios::report_divergence(&full).await;
         }
     }
-    // Partial members: unpartitioned notes, and every list they hold.
     if let Some(reference) = full.first() {
         let notes = reference.dump(NOTES).await;
         for m in world.members.iter().filter(|m| m.kind == Kind::Partial) {
@@ -732,7 +710,6 @@ async fn heal_and_check(world: &mut World, root: &std::path::Path) -> Result<(),
                 }
             }
         }
-        // Acknowledged inserts that were never deleted must exist.
         let present: BTreeSet<String> = notes
             .unwrap_or_default()
             .iter()
@@ -759,7 +736,6 @@ async fn heal_and_check(world: &mut World, root: &std::path::Path) -> Result<(),
         );
     }
     println!("  pending after heal: {statuses:?}");
-    // Close, check files, reopen once more.
     for m in world.members.iter_mut() {
         if let Err(e) = m.slot.close().await {
             println!("  close {}: {e}", m.slot.name);

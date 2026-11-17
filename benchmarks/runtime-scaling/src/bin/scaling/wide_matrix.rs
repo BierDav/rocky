@@ -1,4 +1,3 @@
-//! Phase 6 install/open and steady-state sweep. Files are retained for inspection.
 use super::{
     CALLER, Failure, NODE, line, resident_mib, wide,
     wide_schema::{Policy, WideSchema, domain_id},

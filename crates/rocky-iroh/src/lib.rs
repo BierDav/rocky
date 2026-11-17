@@ -1,6 +1,3 @@
-//! Rocky's network port on iroh. `Attachment` serves Rocky's protocols on
-//! an endpoint and router the application owns; `Options` is the starter
-//! that binds and owns its own. Scope routing and endpoint controls stay here.
 use rocky_core::net::{
     BoxFuture, Connected, Connector, Discovery, Failure, Incoming, Protocol, SessionStream, Stream,
     Transport,
@@ -40,7 +37,6 @@ pub use discovery::{
 #[cfg(not(target_family = "wasm"))]
 use iroh::address_lookup::DnsAddressLookup;
 
-/// The iroh version these handlers attach to; build the endpoint with it.
 pub use iroh;
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, TransportAddr, Watcher,
@@ -49,7 +45,6 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router, RouterBuilder},
 };
 
-/// Current ALPNs. Old protocol names are refused.
 pub fn alpn(protocol: Protocol) -> &'static [u8] {
     match protocol {
         Protocol::Rpc => b"rocky/rpc",
@@ -64,61 +59,37 @@ pub fn protocol_named(name: &[u8]) -> Option<Protocol> {
         .find(|protocol| alpn(*protocol) == name)
 }
 
-/// The `Transport::kind` of iroh addresses.
 pub const KIND: &str = "iroh";
-/// Dialing and opening a stream each take at most this long.
 pub const TIMEOUT: Duration = Duration::from_secs(15);
-/// Inbound streams waiting for the attached service.
 pub const PENDING: usize = 32;
-/// Inbound connections carrying Rocky protocols at once.
 pub const CONNECTIONS: usize = 64;
-/// Outbound connections kept for reuse.
 pub const CACHED: usize = 64;
-/// Inbound streams one connection has in flight; further streams wait in
-/// QUIC, so no single peer fills the shared queue.
 pub const STREAMS_PER_CONNECTION: usize = 4;
-/// Fully framed or still arriving RPCs in flight across the endpoint.
 pub const RPC_REQUESTS: usize = 32;
-/// An inbound connection with no stream in flight this long is closed, so
-/// idle cached connections cannot keep holding `CONNECTIONS`. A dialer reuses
-/// a connection only within half of it since its last stream opened.
 pub const IDLE: Duration = Duration::from_secs(30);
-/// Close codes of connections Rocky refuses.
 const CLOSED: u32 = 1;
 const BUSY: u32 = 2;
-/// Binding a fixed port again waits this long for the dead socket to go.
 const REBIND: Duration = Duration::from_secs(3);
-/// Pause between attempts to bind a fixed port again.
 const REBIND_RETRY: Duration = Duration::from_millis(100);
-/// Streams one link connection carries; the first is the control stream.
 const LINK_LANES: u8 = 5;
-/// How long `address` waits for a home relay, which makes the address
-/// reachable beyond the LAN.
 const HOME_RELAY_WAIT: Duration = Duration::from_secs(5);
-/// Failed loopback dials otherwise drain for three seconds at QUIC's default
-/// initial RTT.
 #[cfg(feature = "qualification")]
 const LOOPBACK_INITIAL_RTT: Duration = Duration::from_millis(10);
 
-/// One bidirectional stream; it keeps its connection open.
 struct QuicStream {
     _connection: Connection,
     reusable: Option<Arc<AtomicBool>>,
     io: Join<RecvStream, SendStream>,
     read_incomplete: bool,
     write_incomplete: bool,
-    /// An inbound stream's share of its connection.
     _slot: Option<Slot>,
 }
 impl QuicStream {
-    /// A read or write cancelled mid-exchange, which can hide a dead peer.
     fn was_cancelled(&self) -> bool {
         self.read_incomplete || self.write_incomplete
     }
 }
 impl Drop for QuicStream {
-    /// After a cancelled exchange, fresh streams dial again while other
-    /// exchanges on this connection may still finish.
     fn drop(&mut self) {
         if self.was_cancelled()
             && let Some(reusable) = &self.reusable
@@ -129,7 +100,6 @@ impl Drop for QuicStream {
         }
     }
 }
-/// Releases its connection's stream slot and marks it idle when the last ends.
 struct Slot {
     _permit: tokio::sync::OwnedSemaphorePermit,
     active: Arc<watch::Sender<usize>>,
@@ -140,7 +110,6 @@ impl Drop for Slot {
             .send_modify(|active| *active = active.saturating_sub(1));
     }
 }
-/// Completes once no stream has been in flight for `limit`.
 async fn idle(activity: &mut watch::Receiver<usize>, limit: Duration) {
     loop {
         if activity.wait_for(|active| *active == 0).await.is_err() {
@@ -203,7 +172,6 @@ fn stream(
     })
 }
 
-/// A link owns its connection, including the lanes hidden from the service.
 struct LinkConnection(
     Connection,
     std::sync::Mutex<Option<Scope>>,
@@ -216,8 +184,6 @@ impl Drop for LinkConnection {
 }
 struct LinkLane {
     io: Join<RecvStream, SendStream>,
-    /// Keeps the dedicated connection alive until the peer has the final
-    /// bytes, including a resolution reply or signed Close.
     shutdown: Option<BoxFuture<'static, std::io::Result<()>>>,
     finished: bool,
     _owner: Arc<LinkConnection>,
@@ -330,7 +296,6 @@ async fn link_stream(
     Ok((Stream::new(control).with_lanes(lanes), routed))
 }
 
-/// iroh's per-path QUIC measurements of one connection.
 struct Paths(Connection);
 impl Paths {
     fn paths(&self) -> Vec<NetworkPath> {
@@ -379,9 +344,6 @@ struct CachedConnection {
     reusable: Arc<AtomicBool>,
 }
 impl CachedConnection {
-    /// Whether a new stream may use this connection: no exchange on it was
-    /// cancelled, it is open, and it was used within half of `IDLE`, so the
-    /// acceptor's idle close never races the new stream.
     fn reusable(&self) -> bool {
         self.reusable.load(Ordering::SeqCst)
             && self.connection.close_reason().is_none()
@@ -394,43 +356,25 @@ struct Shared {
     restart: Mutex<Option<(Options, [u8; 32])>>,
     routes: std::sync::Mutex<HashMap<Option<Scope>, std::sync::Weak<Route>>>,
     default_route: Arc<Route>,
-    /// Dialed connections and when each last opened a stream.
     connections: Mutex<HashMap<(EndpointId, Protocol), CachedConnection>>,
     link_connections: std::sync::Mutex<Vec<std::sync::Weak<LinkConnection>>>,
     inbound: Semaphore,
     rpc: Arc<Semaphore>,
-    /// Link connections have a budget of their own, so duplicate link
-    /// handshakes still reach the service's tie-break or busy reply.
     inbound_links: Semaphore,
     closed: watch::Sender<bool>,
     refused: AtomicU64,
-    /// The starter's router, which owns the endpoint.
     router: std::sync::Mutex<Option<Router>>,
-    /// Whether an address waits for a home relay.
     relays: bool,
     initial_relay_configuration: Option<String>,
-    /// The protocols this attachment answers.
     protocols: Vec<Protocol>,
-    /// Present only when the attachment was asked to find peers.
     finder: Option<discovery::Finder>,
     discover: Discover,
-    /// The runtime the attachment was made on, normally the endpoint's. A
-    /// connection's driver runs where it was dialed: dialed on a database's
-    /// runtime it would end with the database and leave the endpoint
-    /// waiting for it at close.
     home: Option<rocky_platform::task::Home>,
 }
 
-/// Rocky's protocols on one endpoint. Register `handler` on the router
-/// that owns the endpoint and attach `transport` to a database. Closing
-/// the database, its network service or this attachment leaves the
-/// endpoint and router to their owner. While no service is attached,
-/// Rocky's ALPNs are refused at once.
 #[derive(Clone)]
 pub struct Attachment(Arc<Shared>);
 impl Attachment {
-    /// Uses `endpoint` to dial. Nothing is accepted until the handler is
-    /// registered on a router.
     pub fn new(endpoint: Endpoint) -> Self {
         Self::build(
             endpoint,
@@ -440,13 +384,9 @@ impl Attachment {
             None,
         )
     }
-    /// Like `new`, and finds peers as `discover` asks. Rocky announces
-    /// beside the endpoint: its own lookup services stay as they are.
     pub fn discovering(endpoint: Endpoint, discover: Discover) -> Self {
         Self::build(endpoint, false, Protocol::ALL.to_vec(), discover, None)
     }
-    /// Answers `protocols` instead of a database's, such as a coordinator
-    /// voter's `Protocol::Coordinate`. Dialing is unrestricted.
     pub fn serving(endpoint: Endpoint, protocols: Vec<Protocol>) -> Self {
         Self::build(endpoint, false, protocols, Discover::default(), None)
     }
@@ -481,22 +421,17 @@ impl Attachment {
             protocols,
         }))
     }
-    /// The ALPNs Rocky answers; the first frame selects the current wire format.
     pub fn alpns() -> impl Iterator<Item = &'static [u8]> {
         Protocol::ALL.into_iter().map(alpn)
     }
-    /// The handler of every Rocky ALPN.
     pub fn handler(&self) -> Handler {
         Handler(self.0.clone())
     }
-    /// Registers this attachment's ALPNs next to the application's own
-    /// protocols: Rocky's database protocols unless built with `serving`.
     pub fn register(&self, router: RouterBuilder) -> RouterBuilder {
         self.0.protocols.iter().fold(router, |router, protocol| {
             router.accept(alpn(*protocol), self.handler())
         })
     }
-    /// The network to attach to a database as `Network::Borrowed`.
     pub fn transport(&self) -> Arc<dyn Transport> {
         Arc::new(Port {
             attachment: self.clone(),
@@ -506,12 +441,9 @@ impl Attachment {
     pub fn endpoint(&self) -> Endpoint {
         self.0.endpoint.borrow().clone()
     }
-    /// Inbound connections and streams refused: closed, busy or queue full.
     pub fn refused(&self) -> u64 {
         self.0.refused.load(Ordering::Relaxed)
     }
-    /// Binds a dead starter endpoint again with the same identity; a live
-    /// one is left alone. A borrowed endpoint is its owner's to rebind.
     async fn revive(&self) -> Result<(), Failure> {
         let restart = self.0.restart.lock().await;
         if *self.0.closed.borrow() {
@@ -543,8 +475,6 @@ impl Attachment {
         *self.0.router.lock().unwrap_or_else(PoisonError::into_inner) = Some(router);
         Ok(())
     }
-    /// UDP sockets close with the last clone of their endpoint, so the
-    /// router and cached connections let go of theirs.
     async fn drop_endpoint_clones(&self) {
         let router = self
             .0
@@ -563,8 +493,6 @@ impl Attachment {
     }
 }
 
-/// A closed loopback endpoint that replaces the watched dead endpoint, so
-/// its last clone and fixed port are released before the rebind.
 #[cfg(not(target_family = "wasm"))]
 async fn closed_stand_in(secret: &[u8; 32]) -> Result<Endpoint, Failure> {
     let stand_in = Endpoint::builder(presets::Minimal)
@@ -578,8 +506,6 @@ async fn closed_stand_in(secret: &[u8; 32]) -> Result<Endpoint, Failure> {
     Ok(stand_in)
 }
 
-/// Serves Rocky's ALPNs on a router. It takes no other connection and
-/// never closes the endpoint.
 pub struct Handler(Arc<Shared>);
 impl std::fmt::Debug for Handler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -587,8 +513,6 @@ impl std::fmt::Debug for Handler {
     }
 }
 impl ProtocolHandler for Handler {
-    /// Serves one connection's streams. Duplicate link handshakes are
-    /// served too, so they reach the service's tie-break or busy reply.
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let attachment = Attachment(self.0.clone());
         let mut closed = self.0.closed.subscribe();
@@ -708,9 +632,6 @@ impl ProtocolHandler for Handler {
 }
 
 impl Attachment {
-    /// Signals each change of this attachment's addresses. A closed
-    /// endpoint's watcher ends; the signal then follows the starter's
-    /// replacement.
     pub fn connectivity(&self) -> Option<watch::Receiver<()>> {
         let (events, receiver) = watch::channel(());
         let mut endpoints = self.0.endpoint.subscribe();
@@ -787,11 +708,6 @@ impl Attachment {
 }
 
 impl Attachment {
-    /// Dials `address` for `protocol`. An endpoint the OS reclaimed heals
-    /// here. Link connections are never reused, and others only while
-    /// reusable, so a dial never races the acceptor closing an idle one. The
-    /// home runtime drives the dial; without one, or once it ended, the
-    /// caller's does.
     async fn connect_scoped(
         &self,
         address: &str,
@@ -928,7 +844,6 @@ impl Attachment {
             route: self.0.default_route.clone(),
         }
     }
-    /// Live QUIC path observations for the endpoint behind this address.
     pub async fn paths(&self, address: &str) -> Result<Vec<NetworkPath>, Failure> {
         let address: EndpointAddr = serde_json::from_str(address)?;
         let connections: Vec<_> = self
@@ -1014,8 +929,6 @@ impl Transport for Port {
     fn kind(&self) -> &str {
         KIND
     }
-    /// Waits briefly for a home relay when relays are on: an address with
-    /// one is reachable beyond the LAN.
     fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
         Box::pin(async {
             if self.0.relays {
@@ -1076,8 +989,6 @@ impl Transport for Port {
     ) -> BoxFuture<'a, Result<Stream, Failure>> {
         Box::pin(self.dial_routes(addresses, Protocol::Link, scope, self.route.clone()))
     }
-    /// Returns once the route closes, so `close`, which marks the route
-    /// closed before taking the `incoming` lock, never waits on an accept.
     fn accept(&self) -> BoxFuture<'_, Option<rocky_core::net::Incoming>> {
         Box::pin(async {
             let mut closed = self.route.closed.subscribe();
@@ -1197,7 +1108,6 @@ impl Attachment {
             connections.remove(&(address.id, protocol));
         }
     }
-    /// A restarted peer leaves a cached connection that looks open.
     pub fn forget(&self, address: &str) {
         let Ok(address) = serde_json::from_str::<EndpointAddr>(address) else {
             return;
@@ -1245,8 +1155,6 @@ impl Attachment {
             Ok(())
         })
     }
-    /// Ends Rocky's streams and connections. Only a starter's own router
-    /// and endpoint are shut down; a borrowed endpoint stays open.
     pub fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {
             let _restart = self.0.restart.lock().await;
@@ -1296,25 +1204,17 @@ impl Attachment {
     }
 }
 
-/// The starter endpoint: bound, routed and closed by Rocky.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Options {
-    /// `default`, `staging`, `disabled` or a relay URL.
     #[serde(default)]
     pub relay: Option<String>,
-    /// Where endpoint addresses are published and resolved: `default` for
-    /// n0's DNS service, `disabled`, or the URL of a pkarr relay.
     #[serde(default)]
     pub lookup: Option<String>,
-    /// Find domain members through the topic's rendezvous record on the
-    /// lookup service.
     #[serde(default = "enabled")]
     pub topic: bool,
-    /// Find domain members on the local network over mDNS.
     #[serde(default = "enabled")]
     pub local: bool,
-    /// A local socket address to bind, such as a fixed port.
     #[serde(default)]
     pub bind: Option<String>,
 }
@@ -1333,7 +1233,6 @@ impl Default for Options {
     }
 }
 impl Options {
-    /// Loopback and contacts only: no relay, lookup service or discovery.
     pub fn isolated(bind: &str) -> Self {
         Self {
             relay: Some("disabled".into()),
@@ -1343,8 +1242,6 @@ impl Options {
             bind: Some(bind.into()),
         }
     }
-    /// What these options ask an attachment to find peers with, for
-    /// `Attachment::discovering` on an endpoint bound from them.
     pub fn discover(&self) -> Discover {
         let topic = match (self.topic, self.lookup.as_deref().unwrap_or("default")) {
             (false, _) => Topic::Off,
@@ -1362,13 +1259,9 @@ impl Options {
     fn relays(&self) -> bool {
         self.relay.as_deref() != Some("disabled")
     }
-    /// Whether the endpoint may multicast on the local network, as mDNS and
-    /// the portmapper's gateway discovery do.
     fn allows_multicast(&self) -> bool {
         self.local && !cfg!(target_os = "ios")
     }
-    /// Binds an endpoint with these options and `secret` as its key. The
-    /// caller owns it: route it, then close it.
     pub async fn bind(&self, secret: [u8; 32]) -> Result<Endpoint, Failure> {
         let relay_mode = match self.relay.as_deref().unwrap_or("default") {
             "default" => RelayMode::Default,
@@ -1425,12 +1318,9 @@ impl Options {
         }
         Ok(builder.bind().await?)
     }
-    /// Binds the starter endpoint with a router of Rocky's protocols only.
-    /// Closing the returned attachment's transport shuts both down.
     pub async fn start(&self, secret: [u8; 32]) -> Result<Attachment, Failure> {
         self.start_serving(secret, Protocol::ALL.to_vec()).await
     }
-    /// The starter endpoint answering `protocols`, such as a voter's.
     pub async fn start_serving(
         &self,
         secret: [u8; 32],
@@ -1479,8 +1369,6 @@ mod tests {
         Ok(())
     }
 
-    /// Polls a read with no answer yet to Pending and drops it, as an
-    /// expired deadline does.
     async fn cancel_pending_read(stream: &mut Stream) {
         let read = stream.read_u8();
         tokio::pin!(read);

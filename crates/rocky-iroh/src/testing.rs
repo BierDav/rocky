@@ -1,5 +1,3 @@
-//! Local stand-ins for the services discovery and relaying depend on, for
-//! checks that must not reach a public one.
 use crate::discovery::{entries, rendezvous_key};
 use iroh::EndpointId;
 use iroh_dns::pkarr::SignedPacket;
@@ -16,12 +14,8 @@ use tokio::{
 pub use iroh::test_utils::run_relay_server;
 
 type Packets = Arc<Mutex<HashMap<EndpointId, SignedPacket>>>;
-/// Counts the packets the server stored, so a check waits for one.
 type Stored = Arc<tokio::sync::watch::Sender<u64>>;
-/// A pkarr relay on loopback: stores the newest signed packet per key and
-/// returns it, as the lookup service does. It stops when dropped.
 pub struct LookupServer {
-    /// What `Options::lookup` names.
     pub url: String,
     packets: Packets,
     stored: Stored,
@@ -54,8 +48,6 @@ impl LookupServer {
             task,
         })
     }
-    /// Waits until the rendezvous record of `topic` holds at least
-    /// `contacts` contacts.
     pub async fn wait_for_contacts(&self, topic: &[u8; 32], contacts: usize) {
         let mut stored = self.stored.subscribe();
         while self.contacts(topic) < contacts {
@@ -64,7 +56,6 @@ impl LookupServer {
             }
         }
     }
-    /// Every key a packet was published under.
     pub fn keys(&self) -> Vec<EndpointId> {
         self.packets
             .lock()
@@ -73,7 +64,6 @@ impl LookupServer {
             .copied()
             .collect()
     }
-    /// How many contacts the rendezvous record of `topic` holds.
     pub fn contacts(&self, topic: &[u8; 32]) -> usize {
         self.packets
             .lock()
@@ -81,7 +71,6 @@ impl LookupServer {
             .get(&rendezvous_key(topic).public())
             .map_or(0, |packet| entries(topic, packet).len())
     }
-    /// Everything the service stores, as it would see it.
     pub fn stored(&self) -> Vec<u8> {
         self.packets
             .lock()

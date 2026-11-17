@@ -1,5 +1,3 @@
-//! Phase 7 gate: one full replica node and two partial replicas over the
-//! native transport.
 use super::{Failure, lifetime, line, resident_mib};
 use employees_app::Employees;
 use rocky_core::*;
@@ -14,10 +12,7 @@ type Replica = EncryptedReplica<Employees>;
 const SCOPES: u8 = 20;
 const QUOTA: usize = MAX_SECURE_FRAME / 2;
 const ROWS_PER_OPERATION: usize = 32;
-/// A full node keeps everything it was not told it may drop.
 const FULL_NODE_HARD_BYTES: usize = 4 << 30;
-/// The pause between writes: paced like an interactive client, not a bulk
-/// loader.
 const INTERACTIVE_PACE: Duration = Duration::from_millis(2);
 
 struct World {
@@ -53,7 +48,6 @@ impl World {
     fn credentials(&self, node: &PrivateKey) -> Result<CredentialChain, Failure> {
         self.credentials_for(node, &self.scopes)
     }
-    /// Every frame carries its author's chain, so its size follows the grants.
     fn credentials_for(
         &self,
         node: &PrivateKey,
@@ -184,9 +178,6 @@ fn handle(node: &Node, label: &str, index: usize) -> Commitment {
     bytes.extend((index as u64).to_le_bytes());
     commitment("roles.handle.v1", &bytes)
 }
-/// A request session of `client` on a loopback link to `server`, and the
-/// task answering it until the client hangs up or the task is aborted.
-/// Ending the exchange drops both ends of the link.
 async fn connect(
     client: &Node,
     server: &Node,
@@ -297,7 +288,6 @@ fn check(condition: bool, what: &str) -> Result<(), Failure> {
         Err(format!("roles check failed: {what}").into())
     }
 }
-/// Syncs `scope`, on new sessions while one runs out of its byte budget.
 async fn sync(
     client: &Node,
     server: &Node,
@@ -358,7 +348,6 @@ async fn partial(world: &World, node: &Node, full: &Node) -> Result<(), Failure>
     }
     Ok(())
 }
-/// Authors `count` single-row edits of fresh rows in `scope`, timing each.
 async fn writes(
     world: &World,
     node: &Node,
@@ -384,14 +373,6 @@ async fn writes(
     Ok(times)
 }
 
-/// The phase 7 gate. Devices author in their own scope and push to the full
-/// node, then:
-/// 1. a partial replica holding 5% converges on its subset;
-/// 2. a replica `behind` operations back catches up while both sides write;
-/// 3. behind the pruned prefix, offline edits are applied or reported;
-/// 4. eviction needs custody, and evicted then resubscribed converges;
-/// 5. the full node dies mid-transfer and mid-checkpoint-serve;
-/// 6. a replacement full node starts from the existing one.
 pub async fn run(total: usize, behind: usize) -> Result<(), Failure> {
     let world = World::new()?;
     let dir = tempfile::tempdir()?;

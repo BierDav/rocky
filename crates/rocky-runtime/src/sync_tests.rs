@@ -425,8 +425,6 @@ async fn cross_author_dependency_and_successor_survive_pending_restart() {
     phone.close().await.unwrap();
 }
 
-/// Tracking a mutation reads its own acknowledgment, not every one the
-/// peer sent: the cost does not grow with acknowledged history.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn tracking_a_mutation_reads_only_its_acknowledgment() {
     let dir = Scratch::new().await;
@@ -477,8 +475,6 @@ async fn tracking_a_mutation_reads_only_its_acknowledgment() {
     laptop.close().await.unwrap();
 }
 
-/// Read observers wake for a changed backlog, not for every sync step:
-/// acknowledgments and passes with nothing to apply leave them asleep.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn sync_steps_wake_read_observers_only_when_the_backlog_changes() {
     let dir = Scratch::new().await;
@@ -536,10 +532,6 @@ async fn sync_steps_wake_read_observers_only_when_the_backlog_changes() {
     phone.close().await.unwrap();
 }
 
-/// A pass reads the head of each author's pending log, not the operations
-/// blocked behind it: with the first operation missing, a pass costs the
-/// same however long the blocked backlog is, and the gap's arrival applies
-/// all of it.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_pending_pass_skips_operations_blocked_behind_a_gap() {
     let dir = Scratch::new().await;

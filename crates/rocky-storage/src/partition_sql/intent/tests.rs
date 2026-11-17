@@ -9,7 +9,6 @@ fn text(value: &str) -> SqlValue {
 fn int(value: i64) -> SqlValue {
     SqlValue::Integer(value)
 }
-/// `items` partitioned by a NOCASE `list`.
 fn items(held: &[&str], waiting: &[&str]) -> BTreeMap<String, TablePartitions> {
     let tuples = |lists: &[&str]| lists.iter().map(|list| vec![text(list)]).collect();
     [(
@@ -175,9 +174,6 @@ fn rows(conn: &Connection, filter: &str) -> Vec<(i64, String, i64, i64)> {
     .collect::<Result<_, _>>()
     .unwrap()
 }
-/// Runs the statement once on the held partitions and, split, on a device
-/// that also caches unheld `C`: both end equal and `C` is untouched.
-/// Returns the copies and how many reads were evaluated.
 fn equivalent(sql: &str, params: &[SqlValue]) -> (Vec<PartitionStatement>, usize) {
     let original = db(&["A", "B"]);
     original

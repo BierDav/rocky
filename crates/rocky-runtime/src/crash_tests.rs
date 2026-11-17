@@ -1,7 +1,3 @@
-//! Process-death coverage for the file writer. The parent test re-runs this
-//! test binary as a child that dies inside a cross-domain group, between its
-//! last savepoint and the commit, just after the commit, inside a checkpoint,
-//! inside a grouped incoming page, or between the merged steps of a result.
 use super::*;
 use crate::scaling_option_tests::{NODE, PEER, grouped, note, open_node, pause, scope};
 use inventory_app::InventoryApp;
@@ -34,8 +30,6 @@ fn child(case: &str, dir: &Scratch) -> Child {
         .unwrap()
 }
 
-/// Does nothing in an ordinary run; a parent test selects the case to die in.
-/// Needs threads, which a browser Worker lacks.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crash_child() {
@@ -157,7 +151,6 @@ fn two_files() -> RuntimeOptions {
         ..RuntimeOptions::default()
     }
 }
-/// Even steps write to the first domain, odd ones to the second.
 fn group_domain<'a, A: StoredApplication>(
     first: &'a Replica<A>,
     second: &'a Replica<A>,
@@ -170,9 +163,6 @@ fn group_domain<'a, A: StoredApplication>(
     }
 }
 
-/// Reopen checks sequence, clock, revision bound and projection against the
-/// replayed history of both domains; this adds the per-handle and exact
-/// revision checks. `handles` are those of the first domain.
 async fn recovered(
     dir: &Scratch,
     handles: &[MutationHandle],
@@ -181,8 +171,6 @@ async fn recovered(
     let found = consistent(&runtime.domain(scope(1)).unwrap(), handles).await;
     (runtime, found)
 }
-/// Every handle is committed or absent, and committed ones are exactly the
-/// domain's sequences, rows and revisions.
 async fn consistent(
     replica: &Replica<InventoryApp>,
     handles: &[MutationHandle],
@@ -206,8 +194,6 @@ async fn consistent(
     found
 }
 
-/// The paused first mutation (handle 100) always survives; the group's steps
-/// survive together or not at all, in both domains.
 async fn group_dies(case: &str, survives: bool) {
     let dir = Scratch::new().await;
     let status = child(case, &dir).wait().unwrap();
@@ -302,8 +288,6 @@ async fn death_inside_a_checkpoint_keeps_every_committed_handle() {
     runtime.close().await.unwrap();
 }
 
-/// A page dies with half of its receipts written: none of them survives, and
-/// the sender's retry is received as new.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn death_inside_an_incoming_page_leaves_none_of_its_records() {
     let dir = Scratch::new().await;
@@ -363,8 +347,6 @@ async fn killed_writers_keep_every_acknowledged_group() {
     }
 }
 
-/// Death after the second file is installed and before file 0 records the
-/// set: the next open resumes the install instead of refusing or losing it.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn death_between_installing_files_resumes_the_install() {
     let dir = Scratch::new().await;

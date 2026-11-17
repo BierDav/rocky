@@ -1,6 +1,3 @@
-//! Tasks on the Worker's event loop. Handles are `Send` like tokio's, so
-//! shared code that stores them in `Send` state compiles unchanged; the
-//! tasks themselves need not be `Send`.
 use futures_util::{
     FutureExt,
     future::{AbortHandle, Abortable},
@@ -17,8 +14,6 @@ use std::{
 };
 use tokio::sync::oneshot;
 
-/// The task was aborted before it finished. A panic aborts the Worker's
-/// wasm instance, so it is never reported here.
 #[derive(Debug)]
 pub struct JoinError(());
 impl JoinError {
@@ -36,12 +31,10 @@ impl std::fmt::Display for JoinError {
 }
 impl std::error::Error for JoinError {}
 
-/// Awaits a spawned task's output; dropping it detaches the task.
 #[derive(Debug)]
 pub struct JoinHandle<T> {
     output: oneshot::Receiver<T>,
     abort: AbortHandle,
-    /// Set when the task ends, finished or aborted.
     ended: Arc<AtomicBool>,
 }
 impl<T> JoinHandle<T> {
@@ -84,7 +77,6 @@ where
     }
 }
 
-/// A Worker has one thread, so `spawn` is `spawn_local`.
 pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
 where
     F: Future + 'static,
@@ -93,8 +85,6 @@ where
     spawn_local(future)
 }
 
-/// Runs `work` now, on the Worker's only thread: it is bounded CPU or
-/// SQLite work that natively moves off the async threads.
 pub fn spawn_blocking<T: 'static>(work: impl FnOnce() -> T) -> JoinHandle<T> {
     let (sender, output) = oneshot::channel();
     let _ = sender.send(work());
@@ -106,14 +96,10 @@ pub fn spawn_blocking<T: 'static>(work: impl FnOnce() -> T) -> JoinHandle<T> {
     }
 }
 
-/// Lets timers, network events and other tasks run: a macrotask, unlike a
-/// waker, also yields to the browser's event loop.
 pub async fn yield_now() {
     crate::time::platform::turn().await;
 }
 
-/// Runs `task` on the Worker's event loop, where natively it would get its
-/// own thread.
 pub fn dedicated<F, T>(
     _name: impl Into<String>,
     task: impl FnOnce() -> F + 'static,
@@ -130,16 +116,12 @@ impl<T> Dedicated<T> {
     pub async fn join(self) -> Result<T, Ended> {
         self.0.await.map_err(|_| Ended)
     }
-    /// A synchronous owner cannot wait in a Worker: the task ends on its
-    /// own turn of the event loop.
     pub fn release(self) {}
 }
 
-/// A dedicated task was aborted.
 #[derive(Debug)]
 pub struct Ended;
 
-/// Tasks whose outputs arrive as they finish; dropping the set aborts them.
 pub struct JoinSet<T> {
     tasks: FuturesUnordered<JoinHandle<T>>,
 }
@@ -160,7 +142,6 @@ impl<T: 'static> JoinSet<T> {
         self.tasks.push(handle);
         abort
     }
-    /// A Worker has one thread, so `spawn` is `spawn_local`.
     pub fn spawn(&mut self, task: impl Future<Output = T> + 'static) -> AbortHandle {
         self.spawn_local(task)
     }
@@ -190,9 +171,6 @@ impl<T> Drop for JoinSet<T> {
     }
 }
 
-/// Whether a worker still holds something its owner would wait for. A
-/// Worker's thread cannot block, so `wait_released` returns at once and the
-/// worker task releases on its next turn of the event loop.
 #[derive(Default)]
 pub struct Held(std::sync::atomic::AtomicBool);
 impl Held {
@@ -205,13 +183,8 @@ impl Held {
     pub fn wait_released(&self, _poll: std::time::Duration) {}
 }
 
-/// Synchronous work cannot wait in a Worker: the caller retries at once.
-/// Only connections in this Worker can hold its files, and none of them
-/// can make progress while this work runs.
 pub fn backoff_blocking(_duration: std::time::Duration) {}
 
-/// A Worker has one event loop, which every task shares, so there is no
-/// other runtime to return to.
 #[derive(Clone, Debug)]
 pub struct Home(());
 impl Home {

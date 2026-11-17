@@ -29,39 +29,31 @@ use web_time::Instant;
 pub(crate) enum Fault {
     FailBeforeCommit,
     RetryBeforeCommit(usize),
-    /// Kill the process inside a group, after this many written steps.
     AbortAfterWrites(usize),
-    /// Kill the process after every step of the next group has released its
-    /// savepoint, before the group's `COMMIT`.
     AbortBeforeCommit,
-    /// Kill the process after a group commits, before any submitter is answered.
     AbortAfterCommit,
-    /// Fail the next group's `COMMIT`, as a full disk would.
     FailCommit,
-    /// Kill the process inside a resetting checkpoint that waits for a reader.
     AbortInCheckpoint,
     Pause(
         tokio::sync::oneshot::Sender<()>,
         tokio::sync::oneshot::Receiver<()>,
     ),
-    /// Test hook: the file writer logs each committed group.
     RecordGroups(GroupLog),
-    /// Test hook: copy the file and its WAL to this directory at every flush,
-    /// as power loss would leave them.
     SnapshotAtFlush(std::path::PathBuf),
-    /// Test hook: the passive checkpoint threshold; resets happen at twice it.
     CheckpointFrames(i64),
-    /// Fail the follow-up pass after the next committed mutation.
     FailFollowing,
-    /// Test hook: SQLite steps run so far on the file writer's thread.
     VmSteps(tokio::sync::oneshot::Sender<u64>),
 }
-/// Per committed group: each step's domain index and queue weight.
 #[cfg(test)]
-pub(crate) type GroupLog = Arc<std::sync::Mutex<Vec<Vec<(usize, usize)>>>>;
+pub(crate) type GroupLog = Arc<std::sync::Mutex<Vec<Vec<LoggedStep>>>>;
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct LoggedStep {
+    pub(crate) domain: usize,
+    pub(crate) queue_weight: usize,
+}
 #[cfg(test)]
 impl Fault {
-    /// Faults the file writer handles instead of a domain's worker.
     pub(crate) fn file_level(&self) -> bool {
         matches!(
             self,
@@ -81,19 +73,15 @@ pub(crate) struct Notifications {
     pub(crate) revisions: watch::Sender<LocalRevision>,
     pub(crate) changes: watch::Sender<u64>,
 }
-/// Notifications held back until the file writer's group has committed.
 #[derive(Default)]
 struct Unpublished {
     revision: bool,
     changes: bool,
-    /// Completeness may have changed.
     meta: bool,
     views: Changed,
-    /// Why the tables in `views` changed.
     causes: std::collections::BTreeSet<crate::observe::Cause>,
 }
 impl Unpublished {
-    /// Committed changes of the step that ends.
     pub(crate) fn changed(&mut self, changed: Changed, cause: crate::observe::Cause) {
         if changed.any() {
             self.causes.insert(cause);
@@ -101,36 +89,20 @@ impl Unpublished {
         self.views.merge(changed);
     }
 }
-/// The tables and the views a projection statement can change.
-type Target = (Vec<String>, Vec<usize>);
-/// Distinct projection statements whose changed views are remembered.
+type ChangedTablesAndViews = (Vec<String>, Vec<usize>);
 const MAX_STATEMENT_TARGETS: usize = 4096;
-/// Bytes one retained operation counts beyond its encoding.
 const RECORD_OVERHEAD: usize = 128;
-/// One domain's counters and storage steps. Application state, operation
-/// records and applied history live in storage only. Every domain in a file
-/// writes through the file writer's connection; see `crate::writer`.
 pub(crate) struct Worker<A: StoredApplication> {
     writer: ScopedConnection,
-    /// Read-only connection for requests that write nothing.
     reader: Option<ScopedConnection>,
     reading: bool,
-    /// The running read transaction has no time bound, as an audit reading
-    /// all retained history needs.
     unbounded: bool,
-    /// Set by the file writer while this worker runs a step of its group.
     pub(crate) in_group: bool,
-    /// Whether subphase timing is collected, from `RuntimeOptions::instrument`.
     instrument: bool,
-    /// File writer counters this worker's step subphases feed.
     metrics: Arc<Metrics>,
     unpublished: Unpublished,
-    /// Committed since the file's last flush; exposure must wait for one.
-    /// Starts set: open-time work may be buffered until the first flush.
     dirty: bool,
-    /// Local author sequence covered by the file's durable watermark.
     flushed_sequence: u64,
-    /// The application's SQL, read once at open.
     schema: rocky_core::InstalledSchema,
     app: A,
     policy: A::Policy,
@@ -138,27 +110,18 @@ pub(crate) struct Worker<A: StoredApplication> {
     config: crate::RuntimeConfig,
     plan: Arc<ReadPlan>,
     reads: Arc<Reads>,
-    /// The tables and the views each installed projection statement can
-    /// change, by statement; None if its target is not recognized. An
-    /// installation has few distinct statements, so each is parsed once.
-    targets: std::collections::HashMap<Box<str>, Option<Target>>,
-    /// Tables a write to each table may also change through foreign key
-    /// actions, transitively; logical and lowercase.
+    targets: std::collections::HashMap<Box<str>, Option<ChangedTablesAndViews>>,
     cascades: std::collections::HashMap<String, Vec<String>>,
-    /// Observers of this domain's committed tables.
     events: Arc<crate::observe::TableEvents>,
     retention: retention::Retention,
-    /// Retained operation records and their accounted bytes.
     retained: usize,
     retained_bytes: usize,
-    /// Highest applied sequence of each author; applied logs have no gaps.
     frontier: BTreeMap<NodeId, AuthorSequence>,
     sequence: u64,
     lamport: u64,
     revision: LocalRevision,
     revisions: watch::Sender<LocalRevision>,
     changes: watch::Sender<u64>,
-    /// One change counter per authorized view, and one for read metadata.
     views: Vec<watch::Sender<u64>>,
     meta: watch::Sender<u64>,
     #[cfg(test)]
@@ -206,8 +169,6 @@ where
     A: StoredApplication,
     A::State: Clone,
 {
-    /// Opens a domain on its connection, validating its identity before any
-    /// configuration or schema write.
     pub(crate) async fn open_connection(
         conn: ScopedConnection,
         domain: crate::DomainInstallation<A>,
@@ -222,7 +183,10 @@ where
             identity,
             config,
         } = domain;
-        if options.retention.custody > config.full_nodes.len() {
+        if let crate::checkpoint::PrunedPrefixCustody::FullNodesApplied(custody) =
+            options.retention.custody
+            && custody.get() > config.full_nodes.len()
+        {
             return Err(Error::Incompatible(
                 "custody needs that many configured full nodes".into(),
             ));
@@ -438,24 +402,19 @@ where
         worker.publish();
         Ok(worker)
     }
-    /// The connection for the current step: the file's write connection, or
-    /// the read-only connection inside `read_transaction`.
     pub(super) fn conn(&self) -> &ScopedConnection {
         match (&self.reader, self.reading) {
             (Some(reader), true) => reader,
             _ => &self.writer,
         }
     }
-    /// Serve requests that write nothing from `reader`, a read-only connection.
     pub(crate) fn attach_reader(&mut self, reader: Arc<crate::sqlite::Connection>) {
         self.retention.attach_reader(reader.clone());
         self.reader = Some(self.writer.with_connection(reader));
     }
-    /// The domain's read side, handed to its `Replica` once it is open.
     pub(crate) fn reads(&self) -> Arc<Reads> {
         self.reads.clone()
     }
-    /// Releases notifications held back while the group was open.
     pub(crate) fn publish(&mut self) {
         let pending = std::mem::take(&mut self.unpublished);
         if pending.revision {
@@ -479,11 +438,9 @@ where
     pub(crate) fn dirty(&self) -> bool {
         self.dirty
     }
-    /// A group touching this domain committed without a flush.
     pub(crate) fn buffered(&mut self) {
         self.dirty = true;
     }
-    /// A flush covered everything committed so far.
     pub(crate) fn flushed(&mut self) {
         self.dirty = false;
         self.flushed_sequence = self.sequence;
@@ -500,23 +457,17 @@ where
         self.unpublished.revision |= revision;
         self.unpublished.changes = true;
     }
-    /// After a group failed to commit: drop held notifications and reread the
-    /// counters from storage, so nothing the group adopted survives.
     pub(crate) async fn recover(&mut self) -> Result<(), Error> {
         self.unpublished = Unpublished::default();
         self.transaction(async |worker| worker.restore(false).await)
             .await
     }
-    /// Drops the domain except its notification senders, which the file
-    /// writer releases after the file itself is closed.
     pub(crate) fn into_notifications(self) -> Notifications {
         Notifications {
             revisions: self.revisions,
             changes: self.changes,
         }
     }
-    /// One step of the file writer's group. The answer is held until the
-    /// group commits.
     pub(crate) async fn step(&mut self, command: Command<A::Row>) -> Box<dyn Answer> {
         match command {
             Command::Mutate(handle, mutation, baseline, reply) => {
@@ -544,9 +495,6 @@ where
             }
         }
     }
-    /// A request that writes nothing, answered at once on the read connection.
-    /// The file writer passes a flush here only once the domain is clean; see
-    /// `crate::writer`.
     pub(crate) async fn read(&mut self, command: Command<A::Row>) {
         match command {
             Command::Query(reply) => {
@@ -594,12 +542,6 @@ where
             boundary,
         }
     }
-    /// Runs `body` as one step that writes. Inside the file writer's group it
-    /// gets its own savepoint, so a failure rolls back alone and the rest of
-    /// the group still commits. Outside a group, at open, it is one
-    /// `BEGIN IMMEDIATE` transaction. Either way a busy engine reruns the whole
-    /// step; inside a held write lock only an injected fault is busy. `body` must leave memory unchanged until it has returned: callers
-    /// adopt its result afterwards.
     pub(super) async fn transaction<T>(
         &mut self,
         mut body: impl AsyncFnMut(&mut Self) -> Result<T, Error>,
@@ -646,8 +588,6 @@ where
         }
         Err(Error::RetryExhausted)
     }
-    /// Whether the engine ended the file writer's whole group, for example on
-    /// a full disk.
     fn group_ended(&self) -> Result<bool, Error> {
         Ok(self.conn().is_autocommit()?)
     }
@@ -684,9 +624,6 @@ where
         }
         Err(Error::RetryExhausted)
     }
-    /// Runs `body` in one bounded read transaction on the read-only
-    /// connection, never inside the writer's group. The file writer runs reads
-    /// between groups, so memory then equals the committed state.
     pub(super) async fn read_transaction<T>(
         &mut self,
         mut body: impl AsyncFnMut(&mut Self) -> Result<T, Error>,
@@ -722,8 +659,6 @@ where
         }
         Err(Error::RetryExhausted)
     }
-    /// Decodes a projection read beside the writer and selects the rows
-    /// the caller may see under the current policy. Runs no statement.
     fn decode(&self, projected: crate::read::Projected) -> Result<Snapshot<A::Row>, Error> {
         self.app
             .admit_read(self.identity.scope, self.identity.caller, &self.policy)
@@ -752,8 +687,6 @@ where
             },
         })
     }
-    /// The operation a handle committed. A handle whose operation is behind
-    /// the pruned_prefix reports `Pruned`: it was committed and must not run again.
     async fn lookup_mutation(
         &self,
         handle: crate::MutationHandle,
@@ -795,8 +728,6 @@ where
                 .collect(),
         )
     }
-    /// Retained history is bounded by bytes. At the bound nothing more is
-    /// accepted until a checkpoint and pruning release history.
     fn operation_budget(&self, bytes: usize) -> Result<(), Error> {
         let limit = self.retention.policy.retained_bytes;
         if self
@@ -812,7 +743,6 @@ where
         }
         Ok(())
     }
-    /// The stored rows `op` touches, as the reducer's state.
     pub(super) async fn window(&self, op: &Envelope) -> Result<A::State, Error> {
         let mut loaded = Vec::new();
         for statement in self.app.touched(op) {
@@ -827,8 +757,6 @@ where
         }
         self.app.window(loaded).map_err(application)
     }
-    /// Runs the reducer and candidate admission on the rows `op` touches and
-    /// returns the statements that store its result. Writes nothing.
     pub(super) async fn transition(
         &self,
         op: &Envelope,
@@ -873,7 +801,6 @@ where
         }
         Ok(projected)
     }
-    /// Executes projection statements and reports the views they changed.
     pub(super) async fn store(
         &mut self,
         statements: Vec<ProjectionStatement>,
@@ -910,7 +837,6 @@ where
         }
         Ok(changed)
     }
-    /// Validate against stored rows without writing. Err is a committed retry.
     async fn prepare(
         &self,
         handle: crate::MutationHandle,
@@ -987,7 +913,6 @@ where
             revision,
         }))
     }
-    /// Advance the counters to a written operation; notifications follow the commit.
     fn adopt(&mut self, op: &Envelope, bytes: usize, revision: LocalRevision) {
         self.retained += 1;
         self.retained_bytes = self
@@ -999,11 +924,6 @@ where
         self.lamport = op.lamport.get();
         self.revision = revision;
     }
-    /// Writes a local mutation in one step. Preparation writes nothing, so a
-    /// retried attempt recomputes it in its own snapshot. The mutation is
-    /// written whatever its follow-ups do, since the next pass derives them
-    /// from stored rows again; only a step that could not roll back fails the
-    /// group, and the mutation in it.
     async fn mutate(
         &mut self,
         handle: crate::MutationHandle,
@@ -1117,7 +1037,6 @@ where
         }
         Ok(changed)
     }
-    /// Statements for one prepared mutation inside the caller's transaction.
     async fn write_mutation(
         &mut self,
         handle: crate::MutationHandle,
@@ -1139,7 +1058,6 @@ where
         self.inject_fault().await?;
         Ok(changed)
     }
-    /// One local operation: its record, handle, projection and outbox entry.
     async fn write_operation(
         &mut self,
         handle: crate::MutationHandle,
@@ -1196,8 +1114,6 @@ where
         Ok(())
     }
 }
-/// For each application table, the tables its foreign key actions (cascade,
-/// set null or set default, on update or delete) may change, transitively.
 async fn cascades(
     conn: &ScopedConnection,
     schema: &[impl AsRef<str>],

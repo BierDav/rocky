@@ -1,7 +1,3 @@
-//! Files in Rocky's OPFS pool. SQLite opens databases as pool entries
-//! through the VFS. Every other file is a row of one WAL database in the
-//! pool, so writes and renames are atomic and durable when they return,
-//! like `write_private` natively. Directories are path prefixes.
 use rocky_sqlite_opfs::sahpool::{self, OpfsSAHPoolCfg, OpfsSAHPoolUtil};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{
@@ -11,13 +7,9 @@ use std::{
     path::{Component, Path},
 };
 
-/// The SQLite VFS that holds Rocky's files, and its OPFS directory.
 pub const SQLITE_VFS: &str = "rocky-opfs";
 const DIRECTORY: &str = ".rocky";
-/// The database holding every file that is not itself a database.
 const FILES: &str = ".rocky-files.sqlite";
-/// Free pool entries kept for new files. Creating an entry is asynchronous
-/// in OPFS, so each `prepare` tops the pool up.
 const SPARE: u32 = 8;
 
 thread_local! {
@@ -41,7 +33,6 @@ fn not_found(path: &str) -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, format!("{path} does not exist"))
 }
 
-/// The pool's name for `path`: its normal components joined by `/`.
 fn key(path: &Path) -> io::Result<String> {
     let mut parts = Vec::new();
     for component in path.components() {
@@ -65,7 +56,6 @@ fn key(path: &Path) -> io::Result<String> {
     Ok(parts.join("/"))
 }
 
-/// Unix microseconds, as files record when they were written.
 fn now() -> i64 {
     web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
@@ -84,8 +74,6 @@ fn in_pool(key: &str) -> io::Result<bool> {
     pool()?.exists(key).map_err(unavailable)
 }
 
-/// Installs the pool and the file table and keeps room for new files.
-/// Everything else here is synchronous, so a node prepares before it opens.
 pub async fn prepare(path: &Path) -> io::Result<()> {
     key(path)?;
     let config = OpfsSAHPoolCfg {
@@ -156,15 +144,11 @@ pub fn write(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> io::Result<()> 
     })
 }
 
-/// Replaces `path` atomically, durable on return. OPFS is private to the
-/// origin, so there is no owner-only mode.
 pub fn write_private(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
     let path = path.as_ref();
     write(path, bytes)
 }
 
-/// Writes a new file, durable on return; an existing one fails with
-/// `AlreadyExists`.
 pub fn create_new(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
     let path = path.as_ref();
     let key = key(path)?;
@@ -183,8 +167,6 @@ pub fn create_new(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
     }
 }
 
-/// Replaces the database file at `path` with `bytes`, durable on return:
-/// a pool entry, where SQLite opens it.
 pub fn write_database(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
     let key = key(path.as_ref())?;
     table(|table| {
@@ -228,12 +210,10 @@ pub fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     })
 }
 
-/// Every change is durable when it returns; there is no directory to sync.
 pub fn sync_dir(directory: impl AsRef<Path>) -> io::Result<()> {
     key(directory.as_ref()).map(drop)
 }
 
-/// Directories are prefixes; there is nothing to create.
 pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     key(path.as_ref()).map(drop)
 }
@@ -245,18 +225,40 @@ pub fn create_private_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
 pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
     let (from, to) = (key(from.as_ref())?, key(to.as_ref())?);
     if in_pool(&from)? {
-        return pool()?.rename(&from, &to).map_err(unavailable);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{from} is a database, which a browser cannot rename atomically; \
+                 use replace_database_not_atomic_in_browser"
+            ),
+        ));
     }
+    rename_file(&from, &to)
+}
+
+pub fn replace_database_not_atomic_in_browser(
+    from: impl AsRef<Path>,
+    to: impl AsRef<Path>,
+) -> io::Result<()> {
+    let (from, to) = (key(from.as_ref())?, key(to.as_ref())?);
+    if in_pool(&from)? {
+        return pool()?
+            .rename_not_atomically(&from, &to)
+            .map_err(unavailable);
+    }
+    rename_file(&from, &to)
+}
+
+fn rename_file(from: &str, to: &str) -> io::Result<()> {
     let renamed = table(|table| {
         let transaction = table.unchecked_transaction()?;
-        transaction.execute("DELETE FROM files WHERE path=?", [&to])?;
-        let renamed =
-            transaction.execute("UPDATE files SET path=?2 WHERE path=?1", [&from, &to])?;
+        transaction.execute("DELETE FROM files WHERE path=?", [to])?;
+        let renamed = transaction.execute("UPDATE files SET path=?2 WHERE path=?1", [from, to])?;
         transaction.commit()?;
         Ok(renamed)
     })?;
     if renamed == 0 {
-        return Err(not_found(&from));
+        return Err(not_found(from));
     }
     Ok(())
 }
@@ -275,7 +277,6 @@ pub fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u64> {
     Ok(bytes.len() as u64)
 }
 
-/// Whether a file exists at `path`, or any file under it.
 pub fn exists(path: impl AsRef<Path>) -> bool {
     let path = path.as_ref();
     let Ok(key) = key(path) else {
@@ -319,7 +320,6 @@ pub fn len(path: impl AsRef<Path>) -> io::Result<u64> {
     .ok_or_else(|| not_found(&key))
 }
 
-/// The paths of the files and prefixes directly in `directory`.
 pub fn read_dir(directory: impl AsRef<Path>) -> io::Result<Vec<std::path::PathBuf>> {
     let directory = directory.as_ref();
     let prefix = format!("{}/", key(directory)?);
@@ -341,8 +341,6 @@ pub fn read_dir(directory: impl AsRef<Path>) -> io::Result<Vec<std::path::PathBu
     Ok(entries)
 }
 
-/// When the file at `path` was last written. Databases, which SQLite writes,
-/// report no time.
 pub fn modified(path: impl AsRef<Path>) -> io::Result<web_time::SystemTime> {
     let path = path.as_ref();
     let key = key(path)?;
@@ -357,7 +355,6 @@ pub fn modified(path: impl AsRef<Path>) -> io::Result<web_time::SystemTime> {
     Ok(web_time::UNIX_EPOCH + std::time::Duration::from_micros(written.unsigned_abs()))
 }
 
-/// Makes the file at `path` durable; `false` if there is none.
 pub fn sync(path: impl AsRef<Path>) -> io::Result<bool> {
     let path = path.as_ref();
     let key = key(path)?;
@@ -367,8 +364,6 @@ pub fn sync(path: impl AsRef<Path>) -> io::Result<bool> {
     committed_row_exists(&key)
 }
 
-/// Whether the table holds a row for `key`; rows commit at
-/// `synchronous=FULL`, so one that exists is already durable.
 fn committed_row_exists(key: &str) -> io::Result<bool> {
     table(|table| {
         table
@@ -378,7 +373,6 @@ fn committed_row_exists(key: &str) -> io::Result<bool> {
     .map(|row| row.is_some())
 }
 
-/// One owner per file in this worker; the pool excludes other workers.
 pub struct Owner(String);
 impl Owner {
     pub async fn acquire(path: &Path) -> io::Result<Self> {

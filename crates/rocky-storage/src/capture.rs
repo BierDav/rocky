@@ -1,6 +1,3 @@
-//! Row capture for SQL sessions. The write connection's one row hook feeds
-//! this sink beside the digest tracker; its statement authorizer asks the
-//! gate. Both know tables by their installed classification.
 use crate::{Error, scoped_connection::Names, sqlite::Value, storage};
 use rocky_core::{
     Affinity, ColumnClass, KeyColumn, LogicalSchema, SqlValue, TableClass, key_components,
@@ -13,17 +10,14 @@ use std::{
 pub struct Column {
     pub affinity: Affinity,
     pub derived: bool,
-    /// SQLite computes it, so an image never writes it.
     pub generated: bool,
 }
-/// One column as a session's catalog describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogColumn {
     pub name: String,
     pub affinity: Affinity,
     pub not_null: bool,
     pub collation: rocky_core::Collation,
-    /// Position in the primary key.
     pub key: Option<usize>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,8 +25,6 @@ pub struct CatalogIndex {
     pub name: String,
     pub columns: Vec<String>,
 }
-/// A table a session may name, under the name the session uses. The
-/// catalog never lists protocol tables, other domains or physical names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogTable {
     pub name: String,
@@ -42,27 +34,20 @@ pub struct CatalogTable {
     pub indexes: Vec<CatalogIndex>,
 }
 pub struct Table {
-    /// SQL name in the logical schema.
     pub name: String,
     pub physical: String,
     pub class: TableClass,
-    /// Position of the owning domain among the plan's parts.
     pub owner: usize,
     without_rowid: bool,
     identity: Option<usize>,
     pub columns: Vec<Column>,
     names: Vec<String>,
     capture_order: Vec<usize>,
-    /// Column positions of the primary key, in key order.
     pub key: Vec<usize>,
     key_columns: Vec<KeyColumn>,
-    /// Selects one row by its key, every column in declared order.
     pub select: String,
-    /// Selects every row, every column in declared order.
     pub scan: String,
-    /// Sets the derived columns of one row, then names its key.
     pub restore: Option<String>,
-    /// The table as a catalog lists it, under its schema name.
     pub described: CatalogTable,
 }
 impl Table {
@@ -202,7 +187,6 @@ impl Table {
     fn captured(&self) -> bool {
         self.class.typed()
     }
-    /// Removes one row by its key.
     pub fn delete_by_key(&self) -> String {
         let by_key: Vec<String> = self
             .key
@@ -222,7 +206,6 @@ impl Table {
             .filter(|(_, column)| !column.generated)
             .map(|(name, _)| name)
     }
-    /// The values of `image` that `update_image` and `insert_image` bind.
     pub fn stored(&self, image: &[SqlValue]) -> Vec<SqlValue> {
         image
             .iter()
@@ -231,8 +214,6 @@ impl Table {
             .map(|(value, _)| value.clone())
             .collect()
     }
-    /// Sets the row of a key to an image in declared column order, without
-    /// its generated columns; binds `stored`, then the key.
     pub fn update_image(&self) -> String {
         let columns: Vec<String> = self
             .written()
@@ -250,7 +231,6 @@ impl Table {
             by_key.join(" AND ")
         )
     }
-    /// Inserts one row image in declared column order.
     pub fn insert_image(&self) -> String {
         let columns: Vec<String> = self.written().map(|name| quoted(name)).collect();
         format!(
@@ -260,8 +240,6 @@ impl Table {
             vec!["?"; columns.len()].join(",")
         )
     }
-    /// A hook or read row as the application sees it: one strict stored
-    /// value per declared column.
     pub fn image(&self, values: &[Value]) -> Result<Vec<SqlValue>, String> {
         if values.len() != self.columns.len() {
             return Err(format!("{} changed its columns", self.name));
@@ -292,7 +270,6 @@ impl Table {
         key_components(&self.key_columns, &self.key_values(image))
             .map_err(|error| format!("key of {}: {error}", self.name))
     }
-    /// The derived columns of `image`, in declared order.
     pub fn derived(&self, image: &[SqlValue]) -> Vec<SqlValue> {
         self.columns
             .iter()
@@ -303,15 +280,11 @@ impl Table {
     }
 }
 
-/// The tables a session may name, by physical name. A bound database's plan
-/// holds tables of several domains of one file.
 pub struct Plan {
     pub tables: Vec<Table>,
     physical: HashMap<String, usize>,
     views: HashSet<String>,
 }
-/// One domain's tables in a plan. `tables` picks them by SQL name; None
-/// takes the whole schema.
 pub struct Part<'a> {
     pub schema: &'a LogicalSchema,
     pub names: &'a Names,
@@ -321,8 +294,6 @@ fn quoted(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 impl Plan {
-    /// Additive DDL may append columns in a different order from the logical
-    /// declaration. Capture maps physical hook images back to that declaration.
     pub fn bind_physical_columns(
         &mut self,
         connection: &crate::sqlite::Connection,
@@ -354,7 +325,6 @@ impl Plan {
         }
         Ok(())
     }
-    /// Runtime-owned frozen tables may only be read in this plan.
     pub fn allow_read_only(&mut self, tables: impl IntoIterator<Item = String>) {
         self.views
             .extend(tables.into_iter().map(|name| name.to_ascii_lowercase()));
@@ -366,7 +336,6 @@ impl Plan {
             tables: None,
         }])
     }
-    /// `Table::owner` is the position of a table's part.
     pub fn bound(parts: &[Part<'_>]) -> Result<Self, Error> {
         let mut tables = Vec::new();
         let mut physical = HashMap::new();
@@ -406,8 +375,6 @@ impl Plan {
     fn table(&self, physical: &str) -> Option<usize> {
         self.physical.get(&physical.to_ascii_lowercase()).copied()
     }
-    /// The session's catalog: each table under the name `visible` gives
-    /// it, writable where `writable` allows. Sorted by name.
     pub fn catalog(
         &self,
         visible: impl Fn(&Table) -> Option<String>,
@@ -429,28 +396,18 @@ impl Plan {
     }
 }
 
-/// What a statement being compiled asks to do.
 pub enum Access<'a> {
     Read(&'a str, &'a str),
     Insert(&'a str),
     Delete(&'a str),
     Update(&'a str, &'a str),
-    /// Selecting, calling a function or recursing: no table is named.
     Neutral,
-    /// Schema changes, pragmas, attachments and transaction control.
     Other,
 }
-/// The statement authorizer's state. Unarmed, the runtime's own statements
-/// compile freely. Armed, a statement may read the session's tables and
-/// write the writable ones; anything else is refused.
 #[derive(Default)]
 pub struct Gate {
     plan: Option<Arc<Plan>>,
-    /// Columns the statement assigns, as (table, column).
     assigned: Vec<(usize, usize)>,
-    /// Names read without a column that are no session table. The engine
-    /// reports a counted common table expression or subquery this way, and
-    /// a real table too; see `Connection::compile`.
     unresolved: Vec<String>,
 }
 impl Gate {
@@ -462,7 +419,6 @@ impl Gate {
     pub fn unresolved(&mut self) -> Vec<String> {
         std::mem::take(&mut self.unresolved)
     }
-    /// Lets the runtime's own lookup compile while a statement is checked.
     pub fn suspend(&mut self) -> Option<Arc<Plan>> {
         self.plan.take()
     }
@@ -511,63 +467,43 @@ impl Gate {
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Mode {
-    /// The runtime's own statements: nothing is captured.
     #[default]
     Off,
-    /// A session's statement: row changes are the transaction's writes.
     User,
-    /// The commit's projection: it must leave the session's rows as they are.
     Reconcile,
 }
 struct Event {
     table: usize,
     old: Option<Vec<Value>>,
     new: Option<Vec<Value>>,
-    /// Columns the statement assigned.
     assigned: Vec<usize>,
-    /// The statement failed: its changes may have been undone.
     uncertain: bool,
     bytes: usize,
 }
-/// One key a transaction touched, folded from its surviving events.
 pub struct Touched {
     pub table: usize,
     pub key: Vec<SqlValue>,
-    /// The row at the transaction's start, which the first event of its key
-    /// shows.
     pub before: Option<Vec<SqlValue>>,
-    /// A surviving statement removed the row from this key.
     pub deleted: bool,
     pub assigned: Vec<bool>,
 }
-/// The columns of a table's hook images in order, stored generated
-/// columns included.
 const HOOK_IMAGE_COLUMNS: &str =
     "SELECT name FROM pragma_table_xinfo(?) WHERE hidden<>1 ORDER BY cid";
-/// Whether `table` is a history table the runtime's triggers write, which
-/// is no session's change.
 fn is_history_table(table: &str) -> bool {
     table
         .get(..crate::sqlite::HISTORY_TABLES.len())
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(crate::sqlite::HISTORY_TABLES))
 }
-/// Old and new row images of a session's transaction, in statement order.
-/// A savepoint rollback truncates them. A failure is latched until the
-/// session is disarmed, and the transaction must not commit.
 #[derive(Default)]
 pub struct Sink {
     mode: Mode,
     plan: Option<Arc<Plan>>,
     events: Vec<Event>,
     bytes: usize,
-    /// Most events and bytes one transaction may hold.
     limits: (usize, usize),
     failed: Option<String>,
-    /// The running statement inserted a rowid-table row itself.
     inserted: bool,
-    /// First event of the running statement.
     statement: usize,
-    /// Tables without capture that a statement changed.
     local: Vec<usize>,
 }
 impl Sink {
@@ -586,8 +522,6 @@ impl Sink {
         self.statement = self.events.len();
         self.inserted = false;
     }
-    /// Ends the statement and returns whether it inserted a row itself.
-    /// `assigned` is its assignment mask.
     pub fn end_statement(&mut self, failed: bool, assigned: &[(usize, usize)]) -> bool {
         self.mode = Mode::Off;
         for event in self.events.iter_mut().skip(self.statement) {
@@ -603,7 +537,6 @@ impl Sink {
     pub fn mark(&self) -> usize {
         self.events.len()
     }
-    /// Tables of the events after `mark`.
     pub fn tables_since(&self, mark: usize) -> Vec<usize> {
         self.events
             .iter()
@@ -611,7 +544,6 @@ impl Sink {
             .map(|event| event.table)
             .collect()
     }
-    /// Forgets the events after `mark`, as a savepoint rollback undid them.
     pub fn truncate(&mut self, mark: usize) {
         self.events.truncate(mark);
         self.bytes = self.events.iter().map(|event| event.bytes).sum();
@@ -630,7 +562,6 @@ impl Sink {
             self.failed = Some(reason.into());
         }
     }
-    /// The hook saw a top-level insert into `table`.
     pub fn inserted(&mut self, table: &str) {
         if self.mode == Mode::User
             && let Some(plan) = &self.plan
@@ -641,7 +572,6 @@ impl Sink {
             self.inserted = true;
         }
     }
-    /// Whether the hook should read the changed row of `table` for `observe`.
     pub fn wants(&mut self, main: bool, table: &str) -> bool {
         let Some(plan) = self.plan.clone().filter(|_| self.mode != Mode::Off) else {
             return false;
@@ -745,9 +675,6 @@ impl Sink {
             bytes,
         });
     }
-    /// The keys the surviving events touched, each with its first state.
-    /// Events of a failed statement count as touches only: the final rows
-    /// are read from the tables, never taken from an event.
     pub fn freeze(&self) -> Result<Vec<Touched>, String> {
         let Some(plan) = &self.plan else {
             return Ok(Vec::new());
@@ -839,9 +766,6 @@ mod tests {
     const LOCAL: &str =
         "CREATE TABLE local(id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,body TEXT)";
 
-    /// A connection with the hook, the gate and four classified tables. The
-    /// descriptor is not installable: it only classifies what the raw
-    /// engine does, triggers and cascades included.
     fn setup() -> (Connection, Arc<Plan>) {
         let conn = Connection::open_in_memory().unwrap();
         let integer = |name| column(name, Affinity::Integer, Collation::Binary);
@@ -923,7 +847,6 @@ mod tests {
             .arm(plan.clone(), (1024, 1 << 20));
         (conn, plan)
     }
-    /// Runs one session statement and returns whether it failed.
     fn run(conn: &Connection, plan: &Arc<Plan>, sql: &str) -> bool {
         let session = conn.session().unwrap();
         let capture = conn.capture().unwrap();
@@ -936,7 +859,6 @@ mod tests {
         capture.lock().unwrap().end_statement(failed, &assigned);
         failed
     }
-    /// Table, key, whether a first state exists, deleted, assigned columns.
     type Frozen = (usize, Vec<SqlValue>, bool, bool, Vec<bool>);
     fn frozen(conn: &Connection) -> Vec<Frozen> {
         let capture = conn.capture().unwrap();

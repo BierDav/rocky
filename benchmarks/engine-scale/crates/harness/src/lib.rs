@@ -1,5 +1,3 @@
-//! One workload for every engine; see ../../README.md. An engine crate implements
-//! `Engine` and `Conn` and calls `run::<E>()` from `main`.
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,9 +7,7 @@ use std::time::{Duration, Instant};
 pub type Failure = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Failure>;
 
-/// Every row carries this node; the primary key is `(node, seq)`.
 pub const NODE: [u8; 16] = [3; 16];
-/// Each domain has its own protocol tables and owns tables with `table % DOMAINS == domain`.
 pub const DOMAINS: u64 = 8;
 pub const LOAD_CHUNK: usize = 1000;
 pub const OP_BYTES: usize = 256;
@@ -19,7 +15,6 @@ pub const OP_BYTES: usize = 256;
 pub struct Config {
     pub dir: PathBuf,
     pub tables: u64,
-    /// Full durability: every commit reaches stable storage (F_FULLFSYNC on macOS).
     pub durable: bool,
 }
 
@@ -36,32 +31,20 @@ pub trait Engine: Send + Sync + Sized + 'static {
     const NAME: &'static str;
     type Conn: Conn;
     fn version() -> String;
-    /// Create the store in an empty `dir` with the full schema.
     fn install(config: &Config) -> Result<Self>;
     fn open(config: &Config) -> Result<Self>;
-    /// Called on the thread that will use the connection.
     fn connect(&self) -> Result<Self::Conn>;
 }
 
-/// Each method except `load` and the reads is exactly one committed transaction.
-/// Busy or conflict errors are retried inside the implementation and counted.
 pub trait Conn {
-    /// Bulk-load `rows` into data table `table` as one transaction.
     fn load(&mut self, table: u64, rows: &[Row]) -> Result<()>;
     fn insert(&mut self, table: u64, row: &Row) -> Result<()>;
-    /// Set `a` and `c` of an existing row; `false` when the row is missing.
     fn update(&mut self, table: u64, seq: i64, a: i64, c: &str) -> Result<bool>;
-    /// `(a, b, c)` by primary key.
     fn point(&mut self, table: u64, seq: i64) -> Result<Option<(i64, i64, String)>>;
-    /// Fetch `(seq, c)` of every row with this `a` through the index; returns the row count.
     fn by_a(&mut self, table: u64, a: i64) -> Result<usize>;
-    /// Fetch `(seq, c)` for `low <= b <= high` through the index, at most `limit` rows.
     fn range_b(&mut self, table: u64, low: i64, high: i64, limit: usize) -> Result<usize>;
-    /// A Rocky-shaped write: upsert `row`, append the operation and its outbox
-    /// entry, and advance the domain's replica row, atomically.
     fn mutation(&mut self, domain: u64, table: u64, op: i64, bytes: &[u8], row: &Row)
     -> Result<()>;
-    /// Fold the journal into the main file, where the engine has such a step.
     fn checkpoint(&mut self) -> Result<()>;
     fn retries(&self) -> u64;
 }
@@ -72,7 +55,6 @@ pub fn mix(mut x: u64) -> u64 {
     x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     x ^ (x >> 31)
 }
-/// Distinct `a` values per table, so an equality read returns about 20 rows.
 pub fn a_cardinality(per_table: u64) -> u64 {
     (per_table / 20).max(1)
 }
@@ -160,7 +142,6 @@ fn timed<T>(micros: &mut Vec<u64>, body: impl FnOnce() -> Result<T>) -> Result<T
     Ok(value)
 }
 
-/// Unique operation sequences across runs on the same store.
 fn op_base() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -173,8 +154,6 @@ struct Seen {
     writes: Vec<u64>,
     error: Option<String>,
 }
-/// Another thread reading and writing in domain 1 while the main thread works.
-/// It writes sequence -1, which the load never touches.
 struct Bystander {
     stop: Arc<AtomicBool>,
     seen: Arc<Mutex<Seen>>,
@@ -232,7 +211,6 @@ impl Bystander {
             }
         }
     }
-    /// Joins first, so an operation that was blocked for the whole window is counted.
     fn finish(mut self, out: &mut Out, label: &str) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
@@ -251,7 +229,6 @@ fn measure<C: Conn>(
 ) -> Result<()> {
     let mut random = Random(seed);
     let mut op = op_base();
-    // New rows get sequences above the loaded range, unique per run.
     let mut fresh = per_table as i64 + (op & 0x3FFF_FFFF_FFFF) * 1000;
     let bytes = [9u8; OP_BYTES];
 
@@ -319,7 +296,6 @@ fn measure<C: Conn>(
     Ok(())
 }
 
-/// `writers` threads, one domain each, running mutations for `seconds`.
 fn concurrent<E: Engine>(
     engine: &Arc<E>,
     out: &mut Out,
@@ -329,7 +305,6 @@ fn concurrent<E: Engine>(
     reader: bool,
     seconds: u64,
 ) -> Result<()> {
-    // Threads connect first; the clock starts when all are ready.
     let ready = Arc::new(std::sync::Barrier::new(
         writers as usize + reader as usize + 1,
     ));
@@ -348,7 +323,6 @@ fn concurrent<E: Engine>(
             let mut micros = Vec::new();
             while Instant::now() < deadline {
                 op += 1;
-                // Tables of this writer's domain; with fewer tables than domains, writers share.
                 let table = (random.next(owned) * DOMAINS + writer) % tables;
                 let row = row(table, random.next(per_table) as i64, per_table);
                 timed(&mut micros, || {

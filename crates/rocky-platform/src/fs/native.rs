@@ -6,7 +6,6 @@ use std::{
 
 pub use std::fs::{copy, create_dir_all, read, read_to_string, remove_dir_all, remove_file, write};
 
-/// The directory holding `path`; `.` for a bare file name.
 fn parent(path: &Path) -> &Path {
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
@@ -14,8 +13,6 @@ fn parent(path: &Path) -> &Path {
     }
 }
 
-/// Makes the entries of `directory` durable: a file created, renamed or
-/// removed in it survives a crash. Windows has no directory to sync.
 pub fn sync_dir(directory: impl AsRef<Path>) -> io::Result<()> {
     let directory = directory.as_ref();
     #[cfg(test)]
@@ -27,8 +24,6 @@ pub fn sync_dir(directory: impl AsRef<Path>) -> io::Result<()> {
     Ok(())
 }
 
-/// Creates `path` and its parents, owner-only where the platform has modes,
-/// durable on return.
 pub fn create_private_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
     if path.as_os_str().is_empty() || path.is_dir() {
@@ -47,7 +42,6 @@ pub fn create_private_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     }
 }
 
-/// Replaces `path` atomically with owner-only `bytes`, durable on return.
 pub fn write_private(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
     let path = path.as_ref();
     let tmp = path.with_extension("tmp");
@@ -62,7 +56,6 @@ pub fn write_private(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
     sync_dir(parent(path))
 }
 
-/// Renames `from` to `to`, replacing it, durable on return.
 pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
     let (from, to) = (from.as_ref(), to.as_ref());
     std::fs::rename(from, to)?;
@@ -73,7 +66,13 @@ pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
     Ok(())
 }
 
-/// The paths of the entries directly in `directory`.
+pub fn replace_database_not_atomic_in_browser(
+    from: impl AsRef<Path>,
+    to: impl AsRef<Path>,
+) -> io::Result<()> {
+    rename(from, to)
+}
+
 pub fn read_dir(directory: impl AsRef<Path>) -> io::Result<Vec<PathBuf>> {
     let directory = directory.as_ref();
     std::fs::read_dir(directory)?
@@ -81,20 +80,16 @@ pub fn read_dir(directory: impl AsRef<Path>) -> io::Result<Vec<PathBuf>> {
         .collect()
 }
 
-/// When the file at `path` was last written.
 pub fn modified(path: impl AsRef<Path>) -> io::Result<web_time::SystemTime> {
     let path = path.as_ref();
     std::fs::metadata(path)?.modified()
 }
 
-/// Whether a file or directory exists at `path`.
 pub fn exists(path: impl AsRef<Path>) -> bool {
     let path = path.as_ref();
     path.exists()
 }
 
-/// Writes a new owner-only file, durable on return; an existing one fails
-/// with `AlreadyExists`, so the first of several writers wins.
 pub fn create_new(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
     let path = path.as_ref();
     create_private_dir_all(parent(path))?;
@@ -108,8 +103,6 @@ pub fn create_new(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
     sync_dir(parent(path))
 }
 
-/// Replaces the database file at `path` with `bytes`, durable on return,
-/// where SQLite opens it.
 pub fn write_database(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
     let path = path.as_ref();
     let mut file = File::create(path)?;
@@ -118,15 +111,11 @@ pub fn write_database(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
     sync_dir(parent(path))
 }
 
-/// The length of the file at `path`.
 pub fn len(path: impl AsRef<Path>) -> io::Result<u64> {
     let path = path.as_ref();
     Ok(std::fs::metadata(path)?.len())
 }
 
-/// Makes the file at `path` durable; `false` if there is none. `sync_all`
-/// is `F_FULLFSYNC` on Apple platforms, and Windows needs write access to
-/// flush, so the file opens writable.
 pub fn sync(path: impl AsRef<Path>) -> io::Result<bool> {
     let path = path.as_ref();
     match OpenOptions::new().read(true).write(true).open(path) {
@@ -136,7 +125,6 @@ pub fn sync(path: impl AsRef<Path>) -> io::Result<bool> {
     }
 }
 
-/// Nothing to prepare: the directory is created on demand.
 pub async fn prepare(path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
         create_dir_all(parent)?;
@@ -144,22 +132,15 @@ pub async fn prepare(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// `<file>.lock` beside the file: appended, so `a.db` and `a.sqlite` in one
-/// directory do not share a lock.
 fn lock_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(".lock");
     PathBuf::from(name)
 }
 
-/// Lock attempts before the file counts as owned elsewhere. A child process
-/// being spawned briefly shares a just-closed owner's lock until it execs,
-/// so a reopen right after close retries for a moment.
 const LOCK_ATTEMPTS: u32 = 10;
 const LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
 
-/// The lock file excludes a second process, so one writer owns the file.
-/// Holding it holds the lock.
 pub struct Owner {
     _lock: File,
 }
@@ -204,7 +185,6 @@ mod tests {
     use std::cell::RefCell;
 
     thread_local! {
-        /// The directories this thread synced, in order.
         pub(super) static SYNCED: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
     }
     fn synced() -> Vec<PathBuf> {

@@ -20,7 +20,6 @@ pub enum TodoEntry {
         title: Register<String>,
         completed: Register<bool>,
     },
-    /// Discard hidden registers so delete/edit delivery orders retain equal state.
     Tombstone,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -85,8 +84,6 @@ impl TodoState {
     }
 }
 impl TodoApp {
-    /// Shared local/incoming gateway. Pending operations do not change either
-    /// argument. Runtime transactions must durably retain pending bytes separately.
     pub fn apply_ready(
         &self,
         state: &mut TodoState,

@@ -1,6 +1,3 @@
-//! Placement catalog: append-only assignments of domains to file slots.
-//! File ownership remains independent of domain routing. A domain moves only through
-//! `crate::relocation`.
 use crate::{
     DomainInstallation, DomainPlacement, Error, database::DatabaseOwner, layout,
     scoped_connection::ScopedConnection, sqlite, storage, worker,
@@ -33,12 +30,7 @@ where
     .await
     .map_err(|_| Error::Closed)?
 }
-/// Files installed at once: independent files install concurrently, with
-/// bounded disk pressure.
 const CONCURRENT_INSTALLS: usize = 4;
-/// Opens the placed files. Every selected identity is validated and every
-/// required file acquired before any write; pending domains keep the same
-/// ordered plan across interrupted opens.
 async fn prepare<A: StoredApplication>(
     path: PathBuf,
     files: usize,

@@ -1,4 +1,3 @@
-//! The same behavior from every target's tasks, timers and files.
 use rocky_platform::{fs, task, time};
 use std::time::Duration;
 use wasm_bindgen_test::wasm_bindgen_test;
@@ -24,7 +23,6 @@ async fn timers_wait_and_time_out() {
     assert!(second >= first + Duration::from_millis(5));
 }
 
-/// Natively `spawn_local` needs a `LocalSet`; a Worker's tasks are all local.
 async fn local<F: std::future::Future>(future: F) -> F::Output {
     #[cfg(not(target_family = "wasm"))]
     return tokio::task::LocalSet::new().run_until(future).await;
@@ -110,4 +108,51 @@ async fn one_owner_per_file() {
     );
     drop(owner);
     fs::Owner::acquire(&path).await.unwrap();
+}
+
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn only_the_named_replacement_moves_a_database_where_a_browser_cannot_rename_atomically() {
+    let scratch = fs::Scratch::new().await;
+    let database = scratch.path().join("live.sqlite");
+    let staged = scratch.path().join("staged.sqlite");
+    fs::prepare(&database).await.unwrap();
+    fs::write_database(&staged, b"staged").unwrap();
+    let renamed = fs::rename(&staged, &database);
+    if cfg!(target_family = "wasm") {
+        assert_eq!(
+            renamed.unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput,
+            "an atomic rename refuses a database in the browser"
+        );
+        fs::replace_database_not_atomic_in_browser(&staged, &database).unwrap();
+    } else {
+        renamed.unwrap();
+    }
+    assert!(fs::exists(&database) && !fs::exists(&staged));
+    assert_eq!(fs::len(&database).unwrap(), 6);
+}
+
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn files_differing_only_in_extension_have_separate_owners() {
+    let scratch = fs::Scratch::new().await;
+    let database = scratch.path().join("owned.db");
+    let sqlite = scratch.path().join("owned.sqlite");
+    fs::prepare(&database).await.unwrap();
+    let _database = fs::Owner::acquire(&database).await.unwrap();
+    fs::Owner::acquire(&sqlite)
+        .await
+        .expect("a lock beside each file, not one per stem");
+}
+
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn create_new_refuses_an_existing_file_so_the_first_writer_wins() {
+    let scratch = fs::Scratch::new().await;
+    let path = scratch.path().join("claim");
+    fs::prepare(&path).await.unwrap();
+    fs::create_new(&path, b"first").unwrap();
+    assert_eq!(
+        fs::create_new(&path, b"second").unwrap_err().kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    assert_eq!(fs::read(&path).unwrap(), b"first");
 }

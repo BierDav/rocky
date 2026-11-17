@@ -1,5 +1,3 @@
-//! Shared by `turso-engine` and `turso-patched`; the including crate root
-//! supplies `NAME` and `VERSION`.
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -33,7 +31,6 @@ struct Inner {
     conn: Connection,
     begin: Statement,
     commit: Statement,
-    /// Prepared statements per (operation, table or domain).
     cache: HashMap<(Kind, u64), Statement>,
     retries: u64,
 }
@@ -57,7 +54,6 @@ async fn values(conn: &Connection, sql: &str) -> turso::Result<Vec<Vec<Value>>> 
     Ok(all)
 }
 
-/// Sets the flush policy on this connection and reads it back.
 async fn durability(conn: &Connection, durable: bool) -> Result<()> {
     let (synchronous, fullfsync) = if durable {
         ("FULL", "ON")
@@ -77,7 +73,6 @@ async fn durability(conn: &Connection, durable: bool) -> Result<()> {
             return Err(format!("{sql} is {found:?}, expected {expected}").into());
         }
     }
-    // Experiment knob; unset keeps the engine default of 2,000 pages, as Rocky runs it.
     if let Ok(kib) = std::env::var("TURSO_CACHE_KIB") {
         values(conn, &format!("PRAGMA cache_size=-{}", kib.parse::<u64>()?)).await?;
     }
@@ -120,7 +115,6 @@ impl harness::Engine for Turso {
         runtime()?.block_on(async {
             let db = turso::Builder::new_local(&file(config)).build().await?;
             let conn = db.connect()?;
-            // MVCC DDL is not rollback-safe: create the schema in WAL mode, then switch.
             journal_mode(&conn, "wal").await?;
             durability(&conn, config.durable).await?;
             for table in 0..config.tables {
@@ -239,12 +233,10 @@ impl Inner {
     ) -> turso::Result<u64> {
         let statement = self.statement(kind, id).await?;
         let changed = statement.execute(params).await;
-        // A finished statement keeps its cursors, and their pages, until reset.
         statement.reset()?;
         changed
     }
 
-    /// Runs the statement to completion; `each` sees every row.
     async fn query(
         &mut self,
         kind: Kind,
@@ -266,12 +258,10 @@ impl Inner {
             }
         };
         drop(rows);
-        // A finished statement keeps its cursors, and their pages, until reset.
         statement.reset()?;
         result
     }
 
-    /// One `BEGIN CONCURRENT` transaction, rerun as a whole after a conflict.
     async fn transaction<T>(
         &mut self,
         mut body: impl AsyncFnMut(&mut Self) -> turso::Result<T>,
@@ -288,7 +278,6 @@ impl Inner {
                 Ok(value) => return Ok(value),
                 Err(error) => error,
             };
-            // A conflict can already have ended the transaction inside the engine.
             if !self.conn.is_autocommit()? {
                 self.conn.execute("ROLLBACK", ()).await?;
             }
@@ -300,7 +289,6 @@ impl Inner {
         }
     }
 
-    /// An autocommit read, retried like a transaction.
     async fn read<T>(
         &mut self,
         mut body: impl AsyncFnMut(&mut Self) -> turso::Result<T>,
@@ -424,7 +412,6 @@ impl harness::Conn for TursoConn {
 
     fn checkpoint(&mut self) -> Result<()> {
         let before = self.inner.retries;
-        // Refused as busy while any other transaction is open, so this can starve.
         let result =
             self.runtime.block_on(self.inner.read(async |inner| {
                 values(&inner.conn, "PRAGMA wal_checkpoint(TRUNCATE)").await

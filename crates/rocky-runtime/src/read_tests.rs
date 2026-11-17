@@ -1,5 +1,3 @@
-//! Reads against stored rows: paging, authorization boundaries, observers and
-//! independence from the file's writer.
 use super::*;
 use inventory_app::{InventoryApp, Policy};
 use rocky_core::*;
@@ -16,7 +14,6 @@ fn scope(domain: u8) -> Scope {
         domain: DomainId([domain; 16]),
     }
 }
-/// Two domains in one file; domain 1 may read only notes with `prefix`.
 async fn open(dir: &Scratch, prefix: Option<&str>) -> Runtime<InventoryApp> {
     let installations = [1, 2]
         .into_iter()
@@ -72,7 +69,6 @@ fn texts(snapshot: &ReadSnapshot) -> Vec<String> {
         })
         .collect()
 }
-/// Every page of a query, following its cursors.
 async fn pages(
     replica: &Replica<InventoryApp>,
     sql: &str,
@@ -151,6 +147,20 @@ async fn pages_cover_a_result_once_and_cursors_are_bound_to_their_query() {
         ),
         "one row beyond the limit cannot be paged and is a quota error"
     );
+    for max_rows in [0, crate::read::MAX_PAGE_ROWS + 1] {
+        assert!(
+            matches!(
+                a.read(query(ordered), ReadOptions::new(scope(1), max_rows))
+                    .await,
+                Err(Error::Quota {
+                    resource: "read query",
+                    limit: crate::read::MAX_PAGE_ROWS
+                })
+            ),
+            "a page holds 1 to {} rows",
+            crate::read::MAX_PAGE_ROWS
+        );
+    }
     for max_bytes in [0, MAX_FRAME_BYTES + 1] {
         let options = ReadOptions {
             max_bytes,
@@ -572,7 +582,6 @@ async fn observers_wake_for_their_domain_only_and_share_one_execution() {
         Err(Error::Closed)
     ));
 }
-/// Polls once without waiting.
 fn futures_poll<T>(future: &mut std::pin::Pin<Box<impl Future<Output = T>>>) -> Option<T> {
     let waker = std::task::Waker::noop();
     match future
@@ -584,8 +593,6 @@ fn futures_poll<T>(future: &mut std::pin::Pin<Box<impl Future<Output = T>>>) -> 
     }
 }
 
-/// A read does not pass through the writer: it answers while the writer is
-/// held inside a group, and reports the committed revision it was read at.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn reads_answer_while_the_writer_is_inside_a_group() {
     let dir = Scratch::new().await;

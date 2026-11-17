@@ -1,6 +1,3 @@
-//! Checkpoints, the pruned prefix and pruning of one domain. The checkpoint is a
-//! second copy of the application's tables that lags the projection; it
-//! advances by replaying retained operations.
 use super::*;
 use crate::checkpoint::{
     CheckpointHold, CheckpointInfo, CheckpointRecord, Deduplication, PeerRetention, Request,
@@ -23,21 +20,14 @@ pub(crate) fn initial_checkpoint() -> Result<Vec<crate::sqlite::Value>, Error> {
         crate::sqlite::Value::Blob(encode_stored(&Stored::default())?),
     ])
 }
-/// Milliseconds since the Unix epoch on this replica's clock.
 pub(super) fn now_millis() -> i64 {
     rocky_platform::time::since_epoch().map_or(0, |elapsed| elapsed.as_millis() as i64)
 }
-/// Operations one requested step replays into the checkpoint copy. A step
-/// beside a group replays twice the group's writes, within these bounds, so
-/// the copy catches up under any load without one long step.
 pub(super) const ADVANCE_OPERATIONS: usize = 128;
 pub(super) const ADVANCE_BOUNDS: (usize, usize) = (32, 256);
-/// Records one step deletes, and sequences it moves the pruned prefix per author.
 pub(super) const PRUNE_BATCH: usize = 512;
-/// Rows and bytes of one exported checkpoint page.
 pub(super) const EXPORT_ROWS: usize = 512;
 pub(super) const EXPORT_BYTES: usize = 256 * 1024;
-/// How long an export keeps automatic checkpoints from moving its rows.
 pub(super) const EXPORT_LEASE: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub(super) type Marks = Vec<(NodeId, u64)>;
@@ -74,7 +64,6 @@ pub(super) fn marks(frontier: &rocky_core::AppliedFrontier) -> Marks {
     marks.sort();
     marks
 }
-/// The pruned prefix of a stored retention state, for reads beside the writer.
 pub(crate) fn pruned_prefix(state: &[u8]) -> Result<Vec<(NodeId, u64)>, Error> {
     #[derive(Deserialize)]
     struct Pruned {
@@ -91,20 +80,15 @@ pub(super) fn quoted(name: &str) -> String {
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Candidate {
     pub(super) frontier: Marks,
-    /// The projection's digest when it stood at `frontier`.
     pub(super) live: (Commitment, u64),
-    /// Recomputation reached `frontier` with other rows.
     pub(super) failed: bool,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(super) struct PeerMark {
     pub(super) behind: bool,
-    /// The peer reported everything at or before this as applied.
     pub(super) applied: Marks,
-    /// The peer reported holding everything at or before this.
     #[serde(default)]
     pub(super) held: Marks,
-    /// Since when, in Unix milliseconds, the peer has held back the pruned prefix.
     #[serde(default)]
     pub(super) holding_since: Option<i64>,
 }
@@ -114,10 +98,13 @@ pub(super) struct Import {
     pub(super) table: u32,
     pub(super) position: i64,
 }
-/// Everything persistent besides the two row digests.
+#[derive(Clone, Copy, Default)]
+pub(super) struct LiveAndShadow<T> {
+    pub(super) live: T,
+    pub(super) shadow: T,
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Stored {
-    /// Frontier of the checkpoint copy; None after an aborted import.
     pub(super) shadow: Option<Marks>,
     pub(super) clock: u64,
     pub(super) history: (Commitment, u64),
@@ -146,7 +133,6 @@ pub(super) struct Table {
     pub(super) live: String,
     pub(super) shadow: String,
     pub(super) without_rowid: bool,
-    /// Declared by the application: digested, exported and replaced.
     pub(super) checkpointed: bool,
 }
 pub(super) struct Retention {
@@ -155,22 +141,17 @@ pub(super) struct Retention {
     pub(super) shadow_reader: Option<ScopedConnection>,
     pub(super) tables: Vec<Table>,
     pub(super) tracker: Arc<Mutex<Tracker>>,
-    /// Tracker slots of the projection and of the checkpoint copy.
-    pub(super) slots: (usize, usize),
+    pub(super) slots: LiveAndShadow<usize>,
     pub(super) live: SetDigest,
     pub(super) shadow: SetDigest,
-    /// Digests a step set outright; tracked changes after that still count.
-    pub(super) bases: (Option<SetDigest>, Option<SetDigest>),
+    pub(super) bases: LiveAndShadow<Option<SetDigest>>,
     pub(super) stored: Stored,
     pub(super) record: Option<(CheckpointRecord, Commitment)>,
     pub(super) definition: Commitment,
-    /// A flush covers the latest record.
     pub(super) record_flushed: bool,
-    /// The pruned prefix may be able to move, or rows remain behind it.
     pub(super) prune_wanted: bool,
     pub(super) lease: Option<web_time::Instant>,
 }
-/// Counters a finished import puts in place of the worker's.
 pub(super) struct Switched {
     pub(super) frontier: BTreeMap<NodeId, AuthorSequence>,
     pub(super) lamport: u64,
@@ -228,14 +209,14 @@ impl Retention {
                 .lock()
                 .map_err(|_| Error::Corrupt("row tracker".into()))?;
             let checkpointed = || tables.iter().filter(|table| table.checkpointed);
-            (
-                tracker.register(
+            LiveAndShadow {
+                live: tracker.register(
                     checkpointed().map(|table| (table.live.clone(), table.logical.clone())),
                 ),
-                tracker.register(
+                shadow: tracker.register(
                     checkpointed().map(|table| (table.shadow.clone(), table.logical.clone())),
                 ),
-            )
+            }
         };
         Ok(Self {
             policy,
@@ -246,7 +227,7 @@ impl Retention {
             slots,
             live: SetDigest::default(),
             shadow: SetDigest::default(),
-            bases: (None, None),
+            bases: LiveAndShadow::default(),
             stored: Stored::default(),
             record: None,
             definition: definition_commitment(app),
@@ -270,7 +251,6 @@ impl Retention {
     pub(super) fn below_pruned_prefix(&self, id: OperationId) -> bool {
         id.sequence.get() <= self.pruned_prefix(id.node)
     }
-    /// An acknowledgment may let the pruned prefix follow the checkpoint further.
     pub(super) fn acknowledged(&mut self) {
         if let Some((record, _)) = &self.record {
             let window = self.policy.window as u64;
@@ -279,14 +259,12 @@ impl Retention {
             });
         }
     }
-    /// Whether `peer` reported holding `id` in a catch-up.
     pub(super) fn held_by(&self, peer: NodeId, id: OperationId) -> bool {
         self.stored
             .peers
             .iter()
             .any(|(known, mark)| *known == peer && at(&mark.held, id.node) >= id.sequence.get())
     }
-    /// What `peer` last reported holding and applying.
     pub(super) fn reported(&self, peer: NodeId) -> (Marks, Marks) {
         self.stored
             .peers
@@ -295,12 +273,9 @@ impl Retention {
             .map(|(_, mark)| (mark.held.clone(), mark.applied.clone()))
             .unwrap_or_default()
     }
-    /// The checkpoint copy's frontier, when it can serve as a replay base.
     pub(super) fn base(&self) -> Option<&[(NodeId, u64)]> {
         self.stored.shadow.as_deref()
     }
-    /// The sequence up to which `peer` holds `node`'s pruned operations:
-    /// the pruned prefix, or what it reported applied while declared behind.
     pub(super) fn acknowledged_behind(&self, peer: NodeId, node: NodeId) -> u64 {
         let pruned_prefix = self.pruned_prefix(node);
         match self.stored.peers.iter().find(|(known, _)| *known == peer) {
@@ -319,12 +294,10 @@ impl Retention {
             marker,
             tables: self
                 .checkpointed()
-                .map(|(_, table)| {
-                    (
-                        table.logical.clone(),
-                        table.live.clone(),
-                        table.shadow.clone(),
-                    )
+                .map(|(_, table)| crate::checkpoint::AuditedTable {
+                    logical: table.logical.clone(),
+                    live: table.live.clone(),
+                    shadow: table.shadow.clone(),
                 })
                 .collect(),
         }
@@ -334,37 +307,33 @@ impl Retention {
             .lock()
             .map_err(|_| Error::Corrupt("row tracker".into()))
     }
-    /// Starts a step: forgets row changes of an attempt that did not commit.
     pub(super) fn begin_step(&mut self) -> Result<(), Error> {
         let slots = self.slots;
         let mut tracker = self.tracker()?;
-        tracker.take(slots.0);
-        tracker.take(slots.1);
+        tracker.take(slots.live);
+        tracker.take(slots.shadow);
         drop(tracker);
-        self.bases = (None, None);
+        self.bases = LiveAndShadow::default();
         Ok(())
     }
-    /// The digests as the running step leaves them.
     pub(super) fn current(&self) -> Result<(SetDigest, SetDigest), Error> {
         let tracker = self.tracker()?;
-        let mut live = self.bases.0.unwrap_or(self.live);
-        live.merge(&tracker.peek(self.slots.0));
-        let mut shadow = self.bases.1.unwrap_or(self.shadow);
-        shadow.merge(&tracker.peek(self.slots.1));
+        let mut live = self.bases.live.unwrap_or(self.live);
+        live.merge(&tracker.peek(self.slots.live));
+        let mut shadow = self.bases.shadow.unwrap_or(self.shadow);
+        shadow.merge(&tracker.peek(self.slots.shadow));
         Ok((live, shadow))
     }
-    /// Sets the checkpoint copy's digest outright, after statements the
-    /// tracker need not have followed.
     pub(super) fn rebase_shadow(&mut self, digest: SetDigest) -> Result<(), Error> {
-        let slot = self.slots.1;
+        let slot = self.slots.shadow;
         self.tracker()?.take(slot);
-        self.bases.1 = Some(digest);
+        self.bases.shadow = Some(digest);
         Ok(())
     }
     pub(super) fn rebase_live(&mut self, digest: SetDigest) -> Result<(), Error> {
-        let slot = self.slots.0;
+        let slot = self.slots.live;
         self.tracker()?.take(slot);
-        self.bases.0 = Some(digest);
+        self.bases.live = Some(digest);
         Ok(())
     }
     pub(super) fn adopt(&mut self, stored: Stored) -> Result<(), Error> {
@@ -403,7 +372,6 @@ impl Retention {
         }
     }
 }
-/// The installed reducer, schema, projection and handler generations.
 pub(crate) fn definition_commitment<A: StoredApplication>(app: &A) -> Commitment {
     rocky_core::installed_definition(app)
 }
@@ -428,8 +396,6 @@ where
             .map(|(node, sequence)| (*node, sequence.get()))
             .collect()
     }
-    /// Adds the checkpoint tables to a file that has none: a new file, or
-    /// one written before checkpoints, whose whole history is still retained.
     pub(super) async fn install_retention(&mut self) -> Result<(), Error> {
         for sql in &self.schema.statements {
             self.retention
@@ -460,9 +426,6 @@ where
             .await?;
         Ok(())
     }
-    /// Rereads the digests and checkpoint state from storage. The record
-    /// counts as unflushed: the file writer flushes once at open, before
-    /// anything is exposed.
     pub(super) async fn load_retention(&mut self) -> Result<(), Error> {
         let row = rows(
             self.conn(),
@@ -511,20 +474,18 @@ where
         }
         Ok(())
     }
-    /// Writes the digests a step changed; the caller adopts them after the
-    /// step's savepoint is released.
     pub(super) async fn settle(&mut self) -> Result<(SetDigest, SetDigest), Error> {
         let slots = self.retention.slots;
         let (live, shadow) = {
             let mut tracker = self.retention.tracker()?;
             let failed = || Error::Corrupt("a changed row could not be read for its digest".into());
-            let live = tracker.take(slots.0).ok_or_else(failed)?;
-            let shadow = tracker.take(slots.1).ok_or_else(failed)?;
+            let live = tracker.take(slots.live).ok_or_else(failed)?;
+            let shadow = tracker.take(slots.shadow).ok_or_else(failed)?;
             (live, shadow)
         };
         let mut digests = (
-            self.retention.bases.0.unwrap_or(self.retention.live),
-            self.retention.bases.1.unwrap_or(self.retention.shadow),
+            self.retention.bases.live.unwrap_or(self.retention.live),
+            self.retention.bases.shadow.unwrap_or(self.retention.shadow),
         );
         digests.0.merge(&live);
         digests.1.merge(&shadow);
@@ -540,7 +501,7 @@ where
     }
     pub(super) fn adopt_digests(&mut self, digests: (SetDigest, SetDigest)) {
         (self.retention.live, self.retention.shadow) = digests;
-        self.retention.bases = (None, None);
+        self.retention.bases = LiveAndShadow::default();
     }
     pub(super) async fn persist(&self, stored: &Stored) -> Result<(), Error> {
         self.conn()
@@ -551,7 +512,6 @@ where
             .await?;
         Ok(())
     }
-    /// Whether the file writer should run a maintenance step beside a group.
     pub(crate) fn maintenance_due(&self) -> bool {
         let retention = &self.retention;
         if !retention.policy.automatic || retention.hold().is_some() {
@@ -571,11 +531,12 @@ where
             .sum();
         since > 0
             && !retention.leased()
-            && ((retention.policy.checkpoint_operations > 0
-                && since >= retention.policy.checkpoint_operations as u64)
-                || self.retained_bytes >= retention.policy.retained_bytes / 2)
+            && (matches!(
+                retention.policy.checkpoint,
+                crate::checkpoint::CheckpointTrigger::AfterOperations(operations)
+                    if since >= operations.get() as u64
+            ) || self.retained_bytes >= retention.policy.retained_bytes / 2)
     }
-    /// A verified checkpoint waits for a flush before the pruned prefix may move.
     pub(crate) fn wants_flush(&self) -> bool {
         let retention = &self.retention;
         retention.policy.automatic
@@ -584,9 +545,6 @@ where
             && retention.prune_wanted
             && retention.stored.candidate.is_none()
     }
-    /// One bounded step of whatever is due. Failures stay in the status; a
-    /// failed step rolled back alone. A step held by an import or a missing
-    /// base is retried beside a later group.
     pub(crate) async fn maintain(&mut self, writes: usize) -> Result<(), Error> {
         let retention = &self.retention;
         if retention.stored.candidate.is_none()
@@ -739,9 +697,6 @@ where
                 .collect::<Result<_, Error>>()?,
         })
     }
-    /// Starts a checkpoint of the applied frontier, or replays the next
-    /// operations into the checkpoint copy; the last step compares it with
-    /// the digest the projection had at that frontier.
     pub(super) async fn checkpoint_step(
         &mut self,
         requested: bool,
@@ -763,8 +718,6 @@ where
         }
         Ok(advanced.step)
     }
-    /// Advances the checkpoint by one bounded step. Only an explicit
-    /// `requested` step retries a checkpoint that failed.
     pub(super) async fn advance(
         &mut self,
         requested: bool,
@@ -897,7 +850,6 @@ where
             failed,
         }))
     }
-    /// Applies one applied operation to the checkpoint copy, as replay.
     pub(super) async fn replay(&self, op: &Envelope) -> Result<(), Error> {
         let shadow = self.shadow();
         let mut loaded = Vec::new();
@@ -985,7 +937,9 @@ where
         }
         Ok(rejected)
     }
-    pub(super) async fn unsettled(&self) -> Result<Vec<(OperationId, bool, bool)>, Error> {
+    pub(super) async fn unsettled(
+        &self,
+    ) -> Result<Vec<crate::checkpoint::UnsettledOperation>, Error> {
         let mut records = self
             .conn()
             .query(
@@ -995,11 +949,11 @@ where
             .await?;
         let mut unsettled = Vec::new();
         while let Some(row) = records.next().await? {
-            unsettled.push((
-                incoming::operation_id(&row.get::<Vec<u8>>(0)?, row.get(1)?)?,
-                row.get::<String>(2)? == "local",
-                row.get::<String>(3)? == "rejected",
-            ));
+            unsettled.push(crate::checkpoint::UnsettledOperation {
+                identity: incoming::operation_id(&row.get::<Vec<u8>>(0)?, row.get(1)?)?,
+                local: row.get::<String>(2)? == "local",
+                rejected: row.get::<String>(3)? == "rejected",
+            });
         }
         Ok(unsettled)
     }

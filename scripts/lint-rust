@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Rust source policy: no allow attributes and no comments except docs.
+"""Rust source policy: no allow attributes, no comments and no doc text.
 
-  scripts/lint-rust              check every workspace package; a package listed
-                                 in scripts/comment-budgets.toml may hold exactly
-                                 its budget of plain comments
+  scripts/lint-rust              check every workspace package and every Cargo
+                                 workspace of OUTSIDE_THE_WORKSPACE; a workspace
+                                 package listed in scripts/comment-budgets.toml
+                                 may hold exactly its budget of comment lines
   scripts/lint-rust PATH...      check the named files, reporting every comment
-  scripts/lint-rust --fix        lower budgets to the current counts, then check
+  scripts/lint-rust --fix        lower budgets to the current counts, then check;
+                                 the budget file goes once every budget is zero
 """
 import json
 import os
@@ -18,9 +20,14 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 BUDGETS = ROOT / 'scripts/comment-budgets.toml'
+OUTSIDE_THE_WORKSPACE = ('benchmarks/chaos', 'benchmarks/engine-comparison',
+                         'benchmarks/engine-scale')
+UPSTREAM = ('benchmarks/engine-scale/turso-patched/vendor',)
+SKIPPED_DIRECTORIES = ('target', 'node_modules')
 ALLOW_GUIDANCE = '#[allow(...)] is forbidden; use #[expect(lint, reason = "...")] instead'
-COMMENT_GUIDANCE = ('plain comments are forbidden; express the reason as a type, a named item '
-                    'with a doc comment, a test or an assertion message, or delete it')
+COMMENT_GUIDANCE = ('comments, doc comments and #[doc = ...] text are forbidden; carry the meaning '
+                    'in a type or guard, a test name or assertion message, or a clearer name, '
+                    'or delete it')
 TOKEN = re.compile(
     r'//[^\n]*|/\*|(?P<raw>(?:br|cr|r)(?P<hashes>\#*)")'
     r'|(?:b|c)?"(?:\\.|[^"\\])*"'
@@ -64,20 +71,6 @@ def tokens(source):
             yield value, position
 
 
-def is_doc(comment):
-    if comment.startswith('//'):
-        return comment.startswith('//!') or comment.startswith('///') and not comment.startswith('////')
-    return comment.startswith('/*!') or (
-        comment.startswith('/**') and not comment.startswith('/***') and comment != '/**/')
-
-
-def comments(source):
-    """Lines of comments that are not documentation."""
-    for kind, value, position in lexemes(source):
-        if kind == 'comment' and not is_doc(value):
-            yield source.count('\n', 0, position) + 1
-
-
 def arguments(parts):
     start = depth = 0
     for index, (value, _) in enumerate(parts):
@@ -91,18 +84,28 @@ def arguments(parts):
     yield parts[start:]
 
 
-def forbidden(attribute):
+def allowed(attribute):
     if len(attribute) < 2 or attribute[1][0] != '(':
         return
     if attribute[0][0] == 'allow':
         yield attribute[0][1]
     elif attribute[0][0] == 'cfg_attr':
         for child in list(arguments(attribute[2:-1]))[1:]:
-            yield from forbidden(child)
+            yield from allowed(child)
 
 
-def violations(source):
-    """Lines of allow attributes, including inner and inactive conditional ones."""
+def documented(attribute):
+    if len(attribute) < 2:
+        return
+    if attribute[0][0] == 'doc' and attribute[1][0] == '=':
+        yield attribute[0][1]
+    elif attribute[0][0] == 'cfg_attr' and attribute[1][0] == '(':
+        for child in list(arguments(attribute[2:-1]))[1:]:
+            yield from documented(child)
+
+
+def attributes(source):
+    """Token lists inside each outer or inner attribute."""
     parts = list(tokens(source))
     for index, (value, _) in enumerate(parts):
         if value != '#':
@@ -119,41 +122,66 @@ def violations(source):
             elif parts[end][0] == ']':
                 depth -= 1
             if depth == 0:
-                for position in forbidden(parts[start + 1:end]):
-                    yield source.count('\n', 0, position) + 1
+                yield parts[start + 1:end]
                 break
 
 
-def package_sources(directory):
-    """Rust files of the package at `directory`, excluding nested packages."""
+def line(source, position):
+    return source.count('\n', 0, position) + 1
+
+
+def violations(source):
+    """Lines of allow attributes, including inner and inactive conditional ones."""
+    for attribute in attributes(source):
+        for position in allowed(attribute):
+            yield line(source, position)
+
+
+def comments(source):
+    """Every line a comment spans, doc comments included, and each `doc = ...` attribute."""
+    lines = set()
+    for kind, value, position in lexemes(source):
+        if kind == 'comment':
+            first = line(source, position)
+            lines.update(range(first, first + value.count('\n') + 1))
+    for attribute in attributes(source):
+        lines.update(line(source, position) for position in documented(attribute))
+    return sorted(lines)
+
+
+def rust_sources(directory, nested_packages):
+    """Rust files under `directory`, without build output, the repository's `local`
+    directory or upstream code; nested packages only when `nested_packages`."""
+    excluded = {ROOT / 'local', *(ROOT / path for path in UPSTREAM)}
     for current, dirs, files in os.walk(directory):
-        dirs[:] = sorted(d for d in dirs if d not in ('target', 'local', 'node_modules')
-                         and not d.startswith('.') and not (Path(current) / d / 'Cargo.toml').exists())
+        current = Path(current)
+        dirs[:] = sorted(
+            name for name in dirs
+            if name not in SKIPPED_DIRECTORIES and not name.startswith('.')
+            and current / name not in excluded
+            and (nested_packages or not (current / name / 'Cargo.toml').exists()))
         for name in sorted(files):
             if name.endswith('.rs'):
-                yield Path(current) / name
+                yield current / name
 
 
 def workspace_packages():
-    """`(name, directory, upstream)` per member; vendored upstream code keeps its comments."""
+    """`(name, directory)` per member of the root Cargo workspace."""
     metadata = json.loads(subprocess.check_output(
         ['cargo', 'metadata', '--offline', '--locked', '--no-deps', '--format-version', '1'], cwd=ROOT))
     members = set(metadata['workspace_members'])
     for package in sorted(metadata['packages'], key=lambda package: package['name']):
         if package['id'] in members:
-            directory = Path(package['manifest_path']).parent.resolve()
-            yield package['name'], directory, directory.is_relative_to(ROOT / 'vendor')
+            yield package['name'], Path(package['manifest_path']).parent.resolve()
 
 
-def read_budgets():
-    return tomllib.loads(BUDGETS.read_text()) if BUDGETS.exists() else {}
-
-
-def write_budgets(budgets):
-    header = ''.join(line for line in BUDGETS.read_text().splitlines(keepends=True)
-                     if line.startswith('#'))
-    BUDGETS.write_text(header + '\n' + ''.join(f'{name} = {count}\n'
-                                               for name, count in sorted(budgets.items())))
+def scanned(packages):
+    """`(name, sources)` per workspace package, then per Cargo workspace outside it."""
+    for name, directory in packages.items():
+        yield name, rust_sources(directory, nested_packages=False)
+    for path in OUTSIDE_THE_WORKSPACE:
+        if (ROOT / path).is_dir():
+            yield path, rust_sources(ROOT / path, nested_packages=True)
 
 
 def report(path, lines, guidance):
@@ -174,39 +202,54 @@ def check_paths(paths):
 def check_workspace(fix):
     failed = False
     counts = {}
-    for name, directory, upstream in workspace_packages():
+    packages = dict(workspace_packages())
+    for name, sources in scanned(packages):
         found = []
-        for path in package_sources(directory):
+        for path in sources:
             source = path.read_text()
             failed |= report(path, list(violations(source)), ALLOW_GUIDANCE)
-            if not upstream:
-                found.extend((path, line) for line in comments(source))
+            found.extend((path, number) for number in comments(source))
         counts[name] = found
-    budgets = read_budgets()
-    if fix:
-        lowered = {name: min(budget, len(counts.get(name, [])))
+    budgets, over = check_budgets(counts, packages, fix)
+    failed |= over
+    for name, found in counts.items():
+        if name not in budgets:
+            for path, number in found:
+                failed |= report(path, [number], COMMENT_GUIDANCE)
+    return failed
+
+
+def check_budgets(counts, packages, fix):
+    """Budgets of packages still converting; delete with the budget file once it is gone."""
+    budgets = tomllib.loads(BUDGETS.read_text()) if BUDGETS.exists() else {}
+    if fix and budgets:
+        budgets = {name: min(budget, len(counts.get(name, [])))
                    for name, budget in budgets.items()}
-        budgets = {name: budget for name, budget in lowered.items() if budget}
-        write_budgets(budgets)
+        budgets = {name: budget for name, budget in budgets.items() if budget}
+        if budgets:
+            header = ''.join(line for line in BUDGETS.read_text().splitlines(keepends=True)
+                             if line.startswith('#'))
+            BUDGETS.write_text(header + '\n' + ''.join(f'{name} = {count}\n'
+                                                       for name, count in sorted(budgets.items())))
+        else:
+            BUDGETS.unlink()
+            print(f'{BUDGETS.name}: every budget is zero; the file is gone', file=sys.stderr)
+    failed = False
     for name, budget in budgets.items():
-        if name not in counts:
+        found = len(counts.get(name, []))
+        if name not in packages:
             print(f'{BUDGETS}: error: {name} is not a workspace package', file=sys.stderr)
             failed = True
-    for name, found in counts.items():
-        budget = budgets.get(name)
-        if budget is None:
-            for path, line in found:
-                failed |= report(path, [line], COMMENT_GUIDANCE)
-        elif len(found) > budget:
-            print(f'{name}: error: {len(found)} plain comments exceed its budget of {budget} in '
+        elif found > budget:
+            print(f'{name}: error: {found} comment lines exceed its budget of {budget} in '
                   f'{BUDGETS.name}; list a file\'s comments with scripts/lint-rust PATH',
                   file=sys.stderr)
             failed = True
-        elif len(found) < budget:
-            print(f'{name}: error: {len(found)} plain comments remain under its budget of {budget}; '
+        elif found < budget:
+            print(f'{name}: error: {found} comment lines remain under its budget of {budget}; '
                   'lower it with scripts/lint --fix', file=sys.stderr)
             failed = True
-    return failed
+    return budgets, failed
 
 
 def main(arguments):

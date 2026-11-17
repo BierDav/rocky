@@ -49,8 +49,6 @@ fn launch() -> Result<Launch, String> {
     })
 }
 
-/// Window and Edit menus: on macOS the Edit items carry the cut, copy,
-/// paste, undo and select-all shortcuts.
 fn menu() -> Result<Menu, dioxus::desktop::muda::Error> {
     let window = Submenu::with_items(
         "Window",

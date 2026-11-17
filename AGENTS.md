@@ -35,11 +35,13 @@
 
 ## Comments
 
-- Code explains itself through names, types and tests. Plain comments are
-  forbidden (`scripts/lint-rust`); only brief doc comments on items are allowed.
+- Rust code holds no comments of any kind: no `//` or `/* */` comments, no doc
+  comments and no `#[doc = ...]` text (`scripts/lint-rust`). Code explains
+  itself through names, types, guards and tests.
 - Encode a reason or warning as, in order of preference: a type or guard that
   makes the mistake impossible; a test named after the rule or an assertion
-  message; a named `const`, `fn` or type with a doc comment; otherwise delete it.
+  message; a clearer name for the item, parameter or constant; otherwise delete
+  it. Examples are ordinary tests, not doctests.
 - Packages in `scripts/comment-budgets.toml` still carry old comments. Convert
   them when you touch that code; budgets only go down.
 

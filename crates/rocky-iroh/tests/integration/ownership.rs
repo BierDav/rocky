@@ -1,6 +1,3 @@
-//! Who owns the endpoint: Rocky's handlers next to an application's own
-//! protocol on its router, and the starter that owns everything it binds.
-//! Loopback only.
 use rocky_core::net::{Failure, Incoming, Protocol, Transport};
 use rocky_iroh::{
     Attachment, Options,
@@ -19,7 +16,6 @@ const TEST_SCOPE: rocky_core::Scope = rocky_core::Scope {
     domain: rocky_core::DomainId([3; 16]),
 };
 
-/// The application's own protocol: echoes one stream.
 #[derive(Debug)]
 struct Echo;
 impl ProtocolHandler for Echo {
@@ -43,7 +39,6 @@ async fn echo(from: &Endpoint, to: EndpointAddr) -> Result<Vec<u8>, Failure> {
     connection.close(0u32.into(), b"done");
     Ok(reply)
 }
-/// One request and reply over a Rocky stream between two transports.
 async fn rocky(from: &dyn Transport, to: &dyn Transport) -> Result<(), Failure> {
     let address = to.address().await?;
     let exchange = from.request(std::slice::from_ref(&address), TEST_SCOPE, b"ping");
@@ -59,7 +54,6 @@ async fn rocky(from: &dyn Transport, to: &dyn Transport) -> Result<(), Failure> 
     Ok(())
 }
 
-/// Whether a Rocky stream to `address` fails before any reply.
 async fn refused(from: &dyn Transport, address: &str) -> bool {
     from.request(&[address.into()], TEST_SCOPE, b"ping")
         .await
@@ -356,7 +350,6 @@ async fn closing_a_borrowed_attachment_ends_its_link_lanes_and_keeps_the_endpoin
     Ok(())
 }
 
-/// Only stops a hang should close wait for the pending accept's queue lock.
 const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[tokio::test]

@@ -1,4 +1,3 @@
-//! The OS owns multicast; registration never binds or closes iroh's UDP socket.
 use super::{Budget, Candidate, Failure, Properties, SERVICE, TXT_BYTES, candidate, identify};
 use async_dnssd::{
     Browse, BrowseData, BrowseResult, BrowsedFlags, RegisterData, Registration, ResolvedHostFlags,
@@ -9,8 +8,6 @@ use iroh::EndpointAddr;
 use rocky_core::net::BoxFuture;
 use std::{net::SocketAddr, time::Duration};
 
-/// A and AAAA can arrive in separate callbacks; resolution waits this long
-/// after the first so both route families are kept.
 const SECOND_FAMILY_WAIT: Duration = Duration::from_millis(250);
 
 pub(super) struct Backend {

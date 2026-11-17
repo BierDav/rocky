@@ -1,15 +1,3 @@
-//! Shared todo lists on Rocky's replayed tables.
-//!
-//! Every write is one transaction whose statements replicate as intent.
-//! A todo's place in its list is a [fractional index](position), so moving
-//! it rewrites only that todo, and concurrent moves both keep their place.
-//! A list holds each title once: of two devices adding or renaming todos
-//! to the same title concurrently, replay keeps the earlier transaction in
-//! canonical order and drops the other on every replica.
-//!
-//! Each list is its own partition. Devices take one of three [roles]:
-//! trusted devices enroll others and seal, full devices receive every
-//! list, partial devices only the lists shared with them.
 pub mod position;
 pub mod roles;
 
@@ -25,12 +13,9 @@ pub const APPLICATION: &str = "todo";
 pub const LISTS: &str = "lists";
 pub const TODOS: &str = "todos";
 pub const DEVICES: &str = "devices";
-/// The partition group holding one list and its todos.
 pub const LIST_GROUP: &str = "list";
 pub const MAX_TITLE_BYTES: usize = 1024;
 
-/// The replicated schema: lists, todos ordered within their list, and the
-/// devices with their roles.
 pub fn schema() -> Result<Schema, Failure> {
     let title_check = format!("length(trim(title)) > 0 AND length(title) <= {MAX_TITLE_BYTES}");
     let lists = grouped(
@@ -100,7 +85,6 @@ fn unique<const N: usize>(name: &str, columns: [&str; N]) -> IndexDefinition {
     }
 }
 
-/// An installation of the todo schema in `directory`.
 pub fn configuration(directory: impl Into<PathBuf>) -> Result<Configuration, Failure> {
     Configuration::new(directory, &schema()?)
 }
@@ -134,8 +118,6 @@ impl Todo {
 }
 const TODO_COLUMNS: &str = "id,list,title,completed,priority,position";
 
-/// A committed insert: the new row's id and the transaction replay may
-/// still drop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Created {
     pub id: RowIdentity,
@@ -167,8 +149,6 @@ fn title(title: &str) -> Result<&str, TodoError> {
     Ok(title)
 }
 
-/// The todo operations over one database. Each write commits one
-/// transaction and returns once it is locally durable.
 #[derive(Clone)]
 pub struct Todos {
     database: Arc<Database>,
@@ -180,8 +160,6 @@ impl Todos {
     pub fn database(&self) -> &Arc<Database> {
         &self.database
     }
-    /// Creates a list in a new partition and shares it with the full and
-    /// trusted devices.
     pub async fn create_list(&self, name: &str) -> Result<Created, Failure> {
         let name = title(name)?;
         self.database.session().next_partition(LISTS).await?;
@@ -203,7 +181,6 @@ impl Todos {
         self.write("UPDATE lists SET title=? WHERE id=?", params![name, list])
             .await
     }
-    /// Deletes the list and, by cascade, its todos.
     pub async fn delete_list(
         &self,
         list: RowIdentity,
@@ -211,7 +188,6 @@ impl Todos {
         self.write("DELETE FROM lists WHERE id=?", params![list])
             .await
     }
-    /// The lists this device holds.
     pub async fn lists(&self) -> Result<Vec<List>, Failure> {
         let rows = self
             .database
@@ -229,7 +205,6 @@ impl Todos {
             .collect()
     }
 
-    /// Appends a todo to the end of `list`.
     pub async fn add(&self, list: RowIdentity, name: &str) -> Result<Created, Failure> {
         let name = title(name)?;
         let mut transaction = self.database.transaction().await?;
@@ -270,7 +245,6 @@ impl Todos {
         )
         .await
     }
-    /// Raises the priority by one; concurrent raises all count.
     pub async fn raise_priority(
         &self,
         list: RowIdentity,
@@ -282,8 +256,6 @@ impl Todos {
         )
         .await
     }
-    /// Moves `todo` to `index` among the other todos of its list; an index
-    /// past the end appends.
     pub async fn move_to(
         &self,
         list: RowIdentity,
@@ -314,7 +286,6 @@ impl Todos {
         )
         .await
     }
-    /// `list`'s todos in order.
     pub async fn todos(&self, list: RowIdentity) -> Result<Vec<Todo>, Failure> {
         self.select(
             &format!("SELECT {TODO_COLUMNS} FROM todos WHERE list=? ORDER BY position"),
@@ -322,8 +293,6 @@ impl Todos {
         )
         .await
     }
-    /// Every todo held here, ordered by list then position: what replicas
-    /// holding the same lists at one seal agree on.
     pub async fn all_todos(&self) -> Result<Vec<Todo>, Failure> {
         self.select(
             &format!("SELECT {TODO_COLUMNS} FROM todos ORDER BY list,position"),
@@ -331,8 +300,6 @@ impl Todos {
         )
         .await
     }
-    /// Why replay dropped `token` here, and whether a seal made that final;
-    /// `None` while it stands.
     pub async fn dropped(
         &self,
         token: TransactionToken,
@@ -358,12 +325,10 @@ impl Todos {
     }
 }
 
-/// An empty blob is no row identity, so `None` excludes nothing.
 fn excluded_identity(except: Option<RowIdentity>) -> SqlValue {
     except.map_or(SqlValue::Blob(Vec::new()), RowIdentity::sql)
 }
 
-/// `list`'s positions in order, without `except`.
 async fn positions(
     transaction: &mut Transaction,
     list: RowIdentity,

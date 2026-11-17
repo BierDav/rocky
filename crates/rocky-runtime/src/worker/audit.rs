@@ -1,6 +1,5 @@
 use super::*;
 
-/// Records read per query, so the audit's memory does not grow with history.
 const PAGE: i64 = 256;
 
 impl<A> Worker<A>
@@ -8,15 +7,6 @@ where
     A: StoredApplication,
     A::State: Clone,
 {
-    /// The explicit audit of everything but stored rows: retained history,
-    /// counters, acknowledgments, handles, outgoing work and the strong
-    /// ledger must agree. It reads retained records in pages. Rows are
-    /// compared with their digests off the writer thread, and the projection
-    /// is recomputed by the checkpoint that follows; see `Replica::audit`.
-    /// Applied history has no gap, since pruning removes a prefix. Clocks and
-    /// revisions are checked exactly only without an imported checkpoint or
-    /// pruned history, which carry ones this file no longer shows. Returns the
-    /// number of retained operations.
     pub(super) async fn audit(&self) -> Result<usize, Error> {
         let corrupt = |what: &str| Error::Corrupt(what.into());
         let metadata = rows(
@@ -198,8 +188,6 @@ where
             }
         }
     }
-    /// Every local operation still inside the retry window has one handle
-    /// bound to its input; a handle without an operation is behind the pruned prefix.
     async fn audit_handles(&self, sequence: u64) -> Result<(), Error> {
         let corrupt = || Error::Corrupt("mutation handle binding".into());
         let local = self.identity.node;
@@ -262,9 +250,6 @@ where
         }
         Ok(())
     }
-    /// The outbox holds exactly the local operations after the pruned prefix that
-    /// some delivery target has not acknowledged. The last page also covers
-    /// anything after the newest operation.
     async fn audit_outbox(&self) -> Result<(), Error> {
         let local = self.identity.node;
         let pruned_prefix = self.retention.pruned_prefix(local);

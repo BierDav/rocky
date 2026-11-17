@@ -47,7 +47,6 @@ pub(super) async fn fault<A: StoredApplication>(replica: &Replica<A>, fault: wor
     enqueue(&replica.inner.commands, Command::Fault(fault, reply)).unwrap();
     result.await.unwrap().unwrap();
 }
-/// SQLite steps the domain's file writer has run so far.
 pub(super) async fn vm_steps<A: StoredApplication>(replica: &Replica<A>) -> u64 {
     let (steps, counted) = oneshot::channel();
     fault(replica, worker::Fault::VmSteps(steps)).await;
@@ -141,8 +140,6 @@ async fn actions_reopen_counters_outbox_and_rebuild() {
     reopened.close().await.unwrap();
 }
 
-/// The mutation commits whatever its follow-ups do, and its caller learns
-/// so; the failed pass is counted and the next one derives them again.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_failed_follow_up_pass_still_reports_the_committed_mutation() {
     let dir = Scratch::new().await;
@@ -471,9 +468,6 @@ async fn dropping_last_runtime_drains_work_and_stops_observer() {
     reopened.close().await.unwrap();
 }
 
-/// Another connection holding the write lock makes the file writer retry
-/// `BEGIN IMMEDIATE` with backoff, then report `RetryExhausted` after the
-/// 318 ms bound. Nothing commits while the lock is held.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_file_held_by_another_connection_is_retried_then_exhausted() {
     let dir = Scratch::new().await;

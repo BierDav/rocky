@@ -1,4 +1,3 @@
-//! Combined trusted storage soak; qualification gaps are reported explicitly.
 use super::wide_schema::{Policy, WideSchema, domain_id};
 use super::{CALLER, Failure, NODE, resident_mib};
 use rocky_core::{Envelope, MeshId, OperationId, Scope, SqlValue};
@@ -72,10 +71,6 @@ fn histogram(label: &str, latency: &Mutex<Latency>) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Runs the soak. Each interval prints and resets the service time of each
-/// observer delivery: the read of the subscribed range plus any wait for the
-/// change notification, which under continuous churn is small against the
-/// read, so it measures the observer-read cost.
 pub async fn run(config: Config) -> Result<(), Failure> {
     std::fs::create_dir_all(&config.directory)?;
     let path = config.directory.join("soak.db");

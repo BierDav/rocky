@@ -1,5 +1,3 @@
-//! One device in its own process, so the orchestrator can SIGKILL it at any
-//! moment. Requests arrive as JSON lines on stdin and run concurrently.
 use rocky_sdk::Engine;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -27,7 +25,6 @@ pub fn options(dir: &str, port: u16, mode: Value) -> Value {
     options
 }
 
-/// `node <options-json>`: opens, prints `{"opened":scope}` or `{"open_failed":..}`, then serves.
 pub async fn run(options: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let out = Arc::new(Mutex::new(tokio::io::stdout()));
     let emit = |out: Arc<Mutex<tokio::io::Stdout>>, value: Value| async move {
@@ -74,7 +71,6 @@ pub async fn run(options: String) -> Result<(), Box<dyn std::error::Error + Send
             emit(out, json!({"id": id, "reply": reply})).await;
         });
     }
-    // stdin closed: the orchestrator went away; close gracefully.
     let _ = engine.close().await;
     Ok(())
 }

@@ -95,8 +95,6 @@ pub struct Directory {
     pub delegations: Vec<Delegation>,
     pub ownership: Vec<Ownership>,
     pub artifacts: Vec<Artifacts>,
-    /// Tombstones of revoked grant IDs and deleted credential keys; neither
-    /// may be reused.
     pub deleted_keys: BTreeSet<Commitment>,
     pub deletions: Vec<Deletion>,
 }

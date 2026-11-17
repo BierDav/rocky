@@ -5,14 +5,11 @@ use crate::replication::{
 use rocky_core::ProtocolError;
 use std::collections::BTreeSet;
 
-/// Whether a retained operation's dependencies allow applying it now.
 pub(super) enum Readiness {
     Ready,
     Pending,
-    /// A dependency is rejected or not older than the operation.
     Invalid(Error),
 }
-/// What one pass over pending operations changed, adopted after its commit.
 struct Pass {
     applied: Vec<OperationId>,
     revision: LocalRevision,
@@ -36,15 +33,6 @@ where
     A: StoredApplication,
     A::State: Clone,
 {
-    /// Rereads the domain's counters and checkpoint state from storage.
-    /// Starts from nothing, so a retried attempt cannot double-count an
-    /// earlier partial pass. With `open`, the operations after the
-    /// checkpoint and the strong ledger are also validated; history behind
-    /// the checkpoint is verified by the explicit audit. Everything behind
-    /// an author's pruned prefix was applied before it was pruned. Local
-    /// operations after the applied frontier wait to be applied again on an
-    /// imported checkpoint, but none is ever missing, so the newest one is
-    /// the local sequence counter.
     pub(super) async fn restore(&mut self, open: bool) -> Result<(), Error> {
         self.load_retention().await?;
         let budget = rows(
@@ -117,9 +105,6 @@ where
         self.revision = LocalRevision::new(*revision as u64)?;
         Ok(())
     }
-    /// The newest retained applied operation of an author. Applied ones have
-    /// no gaps and later ones are pending or rejected, so the descending
-    /// search walks back over that tail only.
     async fn newest_retained_applied(&self, node: NodeId) -> Result<u64, Error> {
         let mut applied = self
             .conn()
@@ -133,9 +118,6 @@ where
             None => 0,
         })
     }
-    /// Checks one author's operations after the checkpoint: canonical bytes
-    /// under the right key, an applied prefix without gaps up to `applied`,
-    /// and nothing applied after it.
     async fn validate_tail(&self, node: NodeId, applied: u64) -> Result<(), Error> {
         let corrupt = || Error::Corrupt("foreign or inconsistent history".into());
         let base = self
@@ -187,7 +169,6 @@ where
         }
         Ok(())
     }
-    /// Encoded bytes and status of a retained operation.
     pub(super) async fn record(&self, id: OperationId) -> Result<Option<(Vec<u8>, String)>, Error> {
         let mut records = self
             .conn()
@@ -214,8 +195,6 @@ where
             None => Ok(None),
         }
     }
-    /// Checks the dependencies of `op` against retained operations. Those
-    /// behind the pruned prefix were applied; their clocks are gone.
     pub(super) async fn readiness(&self, op: &Envelope) -> Result<Readiness, Error> {
         let mut pending = false;
         for dependency in &op.dependencies {
@@ -246,8 +225,6 @@ where
             Readiness::Ready
         })
     }
-    /// Identities of retained operations after `after` in key order, read
-    /// from the primary key index alone.
     async fn identities(
         &self,
         after: Option<OperationId>,
@@ -274,9 +251,6 @@ where
         }
         Ok(identities)
     }
-    /// The contiguous held prefix of every author's log, and the first
-    /// retained operations above it that are not rejected. Received, pending
-    /// and rejected operations extend the applied prefix while contiguous.
     async fn held(&self) -> Result<(rocky_core::AppliedFrontier, Vec<OperationId>), Error> {
         let applied = super::retention::marks(&self.applied_frontier());
         let mut nodes: Vec<_> = self.config.authors.iter().map(|(node, _)| *node).collect();
@@ -479,10 +453,6 @@ where
             next: if more { last } else { None },
         })
     }
-    /// Stores one received operation as pending. A late copy of one applied
-    /// and pruned is a duplicate, whatever it would do to rows that changed
-    /// or were deleted since. Its time is validated against every retained
-    /// dependency, pending ones included.
     async fn receive(&mut self, bytes: Vec<u8>) -> Result<Acknowledgment, Error> {
         if bytes.len() > rocky_core::MAX_PAYLOAD_BYTES + 256 {
             return Err(ProtocolError::InvalidLength.into());
@@ -559,11 +529,6 @@ where
             applied: false,
         })
     }
-    /// One writer step for a bounded batch. Every record is received in its
-    /// own savepoint, so a refused one rolls back alone; one application pass
-    /// follows in another, so a failed pass rolls back alone and its
-    /// receipts apply later. The whole step shares the group's commit, so a
-    /// failed rollback, which leaves the connection state unknown, ends it.
     async fn receive_page(
         &mut self,
         records: Vec<Vec<u8>>,
@@ -624,13 +589,6 @@ where
             }
         }
     }
-    /// One bounded pass inside the caller's transaction. An operation depends
-    /// on its author's predecessor, and an author's applied operations have
-    /// no gaps, so only the lowest pending operation of each author can be
-    /// applied or rejected: the pass follows those heads, never the blocked
-    /// operations behind them. Each one is reduced against stored rows and
-    /// written before the next is read; rounds repeat while one author's
-    /// progress may unblock another's head.
     async fn apply_pending(&mut self) -> Result<Option<Pass>, Error> {
         let mut pass = Pass {
             applied: Vec::new(),
@@ -684,8 +642,6 @@ where
         self.inject_fault().await?;
         Ok(Some(pass))
     }
-    /// The lowest pending operation of `node` with `same`, else of the first
-    /// author after `node` that has one.
     async fn pending_head(
         &self,
         node: Option<NodeId>,
@@ -701,8 +657,6 @@ where
             None => Ok(None),
         }
     }
-    /// Stores a pending operation's outcome: its statements, or its rejection.
-    /// A refused local operation is also kept to be reported, not dropped.
     async fn settle_pending(
         &mut self,
         op: &Envelope,
@@ -746,9 +700,6 @@ where
         }
         Ok(())
     }
-    /// Records a peer's acknowledgment, which behind the pruned prefix is no
-    /// longer needed. The outbox entry goes once every delivery target
-    /// received the operation; a held frontier from catch-up counts as receipt.
     async fn acknowledge(&mut self, peer: NodeId, ack: Acknowledgment) -> Result<(), Error> {
         self.validate_peer(peer)?;
         if self.retention.below_pruned_prefix(ack.id) {
@@ -829,9 +780,6 @@ where
             None => None,
         })
     }
-    /// A peer's delivery progress. Local operations are exactly
-    /// `1..=sequence`; those behind the pruned prefix were acknowledged before
-    /// they were pruned, unless the peer is declared behind.
     async fn progress(&self, peer: NodeId) -> Result<PeerProgress, Error> {
         let acks = self.peer_acknowledgments(peer).await?;
         let received: BTreeSet<_> = acks.iter().map(|ack| ack.id).collect();
@@ -885,7 +833,6 @@ where
             ),
         })
     }
-    /// Test hook at the last statement of a write step.
     pub(super) async fn inject_fault(&mut self) -> Result<(), Error> {
         #[cfg(test)]
         if let Some(fault) = self.fault.take() {

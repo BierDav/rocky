@@ -1,9 +1,4 @@
-// Rocky: the SQLite amalgamation in `sqlite3/` is libsqlite3-sys 0.38.2's,
-// the one native Rocky bundles, and the flags are its bundled flags. Only
-// what cannot exist in a browser differs: no OS layer (`SQLITE_OS_OTHER`;
-// the VFS is registered at runtime), no threads, no extension loading, no
-// temporary files, no `localtime_r` or `usleep`.
-const FLAGS: &[&str] = &[
+const LIBSQLITE3_SYS_BUNDLED_FLAGS: &[&str] = &[
     "-DSQLITE_CORE",
     "-DSQLITE_DEFAULT_FOREIGN_KEYS=1",
     "-DSQLITE_ENABLE_API_ARMOR",
@@ -20,17 +15,15 @@ const FLAGS: &[&str] = &[
     "-DSQLITE_SOUNDEX",
     "-DSQLITE_USE_URI",
     "-DHAVE_ISNAN",
-    // Browser-only.
+];
+
+const BROWSER_ONLY_FLAGS: &[&str] = &[
     "-DSQLITE_OS_OTHER",
     "-DSQLITE_THREADSAFE=0",
     "-DSQLITE_OMIT_LOAD_EXTENSION",
     "-DSQLITE_TEMP_STORE=3",
 ];
 
-/// Natively libsqlite3-sys compiles SQLite. In a browser this archive is
-/// named `libsqlite3.a`: libsqlite3-sys, built without `bundled`, links
-/// `-lsqlite3`, and the search path emitted here resolves it, so no consumer
-/// configuration is needed.
 fn main() {
     println!("cargo::rerun-if-changed=shim");
     println!("cargo::rerun-if-changed=sqlite3");
@@ -40,10 +33,7 @@ fn main() {
     }
 }
 
-/// The toolchain's `llvm-ar` (rustup component `llvm-tools`). A host `ar`
-/// such as Apple's writes no symbol index for wasm objects, and rust-lld then
-/// finds no SQLite symbols. `AR_wasm32_unknown_unknown` still overrides it.
-fn toolchain_archiver() -> Option<std::path::PathBuf> {
+fn toolchain_llvm_ar() -> Option<std::path::PathBuf> {
     if std::env::var_os("AR_wasm32_unknown_unknown").is_some() {
         return None;
     }
@@ -64,7 +54,6 @@ fn toolchain_archiver() -> Option<std::path::PathBuf> {
 
 fn compile() {
     const C_SOURCE: [&str; 36] = [
-        // string
         "string/memchr.c",
         "string/memrchr.c",
         "string/stpcpy.c",
@@ -81,14 +70,12 @@ fn compile() {
         "string/strncpy.c",
         "string/strrchr.c",
         "string/strspn.c",
-        // stdlib
         "stdlib/atoi.c",
         "stdlib/bsearch.c",
         "stdlib/qsort.c",
         "stdlib/qsort_nr.c",
         "stdlib/strtod.c",
         "stdlib/strtol.c",
-        // math
         "math/__fpclassifyl.c",
         "math/acosh.c",
         "math/asinh.c",
@@ -98,12 +85,9 @@ fn compile() {
         "math/scalbnl.c",
         "math/sqrt.c",
         "math/trunc.c",
-        // errno
         "errno/__errno_location.c",
-        // stdio
         "stdio/__toread.c",
         "stdio/__uflow.c",
-        // internal
         "internal/floatscan.c",
         "internal/shgetc.c",
     ];
@@ -123,10 +107,13 @@ fn compile() {
         .flag("-include")
         .flag("shim/wasm-shim.h");
 
-    for flag in FLAGS {
+    for flag in LIBSQLITE3_SYS_BUNDLED_FLAGS
+        .iter()
+        .chain(BROWSER_ONLY_FLAGS)
+    {
         cc.flag(flag);
     }
-    if let Some(archiver) = toolchain_archiver() {
+    if let Some(archiver) = toolchain_llvm_ar() {
         cc.archiver(archiver);
     }
 

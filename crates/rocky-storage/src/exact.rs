@@ -1,8 +1,3 @@
-//! Checked arithmetic. SQLite turns an INTEGER `+`, `-`, `*` or `/` that
-//! leaves `i64` into a REAL; Rocky evaluates them with the `checked_*`
-//! functions instead, which fail with SQLite's own "integer overflow" error.
-//! Replayed statements and assertions are rewritten to call them; replayed
-//! table declarations, which SQLite evaluates as written, must call them.
 use rusqlite::{
     Connection,
     functions::{Context, FunctionFlags},
@@ -11,7 +6,6 @@ use rusqlite::{
 use sqlparser::ast::*;
 use std::ops::ControlFlow;
 
-/// The message of every overflow, as SQLite's `sum` and `abs` raise it.
 pub const OVERFLOW: &str = "integer overflow";
 
 #[derive(Clone, Copy)]
@@ -28,8 +22,6 @@ impl Operation {
         ("checked_mul", Self::Multiply),
         ("checked_div", Self::Divide),
     ];
-    /// SQLite's result for numeric operands, except that an INTEGER result
-    /// outside `i64` is an error. Division by zero is NULL, as in SQLite.
     fn apply(self, left: ValueRef<'_>, right: ValueRef<'_>) -> Result<Engine, &'static str> {
         let real = |value: ValueRef<'_>| match value {
             ValueRef::Integer(value) => Ok(value as f64),
@@ -67,8 +59,6 @@ impl Operation {
     }
 }
 
-/// Registers the `checked_*` functions on a connection; Rocky's own
-/// connections have them, a plain one replaying intents needs them.
 pub fn register(connection: &Connection) -> rusqlite::Result<()> {
     let flags = FunctionFlags::SQLITE_UTF8
         | FunctionFlags::SQLITE_DETERMINISTIC
@@ -83,8 +73,6 @@ pub fn register(connection: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Rewrites INTEGER-promoting operators into `checked_*` calls. A negated
-/// number stays a literal.
 pub(crate) struct Checked;
 impl VisitorMut for Checked {
     type Break = ();
@@ -136,8 +124,6 @@ fn number(digits: &str) -> Value {
     Value::Number(digits.into(), false)
 }
 
-/// `sql` with its arithmetic checked, for the author's own run of a
-/// statement whose replay `split_intent` rewrites the same way.
 pub fn checked_statement(sql: &str) -> Result<String, String> {
     let parsed = crate::parsed::parse(sql)?;
     let [statement] = &*parsed else {

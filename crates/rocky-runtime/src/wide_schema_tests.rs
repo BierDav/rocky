@@ -1,4 +1,3 @@
-//! Wide-schema bootstrap, additive indexes and persistent explicit placement.
 use super::*;
 use crate::scaling_option_tests::NODE;
 use inventory_app::{InventoryApp, Policy};
@@ -383,7 +382,6 @@ async fn bootstrap_child() {
     }
     panic!("bootstrap did not abort");
 }
-/// Crashes a child process.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn interrupted_schema_resumes_committed_steps_and_never_opens_half_installed() {
@@ -473,7 +471,6 @@ async fn a_failed_ddl_step_rolls_back_and_a_different_resume_plan_is_refused() {
     ));
 }
 
-/// Crashes a child process.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn placed_bootstrap_resumes_before_and_after_the_file_completion_marker() {
@@ -529,7 +526,6 @@ async fn placed_bootstrap_resumes_before_and_after_the_file_completion_marker() 
     }
 }
 
-/// Crashes a child process.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn unscoped_wide_bootstrap_resumes_without_admitting_partial_identity() {

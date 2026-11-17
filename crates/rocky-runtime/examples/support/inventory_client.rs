@@ -5,7 +5,6 @@ use rocky_runtime::{
     TypedQuery,
 };
 
-/// App SDK: consumers supply domain actions and receive typed data/handles.
 pub struct InventoryClient {
     pub replica: Replica<InventoryApp>,
     scope: Scope,

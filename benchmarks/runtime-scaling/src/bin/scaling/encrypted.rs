@@ -1,6 +1,3 @@
-//! Baseline for the `EncryptedReplica` path. It has its own storage code, one
-//! mutex around all work and its own retained-history bounds, which
-//! checkpoints and pruning keep a scope inside.
 use super::{Failure, futures, lifetime, line, resident_mib};
 use employees_app::Employees;
 use rocky_core::{
@@ -22,7 +19,6 @@ impl Fixture {
     fn app(&self) -> Employees {
         Employees::new(*self.publisher.public_key().as_bytes())
     }
-    /// Publisher, user, deployment and node: the full credential chain depth.
     fn config(&self, node: &PrivateKey) -> Result<SecureConfig, Error> {
         let manifest = self.app().definition();
         let (user, deployment) = (PrivateKey::new(), PrivateKey::new());
@@ -81,7 +77,6 @@ impl Fixture {
             keys: vec![KeyMaterial::new(self.scope, 1, [11; 32])],
         })
     }
-    /// The `version`th edit of a row; version 0 inserts it.
     fn edit(&self, index: usize, version: usize) -> ([u8; 32], Vec<RowChange>) {
         let name = |version: usize| self.app().name(&format!("employee-{index}-{version}"));
         let change = RowChange {
@@ -107,16 +102,12 @@ impl Fixture {
         (id, vec![change])
     }
 }
-/// Prints the outcome of one measured step; a refusal is a result.
 fn report(label: &str, started: Instant, result: Result<String, Error>) {
     match result {
         Ok(detail) => println!("{label}: {} ms{detail}", started.elapsed().as_millis()),
         Err(error) => println!("{label}: refused: {error}"),
     }
 }
-/// Encrypted replica costs, including one complete catch-up pass as a peer
-/// with nothing would request it, and the single mutex under contention:
-/// concurrent submitters queue, and reads wait behind writes.
 pub async fn run() -> Result<(), Failure> {
     let publisher = PrivateKey::new();
     let scope = Employees::new(*publisher.public_key().as_bytes()).scope(MeshId([1; 16]), false);
@@ -367,11 +358,6 @@ fn file_bytes(directory: &std::path::Path, prefix: &str) -> Result<u64, std::io:
     })
 }
 
-/// One scope taken well past the former 4,096-record quota: 2,000 rows are
-/// inserted and then edited, 1,000 operations per cycle. A second replica
-/// holds custody and acknowledges; every cycle ends with a checkpoint, a
-/// prune and a reopen. The handle window is 2,000 so that the file reaches its
-/// steady state within the run.
 async fn cycles(fixture: &Fixture, directory: &std::path::Path) -> Result<(), Failure> {
     const ROWS: usize = 2000;
     const BATCH: usize = 1000;
@@ -484,7 +470,6 @@ async fn cycles(fixture: &Fixture, directory: &std::path::Path) -> Result<(), Fa
     Ok(())
 }
 
-/// A signing failure as the runtime reports it.
 fn signing(error: rocky_secure::credentials::Error) -> Error {
     Error::Rejected(error.to_string())
 }

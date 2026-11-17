@@ -16,7 +16,6 @@ pub(super) fn scope(domain: u8) -> Scope {
 async fn open(dir: &Scratch, options: RuntimeOptions) -> Runtime<InventoryApp> {
     open_node(&dir.path().join("options.db"), NODE, options).await
 }
-/// Two domains that accept operations authored by either node.
 pub(super) async fn open_node(
     path: &Path,
     node: NodeId,
@@ -62,7 +61,6 @@ pub(super) fn note(replica: &Replica<InventoryApp>, handle: u8, text: &str) -> M
         )
         .unwrap()
 }
-/// Holds the worker inside its first transaction so later mutations queue up.
 pub(super) async fn pause(
     replica: &Replica<InventoryApp>,
 ) -> (MutationReceipt, oneshot::Sender<()>) {
@@ -73,7 +71,6 @@ pub(super) async fn pause(
     waiting.await.unwrap();
     (first, resume)
 }
-/// Both domains in one file, so their writes share groups.
 pub(super) fn grouped() -> RuntimeOptions {
     RuntimeOptions {
         group_commit: 32,
@@ -213,7 +210,6 @@ async fn reads_follow_commits_and_page_instead_of_refusing() {
     runtime.close().await.unwrap();
 }
 
-/// Needs threads, which a browser Worker lacks.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_domains_share_the_file_writer_and_reopen() {

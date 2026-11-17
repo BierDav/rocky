@@ -48,18 +48,13 @@ pub enum Error {
     },
     Coordination(rocky_core::CoordinationError),
     Rejected(String),
-    /// A gate refused: every blocker it found, never only the first.
     Blocked(Vec<rocky_core::Blocker>),
     RetryExhausted,
     Conflict,
-    /// Retained history reached its bound. Writes resume once a checkpoint
-    /// and delivery acknowledgments let pruning release history.
     Retention {
         retained: usize,
         limit: usize,
     },
-    /// The handle committed this operation, which has since been
-    /// pruned. It is not executed again; its bytes are no longer available.
     Pruned {
         node: rocky_core::NodeId,
         sequence: u64,
@@ -69,13 +64,11 @@ pub enum Error {
         cause: String,
         rollback: StorageFailure,
     },
-    /// A SQL session call failed; see `Error::sql_certainty`.
     Sql(crate::sql::SqlError),
     #[cfg(any(test, feature = "test-support", feature = "qualification"))]
     InjectedFailure,
 }
 impl Error {
-    /// A short category for diagnostics; it never carries the message.
     pub fn category(&self) -> &'static str {
         match self {
             Self::Io(_) => "io",
@@ -222,23 +215,15 @@ pub fn retryable(e: &Error) -> bool {
     }
 }
 
-/// Whole-transaction attempts before a conflict is reported as `RetryExhausted`.
-/// The delays add up to 318 ms. Inside one process the single writer never
-/// conflicts; this bounds the wait for a file briefly held by another process.
 pub const TRANSACTION_ATTEMPTS: usize = 10;
 pub fn backoff(attempt: usize) -> std::time::Duration {
     std::time::Duration::from_millis(2 << attempt.min(5))
 }
-/// Longest read transaction. An open reader stops the WAL from being reset,
-/// so a read that runs longer is interrupted with a retryable error.
 pub const READ_TRANSACTION_BOUND: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// The engine ended the file writer's group while a step was running.
 pub fn group_lost() -> Error {
     Error::Storage(sqlite::Error::Group("the engine ended the transaction".into()).into())
 }
-/// The error every further waiter of a failed group receives; the original
-/// goes to one waiter.
 pub fn group_error(error: &Error) -> Error {
     match error {
         Error::RetryExhausted => Error::RetryExhausted,
@@ -262,8 +247,6 @@ pub async fn collect_rows(mut result: sqlite::Rows) -> Result<Vec<Vec<SqlValue>>
     }
     Ok(values)
 }
-/// An engine value at the application boundary. The engine stores NaN as
-/// NULL, so a NaN can only come from an expression.
 pub fn sql_value(value: sqlite::Value) -> Result<SqlValue, Error> {
     Ok(match value {
         sqlite::Value::Null => SqlValue::Null,
@@ -287,7 +270,6 @@ pub fn bindings(values: Vec<SqlValue>) -> Vec<sqlite::Value> {
         })
         .collect()
 }
-/// `finish` on an unscoped connection.
 pub async fn finish_raw<T>(
     conn: &sqlite::Connection,
     result: Result<T, Error>,
@@ -310,8 +292,6 @@ pub async fn finish_raw<T>(
     }
     result
 }
-/// Commits after `result` succeeded, otherwise rolls back unless SQLite
-/// already ended the transaction itself, as after a full disk.
 pub async fn finish<T>(conn: &Connection, result: Result<T, Error>) -> Result<T, Error> {
     let result = match result {
         Ok(value) => match conn.execute("COMMIT", ()).await {

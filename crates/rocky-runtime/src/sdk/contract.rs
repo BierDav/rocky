@@ -9,7 +9,6 @@ pub const VERSION: u32 = 2;
 pub enum BoundValue {
     Null,
     Integer(String),
-    /// The 16 hexadecimal digits of the double's bits.
     Real(String),
     Text(String),
     Blob(Vec<u8>),
@@ -52,10 +51,8 @@ pub struct Query {
     pub sql: String,
     pub values: Vec<BoundValue>,
     pub max_rows: usize,
-    /// Byte limit of the page; 1 MiB when absent.
     #[serde(default)]
     pub max_bytes: Option<usize>,
-    /// `next` of the previous page of the same query.
     #[serde(default)]
     pub cursor: Option<String>,
 }

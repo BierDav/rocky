@@ -5,9 +5,6 @@ pub use tokio::{
     task::{JoinError, JoinHandle, JoinSet, spawn_local, yield_now},
 };
 
-/// Runs synchronous `work` on tokio's blocking pool. On a thread running a
-/// seeded simulation (`entropy::simulation`) it runs in place, as in a
-/// browser, so no thread's timing reaches the simulation's order.
 pub fn spawn_blocking<F, R>(work: F) -> JoinHandle<R>
 where
     F: FnOnce() -> R + Send + 'static,
@@ -21,14 +18,8 @@ where
     tokio::task::spawn_blocking(work)
 }
 
-/// The stack of every thread Rocky starts. An application that builds Rocky
-/// unoptimized, as Cargo's dev profile does, polls futures deep enough to
-/// overflow std's 2 MiB default; the memory is reserved, not committed.
 pub const THREAD_STACK: usize = 16 << 20;
 
-/// Runs `task` to completion on its own thread and current-thread runtime,
-/// so its blocking SQLite work never stalls the caller's executor. A seeded
-/// simulation's thread runs it as a local task, as a browser Worker does.
 pub fn dedicated<F, T>(
     name: impl Into<String>,
     task: impl FnOnce() -> F + Send + 'static,
@@ -56,7 +47,6 @@ where
     Ok(Dedicated(Running::Thread(thread)))
 }
 
-/// A `dedicated` task. Joining waits for its thread to end.
 pub struct Dedicated<T>(Running<T>);
 enum Running<T> {
     Thread(std::thread::JoinHandle<T>),
@@ -64,8 +54,6 @@ enum Running<T> {
     Local(JoinHandle<T>),
 }
 impl<T: Send + 'static> Dedicated<T> {
-    /// Joins a thread from a blocking task, never in place, because the
-    /// thread may still need this executor.
     pub async fn join(self) -> Result<T, Ended> {
         match self.0 {
             Running::Thread(thread) => tokio::task::spawn_blocking(move || thread.join())
@@ -76,8 +64,6 @@ impl<T: Send + 'static> Dedicated<T> {
             Running::Local(task) => task.await.map_err(|_| Ended),
         }
     }
-    /// Lets a synchronous owner wait for the task's end: it joins the thread.
-    /// A local task ends on its own turn instead.
     pub fn release(self) {
         match self.0 {
             Running::Thread(thread) => {
@@ -89,12 +75,9 @@ impl<T: Send + 'static> Dedicated<T> {
     }
 }
 
-/// A dedicated task panicked or could not be joined.
 #[derive(Debug)]
 pub struct Ended;
 
-/// Whether a worker still holds something, such as a connection, that its
-/// owner waits for before going on.
 #[derive(Default)]
 pub struct Held {
     held: std::sync::Mutex<bool>,
@@ -113,9 +96,6 @@ impl Held {
         }
         self.released.notify_all();
     }
-    /// Waits until the worker releases, rechecking every `poll` in case it
-    /// missed a signal such as a disconnected channel. Under simulation it
-    /// returns at once: a local worker cannot run while this thread waits.
     pub fn wait_released(&self, poll: std::time::Duration) {
         #[cfg(feature = "simulation")]
         if crate::entropy::simulation::installed() {
@@ -133,14 +113,10 @@ impl Held {
     }
 }
 
-/// Waits `duration` inside synchronous work that `spawn_blocking` runs,
-/// such as a retry after another process held a file.
 pub fn backoff_blocking(duration: std::time::Duration) {
     std::thread::sleep(duration);
 }
 
-/// The runtime something was made on, which outlives the caller's: work
-/// spawned there keeps running after a short-lived caller's runtime ends.
 #[derive(Clone, Debug)]
 pub struct Home(tokio::runtime::Handle);
 impl Home {

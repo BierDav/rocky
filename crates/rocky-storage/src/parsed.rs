@@ -1,5 +1,3 @@
-//! Parsed statements by SQL text: a statement that several checks read, or
-//! that runs again, is parsed once.
 use sqlparser::{ast::Statement, dialect::SQLiteDialect, parser::Parser};
 use std::{
     borrow::Borrow,
@@ -8,14 +6,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Entries per generation. Two generations are kept, so an entry used
-/// since the last turnover stays while a stream of distinct ones passes.
 const GENERATION: usize = 256;
-/// Longer texts, such as bulk inserts, are parsed each time instead of
-/// displacing the statements an application repeats.
 pub(crate) const CACHED_BYTES: usize = 16 * 1024;
 
-/// A bounded map of recently used entries.
 pub(crate) struct Recent<K, V>(Mutex<Option<[HashMap<K, V>; 2]>>);
 impl<K: Eq + Hash, V: Clone> Recent<K, V> {
     pub(crate) const fn new() -> Self {
@@ -55,10 +48,13 @@ impl<K: Eq + Hash, V: Clone> Recent<K, V> {
 type Parsed = Arc<[Statement]>;
 static PARSED: Recent<Arc<str>, Parsed> = Recent::new();
 
-/// The statements of `sql`, parsed in the SQLite dialect.
 pub fn parse(sql: &str) -> Result<Parsed, String> {
+    parse_through(&PARSED, sql)
+}
+
+fn parse_through(cache: &Recent<Arc<str>, Parsed>, sql: &str) -> Result<Parsed, String> {
     let cached = sql.len() <= CACHED_BYTES;
-    if cached && let Some(hit) = PARSED.get(sql) {
+    if cached && let Some(hit) = cache.get(sql) {
         return Ok(hit);
     }
     #[cfg(any(test, feature = "test-support"))]
@@ -67,7 +63,7 @@ pub fn parse(sql: &str) -> Result<Parsed, String> {
         .map_err(|error| error.to_string())?
         .into();
     if cached {
-        PARSED.put(sql.into(), parsed.clone());
+        cache.put(sql.into(), parsed.clone());
     }
     Ok(parsed)
 }
@@ -76,7 +72,6 @@ pub fn parse(sql: &str) -> Result<Parsed, String> {
 thread_local! {
     static PARSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
-/// Texts the parser read on this thread, for tests that count parses.
 #[cfg(any(test, feature = "test-support"))]
 pub fn parses() -> u64 {
     PARSES.with(std::cell::Cell::get)
@@ -88,22 +83,45 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_text_is_parsed_once_while_it_stays_in_use() {
+        let cache = Recent::new();
         let before = parses();
-        let sql = "SELECT 1 AS parsed_once_marker";
-        let first = parse(sql).unwrap();
+        let sql = "SELECT 1 AS parsed_once";
+        let first = parse_through(&cache, sql).unwrap();
         for _ in 0..3 {
-            assert!(Arc::ptr_eq(&first, &parse(sql).unwrap()));
+            assert!(Arc::ptr_eq(&first, &parse_through(&cache, sql).unwrap()));
         }
         assert_eq!(parses() - before, 1);
         for index in 0..GENERATION * 3 {
-            parse(&format!("SELECT {index} AS parsed_stream_marker")).unwrap();
-            parse(sql).unwrap();
+            parse_through(&cache, &format!("SELECT {index} AS streamed")).unwrap();
+            parse_through(&cache, sql).unwrap();
         }
         assert_eq!(
             parses() - before,
             1 + 3 * GENERATION as u64,
             "a stream of distinct texts keeps a statement that is still used"
         );
-        assert!(parse("SELECT FROM WHERE").is_err());
+        assert!(parse_through(&cache, "SELECT FROM WHERE").is_err());
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn texts_longer_than_the_cache_bound_are_never_cached_and_displace_nothing() {
+        let cache = Recent::new();
+        let kept = "SELECT 1 AS kept";
+        let first = parse_through(&cache, kept).unwrap();
+        let padding = " ".repeat(CACHED_BYTES);
+        let before = parses();
+        for index in 0..2 * GENERATION {
+            let oversized = format!("SELECT {index} AS bulk{padding}");
+            parse_through(&cache, &oversized).unwrap();
+            assert!(
+                cache.get(oversized.as_str()).is_none(),
+                "an oversized text is parsed each time, not cached"
+            );
+        }
+        assert_eq!(parses() - before, 2 * GENERATION as u64);
+        assert!(
+            cache.get(kept).is_some_and(|hit| Arc::ptr_eq(&hit, &first)),
+            "two generations of oversized texts leave the cached statement in place"
+        );
     }
 }

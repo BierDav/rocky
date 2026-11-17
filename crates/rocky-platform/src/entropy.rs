@@ -1,10 +1,5 @@
-//! Randomness for keys, nonces and identifiers: the operating system's.
-//! With the `simulation` feature a thread may install a seeded source and a
-//! simulated wall clock (see [`simulation`]); every other thread, and every
-//! build without the feature, uses the operating system's.
 use rand::RngCore;
 
-/// Fills `bytes` from the operating system, or this thread's seeded source.
 pub fn fill(bytes: &mut [u8]) {
     #[cfg(feature = "simulation")]
     if simulation::fill(bytes) {
@@ -21,12 +16,6 @@ pub fn random_u64() -> u64 {
     u64::from_le_bytes(random())
 }
 
-/// A deterministic simulation's seam, for tests only: on the installing
-/// thread, randomness comes from a seed, the wall clock is a fixed epoch
-/// plus the elapsed time of the (paused) task clock and what [`pass`]
-/// added, and tasks run as in a
-/// browser Worker: `spawn_blocking` in place, `dedicated` as a local task.
-/// Nothing is cryptographically random while it is installed.
 #[cfg(feature = "simulation")]
 pub mod simulation {
     use crate::time::{Duration, Instant};
@@ -35,18 +24,14 @@ pub mod simulation {
     struct Source {
         state: u64,
         started: Instant,
-        /// Wall time the simulation let pass besides the task clock.
         passed: Duration,
-        /// A wall clock that stands still at the epoch.
         frozen: bool,
     }
     thread_local! {
         static SOURCE: RefCell<Option<Source>> = const { RefCell::new(None) };
     }
-    /// The simulated wall clock's start: 2026-01-01T00:00:00Z.
     const EPOCH: Duration = Duration::from_secs(1_767_225_600);
 
-    /// Installed until dropped, on this thread only.
     #[must_use]
     pub struct Seeded(());
     impl Drop for Seeded {
@@ -54,7 +39,6 @@ pub mod simulation {
             SOURCE.with(|source| source.borrow_mut().take());
         }
     }
-    /// Seeds this thread's randomness and starts its wall clock.
     pub fn seed(seed: u64) -> Seeded {
         SOURCE.with(|source| {
             *source.borrow_mut() = Some(Source {
@@ -66,12 +50,9 @@ pub mod simulation {
         });
         Seeded(())
     }
-    /// Whether this thread runs a seeded simulation.
     pub fn installed() -> bool {
         SOURCE.with(|source| source.borrow().is_some())
     }
-    /// Moves this thread's wall clock on by `by`, as between two user
-    /// actions, without firing the task clock's timers.
     pub fn pass(by: Duration) {
         SOURCE.with(|source| {
             if let Some(source) = source.borrow_mut().as_mut() {
@@ -79,21 +60,13 @@ pub mod simulation {
             }
         })
     }
-    /// Seconds every thread's operating-system wall clock skips.
     static SKIPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    /// Moves the operating-system wall clock of every thread in this
-    /// process on by `by`, as a long absence would, for threads the
-    /// simulation does not cover, such as a database's own. Every database
-    /// the process runs sees it: a test that skips runs in a binary of its
-    /// own.
     pub fn skip(by: Duration) {
         SKIPPED.fetch_add(by.as_secs(), std::sync::atomic::Ordering::SeqCst);
     }
     pub(crate) fn skipped() -> Duration {
         Duration::from_secs(SKIPPED.load(std::sync::atomic::Ordering::SeqCst))
     }
-    /// Stops this thread's wall clock at the epoch for good, as a clock
-    /// that stands still: hybrid stamps then advance by observation only.
     pub fn freeze() {
         SOURCE.with(|source| {
             if let Some(source) = source.borrow_mut().as_mut() {
@@ -114,7 +87,6 @@ pub mod simulation {
             true
         })
     }
-    /// Advances SplitMix64: reproducible, not secret.
     fn split_mix64(state: &mut u64) -> u64 {
         *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut mixed = *state;

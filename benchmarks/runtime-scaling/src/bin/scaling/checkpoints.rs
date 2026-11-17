@@ -1,7 +1,3 @@
-//! The phase 4 gate: one domain of the wide schema taken to a lifetime of
-//! `operations` over `rows` live rows with the default retention policy, so
-//! checkpoints and pruning run beside the writes. Reports write cost, memory,
-//! retained history and file size along the way, then reopen and audit time.
 use super::wide::{commit, open, scope};
 use super::wide_schema::WideSchema;
 use super::{Failure, NODE, futures, line, resident_mib};
@@ -14,10 +10,8 @@ use std::{
 };
 
 const WRITERS: usize = 16;
-/// Reports during the edit phase; each spans many checkpoint and prune cycles.
 const REPORTS: usize = 12;
 
-/// Bytes of the database file and of its write-ahead log.
 fn file_bytes(directory: &Path) -> (u64, u64) {
     let size = |name: &str| std::fs::metadata(directory.join(name)).map_or(0, |file| file.len());
     (size("checkpoints.db"), size("checkpoints.db-wal"))

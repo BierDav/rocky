@@ -1,6 +1,3 @@
-//! Incoming replication on two domains
-//! that share one file writer. Quotas are untouched, so the operation count comes
-//! from several rounds on fresh files.
 use super::{CALLER, Failure, NODE, futures, installation, line, scope};
 use inventory_app::InventoryApp;
 use rocky_core::*;
@@ -40,9 +37,6 @@ async fn open(
     Runtime::open_with_options(path, installations, options).await
 }
 type Timings = Vec<Duration>;
-/// One measured round of a receiver opened with `options`. The author only
-/// supplies operations, so its own flushes are not under test; the closing
-/// reopen replays history against counters and projections.
 async fn round(options: RuntimeOptions) -> Result<Timings, Failure> {
     let dir = tempfile::tempdir()?;
     let author = RuntimeOptions::default();

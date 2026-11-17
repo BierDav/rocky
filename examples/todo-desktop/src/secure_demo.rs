@@ -1,4 +1,3 @@
-//! Development employees composition over authenticated loopback links and an opaque relay.
 use employees_app::Employees;
 use rocky_core::{
     Commitment, FieldSelection, MeshId, ResourceGrant, ResourceScope, Right, RowChange,
@@ -12,15 +11,10 @@ use rocky_secure::{
 use std::{collections::BTreeSet, path::Path};
 use tokio::net::{TcpListener, TcpStream};
 
-/// A public fixture secret: this demo holds reproducible development data
-/// only.
 const FIXTURE_PUBLISHER: [u8; 32] = [81; 32];
 const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
-/// Credentials live under a year; each start issues them afresh.
 const CREDENTIAL_LIFETIME: std::time::Duration = DAY.saturating_mul(300);
 
-/// Each permission set belongs to its own identity, apart from the node key
-/// `index` names.
 fn identity_key(index: u8) -> PrivateKey {
     PrivateKey::from_bytes(&[index ^ 0x80; 32])
 }
@@ -168,7 +162,6 @@ impl SecureDemo {
     pub fn employee_id(&self) -> Commitment {
         rocky_core::commitment("employees.id.v1", b"demo-employee")
     }
-    /// Writes the public name and the private salary, one frame per scope.
     pub async fn set_employee(&self, name: &str, salary: &str) -> Result<(), Error> {
         for (scope, after) in [
             (self.scopes[0], self.app().name(name)),
@@ -221,7 +214,6 @@ impl SecureDemo {
             .await?;
         Ok(())
     }
-    /// Every hop uses mutual authentication and subscription-filtered native TCP.
     pub async fn pump(&self) -> Result<(), Error> {
         self.copy_rows(1, 2, vec![self.scopes[0]]).await?;
         self.copy_rows(2, 0, vec![self.scopes[0]]).await?;
@@ -266,8 +258,6 @@ impl SecureDemo {
         }
         Ok(())
     }
-    /// A request channel `opener` opens on a loopback link to `answerer`,
-    /// with the session answering it. Dropping the guard ends the link.
     async fn channel(
         &self,
         opener: usize,
@@ -319,7 +309,6 @@ impl SecureDemo {
     }
 }
 
-/// Both ends of a demo link; neither outlives the exchange.
 struct Driven([tokio::task::JoinHandle<Result<(), Error>>; 2]);
 impl Drop for Driven {
     fn drop(&mut self) {
@@ -329,7 +318,6 @@ impl Drop for Driven {
     }
 }
 
-/// A signing failure as the runtime reports it.
 fn signing(error: rocky_secure::credentials::Error) -> Error {
     Error::Rejected(error.to_string())
 }

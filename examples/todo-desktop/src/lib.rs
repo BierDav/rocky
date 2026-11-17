@@ -1,8 +1,3 @@
-//! The todo desktop app: one window, a panel per local installation.
-//!
-//! The demo keeps several installations in one window, linked in-process;
-//! device mode keeps one, linked over iroh. Each panel starts, joins or
-//! resets its installation, shows its sync status, and edits lists.
 pub mod secure_demo;
 mod status;
 
@@ -15,26 +10,20 @@ use std::{
 };
 use todo_app::{List, Member, Role, Todo, Todos, configuration, roles};
 
-/// How installations reach each other.
 #[derive(Clone)]
 pub enum Link {
-    /// One in-process hub for every panel.
     Demo(Arc<Hub>),
-    /// iroh with these options.
     Iroh(rocky_iroh::Options),
 }
 
-/// The window's installations: each lives in `root/<name>`.
 #[derive(Clone)]
 pub struct Workspace {
     root: PathBuf,
     link: Link,
     names: Signal<Vec<String>>,
-    /// What closes with the window.
     open: Arc<Mutex<BTreeMap<String, Todos>>>,
 }
 impl Workspace {
-    /// Must be called inside the Dioxus runtime: it owns signals.
     fn new(root: PathBuf, link: Link, names: Vec<String>) -> Self {
         Self {
             root,
@@ -61,7 +50,6 @@ impl Workspace {
     fn closed(&self, name: &str) -> Option<Todos> {
         self.open.lock().ok()?.remove(name)
     }
-    /// The other open installations, for the demo's in-process peering.
     fn others(&self, name: &str) -> Vec<Todos> {
         self.open
             .lock()
@@ -89,7 +77,6 @@ impl Workspace {
     }
 }
 
-/// What `main` chose; the window builds the [`Workspace`] from it.
 #[derive(Clone)]
 pub struct Launch {
     pub root: PathBuf,
@@ -111,8 +98,6 @@ impl Launch {
             self.demo_installations(),
         )
     }
-    /// The demo's panels: the installations already here, at least the
-    /// defaults.
     fn demo_installations(&self) -> Vec<String> {
         let mut names: Vec<String> = DEMO.iter().map(|name| (*name).into()).collect();
         if let Ok(entries) = std::fs::read_dir(&self.root) {
@@ -128,9 +113,6 @@ impl Launch {
         names
     }
 }
-/// Exchanges contacts between `todos` and the `others` open in this process
-/// that share its database: in-process peers find each other only through
-/// contacts, and only within one database.
 async fn introduce_in_process_peers(todos: &Todos, others: Vec<Todos>) -> Result<(), Failure> {
     let contact = todos.database().session().contact().await?;
     let scope = todos.database().scope();
@@ -215,7 +197,6 @@ enum Phase {
     Failed(String),
 }
 
-/// One installation: its start screen, or the device once open.
 #[component]
 fn Installation(name: String, closing: bool) -> Element {
     let workspace = use_context::<Workspace>();
@@ -289,7 +270,6 @@ fn Installation(name: String, closing: bool) -> Element {
     }
 }
 
-/// Todos compared by identity, as Dioxus props must compare.
 #[derive(Clone)]
 struct Shared(Todos);
 impl PartialEq for Shared {
@@ -298,7 +278,6 @@ impl PartialEq for Shared {
     }
 }
 
-/// Creates the first, trusted device or joins with an invitation code.
 #[component]
 fn Start(name: String, phase: Signal<Phase>) -> Element {
     let workspace = use_context::<Workspace>();
@@ -375,7 +354,6 @@ fn Reset(onreset: EventHandler<()>, closing: bool) -> Element {
     }
 }
 
-/// What an open device shows, refreshed on every committed change.
 #[derive(Clone, Default, PartialEq)]
 struct View {
     node: String,
@@ -415,8 +393,6 @@ async fn load(todos: &Todos, chosen: Option<rocky_sdk::RowIdentity>) -> Result<V
     })
 }
 
-/// Runs one write; on success remembers its token so a later drop of it
-/// is reported as this device's.
 fn submit(
     mut busy: Signal<bool>,
     mut error: Signal<Option<String>>,
@@ -638,7 +614,6 @@ fn Device(name: String, todos: Shared, closing: bool) -> Element {
     }
 }
 
-/// Invitation codes for new devices, one per role.
 #[component]
 fn Invite(todos: Shared) -> Element {
     let todos = todos.0;
@@ -747,7 +722,7 @@ fn TodoRow(
                 Action::Complete(done) => todos.set_completed(list, id, done).await,
                 Action::Rename(title) => todos.rename(list, id, &title).await,
                 Action::Raise => todos.raise_priority(list, id).await,
-                Action::Move(to) => todos.move_to(list, id, to).await,
+                Action::MoveToIndexAmongOthers(to) => todos.move_to(list, id, to).await,
                 Action::Delete => todos.delete(list, id).await,
             }
         });
@@ -766,8 +741,8 @@ fn TodoRow(
                 input { key: "{row.title}", name: "title", r#type: "text", aria_label: "Rename {row.title}", initial_value: row.title.clone(), disabled }
             }
             button { class: "icon", title: "Raise priority", aria_label: "Raise priority of {row.title}", disabled, onclick: move |_| write_raise(Action::Raise), "▲ {row.priority}" }
-            button { class: "icon", title: "Move up", aria_label: "Move {row.title} up", disabled: disabled || position == 0, onclick: move |_| write_up(Action::Move(position.saturating_sub(1))), "↑" }
-            button { class: "icon", title: "Move down", aria_label: "Move {row.title} down", disabled: disabled || last, onclick: move |_| write_down(Action::Move(position + 1)), "↓" }
+            button { class: "icon", title: "Move up", aria_label: "Move {row.title} up", disabled: disabled || position == 0, onclick: move |_| write_up(Action::MoveToIndexAmongOthers(position.saturating_sub(1))), "↑" }
+            button { class: "icon", title: "Move down", aria_label: "Move {row.title} down", disabled: disabled || last, onclick: move |_| write_down(Action::MoveToIndexAmongOthers(position + 1)), "↓" }
             button { class: "icon", title: "Delete", aria_label: "Delete {row.title}", disabled, onclick: move |_| write_delete(Action::Delete), "✕" }
         }
     }
@@ -778,7 +753,6 @@ enum Action {
     Complete(bool),
     Rename(String),
     Raise,
-    /// The index among the list's other todos.
-    Move(usize),
+    MoveToIndexAmongOthers(usize),
     Delete,
 }

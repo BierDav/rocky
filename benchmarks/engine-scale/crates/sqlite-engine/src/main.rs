@@ -1,11 +1,9 @@
-//! SQLite in WAL mode; one file, one connection per thread.
 use std::path::PathBuf;
 use std::time::Duration;
 
 use harness::{Config, Conn, DOMAINS, Engine, NODE, Result, Row};
 use rusqlite::{Connection, ErrorCode, OpenFlags, params};
 
-/// Statement shapes per data table, plus slack for the per-domain statements.
 const SHAPES_PER_TABLE: usize = 6;
 
 struct Sqlite {
@@ -43,7 +41,6 @@ impl Sqlite {
         }
     }
 
-    /// Opening can meet `SQLITE_BUSY_RECOVERY` while another thread recovers the WAL.
     fn raw(&self, create: bool) -> Result<Connection> {
         let mut attempt = 0;
         let (conn, actual) = loop {
@@ -68,7 +65,6 @@ impl Sqlite {
             flags |= OpenFlags::SQLITE_OPEN_CREATE;
         }
         let conn = Connection::open_with_flags(&self.path, flags)?;
-        // Busy errors are retried and counted here, not inside SQLite.
         conn.busy_timeout(Duration::ZERO)?;
         if let Some(kib) = env_i64("SQLITE_CACHE_KIB") {
             conn.pragma_update(None, "cache_size", -kib)?;
@@ -89,7 +85,6 @@ impl Sqlite {
             read("fullfsync")?,
             read("checkpoint_fullfsync")?,
         );
-        // Load the schema now so later statements do not pay for or fail on it.
         conn.query_row("SELECT count(*) FROM sqlite_schema WHERE 0", [], |_| Ok(()))?;
         Ok((conn, actual))
     }
@@ -164,7 +159,6 @@ impl Engine for Sqlite {
 }
 
 impl SqliteConn {
-    /// One `BEGIN IMMEDIATE` transaction, rerun from the start while the file is busy.
     fn write<T>(&mut self, mut body: impl FnMut(&Connection) -> rusqlite::Result<T>) -> Result<T> {
         let mut attempt = 0;
         loop {
@@ -196,7 +190,6 @@ impl SqliteConn {
         }
     }
 
-    /// A read, rerun while busy (only possible during WAL recovery or a truncate).
     fn read<T>(&mut self, mut body: impl FnMut(&Connection) -> rusqlite::Result<T>) -> Result<T> {
         let mut attempt = 0;
         loop {
@@ -333,7 +326,6 @@ impl Conn for SqliteConn {
     }
 
     fn checkpoint(&mut self) -> Result<()> {
-        // The pragma reports a blocked checkpoint in its first column rather than as an error.
         self.read(|conn| {
             let blocked: i64 =
                 conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;

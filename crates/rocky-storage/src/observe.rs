@@ -1,7 +1,3 @@
-//! Committed table events. A runtime publishes the logical tables a commit
-//! changed after the commit; observers registered for those tables merge
-//! them into one pending change. Publication visits the observers of the
-//! changed tables only, and an observer holds at most one pending change.
 use crate::Error;
 use rocky_core::{Commitment, Scope};
 use std::{
@@ -10,36 +6,20 @@ use std::{
 };
 use tokio::sync::Notify;
 
-/// What made committed tables change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Cause {
-    /// A local write: a SQL transaction or a mutation.
     Local,
-    /// Operations received from a peer.
     Sync,
-    /// The tables were rebuilt: a rebootstrap, a checkpoint or a shadow switch.
     Rebuild,
-    /// Authority or readiness changed: credentials, keys, holdings or
-    /// eviction. Rows may have become readable or unavailable.
     Authority,
 }
-/// Changes since the observer last took one, merged.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TableChange {
-    /// Observed logical tables whose committed rows may differ, lowercase.
     pub tables: BTreeSet<String>,
-    /// The committed revision of each domain after the latest merged
-    /// change. A read started after receiving this observes at least it.
     pub revisions: BTreeMap<Scope, u64>,
     pub causes: BTreeSet<Cause>,
-    /// Transactions a committed replay dropped here, by identity; every
-    /// observer receives them, whichever tables it follows.
     pub dropped: BTreeSet<Commitment>,
-    /// This replica's own transactions whose outcome a committed seal or
-    /// checkpoint may have made final here; every observer receives them.
     pub sealed: BTreeSet<Commitment>,
-    /// More outcomes changed than one change holds: `dropped` and `sealed`
-    /// are empty and every transaction's outcome must be read again.
     pub reconcile: bool,
 }
 impl TableChange {
@@ -55,8 +35,6 @@ impl TableChange {
         *current = (*current).max(revision);
         self.causes.extend(causes);
     }
-    /// Adds changed outcomes; past `MAX_PENDING_OUTCOMES` they coalesce into
-    /// `reconcile`.
     fn merge_outcomes(&mut self, outcomes: &Outcomes) {
         if self.reconcile {
             return;
@@ -70,14 +48,11 @@ impl TableChange {
         }
     }
 }
-/// Changed outcomes one pending change names; more coalesce into a
-/// `reconcile`.
 pub const MAX_PENDING_OUTCOMES: usize = 4096;
 
 #[derive(Default)]
 struct Pending {
     change: Option<TableChange>,
-    /// A registry the observer follows was closed.
     closed: bool,
 }
 #[derive(Default)]
@@ -111,7 +86,6 @@ impl Slot {
     }
 }
 
-/// An observer of one table, reported under `label`.
 struct Entry {
     slot: Weak<Slot>,
     label: String,
@@ -120,7 +94,6 @@ struct Entry {
 struct Registry {
     by_table: HashMap<String, Vec<Entry>>,
     every: Vec<Weak<Slot>>,
-    /// Registrations since dead entries were last removed.
     added: usize,
 }
 impl Registry {
@@ -142,10 +115,8 @@ impl Registry {
     }
 }
 
-/// The observers of one domain's tables. Dropping it ends them.
 pub struct TableEvents {
     scope: Scope,
-    /// Every logical table of the domain, lowercase.
     tables: BTreeSet<String>,
     registry: Mutex<Registry>,
 }
@@ -167,8 +138,6 @@ impl TableEvents {
             registry: Mutex::default(),
         })
     }
-    /// The events of the same domain with another set of tables, such as
-    /// after a schema switch: every observer moves over and stays open.
     pub fn follow(&self, tables: impl IntoIterator<Item = String>) -> Arc<Self> {
         let next = Self::new(self.scope, tables);
         if let (Ok(mut from), Ok(mut to)) = (self.registry.lock(), next.registry.lock()) {
@@ -182,9 +151,6 @@ impl TableEvents {
     pub fn tables(&self) -> &BTreeSet<String> {
         &self.tables
     }
-    /// Registers `observer` for `tables`, each `(table, label)` reported
-    /// under its label; None is every table under its own name. A table
-    /// the domain does not have is refused.
     pub fn register(
         &self,
         observer: &TableObserver,
@@ -221,8 +187,6 @@ impl TableEvents {
         }
         Ok(())
     }
-    /// Offers a committed change of `tables` to their observers; None is
-    /// every table. Call only after the commit.
     pub fn publish(&self, tables: Option<&BTreeSet<String>>, revision: u64, causes: &[Cause]) {
         if causes.is_empty() {
             return;
@@ -258,18 +222,13 @@ impl TableEvents {
     }
 }
 
-/// Transactions whose outcome a commit changed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Outcomes {
-    /// Dropped by a replay.
     pub dropped: BTreeSet<Commitment>,
-    /// Own transactions a seal or checkpoint may have made final.
     pub sealed: BTreeSet<Commitment>,
 }
 
 impl TableEvents {
-    /// Offers transactions whose outcome a commit changed to every
-    /// observer. Call only after the commit.
     pub fn publish_outcomes(&self, revision: u64, outcomes: &Outcomes) {
         if outcomes.dropped.is_empty() && outcomes.sealed.is_empty() {
             return;
@@ -286,28 +245,21 @@ impl TableEvents {
     }
 }
 
-/// Receives committed changes of the tables it registered for. Register
-/// it before taking the initial snapshot: every later commit is reported,
-/// coalesced into at most one pending change.
 #[derive(Default)]
 pub struct TableObserver {
     slot: Arc<Slot>,
-    /// Revisions committed when the observer was registered.
     registered: BTreeMap<Scope, u64>,
 }
 impl TableObserver {
     pub fn new() -> Self {
         Self::default()
     }
-    /// Records the revision a domain had committed once the observer was
-    /// registered with it.
     pub fn registered_at(&mut self, scope: Scope, revision: u64) {
         self.registered.insert(scope, revision);
     }
     pub fn registered(&self) -> &BTreeMap<Scope, u64> {
         &self.registered
     }
-    /// The pending change, if any, without waiting.
     pub fn try_next(&mut self) -> Result<Option<TableChange>, Error> {
         let mut pending = self.slot.pending.lock().map_err(|_| Error::Closed)?;
         match pending.change.take() {
@@ -316,8 +268,6 @@ impl TableObserver {
             None => Ok(None),
         }
     }
-    /// Waits for the next change. After its domain closes, the remaining
-    /// change is returned once and then `Error::Closed`.
     pub async fn next(&mut self) -> Result<TableChange, Error> {
         loop {
             if let Some(change) = self.try_next()? {
@@ -431,8 +381,6 @@ mod tests {
         let registry = first.registry.lock().unwrap();
         assert_eq!(registry.by_table["items"].len(), 1);
     }
-    /// Outcomes an observer does not take stay bounded: past the cap they
-    /// coalesce into one reconcile, and later changes start over.
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn a_burst_of_outcomes_past_the_cap_coalesces_into_a_reconcile() {
         let events = TableEvents::new(scope(1), ["items".into()]);

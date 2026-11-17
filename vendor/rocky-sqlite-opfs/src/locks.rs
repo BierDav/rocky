@@ -1,18 +1,7 @@
-//! Rocky: SQLite's file locks and WAL shared memory between the connections
-//! one worker opens on pool files.
-//!
-//! OPFS sync access handles already exclude every other worker and tab, so
-//! only connections in this worker can share a file. This is the in-process
-//! part of SQLite's unix locking protocol (`os_unix.c`, `unixLock` and
-//! `unixShmLock`) with the wal-index kept in heap memory, so WAL and several
-//! connections per file work as they do natively. Safe code only: the VFS
-//! callbacks translate pointers and result codes.
 use std::collections::HashMap;
 
-/// A connection's file: the address of its `sqlite3_file`, unique while open.
 pub(crate) type Handle = usize;
 
-/// SQLite's `SQLITE_LOCK_*` levels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Level {
     None,
@@ -34,7 +23,6 @@ impl Level {
     }
 }
 
-/// A wal-index lock request (`SQLITE_SHM_*` flags).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ShmLock {
     Unlock,
@@ -42,27 +30,21 @@ pub(crate) enum ShmLock {
     Exclusive,
 }
 
-/// Another connection holds a conflicting lock (`SQLITE_BUSY`).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Busy;
 
-/// A wal-index slot: readers or one writer.
 #[derive(Clone, Copy, Default)]
 struct Slot {
     shared: usize,
     exclusive: Option<Handle>,
 }
 
-/// The state every connection to one file shares.
 #[derive(Default)]
 struct File {
-    /// Connections holding at least `SHARED`.
     shared: usize,
     reserved: Option<Handle>,
     pending: Option<Handle>,
     exclusive: Option<Handle>,
-    /// The wal-index. Regions are boxed, so their addresses stay fixed while
-    /// any connection maps them.
     regions: Vec<Box<[u8]>>,
     mapped: usize,
     slots: [Slot; 8],
@@ -97,8 +79,6 @@ impl Locks {
         );
     }
 
-    /// Releases everything `handle` holds; the last connection to a file
-    /// discards its wal-index, which the next open rebuilds from the WAL.
     pub(crate) fn close(&mut self, handle: Handle) {
         self.unlock(handle, Level::None);
         self.shm_unmap(handle);
@@ -119,8 +99,6 @@ impl Locks {
         Some((open, file))
     }
 
-    /// Raises `handle` to `want`. A refused `EXCLUSIVE` keeps `PENDING`, so
-    /// new readers wait while existing ones finish, as on unix.
     pub(crate) fn lock(&mut self, handle: Handle, want: Level) -> Result<(), Busy> {
         let Some((open, file)) = self.state(handle) else {
             return Err(Busy);
@@ -156,7 +134,6 @@ impl Locks {
                 if want == Level::Pending {
                     return Ok(());
                 }
-                // Every reader but this connection must be gone.
                 if file.shared > 1 {
                     return Err(Busy);
                 }
@@ -167,7 +144,6 @@ impl Locks {
         }
     }
 
-    /// Lowers `handle` to `want`, which is `SHARED` or `NONE`.
     pub(crate) fn unlock(&mut self, handle: Handle, want: Level) {
         let Some((open, file)) = self.state(handle) else {
             return;
@@ -192,7 +168,6 @@ impl Locks {
         }
     }
 
-    /// Whether any connection to the file holds `RESERVED` or more.
     pub(crate) fn reserved(&self, handle: Handle) -> bool {
         self.handles
             .get(&handle)
@@ -202,8 +177,6 @@ impl Locks {
             })
     }
 
-    /// The wal-index region `index` of `size` bytes, zeroed when `extend`
-    /// adds it; `None` if it does not exist and `extend` is false.
     pub(crate) fn shm_map(
         &mut self,
         handle: Handle,
@@ -301,7 +274,6 @@ impl Locks {
         }
     }
 
-    /// Stops `handle` using the wal-index; the last user discards it.
     pub(crate) fn shm_unmap(&mut self, handle: Handle) {
         let _ = self.shm_lock(handle, 0, 8, ShmLock::Unlock);
         let Some((open, file)) = self.state(handle) else {
@@ -336,8 +308,6 @@ mod tests {
         locks.lock(1, Level::Reserved).unwrap();
         assert_eq!(locks.lock(2, Level::Reserved), Err(Busy));
         assert!(locks.reserved(2));
-        // A reader blocks the writer, which keeps PENDING and so blocks
-        // new readers until the old one leaves.
         assert_eq!(locks.lock(1, Level::Exclusive), Err(Busy));
         locks.unlock(2, Level::None);
         assert_eq!(locks.lock(2, Level::Shared), Err(Busy));
@@ -360,7 +330,6 @@ mod tests {
         locks.shm_lock(1, 3, 1, ShmLock::Exclusive).unwrap();
         assert_eq!(locks.shm_lock(2, 0, 8, ShmLock::Exclusive), Err(Busy));
         locks.shm_lock(2, 0, 3, ShmLock::Exclusive).unwrap();
-        // Closing releases the closer's locks.
         locks.close(1);
         locks.shm_lock(2, 3, 1, ShmLock::Exclusive).unwrap();
         locks.close(2);

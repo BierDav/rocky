@@ -1,4 +1,3 @@
-//! The multi-file layout: names, assignment, refusal and resumed installs.
 use super::*;
 use crate::layout::file_path;
 use crate::scaling_option_tests::{NODE, PEER, installations, note, open_node, scope};
@@ -12,7 +11,6 @@ fn files(files: usize) -> RuntimeOptions {
         ..RuntimeOptions::default()
     }
 }
-/// Whether `domain`'s tables are in `path`.
 async fn holds(path: &std::path::Path, domain: u8) -> bool {
     let conn = crate::sqlite::Connection::open_read_only(path).unwrap();
     let name = format!("{}_rocky_replica", crate::runtime::namespace(scope(domain)));
@@ -94,10 +92,10 @@ async fn another_file_count_or_a_missing_extra_or_foreign_file_is_refused() {
     refused(open(3).await, "another file count");
     let sibling = file_path(&path, 1);
     let moved = dir.path().join("moved.db");
-    rocky_platform::fs::rename(&sibling, &moved).unwrap();
+    rocky_platform::fs::replace_database_not_atomic_in_browser(&sibling, &moved).unwrap();
     refused(open(2).await, "missing");
     assert!(!rocky_platform::fs::exists(&sibling));
-    rocky_platform::fs::rename(&moved, &sibling).unwrap();
+    rocky_platform::fs::replace_database_not_atomic_in_browser(&moved, &sibling).unwrap();
     let extra = file_path(&path, 2);
     rocky_platform::fs::write(&extra, b"").unwrap();
     refused(open(2).await, "not part of");
@@ -108,11 +106,11 @@ async fn another_file_count_or_a_missing_extra_or_foreign_file_is_refused() {
         .close()
         .await
         .unwrap();
-    rocky_platform::fs::rename(&sibling, &moved).unwrap();
+    rocky_platform::fs::replace_database_not_atomic_in_browser(&sibling, &moved).unwrap();
     rocky_platform::fs::copy(file_path(&other, 1), &sibling).unwrap();
     refused(open(2).await, "another runtime");
     rocky_platform::fs::remove_file(&sibling).unwrap();
-    rocky_platform::fs::rename(&moved, &sibling).unwrap();
+    rocky_platform::fs::replace_database_not_atomic_in_browser(&moved, &sibling).unwrap();
     assert_eq!(rocky_platform::fs::read(&path).unwrap(), before);
     open(2).await.unwrap().close().await.unwrap();
 }

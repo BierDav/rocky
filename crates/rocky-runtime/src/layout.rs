@@ -1,13 +1,3 @@
-//! The files of one `Runtime`. File 0 is the path given to `Runtime::open`;
-//! file `k` adds `-k` to its stem: `laptop.db`, `laptop-1.db`, `laptop-2.db`.
-//! Domain `i` in sorted scope order lives in file `i % files`, where `files`
-//! is the requested count capped at the number of domains.
-//!
-//! Every file records the runtime's binding and the layout (requested count,
-//! files used, its own index). The other files are installed first; file 0
-//! is installed last, so its record marks the whole set as installed. An
-//! interrupted install resumes; a missing, extra or foreign file, or another
-//! file count, is refused. No transaction spans two files.
 use crate::{
     DomainInstallation, Error, database::DatabaseOwner, runtime::MAX_FILES,
     scoped_connection::ScopedConnection, sqlite, storage,
@@ -15,8 +5,6 @@ use crate::{
 use rocky_core::{SqlValue, StoredApplication};
 use std::path::{Path, PathBuf};
 
-/// Test hook: kill the process after the other files are installed, before
-/// file 0 records the set as installed.
 #[cfg(test)]
 pub(crate) static ABORT_BEFORE_MARKER: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -34,8 +22,6 @@ pub(crate) fn file_path(path: &Path, index: usize) -> PathBuf {
 }
 type Opened = (DatabaseOwner, sqlite::Connection);
 
-/// Installs or verifies every file on a helper thread, then hands each open
-/// file and the installations back for the file writers.
 pub(crate) async fn install<A>(
     path: PathBuf,
     requested: usize,
@@ -110,8 +96,6 @@ fn present(path: &Path) -> bool {
     rocky_platform::fs::len(path).is_ok_and(|len| len > 0)
 }
 
-/// Opens and installs the layout's files. File 0 is installed last: its
-/// record marks the set as installed.
 async fn prepare<A: StoredApplication>(
     path: &Path,
     requested: usize,
@@ -210,8 +194,6 @@ fn assigned<A: StoredApplication>(
         .filter(move |(position, _)| position % used == index)
         .map(|(_, domain)| domain)
 }
-/// Every bounded step and its cursor commit together. Admission starts only
-/// after the final binding record replaces the bootstrap marker.
 pub(crate) async fn bootstrap<'a, A: StoredApplication + 'a>(
     root: &ScopedConnection,
     binding: &[u8],

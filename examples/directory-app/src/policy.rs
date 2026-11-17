@@ -80,7 +80,6 @@ impl Directory {
         }
         false
     }
-    /// Learned directory revocations reject future sessions; app grants remain app-owned.
     pub fn registered_node(&self, key: Commitment) -> bool {
         !self.deleted_keys.contains(&key)
             && self

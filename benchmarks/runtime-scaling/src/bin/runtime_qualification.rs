@@ -1,4 +1,3 @@
-//! Bounded adapter measurements; run the compiled binary under `/usr/bin/time -l`.
 use inventory_app::{InventoryApp, Policy};
 use rocky_core::{DomainId, MeshId, NodeId, PrincipalId, Scope};
 use rocky_runtime::{

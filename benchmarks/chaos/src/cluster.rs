@@ -1,4 +1,3 @@
-//! The orchestrator's view of node processes: spawn, call, kill, reopen.
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -32,8 +31,6 @@ pub fn exe() -> PathBuf {
 }
 
 impl Node {
-    /// Starts a node process. `mode` is `{"mode":"create"}`, `{"mode":"join","invitation":..}`
-    /// or `{"mode":"resume"}`. Returns the open failure as `Err`.
     pub async fn spawn(
         name: &str,
         root: &Path,
@@ -91,7 +88,6 @@ impl Node {
                     let _ = tx.send(value);
                 }
             }
-            // Process gone: fail everything still waiting.
             reader.lock().unwrap().clear();
         });
         Ok(Arc::new(Node {
@@ -148,7 +144,6 @@ impl Node {
             Err(e) => panic!("{}: {request} failed: {e}", self.name),
         }
     }
-    /// SIGKILL: no close, no flush, no drain.
     pub async fn kill(&self) {
         let mut child = self.child.lock().await;
         let _ = child.start_kill();
@@ -168,7 +163,6 @@ impl Node {
         }
     }
 
-    // ---- application helpers ----
 
     pub async fn node_id(&self) -> String {
         self.ok(json!({"type":"session"})).await["node"]
@@ -202,7 +196,6 @@ impl Node {
     pub async fn status(&self) -> Reply {
         self.call(json!({"type":"status"})).await
     }
-    /// Every row of `sql` (which must not end in LIMIT), paged by the harness.
     pub async fn rows(&self, sql: &str) -> Result<Vec<Value>, Value> {
         let mut all = Vec::new();
         loop {
@@ -210,7 +203,6 @@ impl Node {
             let page = self
                 .call(json!({"type":"read","query":{"sql":paged,"values":[],"max_rows":1000}}))
                 .await?;
-            // Pages are also bounded by bytes: stop only on an empty page.
             let rows = page["rows"].as_array().cloned().unwrap_or_default();
             let done = rows.is_empty();
             all.extend(rows);
@@ -219,7 +211,6 @@ impl Node {
             }
         }
     }
-    /// Sorted text rendering of a query, for comparisons.
     pub async fn dump(&self, sql: &str) -> Result<Vec<String>, Value> {
         let rows = self.rows(sql).await?;
         let mut out: Vec<String> = rows
@@ -243,7 +234,6 @@ impl Node {
         self.call(json!({"type":"sql","sql":sql,"values":values}))
             .await
     }
-    /// One transaction: next_id + INSERT; rolls back on failure.
     pub async fn insert(
         &self,
         table: &str,
@@ -282,7 +272,6 @@ impl Node {
         )
         .await
     }
-    /// `count` notes in one transaction.
     pub async fn add_notes_batch(
         &self,
         prefix: &str,
@@ -308,7 +297,6 @@ impl Node {
         }
         result
     }
-    /// Issuer: prepares the list's group secret, then inserts it.
     pub async fn add_list(&self, title: &str) -> Result<String, Value> {
         self.call(json!({"type":"partition_next","table":"lists"}))
             .await?;
@@ -347,7 +335,6 @@ impl Node {
     }
 }
 
-/// Every node's configured peers include every other node.
 pub async fn mesh(nodes: &[&Node]) {
     for a in nodes {
         for b in nodes {

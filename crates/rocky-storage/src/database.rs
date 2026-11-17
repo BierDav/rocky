@@ -2,8 +2,6 @@ use crate::{Error, sqlite};
 use rocky_platform::fs;
 use std::path::{Path, PathBuf};
 
-/// File lifetime is separate from scoped reducer/author/revision scheduling.
-/// One writer owns the file; `fs::Owner` excludes the others.
 pub struct DatabaseOwner {
     path: PathBuf,
     _owner: fs::Owner,
@@ -47,18 +45,14 @@ impl DatabaseOwner {
     }
 }
 
-/// Lets maintenance reclaim free pages in bounded steps; only an empty file
-/// takes `auto_vacuum`.
 const INCREMENTAL_AUTO_VACUUM: &str = "PRAGMA auto_vacuum=INCREMENTAL";
 
 fn has_data(path: &Path) -> bool {
     fs::len(path).is_ok_and(|len| len > 0)
 }
 
-/// Current Rocky SQLite file identity. Application schema generations are independent.
 pub const FILE_FORMAT: i64 = 0x524b5902;
 
-/// Read-only preflight, also used before SDK settings/enrollment writes.
 pub async fn check_file_format(path: &Path) -> Result<(), Error> {
     if !has_data(path) {
         return Ok(());
@@ -101,7 +95,6 @@ pub async fn check_file_format(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// These inspect the native file layout: the bytes and the lock beside them.
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use super::*;

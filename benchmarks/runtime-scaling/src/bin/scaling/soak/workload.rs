@@ -7,13 +7,8 @@ pub(super) fn scope(domain: u16) -> Scope {
         domain: domain_id(domain),
     }
 }
-/// Tables that receive every row after each table was seeded once.
 const HOT_TABLES: u16 = 50;
-/// Every this many steps a write replaces a live row, which keeps the live
-/// row count fixed and exercises permanent deletion.
 const REPLACE_EVERY: usize = 128;
-/// The table of row `index`: each cold table is seeded once, then all other
-/// rows go to the hot set.
 pub(super) fn table(index: usize, tables: u16) -> u16 {
     if index < usize::from(tables) {
         index as u16

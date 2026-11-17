@@ -1,12 +1,9 @@
-//! Focused reproductions of individual findings.
 use crate::scenarios::{
     Failure, LISTS, NOTES, Slot, finding, populate, root, short, status_data, writer_all,
 };
 use serde_json::json;
 use std::time::Duration;
 
-/// background -> foreground on a fixed bind port, on an ephemeral port,
-/// and after a socket fault; then whether sync and a restart recover.
 pub async fn foreground_rebind() -> Result<(), Failure> {
     for ephemeral in [false, true] {
         println!(
@@ -85,7 +82,6 @@ async fn rebind_once(ephemeral: bool) -> Result<(), Failure> {
             }))
         );
     }
-    // Networking toggles do not rebind; a restart does.
     let _ = b
         .n()
         .call(json!({"type":"networking_control","enabled":false}))
@@ -110,8 +106,6 @@ async fn rebind_once(ephemeral: bool) -> Result<(), Failure> {
     Ok(())
 }
 
-/// The enrollment window that leaves `identity.join.json` without
-/// `identity.json`: which recovery paths work?
 pub async fn enrollment_window() -> Result<(), Failure> {
     let root = root("enroll-window");
     let mut a = Slot::new("a", &root);
@@ -144,9 +138,6 @@ pub async fn enrollment_window() -> Result<(), Failure> {
         if !pending {
             continue;
         }
-        // Odd attempts: retry the same invitation directly. Even attempts:
-        // the issuer creates another invitation first (another device, or
-        // the user tapping "Add device" again), then both are tried.
         let resume = j.resume().await.err().unwrap_or_else(|| "ok".into());
         let mut fresh = String::from("-");
         let fresh_invitation = (attempt % 2 == 0).then_some(());
@@ -186,7 +177,6 @@ pub async fn enrollment_window() -> Result<(), Failure> {
             break;
         }
     }
-    // The same invitation once the issuer is unreachable.
     let name = "offline-issuer";
     let mut j = Slot::new(name, &root);
     let invitation = a.n().invite(writer_all()).await;
@@ -235,7 +225,6 @@ pub async fn enrollment_window() -> Result<(), Failure> {
     Ok(())
 }
 
-/// A partial replica receives one shared list: does it hold it?
 pub async fn partial_holds_shared() -> Result<(), Failure> {
     let root = root("partial-shared");
     let mut a = Slot::new("a", &root);
@@ -298,7 +287,6 @@ pub async fn partial_holds_shared() -> Result<(), Failure> {
     Ok(())
 }
 
-/// A writer that was never shared a list: does readiness ever settle?
 pub async fn pending_forever() -> Result<(), Failure> {
     let root = root("pending");
     let mut a = Slot::new("a", &root);
@@ -357,8 +345,6 @@ pub async fn pending_forever() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Eviction on a partial replica with the full node named either by node
-/// key (what `session`/`peers` expose) or by its PeerId commitment.
 pub async fn evict_with_full_node() -> Result<(), Failure> {
     use rocky_sdk::credentials::{PeerId, PublicKey};
     let root = root("evict-full");
@@ -408,7 +394,6 @@ pub async fn evict_with_full_node() -> Result<(), Failure> {
             );
         }
         if evict.is_ok() {
-            // Kill during re-subscribe bootstrap, then write before syncing.
             let kind = if label == "PeerId" {
                 "partition_bootstrap"
             } else {
@@ -456,8 +441,6 @@ pub async fn evict_with_full_node() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Evict, resubscribe and watch the list over many syncs, with and without
-/// a SIGKILL during the first resync, and without any own writes.
 pub async fn evict_resubscribe() -> Result<(), Failure> {
     let root = root("evict-resub");
     let mut a = Slot::new("a", &root);

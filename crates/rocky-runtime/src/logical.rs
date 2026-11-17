@@ -1,5 +1,3 @@
-//! Binds an installed domain to its logical schema: the descriptor is stored
-//! once, a different one is refused, and the physical tables must match it.
 use crate::{Error, scoped_connection::ScopedConnection, storage};
 use rocky_core::{Affinity, Collation, LogicalSchema, LogicalTable, SqlValue};
 
@@ -40,7 +38,6 @@ struct ForeignKey {
     on_update: String,
     on_delete: String,
 }
-/// Key columns of an index as `(name, descending, collation)`.
 async fn index_columns(
     conn: &ScopedConnection,
     index: &str,
@@ -184,7 +181,6 @@ async fn verify_table(
     }
     Ok(())
 }
-/// Runs inside the open transaction, after the application's tables exist.
 pub(crate) async fn bind(conn: &ScopedConnection, schema: &LogicalSchema) -> Result<(), Error> {
     schema
         .supported_on(rocky_core::Profile::Trusted)

@@ -1,7 +1,3 @@
-//! Snapshot cursors served by a bounded pool of reusable read-only connections.
-//! Each active cursor leases one worker and pins its snapshot until it ends.
-//! A worker is a `dedicated` task: its own thread natively, a task on the
-//! Worker's event loop in a browser.
 use crate::{
     Error,
     sql::{AbortReason, SqlError},
@@ -20,16 +16,11 @@ use std::{
 use tokio::sync::{mpsc, oneshot, watch};
 use web_time::Instant;
 
-/// Bounds of one cursor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CursorLimits {
-    /// Rows of one page.
     pub page_rows: usize,
-    /// Bytes of one page; a single larger row fails with `Quota`.
     pub page_bytes: usize,
-    /// The cursor ends when no call arrives for this long.
     pub idle: Duration,
-    /// The cursor ends this long after it opened, however busy.
     pub lifetime: Duration,
 }
 impl Default for CursorLimits {
@@ -42,14 +33,9 @@ impl Default for CursorLimits {
         }
     }
 }
-/// How often an idle cursor worker checks for a closing host.
 const POLL: Duration = Duration::from_millis(50);
-/// Open cursors one session may hold.
 pub const MAX_SESSION_CURSORS: usize = 64;
-/// Free workers a host keeps for later cursors; a worker freed beyond them
-/// ends with its connection.
 const MAX_IDLE_WORKERS: usize = 2;
-/// Longest cursor lifetime a caller may ask for.
 pub const MAX_CURSOR_LIFETIME: Duration = Duration::from_secs(300);
 impl CursorLimits {
     pub fn validate(&self) -> Result<(), Error> {
@@ -67,47 +53,32 @@ impl CursorLimits {
     }
 }
 
-/// One result column: its name and the declared type of the column it
-/// reads, if it reads one directly.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResultColumn {
     pub name: String,
     pub declared: Option<String>,
 }
-/// One page of a cursor. `done` is set with the last row.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CursorPage {
     pub rows: Vec<Vec<SqlValue>>,
     pub done: bool,
 }
 
-/// Checked before each page is stepped and again before it is delivered.
-/// An error ends the cursor and discards the page.
 pub type Guard = Arc<dyn Fn() -> Result<(), Error> + Send + Sync>;
 
-/// What a runtime authorized for one cursor.
 pub struct CursorPlan {
     pub path: PathBuf,
-    /// The statement with physical names; it must only read.
     pub sql: String,
     pub params: Vec<SqlValue>,
-    /// Physical tables the statement may read.
     pub readable: Vec<String>,
-    /// Reads the snapshot's revision before the statement is compiled.
     pub revision: Option<String>,
-    /// Commit epoch the admission snapshot describes, checked inside the read transaction.
     pub epoch: Option<(String, u64)>,
     pub limits: CursorLimits,
     pub guard: Guard,
-    /// Run on the connection before the snapshot opens, such as the
-    /// temporary views of a connection bound to a seal.
     pub prelude: Vec<String>,
-    /// Must return a row inside the snapshot, or the cursor fails with
-    /// `Unavailable::Released`.
     pub requires: Option<String>,
 }
 
-/// A whole result another statement read from the cursor's snapshot.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SnapshotRows {
     pub columns: Vec<ResultColumn>,
@@ -123,11 +94,9 @@ enum Request {
     Next(oneshot::Sender<Result<CursorPage, Error>>),
     Reset(oneshot::Sender<Result<(), Error>>),
     Run(Statement),
-    /// Wakes an idle worker to notice that its cursor ended.
     Wake,
 }
 impl Request {
-    /// Answers whatever the request waits for with `error`.
     fn fail(self, error: Error) {
         match self {
             Self::Next(reply) => drop(reply.send(Err(error))),
@@ -142,18 +111,12 @@ struct Opened {
     revision: Option<u64>,
 }
 
-/// Shared between a cursor's handle, its worker and its host.
 struct Control {
     cancelled: Arc<AtomicBool>,
-    /// Why the cursor ended, once it has.
     ended: Mutex<Option<End>>,
-    /// The worker still holds its connection.
     alive: task::Held,
-    /// The handle is gone; the worker ends the cursor on its next turn.
     dropped: AtomicBool,
-    /// Reaches the worker without keeping the channel open.
     wake: mpsc::WeakUnboundedSender<Request>,
-    /// Set once the worker ended the cursor's read transaction.
     released: watch::Sender<bool>,
 }
 #[derive(Clone, Copy, Debug)]
@@ -182,14 +145,12 @@ impl Control {
             _ => Error::Closed,
         }
     }
-    /// The worker no longer holds the cursor's connection.
     fn release(&self) {
         self.alive.set(false);
         self.released.send_replace(true);
     }
 }
 
-/// The cursors of one file, ended together when the file closes.
 #[derive(Default)]
 pub struct CursorHost {
     controls: Mutex<Vec<Weak<Control>>>,
@@ -200,8 +161,6 @@ impl CursorHost {
     pub fn new() -> Arc<Self> {
         Arc::default()
     }
-    /// Ends every cursor and waits until their connections are closed.
-    /// Later opens are refused.
     pub fn close(&self) {
         let Some(workers) = self.close_to_leases() else {
             return;
@@ -220,15 +179,11 @@ impl CursorHost {
             worker.task.release();
         }
     }
-    /// Marks the host closed, so later leases add no worker, and takes its
-    /// workers. The lock is released before they are joined because workers
-    /// free themselves under it.
     fn close_to_leases(&self) -> Option<Vec<Worker>> {
         let mut workers = self.workers.lock().ok()?;
         self.closed.store(true, Ordering::SeqCst);
         Some(std::mem::take(&mut *workers))
     }
-    /// Workers that keep a connection; connections are reused between leases.
     pub fn workers(&self) -> usize {
         self.workers.lock().map_or(0, |workers| {
             workers
@@ -237,10 +192,6 @@ impl CursorHost {
                 .count()
         })
     }
-    /// Ends every open cursor with `Aborted(Preempted)` and waits until
-    /// their read transactions end, so the write-ahead log can be reset; a
-    /// control that is gone took its worker's turn with it. Returns how many
-    /// it ended.
     pub async fn preempt(&self) -> usize {
         let open: Vec<_> = match self.controls.lock() {
             Ok(controls) => controls
@@ -264,7 +215,6 @@ impl CursorHost {
         }
         open.len()
     }
-    /// Open cursors, for tests and diagnostics.
     pub fn open_cursors(&self) -> usize {
         self.controls
             .lock()
@@ -279,19 +229,14 @@ impl CursorHost {
     }
 }
 
-/// A statement stepping through one committed snapshot. Dropping it ends
-/// the read transaction and returns its worker to the pool.
 pub struct SnapshotCursor {
     columns: Vec<ResultColumn>,
     revision: Option<u64>,
     requests: Option<mpsc::UnboundedSender<Request>>,
     control: Arc<Control>,
-    /// The session's open-cursor count, released on drop.
     count: Arc<AtomicUsize>,
 }
 impl Drop for SnapshotCursor {
-    /// Disconnects the request channel, which wakes the leased worker at
-    /// once, and waits until the worker releases.
     fn drop(&mut self) {
         self.requests = None;
         self.control.cancelled.store(true, Ordering::SeqCst);
@@ -301,7 +246,6 @@ impl Drop for SnapshotCursor {
     }
 }
 impl SnapshotCursor {
-    /// Opens `plan` on `host`. `count` is the session's open cursors.
     pub async fn open(
         host: &Arc<CursorHost>,
         count: Arc<AtomicUsize>,
@@ -351,29 +295,22 @@ impl SnapshotCursor {
         cursor.revision = opened.revision;
         Ok(cursor)
     }
-    /// Result columns, fixed for the cursor's life.
     pub fn columns(&self) -> &[ResultColumn] {
         &self.columns
     }
-    /// The revision of the snapshot, when the runtime reports one.
     pub fn revision(&self) -> Option<u64> {
         self.revision
     }
-    /// The next page. After the last one, pages are empty and done.
     pub async fn next(&mut self) -> Result<CursorPage, Error> {
         let (reply, answer) = oneshot::channel();
         self.send(Request::Next(reply))?;
         answer.await.map_err(|_| self.control.error())?
     }
-    /// Starts again from the first row of the same snapshot.
     pub async fn reset(&mut self) -> Result<(), Error> {
         let (reply, answer) = oneshot::channel();
         self.send(Request::Reset(reply))?;
         answer.await.map_err(|_| self.control.error())?
     }
-    /// Reads the whole result of another statement from the same snapshot,
-    /// at most `max_bytes` of values. `sql` must only read the plan's
-    /// tables, as the cursor's own statement does; its pages are unaffected.
     pub async fn run(
         &mut self,
         sql: String,
@@ -389,12 +326,10 @@ impl SnapshotCursor {
         }))?;
         answer.await.map_err(|_| self.control.error())?
     }
-    /// Interrupts a running step; the cursor ends with `Aborted(Cancelled)`.
     pub fn cancel(&self) {
         self.control.end(End::Cancelled);
         self.control.cancelled.store(true, Ordering::SeqCst);
     }
-    /// Ends the cursor now; equivalent to dropping it.
     pub fn close(self) {}
     fn send(&self, request: Request) -> Result<(), Error> {
         self.requests
@@ -421,16 +356,11 @@ struct Job {
 struct Worker {
     jobs: mpsc::Sender<Job>,
     busy: Arc<AtomicBool>,
-    /// The worker ended after its last cursor; it takes no more jobs, and
-    /// the pool drops it, detaching its task's handle.
     retired: Arc<AtomicBool>,
     task: task::Dedicated<()>,
-    /// The cursor it serves or last served.
     serving: Weak<Control>,
 }
 impl Worker {
-    /// Free, or ending a cursor whose handle is gone, with room to queue the
-    /// next job. Natively a dropped handle waits until its worker is free.
     fn available(&self) -> bool {
         if self.retired.load(Ordering::SeqCst) {
             return false;
@@ -501,10 +431,6 @@ impl CursorHost {
         worker.jobs.try_send(job).map_err(|_| Error::Closed)
     }
 }
-/// Frees a worker after its cursor, under the host's lock so workers ending
-/// together count each other. Returns whether it ends instead: when no job
-/// waits for it and enough other workers are free. A lease queues a job
-/// only while it holds the lock, so no job can arrive unseen.
 fn free(
     pool: &Weak<Mutex<Vec<Worker>>>,
     busy: &AtomicBool,
@@ -532,8 +458,6 @@ fn free(
     busy.store(false, Ordering::SeqCst);
     retire
 }
-/// Reads the revision, or anything at all, which starts the snapshot every
-/// later page shares.
 fn start_snapshot(
     raw: &rusqlite::Connection,
     revision: Option<&str>,
@@ -554,8 +478,6 @@ fn start_snapshot(
         }
     }
 }
-/// Allows reads of `readable` main tables and, when a prelude made views,
-/// of `temp`: the prelude's temporary views read only readable tables.
 fn snapshot_authorizer(
     readable: Vec<String>,
     prelude_views: bool,
@@ -580,7 +502,6 @@ fn snapshot_authorizer(
         _ => Authorization::Deny,
     }
 }
-/// Fails the next request with `error`, if one arrives within `idle`.
 async fn report_on_next_request(
     requests: &mut mpsc::UnboundedReceiver<Request>,
     idle: Duration,
@@ -792,8 +713,6 @@ async fn run(
     end
 }
 
-/// Steps another read-only statement to its end inside the cursor's
-/// transaction. The authorizer installed for the cursor applies to it.
 fn whole(
     raw: &rusqlite::Connection,
     plan: &CursorPlan,
@@ -842,11 +761,9 @@ fn whole(
     })
 }
 
-/// Where a cursor's execution stands between pages.
 #[derive(Default)]
 struct Position {
     exhausted: bool,
-    /// A stepped row that did not fit its page; it opens the next one.
     carry: Option<Vec<SqlValue>>,
 }
 fn weight(row: &[SqlValue]) -> usize {
@@ -859,7 +776,6 @@ fn weight(row: &[SqlValue]) -> usize {
         .sum()
 }
 
-/// Steps one page, checking the guard before stepping and before delivery.
 fn page(
     rows: &mut rusqlite::Rows<'_>,
     plan: &CursorPlan,
@@ -1020,8 +936,6 @@ mod tests {
         assert_eq!(host.workers(), 0);
     }
 
-    /// Workers freed after a burst of cursors end beyond the few kept for
-    /// reuse, closing their connections; a later cursor still opens.
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn freed_workers_beyond_the_idle_bound_retire() {
         let file = file(1).await;
@@ -1352,8 +1266,6 @@ mod tests {
             .expect("the WAL resets once no cursor pins it");
     }
 
-    /// A writer that must reset the log ends the cursors pinning it: they
-    /// report `Aborted(Preempted)` and the reset completes.
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn preempting_ends_the_cursors_that_pin_the_log() {
         let file = file(3).await;

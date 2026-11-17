@@ -1,4 +1,3 @@
-//! Checkpoints, the pruned prefix, pruning and rebootstrap of the trusted path.
 use super::*;
 use crate::checkpoint::{Request, Response, Step};
 use crate::tests::{create, fault, mutation};
@@ -10,7 +9,6 @@ use std::os::unix::process::ExitStatusExt;
 const CASE: &str = "ROCKY_RETENTION_CASE";
 const DIR: &str = "ROCKY_RETENTION_DIR";
 
-/// No retained window and no automatic steps: a test drives each one.
 fn manual() -> RuntimeOptions {
     RuntimeOptions {
         retention: RetentionPolicy {
@@ -54,7 +52,6 @@ async fn edit(replica: &Replica<TodoApp>, entity: OperationId, action: Action) -
         .await
         .unwrap()
 }
-/// Sends what `to` lacks, with acknowledgments; false if it is behind the pruned_prefix.
 async fn sync(from: &Replica<TodoApp>, to: &Replica<TodoApp>, peer: NodeId) -> bool {
     loop {
         let state = to.sync_state().await.unwrap();
@@ -75,7 +72,6 @@ async fn sync(from: &Replica<TodoApp>, to: &Replica<TodoApp>, peer: NodeId) -> b
         }
     }
 }
-/// Copies `from`'s checkpoint into `to`, page by page over the wire encoding.
 async fn rebootstrap(from: &Replica<TodoApp>, to: &Replica<TodoApp>) -> RebootstrapReport {
     let mut cursor = None;
     loop {
@@ -249,9 +245,6 @@ async fn an_unverifiable_checkpoint_blocks_pruning() {
     phone.close().await.unwrap();
 }
 
-/// The phone is offline across a prune. Slightly behind, it converges from
-/// retained operations; behind the pruned prefix it is told so, imports the
-/// checkpoint and converges with its own unsent edits.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_offline_replica_converges_or_rebootstraps_with_its_local_edits() {
     let dir = Scratch::new().await;
@@ -454,14 +447,12 @@ async fn retried_handles_from_before_the_pruned_prefix_do_not_execute_twice() {
     phone.close().await.unwrap();
 }
 
-/// With `behind_after`, a delivery target that holds back the pruned_prefix that
-/// long is declared behind; contact restarts its time.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_target_holding_back_the_pruned_prefix_too_long_is_declared_behind() {
     let dir = Scratch::new().await;
     let timed = |after| RuntimeOptions {
         retention: RetentionPolicy {
-            behind_after: Some(after),
+            declare_behind: BehindDeclaration::AfterHoldingBackFor(after),
             ..manual().retention
         },
         ..RuntimeOptions::default()
@@ -515,7 +506,7 @@ async fn retained_bytes_trigger_checkpoints_and_then_push_back() {
     let dir = Scratch::new().await;
     let bounded = |automatic| RuntimeOptions {
         retention: RetentionPolicy {
-            checkpoint_operations: 0,
+            checkpoint: CheckpointTrigger::OnRequestOrAtHalfOfRetainedBytes,
             window: 0,
             retained_bytes: 16 * 1024,
             handles: 4,
@@ -581,9 +572,6 @@ async fn retained_bytes_trigger_checkpoints_and_then_push_back() {
     laptop.close().await.unwrap();
 }
 
-/// A failure injected into every step of checkpoint creation, pruning and
-/// rebootstrap rolls that step back alone; the file reopens, passes the
-/// audit and the step then completes.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_failure_at_any_step_leaves_a_file_that_reopens_and_audits() {
     let dir = Scratch::new().await;
@@ -662,7 +650,6 @@ async fn a_failure_at_any_step_leaves_a_file_that_reopens_and_audits() {
     phone.close().await.unwrap();
 }
 
-/// Crashes a child process, which a browser cannot spawn.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_aborted_import_keeps_the_projection_and_a_superseded_export_restarts() {
@@ -763,8 +750,6 @@ async fn seed(dir: &Path) -> (Replica<TodoApp>, Replica<TodoApp>) {
     laptop.declare_behind(fixtures::PHONE).await.unwrap();
     (laptop, phone)
 }
-/// Does nothing in an ordinary run; the parent selects the step to die in.
-/// Needs threads, which a browser Worker lacks.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crash_child() {
@@ -820,8 +805,6 @@ async fn crash_child() {
     panic!("the injected fault did not end the process");
 }
 
-/// Process death inside each step: the uncommitted step is gone, the file
-/// opens, passes the audit, and the work completes afterwards.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn death_inside_any_step_leaves_a_file_that_opens_and_audits() {
     for case in ["candidate", "replay", "prune", "stage", "switch"] {

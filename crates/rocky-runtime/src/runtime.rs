@@ -1,29 +1,18 @@
 use crate::{scoped_connection::ScopedConnection, storage, worker, *};
 
-/// Installed code and policy for one declared domain. All domains are installed
-/// before admission; optional additive indexes are installed during open.
 pub struct DomainInstallation<A: StoredApplication> {
     pub app: A,
     pub policy: A::Policy,
     pub identity: Identity,
     pub config: RuntimeConfig,
 }
-/// When commits reach the device. Either way nothing leaves the device before
-/// a full flush covers it, so power loss can only drop local work that was
-/// never sent, sealed or acknowledged.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Durability {
-    /// Commits at `synchronous=NORMAL` without a device flush. A flush, forced
-    /// before anything is exposed outside the device, advances the durable
-    /// watermark; see `CommitClass`.
     #[default]
     Buffered,
-    /// Every group is flushed (`F_FULLFSYNC` where available) before replies.
     Full,
 }
 impl Durability {
-    /// The `synchronous` level for ordinary groups. Flushes always use FULL
-    /// with `fullfsync`.
     pub(crate) fn synchronous(self) -> i64 {
         match self {
             Self::Buffered => 1,
@@ -31,40 +20,19 @@ impl Durability {
         }
     }
 }
-/// Most files one `Runtime` spreads its domains over.
 pub(crate) const MAX_FILES: usize = 16;
-/// Explicit layouts can serve larger domain sets.
 pub(crate) const MAX_PLACED_FILES: usize = 256;
-/// Most writing steps one group commit may hold.
 pub(crate) const MAX_GROUP_COMMIT: usize = 256;
-/// Bounds of `RuntimeOptions::checkpoint_frames`: 1 MiB to 4 GiB of WAL.
 pub(crate) const MIN_CHECKPOINT_FRAMES: u32 = 256;
 pub(crate) const MAX_CHECKPOINT_FRAMES: u32 = 1 << 20;
-/// Enough for 16 domains with 8 waiting writers each to share one commit. A
-/// group takes only what is already queued, so the bound adds no delay under
-/// light load.
 const DEFAULT_GROUP_COMMIT: usize = 128;
-/// Experimental scaling controls; defaults reproduce the qualified behaviour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RuntimeOptions {
     pub durability: Durability,
-    /// Most writing steps, across all domains of the file, that share one
-    /// commit and flush. One means a commit per step.
     pub group_commit: usize,
-    /// When each domain checkpoints and prunes its history.
     pub retention: RetentionPolicy,
-    /// Files the domains are spread over, each with its own writer thread,
-    /// WAL and flush. Fixed at first install: up to 16 for automatic layouts,
-    /// or 256 with `Runtime::open_placed`.
     pub files: usize,
-    /// WAL frames of 4 KiB after which a file's writer checkpoints between
-    /// groups; the WAL file can reach about twice this. Each checkpoint
-    /// holds the writer for tens of milliseconds, so a file under sustained
-    /// load trades WAL size for tail latency here.
     pub checkpoint_frames: u32,
-    /// Collect per-step subphase timing (admission/reduction/encoding/SQL) and
-    /// record checkpoint intervals with monotonic timestamps. Off by default:
-    /// the added timestamps and atomics are measurable at high write rates.
     pub instrument: bool,
 }
 impl Default for RuntimeOptions {
@@ -96,7 +64,6 @@ impl RuntimeOptions {
         Ok(())
     }
 }
-/// Persistent file assignment. Supply the recorded set plus any new domains.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DomainPlacement {
     pub scope: Scope,
@@ -104,7 +71,6 @@ pub struct DomainPlacement {
 }
 pub struct Runtime<A: StoredApplication> {
     domains: std::collections::HashMap<Scope, Replica<A>>,
-    /// One file writer per file; each owns the domains of its file.
     threads: Vec<rocky_platform::task::Dedicated<()>>,
 }
 impl<A> Runtime<A>
@@ -113,8 +79,6 @@ where
     A::State: Clone,
     A::Policy: Send + 'static,
 {
-    /// Opens or installs the domains in `path` and its sibling files; see
-    /// `crate::layout` for names, assignment and the install order.
     pub async fn open(
         path: impl AsRef<Path>,
         installations: Vec<DomainInstallation<A>>,
@@ -128,10 +92,6 @@ where
     ) -> Result<Self, Error> {
         Self::open_layout(path, installations, options, None).await
     }
-    /// Opens only files serving these installations. Assignments are persisted
-    /// independently of sorted scope order and may only be extended. Fewer
-    /// domains than files use only as many files as domains. If a file fails
-    /// to open, dropping the domain queues stops the writers that did.
     pub async fn open_placed(
         path: impl AsRef<Path>,
         installations: Vec<DomainInstallation<A>>,

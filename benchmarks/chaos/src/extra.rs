@@ -1,4 +1,3 @@
-//! Niche topologies, local file damage and request fuzzing.
 use crate::scenarios::{
     Failure, ITEMS, LISTS, NOTES, Slot, finding, heal, integrity, join_full, populate,
     report_divergence, root, short, status_data, writer_all,
@@ -7,8 +6,6 @@ use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use serde_json::{Value, json};
 use std::time::Duration;
 
-/// A new full node's only reachable peer is a partial replica: does it
-/// claim completion from a subset, and does it complete once the issuer returns?
 pub async fn bootstrap_from_partial() -> Result<(), Failure> {
     let root = root("from-partial");
     let mut a = Slot::new("a", &root);
@@ -24,7 +21,6 @@ pub async fn bootstrap_from_partial() -> Result<(), Failure> {
     for _ in 0..2 {
         let _ = p.n().sync().await;
     }
-    // F joins; A shares all lists, then dies before F syncs anything.
     let mut f = Slot::new("f", &root);
     join_full(a.n(), &mut f, &lists).await?;
     a.kill().await;
@@ -66,8 +62,6 @@ pub async fn bootstrap_from_partial() -> Result<(), Failure> {
     Ok(())
 }
 
-/// A revoked writer keeps writing and pushes through a full peer that has
-/// not yet learned of the revocation; that peer then meets the issuer.
 pub async fn revoked_via_stale_peer() -> Result<(), Failure> {
     let root = root("revoked-stale");
     let mut a = Slot::new("a", &root);
@@ -81,7 +75,6 @@ pub async fn revoked_via_stale_peer() -> Result<(), Failure> {
     for n in [b.n(), c.n(), a.n()] {
         let _ = n.sync().await;
     }
-    // Cut A off, then revoke B on A only.
     let _ = b
         .n()
         .call(json!({"type":"peer_remove","node": a.n().node_id().await}))
@@ -127,7 +120,6 @@ pub async fn revoked_via_stale_peer() -> Result<(), Failure> {
         .await
         .map(|r| r.len());
     println!("  c accepted rows written by b after its revocation (c unaware): {on_c:?}");
-    // C meets A and learns the revocation.
     crate::cluster::mesh(&[a.n(), c.n()]).await;
     for _ in 0..3 {
         let _ = c.n().sync().await;
@@ -315,7 +307,6 @@ pub async fn revoked_via_stale_peer() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Two processes open the same directory.
 pub async fn double_open() -> Result<(), Failure> {
     let root = root("double-open");
     let mut a = Slot::new("a", &root);
@@ -337,7 +328,6 @@ pub async fn double_open() -> Result<(), Failure> {
         short(&a.n().add_note("after-twin", "x").await.is_ok())
     );
     a.kill().await;
-    // Stale lock files after SIGKILL must not block reopen.
     println!(
         "  reopen after kill with lock files left: {}",
         short(&a.resume().await.map(|_| "ok"))
@@ -346,8 +336,6 @@ pub async fn double_open() -> Result<(), Failure> {
     Ok(())
 }
 
-/// After SIGKILL, the WAL is lost (power-loss-like) or identity.json is
-/// rolled back to an older copy: do the stores still agree?
 pub async fn file_damage() -> Result<(), Failure> {
     let root = root("damage");
     let mut a = Slot::new("a", &root);
@@ -360,7 +348,6 @@ pub async fn file_damage() -> Result<(), Failure> {
     for _ in 0..2 {
         let _ = b.n().sync().await;
     }
-    // New list shared after the identity snapshot: a key arrives later.
     let late = a.n().add_list("late").await.map_err(|e| e.to_string())?;
     for i in 0..10 {
         let _ = a.n().add_item(&late, &format!("late{i}")).await;
@@ -372,7 +359,6 @@ pub async fn file_damage() -> Result<(), Failure> {
         let _ = b.n().add_item(&late, &format!("b-late{i}")).await;
     }
     b.kill().await;
-    // 1. WAL gone.
     let wal = root.join("b/rocky.sqlite-wal");
     let wal_len = std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
     let _ = std::fs::remove_file(&wal);
@@ -396,7 +382,6 @@ pub async fn file_damage() -> Result<(), Failure> {
         ));
     }
     println!("  integrity after WAL loss: {}", integrity(&root.join("b")));
-    // 2. identity.json rolled back to before the late key arrived.
     std::fs::write(root.join("b/identity.json"), &old_identity)?;
     let reopened = b.resume().await;
     println!(
@@ -429,8 +414,6 @@ pub async fn file_damage() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Random and malformed native requests; the node must answer each with an
-/// error or a value, and remain usable.
 pub async fn request_fuzz() -> Result<(), Failure> {
     let root = root("request-fuzz");
     let mut a = Slot::new("a", &root);
@@ -643,8 +626,6 @@ fn random_value(rng: &mut StdRng, depth: u32, list: &str) -> Value {
     }
 }
 
-/// A second trusted device is killed mid-bootstrap; with the original issuer
-/// offline it enrolls a new device and serves it its incomplete state.
 pub async fn half_bootstrapped_source() -> Result<(), Failure> {
     let root = root("half-source");
     let mut a = Slot::new("a", &root);
@@ -716,8 +697,6 @@ pub async fn half_bootstrapped_source() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Trusted T creates a list and shares it with trusted A. Can A share it
-/// with a full device enrolled later, while T is offline?
 pub async fn cross_issuer_share() -> Result<(), Failure> {
     let root = root("cross-issuer");
     let mut a = Slot::new("a", &root);
@@ -779,8 +758,6 @@ pub async fn cross_issuer_share() -> Result<(), Failure> {
     Ok(())
 }
 
-/// The sharer is SIGKILLed during the sync that would deliver an envelope
-/// to an offline trusted recipient; can the recipient share it onward later?
 pub async fn envelope_kill() -> Result<(), Failure> {
     let root = root("envelope-kill");
     let mut a = Slot::new("a", &root);
@@ -851,8 +828,6 @@ pub async fn envelope_kill() -> Result<(), Failure> {
     Ok(())
 }
 
-/// A second trusted device whose bootstrap did not finish before the
-/// original issuer vanished: can it still enroll devices?
 pub async fn orphaned_second_issuer() -> Result<(), Failure> {
     let root = root("orphan-issuer");
     let mut a = Slot::new("a", &root);

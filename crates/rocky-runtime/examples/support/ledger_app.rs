@@ -61,8 +61,6 @@ impl Application for LedgerApp {
         state.events.insert(op.id, state.values[&op.entity].0);
         Ok(())
     }
-    /// Both the selected row and its resulting ownership must authorize all
-    /// fields.
     fn admit_candidate(
         &self,
         before: &State,
@@ -134,7 +132,6 @@ impl StoredApplication for LedgerApp {
             )
             .collect()
     }
-    /// The account an operation edits. Its event row is new and needs no load.
     fn touched(&self, op: &Envelope) -> Vec<ProjectionStatement> {
         vec![ProjectionStatement {
             sql: "SELECT 'account',node,sequence,value,owner FROM accounts WHERE node=? AND sequence=?".into(),

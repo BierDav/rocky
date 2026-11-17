@@ -1,4 +1,3 @@
-//! Bounded, resumable DDL installation. The plan hash prevents resuming another build.
 use crate::{
     Error,
     scoped_connection::ScopedConnection,
@@ -9,7 +8,6 @@ use crate::{
 pub(crate) const STEP: usize = 64;
 pub(crate) type Statement = (String, Vec<Value>);
 
-/// Only compiled CREATE TABLE/INDEX/VIEW statements are accepted for schema creation.
 pub(crate) fn idempotent(sql: &str) -> Result<String, Error> {
     let words: Vec<_> = sql.split_whitespace().take(6).collect();
     let unique = words
@@ -136,7 +134,6 @@ pub(crate) async fn install(
 pub(crate) static ABORT_AFTER_STEP: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Base, shadow and protocol schema of a domain, with its identity last.
 pub(crate) fn domain_statements<A: rocky_core::StoredApplication>(
     mapping: &ScopedConnection,
     identity: crate::Identity,

@@ -1,4 +1,3 @@
-//! Same-file independent-domain observer contention evidence; not an engine benchmark.
 use inventory_app::{InventoryApp, Policy};
 use rocky_core::{DomainId, MeshId, NodeId, PrincipalId, Scope, SqlValue};
 use rocky_runtime::{

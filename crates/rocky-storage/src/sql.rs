@@ -1,27 +1,16 @@
-//! Session types and transaction-control parsing shared by SQL sessions.
 use crate::{CommitClass, Error, scoped_connection};
 use std::time::Duration;
 
-/// Longest transaction a session may ask for. While it runs, no other write
-/// of the file commits.
 pub const MAX_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(60);
-/// Nested savepoints of one transaction.
 pub const MAX_SAVEPOINTS: usize = 64;
 
-/// Bounds of one session. They are compatibility limits: a transaction that
-/// exceeds one is rolled back and reports it; nothing is truncated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SqlOptions {
-    /// From `BEGIN` to the end of the transaction, waiting included.
     pub transaction_timeout: Duration,
-    /// Longest run of one statement.
     pub statement_budget: Duration,
-    /// Row changes and bytes of row images one transaction may capture.
     pub captured_rows: usize,
     pub captured_bytes: usize,
-    /// Bytes one statement may return.
     pub result_bytes: usize,
-    /// What a commit has reached before it is acknowledged.
     pub acknowledge: CommitClass,
 }
 impl Default for SqlOptions {
@@ -51,58 +40,30 @@ impl SqlOptions {
     }
 }
 
-/// Why a table's rows cannot be read locally. An authorized empty table is
-/// never unavailable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unavailable {
-    /// The table's domain is not open, or its scope was never held,
-    /// is unsubscribed or is evicted.
     NotHeld,
-    /// The reader key of its scope is not installed.
     KeyMissing,
-    /// Admitted operations of its scope are not applied yet, or the
-    /// domain is being rebuilt.
     Incomplete,
-    /// The session's authority changed; open a new session.
     Revoked,
-    /// The seal a bound connection reads is no longer kept.
     Released,
 }
-/// Why the runtime rolled a transaction back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AbortReason {
-    /// The transaction outlived `SqlOptions::transaction_timeout`.
     Timeout,
-    /// `SqlSession::cancel` was called.
     Cancelled,
-    /// A statement was refused or a changed row could not be captured.
     Poisoned(String),
-    /// The engine ended the transaction, as `OR ROLLBACK` or an interrupt does.
     Engine(String),
-    /// A cursor's snapshot was ended so the write-ahead log could be reset;
-    /// open the cursor again.
     Preempted,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SqlError {
-    /// The engine refused the statement with this extended result code. An
-    /// open transaction continues, as the statement's conflict clause decides.
     Statement { code: i32, message: String },
-    /// The statement reaches beyond the tables a session may read or write.
     Denied,
-    /// The statement is outside the supported SQL surface. It had no effect
-    /// and an open transaction continues.
     Unsupported(String),
-    /// A table the statement names is not available locally: its scope is
-    /// not held, its key is missing or its rows are incomplete. Nothing ran.
     Unavailable { table: String, reason: Unavailable },
-    /// The transaction was rolled back. Until the session acknowledges with
-    /// `ROLLBACK` or `COMMIT`, every statement reports this.
     Aborted(AbortReason),
-    /// The transaction's rows cannot be published; it was rolled back.
     Capture(String),
-    /// The statement was prepared by a session of another domain, binding or
-    /// binding generation. Prepare it again; nothing ran.
     Stale,
 }
 impl std::fmt::Display for SqlError {
@@ -151,24 +112,17 @@ impl SqlError {
         }
     }
 }
-/// `SQLITE_MISUSE`, for binding and conversion errors of the adapter.
 const SQLITE_MISUSE: i32 = 21;
-/// What a caller knows after a failed call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Certainty {
-    /// Nothing happened; the same call may be sent again.
     Retryable,
-    /// The outcome is known: the statement or transaction had no effect.
     Definite,
-    /// A commit may have happened. Ask `Replica::sql_outcome` with its token.
-    Uncertain,
+    ResolveWithTransactionOutcome,
 }
 impl Error {
-    /// How much a failed session call tells. A transaction body is never
-    /// replayed by the runtime; a retryable error concerns one call.
     pub fn sql_certainty(&self) -> Certainty {
         match self {
-            Self::Closed | Self::Rollback { .. } => Certainty::Uncertain,
+            Self::Closed | Self::Rollback { .. } => Certainty::ResolveWithTransactionOutcome,
             Self::Backpressure | Self::RetryExhausted => Certainty::Retryable,
             error if crate::storage::retryable(error) => Certainty::Retryable,
             _ => Certainty::Definite,
@@ -178,16 +132,11 @@ impl Error {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SqlState {
-    /// No transaction: a statement commits by itself.
     Idle,
-    /// A transaction holds the file's writer. It ends with a commit, a
-    /// rollback or an error that reports `SqlError::Aborted`.
     Active,
 }
-/// How the session interprets one statement.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Control {
-    /// `BEGIN` with its mode keyword.
     Begin(&'static str),
     Commit,
     Rollback,
@@ -196,8 +145,6 @@ pub enum Control {
     Release(String),
     Statement,
 }
-/// Transaction control is interpreted by the session and never reaches the
-/// engine as text. Anything else must be a single statement.
 pub fn classify(sql: &str) -> Result<Control, SqlError> {
     let mut words: Vec<String> = scoped_connection::tokens(sql)
         .into_iter()
@@ -270,6 +217,27 @@ pub fn classify(sql: &str) -> Result<Control, SqlError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_failure_that_may_have_committed_is_resolved_with_the_transaction_outcome() {
+        assert_eq!(
+            Error::Closed.sql_certainty(),
+            Certainty::ResolveWithTransactionOutcome
+        );
+        assert_eq!(
+            Error::Rollback {
+                cause: "commit".into(),
+                rollback: crate::sqlite::Error::Deadline.into(),
+            }
+            .sql_certainty(),
+            Certainty::ResolveWithTransactionOutcome
+        );
+        assert_eq!(Error::Backpressure.sql_certainty(), Certainty::Retryable);
+        assert_eq!(
+            Error::Sql(SqlError::Denied).sql_certainty(),
+            Certainty::Definite
+        );
+    }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn transaction_control_is_classified_and_other_text_is_one_statement() {

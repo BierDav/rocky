@@ -1,4 +1,3 @@
-//! Process death in each step of a placement migration.
 use super::*;
 use crate::wide_schema_tests::{app, installation, options, test_scope};
 use rocky_platform::fs::Scratch;
@@ -8,8 +7,6 @@ use std::process::Stdio;
 const CASE: &str = "ROCKY_RELOCATION_CRASH_STEP";
 const DIR: &str = "ROCKY_RELOCATION_CRASH_DIR";
 
-/// Does nothing in an ordinary run; a parent test selects where to die.
-/// Needs threads, which a browser Worker lacks.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crash_child() {

@@ -1,6 +1,3 @@
-//! Writer subphase attribution, checkpoint-overlap of per-write latency and
-//! same-file sync interference. Measurement only: it changes no runtime
-//! default and runs with the runtime's instrumentation switch.
 use super::gate::{Histogram, open};
 use super::{Failure, NODE, scope};
 use rocky_core::*;
@@ -12,9 +9,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
-/// A bounded ring of recent per-write service intervals on the monotonic
-/// clock. `dropped` counts records evicted from the front once the ring filled,
-/// so a truncated sample is always visible in the report.
 pub(super) struct Samples {
     ring: VecDeque<(Instant, Duration)>,
     capacity: usize,
@@ -48,16 +42,10 @@ impl Samples {
     pub(super) fn is_empty(&self) -> bool {
         self.ring.is_empty()
     }
-    /// Whether any retained sample's `[start, end]` window intersects one of
-    /// the checkpoint intervals. Intervals are sequential and non-overlapping,
-    /// so a binary search over their starts is exact.
     fn overlaps(start: Instant, end: Instant, intervals: &[CheckpointInterval]) -> bool {
         let index = intervals.partition_point(|interval| interval.start <= end);
         index != 0 && intervals[index - 1].end >= start
     }
-    /// Percentile-based overlap report over the retained samples. `n` is the
-    /// retained count, not the offered count; `dropped` above says how many
-    /// older samples are missing.
     pub(super) fn overlap(&self, intervals: &[CheckpointInterval]) -> Overlap {
         let mut rows: Vec<(Duration, bool)> = self
             .ring
@@ -113,7 +101,6 @@ impl Samples {
     }
 }
 
-/// A tail summary for one subset of the samples.
 pub(super) struct Tail {
     pub(super) n: u64,
     pub(super) p50_us: u64,
@@ -122,7 +109,6 @@ pub(super) struct Tail {
     pub(super) max_us: u64,
 }
 
-/// The overlap analysis for one run's samples and checkpoint intervals.
 pub(super) struct Overlap {
     pub(super) n: u64,
     pub(super) overlapping: u64,
@@ -130,21 +116,14 @@ pub(super) struct Overlap {
     pub(super) p99_us: u64,
     pub(super) p999_us: u64,
     pub(super) max_us: u64,
-    /// The worst 1% of samples by rank and how many of them overlapped a
-    /// checkpoint; likewise the worst 0.1%.
     pub(super) p99_samples: u64,
     pub(super) p99_overlapping: u64,
     pub(super) p999_samples: u64,
     pub(super) p999_overlapping: u64,
-    /// Latency of the samples that did and did not overlap a checkpoint.
     pub(super) overlap: Tail,
     pub(super) no_overlap: Tail,
 }
 
-/// The samples above the `per_mille` percentile and how many of them
-/// overlapped a checkpoint. The tail is the worst `1%` (p99) or `0.1%`
-/// (p99.9) of samples by rank, so ties at the percentile value do not
-/// inflate it.
 fn tail(rows: &[(Duration, bool)], per_mille: u64) -> (u64, u64) {
     let count = ((rows.len() as u64 * (1000 - per_mille)).div_ceil(1000)).max(1) as usize;
     let slice = &rows[rows.len().saturating_sub(count)..];
@@ -160,9 +139,6 @@ fn percentile(sorted: &[Duration], per_mille: u64) -> u64 {
     sorted[(target - 1).min(sorted.len() as u64 - 1) as usize].as_micros() as u64
 }
 
-/// SQLite's own page accounting, read from the database header without opening
-/// the engine: database size in pages and how many pages are on the freelist.
-/// `wal_bytes` is the sidecar file's size.
 pub(super) struct StorageFacts {
     pub(super) page_size: u32,
     pub(super) page_count: u32,
@@ -193,13 +169,12 @@ pub(super) fn storage_facts(path: &Path) -> Option<StorageFacts> {
     })
 }
 
-/// The peer only supplies a backlog: it keeps its history so the whole
-/// preloaded range is available to page. The file under test keeps the
-/// runtime defaults.
 fn backlog_peer_retention() -> rocky_runtime::RetentionPolicy {
     rocky_runtime::RetentionPolicy {
         automatic: false,
-        checkpoint_operations: 1_000_000,
+        checkpoint: rocky_runtime::CheckpointTrigger::AfterOperations(
+            const { std::num::NonZeroUsize::new(1_000_000).unwrap() },
+        ),
         window: 1_000_000,
         retained_bytes: 1 << 30,
         ..rocky_runtime::RetentionPolicy::default()
@@ -216,10 +191,6 @@ fn open_options(instrument: bool) -> RuntimeOptions {
     }
 }
 
-/// Fixed-rate open-loop local writes with subphase attribution, bounded
-/// latency samples and checkpoint-overlap analysis. Mirrors the Part 2
-/// `erp-open-loop` schedule so the latency is
-/// comparable, and returns the run's raw facts for the report.
 pub(super) async fn erp_open_loop(
     rate: u64,
     seconds: u64,
@@ -335,7 +306,6 @@ pub(super) async fn erp_open_loop(
     Ok(outcome)
 }
 
-/// Everything the attribution report prints, kept for the evidence writer.
 pub(super) struct Outcome {
     pub(super) histogram: Histogram,
     pub(super) samples: Samples,
@@ -474,9 +444,6 @@ impl Outcome {
     }
 }
 
-/// Same-file sync interference: fixed-rate local authoring on domain 1 while a
-/// preloaded peer backlog is applied to domain 2 of the same file. Uses only
-/// the existing trusted `operation_page`/`receive_page`/`process_pending` APIs.
 pub(super) async fn erp_sync(
     rate: u64,
     seconds: u64,

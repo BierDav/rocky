@@ -8,8 +8,6 @@ pub struct Replay {
     pub applied: AppliedOperations,
 }
 
-/// Canonical topological replay. Duplicate bytes collapse; conflicting identities
-/// and unresolved dependencies are errors, never a reported complete projection.
 pub fn replay(
     operations: impl IntoIterator<Item = Envelope>,
     policy: &StaticPolicy,

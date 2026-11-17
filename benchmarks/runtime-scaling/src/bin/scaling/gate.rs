@@ -1,5 +1,3 @@
-//! Phase 5 gate: sustained local writes on 16 domains at full durability,
-//! with incoming pages and paced writers running beside them.
 use super::{CALLER, Failure, NODE, Wide, installation, resident_mib, scope};
 use rocky_core::*;
 use rocky_runtime::{
@@ -13,21 +11,16 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 const PEER: NodeId = NodeId([4; 16]);
-/// Domains with `CLIENTS` closed-loop writers each.
 const DOMAINS: u8 = 16;
 const CLIENTS: usize = 8;
-/// Rows each local client creates before it only edits them.
 const ROWS: usize = 256;
-/// Two more domains run paced local writers.
 const PACED: [u8; 2] = [17, 18];
 const PACED_ROWS: usize = 16;
 const PACED_WRITE_PAUSE: Duration = Duration::from_secs(1);
-/// Domains that also receive a peer's operations, a page per tick.
 const INCOMING: [u8; 4] = [3, 4, 5, 6];
 const INCOMING_BATCH: usize = 320;
 const INCOMING_TICK: Duration = Duration::from_millis(100);
 
-/// Latencies in 100 µs buckets up to one second, and the exact maximum.
 pub(super) struct Histogram {
     buckets: Vec<u64>,
     count: u64,
@@ -54,7 +47,6 @@ impl Histogram {
         self.count += other.count;
         self.max = self.max.max(other.max);
     }
-    /// Upper bound of the bucket holding the quantile, in microseconds.
     pub(super) fn at(&self, percent: u64) -> u64 {
         self.at_per_mille(percent.saturating_mul(10))
     }
@@ -85,8 +77,6 @@ impl Histogram {
     }
 }
 
-/// Fixed-rate schedule for an ERP-style local write stream. Latency includes
-/// time spent behind schedule, so a busy caller cannot hide queueing.
 pub async fn erp_open_loop(
     rate: u64,
     seconds: u64,
@@ -312,8 +302,6 @@ pub(super) async fn open(
         .collect();
     Runtime::open_with_options(path, installations, options).await
 }
-/// Creates `rows` rows, then edits them in turn, until the deadline, with
-/// `pause` between writes.
 async fn client(
     replica: Replica<Wide>,
     label: String,
@@ -347,8 +335,6 @@ async fn client(
     }
     Ok(timings)
 }
-/// The peer authors a batch, then hands it over a page per tick. Returns the
-/// page latencies and the operations received.
 async fn incoming(
     from: Replica<Wide>,
     to: Replica<Wide>,
@@ -433,10 +419,6 @@ fn total(stats: &[WriterStats]) -> WriterStats {
     }
     sum
 }
-/// `gate [seconds] [files] [checkpoint_frames] [group] [directory]`. Fails on
-/// the first storage error. The last three override `RuntimeOptions`. The
-/// peer only supplies operations, so its file is not under test; one replica
-/// per file reports that file's writer.
 pub async fn run(
     seconds: u64,
     files: usize,

@@ -1,9 +1,3 @@
-//! Rocky's SQLite. Natively libsqlite3-sys compiles it; in a browser this
-//! crate does, with the same source and flags (see `build.rs`), and rusqlite
-//! links it through libsqlite3-sys without `bundled`.
-//!
-//! The preupdate hook lives here because rusqlite's `preupdate_hook` feature
-//! runs bindgen against a system `sqlite3.h`, which a browser build lacks.
 #![cfg_attr(target_feature = "atomics", feature(stdarch_wasm_atomic_wait))]
 
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
@@ -25,7 +19,6 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use rusqlite::ffi;
 use rusqlite::types::ValueRef;
 
-/// How a row changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
     Insert,
@@ -33,7 +26,6 @@ pub enum Change {
     Update,
 }
 
-/// A row change SQLite is about to make, valid during the hook call.
 pub struct PreUpdate {
     db: *mut ffi::sqlite3,
     change: Change,
@@ -44,42 +36,53 @@ impl PreUpdate {
         self.change
     }
 
-    /// The changed table's column count.
     pub fn columns(&self) -> i32 {
-        // SAFETY: `db` is the connection running this hook.
         unsafe { ffi::sqlite3_preupdate_count(self.db) }
     }
 
-    /// 0 for a statement's own change, 1 for a change of its triggers, and
-    /// so on.
     pub fn depth(&self) -> i32 {
-        // SAFETY: `db` is the connection running this hook.
         unsafe { ffi::sqlite3_preupdate_depth(self.db) }
     }
 
-    /// A column before a delete or update.
     pub fn before(&self, column: i32) -> rusqlite::Result<ValueRef<'_>> {
-        let mut value = std::ptr::null_mut();
-        // SAFETY: `db` is the connection running this hook; SQLite refuses
-        // an insert and a column out of range.
-        check(unsafe { ffi::sqlite3_preupdate_old(self.db, column, &mut value) })?;
-        // SAFETY: SQLite returned the value, valid for this call.
-        unsafe { value_ref(value) }
+        self.value(column, ffi::sqlite3_preupdate_old)
     }
 
-    /// A column after an insert or update.
     pub fn after(&self, column: i32) -> rusqlite::Result<ValueRef<'_>> {
+        self.value(column, ffi::sqlite3_preupdate_new)
+    }
+
+    fn value(&self, column: i32, read: ValueReader) -> rusqlite::Result<ValueRef<'_>> {
         let mut value = std::ptr::null_mut();
-        // SAFETY: as in `before`.
-        check(unsafe { ffi::sqlite3_preupdate_new(self.db, column, &mut value) })?;
-        // SAFETY: as in `before`.
-        unsafe { value_ref(value) }
+        check(unsafe { read(self.db, column, &mut value) })?;
+        let bytes = |pointer: *const c_void| {
+            let length = usize::try_from(unsafe { ffi::sqlite3_value_bytes(value) }).unwrap_or(0);
+            match (pointer.is_null(), length) {
+                (_, 0) => Ok(&[][..]),
+                (true, _) => Err(rusqlite::Error::SqliteFailure(
+                    ffi::Error::new(ffi::SQLITE_NOMEM),
+                    None,
+                )),
+                (false, length) => {
+                    Ok(unsafe { std::slice::from_raw_parts(pointer.cast(), length) })
+                }
+            }
+        };
+        unsafe {
+            Ok(match ffi::sqlite3_value_type(value) {
+                ffi::SQLITE_INTEGER => ValueRef::Integer(ffi::sqlite3_value_int64(value)),
+                ffi::SQLITE_FLOAT => ValueRef::Real(ffi::sqlite3_value_double(value)),
+                ffi::SQLITE_TEXT => ValueRef::Text(bytes(ffi::sqlite3_value_text(value).cast())?),
+                ffi::SQLITE_BLOB => ValueRef::Blob(bytes(ffi::sqlite3_value_blob(value))?),
+                _ => ValueRef::Null,
+            })
+        }
     }
 }
 
-/// Calls `hook(database, table, row)` before each row change of
-/// `connection`, replacing an earlier hook. The connection frees the hook
-/// when it closes.
+type ValueReader =
+    unsafe extern "C" fn(*mut ffi::sqlite3, c_int, *mut *mut ffi::sqlite3_value) -> c_int;
+
 pub fn preupdate_hook<F>(connection: &rusqlite::Connection, hook: F) -> rusqlite::Result<()>
 where
     F: FnMut(&str, &str, &PreUpdate) + Send + 'static,
@@ -99,8 +102,6 @@ where
             ffi::SQLITE_UPDATE => Change::Update,
             _ => return,
         };
-        // SAFETY: `data` is the `F` registered below, which lives until the
-        // connection closes; the names are SQLite's nul-terminated strings.
         let (hook, database, table) = unsafe {
             (
                 &mut *data.cast::<F>(),
@@ -109,20 +110,14 @@ where
             )
         };
         let row = PreUpdate { db, change };
-        // A panic must not unwind into SQLite.
-        let _ = catch_unwind(AssertUnwindSafe(|| hook(&database, &table, &row)));
+        never_unwind_into_sqlite(|| hook(&database, &table, &row));
     }
     unsafe extern "C" fn free<F>(data: *mut c_void) {
-        // SAFETY: `data` came from `Box::into_raw` below, freed only here.
         drop(unsafe { Box::from_raw(data.cast::<F>()) });
     }
 
-    // SAFETY: the handle is not closed or shared beyond these calls.
     let db = unsafe { connection.handle() };
     let data = Box::into_raw(Box::new(hook)).cast::<c_void>();
-    // SAFETY: the hook points at `data` before the client data replaces, and
-    // so frees, an earlier hook's. On failure SQLite has already freed
-    // `data`, so the hook is removed.
     unsafe {
         ffi::sqlite3_preupdate_hook(db, Some(call::<F>), data);
         let code = ffi::sqlite3_set_clientdata(db, HOOK.as_ptr(), data, Some(free::<F>));
@@ -135,39 +130,15 @@ where
 
 const HOOK: &CStr = c"rocky_sqlite.preupdate";
 
+fn never_unwind_into_sqlite(call: impl FnOnce()) {
+    let _ = catch_unwind(AssertUnwindSafe(call));
+}
+
 fn check(code: c_int) -> rusqlite::Result<()> {
     if code == ffi::SQLITE_OK {
         Ok(())
     } else {
         Err(rusqlite::Error::SqliteFailure(ffi::Error::new(code), None))
-    }
-}
-
-/// # Safety
-/// `value` is a protected SQLite value that outlives `'a`.
-unsafe fn value_ref<'a>(value: *mut ffi::sqlite3_value) -> rusqlite::Result<ValueRef<'a>> {
-    let bytes = |pointer: *const c_void| {
-        // SAFETY: SQLite returns `bytes` bytes at `pointer`, or no pointer
-        // for an empty value or when it cannot allocate.
-        let length = usize::try_from(unsafe { ffi::sqlite3_value_bytes(value) }).unwrap_or(0);
-        match (pointer.is_null(), length) {
-            (_, 0) => Ok(&[][..]),
-            (true, _) => Err(rusqlite::Error::SqliteFailure(
-                ffi::Error::new(ffi::SQLITE_NOMEM),
-                None,
-            )),
-            (false, length) => Ok(unsafe { std::slice::from_raw_parts(pointer.cast(), length) }),
-        }
-    };
-    // SAFETY: `value` is valid, per the caller.
-    unsafe {
-        Ok(match ffi::sqlite3_value_type(value) {
-            ffi::SQLITE_INTEGER => ValueRef::Integer(ffi::sqlite3_value_int64(value)),
-            ffi::SQLITE_FLOAT => ValueRef::Real(ffi::sqlite3_value_double(value)),
-            ffi::SQLITE_TEXT => ValueRef::Text(bytes(ffi::sqlite3_value_text(value).cast())?),
-            ffi::SQLITE_BLOB => ValueRef::Blob(bytes(ffi::sqlite3_value_blob(value))?),
-            _ => ValueRef::Null,
-        })
     }
 }
 
@@ -220,6 +191,11 @@ mod tests {
         };
         preupdate_hook(&connection, record(&replaced)).unwrap();
         preupdate_hook(&connection, record(&seen)).unwrap();
+        assert_eq!(
+            Arc::strong_count(&replaced),
+            1,
+            "replacing a hook frees the earlier one"
+        );
         connection
             .execute_batch(
                 "INSERT INTO rows VALUES(1, 'a'); UPDATE rows SET value = x'00' WHERE id = 1;
@@ -242,5 +218,29 @@ mod tests {
         );
         drop(connection);
         assert_eq!(Arc::strong_count(&seen), 1, "closing frees the hook");
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn a_panicking_hook_never_unwinds_into_sqlite_and_the_statement_succeeds() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE rows(id INTEGER PRIMARY KEY)")
+            .unwrap();
+        let calls = Arc::new(Mutex::new(0));
+        let counted = calls.clone();
+        preupdate_hook(&connection, move |_: &str, _: &str, _: &PreUpdate| {
+            *counted.lock().unwrap() += 1;
+            panic!("a hook bug");
+        })
+        .unwrap();
+        connection
+            .execute("INSERT INTO rows VALUES(1), (2)", [])
+            .unwrap();
+        assert_eq!(*calls.lock().unwrap(), 2, "the hook ran for every row");
+        let stored: i64 = connection
+            .query_row("SELECT count(*) FROM rows", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored, 2);
     }
 }

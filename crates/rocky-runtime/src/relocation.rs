@@ -1,8 +1,3 @@
-//! Durable placement migration: moves installed domains to another file
-//! slot while nothing has them open. The catalog records the intent, then
-//! the copy's switch, then the cleanup; an interrupted migration resumes
-//! from whichever of the three it reached. The source stays authoritative
-//! until the catalog assigns the domain to its target.
 use crate::{
     DomainPlacement, Error, database::DatabaseOwner, layout, placement,
     scoped_connection::ScopedConnection, sqlite, storage,
@@ -13,8 +8,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Test hook: kill the process after this step: 1 intent recorded, 2 copy
-/// committed, 3 assignment switched, 4 source dropped.
 #[cfg(test)]
 pub(crate) static ABORT_AFTER: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -25,10 +18,6 @@ fn reached(_step: usize) {
     }
 }
 
-/// Moves each named domain to its new file slot and returns the complete
-/// recorded assignment set. No runtime may have the catalog's affected files
-/// open. Without moves it finishes an interrupted migration and reports the
-/// recorded set.
 pub async fn migrate_placement(
     path: impl AsRef<Path>,
     moves: Vec<DomainPlacement>,
@@ -65,8 +54,6 @@ struct Migration {
     copied: bool,
 }
 
-/// Records the moves and carries out every pending migration. Updating a
-/// domain's assignment is the switch: from then on the target holds it.
 async fn run(path: &Path, moves: Vec<DomainPlacement>) -> Result<Vec<DomainPlacement>, Error> {
     let mut catalog_path = path.as_os_str().to_owned();
     catalog_path.push("-placement.sqlite");
@@ -165,10 +152,10 @@ async fn run(path: &Path, moves: Vec<DomainPlacement>) -> Result<Vec<DomainPlace
         .await?;
     }
     let mut recorded = Vec::new();
-    for (key, (file, _, _)) in assignments(&catalog).await? {
+    for (key, assignment) in assignments(&catalog).await? {
         recorded.push(DomainPlacement {
             scope: scope(&key)?,
-            file,
+            file: assignment.file,
         });
     }
     Ok(recorded)
@@ -204,8 +191,13 @@ async fn migrations(catalog: &ScopedConnection) -> Result<Vec<Migration>, Error>
         })
         .collect()
 }
-/// Scope to its slot, whether it was ever installed and whether it is ready.
-type Assignments = BTreeMap<Vec<u8>, (usize, bool, bool)>;
+#[derive(Clone, Copy)]
+struct Assignment {
+    file: usize,
+    ever_installed: bool,
+    ready: bool,
+}
+type Assignments = BTreeMap<Vec<u8>, Assignment>;
 async fn assignments(catalog: &ScopedConnection) -> Result<Assignments, Error> {
     let rows = storage::rows(
         catalog,
@@ -221,15 +213,16 @@ async fn assignments(catalog: &ScopedConnection) -> Result<Assignments, Error> {
                 SqlValue::Integer(ready),
             ] => Ok((
                 scope.clone(),
-                (*file as usize, *installed != 0, *ready != 0),
+                Assignment {
+                    file: *file as usize,
+                    ever_installed: *installed != 0,
+                    ready: *ready != 0,
+                },
             )),
             _ => Err(Error::Corrupt("placement assignment".into())),
         })
         .collect()
 }
-/// Validates the moves against the recorded assignments and records them. A domain that was never installed has no data and is
-/// reassigned at once. Nothing is recorded while a runtime holds a file or
-/// a target is foreign.
 async fn plan(
     catalog: &ScopedConnection,
     path: &Path,
@@ -241,7 +234,12 @@ async fn plan(
     let mut moving: Vec<(Vec<u8>, usize, usize, bool)> = Vec::new();
     for item in moves {
         let key = placement::key(item.scope);
-        let Some((file, installed, ready)) = recorded.get(&key).copied() else {
+        let Some(Assignment {
+            file,
+            ever_installed,
+            ready,
+        }) = recorded.get(&key).copied()
+        else {
             return Err(Error::Incompatible("unassigned scope".into()));
         };
         if item.file >= files || moving.iter().any(|(scope, ..)| *scope == key) {
@@ -249,7 +247,7 @@ async fn plan(
                 "invalid or duplicate domain placement".into(),
             ));
         }
-        if installed && !ready {
+        if ever_installed && !ready {
             return Err(Error::Incompatible(
                 "finish the domain's interrupted installation before moving it".into(),
             ));
@@ -295,9 +293,6 @@ async fn text(
 ) -> Result<Vec<Vec<SqlValue>>, Error> {
     storage::collect_rows(conn.query(sql, [value]).await?).await
 }
-/// Tables of `schema` in the domain's namespace, each with its statement.
-/// Indexes travel with their table; any other installed object refuses the
-/// move.
 async fn tables(
     conn: &ScopedConnection,
     schema: &str,
@@ -335,7 +330,6 @@ async fn tables(
     }
     Ok(found)
 }
-/// A file of this catalog, with its marker checked against `binding`.
 async fn open(
     path: &Path,
     binding: &[u8],
@@ -367,10 +361,6 @@ async fn open(
     }
     Ok((owner, conn))
 }
-/// Copies the namespace's tables, rows and indexes into `target` in one
-/// transaction. A copy left by an interrupted attempt is replaced: the
-/// source is still the domain. The source's lock is held while it is read,
-/// which keeps every writer out.
 async fn copy(
     source: &Path,
     source_binding: &[u8],
@@ -503,7 +493,6 @@ async fn copy(
     detached?;
     Ok(())
 }
-/// Drops the namespace's tables from the file the domain left.
 async fn discard(source: &Path, namespace: &str) -> Result<(), Error> {
     if !rocky_platform::fs::exists(source) {
         return Ok(());

@@ -213,8 +213,6 @@ impl Db {
             }
         }
         if let Some(anchor) = &self._anchor {
-            // Participate in WAL before the setup connection closes; an unopened
-            // pager alone does not prevent SQLite's last-WAL-connection checkpoint.
             let conn = anchor.lock().unwrap();
             conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA fullfsync=ON;")?;
             let _: i64 = conn.query_row("SELECT count(*) FROM invoices", [], |row| row.get(0))?;
@@ -222,8 +220,6 @@ impl Db {
         Ok(())
     }
 }
-// Re-scan committed transaction identities, not MAX(change_id): late commits cannot be skipped.
-// No pruning here: retained transaction IDs are part of the durable replay contract.
 async fn drain(c: &Conn, capture: &str) -> Result<(usize, usize, Vec<i64>)> {
     let query = match capture {
         "cdc" => {
@@ -243,7 +239,6 @@ async fn drain(c: &Conn, capture: &str) -> Result<(usize, usize, Vec<i64>)> {
     })
     .await?;
     let result=async {let rows=c.rows(query).await?; let mut count=0; for r in &rows {let id=&r[0]; let n:usize=r[1].parse()?;
- // Read actual payloads as well as counting them.
  if capture=="cdc" {c.rows(&format!("SELECT d.before,d.after,d.updates FROM turso_cdc d JOIN turso_cdc marker ON marker.change_txn_id=d.change_txn_id WHERE marker.table_name='txmeta' AND marker.id={id}")).await?;}
  else if capture=="trigger" {c.rows(&format!("SELECT before_value,after_value FROM staging WHERE tx={id}")).await?;}
  else {c.rows(&format!("SELECT payload FROM txmeta WHERE id={id}")).await?;}
@@ -377,7 +372,6 @@ async fn main() -> Result<()> {
         initial_storage
             .push(json!({"file":e.file_name().to_string_lossy(),"bytes":e.metadata()?.len()}));
     }
-    // Warm-up before timing, same schema and capture path.
     for db in &dbs {
         let c = db.conn(capture).await?;
         for i in 1..=10 {

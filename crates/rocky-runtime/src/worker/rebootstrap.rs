@@ -1,5 +1,3 @@
-//! Rebootstrap: exporting the checkpoint copy in pages, and importing a
-//! peer's checkpoint in place of the projection.
 use super::retention::*;
 use super::*;
 use crate::checkpoint::{CheckpointCursor, CheckpointPage, CheckpointRecord};
@@ -11,9 +9,6 @@ where
     A: StoredApplication,
     A::State: Clone,
 {
-    /// One page of the checkpoint copy's rows, while it stands at the record.
-    /// Pages continue after the last key, never by offset; an empty table is
-    /// skipped, so a page is empty only at the end.
     pub(super) async fn export(
         &self,
         after: Option<CheckpointCursor>,
@@ -156,8 +151,6 @@ where
         }
         self.retention.rebase_shadow(SetDigest::default())
     }
-    /// Stages one page in the checkpoint copy; the last page verifies the
-    /// rows and switches the projection to them.
     pub(super) async fn import(
         &mut self,
         page: CheckpointPage,
@@ -290,9 +283,6 @@ where
         self.inject_fault().await?;
         Ok((stored, Some((switched, checkpoint))))
     }
-    /// Replaces the projection with the staged checkpoint. Operations it
-    /// covers are dropped; the others, local ones included, become pending
-    /// and are applied again on top of it.
     pub(super) async fn switch(
         &mut self,
         stored: &mut Stored,
@@ -359,7 +349,6 @@ where
         })
     }
 }
-/// The primary key columns of a `WITHOUT ROWID` table, quoted, in key order.
 fn primary_key(conn: &ScopedConnection, table: &str) -> Result<Vec<String>, Error> {
     let rows = conn.connection().rows(
         "SELECT name FROM pragma_table_info(?) WHERE pk>0 ORDER BY pk",

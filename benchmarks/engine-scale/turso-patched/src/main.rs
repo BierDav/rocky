@@ -1,4 +1,3 @@
-//! The `turso-engine` adapter against patched turso_core; see ../prepare.sh.
 #[path = "../../crates/turso-engine/src/adapter.rs"]
 mod adapter;
 

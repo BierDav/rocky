@@ -1,14 +1,7 @@
-//! Order-independent digests of stored rows and operations, and the row
-//! tracker that keeps them current.
 use crate::sqlite::Value;
 use rocky_core::Commitment;
 use std::collections::HashMap;
 
-/// The sum, modulo 2^256, of the hashes of a multiset of items, and its size.
-/// Adding and removing items commute, so a digest can follow single changes
-/// and two replicas holding the same items have the same digest. It detects
-/// corruption and divergence; it is not collision resistant against a party
-/// that chooses the items.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SetDigest {
     pub sum: Commitment,
@@ -33,7 +26,6 @@ impl SetDigest {
         }
         self.count = self.count.wrapping_sub(1);
     }
-    /// Adds a difference: `other` may hold removed items as wrapped values.
     pub fn merge(&mut self, other: &Self) {
         let count = self.count.wrapping_add(other.count);
         self.add(&other.sum);
@@ -57,13 +49,10 @@ impl SetDigest {
     }
 }
 
-/// The integer the engine stores for an integral REAL; its row hook then
-/// reports that integer where a read reports the REAL.
 fn stored_integer(value: f64) -> Option<i64> {
     (value.fract() == 0.0 && value.abs() < -(i64::MIN as f64)).then_some(value as i64)
 }
 
-/// The hash of one stored row: its logical table and every column in order.
 pub fn row_hash<'a>(table: &str, values: impl Iterator<Item = &'a Value>) -> Commitment {
     let mut bytes = (table.len() as u32).to_le_bytes().to_vec();
     bytes.extend(table.as_bytes());
@@ -100,19 +89,13 @@ pub fn operation_hash(bytes: &[u8]) -> Commitment {
     rocky_core::commitment("rocky.checkpoint.operation.v1", bytes)
 }
 
-/// Digest changes of the tracked tables of one write connection, fed by the
-/// engine's row hook. Each registration gets a slot that sums the rows
-/// inserted into, minus the rows removed from, its tables.
 #[derive(Default)]
 pub struct Tracker {
-    /// Physical table name to its slot and logical name.
     tables: HashMap<String, (usize, String)>,
     slots: Vec<SetDigest>,
-    /// A changed row could not be read; the step must not commit.
     failed: bool,
 }
 impl Tracker {
-    /// Tracks `tables`, given as (physical, logical) names, in a new slot.
     pub fn register(&mut self, tables: impl Iterator<Item = (String, String)>) -> usize {
         let slot = self.slots.len();
         self.slots.push(SetDigest::default());
@@ -140,7 +123,6 @@ impl Tracker {
     pub fn fail(&mut self) {
         self.failed = true;
     }
-    /// The change since the last `take` of `slot`, or None after a failed read.
     pub fn take(&mut self, slot: usize) -> Option<SetDigest> {
         let failed = std::mem::take(&mut self.failed);
         let delta = self.slots.get_mut(slot).map(std::mem::take);
@@ -184,8 +166,6 @@ mod tests {
     }
 
     const TRACKED: [&str; 4] = ["plain", "keyed", "loose", "typed"];
-    /// The tracked digest must equal a scan after every kind of row change
-    /// the engine supports, or a checkpoint would not verify.
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn the_row_hook_follows_every_kind_of_change() {
         let conn = crate::sqlite::Connection::open_in_memory().unwrap();

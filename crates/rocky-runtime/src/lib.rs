@@ -1,4 +1,3 @@
-//! Persistent local replicas.
 mod bootstrap;
 mod checkpoint;
 mod layout;
@@ -9,7 +8,6 @@ mod read;
 mod relocation;
 mod runtime;
 mod schema_evolution;
-/// Versioned language-neutral SDK session over the precise runtime contract.
 pub mod sdk;
 pub use relocation::migrate_placement;
 pub use rocky_storage::cursor::{
@@ -17,7 +15,6 @@ pub use rocky_storage::cursor::{
     SnapshotCursor, SnapshotRows,
 };
 pub use rocky_storage::observe::{Cause, TableChange, TableObserver};
-/// How a session reads a statement's transaction control.
 pub use rocky_storage::sql::{Control as SqlControl, classify as classify_sql};
 mod tracking;
 pub use query::{
@@ -33,9 +30,9 @@ mod storage;
 mod worker;
 mod writer;
 pub use checkpoint::{
-    AuditReport, Catchup, CheckpointCursor, CheckpointHold, CheckpointInfo, CheckpointPage,
-    CheckpointRecord, Deduplication, PeerRetention, PrunedNotice, RebootstrapReport,
-    RetentionPolicy, RetentionStatus,
+    AuditReport, BehindDeclaration, Catchup, CheckpointCursor, CheckpointHold, CheckpointInfo,
+    CheckpointPage, CheckpointRecord, CheckpointTrigger, Deduplication, PeerRetention,
+    PrunedNotice, PrunedPrefixCustody, RebootstrapReport, RetentionPolicy, RetentionStatus,
 };
 pub use digest::SetDigest;
 pub use replication::{
@@ -68,14 +65,10 @@ impl Identity {
         }
     }
 }
-/// Explicit trusted development author bindings and delivery obligations.
-/// This configuration is not cryptographic authentication.
 #[derive(Clone, Debug, Default)]
 pub struct RuntimeConfig {
     pub authors: Vec<(NodeId, PrincipalId)>,
     pub delivery_targets: Vec<NodeId>,
-    /// Delivery targets trusted as full replica nodes. With a nonzero
-    /// `RetentionPolicy::custody`, only their applied frontiers move the pruned_prefix.
     pub full_nodes: Vec<NodeId>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,14 +91,11 @@ pub struct QueryIdentity {
     pub scope: Scope,
     pub name: &'static str,
 }
-/// Cursor pages cover retained records in key order. Restart a pass to discover
-/// new records inserted before its cursor. Records behind the pruned prefix are gone.
 #[derive(Clone, Debug)]
 pub struct Page<T, C> {
     pub items: Vec<T>,
     pub next: Option<C>,
 }
-/// A precise encoded application action. None targets the newly allocated ID.
 pub struct Mutation {
     pub entity: Option<OperationId>,
     pub payload: Vec<u8>,
@@ -121,7 +111,6 @@ fn mutation_hash(payload: &[u8], entity: Option<OperationId>) -> rocky_core::Com
     }
     rocky_core::commitment("rocky.mutation.input", &bytes)
 }
-/// Awaiting this receipt is optional; admitted work belongs to the runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MutationHandle(pub rocky_core::Commitment);
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,17 +127,12 @@ impl MutationReceipt {
     pub fn handle(&self) -> MutationHandle {
         self.handle
     }
-    /// The local commit, which may still be buffered. The operation is local
-    /// evidence: send operations to peers through the replication API, or
-    /// await `flushed` first.
     pub async fn committed(self) -> Result<Envelope, Error> {
         Ok(self.receipt().await?.operation)
     }
-    /// The local commit and the class it reached.
     pub async fn receipt(self) -> Result<CommittedMutation, Error> {
         self.result.await.map_err(|_| Error::Closed)?
     }
-    /// Waits until a flush covers the commit, forcing one if needed.
     pub async fn flushed(self) -> Result<Envelope, Error> {
         let domain = self.domain.clone();
         let committed = self.receipt().await?;
@@ -158,7 +142,6 @@ impl MutationReceipt {
         Ok(committed.operation)
     }
 }
-/// Lets a receipt force its domain's flush without knowing the row type.
 trait FlushDomain: Send + Sync {
     fn flush(
         &self,
@@ -185,12 +168,8 @@ enum Command<R> {
         Reply<CommittedMutation>,
     ),
     LookupMutation(MutationHandle, Reply<Option<CommittedMutation>>),
-    /// Answers once a flush covers every commit of the domain so far.
     Flush(Reply<()>),
-    /// Answered once the domain's earlier work has committed, so a snapshot
-    /// read after it includes that work.
     Query(Reply<()>),
-    /// Decodes and selects rows read beside the writer under current policy.
     Decode(Box<read::Projected>, Reply<Snapshot<R>>),
     Close(Reply<()>),
     Sync(replication::Request, Reply<replication::Response>),
@@ -199,7 +178,6 @@ enum Command<R> {
     Fault(worker::Fault, Reply<()>),
 }
 impl<R> Command<R> {
-    /// Whether the command joins the file writer's group; others only read.
     fn writes(&self) -> bool {
         match self {
             Self::Mutate(..) => true,
@@ -208,8 +186,6 @@ impl<R> Command<R> {
             _ => false,
         }
     }
-    /// Whether the reply can leave the device. It is answered only once the
-    /// file's durable watermark covers everything the domain has committed.
     fn exposes(&self) -> bool {
         match self {
             Self::Flush(_) => true,
@@ -218,7 +194,6 @@ impl<R> Command<R> {
             _ => false,
         }
     }
-    /// The kind of work a writer step runs, for `WriterStats` attribution.
     fn step_kind(&self) -> crate::writer::StepKind {
         match self {
             Self::Mutate(..) => crate::writer::StepKind::Authoring,
@@ -226,7 +201,6 @@ impl<R> Command<R> {
             _ => crate::writer::StepKind::Other,
         }
     }
-    /// Answers without running the command.
     fn refuse(self, error: Error) {
         match self {
             Self::Mutate(_, _, _, reply) => drop(reply.send(Err(error))),
@@ -251,9 +225,7 @@ struct Inner<R> {
     nonce: rocky_core::Commitment,
     submissions: std::sync::atomic::AtomicU64,
     observers: Arc<tokio::sync::Semaphore>,
-    /// Set by the file's writer once the domain is open.
     reads: std::sync::OnceLock<Arc<read::Reads>>,
-    /// Counters of the file writer that owns this domain.
     metrics: Arc<writer::Metrics>,
 }
 impl<R> Inner<R> {
@@ -316,7 +288,6 @@ where
         )
         .await
     }
-    /// A single-domain file with explicit options; `files` does not apply.
     pub async fn open_with_options(
         path: impl AsRef<Path>,
         app: A,
@@ -413,18 +384,12 @@ where
         bytes.extend(next.to_le_bytes());
         MutationHandle(rocky_core::commitment("rocky.mutation.handle", &bytes))
     }
-    /// Queues the mutation or returns `Backpressure` at once when the domain's
-    /// queue is full; `submit` waits instead.
     pub fn mutate(&self, mutation: Mutation) -> Result<MutationReceipt, Error> {
         self.mutate_with_handle(self.next_handle(), mutation)
     }
-    /// Like `mutate`, but waits for room in the domain's queue instead of
-    /// returning `Backpressure`. Dropping the future before it resolves
-    /// queues nothing.
     pub async fn submit(&self, mutation: Mutation) -> Result<MutationReceipt, Error> {
         self.submit_with_handle(self.next_handle(), mutation).await
     }
-    /// `submit` with a caller-chosen handle; see `mutate_with_handle`.
     pub async fn submit_with_handle(
         &self,
         handle: MutationHandle,
@@ -442,21 +407,15 @@ where
             domain,
         })
     }
-    /// Work admitted to this domain's queue and not yet taken by its writer.
     pub fn queue_depth(&self) -> QueueDepth {
         self.inner.commands.depth()
     }
-    /// Counters of the file writer this domain shares with its file's others.
     pub fn writer_stats(&self) -> WriterStats {
         self.inner.metrics.snapshot()
     }
-    /// The most recent checkpoint intervals with monotonic timestamps, in
-    /// completion order, and how many were dropped once the bounded log filled.
-    /// Empty unless the file was opened with `RuntimeOptions::instrument`.
     pub fn checkpoint_intervals(&self) -> (Vec<CheckpointInterval>, u64) {
         self.inner.metrics.checkpoint_intervals()
     }
-    /// Reusing a handle retries the same mutation; a different payload conflicts.
     pub fn mutate_with_handle(
         &self,
         handle: MutationHandle,
@@ -464,8 +423,6 @@ where
     ) -> Result<MutationReceipt, Error> {
         self.mutate_with_precondition(handle, mutation, None)
     }
-    /// A baseline mismatch rejects the entire mutation. Retrying a committed
-    /// handle returns its original result even after the baseline has advanced.
     pub fn mutate_with_precondition(
         &self,
         handle: MutationHandle,
@@ -484,16 +441,12 @@ where
             domain,
         })
     }
-    /// None means no local commit, including work still in the queue. Some is
-    /// local commit evidence that may still be buffered; `lookup_commit`
-    /// reports whether a flush made it durable.
     pub async fn lookup_mutation(&self, handle: MutationHandle) -> Result<Option<Envelope>, Error> {
         Ok(self
             .lookup_commit(handle)
             .await?
             .map(|committed| committed.operation))
     }
-    /// The committed operation for `handle` and the class it has reached.
     pub async fn lookup_commit(
         &self,
         handle: MutationHandle,
@@ -505,15 +458,11 @@ where
             .await?;
         result.await.map_err(|_| Error::Closed)?
     }
-    /// Waits until a flush covers every commit of this domain so far, forcing
-    /// one if needed. Flushes are shared by every domain of the file.
     pub async fn flush(&self) -> Result<(), Error> {
         let (reply, result) = oneshot::channel();
         self.inner.commands.send(Command::Flush(reply)).await?;
         result.await.map_err(|_| Error::Closed)?
     }
-    /// The logical schema this domain is bound to, as verified against the
-    /// installed tables at open. None for an application without one.
     pub fn logical_schema(&self) -> Result<Option<Arc<rocky_core::LogicalSchema>>, Error> {
         Ok(self.inner.reads()?.logical())
     }
@@ -523,10 +472,6 @@ where
     pub fn scope(&self) -> Scope {
         self.inner.scope
     }
-    /// Observes committed changes of this domain's tables by name; None is
-    /// every table. Register before reading the initial snapshot: every
-    /// later commit that changes an observed table is reported once, after
-    /// it committed, with the domain's revision after it.
     pub fn observe_tables(&self, tables: Option<&[&str]>) -> Result<observe::TableObserver, Error> {
         let labels: Option<Vec<(String, String)>> = tables.map(|tables| {
             tables
@@ -538,8 +483,6 @@ where
         self.register_tables(&mut observer, labels.as_deref())?;
         Ok(observer)
     }
-    /// Registers `observer`, then reads the revision it starts at, so a commit
-    /// published before registering is in that revision.
     pub(crate) fn register_tables(
         &self,
         observer: &mut observe::TableObserver,
@@ -549,7 +492,6 @@ where
         observer.registered_at(self.inner.scope, self.inner.revisions.borrow().get());
         Ok(())
     }
-    /// Registers immediately, before the initial query. No per-observer task.
     pub fn observe(&self) -> Result<Observer<A::Row>, Error> {
         Ok(Observer {
             _budget: self.observer_budget()?,
@@ -569,7 +511,6 @@ where
                 limit: MAX_OBSERVERS,
             })
     }
-    /// Drains admitted work before releasing the database and stopping observers.
     pub async fn close(&self) -> Result<(), Error> {
         let (reply, result) = oneshot::channel();
         self.inner.commands.send(Command::Close(reply)).await?;
@@ -581,7 +522,6 @@ where
         Ok(())
     }
 }
-/// Commands and bytes waiting in one domain's queue, with their bounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueueDepth {
     pub commands: usize,
@@ -600,7 +540,6 @@ struct CommandQueue<R> {
     bytes: Arc<tokio::sync::Semaphore>,
 }
 impl<R> CommandQueue<R> {
-    /// Bytes `command` holds of the queue's byte budget while it waits.
     fn weight(command: &Command<R>) -> Result<usize, Error> {
         let control = matches!(
             command,
@@ -640,7 +579,6 @@ impl<R> CommandQueue<R> {
             _budget: budget,
         })
     }
-    /// Waits for both the byte budget and a queue slot; never `Backpressure`.
     async fn wait(&self, command: Command<R>) -> Result<(), Error> {
         let budget = self
             .bytes
@@ -683,8 +621,6 @@ impl<R> CommandQueue<R> {
 fn enqueue<R>(sender: &CommandQueue<R>, command: Command<R>) -> Result<(), Error> {
     sender.try_send(command)
 }
-/// The whole projection: ordered after the domain's earlier work, read on
-/// the read pool, and only decoded by the writer, which owns the application.
 async fn query<R>(inner: &Inner<R>, wait: bool) -> Result<Snapshot<R>, Error> {
     barrier(&inner.commands, wait).await?;
     decode(inner, inner.reads()?.projection().await?).await

@@ -1,4 +1,3 @@
-//! Checkpoints, the pruning pruned prefix and rebootstrap of the trusted path.
 use crate::{Command, Error, Replica, SyncState, TransferPage, digest::SetDigest};
 use rocky_core::{
     AppliedFrontier, AuthorSequence, Commitment, NodeId, OperationId, Scope, SqlValue,
@@ -6,87 +5,75 @@ use rocky_core::{
 };
 use tokio::sync::oneshot;
 
-/// When a domain checkpoints and prunes its history.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RetentionPolicy {
-    /// Applied operations after the last checkpoint that start the next one.
-    /// Zero starts one only on request or at half of `retained_bytes`.
-    pub checkpoint_operations: usize,
-    /// Most recent applied operations of each author kept behind a
-    /// checkpoint, so a peer that is slightly behind catches up without one.
+    pub checkpoint: CheckpointTrigger,
     pub window: usize,
-    /// Hard bound on retained operation bytes. Half of it starts a
-    /// checkpoint; at the bound writes and receipts fail with
-    /// `Error::Retention` until pruning releases history.
     pub retained_bytes: usize,
-    /// Most recent local mutation handles kept for retries after their
-    /// operations are pruned. An older handle is forgotten.
     pub handles: usize,
-    /// Run checkpoint and prune steps beside writes. Otherwise only
-    /// `Replica::checkpoint` and `Replica::prune` run them.
     pub automatic: bool,
-    /// How long a delivery target may hold back the pruned prefix before it is
-    /// declared behind. None waits for `Replica::declare_behind`.
-    pub behind_after: Option<std::time::Duration>,
-    /// Full nodes of `RuntimeConfig::full_nodes` that must have applied an
-    /// operation before the pruned prefix passes it; other delivery targets then
-    /// do not hold it back. Zero waits for every delivery target instead.
-    pub custody: usize,
+    pub declare_behind: BehindDeclaration,
+    pub custody: PrunedPrefixCustody,
 }
+const DEFAULT_CHECKPOINT_OPERATIONS: std::num::NonZeroUsize =
+    std::num::NonZeroUsize::new(4096).unwrap();
 impl Default for RetentionPolicy {
     fn default() -> Self {
         Self {
-            checkpoint_operations: 4096,
+            checkpoint: CheckpointTrigger::AfterOperations(DEFAULT_CHECKPOINT_OPERATIONS),
             window: 1024,
             retained_bytes: 64 * crate::MAX_FRAME_BYTES,
             handles: 65_536,
             automatic: true,
-            behind_after: None,
-            custody: 0,
+            declare_behind: BehindDeclaration::ThroughDeclareBehindOnly,
+            custody: PrunedPrefixCustody::EveryDeliveryTarget,
         }
     }
 }
 
-/// Handles retained for retries when the checkpoint was made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckpointTrigger {
+    AfterOperations(std::num::NonZeroUsize),
+    OnRequestOrAtHalfOfRetainedBytes,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BehindDeclaration {
+    AfterHoldingBackFor(std::time::Duration),
+    ThroughDeclareBehindOnly,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrunedPrefixCustody {
+    EveryDeliveryTarget,
+    FullNodesApplied(std::num::NonZeroUsize),
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Deduplication {
     pub mutations: u64,
-    /// Lowest local sequence that still has a mutation handle.
     pub mutation_floor: u64,
 }
-/// The canonical record of one checkpoint. Everything up to `state` is the
-/// same on every replica that has applied `frontier`; the rest is evidence of
-/// the replica that made it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckpointRecord {
     pub scope: Scope,
-    /// Installed definition: reducer, schema and projection.
     pub definition: Commitment,
     pub versions: Versions,
     pub projection: u32,
     pub frontier: AppliedFrontier,
-    /// Highest Lamport time of an operation at or before `frontier`.
     pub clock: u64,
-    /// Every operation at or before `frontier`, by encoded bytes.
     pub history: SetDigest,
-    /// Every stored row of the checkpoint tables at `frontier`, deletion
-    /// evidence included.
     pub state: SetDigest,
     pub node: NodeId,
     pub policy_version: u64,
-    /// The trusted path has no keys; always zero.
     pub key_epoch: u64,
     pub sequence: u64,
-    /// The record this one was recomputed from; zero for the first.
     pub previous: Commitment,
     pub handles: Deduplication,
-    /// Recovery copies this checkpoint replaces, and those it leaves as the
-    /// only copy. The trusted path keeps none.
     pub superseded_recovery: Vec<Commitment>,
     pub sole_recovery: Vec<Commitment>,
 }
 const RECORD_MAGIC: &[u8] = b"rocky.checkpoint.v2";
-/// A runtime configures at most this many authors.
 const MAX_FRONTIER_AUTHORS: usize = 64;
 const NOTICE_MAGIC: &[u8] = b"rocky.pruned.v1";
 const PAGE_MAGIC: &[u8] = b"rocky.checkpoint.page.v3";
@@ -268,15 +255,11 @@ impl CheckpointRecord {
         input.end()?;
         Ok(record)
     }
-    /// The checkpoint's identity.
     pub fn commitment(&self) -> Commitment {
         rocky_core::commitment("rocky.checkpoint.record.v1", &self.encode())
     }
 }
 
-/// The wire signal for a peer behind the pruned prefix: the sender has declared
-/// the operations at or before `pruned_prefix` prunable and can no longer supply
-/// them. The peer imports `checkpoint` and syncs operations after it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrunedNotice {
     pub scope: Scope,
@@ -310,15 +293,12 @@ impl PrunedNotice {
         Ok(notice)
     }
 }
-/// What a peer gets when it asks for the operations it lacks.
 #[derive(Clone, Debug)]
 pub enum Catchup {
     Operations(TransferPage),
     BehindPruned(PrunedNotice),
 }
 
-/// A position in a checkpoint's rows: the last rowid of a table, or for a
-/// `WITHOUT ROWID` table the rows read so far and the last primary key.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CheckpointCursor {
     pub checkpoint: Commitment,
@@ -326,9 +306,6 @@ pub struct CheckpointCursor {
     pub position: i64,
     pub key: Vec<SqlValue>,
 }
-/// One bounded page of a checkpoint's rows. The first page carries the
-/// record. `rows` are stored rows of the application's checkpoint table
-/// number `table`; `start` is the position the page was read from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckpointPage {
     pub start: CheckpointCursor,
@@ -426,7 +403,6 @@ impl CheckpointPage {
     }
 }
 
-/// Primary key columns a cursor may carry; SQLite allows far fewer columns.
 const MAX_CURSOR_KEY: usize = 2000;
 fn write_value(out: &mut Writer, value: &SqlValue) {
     match value {
@@ -464,35 +440,24 @@ pub struct CheckpointInfo {
     pub commitment: Commitment,
     pub record: CheckpointRecord,
 }
-/// Why no new checkpoint can be made now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckpointHold {
-    /// The last checkpoint did not recompute to the stored projection.
     Unverifiable,
-    /// A checkpoint import is in progress.
     Rebootstrap,
-    /// An aborted import left no base to recompute from.
     NoBase,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RetentionStatus {
-    /// The latest verified checkpoint.
     pub checkpoint: Option<CheckpointInfo>,
-    /// The frontier of a checkpoint being recomputed.
     pub pending: Option<AppliedFrontier>,
     pub hold: Option<CheckpointHold>,
-    /// Operations at or before it are pruned or about to be.
     pub pruned_prefix: AppliedFrontier,
-    /// Delivery targets declared behind the pruned prefix.
     pub behind: Vec<NodeId>,
     pub retained_operations: usize,
     pub retained_bytes: usize,
     pub policy: RetentionPolicy,
-    /// What each delivery target last reported in a catch-up.
     pub peers: Vec<PeerRetention>,
 }
-/// A delivery target's last reported frontiers. Compare `applied` with the
-/// local applied frontier for its lag.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeerRetention {
     pub peer: NodeId,
@@ -501,22 +466,16 @@ pub struct PeerRetention {
     pub held: AppliedFrontier,
     pub applied: AppliedFrontier,
 }
-/// What a checkpoint import did with the operations the checkpoint lacks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RebootstrapReport {
     pub checkpoint: Commitment,
-    /// Local operations after the checkpoint, applied again on top of it.
     pub reapplied: Vec<OperationId>,
-    /// Local operations the application refused on top of it, with reasons.
     pub rejected: Vec<(OperationId, String)>,
-    /// Retained operations still waiting for a dependency.
     pub pending: Vec<OperationId>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuditReport {
     pub checkpoint: Option<Commitment>,
-    /// The projection was recomputed from the checkpoint and retained
-    /// operations. False while a hold prevents it.
     pub recomputed: bool,
     pub rows: u64,
     pub retained_operations: usize,
@@ -524,16 +483,13 @@ pub struct AuditReport {
 
 pub(crate) enum Request {
     Status,
-    /// One step of creating and recomputing a checkpoint.
     Checkpoint,
-    /// One step of declaring the pruned prefix and deleting behind it.
     Prune,
     DeclareBehind(NodeId),
     Catchup(Option<NodeId>, Box<SyncState>, Option<OperationId>),
     Export(Option<CheckpointCursor>),
     Import(Box<CheckpointPage>),
     AbortImport,
-    /// History, counters and ledgers; rows are compared off the writer.
     Audit,
     Rejected,
     Unsettled,
@@ -550,7 +506,6 @@ impl Request {
                 | Self::AbortImport
         )
     }
-    /// A notice, an operation page and checkpoint rows reach a peer.
     pub(crate) fn exposes(&self) -> bool {
         matches!(self, Self::Catchup(..) | Self::Export(_))
     }
@@ -574,7 +529,6 @@ impl Request {
         }
     }
 }
-/// Whether a stepped request has more to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step {
     More,
@@ -586,20 +540,26 @@ pub(crate) enum Response {
     Step(Step),
     Catchup(Catchup),
     Page(Box<CheckpointPage>),
-    /// Set when the import finished and switched the projection.
     Imported(Option<Commitment>),
     Audit(usize),
     Rejected(Vec<(OperationId, String)>),
-    /// Retained operations not applied: (identity, local, rejected).
-    Unsettled(Vec<(OperationId, bool, bool)>),
+    Unsettled(Vec<UnsettledOperation>),
 }
-/// Rows one audit pass compares off the writer thread.
+pub(crate) struct UnsettledOperation {
+    pub(crate) identity: OperationId,
+    pub(crate) local: bool,
+    pub(crate) rejected: bool,
+}
 #[derive(Clone)]
 pub(crate) struct RowAudit {
-    /// Physical name of the domain's `rocky_checkpoint` table.
     pub(crate) marker: String,
-    /// Logical name with the physical live and checkpoint tables.
-    pub(crate) tables: Vec<(String, String, String)>,
+    pub(crate) tables: Vec<AuditedTable>,
+}
+#[derive(Clone)]
+pub(crate) struct AuditedTable {
+    pub(crate) logical: String,
+    pub(crate) live: String,
+    pub(crate) shadow: String,
 }
 
 impl<A> Replica<A>
@@ -631,9 +591,6 @@ where
             _ => Err(Error::Corrupt("retention status".into())),
         }
     }
-    /// Makes a checkpoint of everything applied now and recomputes it from
-    /// the previous one in bounded steps, yielding between them. Fails with
-    /// `Corrupt` when the recomputed rows differ from the stored projection.
     pub async fn checkpoint(&self) -> Result<CheckpointInfo, Error> {
         self.steps(|| Request::Checkpoint).await?;
         self.retention_status()
@@ -641,30 +598,19 @@ where
             .checkpoint
             .ok_or_else(|| Error::Corrupt("checkpoint missing after its last step".into()))
     }
-    /// Advances the pruned prefix as far as the checkpoint, the retained window
-    /// and delivery acknowledgments allow, and deletes behind it in bounded
-    /// steps. Returns the pruned prefix.
     pub async fn prune(&self) -> Result<AppliedFrontier, Error> {
         self.flush().await?;
         self.steps(|| Request::Prune).await?;
         Ok(self.retention_status().await?.pruned_prefix)
     }
-    /// Stops waiting for `peer` to acknowledge history. It will be told to
-    /// import a checkpoint once it asks for operations behind the pruned prefix.
     pub async fn declare_behind(&self, peer: NodeId) -> Result<(), Error> {
         self.retention_request(Request::DeclareBehind(peer))
             .await
             .map(|_| ())
     }
-    /// The operations a peer lacks, given its `sync_state`, or the notice
-    /// that it is behind the pruned_prefix. `peer` names a delivery target, whose
-    /// applied frontier then counts as acknowledgment.
     pub async fn catch_up(&self, peer: Option<NodeId>, state: SyncState) -> Result<Catchup, Error> {
         self.catch_up_after(peer, state, None).await
     }
-    /// One bounded page of a range pass: the operations the peer lacks after
-    /// `after`, with `next` set while more remain. Start each pass without a
-    /// cursor and with the peer's current state.
     pub async fn catch_up_after(
         &self,
         peer: Option<NodeId>,
@@ -696,8 +642,6 @@ where
             _ => Err(Error::Corrupt("catch-up response".into())),
         }
     }
-    /// One page of the latest checkpoint's rows. A checkpoint made
-    /// meanwhile ends the pass with `Rejected`; start again without a cursor.
     pub async fn checkpoint_page(
         &self,
         after: Option<CheckpointCursor>,
@@ -707,11 +651,6 @@ where
             _ => Err(Error::Corrupt("checkpoint page".into())),
         }
     }
-    /// Imports one page of a peer's checkpoint. The last page verifies the
-    /// rows against the record, replaces the projection and applies again
-    /// the retained operations the checkpoint lacks; its report accounts for
-    /// every local one. Until then the replica keeps working on its own
-    /// state.
     pub async fn import_checkpoint(
         &self,
         page: CheckpointPage,
@@ -739,35 +678,30 @@ where
             checkpoint,
             reapplied: before
                 .iter()
-                .filter(|(id, local, _)| *local && !after.iter().any(|(other, _, _)| other == id))
-                .map(|(id, _, _)| *id)
+                .filter(|before| {
+                    before.local && !after.iter().any(|after| after.identity == before.identity)
+                })
+                .map(|operation| operation.identity)
                 .collect(),
             rejected,
             pending: after
                 .into_iter()
-                .filter(|(_, _, rejected)| !rejected)
-                .map(|(id, _, _)| id)
+                .filter(|operation| !operation.rejected)
+                .map(|operation| operation.identity)
                 .collect(),
         }))
     }
-    /// Drops a partly imported checkpoint. The replica keeps its projection
-    /// but has no base for checkpoints of its own until an import completes.
     pub async fn abort_rebootstrap(&self) -> Result<(), Error> {
         self.retention_request(Request::AbortImport)
             .await
             .map(|_| ())
     }
-    /// Local operations the application refused when they were applied again
-    /// after a checkpoint import, with its reasons.
     pub async fn rejected_local_operations(&self) -> Result<Vec<(OperationId, String)>, Error> {
         match self.retention_request(Request::Rejected).await? {
             Response::Rejected(operations) => Ok(operations),
             _ => Err(Error::Corrupt("rejected operations".into())),
         }
     }
-    /// Full verification, in bounded memory: recomputes the projection from
-    /// the checkpoint and retained operations, compares stored rows with
-    /// their digests, and checks retained history, handles and outgoing work.
     pub async fn audit(&self) -> Result<AuditReport, Error> {
         let retained = match self.retention_request(Request::Audit).await? {
             Response::Audit(retained) => retained,

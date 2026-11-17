@@ -1,22 +1,15 @@
-//! Probe-only application with a generated schema. It exists to measure wide
-//! schemas against today's limits and is not part of the supported API.
 use rocky_core::*;
 use std::collections::BTreeMap;
 
 pub const MAX_TABLES: u16 = 2000;
-/// Terms per projection subquery: the pinned engine overflows its stack on a
-/// flat compound of roughly 1,000 terms.
 const COMPOUND_GROUP: usize = 32;
 
-/// Generated SQL, leaked once per probe run to satisfy the `'static` contract.
 pub struct Layout {
     schema: Vec<&'static str>,
     projection: &'static str,
     names: Vec<&'static str>,
     upsert: Vec<&'static str>,
-    /// One stored row by key, in projection shape.
     select: Vec<&'static str>,
-    /// The readable rows of each table: live ones, without reducer columns.
     views: Vec<&'static str>,
 }
 #[derive(Clone, Copy)]
@@ -28,7 +21,6 @@ pub struct Row {
     pub b: i64,
     pub c: String,
     stamp: Stamp,
-    /// Deleted rows stay stored as tombstones so later edits still converge.
     deleted: bool,
 }
 #[derive(Clone, Default)]
@@ -51,7 +43,6 @@ fn leak(text: String) -> &'static str {
     Box::leak(text.into_boxed_str())
 }
 impl WideSchema {
-    /// Tables `t0..`, each with two indexed columns.
     pub fn new(tables: u16) -> Self {
         let mut layout = Layout {
             schema: Vec::new(),
@@ -107,8 +98,6 @@ impl WideSchema {
         payload.extend(c.as_bytes());
         payload
     }
-    /// Edits and deletions name their row's table: a transition must be
-    /// able to say which stored row it touches before reading any.
     pub fn set_a(table: u16, a: i64) -> Vec<u8> {
         let mut payload = vec![1];
         payload.extend(table.to_le_bytes());
@@ -172,8 +161,6 @@ impl Application for WideSchema {
     fn admit(&self, op: &Envelope, policy: &Policy) -> Result<(), Invalid> {
         self.admit_read(op.scope, op.caller, policy)
     }
-    /// Deletion is permanent; field edits are last-writer-wins. The window
-    /// holds the row only if it is stored in the named table.
     fn apply_ready(
         &self,
         state: &mut Rows,
@@ -253,7 +240,6 @@ impl StoredApplication for WideSchema {
             projection: 1,
         }
     }
-    /// Every physical row shape has a real manifest entity and fields.
     fn manifest(&self) -> Option<ApplicationManifest> {
         let mut manifest = ApplicationManifest {
             publisher: [0x57; 32],
@@ -326,8 +312,6 @@ impl StoredApplication for WideSchema {
             })
             .collect()
     }
-    /// The rows an edit or deletion reads; a created row is new, and an
-    /// invalid payload fails in the reducer.
     fn touched(&self, op: &Envelope) -> Vec<ProjectionStatement> {
         match decode(&op.payload) {
             Ok(action @ (Action::SetA(..) | Action::Delete(_))) => self

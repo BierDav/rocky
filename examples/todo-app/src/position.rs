@@ -1,19 +1,11 @@
-//! Fractional indexes: a todo's place is a base-62 string between its
-//! neighbours', so a move rewrites one row. Each key ends with its todo's
-//! own row identity as a tag, so two devices placing todos into one gap
-//! never collide and every list has one total order.
 use rocky_sdk::RowIdentity;
 
-/// Digits in ascending byte order, so SQLite's binary collation and Rust's
-/// `str` ordering agree with digit order.
 const DIGITS: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const BASE: u8 = 62;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PositionError {
-    /// `before` does not sort strictly before `after`.
     Unordered,
-    /// A stored key holds a non-digit or ends with the zero digit.
     Invalid(String),
 }
 impl std::fmt::Display for PositionError {
@@ -26,8 +18,6 @@ impl std::fmt::Display for PositionError {
 }
 impl std::error::Error for PositionError {}
 
-/// The digits of a stored key. A valid key ends with a non-zero digit: a
-/// trailing zero digit would leave no key directly below it.
 fn digits(key: &str) -> Result<Vec<u8>, PositionError> {
     let invalid = || PositionError::Invalid(key.to_owned());
     let digits = key
@@ -46,8 +36,6 @@ fn digits(key: &str) -> Result<Vec<u8>, PositionError> {
     }
 }
 
-/// The key of todo `tag` strictly between `before` and `after`; `None`
-/// stands for the list's start or end.
 pub fn between(
     before: Option<&str>,
     after: Option<&str>,
@@ -68,8 +56,6 @@ pub fn between(
         .collect())
 }
 
-/// The base-62 digits of the big-endian number `tag`, least significant
-/// first: a non-zero tag's last digit is non-zero.
 fn tag_digits(tag: &[u8]) -> Vec<u8> {
     let mut number = tag.to_vec();
     let mut digits = Vec::new();
@@ -85,9 +71,6 @@ fn tag_digits(tag: &[u8]) -> Vec<u8> {
     digits
 }
 
-/// Digits strictly between `low` and `high` that are not a prefix of
-/// `high`, so any suffix keeps them below `high`. Needs `low < high`.
-/// Ends within `low`'s length plus one, as past it the low digit is zero.
 fn middle(low: &[u8], high: Option<&[u8]>) -> Vec<u8> {
     let mut key = Vec::new();
     let mut high = high;
@@ -168,6 +151,11 @@ mod tests {
             *a < inner && inner < *b,
             "a later placement between the two concurrent ones still fits"
         );
+    }
+
+    #[test]
+    fn digits_ascend_in_byte_order_so_sqlite_and_rust_order_keys_alike() {
+        assert!(DIGITS.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]

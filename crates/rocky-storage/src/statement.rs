@@ -1,7 +1,3 @@
-//! Application statements as a SQLite-dialect syntax tree: the supported
-//! surface is checked and logical table names are resolved to physical ones
-//! by position, never by textual replacement. The engine's authorizer still
-//! decides every table access.
 use sqlparser::ast::{
     Expr, FromTable, ObjectName, ObjectNamePart, Query, SelectItem,
     SelectItemQualifiedWildcardKind, Statement, TableFactor, TableObject, Visit, Visitor,
@@ -10,7 +6,6 @@ use sqlparser::tokenizer::{Location, Span};
 use std::collections::BTreeSet;
 use std::ops::ControlFlow;
 
-/// What a statement does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Read,
@@ -18,22 +13,15 @@ pub enum Kind {
     Update,
     Delete,
 }
-/// A statement inside the supported surface, with physical table names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Analyzed {
     pub sql: String,
     pub kind: Kind,
-    /// Logical tables the statement names, lowercase and without common
-    /// table expressions. Unknown names are included as written.
     pub tables: BTreeSet<String>,
 }
-/// Why a statement never reaches the engine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Rejection {
-    /// It reaches beyond what a session may name: schema changes, pragmas,
-    /// attachments, protocol or engine objects.
     Denied(String),
-    /// It is outside the supported surface or not parsable as SQLite.
     Unsupported(String),
 }
 impl From<Rejection> for crate::sqlite::Error {
@@ -45,9 +33,7 @@ impl From<Rejection> for crate::sqlite::Error {
     }
 }
 
-/// Table-valued functions a statement may read from.
 const TABLE_FUNCTIONS: &[&str] = &["json_each", "json_tree"];
-/// Functions that reach the file, the engine or its extensions.
 pub(crate) const DENIED_FUNCTIONS: &[&str] = &[
     "load_extension",
     "readfile",
@@ -56,13 +42,9 @@ pub(crate) const DENIED_FUNCTIONS: &[&str] = &[
     "fts3_tokenizer",
     "zipfile",
 ];
-/// Prefixes of names that are never an application's.
 const RESERVED: &[&str] = &["sqlite_", "rocky_", "secure_", "pragma_"];
-/// Longest statement text analyzed.
 pub const MAX_STATEMENT_BYTES: usize = 1024 * 1024;
 
-/// Leading keywords of statements that change the schema, the engine or
-/// its attachments, denied in any spelling, even one the parser refuses.
 const FORBIDDEN: &[&str] = &["PRAGMA", "ATTACH", "DETACH", "CREATE", "DROP", "ALTER"];
 fn forbidden(sql: &str) -> bool {
     crate::scoped_connection::tokens(sql)
@@ -85,7 +67,6 @@ fn unsupported<T>(reason: impl Into<String>) -> Result<T, Rejection> {
     Err(Rejection::Unsupported(reason.into()))
 }
 
-/// Byte offsets of the parser's line and column positions.
 struct Offsets<'a> {
     sql: &'a str,
     lines: Vec<usize>,
@@ -113,7 +94,6 @@ impl<'a> Offsets<'a> {
     }
 }
 
-/// A table name as one plain identifier, or None if it is qualified.
 fn single(name: &ObjectName) -> Option<&sqlparser::ast::Ident> {
     match name.0.as_slice() {
         [ObjectNamePart::Identifier(ident)] => Some(ident),
@@ -121,7 +101,6 @@ fn single(name: &ObjectName) -> Option<&sqlparser::ast::Ident> {
     }
 }
 
-/// Names every common table expression of a statement defines.
 #[derive(Default)]
 struct Ctes(BTreeSet<String>);
 impl Visitor for Ctes {
@@ -136,7 +115,6 @@ impl Visitor for Ctes {
     }
 }
 
-/// Qualified column references of a `RETURNING` clause to one table.
 struct Qualifiers<'n> {
     table: &'n str,
     found: Vec<Span>,
@@ -171,8 +149,6 @@ impl<F: Fn(&str) -> Option<String>> Resolver<'_, F> {
         self.failure = Some(rejection);
         ControlFlow::Break(())
     }
-    /// Resolves one table reference; `aliased` keeps the logical name
-    /// visible to qualified columns when the statement gave no alias.
     fn table(&mut self, name: &ObjectName, aliased: bool) -> Result<(), Rejection> {
         if let [
             ObjectNamePart::Identifier(parent),
@@ -238,8 +214,6 @@ impl<F: Fn(&str) -> Option<String>> Resolver<'_, F> {
         self.edits.push((range, replacement));
         Ok(())
     }
-    /// A DML target: qualified columns of its `RETURNING` clause name the
-    /// physical table, since the engine does not resolve aliases there.
     fn target(
         &mut self,
         name: &ObjectName,
@@ -382,9 +356,6 @@ impl<F: Fn(&str) -> Option<String>> Visitor for Resolver<'_, F> {
     }
 }
 
-/// Checks one statement against the supported surface and resolves its
-/// tables through `physical`, which maps a lowercase logical name to the
-/// physical table, or None for a name the caller does not bind.
 pub fn analyze(
     sql: &str,
     physical: impl Fn(&str) -> Option<String>,
@@ -392,8 +363,6 @@ pub fn analyze(
     analyze_with(sql, physical, false)
 }
 
-/// Migration-only resolver: `parent.<table>` can be read, never written.
-/// The caller binds each parent name to its frozen read-only table.
 pub fn analyze_migration(
     sql: &str,
     physical: impl Fn(&str) -> Option<String>,

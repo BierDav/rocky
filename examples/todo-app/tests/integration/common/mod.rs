@@ -1,4 +1,3 @@
-//! Devices of one todo domain over an in-process link.
 use rocky_sdk::{Failure, Network, transport::memory::Hub};
 use std::{path::Path, sync::Arc};
 use todo_app::{Role, Todos, configuration, roles};
@@ -9,7 +8,6 @@ pub struct World {
     pub devices: Vec<Todos>,
 }
 impl World {
-    /// A domain whose first device, the trusted "laptop", created it.
     pub async fn new() -> Result<Self, Failure> {
         let root = tempfile::tempdir()?;
         let hub = Arc::new(Hub::default());
@@ -30,7 +28,6 @@ impl World {
     pub fn trusted(&self) -> &Todos {
         &self.devices[0]
     }
-    /// Joins a device invited by the first and meshes it with every other.
     pub async fn join(&mut self, name: &str, role: Role) -> Result<Todos, Failure> {
         let code = self.trusted().invite(role).await?;
         let joined = roles::join(
@@ -54,7 +51,6 @@ impl World {
         self.devices.push(joined.clone());
         Ok(joined)
     }
-    /// Two sync rounds over every device.
     pub async fn sync(&self) -> Result<(), Failure> {
         sync(&self.devices.iter().collect::<Vec<_>>()).await
     }
@@ -66,7 +62,6 @@ impl World {
     }
 }
 
-/// Two sync rounds over `devices` only.
 pub async fn sync(devices: &[&Todos]) -> Result<(), Failure> {
     for _ in 0..2 {
         for device in devices {

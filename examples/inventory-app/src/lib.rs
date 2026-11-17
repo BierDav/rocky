@@ -1,4 +1,3 @@
-//! Independent draft notes: a merge-only application of the trusted runtime.
 use rocky_core::*;
 use std::collections::BTreeMap;
 
@@ -124,8 +123,6 @@ impl CompiledSchema for InventoryApp {
         &["drafts"]
     }
 }
-/// Drafts whose note starts with the bound prefix, matched exactly: `LIKE`
-/// would fold case and read wildcards.
 const DRAFTS_WITH_NOTE_PREFIX: &str =
     "SELECT node,sequence,note FROM drafts WHERE substr(note,1,length(?))=?";
 

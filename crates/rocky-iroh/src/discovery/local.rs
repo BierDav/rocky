@@ -1,4 +1,3 @@
-//! One fixed DNS-SD type; topic claims are private, bounded and short lived.
 #![cfg_attr(
     target_family = "wasm",
     expect(
@@ -25,7 +24,6 @@ mod multicast;
 #[cfg(not(any(target_vendor = "apple", target_family = "wasm")))]
 use multicast::Backend;
 
-/// The fixed Bonjour type applications declare in their Info.plist.
 pub const LOCAL_SERVICE: &str = "_rocky._udp";
 const SERVICE: &str = "_rocky._udp.local.";
 const VERSION: &str = "2";
@@ -140,7 +138,6 @@ fn candidate(
     (!address.addrs.is_empty()).then_some((node, address))
 }
 
-/// Bounds candidate resolution/reporting, including unique-name churn and replay.
 struct Budget {
     since: rocky_platform::time::Instant,
     seen: Vec<String>,
@@ -173,7 +170,6 @@ fn port(endpoint: &Endpoint) -> Result<u16, Failure> {
         .ok_or("iroh has no bound socket")?
         .port())
 }
-/// A browser binds no socket to announce.
 #[cfg(target_family = "wasm")]
 fn port(_: &Endpoint) -> Result<u16, Failure> {
     Err("local network discovery is unavailable in a browser".into())

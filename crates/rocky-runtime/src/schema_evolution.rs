@@ -1,4 +1,3 @@
-//! The smallest in-place schema change: append-only non-unique indexes.
 use crate::{
     Error,
     scoped_connection::{Names, ScopedConnection, tokens},

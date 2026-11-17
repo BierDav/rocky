@@ -1,4 +1,3 @@
-//! Misbehaving local application code and lifecycle abuse.
 use crate::scenarios::{
     Failure, ITEMS, LISTS, NOTES, OPEN, Slot, finding, heal, integrity, populate,
     report_divergence, root, short, status_data, writer_all,
@@ -6,7 +5,6 @@ use crate::scenarios::{
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
-/// Statements a buggy or hostile app might run through the session's SQL.
 const HOSTILE: &[&str] = &[
     "ATTACH DATABASE '/tmp/rocky-chaos-evil.sqlite' AS evil",
     "PRAGMA writable_schema = 1",
@@ -46,8 +44,6 @@ const HOSTILE: &[&str] = &[
     "BEGIN",
 ];
 
-/// Each hostile statement, then health checks: the node writes, syncs and
-/// converges with a peer, and its file passes integrity_check.
 pub async fn app_sql_abuse() -> Result<(), Failure> {
     let root = root("sql-abuse");
     let mut a = Slot::new("a", &root);
@@ -86,7 +82,6 @@ pub async fn app_sql_abuse() -> Result<(), Failure> {
                 "application SQL `{sql}` blocks the session for {took:?}"
             ));
         }
-        // Leave no open transaction behind between probes.
         let _ = b.n().sql("ROLLBACK", json!([])).await;
         let probe = b.n().add_note(&format!("probe{i}"), "p").await;
         if let Err(e) = probe {
@@ -114,8 +109,6 @@ pub async fn app_sql_abuse() -> Result<(), Failure> {
     Ok(())
 }
 
-/// SIGKILL with an open transaction, during COMMIT and with concurrent
-/// transactions from one session; nothing applies in part.
 pub async fn kill_in_transaction() -> Result<(), Failure> {
     let root = root("kill-tx");
     let mut a = Slot::new("a", &root);
@@ -127,7 +120,6 @@ pub async fn kill_in_transaction() -> Result<(), Failure> {
     let _ = a.n().share(&lists[0], &[b.n().node_id().await]).await;
     let _ = b.n().sync().await;
 
-    // 1. Concurrent BEGINs on one session.
     let n = b.n().clone();
     let mut tasks = Vec::new();
     for t in 0..8 {
@@ -160,7 +152,6 @@ pub async fn kill_in_transaction() -> Result<(), Failure> {
     }
     let _ = b.n().sql("ROLLBACK", json!([])).await;
 
-    // 2. Kill with an open, uncommitted multi-row transaction.
     b.n().sql("BEGIN", json!([])).await.ok();
     for i in 0..5 {
         let id = b.n().call(json!({"type":"next_id","table":"notes"})).await;
@@ -178,8 +169,6 @@ pub async fn kill_in_transaction() -> Result<(), Failure> {
     if leaked.as_ref().is_ok_and(|r| !r.is_empty()) {
         finding("rows of an uncommitted transaction survive SIGKILL");
     }
-    // 3. Kill racing COMMIT, many times; every committed row must be
-    // durable once COMMIT replied, and the replica must still sync.
     let mut acknowledged = Vec::new();
     for round in 0..12 {
         let n = b.n().clone();
@@ -225,8 +214,6 @@ pub async fn kill_in_transaction() -> Result<(), Failure> {
     Ok(())
 }
 
-/// A partial replica evicts a list it wrote to, SIGKILLed mid-eviction,
-/// then resubscribes and writes again.
 pub async fn evict_kill() -> Result<(), Failure> {
     let root = root("evict-kill");
     let mut a = Slot::new("a", &root);
@@ -245,7 +232,6 @@ pub async fn evict_kill() -> Result<(), Failure> {
         let _ = p.n().add_item(&lists[0], &format!("p-item{i}")).await;
     }
     let list = json!([{"type":"integer","value":lists[0]}]);
-    // Unsynced own writes: eviction must refuse rather than lose them.
     let early = p
         .n()
         .call(json!({"type":"partition_evict","group":"list","values":list}))
@@ -266,7 +252,6 @@ pub async fn evict_kill() -> Result<(), Failure> {
         }
     }
     let _ = p.n().sync().await;
-    // Evict, killed at a random moment.
     let n = p.n().clone();
     let l2 = list.clone();
     let task = tokio::spawn(async move {
@@ -336,8 +321,6 @@ pub async fn evict_kill() -> Result<(), Failure> {
     Ok(())
 }
 
-/// The issuer prunes with window 0 after a full node acknowledged; a node
-/// that was offline (with unsent writes) then reconnects, and a third joins.
 pub async fn prune_then_rejoin() -> Result<(), Failure> {
     let root = root("prune");
     let mut a = Slot::new("a", &root);
@@ -359,7 +342,6 @@ pub async fn prune_then_rejoin() -> Result<(), Failure> {
     for n in [f.n(), c.n(), f.n(), c.n()] {
         let _ = n.sync().await;
     }
-    // C goes offline with unsent edits, also on rows A will rewrite.
     c.n()
         .call(json!({"type":"networking_control","enabled":false}))
         .await
@@ -401,7 +383,6 @@ pub async fn prune_then_rejoin() -> Result<(), Failure> {
             )))
         );
     }
-    // C returns; then is killed in the middle of its rebootstrap.
     c.n()
         .call(json!({"type":"networking_control","enabled":true}))
         .await
@@ -448,7 +429,6 @@ pub async fn prune_then_rejoin() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Graceful close while sync, reads, writes and subscriptions run.
 pub async fn close_during_sync() -> Result<(), Failure> {
     let root = root("close-sync");
     let mut a = Slot::new("a", &root);

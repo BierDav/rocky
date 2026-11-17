@@ -1,5 +1,3 @@
-//! The pruned prefix: how far it may move, what is deleted behind it,
-//! and what a peer that asks for operations gets.
 use super::retention::*;
 use super::*;
 use crate::checkpoint::{Catchup, PrunedNotice, Step};
@@ -11,7 +9,6 @@ where
     A: StoredApplication,
     A::State: Clone,
 {
-    /// Moves the pruned prefix and deletes behind it; one bounded transaction.
     pub(super) async fn prune_step(&mut self) -> Result<Step, Error> {
         let (stored, step, released) = self
             .transaction(async |worker| {
@@ -39,12 +36,6 @@ where
         self.retention.prune_wanted = step == Step::More;
         Ok(step)
     }
-    /// The pruned prefix follows the durable checkpoint, less the retained window,
-    /// as far as every delivery target has acknowledged or is declared behind.
-    /// With `behind_after`, a target that holds it back that long is declared
-    /// behind. A target acknowledged what it reported applied or held, or
-    /// holds a receipt for. Custody counts only full nodes that applied; other
-    /// targets rebootstrap from them once they fall behind.
     pub(super) async fn advance_pruned_prefix(&self, stored: &mut Stored) -> Result<bool, Error> {
         let Some((record, _)) = &self.retention.record else {
             return Ok(false);
@@ -53,7 +44,10 @@ where
             return Ok(false);
         }
         let window = self.retention.policy.window as u64;
-        let timed = self.retention.policy.behind_after;
+        let timed = match self.retention.policy.declare_behind {
+            crate::checkpoint::BehindDeclaration::AfterHoldingBackFor(after) => Some(after),
+            crate::checkpoint::BehindDeclaration::ThroughDeclareBehindOnly => None,
+        };
         let mut moved = false;
         let mut holding = BTreeSet::new();
         for (node, covered) in marks(&record.frontier) {
@@ -62,8 +56,10 @@ where
                 .saturating_sub(window)
                 .min(current + PRUNE_BATCH as u64);
             let mut limit = wanted;
-            let custody = self.retention.policy.custody;
-            if custody > 0 {
+            if let crate::checkpoint::PrunedPrefixCustody::FullNodesApplied(custody) =
+                self.retention.policy.custody
+            {
+                let custody = custody.get();
                 let mut covered = Vec::new();
                 for target in &self.config.full_nodes {
                     let peer = stored
@@ -159,8 +155,6 @@ where
         }
         Ok(moved)
     }
-    /// Records since when each target holds back the pruned prefix and declares
-    /// it behind after `after`. True if a mark changed.
     fn time_holding(
         &self,
         stored: &mut Stored,
@@ -200,10 +194,6 @@ where
         }
         changed
     }
-    /// Deletes operations, acknowledgments, outgoing entries and forgotten
-    /// handles behind the pruned prefix; a handle outlives its operation by
-    /// the retry window. Returns the released records and bytes, and whether
-    /// rows remain.
     pub(super) async fn delete_behind(
         &self,
         stored: &Stored,
@@ -268,10 +258,6 @@ where
         }
         Ok((released, more))
     }
-    /// The operations `state` lacks after `after`, or the notice that it is
-    /// behind the pruned prefix. A named target's held and applied frontiers are
-    /// kept as acknowledgment, and clear the outgoing work they cover; a peer
-    /// in contact is not silent, so its holding time restarts.
     pub(super) async fn catch_up(
         &mut self,
         peer: Option<NodeId>,
@@ -384,9 +370,6 @@ where
         self.inject_fault().await?;
         Ok((changed, Catchup::Operations(TransferPage { records, next })))
     }
-    /// Deletes the outgoing entries `peer`'s reported frontier newly covers,
-    /// after `from`, that every other delivery target holds too, by its
-    /// reported frontier or a receipt. A receipt clears its entry itself.
     async fn clear_delivered(&self, stored: &Stored, peer: NodeId, from: u64) -> Result<(), Error> {
         let local = self.identity.node;
         let to = held_at(stored, peer, local);
@@ -410,7 +393,6 @@ where
         Ok(())
     }
 }
-/// What `peer` last reported holding of `node`'s log.
 fn held_at(stored: &Stored, peer: NodeId, node: NodeId) -> u64 {
     stored
         .peers

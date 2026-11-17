@@ -1,7 +1,6 @@
 use crate::{Action, Error};
 use rocky_core::{Envelope, NodeId, PrincipalId, Scope, fixtures};
 
-/// Trusted development input, not an authenticated capability.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StaticPolicy {
     pub scope: Scope,
@@ -81,7 +80,6 @@ impl StaticPolicy {
     }
 }
 
-/// A grant pairs a row with its permitted fields; grants do not cross rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RowGrant {
     pub entity: rocky_core::OperationId,

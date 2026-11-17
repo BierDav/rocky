@@ -1,5 +1,3 @@
-//! The file writer: cross-domain groups, savepoints, publication after commit,
-//! fairness, reads beside the writer and WAL checkpoints.
 use super::*;
 use crate::scaling_option_tests::{NODE, note, open_node, pause, scope};
 use crate::worker::{Fault, GroupLog};
@@ -12,7 +10,6 @@ const FILE: &str = "writer.db";
 async fn open(dir: &Scratch, options: RuntimeOptions) -> Runtime<InventoryApp> {
     open_node(&dir.path().join(FILE), NODE, options).await
 }
-/// Both domains in one file, so their writes share the file writer's groups.
 fn one_file() -> RuntimeOptions {
     RuntimeOptions {
         files: 1,
@@ -25,9 +22,17 @@ async fn record(replica: &Replica<InventoryApp>) -> GroupLog {
     log
 }
 fn groups(log: &GroupLog) -> Vec<Vec<(usize, usize)>> {
-    log.lock().unwrap().clone()
+    log.lock()
+        .unwrap()
+        .iter()
+        .map(|group| {
+            group
+                .iter()
+                .map(|step| (step.domain, step.queue_weight))
+                .collect()
+        })
+        .collect()
 }
-/// Operations of one domain that another connection can see committed.
 async fn stored(dir: &Scratch, domain: u8) -> Vec<Vec<SqlValue>> {
     let conn = crate::scoped_connection::ScopedConnection::new(
         crate::sqlite::Connection::open_read_only(&dir.path().join(FILE)).unwrap(),
@@ -161,8 +166,6 @@ async fn nothing_of_a_group_is_observable_before_its_commit() {
     runtime.close().await.unwrap();
 }
 
-/// A group whose commit fails publishes nothing, fails every waiter and
-/// leaves each touched domain's memory equal to storage.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_failed_commit_fails_the_group_and_restores_memory() {
     let dir = Scratch::new().await;
@@ -336,9 +339,6 @@ async fn groups_are_bounded_by_queued_bytes() {
     runtime.close().await.unwrap();
 }
 
-/// Reads run on the read-only connection between groups: the reported
-/// revision is the one their rows and memory-derived fields belong to.
-/// Needs threads, which a browser Worker lacks.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reads_report_the_revision_their_rows_were_read_at() {
@@ -424,8 +424,6 @@ async fn reads_report_the_revision_their_rows_were_read_at() {
     runtime.close().await.unwrap();
 }
 
-/// A statement or read transaction left open would pin the WAL; after reads
-/// another connection can checkpoint and reset the whole log.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn reads_leave_no_transaction_or_cursor_open() {
     let dir = Scratch::new().await;
@@ -459,13 +457,11 @@ async fn reads_leave_no_transaction_or_cursor_open() {
     runtime.close().await.unwrap();
 }
 
-/// Needs threads, which a browser Worker lacks.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_wal_stays_bounded_under_sustained_writes_with_readers() {
     let dir = Scratch::new().await;
     let runtime = open(&dir, one_file()).await;
-    /// Small, so a short test crosses the checkpoint threshold many times.
     const FRAMES: i64 = 1000;
     crate::tests::fault(
         &runtime.domain(scope(1)).unwrap(),
@@ -544,9 +540,6 @@ async fn the_wal_stays_bounded_under_sustained_writes_with_readers() {
     );
 }
 
-/// While a reader pins the log, resets that wait for it back off over
-/// groups instead of stalling every group; once it ends the log resets.
-/// A second connection to the file, which the browser target keeps out.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test]
 async fn a_pinned_log_backs_off_waiting_resets() {

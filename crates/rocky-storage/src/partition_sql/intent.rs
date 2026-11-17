@@ -1,6 +1,3 @@
-//! Intents of replayed tables: a write is checked for deterministic replay
-//! and split into one copy per held partition it reaches. Reads of other
-//! partitions are evaluated once by the author and bound as values.
 use super::{
     Bindings, Checked, Filter, Proof, Refusal, TablePartitions, normalize, parse, prepare, proof,
     propagate, table, table_name, value,
@@ -13,13 +10,9 @@ use std::{
     ops::ControlFlow,
 };
 
-/// Partitions one statement may reach. Each is one frame of the
-/// transaction's bundle, so this equals rocky-secure's `MAX_BUNDLE_FRAMES`.
 pub const MAX_INTENT_PARTITIONS: usize = 64;
 
 pub use rocky_core::DETERMINISTIC_FUNCTIONS;
-/// Date and time functions: deterministic only when every argument is
-/// bound and none reads the clock or the local time zone.
 const CLOCK_FUNCTIONS: &[&str] = &[
     "date",
     "datetime",
@@ -32,48 +25,27 @@ const CLOCK_FUNCTIONS: &[&str] = &[
 const CLOCK_KEYWORDS: &[&str] = &["current_date", "current_time", "current_timestamp"];
 const CLOCK_ARGUMENTS: &[&str] = &["now", "localtime", "utc"];
 const RANDOM_FUNCTIONS: &[&str] = &["random", "randomblob"];
-/// Connection state; every `sqlite_` function reads the engine build.
 const ENVIRONMENT_FUNCTIONS: &[&str] = &["changes", "last_insert_rowid", "total_changes"];
 const TABLE_FUNCTIONS: &[&str] = &["json_each", "json_tree"];
-/// Names SQLite may resolve to the rowid, a key each replica assigns itself.
 const ROWID: &[&str] = &["rowid", "_rowid_", "oid"];
 
-/// Why a statement cannot replicate as an intent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntentRefusal {
-    /// A read, or anything else that is not INSERT, UPDATE or DELETE.
     NotAWrite,
-    /// CREATE, DROP or ALTER.
     Schema,
     Pragma,
-    /// ATTACH or DETACH.
     Attachment,
-    /// `load_extension` or a function only an extension provides.
     Extension(String),
-    /// A date or time function that may read the clock or the time zone.
     Clock(String),
     Random(String),
-    /// A function that reads the connection or the engine build.
     Environment(String),
-    /// A function outside [`DETERMINISTIC_FUNCTIONS`].
     UnknownFunction(String),
     UnknownCollation(String),
     RowId,
-    /// AUTOINCREMENT in a replayed table's schema.
     Autoincrement,
-    /// A write to a partition column would move its row between partitions.
-    PartitionMove {
-        table: String,
-        column: String,
-    },
-    /// A read of other partitions that refers to the outer statement, so it
-    /// cannot be evaluated once.
+    PartitionMove { table: String, column: String },
     CorrelatedSubquery,
-    Unavailable {
-        table: String,
-        reason: Unavailable,
-    },
-    /// The statement reaches more than [`MAX_INTENT_PARTITIONS`] partitions.
+    Unavailable { table: String, reason: Unavailable },
     TooManyPartitions(usize),
     Unsupported(String),
 }
@@ -117,7 +89,6 @@ impl From<Refusal> for IntentRefusal {
         }
     }
 }
-/// A refused statement, or the caller's failure to evaluate a read.
 #[derive(Debug)]
 pub enum SplitError<E> {
     Refused(IntentRefusal),
@@ -134,27 +105,18 @@ impl<E> From<Refusal> for SplitError<E> {
     }
 }
 
-/// One copy of a statement, limited to one held partition.
 #[derive(Debug)]
 pub struct PartitionStatement {
-    /// The partition as listed in [`TablePartitions::held`]; empty for an
-    /// unpartitioned table.
     pub partition: Vec<SqlValue>,
     pub statement: Checked,
 }
 
-/// The table a write names as its target, lowercase; `None` for anything
-/// `split_intent` would refuse before looking at a target.
 pub fn written_table(sql: &str, views: &[rocky_core::LogicalView]) -> Option<String> {
     target(&prepare(sql, views).ok()?.statement)
         .ok()
         .map(|(name, _)| name)
 }
 
-/// Checks an assertion: one deterministic `SELECT` reading only `tables`,
-/// each filtered to its held partitions whether or not the `SELECT` names
-/// them, so that it sees exactly the transaction's partition. Its
-/// arithmetic is checked.
 pub fn check_assertion(
     sql: &str,
     views: &[rocky_core::LogicalView],
@@ -198,7 +160,6 @@ pub fn check_assertion(
     Ok(prepared.check_assertion(&[], tables)?)
 }
 
-/// Refuses a replayed table's schema whose keys replicas would assign.
 pub fn check_replayed_table(create_sql: &str) -> Result<(), IntentRefusal> {
     if crate::scoped_connection::tokens(create_sql)
         .iter()
@@ -209,11 +170,6 @@ pub fn check_replayed_table(create_sql: &str) -> Result<(), IntentRefusal> {
     Ok(())
 }
 
-/// Checks a write to a replayed table and splits it into one copy per held
-/// partition it reaches, in `held` order, with its arithmetic checked; no
-/// copy means it changes nothing held here. `evaluate` runs a read of other partitions on the snapshot
-/// the statement executed on and returns its rows. Each distinct read runs
-/// once and its result is bound into every copy.
 pub fn split_intent<E>(
     sql: &str,
     params: &[SqlValue],
@@ -224,8 +180,6 @@ pub fn split_intent<E>(
     split_intent_within(sql, params, views, tables, MAX_INTENT_PARTITIONS, evaluate)
 }
 
-/// Numbers each anonymous parameter in place, so parameters keep their
-/// places wherever values are added.
 fn number_parameters(statement: &mut Statement, numbers: &BTreeMap<(u64, u64), usize>) {
     let _ = VisitMut::visit(
         statement,
@@ -237,9 +191,6 @@ fn number_parameters(statement: &mut Statement, numbers: &BTreeMap<(u64, u64), u
     );
 }
 
-/// [`split_intent`] reaching at most `limit` partitions. A migration
-/// replays each partition's copy as its own transaction, so it is not
-/// bound by one bundle's frames.
 pub fn split_intent_within<E>(
     sql: &str,
     params: &[SqlValue],
@@ -389,7 +340,6 @@ pub fn split_intent_within<E>(
     Ok(copies)
 }
 
-/// The refusal a statement's leading keyword names, if any.
 fn keyword(sql: &str) -> Option<IntentRefusal> {
     let tokens = crate::scoped_connection::tokens(sql);
     let word = tokens.iter().find(|token| !token.trim().is_empty())?;
@@ -402,7 +352,6 @@ fn keyword(sql: &str) -> Option<IntentRefusal> {
     })
 }
 
-/// The written table and, for UPDATE and DELETE, the name its row goes by.
 fn target(statement: &Statement) -> Result<(String, Option<String>), IntentRefusal> {
     let unsupported = |what: &str| {
         Err(IntentRefusal::Unsupported(format!(
@@ -457,7 +406,6 @@ fn target(statement: &Statement) -> Result<(String, Option<String>), IntentRefus
     }
 }
 
-/// Refuses written columns that are rowids or partition columns.
 fn writes(statement: &Statement, table: &str, rule: &TablePartitions) -> Result<(), IntentRefusal> {
     let mut columns: Vec<&ObjectName> = Vec::new();
     let mut assignments: Vec<&Assignment> = Vec::new();
@@ -508,7 +456,6 @@ fn writes(statement: &Statement, table: &str, rule: &TablePartitions) -> Result<
     Ok(())
 }
 
-/// The determinism rules over every expression and table source.
 struct Determinism<'a> {
     bindings: &'a Bindings<'a>,
 }
@@ -629,33 +576,23 @@ impl Visitor for Determinism<'_> {
     }
 }
 
-/// Result rows of an evaluated read.
 type Rows = Vec<Vec<SqlValue>>;
-/// Each reached held partition (None when unpartitioned) and, for an
-/// INSERT of several partitions, its rows.
 type Reached = Vec<(Option<usize>, Option<Vec<usize>>)>;
-/// Splits one statement; as a visitor, binds the reads of one copy that
-/// leave its partition.
 struct Split<'a, E> {
     tables: &'a BTreeMap<String, TablePartitions>,
     name: String,
-    /// The outer row's name, which a subquery may equate partition columns to.
     seed: Option<String>,
     rule: &'a TablePartitions,
     held: Vec<Vec<PartitionValue>>,
     waiting: Vec<Vec<PartitionValue>>,
     bindings: &'a Bindings<'a>,
-    /// The caller's parameters, then each bound value.
     values: Vec<SqlValue>,
-    /// Evaluated reads by their text.
     reads: BTreeMap<String, Rows>,
-    /// The current copy's partition, as held and normalized.
     copy: Vec<SqlValue>,
     partition: Vec<PartitionValue>,
     evaluate: &'a mut dyn FnMut(&Checked) -> Result<Rows, E>,
 }
 impl<E> Split<'_, E> {
-    /// The held partition of a tuple, refusing one that waits or is not held.
     fn locate(&self, tuple: &[SqlValue]) -> Result<usize, IntentRefusal> {
         let tuple = self
             .rule
@@ -677,8 +614,6 @@ impl<E> Split<'_, E> {
             },
         })
     }
-    /// The held partitions an UPDATE or DELETE reaches: those its filter
-    /// pins, or every held one. One that waits refuses the write.
     fn pinned(&self, selection: Option<&Expr>) -> Result<Reached, IntentRefusal> {
         if self.rule.columns.is_empty() {
             return Ok(vec![(None, None)]);
@@ -741,9 +676,6 @@ impl<E> Split<'_, E> {
         }
         Ok(reached)
     }
-    /// The held partitions an INSERT's rows go to, with the rows of each.
-    /// A SELECT of its own partition's rows stays SQL; any other is
-    /// evaluated and its rows bound.
     fn insert(&mut self, insert: &mut Insert) -> Result<Reached, SplitError<E>> {
         let unpartitioned = self.rule.columns.is_empty();
         let positions = self
@@ -829,8 +761,6 @@ impl<E> Split<'_, E> {
             .map(|(index, rows)| (Some(index), Some(rows)))
             .collect())
     }
-    /// Evaluates an INSERT source and replaces it with its rows as bound
-    /// values; returns each row's partition values.
     fn bind_rows(
         &mut self,
         source: &mut Query,
@@ -871,8 +801,6 @@ impl<E> Split<'_, E> {
         };
         Ok(tuples)
     }
-    /// Whether a query reads only the current copy's partition, so replicas
-    /// holding it can replay the read.
     fn local(&self, query: &Query) -> bool {
         let mut selects = Vec::new();
         query.with.is_none()
@@ -936,8 +864,6 @@ impl<E> Split<'_, E> {
         self.values.push(value);
         Expr::Value(Value::Placeholder(format!("?{}", self.values.len())).with_empty_span())
     }
-    /// The rows of a read, evaluated once with the held filters applied and
-    /// with checked arithmetic, since its values are bound into the intent.
     fn rows(&mut self, sql: String) -> Result<Rows, SplitError<E>> {
         if let Some(rows) = self.reads.get(&sql) {
             return Ok(rows.clone());
@@ -950,7 +876,6 @@ impl<E> Split<'_, E> {
         self.reads.insert(sql, rows.clone());
         Ok(rows)
     }
-    /// A one-value read as a bound value.
     fn scalar(&mut self, sql: String) -> Result<Expr, SplitError<E>> {
         match <[Vec<SqlValue>; 1]>::try_from(self.rows(sql)?) {
             Ok([row]) => match <[SqlValue; 1]>::try_from(row) {
@@ -1023,8 +948,6 @@ impl<E> VisitorMut for Split<'_, E> {
     }
 }
 
-/// The SELECT blocks of a query body and its derived tables, without
-/// expression subqueries; false for a shape that is never local.
 fn blocks<'q>(body: &'q SetExpr, out: &mut Vec<&'q Select>) -> bool {
     fn derived<'q>(factor: &'q TableFactor, out: &mut Vec<&'q Select>) -> bool {
         match factor {
@@ -1058,12 +981,9 @@ fn blocks<'q>(body: &'q SetExpr, out: &mut Vec<&'q Select>) -> bool {
         _ => false,
     }
 }
-/// A table function or a table of another database, which a write never
-/// targets, named without an alias.
 fn never_the_target(name: &ObjectName) -> (String, String) {
     (name.to_string(), String::new())
 }
-/// Tables a FROM item reads directly, as `(name, alias)`.
 fn sources(item: &TableWithJoins, out: &mut Vec<(String, String)>) {
     fn factor(factor: &TableFactor, out: &mut Vec<(String, String)>) {
         match factor {
@@ -1082,7 +1002,6 @@ fn sources(item: &TableWithJoins, out: &mut Vec<(String, String)>) {
         factor(&join.relation, out);
     }
 }
-/// Whether a query names a table or alias it does not define itself.
 fn correlated(query: &Query) -> bool {
     #[derive(Default)]
     struct Names {
@@ -1122,8 +1041,6 @@ fn correlated(query: &Query) -> bool {
     let _ = query.visit(&mut names);
     names.used.iter().any(|name| !names.defined.contains(name))
 }
-/// Renumbers the parameters a statement uses to `?1..` in order, returning
-/// their values.
 fn compact(statement: &mut Statement, values: &[SqlValue]) -> Result<Vec<SqlValue>, IntentRefusal> {
     fn number(value: &Value) -> Option<usize> {
         match value {

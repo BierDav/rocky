@@ -1,5 +1,3 @@
-//! Stored rows are the state: a transition loads only what it touches, and
-//! open no longer needs application state in memory.
 use super::*;
 use inventory_app::{InventoryApp, Policy};
 use rocky_core::*;
@@ -19,16 +17,11 @@ fn scope_in(domain: DomainId) -> Scope {
         domain,
     }
 }
-/// The inventory app, recording the most rows any window held and how many
-/// windows were built.
 #[derive(Clone, Default)]
 struct Watched {
     widest: Arc<AtomicUsize>,
     windows: Arc<AtomicUsize>,
-    /// Declares the drafts table `WITHOUT ROWID`.
     rowless: bool,
-    /// Adds a `tags` row per draft that a draft's deletion cascades to; a
-    /// draft edited to `drop` is deleted.
     cascading: bool,
 }
 impl Application for Watched {
@@ -211,8 +204,6 @@ async fn count_in(replica: &Replica<Watched>, scope: Scope) -> i64 {
     }
 }
 
-/// Local and incoming transitions are reduced on the one row they touch,
-/// whatever the domain holds, and open builds no window at all.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn transitions_load_only_the_rows_they_touch() {
     let dir = Scratch::new().await;
@@ -258,9 +249,6 @@ async fn transitions_load_only_the_rows_they_touch() {
     source.close().await.unwrap();
 }
 
-/// Open does not replay history: the explicit audit finds a tampered row.
-/// With default options a domain grows past the former operation quota,
-/// checkpoints and prunes on its own, and reopens from the checkpoint.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn open_does_not_replay_and_a_domain_outgrows_the_former_quota() {
     let dir = Scratch::new().await;
@@ -334,9 +322,6 @@ async fn open_does_not_replay_and_a_domain_outgrows_the_former_quota() {
     runtime.close().await.unwrap();
 }
 
-/// A checkpoint of a `WITHOUT ROWID` table is exported over several pages
-/// and imported into one domain of a multi-domain file; the other domain is
-/// untouched and every domain audits, also after reopening.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_rowless_checkpoint_imports_into_one_domain_of_a_shared_file() {
     let dir = Scratch::new().await;
@@ -400,8 +385,6 @@ async fn a_rowless_checkpoint_imports_into_one_domain_of_a_shared_file() {
     target.close().await.unwrap();
 }
 
-/// Pages of a `WITHOUT ROWID` checkpoint table continue after the last key:
-/// a late page costs what an earlier one does.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn rowless_checkpoint_pages_cost_the_same_at_any_depth() {
     let dir = Scratch::new().await;
@@ -447,10 +430,6 @@ async fn rowless_checkpoint_pages_cost_the_same_at_any_depth() {
     source.close().await.unwrap();
 }
 
-/// A full query reads its rows beside the writer: the writer only decodes
-/// them, and the frontier read with them is the writer's own, also behind
-/// a pruned prefix.
-/// A browser Worker runs the read pool on the writer's own thread.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test]
 async fn queries_run_no_statement_on_the_writer() {
@@ -485,8 +464,6 @@ async fn queries_run_no_statement_on_the_writer() {
     runtime.close().await.unwrap();
 }
 
-/// Observers see what a foreign key action changed: deleting a draft
-/// cascades to its tag, so observers of the tags hear of it.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn observers_see_rows_a_cascade_changed() {
     let dir = Scratch::new().await;

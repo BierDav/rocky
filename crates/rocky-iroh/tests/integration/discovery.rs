@@ -1,5 +1,3 @@
-//! Discovery between two endpoints of one host: over mDNS, and over the
-//! rendezvous record on a local lookup server.
 use rocky_core::net::{Failure, Found, LOCAL_PATH, PathState, TOPIC_PATH};
 use rocky_iroh::{Attachment, Discover, Options, Topic, iroh::EndpointAddr, testing::LookupServer};
 use std::time::Duration;

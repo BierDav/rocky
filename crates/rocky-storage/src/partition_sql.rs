@@ -1,4 +1,3 @@
-//! Completeness proofs for each resolved SQL table reference.
 mod intent;
 pub use intent::{
     DETERMINISTIC_FUNCTIONS, IntentRefusal, MAX_INTENT_PARTITIONS, PartitionStatement, SplitError,
@@ -21,20 +20,14 @@ pub struct PartitionColumn {
 pub struct TablePartitions {
     pub columns: Vec<PartitionColumn>,
     pub complete: bool,
-    /// Values in partition declaration order; only readable, held scopes.
     pub held: Vec<Vec<SqlValue>>,
-    /// Held partitions whose rows are not all here: a read that may reach
-    /// one is refused as incomplete, never answered as absence.
     pub waiting: Vec<Vec<SqlValue>>,
 }
 impl TablePartitions {
-    /// Whether reads of the table are rewritten to a filtered subquery.
     fn filtered(&self) -> bool {
         !self.complete && !self.columns.is_empty()
     }
 }
-/// Why a statement is refused: outside the supported surface, or a table
-/// it reads is not available on this device.
 #[derive(Debug)]
 pub enum Refusal {
     Unsupported(String),
@@ -77,14 +70,11 @@ fn parse(sql: &str) -> Result<Statement, String> {
         _ => Err("one statement required".into()),
     }
 }
-/// A checked statement and its parameters: the caller's, then the values
-/// of the held partitions a partial read is filtered to.
 #[derive(Debug)]
 pub struct Checked {
     pub sql: String,
     pub params: Vec<SqlValue>,
 }
-/// A table named plainly or in `main`, lowercase.
 fn table_name(name: &ObjectName) -> Option<String> {
     match name.0.as_slice() {
         [ObjectNamePart::Identifier(name)] => Some(name.value.to_ascii_lowercase()),
@@ -130,11 +120,9 @@ struct Bindings<'a> {
     params: &'a [SqlValue],
     placeholders: BTreeMap<(u64, u64), String>,
     values: BTreeMap<(u64, u64), SqlValue>,
-    /// The number of each anonymous `?`.
     numbers: BTreeMap<(u64, u64), usize>,
 }
 impl Bindings<'_> {
-    /// Binds each placeholder; returns the highest parameter number.
     fn bind(&mut self) -> Result<usize, String> {
         let mut next = 0usize;
         for (span, name) in &self.placeholders {
@@ -262,8 +250,6 @@ fn proof(expr: &Expr, aliases: &[(String, String)], bindings: &Bindings<'_>, to:
         _ => {}
     }
 }
-/// Inner join `ON` conditions, which constrain every participant; an outer
-/// `ON` constrains only the input it does not preserve.
 fn inner_join_conditions(from: &[TableWithJoins]) -> impl Iterator<Item = &Expr> {
     from.iter()
         .flat_map(|item| &item.joins)
@@ -456,20 +442,14 @@ impl Visitor for Checker<'_> {
         }
     }
 }
-/// A statement with its views expanded, and the tables it may reference.
 pub struct Prepared {
     statement: Statement,
     tables: BTreeSet<String>,
 }
 impl Prepared {
-    /// Conservative table references, after expanding views, for loading
-    /// only the readiness proofs a statement can use. CTE names may also be
-    /// returned.
     pub fn tables(&self) -> &BTreeSet<String> {
         &self.tables
     }
-    /// Checks every query block separately. The returned statement filters
-    /// partial reads to held scopes and binds only `params`.
     pub fn check(
         &self,
         params: &[SqlValue],
@@ -477,8 +457,6 @@ impl Prepared {
     ) -> Result<Checked, Refusal> {
         self.check_mode(params, tables, false)
     }
-    /// Checks an assertion query and appends the held-partition filters
-    /// without requiring the assertion to state the partition predicate.
     fn check_assertion(
         &self,
         params: &[SqlValue],
@@ -528,13 +506,9 @@ impl Prepared {
         })
     }
 }
-/// Reparses an expanded statement: spans identify placeholders and reads,
-/// so they must come from the statement's own text.
 fn with_own_spans(statement: &Statement) -> Result<Statement, String> {
     parse(&statement.to_string())
 }
-/// Expands `sql`'s views. Statements and their expansions are prepared
-/// once while they stay in use.
 pub fn prepare(sql: &str, views: &[rocky_core::LogicalView]) -> Result<Arc<Prepared>, Refusal> {
     let key = prepared_key(sql, views);
     if let Some((text, prepared)) = PREPARED.get(&key)
@@ -567,8 +541,6 @@ pub fn prepare(sql: &str, views: &[rocky_core::LogicalView]) -> Result<Arc<Prepa
     }
     Ok(prepared)
 }
-/// Prepared statements by a digest of their text and views; a hit is
-/// compared with the text.
 static PREPARED: crate::parsed::Recent<u64, (Arc<str>, Arc<Prepared>)> =
     crate::parsed::Recent::new();
 fn prepared_key(sql: &str, views: &[rocky_core::LogicalView]) -> u64 {
@@ -589,8 +561,6 @@ fn check(
     let checked = prepare(sql, &[])?.check(params, tables)?;
     Ok(inline(&checked))
 }
-/// The checked statement with its parameters written in, for tests that
-/// run it.
 #[cfg(test)]
 fn inline(checked: &Checked) -> String {
     let mut sql = checked.sql.clone();
@@ -619,8 +589,6 @@ fn literal(value: &SqlValue) -> String {
         ),
     }
 }
-/// Rows of the held partitions, their values written as literals: binding
-/// them would make the statement's parameters grow with the holdings.
 fn held_partitions(rule: &TablePartitions, alias: Option<&str>) -> String {
     if rule.held.is_empty() || rule.columns.is_empty() {
         return "0".into();
@@ -653,15 +621,12 @@ fn held_partitions(rule: &TablePartitions, alias: Option<&str>) -> String {
     };
     format!("{names} IN ({values})")
 }
-/// The shortest text that reads back as the same double.
 fn shortest_real_text(value: f64) -> String {
     format!("{value:?}")
 }
-/// Whether `text` holds a NUL, which would end a statement's text.
 fn would_end_statement_text(text: &str) -> bool {
     text.contains('\0')
 }
-/// A held value as SQL that reads back as the same value and storage class.
 fn held_value(value: &SqlValue) -> String {
     let hex = |bytes: &[u8]| {
         let mut hex = String::with_capacity(bytes.len() * 2 + 3);
@@ -748,8 +713,6 @@ impl Filter<'_> {
 }
 impl VisitorMut for Filter<'_> {
     type Break = String;
-    /// Numbers each anonymous `?`, so the parameters a filter adds keep
-    /// their places wherever it is inserted.
     fn pre_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<String> {
         if let Expr::Value(value) = expr
             && let Value::Placeholder(name) = &mut value.value
@@ -855,7 +818,6 @@ pub fn check_with_views(
     prepare(sql, views)?.check(params, tables)
 }
 
-/// The statement with its views expanded, and whether it named any.
 fn expand_views(
     sql: &str,
     views: &[rocky_core::LogicalView],
@@ -1194,8 +1156,6 @@ mod tests {
             );
         }
     }
-    /// Holdings past SQLite's variable limit still filter: the statement
-    /// binds the caller's parameters only, however many partitions are held.
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn holdings_past_the_variable_limit_bind_no_parameters() {
         const SQLITE_MAX_VARIABLE_NUMBER: usize = 32766;

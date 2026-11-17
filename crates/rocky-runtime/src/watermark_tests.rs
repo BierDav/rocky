@@ -1,5 +1,3 @@
-//! Buffered commits behind the durable watermark: nothing leaves the device
-//! before a flush covers it, so power loss can drop only never-exposed work.
 use super::*;
 use crate::scaling_option_tests::{NODE, PEER, note, open_node, scope};
 use crate::worker::Fault;
@@ -14,11 +12,9 @@ fn one_file() -> RuntimeOptions {
         ..RuntimeOptions::default()
     }
 }
-/// Copies the file as it stood at its latest flush here.
 async fn snapshots(replica: &Replica<InventoryApp>, directory: &Path) {
     crate::tests::fault(replica, Fault::SnapshotAtFlush(directory.to_path_buf())).await;
 }
-/// Rows of `domain` as power loss after the latest flush would leave them.
 async fn flushed(snapshot: &Path, file: &str, domain: u8, sql: &str) -> Vec<Vec<SqlValue>> {
     let copy = Scratch::new().await;
     for name in [file.to_string(), format!("{file}-wal")] {
@@ -99,8 +95,6 @@ async fn a_buffered_commit_is_never_reported_as_flushed() {
     full.close().await.unwrap();
 }
 
-/// Every exposure point answers only after a flush covering what it shows:
-/// the latest flushed copy of the file already holds it.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn nothing_leaves_the_device_before_a_flush_covers_it() {
     let dir = Scratch::new().await;
@@ -166,7 +160,6 @@ async fn nothing_leaves_the_device_before_a_flush_covers_it() {
     peer.close().await.unwrap();
 }
 
-/// Restores the files as they stood at the latest flush, as power loss would.
 fn lose_unflushed(snapshot: &Path, live: &Path, file: &str) {
     for suffix in ["", "-wal", "-shm"] {
         let _ = rocky_platform::fs::remove_file(live.join(format!("{file}{suffix}")));
@@ -179,8 +172,6 @@ fn lose_unflushed(snapshot: &Path, live: &Path, file: &str) {
     }
 }
 
-/// Local writes stay buffered while incoming pages and strong commands run
-/// on the same domain, and each exposure is on the device when it returns.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn exposure_stays_behind_the_watermark_with_incoming_work() {
     let dir = Scratch::new().await;
@@ -223,8 +214,6 @@ async fn exposure_stays_behind_the_watermark_with_incoming_work() {
     runtime.close().await.unwrap();
 }
 
-/// Replaces the earlier fork demonstration: losing buffered commits can no
-/// longer fork an author log, because nothing above the watermark was sent.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn losing_unflushed_commits_drops_only_unexposed_work_and_never_forks() {
     let dir = Scratch::new().await;

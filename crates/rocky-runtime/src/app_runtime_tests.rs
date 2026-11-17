@@ -72,8 +72,6 @@ async fn note(replica: &Replica<InventoryApp>, text: &str) -> Envelope {
         .await
         .unwrap()
 }
-/// Domains in one file share the file writer and its groups, but keep their
-/// own revisions and author cursors.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn shared_file_domains_share_groups_with_independent_revisions_and_author_cursors() {
     let dir = Scratch::new().await;
@@ -396,8 +394,6 @@ async fn dynamic_sql_sees_only_current_authorized_rows() {
     );
     runtime.close().await.unwrap();
 }
-/// While the file writer holds its group open, another connection's write
-/// is refused as retryable busy and its reads see only committed state.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn scoped_busy_writes_and_pending_receipts_are_observable() {
     let dir = Scratch::new().await;

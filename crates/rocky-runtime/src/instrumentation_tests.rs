@@ -1,4 +1,3 @@
-//! Subphase attribution, checkpoint-interval recording and the bounded log.
 use super::*;
 use crate::scaling_option_tests::{NODE, note, open_node, scope};
 use crate::worker::Fault;
@@ -37,9 +36,6 @@ async fn subphases_are_zero_by_default_and_recorded_when_instrumented() {
         note(&replica, index, "on").committed().await.unwrap();
     }
     let stats = replica.writer_stats();
-    /// Whether each subphase measures time on its own. A browser coarsens its
-    /// clock to tens of microseconds, so there a short one can measure zero;
-    /// together they still record time.
     const EACH_SUBPHASE_MEASURABLE: bool = !cfg!(target_family = "wasm");
     if EACH_SUBPHASE_MEASURABLE {
         assert!(stats.admission_micros > 0, "{stats:?}");
@@ -65,7 +61,6 @@ async fn checkpoint_intervals_are_recorded_in_monotonic_order_when_instrumented(
     let dir = rocky_platform::fs::Scratch::new().await;
     let runtime = open_node(&dir.path().join("ckpt.db"), NODE, instrumented()).await;
     let replica = runtime.domain(scope(1)).unwrap();
-    /// Small enough that a short write burst crosses it several times.
     const FRAMES: i64 = 10;
     crate::tests::fault(&replica, Fault::CheckpointFrames(FRAMES)).await;
     for index in 0..400u16 {

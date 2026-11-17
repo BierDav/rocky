@@ -1,6 +1,3 @@
-//! The browser's clock and timers. One `setTimeout` covers the earliest
-//! deadline; each `Sleep` is a key into this worker's timer table, so it is
-//! `Send` like tokio's and fits the shared `Send` futures.
 use std::{
     cell::RefCell,
     collections::BTreeMap,
@@ -21,7 +18,6 @@ thread_local! {
 struct Timers {
     next: u64,
     waiting: BTreeMap<(Instant, u64), Waker>,
-    /// The browser timeout armed for the earliest deadline.
     armed: Option<(Instant, i32)>,
 }
 
@@ -29,7 +25,6 @@ fn global() -> web_sys::WorkerGlobalScope {
     js_sys::global().unchecked_into()
 }
 
-/// Wakes every expired timer and arms the browser for the next deadline.
 fn fire() {
     let wakers = TIMERS.with(|timers| {
         let mut timers = timers.borrow_mut();
@@ -62,19 +57,14 @@ fn arm(timers: &mut Timers) {
     }
 }
 
-/// The browser counts whole milliseconds, so `delay` rounds up and a timer
-/// never fires before its deadline.
 fn browser_timeout_millis(delay: Duration) -> i32 {
     i32::try_from(delay.as_micros().div_ceil(1000)).unwrap_or(i32::MAX)
 }
 
-/// A future that completes at its deadline.
 #[derive(Debug)]
 pub struct Sleep {
     deadline: Instant,
     key: Option<u64>,
-    /// Waits for the browser's timer even when the deadline has passed,
-    /// so the event loop runs once.
     turn: bool,
 }
 impl Sleep {
@@ -84,7 +74,6 @@ impl Sleep {
     pub fn is_elapsed(&self) -> bool {
         Instant::now() >= self.deadline
     }
-    /// Moves the deadline, like `tokio::time::Sleep::reset`.
     pub fn reset(mut self: Pin<&mut Self>, deadline: Instant) {
         self.cancel();
         self.deadline = deadline;
@@ -131,7 +120,6 @@ pub fn sleep_until(deadline: Instant) -> Sleep {
         turn: false,
     }
 }
-/// Completes after one turn of the browser's event loop.
 pub(crate) fn turn() -> Sleep {
     Sleep {
         deadline: Instant::now(),
@@ -144,7 +132,6 @@ pub fn sleep(duration: Duration) -> Sleep {
 }
 
 pub mod error {
-    /// The deadline passed before the future completed.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Elapsed(());
     impl std::fmt::Display for Elapsed {
@@ -161,7 +148,6 @@ pub mod error {
     pub(super) const ELAPSED: Elapsed = Elapsed(());
 }
 
-/// `future`, or `Elapsed` once `deadline` passes.
 #[derive(Debug)]
 pub struct Timeout<F> {
     future: Pin<Box<F>>,
@@ -189,15 +175,12 @@ pub fn timeout<F: Future>(duration: Duration, future: F) -> Timeout<F> {
     timeout_at(Instant::now() + duration, future)
 }
 
-/// What an `Interval` does about ticks it missed. Only `Skip` and `Burst`
-/// (tokio's default) are used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissedTickBehavior {
     Burst,
     Skip,
 }
 
-/// Ticks every `period`; the first tick completes immediately.
 #[derive(Debug)]
 pub struct Interval {
     next: Instant,
@@ -233,5 +216,19 @@ pub fn interval(period: Duration) -> Interval {
         next: Instant::now(),
         period,
         missed: MissedTickBehavior::Burst,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn browser_timeouts_round_up_so_a_timer_never_fires_early() {
+        assert_eq!(browser_timeout_millis(Duration::ZERO), 0);
+        assert_eq!(browser_timeout_millis(Duration::from_micros(1)), 1);
+        assert_eq!(browser_timeout_millis(Duration::from_millis(1)), 1);
+        assert_eq!(browser_timeout_millis(Duration::from_micros(1001)), 2);
+        assert_eq!(browser_timeout_millis(Duration::MAX), i32::MAX);
     }
 }

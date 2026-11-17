@@ -1,4 +1,3 @@
-//! Standard DNS-SD on platforms without Apple's system responder.
 use super::{Candidate, Failure, Properties, SERVICE, candidate};
 use iroh::EndpointAddr;
 use mdns_sd::{Receiver, ScopedIp, ServiceDaemon, ServiceEvent, ServiceInfo};

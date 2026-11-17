@@ -1,5 +1,3 @@
-//! Trusted, full and partial devices over an in-process link: lists reach
-//! the devices their roles promise, and offline edits converge.
 use crate::common;
 
 use common::{World, titles};

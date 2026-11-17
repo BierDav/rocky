@@ -1,4 +1,3 @@
-//! Entity-count sweep through signed manifests, grant verification and encrypted scopes.
 use super::{Failure, line, resident_mib};
 use employees_app::Employees;
 use rocky_core::*;

@@ -1,5 +1,3 @@
-//! fjall: LSM keyspaces with optimistic transactions, tables and indexes built by hand.
-//! `KV_LAYOUT=prefixed` keeps all rows in one keyspace and all index entries in another.
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,7 +11,6 @@ const SIGN: u64 = 1 << 63;
 const PK: usize = 24;
 const INDEX_A: u8 = 0;
 const INDEX_B: u8 = 1;
-/// Row value: node, seq, a, b, lamport, stamp_node, stamp_seq, c length, c.
 const A_AT: usize = 24;
 const B_AT: usize = 32;
 const C_AT: usize = 76;
@@ -28,8 +25,7 @@ fn env_u64(name: &str, default: u64) -> u64 {
 fn prefixed() -> bool {
     std::env::var("KV_LAYOUT").is_ok_and(|layout| layout == "prefixed")
 }
-/// `FJALL_CHECKPOINT=persist` only syncs the journal instead of flushing memtables.
-fn persist_only() -> bool {
+fn checkpoint_only_syncs_the_journal() -> bool {
     std::env::var("FJALL_CHECKPOINT").is_ok_and(|mode| mode == "persist")
 }
 
@@ -74,7 +70,6 @@ struct Spaces {
     replica: Vec<OptimisticTxKeyspace>,
 }
 
-/// Where a data table lives: keyspaces and the key prefixes inside them.
 struct Place<'a> {
     rows: &'a OptimisticTxKeyspace,
     index_a: &'a OptimisticTxKeyspace,
@@ -84,7 +79,6 @@ struct Place<'a> {
 impl Spaces {
     fn place(&self, table: u64) -> Result<Place<'_>> {
         let at = if self.prefixed { 0 } else { table as usize };
-        // Both indexes share one keyspace in the prefixed layout.
         let index_b = if self.prefixed {
             &self.index_a
         } else {
@@ -156,7 +150,6 @@ impl Place<'_> {
         }
         tx.insert(self.index(index), self.index_key(index, new, pk), []);
     }
-    /// Write a row and its index entries; `unique` rejects an existing primary key.
     fn put(
         &self,
         tx: &mut OptimisticWriteTx,
@@ -198,7 +191,6 @@ struct FjallConn {
 }
 
 impl Fjall {
-    /// Opens the store; keyspaces are created on first use and found again afterwards.
     fn new(config: &Config) -> Result<Self> {
         let db = OptimisticTxDatabase::builder(config.dir.join("fjall"))
             .cache_size(env_u64("FJALL_CACHE_MIB", 512) << 20)
@@ -241,9 +233,8 @@ impl Fjall {
     }
 }
 
-/// Flush every non-empty memtable to a table file, then sync the journal.
 fn flush(db: &OptimisticTxDatabase, spaces: &Spaces) -> Result<()> {
-    if !persist_only() {
+    if !checkpoint_only_syncs_the_journal() {
         for space in spaces.all() {
             space.inner().rotate_memtable()?;
         }
@@ -257,7 +248,6 @@ fn flush(db: &OptimisticTxDatabase, spaces: &Spaces) -> Result<()> {
     Ok(db.persist(PersistMode::SyncAll)?)
 }
 
-/// A clean shutdown leaves no journal to replay on the next open.
 impl Drop for Fjall {
     fn drop(&mut self) {
         let _ = flush(&self.db, &self.spaces);
@@ -270,7 +260,7 @@ impl Engine for Fjall {
 
     fn version() -> String {
         let layout = if prefixed() { "prefixed" } else { "per-table" };
-        let checkpoint = if persist_only() { "persist" } else { "flush" };
+        let checkpoint = if checkpoint_only_syncs_the_journal() { "persist" } else { "flush" };
         format!(
             "3.1.12 occ {layout} cache={}MiB journal={}MiB checkpoint={checkpoint}",
             env_u64("FJALL_CACHE_MIB", 512),
@@ -302,7 +292,6 @@ impl Engine for Fjall {
 }
 
 impl FjallConn {
-    /// One optimistic transaction, rerun from the start when it conflicts.
     fn write<T>(
         &mut self,
         body: impl Fn(&Spaces, &mut OptimisticWriteTx) -> Result<T>,
@@ -320,7 +309,6 @@ impl FjallConn {
         }
     }
 
-    /// Scan index keys in `low..=high`, fetch each row by primary key, decode `(seq, c)`.
     fn through_index(
         &mut self,
         table: u64,
@@ -438,7 +426,6 @@ impl Conn for FjallConn {
         })
     }
 
-    /// The journal is only truncated once the memtables it covers are flushed.
     fn checkpoint(&mut self) -> Result<()> {
         flush(&self.db, &self.spaces)
     }

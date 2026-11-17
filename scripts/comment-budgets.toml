@@ -1,5 +1,13 @@
-# Plain (non-doc) comments each Rust package may still hold while they move into
-# types, named items with doc comments, tests and assertion messages.
-# scripts/lint --fix lowers a budget after cleanup and drops a package at zero;
-# never raise one. A package missing here may hold no plain comments.
+# Temporary: comment lines, doc comments and #[doc = ...] text included, that
+# each Rust package still holds while its meaning moves into types, guards,
+# names and tests. scripts/lint --fix lowers a budget after cleanup, drops a
+# package at zero and deletes this file once none is left; never raise one.
+# A package missing here may hold no comments.
 
+rocky-coordinator = 323
+rocky-core = 673
+rocky-credentials = 1494
+rocky-peer = 3
+rocky-sdk = 4278
+rocky-secure = 4725
+rocky-voter = 159

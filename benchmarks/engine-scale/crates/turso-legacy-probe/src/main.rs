@@ -1,6 +1,3 @@
-//! The pinned engine without Rocky, at target size; see benchmarks/engine-scale/RESULTS.md.
-//! `cargo run --release -p turso-legacy-probe -- load <dir> <tables> <rows>`
-//! then `... -- reopen <dir> <tables> <rows>` in a fresh process.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -8,7 +5,6 @@ use std::time::{Duration, Instant};
 type Failure = Box<dyn std::error::Error>;
 
 const NODE: [u8; 16] = [3; 16];
-/// Sequences above this are written by the measurements, not by the load.
 const EXTRA: i64 = 1 << 40;
 
 fn resident_mib() -> u64 {
@@ -80,7 +76,6 @@ fn values(id: i64) -> [turso::Value; 8] {
     ]
 }
 
-/// What another thread sees while the loader commits and checkpoints.
 #[derive(Default)]
 struct Bystander {
     micros: Vec<u128>,
@@ -284,7 +279,6 @@ async fn load(dir: &std::path::Path, tables: u64, rows: u64) -> Result<(), Failu
         .build()
         .await?;
     let conn = db.connect()?;
-    // Same order as the runtime: schema in WAL mode, then MVCC.
     pragma(&conn, "PRAGMA journal_mode=wal").await?;
     pragma(&conn, "PRAGMA synchronous=0").await?;
     let started = Instant::now();

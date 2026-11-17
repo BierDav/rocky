@@ -1,7 +1,3 @@
-//! Bound reads against stored rows. A read names one authorized view; the
-//! view's `SELECT` replaces that name as a subquery, so the filter runs in the
-//! engine with the table's indexes and no row is copied. Reads use a pool of
-//! read-only connections beside the file's writer.
 use crate::{
     BoundQuery, Completeness, Error, ReadCursor, ReadOptions, ReadSnapshot,
     scoped_connection::{Names, tokens},
@@ -15,47 +11,34 @@ use std::{
 };
 use tokio::sync::watch;
 
-/// Read connections one file keeps beside its writer.
 const POOL_CONNECTIONS: usize = 4;
-/// Result bytes one read may return.
 pub(crate) const MAX_READ_BYTES: usize = crate::MAX_FRAME_BYTES;
-/// Ordering and key columns one keyset cursor may hold.
+pub(crate) const MAX_PAGE_ROWS: usize = 1024;
+const MAX_READ_SQL_BYTES: usize = 8192;
 pub(crate) const MAX_KEYSET_COLUMNS: usize = 16;
 
 struct View {
-    /// The view's `SELECT` over physical tables, with its values inlined.
     subquery: String,
-    /// Physical tables the subquery reads.
     tables: Vec<String>,
-    /// Declared unique, never-NULL columns; empty disables keyset cursors.
     key: Vec<String>,
-    /// Columns declared never NULL, the key included.
     not_null: Vec<String>,
 }
-/// A read rewritten onto its view.
 #[derive(Clone)]
 struct Rewritten {
     sql: String,
     view: Option<usize>,
-    /// Trailing result columns added for the cursor; `None` if the query can
-    /// only continue by offset.
     hidden: Option<usize>,
 }
-/// The ordering of a query that can continue by key.
 struct Keyset {
-    /// Ordering columns as written, then the key columns that complete them.
     terms: Vec<String>,
-    /// How many of `terms` the query's own `ORDER BY` names.
     ordered: usize,
     descending: bool,
-    /// Token indexes of `WHERE`, if present, and of `ORDER`.
     filter: Option<usize>,
     order: usize,
 }
 fn wrong_cursor() -> Error {
     Error::Rejected("read cursor belongs to another query".into())
 }
-/// One domain's authorized views and the statements for a read's metadata.
 pub(crate) struct ReadPlan {
     views: Vec<View>,
     by_name: HashMap<String, usize>,
@@ -84,13 +67,9 @@ fn reserved(name: &str) -> bool {
 fn unquoted(token: &str) -> &str {
     token.trim_matches(['"', '`', '[', ']'])
 }
-/// Whether `?` followed by `next` is a numbered parameter (`?NNN`), which
-/// names its position and so would not bind values in their given order.
 fn is_numbered_parameter(token: &str, next: Option<&str>) -> bool {
     token == "?" && next.is_some_and(|next| next.as_bytes()[0].is_ascii_digit())
 }
-/// The shortest text that reads back as the same double; infinities become
-/// literals that overflow to them.
 fn real_literal(value: f64) -> String {
     match value {
         value if value.is_finite() => format!("{value:?}"),
@@ -98,7 +77,6 @@ fn real_literal(value: f64) -> String {
         _ => "-9e999".into(),
     }
 }
-/// A value as an SQL literal. Only installed view values are inlined.
 fn literal(value: &SqlValue) -> Result<String, Error> {
     Ok(match value {
         SqlValue::Null => "NULL".into(),
@@ -201,14 +179,9 @@ impl ReadPlan {
     pub(crate) fn views(&self) -> usize {
         self.views.len()
     }
-    /// Views that read the logical table `table`.
     pub(crate) fn reading<'a>(&'a self, table: &'a str) -> impl Iterator<Item = usize> + 'a {
         self.by_source.get(table).into_iter().flatten().copied()
     }
-    /// The read with its table replaced by the authorized view. A query that
-    /// can continue by key also returns its ordering columns after its own
-    /// and is ordered by the view's key last; `seek` then starts it after the
-    /// row with those ordering values, which are bound before the query's own.
     fn rewrite(&self, sql: &str, seek: Option<usize>) -> Result<Rewritten, Error> {
         let key = (sql.to_string(), seek);
         let mut cache = self
@@ -294,15 +267,10 @@ impl ReadPlan {
             hidden: Some(keyset.terms.len()),
         })
     }
-    /// The view a query reads, if it is valid and names one.
     pub(crate) fn view(&self, sql: &str) -> Option<usize> {
         self.rewrite(sql, None).ok().and_then(|read| read.view)
     }
 }
-/// The comparison that starts a page after the row whose ordering values are
-/// bound to its parameters. A row value comparison is one index range, unlike
-/// its OR form; it goes before the query's own filter because, of two lower
-/// bounds on an indexed column, the engine seeks with the first.
 fn seek_predicate(columns: &str, descending: bool, values: usize) -> String {
     format!(
         "({columns}){}({})",
@@ -310,12 +278,6 @@ fn seek_predicate(columns: &str, descending: bool, values: usize) -> String {
         vec!["?"; values].join(",")
     )
 }
-/// The ordering of a query whose pages can continue by key: `*` or a column
-/// list without aliases or expressions (an alias could shadow an ordering
-/// column), no numbered parameters (the cursor's values bind first, by
-/// position), no grouping or limit, and an `ORDER BY` of plain columns in one
-/// direction. Descending orders must name only columns declared never NULL,
-/// because the engine sorts NULL last there and a seek would drop those rows.
 fn keyset(tokens: &[String], significant: &[usize], from: usize, view: &View) -> Option<Keyset> {
     if view.key.is_empty() {
         return None;
@@ -405,7 +367,6 @@ fn keyset(tokens: &[String], significant: &[usize], from: usize, view: &View) ->
         order: significant[order],
     })
 }
-/// The statement restrictions for dynamic reads.
 fn validate(sql: &str) -> Result<(), Error> {
     let tokens: Vec<_> = tokens(sql)
         .into_iter()
@@ -472,8 +433,6 @@ fn validate(sql: &str) -> Result<(), Error> {
     }
     Ok(())
 }
-/// Whether a query without `FROM`, or with one named source after it: several
-/// sources could produce an unbounded Cartesian evaluation.
 fn reads_one_source(tokens: &[String]) -> bool {
     let Some(start) = tokens
         .iter()
@@ -499,16 +458,12 @@ fn reads_one_source(tokens: &[String]) -> bool {
 struct Pooled {
     path: Option<PathBuf>,
     idle: Vec<sqlite::Connection>,
-    /// Connections handed to running reads.
     out: usize,
     closed: bool,
 }
-/// Read-only connections of one file. The file's writer attaches the path
-/// once the file is installed and closes the pool before releasing the file.
 pub(crate) struct ReadPool {
     permits: Arc<tokio::sync::Semaphore>,
     state: Mutex<Pooled>,
-    /// Some connection is out with a running read.
     out: rocky_platform::task::Held,
 }
 impl ReadPool {
@@ -529,8 +484,6 @@ impl ReadPool {
             state.path = Some(path);
         }
     }
-    /// Refuses new reads, waits for running ones and closes every connection.
-    /// A running read is bounded by `READ_TRANSACTION_BOUND`.
     pub(crate) fn close(&self) {
         self.permits.close();
         self.state
@@ -562,7 +515,6 @@ impl ReadPool {
         self.out.set(true);
         Ok(connection)
     }
-    /// Returns a connection; one a read panicked on is closed, not reused.
     fn checkin(&self, connection: sqlite::Connection, reuse: bool) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.out -= 1;
@@ -571,9 +523,6 @@ impl ReadPool {
         }
         self.out.set(state.out > 0);
     }
-    /// Runs `read` on a blocking thread with one pooled connection. The
-    /// connection keeps its permit: a cancelled caller frees neither before
-    /// the read returns, so the pool never outgrows its bound.
     async fn run<T: Send + 'static>(
         self: &Arc<Self>,
         read: impl FnOnce(&sqlite::Connection) -> Result<T, Error> + Send + 'static,
@@ -597,8 +546,6 @@ impl ReadPool {
         .map_err(|_| Error::Closed)?
     }
 }
-/// A pooled connection out with a running read. Dropped, also when the read
-/// panics, it goes back to the pool before its permit does.
 struct Out {
     pool: Arc<ReadPool>,
     connection: Option<sqlite::Connection>,
@@ -612,25 +559,20 @@ impl Drop for Out {
     }
 }
 
-/// A validated read, ready to run on any connection of the file.
 struct Prepared {
     sql: String,
     tables: Vec<String>,
     binding: Commitment,
     offset: u64,
-    /// Trailing ordering columns to strip from every row.
     hidden: Option<usize>,
-    /// The cursor's key, bound before the query's values.
     seek: Vec<SqlValue>,
 }
 type Versions = (u64, u64);
-/// The latest result of one observed query, shared by its observers.
 #[derive(Default)]
 pub(crate) struct SharedRead {
     latest: tokio::sync::Mutex<Option<(Versions, ReadSnapshot)>>,
 }
 type SharedKey = (Commitment, usize, usize, Option<String>);
-/// One domain's read side: its views, their change counters and the file's pool.
 pub(crate) struct Reads {
     scope: Scope,
     plan: Arc<ReadPlan>,
@@ -639,13 +581,9 @@ pub(crate) struct Reads {
     meta: watch::Receiver<u64>,
     shared: Mutex<HashMap<SharedKey, Weak<SharedRead>>>,
     audit: crate::checkpoint::RowAudit,
-    /// The descriptor verified against the installed tables at open.
     logical: std::sync::OnceLock<Arc<rocky_core::LogicalSchema>>,
-    /// The worker's table events; gone once the domain closes.
     events: std::sync::OnceLock<Weak<crate::observe::TableEvents>>,
-    /// Statements of a full projection snapshot.
     projection: std::sync::OnceLock<Arc<ProjectionReads>>,
-    /// Test hook: reads executed for observers.
     #[cfg(test)]
     pub(crate) executed: std::sync::atomic::AtomicUsize,
 }
@@ -708,7 +646,6 @@ impl Reads {
     pub(crate) fn bind_events(&self, events: &Arc<crate::observe::TableEvents>) {
         let _ = self.events.set(Arc::downgrade(events));
     }
-    /// The domain's table events while it is open.
     pub(crate) fn events(&self) -> Result<Arc<crate::observe::TableEvents>, Error> {
         self.events
             .get()
@@ -718,8 +655,6 @@ impl Reads {
     pub(crate) fn bind_projection(&self, statements: ProjectionReads) {
         let _ = self.projection.set(Arc::new(statements));
     }
-    /// The whole projection with the revision and applied frontier of the
-    /// snapshot it was read in, read beside the writer.
     pub(crate) async fn projection(self: &Arc<Self>) -> Result<Projected, Error> {
         let statements = self.projection.get().cloned().ok_or(Error::Closed)?;
         let revision = self.plan.revision.clone();
@@ -730,10 +665,6 @@ impl Reads {
     pub(crate) fn bind_logical(&self, schema: rocky_core::LogicalSchema) {
         let _ = self.logical.set(Arc::new(schema));
     }
-    /// Compares the stored rows of the projection and of the checkpoint copy
-    /// with their digests, in one read snapshot and without holding rows.
-    /// Returns the projection's row count. The scan has no time bound; while
-    /// it runs the WAL cannot be reset.
     pub(crate) async fn audit_rows(self: &Arc<Self>) -> Result<u64, Error> {
         let audit = self.audit.clone();
         self.pool
@@ -758,8 +689,10 @@ impl Reads {
                         _ => Err(Error::Corrupt("checkpoint state".into())),
                     };
                     let mut scanned = [crate::digest::SetDigest::default(); 2];
-                    for (logical, live, shadow) in &audit.tables {
-                        for (digest, table) in scanned.iter_mut().zip([live, shadow]) {
+                    for table in &audit.tables {
+                        let logical = &table.logical;
+                        for (digest, table) in scanned.iter_mut().zip([&table.live, &table.shadow])
+                        {
                             conn.scan(
                                 &format!("SELECT * FROM {}", quoted(table)),
                                 Vec::new(),
@@ -789,7 +722,6 @@ impl Reads {
             })
             .await
     }
-    /// Test hook: the change counters an observer of `sql` waits on.
     #[cfg(test)]
     pub(crate) fn counters(&self, sql: &str) -> Versions {
         self.versions(self.plan.view(sql))
@@ -798,10 +730,13 @@ impl Reads {
         if options.scope != self.scope {
             return Err(rocky_core::ProtocolError::ForeignScope.into());
         }
-        if options.max_rows == 0 || options.max_rows > 1024 || query.sql.len() > 8192 {
+        if options.max_rows == 0
+            || options.max_rows > MAX_PAGE_ROWS
+            || query.sql.len() > MAX_READ_SQL_BYTES
+        {
             return Err(Error::Quota {
                 resource: "read query",
-                limit: 1024,
+                limit: MAX_PAGE_ROWS,
             });
         }
         if options.max_bytes == 0 || options.max_bytes > MAX_READ_BYTES {
@@ -845,7 +780,6 @@ impl Reads {
             })
             .await
     }
-    /// The engine's plan for a read, one line per step.
     pub(crate) async fn explain(
         self: &Arc<Self>,
         query: BoundQuery,
@@ -870,8 +804,6 @@ impl Reads {
             })
             .await
     }
-    /// One read transaction: the revision, head and backlog it reports are
-    /// those of the snapshot its rows come from.
     fn snapshot(
         &self,
         conn: &sqlite::Connection,
@@ -961,7 +893,6 @@ impl Reads {
             *self.meta.borrow(),
         )
     }
-    /// Change counters for an observer of `query`: its view's and the domain's.
     pub(crate) fn subscribe(
         &self,
         query: &BoundQuery,
@@ -972,7 +903,6 @@ impl Reads {
             self.meta.clone(),
         )
     }
-    /// The slot observers of the same query and options share.
     pub(crate) fn share(&self, query: &BoundQuery, options: &ReadOptions) -> Arc<SharedRead> {
         let key = (
             binding(self.scope, query),
@@ -991,8 +921,6 @@ impl Reads {
         shared.insert(key, Arc::downgrade(&slot));
         slot
     }
-    /// The query's result at the current change counters. Observers that ask
-    /// while nothing changed since the last execution share that result.
     pub(crate) async fn observed(
         self: &Arc<Self>,
         shared: &SharedRead,
@@ -1014,41 +942,29 @@ impl Reads {
         Ok((sampled_before_read, snapshot))
     }
 }
-/// The statements that read a domain's projection and applied frontier.
 pub(crate) struct ProjectionReads {
     pub(crate) query: String,
-    /// An author's newest applied sequence.
     pub(crate) applied: String,
-    /// The stored retention state, which holds the pruned prefix.
     pub(crate) retention: String,
     pub(crate) authors: Vec<rocky_core::NodeId>,
 }
-/// Projection rows with the revision and applied frontier they were read at.
 pub(crate) struct Projected {
     pub(crate) rows: Vec<Vec<SqlValue>>,
     pub(crate) revision: LocalRevision,
     pub(crate) frontier: rocky_core::AppliedFrontier,
 }
-/// Ends a read transaction, if one is open; it has nothing to commit.
 fn end_read_transaction(conn: &sqlite::Connection) -> Result<(), Error> {
     if !conn.is_autocommit()? {
         conn.run_now("ROLLBACK")?;
     }
     Ok(())
 }
-/// `sql` past its first `offset` rows, skipped inside the engine so that no
-/// skipped row is decoded. Used when no key can seek past them.
 fn skipped_in_engine(sql: &str, offset: u64) -> String {
     format!("SELECT * FROM ({sql}) LIMIT -1 OFFSET {offset}")
 }
-/// Whether a page can continue after the row with these ordering values. NULL
-/// sorts before every value, so a row holding one continues by offset.
 fn seekable_after(ordering: &[SqlValue]) -> bool {
     !ordering.contains(&SqlValue::Null)
 }
-/// One bounded read transaction over the projection. The frontier is
-/// derived as the writer restores it: the newest applied sequence of each
-/// author, and at least its pruned prefix.
 fn project(
     conn: &sqlite::Connection,
     statements: &ProjectionReads,
@@ -1109,7 +1025,6 @@ fn project(
     conn.set_deadline(None)?;
     result
 }
-/// Reruns a read while another process briefly holds the file.
 fn retried<T>(mut read: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
     for attempt in 0..storage::TRANSACTION_ATTEMPTS {
         match read() {
@@ -1132,7 +1047,6 @@ fn read_error(error: sqlite::Error) -> Error {
 fn sql_values(row: Vec<sqlite::Value>) -> Result<Vec<SqlValue>, Error> {
     row.into_iter().map(storage::sql_value).collect()
 }
-/// The logical table a projection statement writes, if it names one.
 pub(crate) fn written_table(sql: &str) -> Option<String> {
     let tokens: Vec<_> = tokens(sql)
         .into_iter()
@@ -1157,26 +1071,19 @@ pub(crate) fn written_table(sql: &str) -> Option<String> {
     };
     Some(unquoted(table).to_ascii_lowercase())
 }
-/// View change counters and changed tables to publish after a commit.
 #[derive(Default)]
 pub(crate) struct Changed {
     views: std::collections::BTreeSet<usize>,
-    /// Logical tables written, lowercase.
     tables: std::collections::BTreeSet<String>,
-    /// A statement's target was not recognized: every view and table may
-    /// have changed.
     all: bool,
 }
 impl Changed {
-    /// `views` are those reading the table a statement wrote; `None` if the
-    /// statement's target is unknown.
     pub(crate) fn record(&mut self, views: Option<&[usize]>) {
         match views {
             Some(views) => self.views.extend(views),
             None => self.all = true,
         }
     }
-    /// A written table; protocol tables are never an observer's.
     pub(crate) fn table(&mut self, table: &str) {
         let table = table.to_ascii_lowercase();
         if !table.starts_with("rocky_") {
@@ -1188,11 +1095,9 @@ impl Changed {
         self.tables.extend(other.tables);
         self.all |= other.all;
     }
-    /// Whether any table or view may have changed.
     pub(crate) fn any(&self) -> bool {
         self.all || !self.tables.is_empty() || !self.views.is_empty()
     }
-    /// The changed tables; None for every table.
     pub(crate) fn tables(&self) -> Option<&std::collections::BTreeSet<String>> {
         (!self.all).then_some(&self.tables)
     }
@@ -1380,8 +1285,6 @@ mod tests {
             assert!(ReadPlan::compile(&names(), vec![invalid]).is_err());
         }
     }
-    /// Reads of the view `notes` keyed by `id` over a file in `dir`: ids
-    /// 1..=9, every third body NULL and the others two repeated values.
     fn notes(dir: &rocky_platform::fs::Scratch) -> (Arc<ReadPool>, Arc<Reads>, Scope) {
         let path = dir.path().join("reads.db");
         let conn = sqlite::Connection::open(&path).unwrap();
@@ -1436,7 +1339,6 @@ mod tests {
         ));
         (pool, reads, scope)
     }
-    /// NULL sorts first ascending: those rows page by offset, then by key.
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn pages_through_null_ordering_values_cover_the_result_once() {
         let dir = rocky_platform::fs::Scratch::new().await;
@@ -1468,8 +1370,6 @@ mod tests {
         assert_eq!(kinds, [Offset, Keyset, Keyset, Keyset]);
         pool.close();
     }
-    /// A cursor's offset is the caller's: the next one is refused rather
-    /// than wrapped or panicking past `u64::MAX`.
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn a_cursor_offset_past_the_largest_is_refused() {
         let dir = rocky_platform::fs::Scratch::new().await;
@@ -1487,9 +1387,6 @@ mod tests {
         assert!(matches!(refused, Err(Error::Rejected(_))), "{refused:?}");
         pool.close();
     }
-    /// The read's thread keeps the connection after its caller went away;
-    /// the slot stays taken until the connection is back. Needs blocking
-    /// threads, which a browser Worker lacks.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_cancelled_read_keeps_its_slot_until_its_connection_is_back() {
@@ -1528,9 +1425,6 @@ mod tests {
             "close waits for the reads, which return every connection and permit"
         );
     }
-    /// A read that panics still returns its connection, closed, and its
-    /// slot: closing the pool does not wait for it forever. Needs blocking
-    /// threads, which a browser Worker lacks.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_panicking_read_returns_its_slot_and_close_finishes() {

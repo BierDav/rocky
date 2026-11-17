@@ -1,5 +1,3 @@
-//! Scripted reproductions. Each scenario prints what it observed; a finding is
-//! printed with `FINDING:` and never aborts the remaining scenarios.
 use crate::cluster::{Node, mesh};
 use serde_json::{Value, json};
 use std::{
@@ -45,7 +43,6 @@ pub fn short(value: &impl std::fmt::Debug) -> String {
     text.chars().take(400).collect()
 }
 
-/// A node with its name, port and directory root kept for restarts.
 pub struct Slot {
     pub name: String,
     pub port: u16,
@@ -85,7 +82,6 @@ impl Slot {
     }
 }
 
-/// `notes` rows of `len` bytes and `lists` lists of `items` items on `a`.
 pub async fn populate(
     a: &Node,
     prefix: &str,
@@ -115,7 +111,6 @@ pub async fn populate(
     ids
 }
 
-/// Joins `slot` as a full writer: authored, and every list shared with it.
 pub async fn join_full(a: &Node, slot: &mut Slot, lists: &[String]) -> Result<Arc<Node>, Failure> {
     let node = slot
         .start(json!({"mode":"join","invitation": a.invite(writer_all()).await}))
@@ -133,7 +128,6 @@ pub async fn status_data(node: &Node) -> Value {
         .map(|s| s["data"].clone())
         .unwrap_or_else(|e| json!({"error": e}))
 }
-/// Polls until the node has imported at least `rows` checkpoint rows, or `limit`.
 pub async fn until_imported(node: &Node, rows: u64, limit: Duration) -> Value {
     let started = Instant::now();
     loop {
@@ -150,8 +144,6 @@ pub const NOTES: &str = "SELECT key, body FROM notes ORDER BY key";
 pub const LISTS: &str = "SELECT id, title FROM lists ORDER BY id";
 pub const ITEMS: &str = "SELECT list, id, title, done FROM items ORDER BY list, id";
 
-/// Online, meshed and synced until `full` agree on every table and no
-/// bootstrap remains, or `rounds` passes elapse. Returns whether they agreed.
 pub async fn heal(nodes: &[&Node], full: &[&Node], rounds: usize) -> bool {
     for node in nodes {
         let _ = node
@@ -205,7 +197,6 @@ pub async fn report_divergence(full: &[&Node]) {
         );
     }
 }
-/// `PRAGMA integrity_check` and foreign keys on a closed node's file.
 pub fn integrity(dir: &Path) -> String {
     let file = dir.join("rocky.sqlite");
     let out = std::process::Command::new("sqlite3")
@@ -249,7 +240,6 @@ pub async fn run(names: &[String]) -> Result<(), Failure> {
         "half_bootstrapped_source",
         "cross_issuer_share",
         "orphaned_second_issuer",
-        // Slow (about 12 minutes): "envelope_kill".
     ];
     let names: Vec<String> = if names.iter().any(|n| n == "all") {
         all.iter().map(|s| s.to_string()).collect()
@@ -303,7 +293,6 @@ pub async fn run(names: &[String]) -> Result<(), Failure> {
     Ok(())
 }
 
-/// A trusted issuer with a bootstrap big enough to interrupt.
 async fn seeded(root: &Path, notes: usize) -> Result<(Slot, Vec<String>), Failure> {
     let mut a = Slot::new("a", root);
     a.start(json!({"mode":"create"})).await?;
@@ -324,7 +313,6 @@ async fn kill_joiner_during_bootstrap() -> Result<(), Failure> {
     for list in &lists {
         let _ = a.n().share(list, std::slice::from_ref(&id)).await;
     }
-    // Kill at increasing import progress, then resume each time.
     for (round, at) in [1u64, 200, 700, 1200].into_iter().enumerate() {
         let data = until_imported(b.n(), at, Duration::from_secs(30)).await;
         println!("  round {round}: kill at {}", short(&data["bootstrap"]));
@@ -350,7 +338,6 @@ async fn kill_joiner_during_bootstrap() -> Result<(), Failure> {
 async fn kill_source_during_bootstrap() -> Result<(), Failure> {
     let root = root("kill-source");
     let (mut a, lists) = seeded(&root, 1500).await?;
-    // A second full node C already synced: B may switch signer to it.
     let mut c = Slot::new("c", &root);
     join_full(a.n(), &mut c, &lists).await?;
     let _ = c.n().sync().await;
@@ -380,7 +367,6 @@ async fn kill_source_during_bootstrap() -> Result<(), Failure> {
             "  (documented: another signer takes over only after unlink or 3 min without progress)"
         );
     }
-    // B writes while the signer is away.
     for i in 0..20 {
         if let Err(e) = b.n().add_note(&format!("b-offline{i}"), "x").await {
             println!("  b write during stalled import: {e}");
@@ -409,8 +395,6 @@ async fn writes_during_bootstrap() -> Result<(), Failure> {
     for list in &lists {
         let _ = a.n().share(list, std::slice::from_ref(&id)).await;
     }
-    // Both sides write while B imports: B into notes and into a list whose
-    // key it may not hold yet, A into the scopes being imported.
     let bn = b.n().clone();
     let list = lists[0].clone();
     let writer_b = tokio::spawn(async move {
@@ -428,7 +412,6 @@ async fn writes_during_bootstrap() -> Result<(), Failure> {
         for i in 0..60 {
             let _ = an.add_note(&format!("a-during{i}"), "during").await;
             let _ = an.add_item(&list, &format!("a-item{i}")).await;
-            // Rewrite rows being imported: update and delete.
             let _ = an
                 .sql(
                     "UPDATE notes SET body = 'updated' WHERE key = ?",
@@ -452,7 +435,6 @@ async fn writes_during_bootstrap() -> Result<(), Failure> {
         finding("rows written on both sides during a bootstrap do not converge");
         report_divergence(&[a.n(), b.n()]).await;
     }
-    // Every B write that reported success must exist on A.
     let notes_a = a.n().dump(NOTES).await.unwrap_or_default();
     let lost: Vec<_> = (0..60)
         .filter(|i| log.get(*i + 3).is_some_and(|l| l.contains("note true")))
@@ -476,12 +458,10 @@ async fn network_cuts_during_bootstrap() -> Result<(), Failure> {
     let root = root("cuts-bootstrap");
     let (mut a, lists) = seeded(&root, 1500).await?;
     let mut b = Slot::new("b", &root);
-    // A fixed port cannot rebind after a socket fault (separate finding).
     if std::env::var("CHAOS_FIXED_PORT").is_err() {
         b.port = 0;
     }
     join_full(a.n(), &mut b, &lists).await?;
-    // Alternate socket faults, networking toggles and background/foreground.
     for round in 0..30 {
         let data = status_data(b.n()).await;
         if data["bootstrap_pending"] == false {
@@ -498,7 +478,6 @@ async fn network_cuts_during_bootstrap() -> Result<(), Failure> {
         if let Err(e) = &r {
             println!("  {call} -> {e}");
         }
-        // The source drops its links too; it keeps its fixed address.
         let _ = a
             .n()
             .call_for(
@@ -535,8 +514,6 @@ async fn network_cuts_during_bootstrap() -> Result<(), Failure> {
     Ok(())
 }
 
-/// SIGKILL while `Database::join` is enrolling, at many offsets: can the
-/// directory be resumed or joined again with a fresh invitation?
 async fn kill_during_enrollment() -> Result<(), Failure> {
     let root = root("kill-enroll");
     let (mut a, _lists) = seeded(&root, 300).await?;
@@ -579,7 +556,6 @@ async fn kill_during_enrollment() -> Result<(), Failure> {
                 )
             }
             Err(resume_error) => {
-                // Can a fresh invitation repair the directory?
                 let fresh = a.n().invite(writer_all()).await;
                 match j.start(json!({"mode":"join","invitation":fresh})).await {
                     Ok(_) => {
@@ -606,9 +582,6 @@ async fn kill_during_enrollment() -> Result<(), Failure> {
     Ok(())
 }
 
-/// The shopping app joins first and sets the Partial role afterwards; the
-/// join's background bootstrap runs in between. Is a list never shared with
-/// the partial device still received and held?
 async fn partial_role_race() -> Result<(), Failure> {
     let root = root("partial-race");
     let (mut a, lists) = seeded(&root, 50).await?;
@@ -624,7 +597,6 @@ async fn partial_role_race() -> Result<(), Failure> {
     let mut p = Slot::new("p", &root);
     p.start(json!({"mode":"join","invitation": a.n().invite(writer_all()).await}))
         .await?;
-    // Exactly as ShoppingNode.join: role after join returns.
     let role = p.n().role(true).await;
     println!("  role after join: {}", short(&role));
     let pid = p.n().node_id().await;
@@ -640,8 +612,6 @@ async fn partial_role_race() -> Result<(), Failure> {
     if held.len() > 1 {
         finding("a partial device holds lists that were never shared with it");
     }
-    // Second variant: SIGKILL between join and role. The app persisted
-    // its kind 'Partial' before calling role; resume never re-applies it.
     let mut q = Slot::new("q", &root);
     q.start(json!({"mode":"join","invitation": a.n().invite(writer_all()).await}))
         .await?;
@@ -666,7 +636,6 @@ async fn revoke_during_bootstrap() -> Result<(), Failure> {
     let mut c = Slot::new("c", &root);
     join_full(a.n(), &mut c, &lists).await?;
     let _ = c.n().sync().await;
-    // C writes unsynced rows, then both get revoked: B mid-import.
     for i in 0..10 {
         let _ = c.n().add_note(&format!("c-unsent{i}"), "x").await;
     }
@@ -697,11 +666,9 @@ async fn revoke_during_bootstrap() -> Result<(), Failure> {
             n.name,
             short(&s["authority"]["verified_revocation"])
         );
-        // A revoked device must still open, read and close.
         let read = n.dump(NOTES).await.map(|r| r.len());
         println!("  {} local read after revocation: {read:?}", n.name);
     }
-    // The issuer stays healthy: writes and a new member bootstraps.
     let _ = a.n().add_note("after-revoke", "x").await;
     let mut d = Slot::new("d", &root);
     join_full(a.n(), &mut d, &lists).await?;

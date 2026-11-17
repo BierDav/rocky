@@ -3,6 +3,10 @@
 use super::roles::FrontierLog;
 use super::*;
 
+/// Row bytes in a remote page: rows get half the frame, and byte strings may
+/// double when encoded.
+const REMOTE_PAGE_ROW_BYTES: usize = MAX_SECURE_FRAME / 4;
+
 /// Rows read from another replica. It describes that replica's state at its
 /// revision and frontier, not this replica's.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,9 +65,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("scope is not held by this replica"));
         }
         let (generation, key) = inner.scope_key(scope)?;
-        // Half the frame for rows: byte strings may double when encoded.
         let page = inner
-            .page(scope, after, max_rows, MAX_SECURE_FRAME / 4)
+            .page(scope, after, max_rows, REMOTE_PAGE_ROW_BYTES)
             .await?;
         let frontier = inner.frontier(scope).await?;
         let fields = inner

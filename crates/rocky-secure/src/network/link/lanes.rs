@@ -13,7 +13,10 @@ struct LaneReader {
     tasks: Vec<rocky_platform::task::JoinHandle<()>>,
     received: Vec<u64>,
     pending: std::collections::VecDeque<Frame>,
+    /// Lanes whose stream finished. FINs on independent streams may overtake
+    /// the signed Close and final request data, so the others still drain.
     ended: std::collections::BTreeSet<usize>,
+    /// The deadline that bounds draining once a lane has ended.
     ending: Option<rocky_platform::time::Instant>,
 }
 impl Drop for LaneReader {
@@ -83,7 +86,6 @@ impl Link {
                 sequence: 0,
             });
         }
-        // Swap through empty lane containers to transfer ownership of the control stream.
         let (sender, incoming) = tokio::sync::mpsc::channel(64);
         let empty = LaneReader {
             incoming,
@@ -181,8 +183,6 @@ impl Reader {
             };
             let (index, frame) = next.ok_or_else(|| Error::Io(closed_by_peer()))??;
             let Some(frame) = frame else {
-                // FINs on independent streams may overtake the signed Close
-                // and final request data. Drain them, with a bounded deadline.
                 reader.ended.insert(index);
                 reader
                     .ending

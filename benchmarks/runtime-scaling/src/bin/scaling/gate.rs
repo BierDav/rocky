@@ -434,7 +434,9 @@ fn total(stats: &[WriterStats]) -> WriterStats {
     sum
 }
 /// `gate [seconds] [files] [checkpoint_frames] [group] [directory]`. Fails on
-/// the first storage error. The last three override `RuntimeOptions`.
+/// the first storage error. The last three override `RuntimeOptions`. The
+/// peer only supplies operations, so its file is not under test; one replica
+/// per file reports that file's writer.
 pub async fn run(
     seconds: u64,
     files: usize,
@@ -452,7 +454,6 @@ pub async fn run(
     );
     let options = open_options(files, Durability::Full, group, checkpoint_frames);
     let runtime = open(path.clone(), NODE, options, tables).await?;
-    // The peer only supplies operations; its file is not under test.
     let source = open(
         dir.join("peer.db"),
         PEER,
@@ -503,7 +504,6 @@ pub async fn run(
             deadline,
         )));
     }
-    // One replica per file reports that file's writer.
     let probes: Vec<_> = (1..=DOMAINS.min(files as u8))
         .map(|domain| runtime.domain(scope(domain)))
         .collect::<Result<_, _>>()?;

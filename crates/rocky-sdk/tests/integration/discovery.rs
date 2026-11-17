@@ -189,9 +189,9 @@ async fn simulator_peer() -> Result<(), Failure> {
     .await?;
     assert_eq!(found["is_issuer"], true);
     std::fs::write(root.join("host-found"), found.to_string())?;
-    // Stay discoverable until the simulator has found this process too.
+    let simulator_found_host = root.join("simulator-found");
     tokio::time::timeout(WAIT, async {
-        while !root.join("simulator-found").exists() {
+        while !simulator_found_host.exists() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
@@ -233,12 +233,7 @@ async fn two_processes_find_each_other_through_the_rendezvous_record_and_converg
         .decode(topics["current"].as_str().ok_or("topic")?.as_bytes())?
         .try_into()
         .map_err(|_| "topic")?;
-    tokio::time::timeout(WAIT, async {
-        while server.contacts(&topic) == 0 {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await?;
+    tokio::time::timeout(WAIT, server.wait_for_contacts(&topic, 1)).await?;
     let report = second_process(root.path(), Some(&server.url), false).await?;
     assert_eq!(report["titles"], json!(a.titles().await));
     assert_eq!(report["titles"], json!(["Milk"]));
@@ -246,8 +241,11 @@ async fn two_processes_find_each_other_through_the_rendezvous_record_and_converg
     assert_eq!(report["found"]["is_local"], false);
     assert_eq!(report["discovery"]["topic"]["state"], "on");
     assert_eq!(report["discovery"]["local"]["state"], "off");
-    // Both members merged their contact into the one record.
-    assert_eq!(server.contacts(&topic), 2);
+    assert_eq!(
+        server.contacts(&topic),
+        2,
+        "both members merge their contact into the one record"
+    );
     a.close().await;
     Ok(())
 }
@@ -265,7 +263,6 @@ async fn an_attached_endpoint_has_the_same_lookup_services_after_a_database_deta
     let endpoint = options.bind([31; 32]).await?;
     let services = endpoint.address_lookup()?.len();
     assert_eq!(services, 2);
-    // Asked for it, the attachment announces beside the endpoint's services.
     let attachment = Attachment::discovering(endpoint.clone(), options.discover());
     let router = attachment
         .register(Router::builder(endpoint.clone()))
@@ -279,14 +276,12 @@ async fn an_attached_endpoint_has_the_same_lookup_services_after_a_database_deta
         .decode(topics["current"].as_str().ok_or("topic")?.as_bytes())?
         .try_into()
         .map_err(|_| "topic")?;
-    tokio::time::timeout(WAIT, async {
-        while server.contacts(&topic) == 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await?;
+    tokio::time::timeout(WAIT, server.wait_for_contacts(&topic, 1)).await?;
     let discovery = snap::ok(a.session.network()).await["discovery"].clone();
-    assert_eq!(discovery["announcing"], true);
+    assert_eq!(
+        discovery["announcing"], true,
+        "a discovering attachment announces beside the endpoint's services"
+    );
     assert_eq!(discovery["topic"]["state"], "on");
     assert_eq!(discovery["local"]["state"], "off");
     assert_eq!(endpoint.address_lookup()?.len(), services);
@@ -298,14 +293,16 @@ async fn an_attached_endpoint_has_the_same_lookup_services_after_a_database_deta
     assert!(!endpoint.is_closed());
     assert_eq!(endpoint.address_lookup()?.len(), services);
 
-    // Not asked, an attachment on the same endpoint has no discovery.
     let plain = Attachment::new(endpoint.clone());
     let a = Device::open(
         &root.path().join("a"),
         Some(Network::Borrowed(plain.transport())),
     )?;
     let discovery = snap::ok(a.session.network()).await["discovery"].clone();
-    assert_eq!(discovery["announcing"], false);
+    assert_eq!(
+        discovery["announcing"], false,
+        "a plain attachment on the same endpoint has no discovery"
+    );
     for path in ["local", "topic"] {
         assert_eq!(discovery[path]["state"], "unavailable");
         assert_eq!(
@@ -362,16 +359,23 @@ async fn two_endpoints_without_a_direct_path_converge_through_a_relay() -> Resul
     );
     assert_eq!(a.titles().await, ["Eggs", "Milk"]);
     assert_eq!(b.titles().await, ["Eggs", "Milk"]);
-    // No direct path existed at any point: neither endpoint has an IP transport.
     for router in &routers {
-        assert!(router.endpoint().addr().ip_addrs().next().is_none());
+        assert!(
+            router.endpoint().addr().ip_addrs().next().is_none(),
+            "no direct path exists: neither endpoint has an IP transport"
+        );
     }
     tokio::join!(a.close(), b.close());
-    // The endpoints are the application's to close, and close at once: no
-    // connection outlives the databases that dialed it.
     for router in routers {
-        tokio::time::timeout(Duration::from_secs(5), router.shutdown()).await??;
-        assert!(router.endpoint().is_closed());
+        tokio::time::timeout(Duration::from_secs(5), router.shutdown())
+            .await?
+            .map_err(|error| {
+                format!("no connection outlives the databases that dialed it: {error}")
+            })?;
+        assert!(
+            router.endpoint().is_closed(),
+            "the application closes its own endpoints"
+        );
     }
     Ok(())
 }

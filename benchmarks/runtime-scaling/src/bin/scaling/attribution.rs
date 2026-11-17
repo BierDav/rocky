@@ -80,14 +80,6 @@ impl Samples {
         };
         let p99 = at(&rows, 990);
         let p999 = at(&rows, 999);
-        // The tail is the worst `1%` (p99) or `0.1%` (p99.9) of samples by
-        // rank, so ties at the percentile value do not inflate the tail count.
-        let tail = |rows: &[(Duration, bool)], per_mille: u64| -> (u64, u64) {
-            let count = ((rows.len() as u64 * (1000 - per_mille)).div_ceil(1000)).max(1) as usize;
-            let slice = &rows[rows.len().saturating_sub(count)..];
-            let hit = slice.iter().filter(|(_, overlaps)| *overlaps).count() as u64;
-            (slice.len() as u64, hit)
-        };
         let (p99_n, p99_hit) = tail(&rows, 990);
         let (p999_n, p999_hit) = tail(&rows, 999);
         let summary = |overlapping: bool| -> Tail {
@@ -149,6 +141,17 @@ pub(super) struct Overlap {
     pub(super) no_overlap: Tail,
 }
 
+/// The samples above the `per_mille` percentile and how many of them
+/// overlapped a checkpoint. The tail is the worst `1%` (p99) or `0.1%`
+/// (p99.9) of samples by rank, so ties at the percentile value do not
+/// inflate it.
+fn tail(rows: &[(Duration, bool)], per_mille: u64) -> (u64, u64) {
+    let count = ((rows.len() as u64 * (1000 - per_mille)).div_ceil(1000)).max(1) as usize;
+    let slice = &rows[rows.len().saturating_sub(count)..];
+    let hit = slice.iter().filter(|(_, overlaps)| *overlaps).count() as u64;
+    (slice.len() as u64, hit)
+}
+
 fn percentile(sorted: &[Duration], per_mille: u64) -> u64 {
     if sorted.is_empty() {
         return 0;
@@ -188,6 +191,19 @@ pub(super) fn storage_facts(path: &Path) -> Option<StorageFacts> {
         database_bytes: u64::from(page_size) * u64::from(page_count),
         wal_bytes: std::fs::metadata(Path::new(&wal)).map_or(0, |m| m.len()),
     })
+}
+
+/// The peer only supplies a backlog: it keeps its history so the whole
+/// preloaded range is available to page. The file under test keeps the
+/// runtime defaults.
+fn backlog_peer_retention() -> rocky_runtime::RetentionPolicy {
+    rocky_runtime::RetentionPolicy {
+        automatic: false,
+        checkpoint_operations: 1_000_000,
+        window: 1_000_000,
+        retained_bytes: 1 << 30,
+        ..rocky_runtime::RetentionPolicy::default()
+    }
 }
 
 fn open_options(instrument: bool) -> RuntimeOptions {
@@ -345,7 +361,6 @@ impl Outcome {
             self.dropped,
             self.max_lag.as_secs_f64() * 1000.0
         );
-        // The writer is file-wide; these are its step subphases in µs/write.
         let steps = self.stats.authoring_steps.max(1);
         let per = |micros: u64| micros as f64 / steps as f64;
         let step = self.stats.step_micros.max(1);
@@ -481,16 +496,7 @@ pub(super) async fn erp_sync(
         RuntimeOptions {
             durability: Durability::Buffered,
             files: 1,
-            // The peer only supplies a backlog; keep its history so the whole
-            // preloaded range is available to page. The file under test keeps
-            // the runtime defaults.
-            retention: rocky_runtime::RetentionPolicy {
-                automatic: false,
-                checkpoint_operations: 1_000_000,
-                window: 1_000_000,
-                retained_bytes: 1 << 30,
-                ..rocky_runtime::RetentionPolicy::default()
-            },
+            retention: backlog_peer_retention(),
             ..RuntimeOptions::default()
         },
         tables,
@@ -583,7 +589,6 @@ pub(super) async fn erp_sync(
         let mut cursor: Option<OperationId> = None;
         let mut pages = 0u64;
         let mut received = 0u64;
-        // Drain the backlog in the same window as the local writes.
         tokio::time::sleep_until(origin).await;
         feeder_feeding.store(true, Relaxed);
         let started = Instant::now();
@@ -728,8 +733,10 @@ mod tests {
         assert_eq!(samples.dropped(), 2);
         let overlap = samples.overlap(&[]);
         assert_eq!(overlap.n, 3);
-        // Only the newest three survive: durations 2, 3, 4 µs.
-        assert_eq!(overlap.max_us, 4);
+        assert_eq!(
+            overlap.max_us, 4,
+            "only the newest three survive: durations 2, 3, 4 µs"
+        );
     }
 
     #[test]
@@ -737,14 +744,15 @@ mod tests {
         let base = Instant::now();
         let intervals = [interval(base + Duration::from_millis(10), 5)];
         let mut samples = Samples::new(16);
-        // Before, inside and after the checkpoint.
         samples.record(base, Duration::from_micros(100));
         samples.record(base + Duration::from_millis(12), Duration::from_micros(100));
         samples.record(base + Duration::from_millis(20), Duration::from_micros(100));
-        // A long write that starts before and ends inside the checkpoint window.
         samples.record(base + Duration::from_millis(9), Duration::from_millis(2));
         let overlap = samples.overlap(&intervals);
-        assert_eq!(overlap.n, 4);
+        assert_eq!(
+            overlap.n, 4,
+            "before, inside and after the checkpoint: a long write that starts before and ends inside the checkpoint window"
+        );
         assert_eq!(overlap.overlapping, 2);
         assert_eq!(overlap.no_overlap.n, 2);
         assert_eq!(overlap.overlap.n, 2);
@@ -755,7 +763,6 @@ mod tests {
         let base = Instant::now();
         let intervals = [interval(base + Duration::from_millis(100), 50)];
         let mut samples = Samples::new(200);
-        // 99 fast writes before the checkpoint, then one very slow write inside.
         for index in 0..99u64 {
             samples.record(
                 base + Duration::from_micros(index),
@@ -764,7 +771,10 @@ mod tests {
         }
         samples.record(base + Duration::from_millis(110), Duration::from_millis(20));
         let overlap = samples.overlap(&intervals);
-        assert_eq!(overlap.n, 100);
+        assert_eq!(
+            overlap.n, 100,
+            "99 fast writes before the checkpoint, then one very slow write inside"
+        );
         assert_eq!(overlap.p99_samples, 1);
         assert_eq!(overlap.p99_overlapping, 1);
         assert_eq!(overlap.p999_samples, 1);
@@ -773,7 +783,6 @@ mod tests {
 
     #[test]
     fn storage_facts_read_the_sqlite_header() {
-        // A 4 KiB page size with 3 pages and one free page, in the header.
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("h.db");
         let mut header = vec![0u8; 100];
@@ -783,7 +792,10 @@ mod tests {
         header[36..40].copy_from_slice(&1u32.to_be_bytes());
         std::fs::write(&path, &header).unwrap();
         let facts = storage_facts(&path).unwrap();
-        assert_eq!(facts.page_size, 4096);
+        assert_eq!(
+            facts.page_size, 4096,
+            "a 4 KiB page size with 3 pages and one free page, in the header"
+        );
         assert_eq!(facts.page_count, 3);
         assert_eq!(facts.freelist_count, 1);
         assert_eq!(facts.database_bytes, 12_288);

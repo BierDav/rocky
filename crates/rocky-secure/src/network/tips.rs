@@ -159,6 +159,8 @@ impl NativeSession {
         }
     }
 
+    /// Exchanges tips, then admits the peer at its followed tip, which a
+    /// received move may have changed since the signed hello.
     pub(super) async fn exchange_tips<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -213,7 +215,6 @@ impl NativeSession {
         else {
             return Err(denied("unexpected followed tip"));
         };
-        // A received move may have changed either tip since the signed hello.
         replica.admit_peer(self.peer, &self.credentials, tip).await
     }
 

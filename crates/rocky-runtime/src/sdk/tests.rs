@@ -68,7 +68,6 @@ async fn subscription_registration_races_coalescing_cancellation_and_scope_denia
         .as_str()
         .unwrap()
         .to_owned();
-    // Commit between registration and first collection.
     ok(call(
         &session,
         Request::Mutate {
@@ -86,7 +85,10 @@ async fn subscription_registration_races_coalescing_cancellation_and_scope_denia
         },
     )
     .await);
-    assert_eq!(initial["rows"][0][0]["value"], "first");
+    assert_eq!(
+        initial["rows"][0][0]["value"], "first",
+        "commit between registration and first collection"
+    );
     for value in 2..=10 {
         ok(call(
             &session,
@@ -173,9 +175,9 @@ async fn precise_handles_preconditions_restart_and_explicit_strong_reads() {
     assert!(
         matches!(call(&session, Request::Mutate { handle:[1;32], entity:None, payload:b"different".to_vec(), baseline:None }).await, Reply::Error { error, .. } if error.code == "conflict")
     );
-    // The removed strong read is no request of this contract.
     assert!(
-        matches!(serde_json::from_slice::<Reply>(&session.dispatch_json(format!(r#"{{"version":{VERSION},"scope":{},"request":{{"type":"read_strong","query":{{"sql":"SELECT 1","values":[]}}}}}}"#, serde_json::to_string(&session.scope()).unwrap()).as_bytes()).await).unwrap(), Reply::Error { error, .. } if error.code == "denied")
+        matches!(serde_json::from_slice::<Reply>(&session.dispatch_json(format!(r#"{{"version":{VERSION},"scope":{},"request":{{"type":"read_strong","query":{{"sql":"SELECT 1","values":[]}}}}}}"#, serde_json::to_string(&session.scope()).unwrap()).as_bytes()).await).unwrap(), Reply::Error { error, .. } if error.code == "denied"),
+        "the removed strong read is no request of this contract"
     );
     let exact = ok(call(
         &session,
@@ -286,14 +288,13 @@ async fn an_update_larger_than_a_frame_ends_its_subscription() {
             baseline: None,
         }
     };
-    // Within the read's byte budget, but JSON spells each byte in six.
     for index in 0..200 {
         ok(call(&session, mutate(index, vec![1; 1000])).await);
     }
     let oversized = call(&session, next()).await;
     assert!(
         matches!(&oversized, Reply::Error { error, .. } if error.code == "quota"),
-        "{oversized:?}"
+        "within the read's byte budget, but JSON spells each byte in six: {oversized:?}"
     );
     ok(call(&session, mutate(200, b"small".to_vec())).await);
     let ended = call(&session, next()).await;

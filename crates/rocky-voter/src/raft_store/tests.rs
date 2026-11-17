@@ -234,9 +234,7 @@ async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
     let pending = pending.as_ref();
     drop(store);
     store = Store::open(dir.path(), genesis.clone(), false, Limits::default()).unwrap();
-    // OpenRaft replays committed entries through its state-machine interface on startup.
-    let entries = store.try_get_log_entries(1..=2).await.unwrap();
-    store.apply(entries).await.unwrap();
+    replay_committed_entries_as_openraft_does_on_startup(&mut store, 1..=2).await;
     assert_eq!(
         store
             .log_head(tip_log(scope))
@@ -382,14 +380,13 @@ async fn requests_authorize_while_a_log_write_holds_the_image() {
         now().unwrap(),
     )
     .unwrap();
-    // As a log append or vote holds it while it publishes.
-    let held = store.0.image.lock().await;
+    let held_as_by_a_publishing_append_or_vote = store.0.image.lock().await;
     let answers = (
         ready(store.preflight(&request)),
         ready(store.read(&request)).map(|read| format!("{read:?}")),
         ready(store.lane(&request)),
     );
-    drop(held);
+    drop(held_as_by_a_publishing_append_or_vote);
     let free = (
         store.preflight(&request).await,
         format!("{:?}", store.read(&request).await),
@@ -429,8 +426,11 @@ async fn updates_share_log_entries_and_apply_metadata_in_place() {
     }
     store.save_vote(&Vote::new(2, 1)).await.unwrap();
     assert_eq!(store.try_get_log_entries(1..=16).await.unwrap().len(), 16);
-    // Every update shared the entries it kept; apply changes no metadata copy.
-    assert_eq!(store.0.copies.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(
+        store.0.copies.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "every update shares the entries it keeps and apply copies no metadata"
+    );
 }
 
 #[tokio::test]
@@ -483,9 +483,7 @@ async fn snapshots_larger_than_32_mib_can_be_saved_and_loaded() {
     let (genesis, _, _, _) = certified();
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path(), genesis.clone(), true, Limits::default()).unwrap();
-
-    // 33 MiB payload exceeds the former 32 MiB MAX_STORE cap
-    let large_payload = vec![0x42u8; 33 * 1024 * 1024];
+    let large_payload = vec![0x42u8; LARGE_SNAPSHOT_BYTES];
     let meta = SnapshotMeta {
         last_log_id: None,
         last_membership: openraft::StoredMembership::default(),
@@ -499,16 +497,25 @@ async fn snapshots_larger_than_32_mib_can_be_saved_and_loaded() {
             "large_snapshot_test",
         )
         .expect("writing a >32 MiB snapshot should succeed under 1 GiB store limit");
-
-    // Verify reading and unsealing the large snapshot
     let path = store.snapshots_dir().join(file_name(snapshot_index(&meta)));
     let raw = read(&path).expect("reading snapshot file should succeed");
-    assert!(raw.len() > 33 * 1024 * 1024);
+    assert!(raw.len() > LARGE_SNAPSHOT_BYTES);
 
     let unsealed: SnapshotFile =
         unseal(SNAPSHOT_LABEL, &raw).expect("unsealing >32 MiB snapshot should succeed");
     assert_eq!(unsealed.meta, meta);
-    assert_eq!(unsealed.metadata.0.len(), 33 * 1024 * 1024);
+    assert_eq!(unsealed.metadata.0.len(), LARGE_SNAPSHOT_BYTES);
+}
+
+/// Larger than 32 MiB.
+const LARGE_SNAPSHOT_BYTES: usize = 33 * 1024 * 1024;
+
+async fn replay_committed_entries_as_openraft_does_on_startup(
+    store: &mut Store,
+    indexes: std::ops::RangeInclusive<u64>,
+) {
+    let entries = store.try_get_log_entries(indexes).await.unwrap();
+    store.apply(entries).await.unwrap();
 }
 
 pub(crate) fn self_certificate(

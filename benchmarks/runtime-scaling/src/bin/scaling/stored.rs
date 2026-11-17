@@ -127,6 +127,16 @@ async fn observed(
     }
     Ok(WRITES as f64 / elapsed.as_secs_f64())
 }
+/// The phase 3 gate over `rows` rows in `tables` tables, kept in `keep` for a
+/// second run from a fresh process.
+///
+/// Operation `index + 1` created row `index` only for the sequential first
+/// writes, so sampled rows are found through the index on `a`, which is
+/// restored after the edits move it. Table 0 holds the rows whose `a` is a
+/// multiple of the table count. Range pages of one table continue by cursor,
+/// then with the last key bound into the predicate; the ordered query
+/// continues by key, while a `LIMIT` makes it ineligible, so its cursor is a
+/// row offset.
 pub async fn run(rows: usize, tables: u16, keep: Option<PathBuf>) -> Result<(), Failure> {
     let tag = format!("stored rows={rows} tables={tables}");
     let options = RuntimeOptions::default();
@@ -186,8 +196,6 @@ pub async fn run(rows: usize, tables: u16, keep: Option<PathBuf>) -> Result<(), 
             reported = created;
         }
     }
-    // Sampled rows: operation `index + 1` created row `index` only for the
-    // sequential first writes, so samples are found through the index on `a`.
     let mut samples = Vec::new();
     for index in (0..rows).step_by(SAMPLE).take(200) {
         let table = domain.table(index);
@@ -223,7 +231,6 @@ pub async fn run(rows: usize, tables: u16, keep: Option<PathBuf>) -> Result<(), 
         .await
     })
     .await?;
-    // The edits above moved `a` of the samples; restore it for the reads.
     for (table, id, index) in &samples {
         commit(
             &domain.replica,
@@ -259,8 +266,6 @@ pub async fn run(rows: usize, tables: u16, keep: Option<PathBuf>) -> Result<(), 
             .await?;
         println!("{tag} plan {name}: {plan:?}");
     }
-    // Pages of one table's rows in index order, first by cursor, then with
-    // the last key bound into the predicate.
     let per_table = rows / usize::from(tables);
     for page in [10usize, 100, 1000] {
         if page * 4 > per_table {
@@ -272,9 +277,9 @@ pub async fn run(rows: usize, tables: u16, keep: Option<PathBuf>) -> Result<(), 
             &format!("{tag} range page={page} by cursor, first pages"),
             20,
             async |index| {
-                // Restart every fourth page.
+                let restarts = index % 4 == 0;
                 let options = ReadOptions::new(scope(), page);
-                let options = match cursor.take().filter(|_| index % 4 != 0) {
+                let options = match cursor.take().filter(|_| !restarts) {
                     Some(cursor) => options.after(cursor),
                     None => options,
                 };
@@ -285,8 +290,6 @@ pub async fn run(rows: usize, tables: u16, keep: Option<PathBuf>) -> Result<(), 
         )
         .await?;
         let depth = per_table / 2;
-        // The ordered query continues by key. A `LIMIT` makes the same query
-        // ineligible, so its cursor is a row offset.
         let unkeyed = BoundQuery {
             sql: format!("{} LIMIT -1", range(0, 0).sql),
             ..range(0, 0)
@@ -334,7 +337,6 @@ pub async fn run(rows: usize, tables: u16, keep: Option<PathBuf>) -> Result<(), 
                 .await?,
             );
         }
-        // Table 0 holds the rows whose `a` is a multiple of the table count.
         let from = (depth * usize::from(tables)) as i64;
         let bound = timed(
             &format!("{tag} range page={page} by bound key, {depth} rows deep"),
@@ -350,7 +352,6 @@ pub async fn run(rows: usize, tables: u16, keep: Option<PathBuf>) -> Result<(), 
             bound.as_micros()
         );
     }
-    // Observers: edits to one row of table 0, watched or not.
     let (table, id, _) = samples[0];
     let unrelated = by_key(domain.table(1), samples[1 % samples.len()].1);
     let alone = observed(

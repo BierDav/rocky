@@ -109,8 +109,7 @@ async fn raw_grants_reach_a_device_that_is_not_an_issuer() -> Result<(), Failure
     let directory = root.join("s");
     let keys = common::node_keys(&directory, None)?;
 
-    // Command rights where no command is, unknown names and empty sets.
-    for refused in [
+    let command_rights_unknown_names_and_empty_sets = [
         json!([{"scope": "items", "rights": ["execute"]}]),
         json!([{"scope": "items", "rights": ["invoke"]}]),
         json!([{"scope": "items", "rights": ["read"], "columns": ["missing"]}]),
@@ -119,14 +118,15 @@ async fn raw_grants_reach_a_device_that_is_not_an_issuer() -> Result<(), Failure
         json!([{"scope": "items", "rights": ["fly"]}]),
         json!([{"scope": "items", "rights": []}]),
         json!([]),
-    ] {
+    ];
+    for refused in command_rights_unknown_names_and_empty_sets {
         assert!(
             snap::observe(issue(
                 &a,
                 keys,
                 refused.clone(),
                 rocky_sdk::GrantTerms::default(),
-                false
+                Issuance::Grant
             ))
             .await
             .is_err(),
@@ -142,7 +142,7 @@ async fn raw_grants_reach_a_device_that_is_not_an_issuer() -> Result<(), Failure
         keys,
         granted.clone(),
         rocky_sdk::GrantTerms::default(),
-        false,
+        Issuance::Grant,
     ))
     .await["supplied"]
         .clone();
@@ -156,17 +156,24 @@ async fn raw_grants_reach_a_device_that_is_not_an_issuer() -> Result<(), Failure
         status["profile"],
         json!({"kind": "grants", "grants": granted})
     );
-    // Custody alone holds no reader key.
     assert!(secret(root, "s", "reader.items")?);
-    assert!(!secret(root, "s", "reader.notes")?);
+    assert!(
+        !secret(root, "s", "reader.notes")?,
+        "custody alone holds no reader key"
+    );
 
     let milk = insert(&a, 1, "Milk").await.map_err(|e| e.to_string())?["id"].clone();
     s.sync().await.map_err(|e| e.to_string())?;
     let items = "SELECT title, completed FROM items ORDER BY title";
     assert_eq!(rows(&s, items).await, [["Milk", "0"]]);
-    // Exactly the granted rights: no insert, no other column.
-    assert!(insert(&s, 2, "Eggs").await.is_err());
-    assert!(set(&s, 3, &milk, "title", json!("Bread")).await.is_err());
+    assert!(
+        insert(&s, 2, "Eggs").await.is_err(),
+        "an update grant allows no insert"
+    );
+    assert!(
+        set(&s, 3, &milk, "title", json!("Bread")).await.is_err(),
+        "a column grant allows no other column"
+    );
     set(&s, 4, &milk, "completed", json!(true))
         .await
         .map_err(|e| e.to_string())?;
@@ -174,7 +181,6 @@ async fn raw_grants_reach_a_device_that_is_not_an_issuer() -> Result<(), Failure
     assert_eq!(rows(&a, items).await, [["Milk", "1"]]);
     assert!(rows(&s, "SELECT text FROM notes").await.is_empty());
 
-    // The issuer lists the identity with its raw grants and can revoke it.
     let identities = snap::ok(a.session.identities()).await;
     let granted_identity = identities["identities"]
         .as_array()
@@ -182,7 +188,10 @@ async fn raw_grants_reach_a_device_that_is_not_an_issuer() -> Result<(), Failure
         .flatten()
         .find(|record| record["identity"] == json!(keys.identity))
         .ok_or("the granted identity")?;
-    assert_eq!(granted_identity["profile"]["kind"], "grants");
+    assert_eq!(
+        granted_identity["profile"]["kind"], "grants",
+        "the issuer lists the identity with its raw grants"
+    );
     snap::ok(
         a.session
             .revoke_identity(&(snap::text(&(keys.identity.to_hex())))),
@@ -194,10 +203,11 @@ async fn raw_grants_reach_a_device_that_is_not_an_issuer() -> Result<(), Failure
             keys,
             granted,
             rocky_sdk::GrantTerms::default(),
-            false
+            Issuance::Grant
         ))
         .await
-        .is_err()
+        .is_err(),
+        "a revoked identity receives no further grants"
     );
     for device in [&a, &s] {
         device.close().await;
@@ -238,13 +248,16 @@ async fn an_invitation_carries_raw_grants() -> Result<(), Failure> {
     assert!(insert(&j, 2, "Milk").await.is_err());
     j.sync().await.map_err(|e| e.to_string())?;
     assert_eq!(rows(&a, "SELECT text FROM notes").await, [["Hello"]]);
-    // A renewal keeps exactly the raw grants.
     snap::ok(async {
         j.session.renew().await?;
         j.session.info().await
     })
     .await;
-    assert_eq!(snap::ok(j.session.info()).await["profile"], profile);
+    assert_eq!(
+        snap::ok(j.session.info()).await["profile"],
+        profile,
+        "a renewal keeps exactly the raw grants"
+    );
     for device in [&a, &j] {
         device.close().await;
     }
@@ -287,7 +300,6 @@ async fn a_delegate_never_holds_more_than_its_delegator() -> Result<(), Failure>
         .clone();
     let s = install(root, &hub, "s", &supplied)?;
     let d_keys = common::node_keys(&root.join("d"), None)?;
-    // No right, scope, column or depth the delegator lacks.
     let insert_only = json!([{"scope": "items", "rights": ["read", "insert", "custody"]}]);
     for (grants, extra) in [
         (
@@ -307,25 +319,24 @@ async fn a_delegate_never_holds_more_than_its_delegator() -> Result<(), Failure>
                 d_keys,
                 grants.clone(),
                 serde_json::from_value(extra).expect("grant terms"),
-                true
+                Issuance::Delegate
             ))
             .await
             .is_err(),
-            "{grants}"
+            "no right, scope, column or depth the delegator lacks: {grants}"
         );
     }
-    // A device whose capability allows no further link delegates nothing;
-    // an issuer grants instead.
     assert!(
         snap::observe(issue(
             &a,
             d_keys,
             insert_only.clone(),
             serde_json::from_value(json!({})).expect("grant terms"),
-            true
+            Issuance::Delegate
         ))
         .await
-        .is_err()
+        .is_err(),
+        "an issuer grants instead of delegating"
     );
     let plain_keys = common::node_keys(&root.join("p"), None)?;
     let plain = snap::ok(
@@ -353,10 +364,11 @@ async fn a_delegate_never_holds_more_than_its_delegator() -> Result<(), Failure>
             d_keys,
             insert_only.clone(),
             serde_json::from_value(json!({})).expect("grant terms"),
-            true
+            Issuance::Delegate
         ))
         .await
-        .is_err()
+        .is_err(),
+        "a device whose capability allows no further link delegates nothing"
     );
 
     let supplied = snap::ok(issue(
@@ -364,7 +376,7 @@ async fn a_delegate_never_holds_more_than_its_delegator() -> Result<(), Failure>
         d_keys,
         insert_only.clone(),
         serde_json::from_value(json!({})).expect("grant terms"),
-        true,
+        Issuance::Delegate,
     ))
     .await["supplied"]
         .clone();
@@ -374,19 +386,17 @@ async fn a_delegate_never_holds_more_than_its_delegator() -> Result<(), Failure>
         status["profile"],
         json!({"kind": "grants", "grants": insert_only})
     );
-    // The delegate's chain is a link longer, valid no longer than its delegator's.
-    assert!(status["expires"].as_str() <= snap::ok(s.session.info()).await["expires"].as_str());
+    assert!(
+        status["expires"].as_str() <= snap::ok(s.session.info()).await["expires"].as_str(),
+        "a delegate's chain is valid no longer than its delegator's"
+    );
     assert!(!secret(root, "d", "reader.notes")?);
-    // Anyone who configured it serves it; its frames verify on arrival.
-    for (left, right) in [(&a, &d)] {
-        left.add_peer(&right.contact().await)
-            .await
-            .map_err(|e| e.to_string())?;
-        right
-            .add_peer(&left.contact().await)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
+    a.add_peer(&d.contact().await)
+        .await
+        .map_err(|e| e.to_string())?;
+    d.add_peer(&a.contact().await)
+        .await
+        .map_err(|e| e.to_string())?;
     let eggs = insert(&d, 1, "Eggs").await.map_err(|e| e.to_string())?["id"].clone();
     let delete = snap::Action::Delete {
         table: "items".to_owned(),
@@ -397,18 +407,21 @@ async fn a_delegate_never_holds_more_than_its_delegator() -> Result<(), Failure>
             .is_err()
     );
     d.sync().await.map_err(|e| e.to_string())?;
-    assert_eq!(rows(&a, "SELECT title FROM items").await, [["Eggs"]]);
-    // Reopening the delegator preserves its recipient range for later grants.
+    assert_eq!(
+        rows(&a, "SELECT title FROM items").await,
+        [["Eggs"]],
+        "a peer that configured the delegate serves it and verifies its frames on arrival"
+    );
     s.close().await;
     let s = Device::new(Database::open(open(&root.join("s"), &hub, "s"))?)?;
-    // An issuer renews no delegated chain; the delegator delegates again.
     assert!(
         snap::observe(async {
             d.session.renew().await?;
             d.session.info().await
         })
         .await
-        .is_err()
+        .is_err(),
+        "an issuer renews no delegated chain"
     );
     let narrower = json!([{"scope": "items", "rights": ["read", "custody"]}]);
     let renewed = snap::ok(issue(
@@ -416,11 +429,11 @@ async fn a_delegate_never_holds_more_than_its_delegator() -> Result<(), Failure>
         d_keys,
         narrower.clone(),
         serde_json::from_value(json!({})).expect("grant terms"),
-        true,
+        Issuance::Delegate,
     ))
     .await["supplied"]
         .clone();
-    let renewed = snap::ok(async {
+    let redelegated_after_delegator_reopened = snap::ok(async {
         d.session
             .install_credentials(
                 serde_json::from_value::<rocky_sdk::Supplied>(json!(renewed))
@@ -430,15 +443,16 @@ async fn a_delegate_never_holds_more_than_its_delegator() -> Result<(), Failure>
         d.session.info().await
     })
     .await;
-    assert_eq!(renewed["writer"], status["writer"]);
-    let status = renewed;
-    // Raw grants that are exactly a starter profile are shown as one.
     assert_eq!(
-        status["profile"],
-        json!({"kind": "reader", "scopes": ["items"]})
+        redelegated_after_delegator_reopened["writer"], status["writer"],
+        "a reopened delegator keeps its recipient range for later grants"
+    );
+    assert_eq!(
+        redelegated_after_delegator_reopened["profile"],
+        json!({"kind": "reader", "scopes": ["items"]}),
+        "raw grants that are exactly a starter profile are shown as one"
     );
     assert!(insert(&d, 3, "Jam").await.is_err());
-    // Credentials of another device or wider than the delegator's are refused.
     assert!(
         snap::observe(async {
             d.session
@@ -450,7 +464,8 @@ async fn a_delegate_never_holds_more_than_its_delegator() -> Result<(), Failure>
             d.session.info().await
         })
         .await
-        .is_err()
+        .is_err(),
+        "credentials of another device, wider than the delegator's, are refused"
     );
     for device in [&a, &s, &d, &p] {
         device.close().await;
@@ -458,19 +473,26 @@ async fn a_delegate_never_holds_more_than_its_delegator() -> Result<(), Failure>
     Ok(())
 }
 
+/// How [`issue`] hands out raw grants.
+enum Issuance {
+    /// As an issuer, from the domain's authority.
+    Grant,
+    /// As a delegator, one link below its own chain.
+    Delegate,
+}
+
 async fn issue(
     device: &Device,
     keys: rocky_sdk::NodeKeys,
     grants: Value,
     terms: rocky_sdk::GrantTerms,
-    delegate: bool,
+    issuance: Issuance,
 ) -> Result<rocky_sdk::Supplied, Failure> {
     let profile = rocky_sdk::GrantProfile::Grants {
         grants: serde_json::from_value(grants)?,
     };
-    if delegate {
-        device.session.delegate(keys, profile, terms).await
-    } else {
-        device.session.grant(keys, profile, terms).await
+    match issuance {
+        Issuance::Delegate => device.session.delegate(keys, profile, terms).await,
+        Issuance::Grant => device.session.grant(keys, profile, terms).await,
     }
 }

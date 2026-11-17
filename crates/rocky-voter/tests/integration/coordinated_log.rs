@@ -86,9 +86,7 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
     );
     let leader = cluster.wait_leader(&admin).await;
     cluster.arm(leader, "reply.before_send");
-    // The exact append is already assigned. Its retry crashes the leader at
-    // the reply boundary, before the remaining acknowledgments.
-    let retry = Action::Append {
+    let retry_of_the_assigned_append = Action::Append {
         expected: 0,
         epoch: pending.epoch,
         hash: pending.hash,
@@ -100,7 +98,9 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
     } else {
         &second
     };
-    let _ = proposer.coordinated(log(cluster.scope), retry).await;
+    let _ = proposer
+        .coordinated(log(cluster.scope), retry_of_the_assigned_append)
+        .await;
     cluster.wait_exit(leader).await;
     cluster.wait_leader(&admin).await;
     let status = first
@@ -193,7 +193,6 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
         "two-node successful write: 3 client calls, 2 Raft entries; leader admitted-client delta {}",
         after.metrics.requests - before.metrics.requests
     );
-    // Drive the explicit production deadline timer; no application node sends a resolving call.
     let head = first.coordinated_head(log(cluster.scope)).await.unwrap();
     let assigned = first
         .coordinated(
@@ -216,20 +215,20 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
         .coordinated(log(cluster.scope), Action::Acknowledge { pending })
         .await
         .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let head = first.coordinated_head(log(cluster.scope)).await.unwrap();
-            if head.pending.is_none() {
-                assert_eq!(head.commit, 3);
-                assert_eq!(head.members.len(), 1);
-                break;
+    let resolved_by_the_voters_deadline_timer =
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let head = first.coordinated_head(log(cluster.scope)).await.unwrap();
+                if head.pending.is_none() {
+                    break head;
+                }
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    // A committed resolution survives snapshots and all process restarts.
+        })
+        .await
+        .expect("the voters' deadline timer resolves without an application call");
+    assert_eq!(resolved_by_the_voters_deadline_timer.commit, 3);
+    assert_eq!(resolved_by_the_voters_deadline_timer.members.len(), 1);
     for id in 1..=3 {
         admin.snapshot(id).await.unwrap();
     }
@@ -240,6 +239,9 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
     }
     cluster.wait_leader(&admin).await;
     let head = first.coordinated_head(log(cluster.scope)).await.unwrap();
-    assert_eq!(head.commit, 3);
-    assert_eq!(head.hashes.len(), 3);
+    assert_eq!(
+        (head.commit, head.hashes.len()),
+        (3, 3),
+        "a committed resolution survives snapshots and every process restart"
+    );
 }

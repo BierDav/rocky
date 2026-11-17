@@ -62,7 +62,6 @@ async fn a_buffered_commit_is_never_reported_as_flushed() {
         lookup.map(|commit| commit.class),
         Some(CommitClass::Buffered)
     );
-    // Awaiting the flush forces one, which covers every earlier commit.
     let second = note(&replica, 2, "flushed").flushed().await.unwrap();
     for (handle, operation) in [(1, &first.operation), (2, &second)] {
         let lookup = replica
@@ -75,9 +74,12 @@ async fn a_buffered_commit_is_never_reported_as_flushed() {
             (operation, CommitClass::Flushed)
         );
     }
-    // A retried handle reports the class its original commit reached.
     let retried = note(&replica, 1, "buffered").receipt().await.unwrap();
-    assert_eq!(retried.class, CommitClass::Flushed);
+    assert_eq!(
+        retried.class,
+        CommitClass::Flushed,
+        "awaiting the flush forces one, which covers every earlier commit: a retried handle reports the class its original commit reached"
+    );
     replica.flush().await.unwrap();
     runtime.close().await.unwrap();
     let full = open_node(
@@ -146,8 +148,6 @@ async fn nothing_leaves_the_device_before_a_flush_covers_it() {
         vec![replica.operation(five.scoped_id()).await.unwrap().unwrap()],
     )
     .await;
-    // A receiver's acknowledgment lets the sender drop its outbox entry, so
-    // the receipt is flushed before it is returned.
     let peer_snapshot = dir.path().join("peer-flushed");
     let peer = open_node(&dir.path().join("peer.db"), PEER, one_file()).await;
     let receiving = peer.domain(scope(1)).unwrap();
@@ -157,7 +157,8 @@ async fn nothing_leaves_the_device_before_a_flush_covers_it() {
         assert!(
             flushed_operations(&peer_snapshot, "peer.db")
                 .await
-                .contains(bytes)
+                .contains(bytes),
+            "a receiver's acknowledgment lets the sender drop its outbox entry, so the receipt is flushed before it is returned"
         );
     }
     drop(two);
@@ -188,7 +189,6 @@ async fn exposure_stays_behind_the_watermark_with_incoming_work() {
     let runtime = open_node(&dir.path().join("node.db"), NODE, one_file()).await;
     let replica = runtime.domain(scope(1)).unwrap();
     snapshots(&replica, &snapshot).await;
-    // The first copy is taken at the first flush.
     note(&replica, 200, "first").flushed().await.unwrap();
     let on_device = async |bytes: &Vec<u8>| {
         flushed_operations(&snapshot, "node.db")
@@ -203,7 +203,6 @@ async fn exposure_stays_behind_the_watermark_with_incoming_work() {
         let local_bytes = local.operation.encode().unwrap();
         assert_eq!(local.class, CommitClass::Buffered);
         assert!(!on_device(&local_bytes).await);
-        // A page is acknowledged to its sender, so it is flushed first.
         let page = remote[usize::from(round) * 3..][..3].to_vec();
         for result in replica.receive_page(page.clone()).await.unwrap() {
             assert!(result.unwrap().applied);
@@ -215,7 +214,11 @@ async fn exposure_stays_behind_the_watermark_with_incoming_work() {
             .lookup_commit(MutationHandle([2 * round + 1; 32]))
             .await
             .unwrap();
-        assert_eq!(covered.unwrap().class, CommitClass::Flushed);
+        assert_eq!(
+            covered.unwrap().class,
+            CommitClass::Flushed,
+            "a page is acknowledged to its sender, so it is flushed first"
+        );
     }
     runtime.close().await.unwrap();
 }
@@ -238,9 +241,12 @@ async fn losing_unflushed_commits_drops_only_unexposed_work_and_never_forks() {
         replica.receive(bytes).await.unwrap();
     }
     replica.process_pending().await.unwrap();
-    // Committed and visible locally, but never exposed.
     let lost = note(&authoring, 2, "lost").receipt().await.unwrap();
-    assert_eq!(lost.class, CommitClass::Buffered);
+    assert_eq!(
+        lost.class,
+        CommitClass::Buffered,
+        "committed and visible locally, but never exposed"
+    );
     assert_eq!(authoring.query().await.unwrap().rows.len(), 2);
     drop(authoring);
     author.close().await.unwrap();
@@ -266,17 +272,21 @@ async fn losing_unflushed_commits_drops_only_unexposed_work_and_never_forks() {
         (snapshot_rows.rows.len(), snapshot_rows.revision.get()),
         (1, 1)
     );
-    // The retried handle commits once, reusing the sequence nobody saw.
     let retried = note(&authoring, 2, "lost").committed().await.unwrap();
-    assert_eq!(retried.id, lost.operation.id);
+    assert_eq!(
+        retried.id, lost.operation.id,
+        "the retried handle commits once, reusing the sequence nobody saw"
+    );
     assert_eq!(
         note(&authoring, 2, "lost").committed().await.unwrap(),
         retried
     );
     let later = note(&authoring, 3, "later").committed().await.unwrap();
     for bytes in authoring.operation_page(Some(kept.id)).await.unwrap().items {
-        // No IdentityConflict: the peer never held the lost bytes.
-        replica.receive(bytes).await.unwrap();
+        replica
+            .receive(bytes)
+            .await
+            .expect("no identity conflict: the peer never held the lost bytes");
     }
     replica.process_pending().await.unwrap();
     let notes = |snapshot: Snapshot<(OperationId, String)>| -> Vec<String> {

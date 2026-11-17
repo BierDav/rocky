@@ -26,12 +26,16 @@ fn only_an_owner_device_no_statement_ended_anchors() -> Result<(), Failure> {
     )?;
     let leaf = chain.certificate().ok_or("certificate")?;
     assert!(anchors(leaf, locator.owner, &RevocationSet::new())?);
-    // The responder's own set carries the tombstone that ended it.
     let tombstone = chain.unlink(&account.identity(), scope.app, 2, node.public_key())?;
     let ended = RevocationSet::try_from(vec![tombstone])?;
-    assert!(!anchors(leaf, locator.owner, &ended)?);
-    // The root's own grant is no owner device.
-    assert!(!anchors(&grant, locator.owner, &RevocationSet::new())?);
+    assert!(
+        !anchors(leaf, locator.owner, &ended)?,
+        "the responder's own set carries the tombstone that ended it"
+    );
+    assert!(
+        !anchors(&grant, locator.owner, &RevocationSet::new())?,
+        "the root's own grant is no owner device"
+    );
     Ok(())
 }
 
@@ -158,17 +162,17 @@ mod installs {
         );
         if stage != Stage::Saved {
             assert!(!directory.join("identity.json").exists(), "{stage:?}");
-            // Nothing is handed out before the identity is saved.
             let refused = config(directory, hub)?.open().await.err();
-            let refused = refused.ok_or("opened a partial install")?.to_string();
+            let refused = refused
+                .ok_or("opened a partial install before its identity was saved")?
+                .to_string();
             assert!(refused.contains("unfinished"), "{stage:?}: {refused}");
         }
         let personal = sign_in(directory, hub, source()?).await?;
-        // The database thread ends the intent before it answers a call.
         personal.opened.database.session().info().await?;
         assert!(
             !directory.join("personal.intent").exists(),
-            "{stage:?}: the intent outlived the handout"
+            "{stage:?}: the database thread ends the intent before it answers a call"
         );
         assert!(
             !CRASHES
@@ -215,7 +219,6 @@ mod installs {
             assert_eq!(personal.freshness, Freshness::LocallyAnchored, "{stage:?}");
             let device = personal.opened.database;
             let node = device.session().info().await?.node;
-            // One node and one certificate, however often it was published.
             let held = known(&owner_path)?;
             assert!(
                 held.personal_devices(owner_key)?.contains(&node),
@@ -226,7 +229,7 @@ mod installs {
                     .filter(|certificate| certificate.capability.subject == node)
                     .count(),
                 1,
-                "{stage:?}"
+                "{stage:?}: one certificate, however often it was published"
             );
             device.session().sync_once().await?;
             assert_eq!(bodies(&device).await?, ["from owner"], "{stage:?}");
@@ -350,8 +353,6 @@ mod installs {
                 .push((owner_path.join("identity.json"), forged()?));
             Ok(())
         };
-        // Its only source answers with another schema: the authenticated
-        // genesis refuses it while staging, and the install keeps nothing.
         forge()?;
         let laptop = root.path().join("laptop");
         let error = match sign_in(&laptop, Some(&hub), SignInSource::Discover).await {
@@ -360,11 +361,17 @@ mod installs {
         };
         assert!(matches!(error, PersonalSignInError::Failed(_)), "{error}");
         let intent = crate::personal::Intent::load(&laptop)?.ok_or("intent")?;
-        assert_eq!(intent.stage, crate::personal::Stage::Prepared);
-        assert!(intent.secrets.is_empty());
+        assert_eq!(
+            intent.stage,
+            crate::personal::Stage::Prepared,
+            "the authenticated genesis refuses a forged schema while staging"
+        );
+        assert!(
+            intent.secrets.is_empty(),
+            "an install refused while staging keeps nothing"
+        );
 
-        // An honest second source.
-        let phone = sign_in(
+        let honest_phone = sign_in(
             &root.path().join("phone"),
             Some(&hub),
             SignInSource::Discover,
@@ -373,7 +380,6 @@ mod installs {
         .opened
         .database;
         announced(&hub, "phone").await;
-        // The lying owner answers first; the phone's answer installs.
         forge()?;
         let personal = sign_in(&laptop, Some(&hub), SignInSource::Discover).await?;
         assert!(
@@ -386,12 +392,13 @@ mod installs {
         assert!(
             known(&root.path().join("phone"))?
                 .personal_devices(account().locator().owner)?
-                .contains(&node)
+                .contains(&node),
+            "the honest phone's answer installs although the lying owner answers first"
         );
         device.session().sync_once().await?;
         assert_eq!(bodies(&device).await?, ["from owner"]);
         device.close().await?;
-        phone.close().await?;
+        honest_phone.close().await?;
         owner.close().await
     }
 }

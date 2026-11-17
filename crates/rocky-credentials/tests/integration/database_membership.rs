@@ -122,7 +122,6 @@ fn one_identity_has_independent_membership_under_distinct_roots_and_namespaces()
         );
         assert_eq!(sets[0], before);
     }
-    // Filling one database never consumes another database's author or slot.
     for sequence in 1..MAX_MEMBERSHIP_NODES as u64 {
         let membership = sets[0].membership().unwrap();
         let linked = chains[0]
@@ -142,7 +141,8 @@ fn one_identity_has_independent_membership_under_distinct_roots_and_namespaces()
         !sets[0]
             .membership()
             .unwrap()
-            .can_link(identity.public_key(), |_| false)
+            .can_link(identity.public_key(), |_| false),
+        "filling one database never consumes another database's author or slot"
     );
     for set in &sets[1..] {
         assert!(

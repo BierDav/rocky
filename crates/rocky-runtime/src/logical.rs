@@ -142,12 +142,11 @@ async fn verify_table(
     if created != table.indexes.len() {
         return Err(differs(name, "missing index"));
     }
-    // Rows of one key share its id and arrive together, in column order.
-    let (mut found, mut current) = (Vec::<ForeignKey>::new(), None);
+    let (mut found, mut current_key_id) = (Vec::<ForeignKey>::new(), None);
     for row in pragma(conn, "foreign_key_list", &installed).await? {
         let id = integer(row.first());
-        if current != Some(id) {
-            current = Some(id);
+        if current_key_id != Some(id) {
+            current_key_id = Some(id);
             found.push(ForeignKey {
                 table: text(row.get(2)).to_string(),
                 on_update: text(row.get(5)).to_string(),

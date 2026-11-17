@@ -106,13 +106,13 @@ async fn a_failed_migration_runs_again_and_a_committed_one_never() -> Result<(),
     let before = graph(&a).await;
     a.close().await;
 
-    // A migration asking for an id is refused before anything is signed.
     let refused = Database::open(open(root.path(), ASKS_FOR_IDS, None))
         .err()
         .ok_or("a migration asking for ids opened")?;
-    assert!(refused.to_string().contains("rocky_next_id"), "{refused}");
-    // One failing while it runs withdraws its private seal and opening:
-    // nothing of it left the device, and the workspace is the source tip's.
+    assert!(
+        refused.to_string().contains("rocky_next_id"),
+        "a migration asking for an id is refused before anything is signed: {refused}"
+    );
     let failed = Database::open(open(root.path(), DUPLICATES, None))
         .err()
         .ok_or("a failing migration opened")?;
@@ -126,11 +126,18 @@ async fn a_failed_migration_runs_again_and_a_committed_one_never() -> Result<(),
     let status = generation(&a).await;
     assert_eq!(status["current"]["schema"], 1, "{status}");
     assert_eq!(status["application"], "current");
-    assert_eq!(graph(&a).await, before);
-    assert_eq!(a.titles().await, ["apples", "bread"]);
+    assert_eq!(
+        graph(&a).await,
+        before,
+        "a failed migration withdraws its private seal and opening"
+    );
+    assert_eq!(
+        a.titles().await,
+        ["apples", "bread"],
+        "after a failed migration the workspace is the source tip's"
+    );
     a.close().await;
 
-    // The fixed release runs the migration again, once.
     let a = reopen(open(root.path(), FIXED, None))?;
     let status = generation(&a).await;
     assert_eq!(status["current"]["schema"], 3, "{status}");
@@ -143,14 +150,21 @@ async fn a_failed_migration_runs_again_and_a_committed_one_never() -> Result<(),
         [snap::cell(text("bread")), snap::cell(text("bread"))]
     ]);
     let tags = rows(&a, TAGS).await;
-    assert_eq!(rows(&a, POSITIONS).await, positions);
+    assert_eq!(
+        rows(&a, POSITIONS).await,
+        positions,
+        "the fixed release runs the migration again"
+    );
     assert_eq!(tags.as_array().map(Vec::len), Some(2));
     a.close().await;
 
-    // Its publication is recorded with its rows: reopening repeats nothing.
     let a = reopen(open(root.path(), FIXED, None))?;
     assert_eq!(rows(&a, POSITIONS).await, positions);
-    assert_eq!(rows(&a, TAGS).await, tags);
+    assert_eq!(
+        rows(&a, TAGS).await,
+        tags,
+        "the publication is recorded with its rows, so reopening repeats nothing"
+    );
     assert_eq!(
         generation(&a).await["migration"],
         json!({"state": "publishing", "bundles": 1, "published": 0})
@@ -178,10 +192,13 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
     a.close().await;
     b.close().await;
 
-    // Apart, each signs the generation and migrates what it holds.
     for directory in [&a_dir, &b_dir] {
         let device = reopen(open(directory, POSITIONED, None))?;
-        assert_eq!(generation(&device).await["current"]["schema"], 2);
+        assert_eq!(
+            generation(&device).await["current"]["schema"],
+            2,
+            "apart, each issuer signs the generation and migrates what it holds"
+        );
         device.close().await;
     }
     let a = reopen(open(&a_dir, POSITIONED, network("a")))?;
@@ -189,18 +206,21 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
     sync(&b).await;
     sync(&a).await;
     sync(&b).await;
-    // The owner's close wins: the issuer's migration tip stays a branch and
-    // its migration is never merged, so no row is there twice.
     for device in [&a, &b] {
         assert_eq!(
             rows(device, POSITIONS).await,
             json!([
                 [snap::cell(text("apples")), snap::cell(text("apples"))],
                 [snap::cell(text("bread")), snap::cell(text("bread"))]
-            ])
+            ]),
+            "the owner's close wins and the issuer's migration is never merged"
         );
         let tags = rows(device, TAGS).await;
-        assert_eq!(tags.as_array().map(Vec::len), Some(2), "{tags}");
+        assert_eq!(
+            tags.as_array().map(Vec::len),
+            Some(2),
+            "no migrated row is there twice: {tags}"
+        );
         assert_eq!(generation(device).await["migration"], Value::Null);
     }
     assert_eq!(rows(&a, TAGS).await, rows(&b, TAGS).await);
@@ -258,7 +278,6 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     introduce(&a, &b).await;
     list(&a, "From a").await?;
     let theirs = list(&b, "From b").await?;
-    // `a` learns of `b`'s list before the list's key reached it.
     snap::ok(
         a.session.register_partition(
             rocky_sdk::PartitionTarget::Group {
@@ -275,10 +294,12 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     .await;
     a.close().await;
 
-    // Holding no key of that list, `a` does not sign.
     let a = reopen(open(&a_dir, POSITIONED_LISTS, network("a")))?;
     let status = generation(&a).await;
-    assert_eq!(status["current"]["schema"], 1, "{status}");
+    assert_eq!(
+        status["current"]["schema"], 1,
+        "an issuer holding no key of a list does not sign: {status}"
+    );
     assert_eq!(status["application"], "ahead");
     assert_eq!(
         status["migration"],
@@ -296,15 +317,17 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     .ok_or("a query on the new field answered")?;
     assert!(query.to_string().contains("no such column"), "{query}");
 
-    // Issuers pass each other their group keys: once `a` holds it, the
-    // next round pulls the list, and `a` signs and migrates.
     for _ in 0..2 {
         sync(&b).await;
         sync(&a).await;
     }
     a.close().await;
     let a = reopen(open(&a_dir, POSITIONED_LISTS, network("a")))?;
-    assert_eq!(generation(&a).await["current"]["schema"], 2);
+    assert_eq!(
+        generation(&a).await["current"]["schema"],
+        2,
+        "once issuers passed each other the group key, the issuer signs and migrates"
+    );
     assert_eq!(
         rows(&a, "SELECT title, position FROM lists ORDER BY title").await,
         json!([
@@ -312,7 +335,6 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
             [snap::cell(text("From b")), snap::cell(text("From b"))]
         ])
     );
-    // An explicit schema open installs the signed generation before sync.
     b.close().await;
     let b = reopen(open(&b_dir, POSITIONED_LISTS, network("b")))?;
     sync(&b).await;
@@ -355,10 +377,12 @@ async fn a_two_step_migration_converges_on_every_member() -> Result<(), Failure>
 /// A returning member reaches the issuer's newest listed base.
 #[tokio::test(flavor = "multi_thread")]
 async fn returning_member_reaches_the_newest_base_after_a_migration() -> Result<(), Failure> {
-    // An unpartitioned seed intent must fit one pulled frame, about 1,100
-    // rows of this shape; `replayed.rs` seeds larger tables by partition.
-    converges_on_every_member(512, 2).await
+    converges_on_every_member(UNPARTITIONED_SEED_ROWS, 2).await
 }
+
+/// An unpartitioned seed intent must fit one pulled frame, about 1,100 rows
+/// of this shape; `replayed.rs` seeds larger tables by partition.
+const UNPARTITIONED_SEED_ROWS: usize = 512;
 
 struct MemberFixture {
     root: crate::support::Directory,
@@ -373,10 +397,14 @@ async fn converges_on_every_member(large: usize, history: usize) -> Result<(), F
     pull_member_fixture(prepare_member_fixture(large, history).await?).await
 }
 
+/// Prepares a returning member that crosses a bundle boundary; `history == 0`
+/// exercises the additive switch and a second migration as well. With history
+/// the empty historical states are finished before the migration is authored:
+/// their seals and listed records remain on the returning member's path. One
+/// publication peer durably acknowledges the migration bundles before the
+/// measured member pulls what it lacks.
 async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFixture, Failure> {
     let root = crate::support::small_directory()?;
-    // The returning member crosses a bundle boundary; other cases exercise
-    // the additive switch and second migration as well.
     let multi_step = history == 0;
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
@@ -398,8 +426,6 @@ async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFi
         }
     }
     if history > 1 {
-        // Finish the empty historical states before authoring the migration.
-        // Their seals and listed records remain on the returning member's path.
         snap::ok(a.session.compact(0)).await;
     }
     let history_time = history_clock.elapsed();
@@ -409,8 +435,6 @@ async fn prepare_member_fixture(large: usize, history: usize) -> Result<MemberFi
     let size =
         |directory: &Path| std::fs::metadata(directory.join("rocky.sqlite")).map(|m| m.len());
     b.close().await;
-    // One publication peer durably acknowledges the migration bundles before
-    // the measured returning member pulls.
     let c_dir = root.path().join("publication-peer");
     let before = size(&a_dir)?;
     let clock = std::time::Instant::now();
@@ -556,7 +580,6 @@ async fn pull_member_fixture(fixture: MemberFixture) -> Result<(), Failure> {
         )
     };
     let network_bytes = hub.written();
-    // The returning member pulls what it lacks.
     let member_wire_start = *network_bytes.borrow();
     let clock = std::time::Instant::now();
     let b = reopen(open(&b_dir, &fill, network("b")))?;
@@ -564,7 +587,6 @@ async fn pull_member_fixture(fixture: MemberFixture) -> Result<(), Failure> {
     eprintln!("STAGE rows={large} member_open={member_open:?}");
     let clock = std::time::Instant::now();
     let mut syncs = 0;
-    // A table whose frames are still arriving reads as unavailable.
     while snap::observe(b.session.read(rocky_sdk::ReadQuery {
         sql: snap::text(&(ready_query)),
         values: vec![],
@@ -590,8 +612,6 @@ async fn pull_member_fixture(fixture: MemberFixture) -> Result<(), Failure> {
     assert_eq!(generation(&a).await["migration"], Value::Null);
     let fingerprint = "SELECT count(*), min(title), max(title), sum(length(title)) FROM items";
     assert_eq!(rows(&a, fingerprint).await, rows(&b, fingerprint).await);
-    // Every key/value is checked, including the seed range, rather than relying
-    // on extrema alone.
     let filled_fields = if multi_step {
         " OR position != title OR tag IS NOT NULL"
     } else {
@@ -616,8 +636,6 @@ async fn pull_member_fixture(fixture: MemberFixture) -> Result<(), Failure> {
             .checked_sub(migration)
             .ok_or("invalid migration accounting")?;
         assert!((0..=67_108_864).contains(&ordinary));
-        // The migration's intent is still retained, so the member replays
-        // it rather than importing the issuer's closing base.
         if !multi_step && directory == &a_dir {
             let mut query = db.prepare("SELECT signed FROM secure_checkpoints c WHERE sequence=(SELECT max(sequence) FROM secure_checkpoints WHERE scope=c.scope)")?;
             let mut items_base = None;
@@ -677,12 +695,10 @@ async fn a_member_writes_its_shared_partition_after_following_a_migration() -> R
         .await;
     sync(&b).await;
     a.close().await;
-    // The issuer migrates; the member follows `main` onto the migration's
-    // line, where it writes under another node of its identity.
     let a = reopen(open(&a_dir, POSITIONED_LISTS, network("a")))?;
-    // The member's application stays at the first version.
     b.close().await;
-    let b = reopen(open(&b_dir, LISTS, network("b")))?;
+    let member_on_the_first_version = LISTS;
+    let b = reopen(open(&b_dir, member_on_the_first_version, network("b")))?;
     introduce(&a, &b).await;
     sync(&b).await;
     assert_eq!(generation(&b).await["current"]["schema"], 2);
@@ -697,7 +713,8 @@ async fn a_member_writes_its_shared_partition_after_following_a_migration() -> R
     sync(&b).await;
     assert_eq!(
         rows(&a, "SELECT title, position FROM lists").await,
-        json!([[snap::cell(text("Monthly")), snap::cell(text("Weekly"))]])
+        json!([[snap::cell(text("Monthly")), snap::cell(text("Weekly"))]]),
+        "a member behind the migration follows main onto its line and its write arrives"
     );
     b.close().await;
     a.close().await;

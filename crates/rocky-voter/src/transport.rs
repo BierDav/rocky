@@ -50,7 +50,6 @@ impl RaftNetworkFactory<Types> for Network {
     }
 }
 impl Connection {
-    // The error type is fixed by openraft.
     #[expect(
         clippy::result_large_err,
         reason = "OpenRaft defines the RPC error type"

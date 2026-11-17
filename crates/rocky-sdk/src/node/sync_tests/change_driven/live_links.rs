@@ -235,7 +235,6 @@ async fn committed_edit_publishes_on_the_link_without_receiver_reconcile() -> Re
                     .all(|event| event["kind"] != "peer_reconciliation_completed"
                         && event["kind"] != "rows_synced")
             );
-            // An idle link opens no new streams as time passes.
             let idle = hub.counts();
             for _ in 0..4 {
                 tokio::time::advance(Duration::from_secs(15)).await;
@@ -243,7 +242,11 @@ async fn committed_edit_publishes_on_the_link_without_receiver_reconcile() -> Re
                     tokio::task::yield_now().await;
                 }
             }
-            assert_eq!(hub.counts(), idle);
+            assert_eq!(
+                hub.counts(),
+                idle,
+                "an idle link opens no new streams as time passes"
+            );
             assert_eq!(a.current().ok_or("service")?.live.len(), 1);
             assert_eq!(b.current().ok_or("service")?.live.len(), 1);
             a.detach(None).await;
@@ -273,7 +276,6 @@ async fn reverse_opened_link_delivers_when_receiver_cannot_be_dialed() -> Result
             )
             .await?;
             targets(&b, std::slice::from_ref(&a)).await?;
-            // Enable the publisher's link acceptor without initiating a pass.
             a.automatic.store(true, Ordering::SeqCst);
             hub.stall_peer("b", true);
             start(&b, true).await?;
@@ -322,7 +324,6 @@ async fn explicit_sync_without_the_worker_closes_its_short_link() -> Result<(), 
             assert_eq!(completed_peers(&synced), 1);
             assert_eq!(rows(&b).await?, ["1"]);
             assert_eq!(hub.protocol_dials("b", "a", Protocol::Link), links + 1);
-            // The reconcile ended the short link on both sides.
             until(|| {
                 a.current().is_some_and(|s| s.live.len() == 0)
                     && b.current().is_some_and(|s| s.live.len() == 0)
@@ -372,7 +373,6 @@ async fn authority_offline_disable_and_detach_end_owned_links() -> Result<(), Fa
                 .iter()
                 .map(|peer| (*peer, service.live.id(*peer)))
                 .collect();
-            // Renewal replaces every authenticated link, including inbound links.
             let chain = a.settings.lock().await.credentials.clone();
             let before = hub.counts()[1];
             a.replica.renew_credentials(chain).await?;
@@ -427,7 +427,6 @@ async fn an_idle_linked_pair_dials_nothing_for_an_hour() -> Result<(), Failure> 
             let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
             let link = sa.live.id(peer);
             let before = [hub.dials_to("a"), hub.dials_to("b")];
-            // An idle link writes nothing; nothing dials, polls or replaces it.
             let written = *hub.written().borrow();
             for _ in 0..240 {
                 tokio::time::advance(Duration::from_secs(15)).await;
@@ -435,10 +434,18 @@ async fn an_idle_linked_pair_dials_nothing_for_an_hour() -> Result<(), Failure> 
                     tokio::task::yield_now().await;
                 }
             }
-            assert_eq!([hub.dials_to("a"), hub.dials_to("b")], before);
-            assert_eq!(*hub.written().borrow(), written);
+            assert_eq!(
+                [hub.dials_to("a"), hub.dials_to("b")],
+                before,
+                "nothing dials an idle link"
+            );
+            assert_eq!(
+                *hub.written().borrow(),
+                written,
+                "an idle link writes nothing"
+            );
             assert_eq!((sa.live.len(), sb.live.len()), (1, 1));
-            assert_eq!(sa.live.id(peer), link);
+            assert_eq!(sa.live.id(peer), link, "nothing replaces an idle link");
             a.detach(None).await;
             b.detach(None).await;
             Ok(())
@@ -484,7 +491,6 @@ async fn a_transport_ended_link_closes_and_reconnects_with_backoff() -> Result<(
                     .insert(peer, met);
             }
 
-            // The hub measures no paths; iroh's are covered by its liveness gate.
             let sync_token = a.sync_status.borrow().token;
             let client = a.client(1)?;
             let token = status.token.as_str();
@@ -492,7 +498,6 @@ async fn a_transport_ended_link_closes_and_reconnects_with_backoff() -> Result<(
             assert!(futures_util::poll!(waiting.as_mut()).is_pending());
             let dials = hub.protocol_dials("a", "b", Protocol::Link);
             let reverse_dials = hub.protocol_dials("b", "a", Protocol::Link);
-            // As iroh's idle timeout ends a connection to a vanished peer.
             hub.sever_links("b");
             until(|| service.live.len() == 0).await;
             assert!(
@@ -1052,7 +1057,12 @@ async fn iroh_reverse_gate() -> Result<(), Failure> {
     real_reverse_gate().await
 }
 
-// Stop both workers before either endpoint closes, so neither redials a closing peer.
+/// Stops both workers before either endpoint closes, so neither redials a closing peer.
+/// Pauses time once reconciliation is done: real QUIC needs its ACK timers
+/// while reconciling, so only the idle interval under test is frozen.
+fn freeze_idle_interval() {
+    tokio::time::pause();
+}
 async fn detach_real_pair(a: &Node, b: &Node) -> Result<(), Failure> {
     let (stopped_a, stopped_b) = tokio::join!(start(a, false), start(b, false));
     stopped_a?;
@@ -1084,9 +1094,7 @@ async fn real_liveness_gate() -> Result<(), Failure> {
                 );
                 tokio::task::yield_now().await;
             }
-            // Real QUIC needs its ACK timers during reconciliation. Freeze
-            // only the idle interval whose lack of traffic this test checks.
-            tokio::time::pause();
+            freeze_idle_interval();
             let before = hub.counts();
             assert!(
                 a.retry_deadline().is_none(),
@@ -1100,8 +1108,6 @@ async fn real_liveness_gate() -> Result<(), Failure> {
                 *b.sync_status.borrow(),
                 snap::Snapshot::snapshot(b.activity.after(0))
             );
-            // iroh keeps the idle connection alive below the stream: the
-            // link itself writes nothing and nothing redials.
             let written = *hub.written().borrow();
             for _ in 0..4 {
                 tokio::time::advance(Duration::from_secs(15)).await;
@@ -1110,9 +1116,17 @@ async fn real_liveness_gate() -> Result<(), Failure> {
                 }
             }
             assert_eq!(hub.counts(), before);
-            assert_eq!(*hub.written().borrow(), written);
+            assert_eq!(
+                *hub.written().borrow(),
+                written,
+                "iroh keeps the idle connection alive below the stream; the link writes nothing"
+            );
             assert_eq!((sa.live.len(), sb.live.len()), (1, 1));
-            assert_eq!(hub.protocol_dials("a", &ab, Protocol::Link), 1);
+            assert_eq!(
+                hub.protocol_dials("a", &ab, Protocol::Link),
+                1,
+                "nothing redials an idle link"
+            );
             detach_real_pair(&a, &b).await?;
             Ok(())
         }))
@@ -1208,12 +1222,11 @@ async fn real_budget_gate() -> Result<(), Failure> {
             until(|| sa.live.len() == 1 && b.current().is_some_and(|s| s.live.len() == 1)).await;
             settled(&a).await;
             settled(&b).await;
-            // Both nodes dial; the losing inbound duplicate holds a permit until
-            // its admission ends. Only an accepted live link may hold one then.
             let kb = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
             until(|| {
-                let held = usize::from(sa.live.dialed(kb) == Some(false));
-                sa.live_budget.available_permits() == crate::node::live_links::BUDGET - held
+                let held_by_accepted_link = usize::from(sa.live.dialed(kb) == Some(false));
+                sa.live_budget.available_permits()
+                    == crate::node::live_links::BUDGET - held_by_accepted_link
             })
             .await;
             let full = sa
@@ -1294,14 +1307,13 @@ async fn a_busy_link_backs_off_without_another_sync_path_and_reopens_when_a_slot
             };
             until(|| c.current().is_some_and(|s| !s.live.contains(peer)) && backoff().is_some())
                 .await;
-            // Explicit sync tries the peer in its backoff and fails too;
-            // nothing else carries the row.
             add(&a, 1).await?;
             let transport = transport(&c).await?;
-            assert!(failed_report(&c.sync(&*transport).await?.0));
-            assert!(rows(&c).await?.is_empty());
-            // The renewal its failure prompts reached the peer, which clears
-            // the backoff until the next busy refusal.
+            assert!(
+                failed_report(&c.sync(&*transport).await?.0),
+                "explicit sync tries the peer in its backoff and fails too"
+            );
+            assert!(rows(&c).await?.is_empty(), "nothing else carries the row");
             until(|| backoff().is_some()).await;
             drop(full);
             let deadline = backoff().ok_or("back-off")?;
@@ -1318,9 +1330,9 @@ async fn a_busy_link_backs_off_without_another_sync_path_and_reopens_when_a_slot
         .await
 }
 
-// Inject a verified incoming statement without renewal or key installation.
+/// Injects a verified incoming statement against the peer's identity,
+/// without renewal or key installation.
 async fn learn_revocation(node: &Node, peer: PublicKey) -> Result<(), Failure> {
-    // Issuer authority targets the peer's identity, never its node.
     let identity = node
         .membership()
         .await?
@@ -1442,7 +1454,6 @@ async fn a_local_commit_between_receipt_snapshots_remains_eligible_for_publicati
             add(&a, 1).await?;
             gate.entered.acquire().await?.forget();
             assert_eq!(rows(&b).await?, ["1"]);
-            // Intake ownership prevents reverse publication until the receipt is processed.
             add(&b, 2).await?;
             gate.resume.add_permits(1);
             while rows(&a).await? != ["1", "2"] {
@@ -1913,7 +1924,6 @@ async fn a_stalled_peer_does_not_hold_publication_to_another() -> Result<(), Fai
                 service.live.traffic().iter().map(|t| t.intakes).sum()
             };
             let (b_before, c_before) = (intakes(&b_service), intakes(&c_service));
-            // B admits each publication but never reads it until the gate opens.
             let gate = Arc::new(Semaphore::new(0));
             *b_service.live.push_gate.lock().unwrap() = Some(gate.clone());
             for key in 1..=2u8 {
@@ -1927,12 +1937,15 @@ async fn a_stalled_peer_does_not_hold_publication_to_another() -> Result<(), Fai
             assert!(rows(&b).await?.is_empty());
             *b_service.live.push_gate.lock().unwrap() = None;
             gate.add_permits(1);
-            // The stalled pass finishes, then the signal it missed publishes the rest.
             while rows(&b).await?.len() != 2 {
                 tokio::task::yield_now().await;
             }
             until(|| !a_service.live.publishing_or_receiving()).await;
-            assert_eq!(intakes(&b_service) - b_before, 2);
+            assert_eq!(
+                intakes(&b_service) - b_before,
+                2,
+                "the stalled pass finishes, then the signal it missed publishes the rest"
+            );
             assert_eq!(intakes(&c_service) - c_before, 2);
             for node in [&a, &b, &c] {
                 node.detach(None).await;
@@ -1981,8 +1994,6 @@ async fn link_control_round_trip_runs_while_the_database_executor_is_blocked() -
             let (a, b) = pair(root.path(), &hub).await?;
             let (near, far) = opened_links(&a, &b).await?;
             let (answer, task) = crate::node::live_links::control_probe(near, far);
-            // Block this LocalSet's OS thread. Framing and routing must finish on
-            // the transport runtime without another database scheduler pass.
             let result = answer.recv_timeout(Duration::from_millis(500));
             task.abort();
             result.map_err(
@@ -2101,7 +2112,6 @@ async fn a_peer_holding_more_than_one_frontier_batch_publishes_only_the_changed_
         .run_until(frozen(async {
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
-            // Partition selectors cover several concrete scopes without extra grants.
             let names: Vec<_> = std::iter::once("items".to_owned())
                 .chain((1..62).map(|n| format!("held_{n}")))
                 .collect();
@@ -2259,10 +2269,8 @@ async fn an_over_budget_burst_is_repaired_once_and_later_edits_publish() -> Resu
                     && !service_b.live.publishing_or_receiving()
             })
             .await;
-            // B never publishes back, so only A's own outcomes move its cursor.
-            let quiet = service_b.live.publishing.lock().await;
+            let b_never_publishes_back = service_b.live.publishing.lock().await;
             let idle = || !service_a.live.publishing_or_receiving();
-            // One capture over the 256 KiB publication budget fails preflight.
             let title = "x".repeat(16 * 1024);
             let client = a.client(1)?;
             let publish = service_a.live.publishing.lock().await;
@@ -2304,7 +2312,6 @@ async fn an_over_budget_burst_is_repaired_once_and_later_edits_publish() -> Resu
                 .as_str()
                 .ok_or("activity")?
                 .parse()?;
-            // The repaired range is not exported again with the next edit.
             add(&a, 1).await?;
             while count(&b).await? != "25" {
                 tokio::task::yield_now().await;
@@ -2322,7 +2329,7 @@ async fn an_over_budget_burst_is_repaired_once_and_later_edits_publish() -> Resu
                 .contains(&event["kind"].as_str().unwrap_or_default())),
                 "{events}"
             );
-            drop(quiet);
+            drop(b_never_publishes_back);
             a.detach(None).await;
             b.detach(None).await;
             Ok(())
@@ -2354,7 +2361,6 @@ async fn a_control_hint_matching_local_state_schedules_no_repair() -> Result<(),
             assert_eq!(work(peer), Some(Some(scopes.iter().copied().collect())));
             a.changed_signal(peer, &scopes, [0; 32], true).await?;
             assert_eq!(work(peer), Some(None));
-            // A full control batch may have been truncated: it widens even when equal.
             let full: Vec<_> = (0..link::SIGNAL_SCOPES)
                 .map(|index| {
                     let mut scope = scopes[0];

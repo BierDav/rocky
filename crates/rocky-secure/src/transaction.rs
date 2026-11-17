@@ -12,13 +12,14 @@ use rocky_core::RowApplication;
 /// watermark; exposing callers flush with `Inner::flush`.
 /// The whole transaction retries with backoff while another connection holds
 /// the file and then reports `Error::RetryExhausted`; inside this process the
-/// replica lock is the only writer. `@commit` skips the WAL check. A macro
-/// because async closures would make the callers' futures lose `Send`.
+/// replica lock is the only writer. `@commit` skips the WAL check;
+/// `@cache_neutral` preserves committed frontiers and is only for
+/// offer/acknowledgment bookkeeping. A macro because async closures would
+/// make the callers' futures lose `Send`.
 macro_rules! transaction {
     (@commit $inner:expr, |$name:ident| $body:expr) => {{
         transaction!(@attempt $inner, false, |$name| $body)
     }};
-    // Only offer/acknowledgment bookkeeping may preserve committed frontiers.
     (@cache_neutral $inner:expr, |$name:ident| $body:expr) => {{
         let owner = &mut *$inner;
         let result = transaction!(@attempt owner, true, |$name| $body);
@@ -88,10 +89,8 @@ impl<A: RowApplication> Inner<A> {
             }
             Ok(value) => {
                 self.note_commit().await;
-                // Typed tables changed: announce them at the committed revision.
-                if self.touched()
-                    && let Err(error) = self.publish_revision().await
-                {
+                let typed_tables_changed = self.touched();
+                if typed_tables_changed && let Err(error) = self.publish_revision().await {
                     self.invalidate_context();
                     return Some(Err(error));
                 }

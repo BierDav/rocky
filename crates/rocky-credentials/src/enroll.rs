@@ -300,8 +300,7 @@ impl RenewRequest {
             time,
             chain,
             exchange,
-            // Replaced below; a signature has no neutral value.
-            signature: node.sign(&[]),
+            signature: placeholder_signature(node),
         };
         request.signature = node.sign(&request.body()?);
         Ok((request, secret))
@@ -341,13 +340,12 @@ impl RenewRequest {
         let identity = self
             .chain
             .provenance_with_families(publisher, self.node, families)?;
-        // The identity's link follows the publisher or an issuer link.
         let capabilities = self.chain.capabilities();
-        let granted = match capabilities.0.len().checked_sub(2) {
+        let follows_publisher_or_issuer = match capabilities.0.len().checked_sub(2) {
             None => true,
             Some(parent) => capabilities.0[parent].capability.extended()?.issues,
         };
-        if !granted {
+        if !follows_publisher_or_issuer {
             return Err(denied("a delegated credential is renewed by its delegator"));
         }
         Ok(identity)
@@ -630,9 +628,8 @@ impl IdentityRequest {
             node: node.public_key(),
             time,
             exchange,
-            // Replaced below; a signature has no neutral value.
-            node_signature: node.sign(&[]),
-            identity_signature: node.sign(&[]),
+            node_signature: placeholder_signature(node),
+            identity_signature: placeholder_signature(node),
         };
         let body = request.body()?;
         request.node_signature = node.sign(&body);
@@ -725,4 +722,10 @@ impl IdentityAnswer {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         decode_bounded(bytes, 3 * MAX_REVOCATION_SET_BYTES)
     }
+}
+
+/// A signature the caller replaces once the signed body is known; signatures
+/// have no neutral value.
+fn placeholder_signature(node: &PrivateKey) -> Signature {
+    node.sign(&[])
 }

@@ -7,30 +7,33 @@
 use super::*;
 use crate::replica::checkpoint::Sets;
 
+/// The seals a scope's rows were taken at, empty ones included, with each
+/// seal's encoded `SealedOutcomes`. Kept while the seal leaves the path.
+const REPLAYED_SEALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_replayed_seals(scope INTEGER NOT NULL,seal BLOB NOT NULL,outcomes BLOB NOT NULL,version INTEGER NOT NULL,PRIMARY KEY(scope,seal)) WITHOUT ROWID";
+/// Rows at the scope's checkpoint, and those of an import in progress.
+const REPLAYED_BASE_ROWS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_replayed_base_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,image BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID";
+/// A locally compacted base borrows immutable seal rows. Imported bases
+/// own their rows instead. The selector changes with the signed checkpoint.
+const REPLAYED_BASE_SOURCE_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_replayed_base_source(scope INTEGER PRIMARY KEY,seal BLOB NOT NULL,version INTEGER NOT NULL) WITHOUT ROWID";
+/// The field ids stored images name; never deleted.
+const REPLAYED_FIELDS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_replayed_fields(ordinal INTEGER PRIMARY KEY,field BLOB NOT NULL UNIQUE)";
+/// While rows are taken at a seal: per lowercase table and encoded key,
+/// the row's image before the earliest open member that changed it, and
+/// that member's order; no image when the member created it.
+const SEAL_UNDONE_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_seal_undone(tbl TEXT NOT NULL,key BLOB NOT NULL,era INTEGER NOT NULL,clock INTEGER NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,image BLOB,PRIMARY KEY(tbl,key)) WITHOUT ROWID";
 pub(in crate::replica) const SCHEMA: &[&str] = &[
-    // Rows at the newest finalized, uncompacted seals; `secure_replayed_seals`
-    // marks the seals a scope's rows were taken at, empty ones included,
-    // with the seal's encoded `SealedOutcomes`. They stay while the seal
-    // leaves the path and comes back.
-    "CREATE TABLE IF NOT EXISTS secure_replayed_seals(scope INTEGER NOT NULL,seal BLOB NOT NULL,outcomes BLOB NOT NULL,version INTEGER NOT NULL,PRIMARY KEY(scope,seal)) WITHOUT ROWID",
+    REPLAYED_SEALS_TABLE,
     "CREATE TABLE IF NOT EXISTS secure_replayed_snapshot_clock(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL)",
     "INSERT OR IGNORE INTO secure_replayed_snapshot_clock VALUES(1,0)",
     "CREATE TABLE IF NOT EXISTS secure_replayed_snapshots(scope INTEGER NOT NULL,seal BLOB NOT NULL,version INTEGER NOT NULL,PRIMARY KEY(scope,seal,version)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_replayed_seal_rows(scope INTEGER NOT NULL,seal BLOB NOT NULL,version INTEGER NOT NULL,row BLOB NOT NULL,image BLOB NOT NULL,PRIMARY KEY(scope,seal,version,row)) WITHOUT ROWID",
-    // Rows at the scope's checkpoint, and those of an import in progress.
-    "CREATE TABLE IF NOT EXISTS secure_replayed_base_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,image BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
-    // A locally compacted base borrows immutable seal rows. Imported bases
-    // own their rows instead. The selector changes with the signed checkpoint.
-    "CREATE TABLE IF NOT EXISTS secure_replayed_base_source(scope INTEGER PRIMARY KEY,seal BLOB NOT NULL,version INTEGER NOT NULL) WITHOUT ROWID",
+    REPLAYED_BASE_ROWS_TABLE,
+    REPLAYED_BASE_SOURCE_TABLE,
     "CREATE VIEW IF NOT EXISTS secure_replayed_base AS SELECT r.scope,r.row,r.image FROM secure_replayed_base_rows r WHERE NOT EXISTS(SELECT 1 FROM secure_replayed_base_source s WHERE s.scope=r.scope) UNION ALL SELECT r.scope,r.row,r.image FROM secure_replayed_base_source s JOIN secure_replayed_seal_rows r ON r.scope=s.scope AND r.seal=s.seal AND r.version=s.version",
     "CREATE TRIGGER IF NOT EXISTS secure_replayed_base_delete INSTEAD OF DELETE ON secure_replayed_base BEGIN DELETE FROM secure_replayed_base_rows WHERE scope=OLD.scope AND row=OLD.row; DELETE FROM secure_replayed_seal_rows WHERE scope=OLD.scope AND row=OLD.row AND (seal,version)=(SELECT seal,version FROM secure_replayed_base_source WHERE scope=OLD.scope); END",
     "CREATE TABLE IF NOT EXISTS secure_replayed_staged(scope INTEGER NOT NULL,row BLOB NOT NULL,image BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
-    // The field ids stored images name; never deleted.
-    "CREATE TABLE IF NOT EXISTS secure_replayed_fields(ordinal INTEGER PRIMARY KEY,field BLOB NOT NULL UNIQUE)",
-    // While rows are taken at a seal: per lowercase table and encoded key,
-    // the row's image before the earliest open member that changed it, and
-    // that member's order; no image when the member created it.
-    "CREATE TABLE IF NOT EXISTS secure_seal_undone(tbl TEXT NOT NULL,key BLOB NOT NULL,era INTEGER NOT NULL,clock INTEGER NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,image BLOB,PRIMARY KEY(tbl,key)) WITHOUT ROWID",
+    REPLAYED_FIELDS_TABLE,
+    SEAL_UNDONE_TABLE,
 ];
 
 const ROW_LABEL: &str = "rocky.replayed-row.v1";
@@ -388,7 +391,6 @@ impl<A: RowApplication> Inner<A> {
         if decided.is_empty() {
             return Ok(());
         }
-        // Each scope's snapshot header first: its rows name its version.
         let mut versions = BTreeMap::new();
         for (scope, id) in &decided {
             let outcomes = self.sealed_outcomes(*id).await?;
@@ -479,7 +481,6 @@ impl<A: RowApplication> Inner<A> {
                     return Err(Error::Corrupt("replayed member".into()));
                 };
                 for undo in super::undo_of(undo)? {
-                    // The earliest member's image wins, whatever the page order.
                     self.conn
                         .execute(
                             "INSERT INTO secure_seal_undone VALUES(?,?,?,?,?,?,?) ON CONFLICT(tbl,key) DO UPDATE SET era=excluded.era,clock=excluded.clock,author=excluded.author,sequence=excluded.sequence,image=excluded.image WHERE (excluded.era,excluded.clock,excluded.author,excluded.sequence)<(era,clock,author,sequence)",
@@ -532,8 +533,6 @@ impl<A: RowApplication> Inner<A> {
             .iter()
             .map(|column| typed::quoted(&column.sql_name))
             .collect();
-        // Pages follow the rowid, or the primary key of a table without
-        // one, which SQLite keeps NOT NULL.
         let without_rowid = crate::scoped_connection::tables(&[&logical.create_sql])
             .first()
             .is_some_and(|(_, without_rowid)| *without_rowid);
@@ -602,7 +601,6 @@ impl<A: RowApplication> Inner<A> {
             self.store_seal_images(seal, projected, images, versions)
                 .await?;
         }
-        // Then each row as open members found it, in key order.
         let mut after = Vec::new();
         loop {
             let records = collect_rows(
@@ -693,7 +691,6 @@ impl<A: RowApplication> Inner<A> {
         id: i64,
         depth: i64,
     ) -> Result<(), Error> {
-        // Headers first: no reader takes a partly released snapshot.
         for table in [
             "secure_replayed_seals",
             "secure_replayed_snapshots",
@@ -1036,9 +1033,6 @@ impl<A: RowApplication> Inner<A> {
         source: TipId,
         rows: &[(Commitment, Vec<u8>)],
     ) -> Result<(), Error> {
-        // Bases of linked scopes restore in any order; their references
-        // settle at commit. Deferral lasts until the transaction ends, so it
-        // stops here: members replayed after the restore check their keys.
         self.conn
             .execute("PRAGMA defer_foreign_keys=ON", ())
             .await?;
@@ -1108,8 +1102,8 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn a_stored_image_unpacks_to_the_full_image() {
         let mut ordinals = FieldOrdinals::default();
-        // Ordinals past one varint byte.
-        for (ordinal, byte) in [(1u64, 1u8), (300, 2), (1 << 20, 3)] {
+        let ordinals_past_one_varint_byte = [(1u64, 1u8), (300, 2), (1 << 20, 3)];
+        for (ordinal, byte) in ordinals_past_one_varint_byte {
             ordinals.ordinals.insert([byte; 32], ordinal);
             ordinals.fields.insert(ordinal, [byte; 32]);
         }
@@ -1123,9 +1117,11 @@ mod tests {
         assert!(packed.len() < image.len());
         assert_eq!(ordinals.unpack(&packed).unwrap(), image);
         assert_eq!(blob_fields(&image).unwrap(), fields);
-        // A field outside the dictionary is refused, never dropped.
         let unknown = fields_blob(&RowFields::from([([9; 32], encoded(SqlValue::Null))]));
-        assert!(ordinals.pack(&unknown).is_err());
+        assert!(
+            ordinals.pack(&unknown).is_err(),
+            "a field outside the dictionary is refused, never dropped"
+        );
     }
 
     fn encoded(value: SqlValue) -> Vec<u8> {

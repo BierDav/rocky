@@ -115,7 +115,8 @@ pub(crate) struct Worker<A: StoredApplication> {
     /// Read-only connection for requests that write nothing.
     reader: Option<ScopedConnection>,
     reading: bool,
-    /// The running read transaction has no time bound.
+    /// The running read transaction has no time bound, as an audit reading
+    /// all retained history needs.
     unbounded: bool,
     /// Set by the file writer while this worker runs a step of its group.
     pub(crate) in_group: bool,
@@ -125,6 +126,7 @@ pub(crate) struct Worker<A: StoredApplication> {
     metrics: Arc<Metrics>,
     unpublished: Unpublished,
     /// Committed since the file's last flush; exposure must wait for one.
+    /// Starts set: open-time work may be buffered until the first flush.
     dirty: bool,
     /// Local author sequence covered by the file's durable watermark.
     flushed_sequence: u64,
@@ -137,7 +139,8 @@ pub(crate) struct Worker<A: StoredApplication> {
     plan: Arc<ReadPlan>,
     reads: Arc<Reads>,
     /// The tables and the views each installed projection statement can
-    /// change, by statement; None if its target is not recognized.
+    /// change, by statement; None if its target is not recognized. An
+    /// installation has few distinct statements, so each is parsed once.
     targets: std::collections::HashMap<Box<str>, Option<Target>>,
     /// Tables a write to each table may also change through foreign key
     /// actions, transitively; logical and lowercase.
@@ -203,6 +206,8 @@ where
     A: StoredApplication,
     A::State: Clone,
 {
+    /// Opens a domain on its connection, validating its identity before any
+    /// configuration or schema write.
     pub(crate) async fn open_connection(
         conn: ScopedConnection,
         domain: crate::DomainInstallation<A>,
@@ -260,7 +265,6 @@ where
                 ));
             }
         }
-        // Validate identity before any configuration or schema write.
         crate::writer::configure(&conn, options.durability).await?;
         app.admit_read(identity.scope, identity.caller, &policy)
             .map_err(application)?;
@@ -358,7 +362,6 @@ where
             instrument: options.instrument,
             metrics,
             unpublished: Unpublished::default(),
-            // Open-time work may be buffered until the writer's first flush.
             dirty: true,
             flushed_sequence: 0,
             schema,
@@ -542,6 +545,8 @@ where
         }
     }
     /// A request that writes nothing, answered at once on the read connection.
+    /// The file writer passes a flush here only once the domain is clean; see
+    /// `crate::writer`.
     pub(crate) async fn read(&mut self, command: Command<A::Row>) {
         match command {
             Command::Query(reply) => {
@@ -565,7 +570,6 @@ where
                 });
                 let _ = reply.send(result);
             }
-            // Served only once the domain is clean; see `crate::writer`.
             Command::Flush(reply) => {
                 let _ = reply.send(Ok(()));
             }
@@ -594,7 +598,7 @@ where
     /// gets its own savepoint, so a failure rolls back alone and the rest of
     /// the group still commits. Outside a group, at open, it is one
     /// `BEGIN IMMEDIATE` transaction. Either way a busy engine reruns the whole
-    /// step. `body` must leave memory unchanged until it has returned: callers
+    /// step; inside a held write lock only an injected fault is busy. `body` must leave memory unchanged until it has returned: callers
     /// adopt its result afterwards.
     pub(super) async fn transaction<T>(
         &mut self,
@@ -604,7 +608,7 @@ where
             return self.standalone(body).await;
         }
         for _ in 0..storage::TRANSACTION_ATTEMPTS {
-            if self.conn().is_autocommit()? {
+            if self.group_ended()? {
                 return Err(storage::group_lost());
             }
             self.conn().execute("SAVEPOINT step", ()).await?;
@@ -622,8 +626,7 @@ where
                 },
                 Err(error) => Err(error),
             };
-            if self.conn().is_autocommit()? {
-                // The engine ended the whole group, for example on a full disk.
+            if self.group_ended()? {
                 return Err(result.err().unwrap_or_else(storage::group_lost));
             }
             let rolled_back = match self.conn().execute("ROLLBACK TO step", ()).await {
@@ -637,12 +640,16 @@ where
                 });
             }
             match result {
-                // Inside a held write lock only an injected fault is busy.
                 Err(error) if retryable(&error) => {}
                 result => return result,
             }
         }
         Err(Error::RetryExhausted)
+    }
+    /// Whether the engine ended the file writer's whole group, for example on
+    /// a full disk.
+    fn group_ended(&self) -> Result<bool, Error> {
+        Ok(self.conn().is_autocommit()?)
     }
     async fn standalone<T>(
         &mut self,
@@ -827,7 +834,6 @@ where
         op: &Envelope,
         boundary: AdmissionBoundary,
     ) -> Result<Result<Vec<ProjectionStatement>, A::Error>, Error> {
-        // Reduction: loading the touched rows and running the reducer.
         let reduce_started = Instant::now();
         let before = self.window(op).await?;
         if self.retention.below_pruned_prefix(op.entity) && self.app.definite_drop(&before, op) {
@@ -847,7 +853,6 @@ where
         if self.instrument {
             self.metrics.add_reduction(nanos(reduce_started));
         }
-        // Admission: the candidate check against the before/after state.
         let admit_started = Instant::now();
         let admitted = reduced.and_then(|()| {
             self.app.admit_candidate(
@@ -861,7 +866,6 @@ where
         if self.instrument {
             self.metrics.add_admission(nanos(admit_started));
         }
-        // Encoding: projecting the resulting statements.
         let project_started = Instant::now();
         let projected = admitted.map(|()| self.app.project(&after, op));
         if self.instrument {
@@ -876,7 +880,6 @@ where
     ) -> Result<Changed, Error> {
         let mut changed = Changed::default();
         for statement in statements {
-            // An installation has few distinct statements: parse each once.
             if !self.targets.contains_key(statement.sql.as_ref()) {
                 if self.targets.len() >= MAX_STATEMENT_TARGETS {
                     self.targets.clear();
@@ -996,13 +999,17 @@ where
         self.lamport = op.lamport.get();
         self.revision = revision;
     }
+    /// Writes a local mutation in one step. Preparation writes nothing, so a
+    /// retried attempt recomputes it in its own snapshot. The mutation is
+    /// written whatever its follow-ups do, since the next pass derives them
+    /// from stored rows again; only a step that could not roll back fails the
+    /// group, and the mutation in it.
     async fn mutate(
         &mut self,
         handle: crate::MutationHandle,
         mutation: Mutation,
         baseline: Option<LocalRevision>,
     ) -> Result<Envelope, Error> {
-        // Preparation writes nothing, so a retried attempt recomputes it in its own snapshot.
         let outcome = self
             .transaction(async |worker| {
                 Ok(match worker.prepare(handle, &mutation, baseline).await? {
@@ -1030,9 +1037,6 @@ where
                 self.unpublished
                     .changed(changed, crate::observe::Cause::Local);
                 self.notify(true);
-                // The mutation is written whatever its follow-ups do: the next
-                // pass derives them from stored rows again. Only a step that
-                // could not roll back fails the group, and the mutation in it.
                 match self.process_following().await {
                     Err(error @ Error::Rollback { .. }) => return Err(error),
                     Err(_) => self.metrics.deferred_follow(),

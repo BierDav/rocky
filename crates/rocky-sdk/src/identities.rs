@@ -71,7 +71,11 @@ impl Settings {
     /// This node's chain under `links`, the identity's capabilities. The
     /// node keeps the certificate it holds while it names this identity,
     /// so a renewal needs no identity key; only a node without one asks the
-    /// identity to certify it. The node key is its writer identity.
+    /// identity to certify it, and a lost link acknowledgment retries the
+    /// same certified node. The node key is its writer identity. In a
+    /// personal database the root trusts only the owner, whose devices each
+    /// stand alone, with no sequence or predecessor; custody principals keep
+    /// membership links.
     pub(crate) fn certify(
         &self,
         vault: &Vault,
@@ -81,8 +85,6 @@ impl Settings {
         if links.database_context(self.publisher)? != self.database_context()? {
             return Err("identity capability belongs to another database".into());
         }
-        // In a personal database the root trusts only the owner, whose
-        // devices stand alone; custody principals keep membership links.
         let owner = self.kind()?.owner();
         if let Some(owner) = owner
             && links.0.first().is_some_and(|grant| {
@@ -104,7 +106,6 @@ impl Settings {
             .credentials
             .certificate()
             .filter(|held| Some(held.issuer) == identity && held.capability.subject == node);
-        // A lost link acknowledgment retries the same certified node.
         if held.is_none()
             && let Some(certificate) = self.revocations.certificates().find(|certificate| {
                 Some(certificate.issuer) == identity && certificate.capability.subject == node
@@ -133,7 +134,6 @@ impl Settings {
                         },
                     ));
                 }
-                // Each owner device stands alone: no sequence, no predecessor.
                 links
                     .clone()
                     .certify_personal(

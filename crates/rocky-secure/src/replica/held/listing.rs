@@ -33,7 +33,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub(super) async fn list_held_changes(&self) -> Result<Vec<HeldChange>, Error> {
         let source = {
             let mut inner = self.inner.lock(Class::Background).await;
-            // The source, authority included, is read once flushed.
             inner = flushed(inner, &self.inner).await?;
             let tables = ["secure_held", "secure_rows"].map(|table| {
                 inner
@@ -84,8 +83,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 records
             };
             if records.is_empty() {
-                // The final acquisition validated both the held set and every
-                // current row used in the listing before returning it.
                 return Ok(changes);
             }
             #[cfg(test)]
@@ -106,8 +103,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     return Err(Error::Corrupt("held change".into()));
                 };
                 after = id.clone();
-                // A stored bundle can be large; decoding and accumulating its
-                // result need neither the replica nor a database transaction.
                 let stored: Stored = decode_bounded(bytes, MAX_BUNDLE_BYTES * 2)?;
                 let mut rows = Vec::with_capacity(stored.rows.len());
                 for row in stored.rows {

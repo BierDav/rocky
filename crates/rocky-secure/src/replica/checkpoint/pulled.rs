@@ -9,9 +9,10 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_pulled_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row))",
     "CREATE TABLE IF NOT EXISTS secure_pulled_stubs(scope INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_pulled_pages(scope INTEGER NOT NULL,after BLOB NOT NULL,next BLOB,signature BLOB NOT NULL,PRIMARY KEY(scope,after)) WITHOUT ROWID",
-    // Seals whose state the next sessions pull from peers.
-    "CREATE TABLE IF NOT EXISTS secure_wanted_seals(domain BLOB NOT NULL,seal BLOB NOT NULL,PRIMARY KEY(domain,seal))",
+    WANTED_SEALS,
 ];
+/// Seals whose state the next sessions pull from peers.
+const WANTED_SEALS: &str = "CREATE TABLE IF NOT EXISTS secure_wanted_seals(domain BLOB NOT NULL,seal BLOB NOT NULL,PRIMARY KEY(domain,seal))";
 /// The staging tables and the pulled tables that keep their contents.
 const KEPT: [(&str, &str); 3] = [
     ("secure_rebootstrap_rows", "secure_pulled_rows"),
@@ -138,7 +139,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if statement.no_frames() {
             inner.check_no_frames(&signed).await?;
         }
-        // A no-frames checkpoint has no pages: it stages complete at once.
         let complete = i64::from(statement.no_frames());
         let bytes = signed.to_bytes()?;
         transaction!(inner, |inner| {
@@ -191,8 +191,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             && staging.sets.rows_summary() == statement.rows
             && staging.sets.tombstones == statement.tombstones
             && staging.sets.creations_summary() == statement.creations;
-        // Authority, schema, key and seal are checked again now: a refusal
-        // keeps nothing and is not corruption.
         let refused = match matches {
             true => match inner.verify_pulled_statement(&staging.signed).await {
                 Ok(()) => None,
@@ -333,7 +331,6 @@ impl<A: RowApplication> Inner<A> {
             .seal
             .ok_or_else(|| denied("a pulled checkpoint sits at a seal"))?;
         let graph = self.graph_for(statement.scope.domain)?;
-        // A seal a revocation excluded stays nameable but is not usable.
         if graph.revoked.contains(&sealed) {
             return Err(denied("a pulled checkpoint's seal was revoked"));
         }
@@ -411,8 +408,6 @@ impl<A: RowApplication> Inner<A> {
             }
             Err(error) => return Err(error),
         }
-        // Another import's staged pages are its own; the pulled state waits
-        // until that import ends.
         if self.staging(id).await?.is_some() {
             return Ok(PulledInstall::Deferred);
         }

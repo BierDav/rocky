@@ -118,12 +118,15 @@ async fn a_member_restored_from_bytes_with_a_fresh_invitation_syncs_and_writes()
     let directory = root.path().join("restored");
     let config = Configuration::new(&directory, &schema()?)?
         .network(Network::Owned(hub.connector("restored")));
-    // Not an archive: refused, and nothing staged stays.
     let invitation = invite(&lost.owner).await?;
     let refused = config.restore_archive(&[0; 64], &invitation).await.err();
     let refused = refused.ok_or("restored junk")?.to_string();
     assert!(refused.contains("not a Rocky backup"), "{refused}");
-    assert_eq!(staged(&directory)?, Vec::<String>::new());
+    assert_eq!(
+        staged(&directory)?,
+        Vec::<String>::new(),
+        "a refused non-archive leaves nothing staged"
+    );
 
     let opened = config
         .restore_archive(&lost.archive, &invite(&lost.owner).await?)
@@ -132,14 +135,16 @@ async fn a_member_restored_from_bytes_with_a_fresh_invitation_syncs_and_writes()
     assert_ne!(identity(&directory)?, lost.identity, "a fresh identity");
     restored_works(&lost.owner, &opened.database, "restored").await?;
     opened.database.close().await?;
-    // Restored once: the directory holds a domain and opens.
     let invitation = invite(&lost.owner).await?;
     let again = config
         .restore_archive(&lost.archive, &invitation)
         .await
         .err();
     let again = again.ok_or("restored twice")?.to_string();
-    assert!(again.contains("a domain exists"), "{again}");
+    assert!(
+        again.contains("a domain exists"),
+        "restored once, the directory holds a domain: {again}"
+    );
     assert_eq!(staged(&directory)?, Vec::<String>::new());
     let reopened = config.open().await?.database;
     assert_eq!(bodies(&reopened).await?, ["restored", "synced", "unsent"]);
@@ -168,7 +173,6 @@ async fn a_restore_stopped_at_any_step_finishes_when_restored_again_under_its_id
         assert_eq!(staged(&directory)?, Vec::<String>::new(), "{stage:?}");
         let enrolled = identity(&directory)?;
         if stage == Stage::Enrolled {
-            // Nothing placed: opening is refused and names the restore.
             let refused = config.open().await.err().ok_or("opened unplaced")?;
             let refused = refused.to_string();
             assert!(
@@ -176,9 +180,12 @@ async fn a_restore_stopped_at_any_step_finishes_when_restored_again_under_its_id
                 "{stage:?}: {refused}"
             );
         }
-        // The invitation was spent: the restore goes on as enrolled.
         let opened = config.restore_archive(&lost.archive, &invitation).await?;
-        assert_eq!(identity(&directory)?, enrolled, "{stage:?}: enrolled again");
+        assert_eq!(
+            identity(&directory)?,
+            enrolled,
+            "{stage:?}: the spent invitation's restore goes on as enrolled"
+        );
         assert_eq!(staged(&directory)?, Vec::<String>::new(), "{stage:?}");
         restored_works(&lost.owner, &opened.database, &format!("{stage:?}")).await?;
         opened.database.close().await?;
@@ -188,7 +195,6 @@ async fn a_restore_stopped_at_any_step_finishes_when_restored_again_under_its_id
 
 /// A crash during the open that rebinds a restored file leaves its WAL
 /// behind. Restoring again replaces the file and never applies that WAL.
-// Needs a native file system and a raw connection to it.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test]
 async fn a_restore_resumed_after_a_crashed_open_drops_its_stale_wal() -> Result<(), Failure> {
@@ -205,16 +211,15 @@ async fn a_restore_resumed_after_a_crashed_open_drops_its_stale_wal() -> Result<
     let invitation = invite(&lost.owner).await?;
     let stopped = config.restore_archive(&lost.archive, &invitation).await;
     assert!(stopped.is_err(), "restored past the stop");
-    // The rebound file and a WAL of its own, as a crash would leave them.
     let database = directory.join("rocky.sqlite");
     let wal = directory.join("rocky.sqlite-wal");
-    let crashed = {
+    let wal_left_by_crash = {
         let connection = rusqlite::Connection::open(&database)?;
         connection.pragma_update(None, "wal_autocheckpoint", 0)?;
         connection.execute_batch("CREATE TABLE stale(x); INSERT INTO stale VALUES(1);")?;
         std::fs::read(&wal)?
     };
-    std::fs::write(&wal, crashed)?;
+    std::fs::write(&wal, wal_left_by_crash)?;
 
     let opened = config.restore_archive(&lost.archive, &invitation).await?;
     restored_works(&lost.owner, &opened.database, "resumed").await?;

@@ -280,14 +280,14 @@ async fn a_missing_held_source_catalog_refuses_then_retries_its_exact_definition
         super::super::compaction::audit::snapshot(&target).await,
         before
     );
-    // Acquisition remains scoped: explicitly follow the source branch to require its catalog.
     target.follow_bookmark(lineage.domain, "dev").await.unwrap();
     assert!(
         target
             .required_schemas()
             .await
             .unwrap()
-            .contains(&(source_tip, lineage.definition(3).hash()))
+            .contains(&(source_tip, lineage.definition(3).hash())),
+        "acquisition stays scoped: only following the source branch requires its catalog"
     );
     let acquisition = super::super::compaction::audit::snapshot(&target).await;
     let mut wrong = lineage.definition(3);
@@ -331,7 +331,9 @@ async fn a_missing_held_source_catalog_refuses_then_retries_its_exact_definition
         lineage.definition(4).hash()
     );
     target.receive_held_frames(frames.clone()).await.unwrap();
-    // An intent is held whole, with no rows to re-author.
-    assert!(target.held_changes().await.unwrap().is_empty());
+    assert!(
+        target.held_changes().await.unwrap().is_empty(),
+        "an intent is held whole, with no rows to re-author"
+    );
     target.audit(lineage.scope("items")).await.unwrap();
 }

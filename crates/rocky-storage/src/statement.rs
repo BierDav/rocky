@@ -62,7 +62,7 @@ const RESERVED: &[&str] = &["sqlite_", "rocky_", "secure_", "pragma_"];
 pub const MAX_STATEMENT_BYTES: usize = 1024 * 1024;
 
 /// Leading keywords of statements that change the schema, the engine or
-/// its attachments.
+/// its attachments, denied in any spelling, even one the parser refuses.
 const FORBIDDEN: &[&str] = &["PRAGMA", "ATTACH", "DETACH", "CREATE", "DROP", "ALTER"];
 fn forbidden(sql: &str) -> bool {
     crate::scoped_connection::tokens(sql)
@@ -410,7 +410,6 @@ fn analyze_with(
     }
     let statements = match crate::parsed::parse(sql) {
         Ok(statements) => statements,
-        // A schema, pragma or attachment statement is denied in any spelling.
         Err(_) if forbidden(sql) => return denied("schema, pragma or attachment statement"),
         Err(error) => return unsupported(error),
     };

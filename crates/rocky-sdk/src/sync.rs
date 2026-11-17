@@ -219,8 +219,10 @@ pub(crate) struct Planned {
 /// Checkpoint-first enrollment, resumed from the runtime's staged pages.
 /// The peer's offers come first: populated scopes import smallest first,
 /// followed by empty scopes. The intent records each scope's rows for progress.
-/// A scope the peer offers no checkpoint of joins by frames. `None` when an
-/// offered import cannot start with this peer: the intent waits for another.
+/// A scope the peer offers no checkpoint of joins by frames, as does one
+/// whose import kept failing, or one the peer never compacted unless a
+/// revoked author's rows must go with an import. `None` when an offered
+/// import cannot start with this peer: the intent waits for another.
 pub(crate) async fn bootstrap(
     replica: &EncryptedReplica<TypedRows>,
     upstream: &Upstream<'_>,
@@ -283,7 +285,6 @@ pub(crate) async fn bootstrap(
                     && replica.import_failures(*scope, checkpoint).await?
                         >= rocky_secure::IMPORT_ATTEMPTS
                 {
-                    // An import that kept failing falls back to frames.
                     pending.retain(|known| known != scope);
                 } else if let Some((checkpoint, rows)) = offer {
                     let plan = Planned {
@@ -297,9 +298,6 @@ pub(crate) async fn bootstrap(
                 } else if replica.rebootstrap_progress(*scope).await?.is_none()
                     && !replica.holds_revoked_frames(*scope).await?
                 {
-                    // The peer has never compacted this scope: it joins by
-                    // frames, unless a revoked author's rows must go with
-                    // an import.
                     pending.retain(|known| known != scope);
                 }
             }
@@ -442,6 +440,8 @@ pub(crate) async fn session(
     }
     Ok(session)
 }
+/// Syncs the rows of `scopes` with the upstream peer. Row transfers take
+/// the planning channel's slot; placements reopen one.
 async fn rows(
     replica: &EncryptedReplica<TypedRows>,
     upstream: &Upstream<'_>,
@@ -493,7 +493,6 @@ async fn rows(
             transfer.held.push(*scope);
         }
     }
-    // Row transfers take the planning channel's slot; placements reopen one.
     let mut planning = if exchange.changed.is_empty() {
         Some(planning)
     } else {
@@ -534,6 +533,14 @@ async fn rows(
     }
     Ok(())
 }
+/// Syncs `scopes` frame by frame, restoring the peer's retained base
+/// before publishing local edits. A scope whose staged import is deferred
+/// goes on with that import's signer. A failed advised import retires the
+/// request channel: the next sync retries that exact checkpoint, then falls
+/// back to frames after `IMPORT_ATTEMPTS` failures counted across restarts.
+/// A scope the peer restores from a checkpoint waits while others go on.
+/// History that never arrives by frames, as a revoked author's, comes with
+/// a listed checkpoint once the scopes caught up.
 async fn rows_scope(
     replica: &EncryptedReplica<TypedRows>,
     upstream: &Upstream<'_>,
@@ -562,13 +569,12 @@ async fn rows_scope(
             ..Default::default()
         };
         for scope in &exchange.changed {
-            // Restore the peer's retained base before publishing local edits.
             let mut pulled = session
                 .catch_up_with_state(replica, *scope, QUOTA, true)
                 .await?;
-            // A crash at the switch leaves complete staging even when
-            // frontiers match; resume through the normal bootstrap path.
-            pulled.behind |= replica.rebootstrap_progress(*scope).await?.is_some();
+            let staging_left_by_crash_at_switch =
+                replica.rebootstrap_progress(*scope).await?.is_some();
+            pulled.behind |= staging_left_by_crash_at_switch;
             let mut moved = Moved {
                 pulled: pulled.frames,
                 bytes: pulled.bytes,
@@ -598,9 +604,6 @@ async fn rows_scope(
                             if result.as_ref().err().is_none_or(counts_against_checkpoint) {
                                 replica.import_failed(*scope, advice.checkpoint).await?;
                             }
-                            // The request channel is retired; the next sync retries
-                            // this exact checkpoint, then falls back to frames after
-                            // three failures, counted across restarts.
                             return Err(match result {
                                 Err(error) => error.into(),
                                 _ => "the peer withdrew the advised checkpoint".into(),
@@ -623,7 +626,6 @@ async fn rows_scope(
                 && !pulled.exhausted
                 && deferred(replica, upstream, *scope, None).await?
             {
-                // Its staged import goes on with that import's signer.
                 transfer.add(*scope, moved);
                 continue;
             }
@@ -650,8 +652,8 @@ async fn rows_scope(
                 break;
             }
             let pushed = session.push(replica, *scope, QUOTA).await?;
-            // The peer restores this scope from a checkpoint; others go on.
-            if pushed.behind {
+            let peer_restores_from_checkpoint = pushed.behind;
+            if peer_restores_from_checkpoint {
                 transfer.wait(&[*scope]);
             }
             moved.pushed = pushed.frames;
@@ -662,8 +664,6 @@ async fn rows_scope(
                 break;
             }
         }
-        // History that never arrives by frames, as a revoked author's,
-        // comes with a listed checkpoint once the scopes caught up.
         if !exhausted {
             for scope in scopes {
                 if !exchange.refused.contains(scope)

@@ -20,9 +20,11 @@ async fn status_tracks_committed_work_and_logout_and_session_close_ends_only_its
         rocky_sdk::GrantProfile::Issuer
     ));
     device.add(1, "apples").await;
-    // A revision racing registration is returned immediately, never lost.
     let next = session.status_after(status.token.clone()).await?;
-    assert_ne!(next.token, status.token);
+    assert_ne!(
+        next.token, status.token,
+        "a revision racing registration is returned immediately, never lost"
+    );
     let wait = session.status_after(next.token);
     let close = session.close();
     let (ended, ()) = tokio::join!(wait, close);
@@ -32,7 +34,6 @@ async fn status_tracks_committed_work_and_logout_and_session_close_ends_only_its
     ));
     assert_eq!(device.titles().await, ["apples"]);
     device.close().await;
-    // The sole issuer cannot log out; check authority loss on an enrolled writer.
     let hub = Arc::new(Hub::default());
     let issuer = Device::create(
         &root.path().join("issuer"),

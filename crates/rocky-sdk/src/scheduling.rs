@@ -26,10 +26,11 @@ impl Retry {
             epoch_millis: None,
         }
     }
+    /// Backs off after a failure, with jitter from a SplitMix64 stream that
+    /// stays reproducible for each node and peer pair.
     pub fn failed(&mut self) {
         let seconds = (1_u64 << self.failures.min(6)).min(60);
         self.failures = self.failures.saturating_add(1);
-        // SplitMix64 keeps a reproducible stream for each node/peer pair.
         self.random = self.random.wrapping_add(0x9e3779b97f4a7c15);
         let mut mixed = self.random;
         mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
@@ -80,7 +81,6 @@ impl Retry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn jitter_spreads_nodes_with_the_same_seed_and_preserves_failure_history() {

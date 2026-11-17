@@ -140,8 +140,6 @@ impl<A: RowApplication> Inner<A> {
             starts.insert(mark.author, mark.sequence.saturating_add(1));
         }
         if let Some(id) = id {
-            // A verified base at a seal of the path accounts for this
-            // scope's own positions through that seal.
             let mut covered = self.seal_anchor(id).await?;
             if let Some(signed) = self
                 .checkpoint_record(id, true)

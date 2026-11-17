@@ -143,12 +143,15 @@ fn a_supplied_set_verifies_with_keys_and_bytes_alone() {
         capabilities: chain.delegable(),
         certificate: chain.certificate().cloned(),
     };
-    // Any channel may carry the bytes; they verify on arrival.
     let received = Credentials::from_bytes(&credentials.to_bytes().expect("bytes")).expect("set");
     let verified = received
         .verify(node.public_key(), domain.manifest.app, NOW)
         .expect("verified");
-    assert_eq!(verified.principal, user.public_key());
+    assert_eq!(
+        verified.principal,
+        user.public_key(),
+        "any channel may carry the bytes; they verify on arrival"
+    );
     assert_eq!(verified.device, node.public_key());
     assert_eq!(
         verified.revocations,
@@ -157,22 +160,22 @@ fn a_supplied_set_verifies_with_keys_and_bytes_alone() {
     assert_eq!(verified.expires, NOW + 30 * DAY);
     assert_eq!(verified.grants.len(), 1);
     assert_eq!(verified.grants[0].scope, domain.resources[0].scope);
-    // Another device, a later time and another publisher are refused.
     assert!(
         received
             .verify(PrivateKey::new().public_key(), domain.manifest.app, NOW)
-            .is_err()
+            .is_err(),
+        "another device is refused"
     );
     assert!(
         received
             .verify(node.public_key(), domain.manifest.app, NOW + 31 * DAY)
             .is_err()
     );
-    // Another application's credentials are refused.
     assert!(
         received
             .verify(node.public_key(), AppId([9; 16]), NOW)
-            .is_err()
+            .is_err(),
+        "another application's credentials are refused"
     );
     let mut foreign = received.clone();
     foreign.publisher = PrivateKey::new().public_key();
@@ -201,9 +204,6 @@ fn chains_keep_publisher_revocations_expiry_attenuation_and_paired_rights() {
             .verify(&chain, &node, &policy, NOW + 30 * DAY)
             .is_err()
     );
-    // Another publisher and a revocation of any link end the chain; a
-    // revocation of someone else does not. No generation is named: the
-    // chain holds in each.
     assert!(
         chain
             .verify(
@@ -212,7 +212,8 @@ fn chains_keep_publisher_revocations_expiry_attenuation_and_paired_rights() {
                 &policy,
                 NOW
             )
-            .is_err()
+            .is_err(),
+        "another publisher ends the chain"
     );
     for key in [user.public_key(), node.public_key()] {
         assert!(
@@ -223,7 +224,6 @@ fn chains_keep_publisher_revocations_expiry_attenuation_and_paired_rights() {
     }
     let unrelated = domain.revoking(&[PrivateKey::new().public_key()]);
     assert!(domain.verify(&chain, &node, &unrelated, NOW).is_ok());
-    // A link valid for longer than a chain may live is refused.
     let mut long = chain.0[0].capability.clone();
     long.expires = long.not_before + MAX_CHAIN_LIFETIME + LIFETIME_SKEW + 1;
     let long = device_chain(
@@ -232,7 +232,10 @@ fn chains_keep_publisher_revocations_expiry_attenuation_and_paired_rights() {
         node.public_key(),
     )
     .expect("chain");
-    assert!(domain.verify(&long, &node, &policy, NOW).is_err());
+    assert!(
+        domain.verify(&long, &node, &policy, NOW).is_err(),
+        "a link valid for longer than a chain may live is refused"
+    );
     assert!(
         domain
             .authority()
@@ -247,18 +250,18 @@ fn chains_keep_publisher_revocations_expiry_attenuation_and_paired_rights() {
             )
             .is_err()
     );
-    // A certificate holds no grants of its own: its node holds its
-    // identity's. One naming any is refused.
     let mut leaf = chain.0[1].capability.clone();
     leaf.grants = chain.0[0].capability.grants.clone();
-    assert!(SignedCapability::sign(leaf, &user).is_err());
+    assert!(
+        SignedCapability::sign(leaf, &user).is_err(),
+        "a certificate naming grants of its own is refused"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_login_principal_alone_grants_nothing() {
     let domain = Domain::new();
     let policy = domain.policy();
-    // A provider vouches for a user. That names who asks; it is no grant.
     struct Provider;
     impl LoginProvider for Provider {
         fn verify(&self, assertion: &[u8], _time: u64) -> Result<ExternalLogin, Error> {
@@ -270,23 +273,27 @@ fn a_login_principal_alone_grants_nothing() {
     }
     let login = Provider.verify(b"alice", NOW).expect("login");
     assert_eq!(login.subject, "alice");
-    // The user signs itself the capability it would like to hold.
     let (user, node) = (PrivateKey::new(), PrivateKey::new());
     let grants = Profile::Issuer.grants(&domain.resources).expect("grants");
     let claimed = Authority::owner(&user)
         .issue(user.public_key(), grants, VALIDITY)
         .expect("self-signed");
     let chain = device_chain(claimed, &user, node.public_key()).expect("chain");
-    assert!(domain.verify(&chain, &node, &policy, NOW).is_err());
+    assert!(
+        domain.verify(&chain, &node, &policy, NOW).is_err(),
+        "a capability the user signs itself grants nothing"
+    );
     assert!(
         chain
             .provenance(domain.publisher.public_key(), node.public_key())
             .is_err()
     );
-    // Distinct identities are distinct types over distinct keys.
     let principal = Identity(user.public_key());
     let device = SigningDevice(node.public_key());
-    assert_ne!(principal.0, device.0);
+    assert_ne!(
+        principal.0, device.0,
+        "distinct identities are distinct types over distinct keys"
+    );
     assert_ne!(Publisher(domain.publisher.public_key()).0, principal.0);
 }
 
@@ -326,7 +333,6 @@ fn profiles_are_scoped_and_hold_no_schema_right() {
             .len(),
         2
     );
-    // No default and no unknown scope.
     for names in [&[][..], &["missing"][..], &["notes", "missing"][..]] {
         let scopes = Domain::names(names);
         assert!(
@@ -334,7 +340,8 @@ fn profiles_are_scoped_and_hold_no_schema_right() {
                 scopes: scopes.clone()
             }
             .grants(&domain.resources)
-            .is_err()
+            .is_err(),
+            "a reader profile has no default and no unknown scope"
         );
         assert!(
             Profile::Writer { scopes }
@@ -373,10 +380,10 @@ fn an_invitation_binds_its_profile_counts_wrong_tokens_and_keeps_its_retry_ident
         invitation.admit(&token, &first, NOW).expect("first"),
         Admission::First
     );
-    // Until claimed, nothing is consumed: a refused context costs nothing.
     assert_eq!(
         invitation.admit(&token, &first, NOW).expect("again"),
-        Admission::First
+        Admission::First,
+        "until claimed, a refused context consumes nothing"
     );
     invitation.claim(&first);
     assert!(!invitation.is_open(&token, NOW));
@@ -386,22 +393,22 @@ fn an_invitation_binds_its_profile_counts_wrong_tokens_and_keeps_its_retry_ident
     );
     assert!(invitation.admit(&token, &request(&token, 2), NOW).is_err());
     assert!(invitation.admit(&token, &first, NOW + 601).is_err());
-    // The sealed enrollment opens for that request and token only.
     let sealed = seal_enrollment(&token, &first, b"enrollment").expect("sealed");
     let round = PairRequest::from_bytes(&first.to_bytes().expect("bytes")).expect("request");
     assert_eq!(
         open_enrollment(&token, &round, &sealed).expect("opened"),
-        b"enrollment"
+        b"enrollment",
+        "the sealed enrollment opens for that request and token"
     );
     assert!(open_enrollment(&[6; 32], &first, &sealed).is_err());
     assert!(open_enrollment(&token, &request(&token, 1), &sealed).is_err());
-    // Ten wrong tokens lock the invitation, also for the right one.
     let mut locked = Invitation::open(&token, Some(profile), NOW + 600);
     for attempt in 0..10 {
         assert!(
             locked
                 .admit(&token, &request(&[attempt + 100; 32], 1), NOW)
-                .is_err()
+                .is_err(),
+            "ten wrong tokens lock the invitation, also for the right one"
         );
     }
     assert!(locked.admit(&token, &first, NOW).is_err());
@@ -468,10 +475,9 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
             .expect("payload"),
         b"keys"
     );
-    // The same grants: a reader stays a reader.
     assert_eq!(
-        renewal.capability.capability.grants,
-        chain.0[0].capability.grants
+        renewal.capability.capability.grants, chain.0[0].capability.grants,
+        "a renewed reader stays a reader"
     );
     let renewed =
         device_chain(renewal.capability.clone(), &user, node.public_key()).expect("chain");
@@ -484,17 +490,21 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
         [Right::Read, Right::Custody].into()
     );
 
-    // Another issuer, a stale request and another device's secret are refused.
     let other = PrivateKey::new().public_key();
     let anchor = (domain.publisher.public_key(),);
-    assert!(request.verify(other, anchor.0, (NOW, 300)).is_err());
+    assert!(
+        request.verify(other, anchor.0, (NOW, 300)).is_err(),
+        "another issuer is refused"
+    );
     assert!(request.verify(issuer, anchor.0, (NOW + 301, 300)).is_err());
     let (_, stranger) = RenewRequest::sign(&node, issuer, chain.clone(), NOW).expect("request");
     assert!(renewal.open(anchor.0, &request, &stranger).is_err());
-    // An answer for another request, or signed by anyone else, is refused.
     let (again, again_secret) =
         RenewRequest::sign(&node, issuer, chain.clone(), NOW).expect("request");
-    assert!(renewal.open(anchor.0, &again, &again_secret).is_err());
+    assert!(
+        renewal.open(anchor.0, &again, &again_secret).is_err(),
+        "an answer for another request is refused"
+    );
     let impostor = PrivateKey::new();
     let forged = Renewal::seal(
         &Authority::owner(&impostor),
@@ -507,7 +517,6 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
     .expect("forged");
     assert!(forged.open(anchor.0, &request, &secret).is_err());
 
-    // A chain the device widened itself has no provenance.
     let mut widened = chain.0[0].capability.clone();
     widened.grants = Profile::Issuer.grants(&domain.resources).expect("grants");
     let claimed = CredentialChain(vec![
@@ -515,10 +524,11 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
         chain.0[1].clone(),
     ]);
     let (escalating, _) = RenewRequest::sign(&node, issuer, claimed, NOW).expect("request");
-    assert!(escalating.verify(issuer, anchor.0, (NOW, 300)).is_err());
+    assert!(
+        escalating.verify(issuer, anchor.0, (NOW, 300)).is_err(),
+        "a chain the device widened itself has no provenance"
+    );
 
-    // An expired chain still proves who asks; another device's revocation
-    // does not stop it.
     let later = NOW + 90 * DAY;
     let next = domain.revoking(&[PrivateKey::new().public_key()]);
     let (late, late_secret) =
@@ -540,9 +550,11 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
     )
     .expect("renewal");
     renewal.open(anchor.0, &late, &late_secret).expect("opened");
-    assert_eq!(renewal.revocations, next);
+    assert_eq!(
+        renewal.revocations, next,
+        "an expired chain still proves who asks; another device's revocation does not stop it"
+    );
 
-    // Revoking the user or the device ends renewal and every chain naming it.
     for subject in [user.public_key(), node.public_key()] {
         let revoked = domain.revoking(&[subject]);
         assert!(
@@ -554,7 +566,8 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
                 VALIDITY,
                 b""
             )
-            .is_err()
+            .is_err(),
+            "revoking the user or the device ends renewal"
         );
         let reissued = domain
             .authority()
@@ -574,30 +587,34 @@ fn raw_grants_name_rights_and_columns_and_profiles_are_built_on_them() {
     let mut resources = Domain::new().resources;
     resources[0].columns.insert("title".into(), [6; 32]);
     let parse = |value: serde_json::Value| serde_json::from_value::<Vec<Grant>>(value);
-    // Any rights to whoever the issuer names; columns narrow fields.
     let raw = parse(serde_json::json!([
         {"scope": "notes", "rights": ["read", "update", "custody"], "columns": ["title"]},
         {"scope": "payroll", "rights": ["delete", "custody"]},
     ]))
     .expect("grants");
     let grants = Grant::resolve_all(&raw, &resources).expect("resolved");
-    assert_eq!(grants[0].fields, FieldSelection::Only([[6; 32]].into()));
+    assert_eq!(
+        grants[0].fields,
+        FieldSelection::Only([[6; 32]].into()),
+        "columns narrow fields"
+    );
     assert_eq!(rights(&grants[1..]), [Right::Delete, Right::Custody].into());
     assert_eq!(
         serde_json::to_value(&raw[0]).expect("json")["rights"],
         serde_json::json!(["read", "update", "custody"])
     );
-    // Each signed grant describes back to the raw grant that made it.
     let described: Vec<Grant> = grants
         .iter()
         .filter_map(|grant| Grant::describe(grant, &resources))
         .collect();
-    assert_eq!(described, raw);
+    assert_eq!(
+        described, raw,
+        "each signed grant describes back to the raw grant that made it"
+    );
     assert_eq!(
         Profile::of(&grants, &resources),
         Profile::Grants { grants: raw }
     );
-    // Unknown names, empty sets and the schema right are refused.
     for refused in [
         serde_json::json!([{"scope": "notes", "rights": ["read"], "columns": ["x"]}]),
         serde_json::json!([{"scope": "x", "rights": ["read"]}]),
@@ -608,20 +625,25 @@ fn raw_grants_name_rights_and_columns_and_profiles_are_built_on_them() {
         let parsed = parse(refused.clone()).expect("parsed");
         assert!(
             Grant::resolve_all(&parsed, &resources).is_err(),
-            "{refused}"
+            "unknown names, empty sets and the schema right are refused: {refused}"
         );
     }
-    // So are names that are no right, the removed command rights included.
     for name in ["fly", "invoke", "execute"] {
-        assert!(parse(serde_json::json!([{"scope": "notes", "rights": [name]}])).is_err());
+        assert!(
+            parse(serde_json::json!([{"scope": "notes", "rights": [name]}])).is_err(),
+            "names that are no right, the removed command rights included, are refused"
+        );
     }
     assert!(parse(serde_json::json!([{"scope": "notes", "rights": [], "rows": "all"}])).is_err());
-    // The starter profiles are functions over raw grants.
     let writer = Profile::Writer {
         scopes: Domain::names(&["payroll"]),
     };
     let raw = writer.raw(&resources).expect("raw");
-    assert_eq!(raw.len(), 1);
+    assert_eq!(
+        raw.len(),
+        1,
+        "the starter profiles are functions over raw grants"
+    );
     assert!(raw[0].rights.contains(&Right::Insert) && raw[0].columns.is_none());
     assert_eq!(
         Profile::Grants { grants: raw }
@@ -678,8 +700,11 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
             },
         )
         .expect("delegated");
-    // The delegation ends with its parent, however long it was asked for.
-    assert_eq!(link.expires(), NOW + 30 * DAY);
+    assert_eq!(
+        link.expires(),
+        NOW + 30 * DAY,
+        "the delegation ends with its parent, however long it was asked for"
+    );
     let chain = link
         .clone()
         .complete(&delegate, node.public_key())
@@ -692,7 +717,6 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
         [narrow.clone()]
     );
     assert_eq!(chain.grants(), [narrow.clone()]);
-    // Wider grants, other scopes, more depth and holding no key are refused.
     let mut wider = narrow.clone();
     wider.rights.insert(Right::Delete);
     let mut other = narrow.clone();
@@ -723,12 +747,14 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
         (&holder, Vec::new(), 1),
         (&delegate, vec![narrow.clone()], 1),
     ] {
-        assert!(delegate_with(holder, grants, depth).is_err());
+        assert!(
+            delegate_with(holder, grants, depth).is_err(),
+            "wider grants, other scopes, more depth and holding no key are refused"
+        );
     }
     let mut widened = wider.clone();
     widened.rights.insert(Right::PublishSchema);
     assert!(delegate_with(&holder, vec![wider, widened], 1).is_err());
-    // The delegate reaches only its own node: one link is all it allows.
     assert!(
         link.delegate(
             &delegate,
@@ -741,19 +767,24 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
                 validity: VALIDITY
             }
         )
-        .is_err()
+        .is_err(),
+        "the delegate reaches only its own node"
     );
-    // An issuer renews the delegator, never the delegate: the root is not its.
     let issuer = PrivateKey::new().public_key();
     let (request, _) = RenewRequest::sign(&node, issuer, chain, NOW).expect("request");
     let anchor = (domain.publisher.public_key(),);
-    assert!(request.verify(issuer, anchor.0, (NOW, 300)).is_err());
-    // A renewed delegator keeps its depth.
+    assert!(
+        request.verify(issuer, anchor.0, (NOW, 300)).is_err(),
+        "an issuer renews the delegator, never the delegate"
+    );
     let renewed = domain
         .authority()
         .renew(&root.capability, &policy, VALIDITY)
         .expect("renewed");
-    assert_eq!(renewed.capability.delegations, 2);
+    assert_eq!(
+        renewed.capability.delegations, 2,
+        "a renewed delegator keeps its depth"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -810,7 +841,6 @@ fn node_leaves_are_writers_named_by_their_own_keys() {
         }
         let bytes = encode(chain).unwrap();
         let decoded: CredentialChain = decode_bounded(&bytes, MAX_CREDENTIAL_BYTES).unwrap();
-        // Another node's key never writes under this certificate.
         assert!(
             decoded
                 .verify_author(
@@ -820,17 +850,17 @@ fn node_leaves_are_writers_named_by_their_own_keys() {
                     &domain.policy(),
                     NOW
                 )
-                .is_err()
+                .is_err(),
+            "another node's key never writes under this certificate"
         );
     }
-    // Independent nodes name distinct identities from their own keys.
     let writer =
         |node: &PrivateKey| rocky_core::WriterId::from_bytes(*node.public_key().as_bytes());
     assert_ne!(
         rocky_core::RowIdentity::next(writer(&nodes[0]), 0).unwrap(),
-        rocky_core::RowIdentity::next(writer(&nodes[1]), 0).unwrap()
+        rocky_core::RowIdentity::next(writer(&nodes[1]), 0).unwrap(),
+        "independent nodes name distinct identities from their own keys"
     );
-    // A leaf naming another node than its subject is refused.
     let mut forged = chains[0].clone();
     let mut leaf = forged.0.pop().unwrap().capability;
     leaf.extension = Extension::new(Extended {
@@ -840,7 +870,10 @@ fn node_leaves_are_writers_named_by_their_own_keys() {
         ..Default::default()
     })
     .unwrap();
-    assert!(SignedCapability::sign(leaf, &identity).is_err());
+    assert!(
+        SignedCapability::sign(leaf, &identity).is_err(),
+        "a leaf naming another node than its subject is refused"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -893,7 +926,6 @@ fn delegations_narrow_and_unknown_extension_versions_are_refused() {
         )
     };
     assert!(verify(&chain).is_ok());
-    // A delegate that signs itself issuer authority is refused on verification.
     let mut wide = narrowed.0[1].capability.clone();
     wide.extension = Extension::new(Extended {
         issues: true,
@@ -906,12 +938,16 @@ fn delegations_narrow_and_unknown_extension_versions_are_refused() {
     ])
     .complete(&delegate, node.public_key())
     .expect("chain");
-    assert!(verify(&widened).is_err());
-    // A node link cannot carry a user extension.
+    assert!(
+        verify(&widened).is_err(),
+        "a delegate that signs itself issuer authority is refused on verification"
+    );
     let mut leaf = chain.0[2].capability.clone();
     leaf.extension = narrowed.0[1].capability.extension.clone();
-    assert!(SignedCapability::sign(leaf, &delegate).is_err());
-    // A later extension version is refused with a clear error.
+    assert!(
+        SignedCapability::sign(leaf, &delegate).is_err(),
+        "a node link cannot carry a user extension"
+    );
     #[derive(serde::Serialize)]
     struct Later {
         version: u32,
@@ -930,6 +966,6 @@ fn delegations_narrow_and_unknown_extension_versions_are_refused() {
         .to_string();
     assert!(
         message.contains("unsupported credential extension version"),
-        "{message}"
+        "a later extension version is refused with a clear error: {message}"
     );
 }

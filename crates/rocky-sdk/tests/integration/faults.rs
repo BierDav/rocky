@@ -39,6 +39,12 @@ fn union() -> Vec<String> {
 fn holds(items: &[String], rows: &[String]) -> bool {
     rows.iter().all(|row| items.contains(row))
 }
+/// Byte offsets that cut a sync during the handshake, the push and the pull.
+const CUTS_THROUGH_HANDSHAKE_PUSH_AND_PULL: [usize; 6] = [0, 300, 3_000, 9_000, 20_000, 45_000];
+/// Stream buffer after which writers wait for the reader: far below a page
+/// of frames, yet enough for both ends' handshakes, which they send before
+/// reading as the transport contract requires.
+const SLOW_READER_CAPACITY: usize = 4096;
 
 #[tokio::test]
 async fn a_cut_stream_loses_nothing_and_applies_nothing_in_part() -> Result<(), Failure> {
@@ -46,16 +52,20 @@ async fn a_cut_stream_loses_nothing_and_applies_nothing_in_part() -> Result<(), 
     let hub = Arc::new(Hub::default());
     let (a, b) = diverged(root.path(), &hub).await?;
     let mut failed = 0;
-    // Cuts during the handshake, the push and the pull.
-    for bytes in [0, 300, 3_000, 9_000, 20_000, 45_000] {
+    for bytes in CUTS_THROUGH_HANDSHAKE_PUSH_AND_PULL {
         snap::ok(b.session.set_networking_enabled(true)).await;
         hub.cut_after(Some(bytes));
         failed += usize::from(common::exchange_failed(&b.sync().await));
         hub.cut_after(None);
-        // `items` reads both fields of every row; a partial row would fail it.
         let (ours, theirs) = (b.items().await, a.items().await);
-        assert!(holds(&ours, &own('b')) && holds(&theirs, &own('a')));
-        assert!(ours.iter().chain(&theirs).all(|row| union().contains(row)));
+        assert!(
+            holds(&ours, &own('b')) && holds(&theirs, &own('a')),
+            "a cut at {bytes} bytes loses no row"
+        );
+        assert!(
+            ours.iter().chain(&theirs).all(|row| union().contains(row)),
+            "a cut at {bytes} bytes applies no row in part"
+        );
     }
     assert!(failed >= 3, "only {failed} cuts interrupted a sync");
     let peer = b.peer(&a.node().await).await;
@@ -68,11 +78,14 @@ async fn a_cut_stream_loses_nothing_and_applies_nothing_in_part() -> Result<(), 
         .expect("reconciliation");
     assert_eq!(last["outcome"] == "completed", b.items().await == union());
 
-    // The interrupted sync repeats safely, and a duplicate changes nothing.
     snap::ok(b.session.set_networking_enabled(true)).await;
     for _ in 0..2 {
         b.sync().await.map_err(|error| error.to_string())?;
-        assert_eq!(b.items().await, union());
+        assert_eq!(
+            b.items().await,
+            union(),
+            "an interrupted sync repeats safely and a duplicate changes nothing"
+        );
         assert_eq!(a.items().await, union());
     }
     a.close().await;
@@ -87,10 +100,7 @@ async fn a_cut_stream_loses_nothing_and_applies_nothing_in_part() -> Result<(), 
 async fn a_slow_reader_holds_the_writer_back_without_loss() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    // Writers wait for the reader after 4 KiB, far below a page of frames.
-    // Both ends send their handshake before reading, so a stream must
-    // buffer that much; see the transport contract.
-    hub.capacity.store(4096, Ordering::SeqCst);
+    hub.capacity.store(SLOW_READER_CAPACITY, Ordering::SeqCst);
     let (a, b) = diverged(root.path(), &hub).await?;
     b.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(b.items().await, union());
@@ -118,11 +128,10 @@ async fn inbound_streams_over_budget_are_dropped_and_served_again_later() -> Res
     .await??;
     let limit = hub.rpc_admission("a").ok_or("RPC listener")?.limit;
     assert_eq!(limit, 32);
-    // An unauthenticated dialer holds every slot without ever speaking.
     let stranger = hub.connector("x").start(false, [0; 32]).await?;
-    let mut held = Vec::new();
+    let mut held_without_speaking = Vec::new();
     for open in 1..=limit {
-        held.push(stranger.connect("a", Protocol::Rpc, None).await?);
+        held_without_speaking.push(stranger.connect("a", Protocol::Rpc, None).await?);
         assert_eq!(hub.rpc_admission("a").ok_or("RPC listener")?.active, open);
     }
     for dropped in 1..=3 {
@@ -142,14 +151,18 @@ async fn inbound_streams_over_budget_are_dropped_and_served_again_later() -> Res
             .active,
         0
     );
-    // The database is as usable as before, and nothing was stored.
-    assert_eq!(a.items().await, own('a'));
-    // Links have their own budget: an enrolled device still syncs.
-    b.sync().await.map_err(|error| error.to_string())?;
+    assert_eq!(
+        a.items().await,
+        own('a'),
+        "a stranger holding every RPC slot stores nothing"
+    );
+    b.sync()
+        .await
+        .map_err(|error| format!("links have their own budget beside RPC: {error}"))?;
     assert_eq!(a.items().await, union());
 
     let mut changed = hub.admission_changes();
-    drop(held);
+    drop(held_without_speaking);
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             changed.borrow_and_update();

@@ -9,7 +9,7 @@ use super::*;
 use rocky_core::Scope;
 use rocky_credentials::TipGraph;
 
-/// Header rows read per acquisition; provisional until measured.
+/// Header rows read per acquisition.
 pub(crate) const HEADER_ROWS: usize = if cfg!(test) { 2 } else { 256 };
 /// Refused paged passes before a scan runs in one acquisition.
 pub(super) const SCAN_PASSES: usize = 3;

@@ -197,7 +197,6 @@ impl Service {
             &publisher,
         )
         .unwrap();
-        // Controls name trusted identities; this node is its own.
         let control = ControlCertificate::sign(
             DomainControl {
                 scope,
@@ -271,7 +270,6 @@ async fn a_trusted_node_claims_and_a_retry_returns_the_same_value() {
         client.claim(service.scope, invoices.clone(), second).await,
         Ok(2)
     );
-    // Another client of the same node, as after a restart, sees the same counter.
     let reopened = service.client(&service.node);
     let reading = reopened
         .counter(service.scope, invoices.clone(), Some(first))
@@ -279,7 +277,8 @@ async fn a_trusted_node_claims_and_a_retry_returns_the_same_value() {
         .unwrap();
     assert_eq!(
         (reading.value, reading.claim),
-        (2, Some(Lookup::Claimed(1)))
+        (2, Some(Lookup::Claimed(1))),
+        "a client reopened on the same node sees the same counter"
     );
     assert_eq!(reopened.claim(service.scope, invoices, second).await, Ok(2));
 }
@@ -315,7 +314,6 @@ async fn only_trusted_nodes_claim() {
             .await,
         Err(CoordinationError::Denied)
     );
-    // Without its certificate, the trusted node's key alone is no identity.
     let uncertified = NetworkCoordinator::connect(
         &service.bundle,
         service.node.clone(),
@@ -326,7 +324,8 @@ async fn only_trusted_nodes_claim() {
         uncertified
             .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
             .await,
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a trusted node's key without its certificate is no identity"
     );
     let trusted = service.client(&service.node);
     let reading = trusted
@@ -414,7 +413,6 @@ async fn a_claim_right_holder_claims_until_its_revocation_is_pushed() {
         },
     )
     .unwrap();
-    // The revoked holder itself may push it; it holds from then on.
     holder
         .revoke(
             service.scope,
@@ -424,7 +422,8 @@ async fn a_claim_right_holder_claims_until_its_revocation_is_pushed() {
         .unwrap();
     assert_eq!(
         holder.claim(service.scope, invoices.clone(), first).await,
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a pushed revocation denies its holder from then on"
     );
     assert_eq!(
         holder.counter(service.scope, invoices, None).await,
@@ -437,12 +436,12 @@ async fn an_answer_not_signed_by_the_certified_voter_is_refused() {
     let service = Service::answered_by(Some(PrivateKey::new())).await;
     let client = service.client(&service.node);
     let invoices = Name::new("invoices").unwrap();
-    // Every attempt is refused, so the outcome stays uncertain.
     assert_eq!(
         client
             .claim(service.scope, invoices, Claim::fresh().unwrap())
             .await,
-        Err(CoordinationError::Unavailable)
+        Err(CoordinationError::Unavailable),
+        "every attempt is refused, so the outcome stays uncertain"
     );
     assert!(service.voter.streams.load(Ordering::Relaxed) > 1);
 }

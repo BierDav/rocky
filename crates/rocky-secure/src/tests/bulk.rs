@@ -58,7 +58,6 @@ async fn migration_provenance_is_private_until_endorsed_and_survives_reopen() {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn verified_membership_bypasses_only_ordinary_history_and_debits_atomically() {
-    // Items and tags: two frames.
     let (l, dir, _, source, signed) = candidate_tables(40, true).await;
     release(&source, &signed).await;
     let key = PrivateKey::new();
@@ -75,7 +74,7 @@ async fn verified_membership_bypasses_only_ordinary_history_and_debits_atomicall
     .await
     .unwrap();
     let payload = frames(&source).await;
-    assert!(payload.len() > 1);
+    assert!(payload.len() > 1, "items and tags take a frame each");
     target
         .inner
         .lock(crate::replica::Class::Background)
@@ -122,7 +121,6 @@ async fn verified_membership_bypasses_only_ordinary_history_and_debits_atomicall
         r.unwrap();
     }
     assert_eq!(target.migration_storage().await.unwrap(), totals);
-    // Neither a later sequence nor a generic local publication acquires capacity.
     let sql = super::generations::session(&source).await;
     let edit = sql
         .run("UPDATE items SET title='ordinary' WHERE key='k0'", vec![])
@@ -137,7 +135,8 @@ async fn verified_membership_bypasses_only_ordinary_history_and_debits_atomicall
             .receive_migration_all(edit)
             .await
             .into_iter()
-            .all(|r| matches!(r, Err(Error::Backpressure)))
+            .all(|r| matches!(r, Err(Error::Backpressure))),
+        "a generic local publication acquires no migration capacity"
     );
     source
         .inner
@@ -215,7 +214,6 @@ async fn verified_membership_bypasses_only_ordinary_history_and_debits_atomicall
         remaining.bytes,
         totals.bytes - payload[0].stored_bytes().unwrap()
     );
-    // Each retained proof remains self-contained after its neighbor is removed.
     for frame in frames(&target).await {
         let proof = frame.migration.as_ref().unwrap();
         signed
@@ -225,7 +223,7 @@ async fn verified_membership_bypasses_only_ordinary_history_and_debits_atomicall
                 *frame.id().unwrap().as_bytes(),
                 frame.stored_bytes().unwrap(),
             )
-            .unwrap();
+            .expect("each retained proof stays self-contained after its neighbor is removed");
     }
     target
         .inner
@@ -359,13 +357,11 @@ async fn failed_flush_retains_exact_classification_and_retry_acknowledges_it_onc
         .admit_migration_publication(signed.clone())
         .await
         .unwrap();
-    // The handshake learns membership before the payload flush under test.
     target
         .learn_revocations(&source.revocations().await)
         .await
         .unwrap();
     let mut payload = frames(&source).await;
-    // The publication was admitted above; exercise the payload flush itself.
     for frame in &mut payload {
         frame.migration.as_mut().unwrap().descriptor = None;
     }
@@ -518,8 +514,6 @@ async fn seal_pruning_and_interrupted_checkpoint_import_debit_and_preserve_proof
     .unwrap();
     let payload = frames(&source).await;
     assert!(payload.len() > 1);
-    // A member prunes with its whole transaction and outcome records: the
-    // target holds them all.
     for result in target.receive_migration_all(payload.clone()).await {
         result.unwrap();
     }
@@ -584,7 +578,6 @@ async fn seal_pruning_and_interrupted_checkpoint_import_debit_and_preserve_proof
     }
     source.audit(l.scope("items")).await.unwrap();
     target.begin_rebootstrap(checkpoint.clone()).await.unwrap();
-    // Staging a page does not debit retained operations before the atomic import.
     let before = target.migration_storage().await.unwrap();
     let mut after = None;
     loop {
@@ -601,7 +594,11 @@ async fn seal_pruning_and_interrupted_checkpoint_import_debit_and_preserve_proof
             .unwrap();
         after = page.next;
         target.stage_checkpoint_page(page).await.unwrap();
-        assert_eq!(target.migration_storage().await.unwrap(), before);
+        assert_eq!(
+            target.migration_storage().await.unwrap(),
+            before,
+            "staging a page debits no retained operations before the atomic import"
+        );
         if after.is_none() {
             break;
         }
@@ -613,10 +610,10 @@ async fn seal_pruning_and_interrupted_checkpoint_import_debit_and_preserve_proof
         .unwrap();
     assert_eq!(target.migration_storage().await.unwrap(), before);
     target.finish_rebootstrap(l.scope("items")).await.unwrap();
-    // The import debits the items member; the tags member stays.
     assert_eq!(
         target.migration_storage().await.unwrap().frames,
-        signed.statement.frames - 1
+        signed.statement.frames - 1,
+        "the import debits the items member; the tags member stays"
     );
     assert!(
         target

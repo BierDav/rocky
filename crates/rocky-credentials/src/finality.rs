@@ -83,14 +83,16 @@ impl TerminalAck {
             return Err(denied("an acknowledgment names its own node's chain"));
         }
         self.link.validate()?;
-        // A cut node's acknowledgments are judged by the cut, not refused.
-        let current = current.filter(|(revocations, _)| {
+        let current_unless_cut = current.filter(|(revocations, _)| {
             self.identity()
                 .is_none_or(|identity| revocations.cut(&identity, &self.signer).is_none())
         });
-        let identity =
-            self.credentials
-                .trusted_node(publisher, self.statement.scope, self.signer, current)?;
+        let identity = self.credentials.trusted_node(
+            publisher,
+            self.statement.scope,
+            self.signer,
+            current_unless_cut,
+        )?;
         if !self.signer.verify(
             &signing_bytes(TERMINAL_ACK, &(&self.statement, &self.link))?,
             &self.signature,

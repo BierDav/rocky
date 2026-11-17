@@ -7,6 +7,11 @@ enum Exit {
     Close(CloseReason),
 }
 impl Node {
+    /// Runs one live link until it closes. Signal work is polled beside the
+    /// request handlers, which may hold the replica while awaiting storage,
+    /// instead of blocking them. A dead peer surfaces as a failed read or
+    /// write: the transport keeps the connection alive and times it out. The
+    /// final close is bounded, which also interrupts a blocked channel write.
     pub(super) async fn run_link(
         &self,
         service: &Link,
@@ -31,8 +36,7 @@ impl Node {
         let mut stage = service.stage.subscribe();
         let mut changes = changed.subscribe();
         let writer = io.writer();
-        // The peer showed that it collects health reports.
-        let collector = watch::channel(false).0;
+        let peer_collects_health = watch::channel(false).0;
         let exit = {
             let receive = async {
                 let mut requests = futures_util::stream::FuturesUnordered::<
@@ -134,8 +138,6 @@ impl Node {
                                     self.link_pending(peer);
                                     continue;
                                 }
-                                // Handlers may hold the replica while awaiting storage. Poll
-                                // signal work beside them instead of blocking their progress.
                                 requests.push(Box::pin(async move {
                                     self.changed_signal(peer, &scopes, token, control).await
                                 }));
@@ -146,7 +148,7 @@ impl Node {
                                 tracing::debug!("a health message was dropped: the link is busy");
                                 continue;
                             }
-                            let (chain, collector) = (&chain, &collector);
+                            let (chain, collector) = (&chain, &peer_collects_health);
                             requests.push(Box::pin(async move {
                                 self.receive_health(peer, chain, collector, bytes).await;
                                 Ok(())
@@ -160,8 +162,6 @@ impl Node {
                     }
                 }
             };
-            // A dead peer surfaces as a failed read or write: the transport
-            // keeps the connection alive and times it out.
             let send = async {
                 changes.borrow_and_update();
                 let mut initial = take_signal(&changed);
@@ -185,7 +185,12 @@ impl Node {
                     }
                 }
             };
-            let health = self.link_health(peer, writer.clone(), direction, collector.subscribe());
+            let health = self.link_health(
+                peer,
+                writer.clone(),
+                direction,
+                peer_collects_health.subscribe(),
+            );
             let health = async {
                 health.await;
                 std::future::pending::<()>().await
@@ -206,12 +211,11 @@ impl Node {
             Exit::Close(reason) => {
                 #[cfg(test)]
                 service.live.closing.fetch_add(1, Ordering::SeqCst);
-                if *collector.borrow() && reason != CloseReason::Authority {
+                if *peer_collects_health.borrow() && reason != CloseReason::Authority {
                     let _ =
                         rocky_platform::time::timeout(CLOSE, self.final_report(&writer, direction))
                             .await;
                 }
-                // Cancellation also interrupts a blocked channel write.
                 let _ = rocky_platform::time::timeout(CLOSE, async {
                     io.send(Frame::new(direction, Message::Close { reason }))
                         .await?;
@@ -251,7 +255,7 @@ impl Node {
     }
 }
 
-// Taking a queued batch must clear it so later scopes cannot be hidden by it.
+/// Takes the queued batch and clears it, so it cannot hide later scopes.
 fn take_signal(changed: &watch::Sender<Option<ChangeHint>>) -> Option<ChangeHint> {
     let mut pending = None;
     changed.send_if_modified(|value| {

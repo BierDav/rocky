@@ -182,8 +182,8 @@ impl<A: RowApplication> Inner<A> {
             sequence: *sequence as u64,
         };
         let listed = outcomes.of(&stamp, &transaction);
-        // A final record here and the base decide the same seal.
-        if *sealed != 0 {
+        let sealed_here = *sealed != 0;
+        if sealed_here {
             let recorded = match dropped {
                 SqlValue::Text(reason) => Some(reason_named(reason)?),
                 _ => None,

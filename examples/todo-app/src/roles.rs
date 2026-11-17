@@ -140,7 +140,8 @@ impl Todos {
     }
     /// Revokes another device and forgets it: its credentials stop
     /// working on every device that learns the revocation, and lists are
-    /// no longer shared with it. Only trusted devices revoke.
+    /// no longer shared with it. Only trusted devices revoke. A device that
+    /// was never a configured peer has no peer entry to remove.
     pub async fn remove_device(&self, node: &str) -> Result<(), Failure> {
         if node == self.node().await? {
             return Err("a device cannot remove itself; reset it instead".into());
@@ -156,7 +157,6 @@ impl Todos {
             .execute("DELETE FROM devices WHERE node=?", params![node])
             .await?;
         transaction.commit().await?;
-        // Not every removed device was a configured peer.
         let _ = self.database.session().remove_peer(node).await;
         Ok(())
     }

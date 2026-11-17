@@ -88,21 +88,21 @@ fn pruning_judges_only_the_lanes_a_cut_names_and_what_arrived_since() {
         past
     );
 
-    // Warm, only the lists' last items are hashed to see they still hold.
     let before = ids_computed();
     assert_eq!(
         graph.prunable(&revocations, &BTreeSet::new()).unwrap(),
-        past
+        past,
+        "warm, only the lists' last items are hashed to see they still hold"
     );
     let warm = ids_computed() - before;
     assert!(warm <= 6, "{warm} IDs computed");
 
-    // A statement admitted since is indexed once.
     let late = chain(&mut graph, &owner, &PrivateKey::new(), 1);
     let before = ids_computed();
     assert_eq!(
         graph.prunable(&revocations, &BTreeSet::new()).unwrap(),
-        past
+        past,
+        "a statement admitted since is indexed once"
     );
     let admitted = ids_computed() - before;
     assert!(admitted <= 8, "{admitted} IDs computed");
@@ -178,7 +178,6 @@ fn a_trusted_identity_keeps_both_lanes_through_unlink_and_root_cuts() {
     let unlink =
         crate::SignedRevocation::sign(unlink_statement.clone(), &identity, &chains[0]).unwrap();
     unlink.verify(root.public_key(), scope.app).unwrap();
-    // An identity never cuts a sibling it did not unlink, or a different identity's lane.
     for foreign_identity in [false, true] {
         let mut forged = unlink_statement.clone();
         if foreign_identity {
@@ -186,7 +185,10 @@ fn a_trusted_identity_keeps_both_lanes_through_unlink_and_root_cuts() {
         } else {
             forged.cut[0].lane = nodes[1].public_key();
         }
-        assert!(crate::SignedRevocation::sign(forged, &identity, &chains[0]).is_err());
+        assert!(
+            crate::SignedRevocation::sign(forged, &identity, &chains[0]).is_err(),
+            "an identity never cuts a sibling it did not unlink, or another identity's lane"
+        );
     }
     let mut revocations = RevocationSet::try_from(vec![unlink]).unwrap();
     let after_unlink = append(&mut graph, 0, 7);
@@ -381,7 +383,6 @@ fn seal_and_finality_lookups_use_the_index() {
             .push(SignedSeal::sign(statement, &owner).unwrap());
     }
     let (first, last) = (graph.seals[0].id().unwrap(), graph.seals[39].id().unwrap());
-    // Distinct records of `last`, all but the newest revoked.
     for format in 0..40 {
         let record = SealFinality {
             format,
@@ -392,16 +393,21 @@ fn seal_and_finality_lookups_use_the_index() {
         }
         graph.finalities.push(record);
     }
-    assert!(graph.is_final(last).unwrap());
+    assert!(
+        graph.is_final(last).unwrap(),
+        "only the newest of distinct finality records of last is unrevoked"
+    );
     assert!(!graph.is_final(first).unwrap());
     let before = ids_computed();
     assert_eq!(graph.seal_by_id(last).unwrap().id().unwrap(), last);
     assert_eq!(graph.seal_by_id(first).unwrap().id().unwrap(), first);
     assert!(graph.seal_by_id([9; 32]).is_err());
     assert!(graph.is_final(last).unwrap());
-    // Four lookups at two lists' last items each, plus the two IDs compared.
     let warm = ids_computed() - before;
-    assert!(warm <= 4 * 2 + 2, "{warm} IDs computed");
+    assert!(
+        warm <= 4 * 2 + 2,
+        "four lookups at two lists' last items each, plus the two IDs compared; {warm} IDs computed"
+    );
     graph.revoked.insert(graph.finalities[39].id().unwrap());
     assert!(!graph.is_final(last).unwrap());
 }

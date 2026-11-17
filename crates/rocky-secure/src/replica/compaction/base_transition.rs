@@ -257,11 +257,12 @@ impl<A: RowApplication> Inner<A> {
                             SqlValue::Integer(*version),
                         ])
                     };
-                    // Retire the current-snapshot header before deleting rows,
-                    // so no reader mistakes a partial retired snapshot for a full one.
-                    let headers = inner.conn.execute(
-                        "DELETE FROM secure_replayed_seals WHERE scope=? AND seal=? AND version=?", params(),
-                    ).await? as usize;
+                    /// Runs before the snapshot's rows are deleted, so no reader
+                    /// mistakes a partially retired snapshot for a full one.
+                    const RETIRE_SNAPSHOT_HEADER: &str =
+                        "DELETE FROM secure_replayed_seals WHERE scope=? AND seal=? AND version=?";
+                    let headers =
+                        inner.conn.execute(RETIRE_SNAPSHOT_HEADER, params()).await? as usize;
                     remaining -= headers;
                     let deleted = inner.conn.execute(
                         "DELETE FROM secure_replayed_seal_rows WHERE scope=?1 AND seal=?2 AND version=?3 AND row IN(SELECT row FROM secure_replayed_seal_rows WHERE scope=?1 AND seal=?2 AND version=?3 ORDER BY row LIMIT ?4)",

@@ -10,6 +10,9 @@ pub struct Names {
     scoped: bool,
     namespace: Option<String>,
 }
+/// Rewritten texts kept before the cache starts over, bounding
+/// caller-generated SQL independently of application width.
+const MAX_REWRITTEN_SQL: usize = 256;
 /// Protocol tables and indexes every domain owns in its namespace.
 const PROTOCOL: &[&str] = &[
     "rocky_replica",
@@ -286,8 +289,7 @@ impl ScopedConnection {
                 return rewritten.clone();
             }
             let rewritten = self.names.sql(sql);
-            // Bound caller-generated SQL independently of application width.
-            if cache.len() >= 256 {
+            if cache.len() >= MAX_REWRITTEN_SQL {
                 cache.clear();
             }
             cache.insert(sql.to_string(), rewritten.clone());

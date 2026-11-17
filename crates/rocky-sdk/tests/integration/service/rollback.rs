@@ -5,6 +5,9 @@ mod diagnostics;
 #[path = "rollback/evidence.rs"]
 mod evidence;
 
+/// The SDK's retention window; compaction releases only operations past it.
+const SDK_RETENTION_WINDOW_OPERATIONS: u32 = 256;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<(), Failure> {
     let mut trace = diagnostics::Trace::new(tempfile::tempdir()?);
@@ -91,11 +94,8 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
         m.sync().await,
         &[("m", &m), ("a", &a), ("t", &t)]
     ));
-    // Cross the SDK's real 256-operation retention window before compacting.
-    // These routine writes do not need per-operation diagnostics; failures are
-    // still returned by the test and the phase remains traceable.
     trace.before("setup.retention.writes");
-    for index in 0..257 {
+    for index in 0..=SDK_RETENTION_WINDOW_OPERATIONS {
         a.write(&format!("later {index:03}"), 1000 + index).await?;
     }
     trace.after();
@@ -197,7 +197,6 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
         );
     }
     eprintln!("rollback: member and relay compacted");
-    // T carries only the graph of main's rollback; its own bookmark stays here.
     step!(
         "park.create",
         snap::value(a.session.create_bookmark("park", None)).await,
@@ -400,16 +399,19 @@ async fn a_compacted_member_waits_for_the_owners_kept_rollback_seal() -> Result<
         snap::value(m.session.held_changes()).await,
         &[("m", &m), ("a", &a), ("t", &t)]
     );
-    // The write past the rolled-back seal is an intent of the abandoned
-    // line: held whole for relay, with no rows for the application to
-    // re-author.
-    assert_eq!(held["count"], 0, "{held}");
+    assert_eq!(
+        held["count"], 0,
+        "an intent past the rolled-back seal leaves no rows to re-author: {held}"
+    );
     let intents: i64 = inspect_file(&m_dir)?.query_row(
         "SELECT count(*) FROM secure_held_frames WHERE intent=1",
         [],
         |row| row.get(0),
     )?;
-    assert!(intents > 0);
+    assert!(
+        intents > 0,
+        "an intent of the abandoned line is held whole for relay"
+    );
     step!(
         "restored.original",
         evidence::restored(&m_dir, &guarded),

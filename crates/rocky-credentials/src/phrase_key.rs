@@ -56,14 +56,16 @@ mod tests {
             PhraseKey::from_phrase(&format!("  {}\n", phrase.replace(' ', "  "))).unwrap();
         assert_eq!(restored.public_key(), key.public_key());
         let mut words: Vec<&str> = phrase.split(' ').collect();
-        // Flip a checksum bit; swapping words can accidentally make another valid phrase.
         let dictionary = bip39::Language::English.word_list();
         let last = dictionary
             .iter()
             .position(|word| *word == words[23])
             .unwrap();
         words[23] = dictionary[last ^ 1];
-        assert!(PhraseKey::from_phrase(&words.join(" ")).is_err());
+        assert!(
+            PhraseKey::from_phrase(&words.join(" ")).is_err(),
+            "a flipped checksum bit is refused, unlike swapped words that may form another valid phrase"
+        );
         let twelve = bip39::Mnemonic::from_entropy(&[7; 16]).unwrap().to_string();
         assert!(PhraseKey::from_phrase(&twelve).is_err());
     }

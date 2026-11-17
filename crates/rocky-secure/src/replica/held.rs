@@ -9,13 +9,15 @@ use super::checkpoint::hash_of;
 use super::*;
 use p2panda_core::{Header, Signature, validate_header};
 
+/// Frames this device authored and never offered to a peer: their writes as
+/// signed, the storage row of each, and their bundle.
+const UNOFFERED: &str = "CREATE TABLE IF NOT EXISTS secure_unoffered(hash BLOB PRIMARY KEY,bundle BLOB NOT NULL,members INTEGER NOT NULL,writes BLOB NOT NULL) WITHOUT ROWID";
+/// Log positions a void record consumed, with the voided header. This
+/// device's own record is NULL until the log's key is registered.
+const VOIDS: &str = "CREATE TABLE IF NOT EXISTS secure_voids(scope BLOB NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,header BLOB NOT NULL,record BLOB,PRIMARY KEY(scope,author,sequence)) WITHOUT ROWID";
 pub(super) const SCHEMA: &[&str] = &[
-    // Frames this device authored and never offered to a peer: their
-    // writes as signed, the storage row of each, and their bundle.
-    "CREATE TABLE IF NOT EXISTS secure_unoffered(hash BLOB PRIMARY KEY,bundle BLOB NOT NULL,members INTEGER NOT NULL,writes BLOB NOT NULL) WITHOUT ROWID",
-    // Log positions a void record consumed, with the voided header. This
-    // device's own record is NULL until the log's key is registered.
-    "CREATE TABLE IF NOT EXISTS secure_voids(scope BLOB NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,header BLOB NOT NULL,record BLOB,PRIMARY KEY(scope,author,sequence)) WITHOUT ROWID",
+    UNOFFERED,
+    VOIDS,
     "CREATE TABLE IF NOT EXISTS secure_void_records(digest BLOB PRIMARY KEY,record BLOB NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_held(id BLOB PRIMARY KEY,change BLOB NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_held_frames(hash BLOB PRIMARY KEY,id BLOB NOT NULL,scope BLOB NOT NULL,frame BLOB NOT NULL,intent INTEGER NOT NULL) WITHOUT ROWID",
@@ -310,7 +312,6 @@ impl<A: RowApplication> Inner<A> {
             return Ok(0);
         }
         let graph = self.graph_for(scope)?;
-        // What each frame's tip had that the path to `target` lost.
         let mut removed_at = BTreeMap::<TipId, (HashSet<_>, HashSet<_>)>::new();
         let mut removed = Vec::with_capacity(frames.len());
         for frame in &frames {
@@ -391,7 +392,6 @@ impl<A: RowApplication> Inner<A> {
                         })
                 })
         };
-        // Only a bundle whose every frame is unoffered can be held whole.
         let bundles = whole_bundles(&frames);
         let held: BTreeSet<Vec<u8>> = bundles
             .iter()
@@ -413,7 +413,6 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<usize, Error> {
         let names = self.item_names().await?;
         let mut held = seeds.clone();
-        // A bundle that saw a held one's effects is held with it.
         loop {
             let voided: HashSet<Hash> = held
                 .iter()
@@ -494,7 +493,6 @@ impl<A: RowApplication> Inner<A> {
             positions::insert(&self.conn, &frame.header, 1, false, true).await?;
             self.delete_voided(frame.hash).await?;
         }
-        // A node registered after open signs its logs' voids then.
         self.sign_voids().await?;
         for scope in scopes {
             if self.tables.contains(&scope.table) {

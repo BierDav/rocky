@@ -6,14 +6,17 @@
 use super::*;
 use rocky_core::replay::IntentStatement;
 
+/// One partition's members in publication order: each scope's statements
+/// and the undo and births of the issuer's execution there.
+const PUBLICATION_INTENTS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_publication_intents(publication BLOB NOT NULL,position INTEGER NOT NULL,members BLOB NOT NULL,PRIMARY KEY(publication,position)) WITHOUT ROWID";
+/// The leading positions authored, of `total`.
+const PUBLICATION_CURSORS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_publication_cursors(publication BLOB PRIMARY KEY,next INTEGER NOT NULL,total INTEGER NOT NULL) WITHOUT ROWID";
+/// Frames of a publication still being authored; never offered.
+const PUBLICATION_UNSENT_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_publication_unsent(hash BLOB PRIMARY KEY,publication BLOB NOT NULL) WITHOUT ROWID";
 pub(in crate::replica) const SCHEMA: &[&str] = &[
-    // One partition's members in publication order: each scope's statements
-    // and the undo and births of the issuer's execution there.
-    "CREATE TABLE IF NOT EXISTS secure_publication_intents(publication BLOB NOT NULL,position INTEGER NOT NULL,members BLOB NOT NULL,PRIMARY KEY(publication,position)) WITHOUT ROWID",
-    // The leading positions authored, of `total`.
-    "CREATE TABLE IF NOT EXISTS secure_publication_cursors(publication BLOB PRIMARY KEY,next INTEGER NOT NULL,total INTEGER NOT NULL) WITHOUT ROWID",
-    // Frames of a publication still being authored; never offered.
-    "CREATE TABLE IF NOT EXISTS secure_publication_unsent(hash BLOB PRIMARY KEY,publication BLOB NOT NULL) WITHOUT ROWID",
+    PUBLICATION_INTENTS_TABLE,
+    PUBLICATION_CURSORS_TABLE,
+    PUBLICATION_UNSENT_TABLE,
 ];
 
 /// Bundles one authoring transaction writes. On the replayed 100k fixture a
@@ -76,7 +79,6 @@ impl<A: RowApplication> Inner<A> {
         {
             return Ok(false);
         }
-        // All unpartitioned scopes form one partition, ordered first.
         let mut partitions = BTreeMap::<Option<Vec<u8>>, Vec<Member>>::new();
         for (scope, (statements, undo)) in intents {
             let partition = self.partitions.get(&scope).map(encode).transpose()?;
@@ -169,7 +171,6 @@ impl<A: RowApplication> Inner<A> {
             let Some([SqlValue::Blob(members)]) = records.first().map(Vec::as_slice) else {
                 return Err(Error::Corrupt("staged publication intents".into()));
             };
-            // Local, with the undo: not bound by a frame.
             let members: Vec<Member> = decode_bounded(members, usize::MAX)?;
             let statements = members
                 .iter()
@@ -323,13 +324,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Ok(())
     }
     /// Authors the next chunk, or records the authored publication; false
-    /// once nothing is left.
+    /// once nothing is left. Each step first waits out a running passive
+    /// checkpoint and cuts the WAL: a truncating checkpoint fails beside a
+    /// passive one, and back-to-back steps would then grow the WAL one chunk
+    /// at a time.
     pub(crate) async fn author_publication_step(
         &self,
         publication: Commitment,
     ) -> Result<bool, Error> {
-        // A truncating checkpoint fails beside a running passive one, and
-        // back-to-back steps would then grow the WAL one chunk at a time.
         let passive = self
             .inner
             .lock(crate::replica::Class::Background)
@@ -341,7 +343,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let Some((next, total)) = inner.publication_cursor(publication).await? else {
             return Ok(false);
         };
-        // The WAL is cut at the passive size, so one more step stays in bound.
         inner
             .checkpoint_over(super::group::WAL_CHECKPOINT_BYTES)
             .await;
@@ -365,7 +366,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if measured {
             drop(flush_guard(inner, &self.inner).await?);
             inner = self.inner.lock(crate::replica::Class::Background).await;
-            // Before the first chunk: what the WAL holds through transaction 1.
             if next == 0 {
                 let pages = wal_pages(&inner, false).await?;
                 CHUNK_PAGES

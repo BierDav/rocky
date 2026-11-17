@@ -50,7 +50,6 @@ fn sibling_names_extend_the_stem() {
 async fn domains_are_assigned_to_files_deterministically() {
     let dir = Scratch::new().await;
     let path = dir.path().join("laptop.db");
-    // Two domains with four requested files use two files and two writers.
     let runtime = open_node(&path, NODE, files(4)).await;
     for domain in [1, 2] {
         note(&runtime.domain(scope(domain)).unwrap(), 1, "note")
@@ -59,7 +58,10 @@ async fn domains_are_assigned_to_files_deterministically() {
             .unwrap();
     }
     runtime.close().await.unwrap();
-    assert!(!rocky_platform::fs::exists(file_path(&path, 2)));
+    assert!(
+        !rocky_platform::fs::exists(file_path(&path, 2)),
+        "two domains with four requested files use two files and two writers"
+    );
     let first = file_path(&path, 0);
     let second = file_path(&path, 1);
     assert!(holds(&first, 1).await && !holds(&first, 2).await);
@@ -90,19 +92,16 @@ async fn another_file_count_or_a_missing_extra_or_foreign_file_is_refused() {
     let before = rocky_platform::fs::read(&path).unwrap();
     refused(open(1).await, "another file count");
     refused(open(3).await, "another file count");
-    // A missing sibling, without creating it.
     let sibling = file_path(&path, 1);
     let moved = dir.path().join("moved.db");
     rocky_platform::fs::rename(&sibling, &moved).unwrap();
     refused(open(2).await, "missing");
     assert!(!rocky_platform::fs::exists(&sibling));
     rocky_platform::fs::rename(&moved, &sibling).unwrap();
-    // A file beyond the recorded layout.
     let extra = file_path(&path, 2);
     rocky_platform::fs::write(&extra, b"").unwrap();
     refused(open(2).await, "not part of");
     rocky_platform::fs::remove_file(&extra).unwrap();
-    // A sibling installed by another runtime.
     let other = dir.path().join("other.db");
     open_node(&other, PEER, files(2))
         .await

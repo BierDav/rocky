@@ -88,8 +88,6 @@ impl<A: RowApplication> Inner<A> {
                 return Err(denied("frame fields are outside its source tip schema"));
             }
         }
-        // Authority covers the writes as signed; the current generation
-        // applies what it still names, the same way on every device.
         for write in writes {
             if write.change.scope != scope
                 || !write.permitted_by(grants)
@@ -104,8 +102,6 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         let fields = self.path_fields(scope.domain, operation.header.extensions.tip)?;
-        // Admission evidence names each birth by its place in the signed
-        // write list, so ordinals survive the path filter.
         let mut current = Vec::new();
         let mut withheld = Vec::new();
         for (ordinal, write) in writes.iter().enumerate() {
@@ -128,7 +124,6 @@ impl<A: RowApplication> Inner<A> {
         let mut result = Vec::new();
         let mut identities = BTreeSet::new();
         let extension = &operation.header.extensions;
-        // Every comparison uses the marks the frame entered with.
         let marks = self.identity_marks(scope).await?;
         let own = self.own_marks(scope).await?;
         let allocation = self.optional_allocation_of(scope).await?;
@@ -250,8 +245,6 @@ impl<A: RowApplication> Inner<A> {
                     };
                 }
                 let restoring = matches!(class, Class::Restore(..));
-                // A restored birth that fails a creation check stays withheld;
-                // its frame was admitted already.
                 let checked = self.check_write(write, scope, &mut changed).await;
                 match checked {
                     Ok(()) => {}
@@ -324,7 +317,6 @@ impl<A: RowApplication> Inner<A> {
                     .app
                     .row_identity(change)
                     .map_err(|message| denied(&message))?);
-                // Validate both the signed transition and the actual candidate under concurrent merges.
                 if changes(&actual) {
                     let valid = self
                         .app
@@ -465,6 +457,28 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
+    /// Reserves the identities `frame` consumed, even those whose row is
+    /// definitely dropped. The frame is replay-eligible here, so the ledger
+    /// folds its own births too.
+    async fn reserve_births(
+        &self,
+        scope: ResourceScope,
+        frame: &EncryptedFrame,
+        payload: &RowPayload,
+    ) -> Result<(), Error> {
+        for birth in self.payload_birth_marks(frame, payload)? {
+            let raise = if birth.carried {
+                identity::Raise::Carried
+            } else {
+                identity::Raise::Own
+            };
+            self.put_identity_mark(scope, &birth.mark, raise).await?;
+            if !birth.carried {
+                self.fold_ledger(scope, &birth.mark).await?;
+            }
+        }
+        Ok(())
+    }
     pub(super) async fn write_materialized(
         &self,
         frame: &EncryptedFrame,
@@ -500,24 +514,7 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
         }
-        // Consumed births reserve identities even when their row is
-        // definitely dropped; the frame is replay-eligible here, so the
-        // ledger folds them too.
-        for birth in self.payload_birth_marks(frame, payload)? {
-            self.put_identity_mark(
-                scope,
-                &birth.mark,
-                if birth.carried {
-                    identity::Raise::Carried
-                } else {
-                    identity::Raise::Own
-                },
-            )
-            .await?;
-            if !birth.carried {
-                self.fold_ledger(scope, &birth.mark).await?;
-            }
-        }
+        self.reserve_births(scope, frame, payload).await?;
         if let Some(receipt) = admission.receipt {
             self.append_admission(receipts::EntryKind::Frame(receipt))
                 .await?;
@@ -530,7 +527,6 @@ impl<A: RowApplication> Inner<A> {
             self.append_admission(receipts::EntryKind::CarryObservation(observation))
                 .await?;
         }
-        // The scope digest follows every stored row in the same transaction.
         let (rows, tombstones, digest, applied) = self.scope_state(id).await?;
         let mut sets = checkpoint::Sets::new();
         (sets.rows, sets.tombstones, sets.digest) = (rows, tombstones, digest);
@@ -554,7 +550,6 @@ impl<A: RowApplication> Inner<A> {
                 )
                 .await?;
             }
-            // The record names its proof's bindings by digest.
             if let Some(proof) = payload
                 .carried(&change.row)
                 .map(|carried| &carried.proof)

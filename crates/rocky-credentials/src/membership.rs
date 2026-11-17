@@ -276,8 +276,10 @@ mod tests {
         let other = certificate(&identity, &PrivateKey::new(), 0, None);
         let mut forged = first.clone();
         forged.author_binding = other.author_binding;
-        // The capability's signature survives; the full certificate proof does not.
-        assert_eq!(forged.capability, first.capability);
+        assert_eq!(
+            forged.capability, first.capability,
+            "the capability's signature survives the forgery"
+        );
         assert_eq!(forged.attestation(), first.attestation());
         let mut set = crate::RevocationSet::new();
         set.link(first).unwrap();

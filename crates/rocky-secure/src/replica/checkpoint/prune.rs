@@ -115,25 +115,22 @@ impl<A: RowApplication> Inner<A> {
         let Some(record) = self.checkpoint_record(id, true).await? else {
             return Ok(PruneStep::blocked(PruneBlock::NoCheckpoint));
         };
-        // An unverifiable checkpoint blocks pruning with its error.
         self.verify_record(scope, &record)?;
-        // A no-frames base covers no operation, whatever its replay cursor.
-        if record
+        let covers_no_operation = record
             .signed
             .as_ref()
-            .is_some_and(|signed| signed.statement.no_frames())
-        {
+            .is_some_and(|signed| signed.statement.no_frames());
+        if covers_no_operation {
             return Ok(PruneStep::blocked(PruneBlock::NoCheckpoint));
         }
         let Some(policy) = self.retention_policy(scope).await? else {
             return Ok(PruneStep::blocked(PruneBlock::NoPolicy));
         };
-        // The checkpoint must survive power loss before anything it covers goes.
-        if self
+        let checkpoint_survives_power_loss = self
             .verified_at
             .get(&id)
-            .is_none_or(|commit| self.flusher.durable() < *commit)
-        {
+            .is_some_and(|commit| self.flusher.durable() >= *commit);
+        if !checkpoint_survives_power_loss {
             if self.flusher.durable() < self.commit {
                 return Ok(PruneStep::blocked(PruneBlock::Durability));
             }
@@ -192,7 +189,6 @@ impl<A: RowApplication> Inner<A> {
                 };
                 let operation = hash_of(hash)?;
                 let header: p2panda_core::Header<Extensions> = decode(header)?;
-                // Acknowledged per operation or through a reported frontier.
                 let (mut peers, _) = inner
                     .covering_peers(&blob, header.public_key, header.seq_num)
                     .await?;
@@ -265,11 +261,8 @@ impl<A: RowApplication> Inner<A> {
                 bytes += *size;
                 step.pruned += 1;
             }
-            // With its last operation, in the same transaction, goes a chain.
             if step.pruned > 0 {
                 inner.sweep_chains().await?;
-            }
-            if step.pruned > 0 {
                 inner
                     .conn
                     .execute(

@@ -108,8 +108,6 @@ impl<A: RowApplication> Inner<A> {
                 .ok_or_else(|| Error::Corrupt("additive table descriptor".into()))?;
             match before.table(&logical.sql_name) {
                 Some(old) => {
-                    // History tables gain missing columns when capture is refreshed;
-                    // they may still hold one an earlier schema removed.
                     for column in logical
                         .columns
                         .iter()

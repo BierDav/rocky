@@ -1,18 +1,25 @@
 use super::*;
 
+/// Serves the pending check of every read and the replay scan.
+const OPERATION_SCOPE_STATUS_INDEX: &str = "CREATE INDEX IF NOT EXISTS secure_operation_scope_status ON secure_operations(scope,status,hash)";
+/// Covers header scans such as the frontier: reading `status` from the
+/// table walks each frame's body overflow pages.
+const OPERATION_HEADERS_INDEX: &str = "CREATE INDEX IF NOT EXISTS secure_operation_headers ON secure_operations(scope,status,hash,header)";
+/// A complete header scan need not carry the encoded scope in each index entry.
+const OPERATION_SCAN_HEADERS_INDEX: &str = "CREATE INDEX IF NOT EXISTS secure_operation_scan_headers ON secure_operations(status,hash,header)";
+/// An author's latest frame of one status, such as its newest held write.
+const OPERATION_AUTHOR_STATUS_INDEX: &str = "CREATE INDEX IF NOT EXISTS secure_operation_author_status ON secure_operations(author,scope,status,sequence)";
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS secure_operation_scope_hash ON secure_operations(scope,hash)",
     "CREATE INDEX IF NOT EXISTS secure_operation_status_hash ON secure_operations(status,hash)",
-    // Serves the pending check of every read and the replay scan.
-    "CREATE INDEX IF NOT EXISTS secure_operation_scope_status ON secure_operations(scope,status,hash)",
-    // Covers header scans such as the frontier: reading `status` from the
-    // table walks each frame's body overflow pages.
-    "CREATE INDEX IF NOT EXISTS secure_operation_headers ON secure_operations(scope,status,hash,header)",
-    // A complete header scan need not carry the encoded scope in each index entry.
-    "CREATE INDEX IF NOT EXISTS secure_operation_scan_headers ON secure_operations(status,hash,header)",
-    // An author's latest frame of one status, such as its newest held write.
-    "CREATE INDEX IF NOT EXISTS secure_operation_author_status ON secure_operations(author,scope,status,sequence)",
+    OPERATION_SCOPE_STATUS_INDEX,
+    OPERATION_HEADERS_INDEX,
+    OPERATION_SCAN_HEADERS_INDEX,
+    OPERATION_AUTHOR_STATUS_INDEX,
 ];
+
+/// Deletes the rows a finalized seal dropped from the base.
+const DELETE_ROWS_DROPPED_BY_FINALIZED_SEAL: &str = "DELETE FROM secure_row_records WHERE scope=? AND row IN (SELECT row FROM secure_checkpoint_scratch WHERE scope=? AND fields=X'')";
 
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Rebuilds one local row projection from the verified checkpoint and the
@@ -138,10 +145,9 @@ impl<A: RowApplication> Inner<A> {
                     )
                     .await?;
             }
-            // A row a finalized seal dropped from the base.
             self.conn
                 .execute(
-                    "DELETE FROM secure_row_records WHERE scope=? AND row IN (SELECT row FROM secure_checkpoint_scratch WHERE scope=? AND fields=X'')",
+                    DELETE_ROWS_DROPPED_BY_FINALIZED_SEAL,
                     bindings(vec![SqlValue::Blob(blob.clone()), SqlValue::Integer(id)]),
                 )
                 .await?;

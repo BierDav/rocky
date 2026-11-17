@@ -48,13 +48,16 @@ async fn echo(from: &Endpoint, to: EndpointAddr) -> Result<Vec<u8>, Failure> {
     connection.close(0u32.into(), b"done");
     Ok(reply)
 }
+/// The application signals renewed reachability; explicit passes respect backoff.
+async fn signal_renewed_reachability(device: &Device) {
+    snap::ok(device.session.set_networking_enabled(true)).await;
+}
 
-// Opening a database blocks its caller; the application's runtime keeps
-// driving the endpoint on other threads meanwhile.
+/// Opening a database blocks its caller while the application's runtime
+/// keeps driving the endpoint on other threads.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    // The application's endpoint and router, with its protocol and Rocky's.
     let endpoint = local().bind([3; 32]).await?;
     let attachment = Attachment::new(endpoint.clone());
     let router = attachment
@@ -66,7 +69,6 @@ async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Resu
         &root.path().join("a"),
         Some(Network::Borrowed(attachment.transport())),
     )?;
-    // The member uses the starter, which owns its endpoint.
     let starter = Network::Owned(Arc::new(rocky_iroh::Options {
         relay: Some("disabled".into()),
         lookup: Some("disabled".into()),
@@ -86,23 +88,33 @@ async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Resu
         (&json!("iroh"), &json!("application"))
     );
 
-    // Closing Rocky's service stops sync and nothing else.
     a.network.as_ref().ok_or("attached")?.close().await;
     a.add(3, "Jam").await;
-    assert!(common::exchange_failed(&b.sync().await));
-    assert_eq!(echo(&caller, endpoint.addr()).await?, b"hello");
-    // The same attachment serves again once a service uses it.
+    assert!(
+        common::exchange_failed(&b.sync().await),
+        "closing Rocky's service stops sync"
+    );
+    assert_eq!(
+        echo(&caller, endpoint.addr()).await?,
+        b"hello",
+        "closing Rocky's service leaves the application's protocol serving"
+    );
     a.database
         .attach(Network::Borrowed(attachment.transport()))
         .await?;
-    // The application signals renewed reachability; explicit passes respect backoff.
-    snap::ok(b.session.set_networking_enabled(true)).await;
+    signal_renewed_reachability(&b).await;
     b.sync().await.map_err(|error| error.to_string())?;
-    assert_eq!(b.titles().await, ["Eggs", "Jam", "Milk"]);
+    assert_eq!(
+        b.titles().await,
+        ["Eggs", "Jam", "Milk"],
+        "the same attachment serves again once a service uses it"
+    );
 
-    // Closing the borrowing database leaves the endpoint and protocol usable.
     a.close().await;
-    assert!(!endpoint.is_closed() && !router.is_shutdown());
+    assert!(
+        !endpoint.is_closed() && !router.is_shutdown(),
+        "closing the borrowing database leaves the endpoint and protocol usable"
+    );
     assert_eq!(echo(&caller, endpoint.addr()).await?, b"hello");
     let a = Device::open(
         &root.path().join("a"),
@@ -111,10 +123,12 @@ async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Resu
     assert_eq!(a.titles().await, ["Eggs", "Jam", "Milk"]);
     a.close().await;
 
-    // The final shutdown is the application's.
     let ((), shutdown, ()) = tokio::join!(b.close(), router.shutdown(), caller.close());
     shutdown?;
-    assert!(endpoint.is_closed());
+    assert!(
+        endpoint.is_closed(),
+        "the final shutdown is the application's"
+    );
     Ok(())
 }
 
@@ -221,9 +235,8 @@ async fn two_personal_databases_share_an_endpoint_and_a_coordinator_and_detach_i
     let right_router = right_harness
         .register(Router::builder(right.clone()))
         .spawn();
-    // One application coordinator serves both databases.
     let logs = rocky_coordinator::coordinated::MemoryLog::new();
-    let coordinator: Arc<dyn rocky_sdk::Coordinator> =
+    let shared_coordinator: Arc<dyn rocky_sdk::Coordinator> =
         Arc::new(logs.client(rocky_sdk::credentials::PrivateKey::new().public_key()));
     let schema = Schema::parse(common::SCHEMA)?;
     let mut owners = Vec::new();
@@ -233,7 +246,7 @@ async fn two_personal_databases_share_an_endpoint_and_a_coordinator_and_detach_i
         let owner = Device::new(
             Configuration::new(root.path().join(name), &schema)?
                 .network(Network::Borrowed(left_harness.transport()))
-                .coordination(coordinator.clone())
+                .coordination(shared_coordinator.clone())
                 .create_personal(prf, namespace)
                 .await?
                 .opened,
@@ -277,37 +290,47 @@ async fn two_personal_databases_share_an_endpoint_and_a_coordinator_and_detach_i
         1
     );
 
-    // Detaching A leaves B's routes, the endpoint and the coordinator.
     a.network.as_ref().ok_or("a network")?.close().await;
     assert!(common::exchange_failed(&a.sync().await));
     b.add(2, "B after A detached").await;
     let report = b.sync().await.map_err(|error| error.to_string())?;
-    assert!(common::reconciled(&report), "{report}");
+    assert!(
+        common::reconciled(&report),
+        "detaching A leaves B's routes: {report}"
+    );
     assert_eq!(
         b.database
             .claim(counter.clone(), counters::Claim::fresh()?)
             .await?,
-        2
+        2,
+        "detaching A leaves the coordinator serving B"
     );
     assert_eq!(
         a.database
             .claim(counter.clone(), counters::Claim::fresh()?)
             .await?,
-        2
+        2,
+        "detaching A leaves the coordinator serving A"
     );
     assert_eq!(echo(&right, left.addr()).await?, b"hello");
-    assert!(!left.is_closed() && !left_router.is_shutdown());
+    assert!(
+        !left.is_closed() && !left_router.is_shutdown(),
+        "detaching A leaves the endpoint open"
+    );
 
-    // Closing A altogether leaves B and the coordinator working.
     let mut owners = owners.into_iter();
     let (a, b) = (owners.next().ok_or("a")?, owners.next().ok_or("b")?);
     a.close().await;
     b.add(3, "B after A closed").await;
     let report = b.sync().await.map_err(|error| error.to_string())?;
-    assert!(common::reconciled(&report), "{report}");
+    assert!(
+        common::reconciled(&report),
+        "closing A leaves B syncing: {report}"
+    );
     assert_eq!(
         b.database.claim(counter, counters::Claim::fresh()?).await?,
-        3
+        3,
+        "closing A leaves the coordinator serving B"
     );
     assert_eq!(echo(&right, left.addr()).await?, b"hello");
     b.close().await;

@@ -59,13 +59,12 @@ fn parse_ps_time(text: &str) -> Option<Duration> {
 
 /// Parses the CPU fields of `/proc/<pid>/stat` or `/proc/self/task/<tid>/stat`
 /// (fields 14 and 15, user and system ticks) at the standard 100 Hz USER_HZ.
+/// The comm field is parenthesized and may hold spaces, so fields resume
+/// after the last ')', with field 3 (state) first.
 #[cfg(any(target_os = "linux", test))]
 fn parse_stat_cpu(stat: &str) -> Option<Duration> {
-    // The comm field is parenthesized and may hold spaces; fields resume after
-    // the last ')'.
-    let rest = stat.rsplit_once(')')?.1;
-    let mut fields = rest.split_whitespace();
-    // rest starts after the comm field's ')', so field 3 ('state') is first.
+    let after_comm = stat.rsplit_once(')')?.1;
+    let mut fields = after_comm.split_whitespace();
     let _state = fields.next()?;
     for _ in 4..14 {
         fields.next()?;
@@ -143,9 +142,12 @@ mod tests {
 
     #[test]
     fn parses_stat_cpu_ticks() {
-        // pid (comm) state ppid ... utime stime: 150 ticks each at 100 Hz.
         let stat = "42 (a b) R 1 42 42 0 -1 4194560 0 0 0 0 150 150 0 0 20 0 1 0 5 0 0";
-        assert_eq!(parse_stat_cpu(stat), Some(Duration::from_secs(3)));
+        assert_eq!(
+            parse_stat_cpu(stat),
+            Some(Duration::from_secs(3)),
+            "pid (comm) state ppid ... utime stime: 150 ticks each at 100 Hz"
+        );
     }
 
     #[cfg(target_os = "linux")]

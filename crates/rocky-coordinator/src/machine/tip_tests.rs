@@ -62,11 +62,11 @@ fn a_tips_writes_commit_through_its_own_log_and_followers() {
         tip: dev(),
     };
     let follower = f.trust();
-    // The opening names its minimum; a trusted node relays it before a join.
     let nodes = f.nodes.clone();
     assert_eq!(
         f.apply_on(&nodes[0], dev, Action::Configure { minimum: 1 }),
-        Ok(Outcome::Coordinated(LogResult::Configured))
+        Ok(Outcome::Coordinated(LogResult::Configured)),
+        "a trusted node relays a tip's opening, with its minimum, before a join"
     );
     join(&mut f, &follower, dev).unwrap();
     assert_eq!(
@@ -112,11 +112,11 @@ fn a_tips_writes_commit_through_its_own_log_and_followers() {
             ..
         }))
     ));
-    // `main`'s in-sync set saw nothing of it.
     let head = f.state.log_head(main).unwrap();
     assert_eq!(
         (head.commit, head.pending, head.members.len()),
-        (0, None, 2)
+        (0, None, 2),
+        "main's in-sync set saw nothing of the other tip"
     );
     assert!(head.hashes.is_empty());
     assert_eq!(f.state.log_head(dev).unwrap().minimum, 1);
@@ -138,7 +138,6 @@ fn a_node_joining_another_tip_leaves_the_log_it_was_in_sync_on() {
     assert_eq!(head.epoch, before.epoch + 1);
     assert!(!head.member(nodes[0].public_key()) && head.member(nodes[1].public_key()));
     assert!(f.state.log_head(dev).unwrap().member(nodes[0].public_key()));
-    // A node does not leave a tip while an entry there is pending.
     let Ok(Outcome::Coordinated(LogResult::Assigned(_))) = f.apply_on(
         &nodes[1],
         main,
@@ -154,7 +153,8 @@ fn a_node_joining_another_tip_leaves_the_log_it_was_in_sync_on() {
     };
     assert_eq!(
         join(&mut f, &nodes[1], dev),
-        Err(CoordinationError::Backpressure)
+        Err(CoordinationError::Backpressure),
+        "a node does not leave a tip while an entry there is pending"
     );
     assert!(
         f.state
@@ -188,7 +188,6 @@ fn a_tip_no_trusted_node_follows_refuses_writes_and_logs_are_bounded() {
         ),
         Err(CoordinationError::Denied)
     );
-    // Neither the read nor the refusal opened a log.
     assert!(
         f.state
             .state
@@ -196,7 +195,8 @@ fn a_tip_no_trusted_node_follows_refuses_writes_and_logs_are_bounded() {
             .unwrap()
             .coordinated
             .get(dev())
-            .is_none()
+            .is_none(),
+        "neither the read nor the refusal opened a log"
     );
     for byte in 10..9 + TIP_LOGS as u8 {
         let log = TipLog {
@@ -237,8 +237,10 @@ fn a_terminal_entry_aborts_the_pending_one_and_ends_the_log() {
     else {
         panic!("{committed:?}")
     };
-    // It took the pending entry's position; the sealed state is entry 1.
-    assert_eq!(position, pending.position);
+    assert_eq!(
+        position, pending.position,
+        "the seal took the pending entry's position"
+    );
     let head = f.state.log_head(main).unwrap();
     assert_eq!(
         (head.commit, head.pending, head.members.len()),
@@ -252,20 +254,22 @@ fn a_terminal_entry_aborts_the_pending_one_and_ends_the_log() {
             continuation: Some(dev()),
         })
     );
-    // A retry answers alike; neither another seal nor a move diverges.
     assert_eq!(
         f.apply_on(&nodes[1], main, sealing(9, Some(dev()))),
         Ok(Outcome::Coordinated(LogResult::Committed {
             position,
             running_hash
-        }))
+        })),
+        "a retried seal answers alike"
     );
     assert_eq!(
         f.apply_on(&nodes[1], main, sealing(8, None)),
         Err(CoordinationError::Sealed)
     );
-    // Its acknowledgments no longer resolve anything.
-    assert!(f.resolve(&pending, &[0, 1], T + 3).is_err());
+    assert!(
+        f.resolve(&pending, &[0, 1], T + 3).is_err(),
+        "a sealed log's acknowledgments no longer resolve anything"
+    );
     for action in [
         Action::Append {
             expected: 2,
@@ -289,12 +293,11 @@ fn a_terminal_entry_aborts_the_pending_one_and_ends_the_log() {
         f.apply_on(&f.owner.clone(), main, Action::Configure { minimum: 1 }),
         Err(CoordinationError::Sealed)
     );
-    // Its nodes follow the continuation.
     let next = TipLog {
         scope: f.scope,
         tip: dev(),
     };
-    join(&mut f, &nodes[0], next).unwrap();
+    join(&mut f, &nodes[0], next).expect("the sealed log's nodes follow the continuation");
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -308,16 +311,18 @@ fn ended_logs_are_retained_up_to_their_bound_and_open_none() {
     for byte in 0..=ENDED_LOGS as u8 {
         f.apply_on(&owner, log(byte), sealing(byte, None)).unwrap();
     }
-    // The earliest ended log is dropped; the rest still report their end.
-    assert_eq!(f.state.log_head(log(0)).unwrap().terminal, None);
+    assert_eq!(
+        f.state.log_head(log(0)).unwrap().terminal,
+        None,
+        "the earliest ended log is dropped"
+    );
     for byte in 1..=ENDED_LOGS as u8 {
         let head = f.state.log_head(log(byte)).unwrap();
         assert_eq!(head.terminal.map(|t| t.digest), Some([byte; 32]));
     }
-    // Ended logs leave room for every open one.
     for byte in 100..99 + TIP_LOGS as u8 {
         f.apply_on(&owner, log(byte), Action::Configure { minimum: 1 })
-            .unwrap();
+            .expect("ended logs leave room for every open one");
     }
 }
 
@@ -352,7 +357,6 @@ fn trusted_nodes_acknowledge_only_the_committed_terminal_once_each() {
     let main = tip_log(f.scope);
     let nodes = f.nodes.clone();
     let open = f.state.log_head(main).unwrap();
-    // An open log has no terminal to acknowledge.
     assert_eq!(
         f.apply_on(
             &nodes[0],
@@ -361,7 +365,8 @@ fn trusted_nodes_acknowledge_only_the_committed_terminal_once_each() {
                 acknowledgment: terminal_ack(&nodes[0], main, &open, 9),
             },
         ),
-        Err(CoordinationError::StaleHead)
+        Err(CoordinationError::StaleHead),
+        "an open log has no terminal to acknowledge"
     );
     f.apply_on(&nodes[0], main, sealing(9, Some(dev())))
         .unwrap();
@@ -379,8 +384,6 @@ fn trusted_nodes_acknowledge_only_the_committed_terminal_once_each() {
             Ok(Outcome::Coordinated(LogResult::TerminalAcknowledged))
         );
     }
-    // Another seal's digest, another node's signature or a second record
-    // of the same node are refused.
     for (key, record, refusal) in [
         (
             &nodes[1],
@@ -406,7 +409,8 @@ fn trusted_nodes_acknowledge_only_the_committed_terminal_once_each() {
                     acknowledgment: record,
                 },
             ),
-            Err(refusal)
+            Err(refusal),
+            "another seal's digest, another node's signature or a repeated record is refused"
         );
     }
     let theirs = terminal_ack(&nodes[1], main, &head, 9);

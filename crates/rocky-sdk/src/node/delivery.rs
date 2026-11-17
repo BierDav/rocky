@@ -32,6 +32,9 @@ impl Deliveries for Port<'_> {
     ) -> DeliveryFuture<'a, Outgoing> {
         Box::pin(async move { self.node.outgoing(peer, chain).await.map_err(secure) })
     }
+    /// Receives on a detached task: installing an epoch ends the link, and the
+    /// admitted batch still finishes when the caller loses the reply, so a
+    /// retry observes every install.
     fn receive(
         &self,
         peer: PublicKey,
@@ -44,8 +47,6 @@ impl Deliveries for Port<'_> {
                 .get()
                 .and_then(std::sync::Weak::upgrade)
                 .ok_or_else(|| secure("delivery owner ended".into()))?;
-            // Installing an epoch ends the link. Finish the admitted local batch
-            // even when its caller loses the reply, so retry observes every install.
             crate::reactor::spawn_local("receive_deliveries", async move {
                 node.receive(peer, deliveries).await
             })
@@ -247,7 +248,6 @@ impl Node {
             if delivery.recipient() != node.public_key() {
                 continue;
             }
-            // A refused envelope gets no receipt: its sender keeps it.
             match self.accept_delivery(&node, &delivery).await {
                 Ok(()) => receipts.push(DeliveryReceipt::sign(&node, delivery.digest()?)?),
                 Err(error) => {
@@ -301,7 +301,6 @@ impl Node {
             .get(&crate::groups::record_key(&partition.record.address))
             .is_none_or(|record| record.epochs.is_empty());
         let full = self.replica.role().await?.role == rocky_secure::ReplicaRole::Full;
-        // Full replicas implicitly hold known partitions, including their own.
         let held = partition
             .members
             .iter()
@@ -500,7 +499,6 @@ impl Node {
             }
             settings.revocations.clone()
         };
-        // A mailbox keeps the receipt of a deposit its recipient took.
         self.with_mailbox(&revocations, |mailbox| {
             let mut changed = false;
             for receipt in receipts

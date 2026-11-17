@@ -157,6 +157,11 @@ impl Registry {
         self.get(identity)
             .is_some_and(|record| record.admitted.is_some())
     }
+    /// Whether admitting `identity` would exceed `MAX_IDENTITIES`; an
+    /// identity already admitted always fits.
+    pub(crate) fn full_for(&self, identity: &PublicKey) -> bool {
+        !self.admitted(identity) && self.identities() >= MAX_IDENTITIES
+    }
     pub fn revoked(&self, identity: &PublicKey) -> bool {
         self.get(identity).is_some_and(|record| record.revoked)
     }
@@ -448,6 +453,8 @@ pub async fn read(
 }
 /// Commits `changes` as one secure transaction, or nothing. A change that
 /// would add an identity beyond the bound refuses the whole transaction.
+/// Replay may meet another issuer's concurrent insert of an entry: it keeps
+/// or replaces that entry rather than dropping the whole record.
 pub async fn write(
     replica: &EncryptedReplica<TypedRows>,
     scope: rocky_core::ResourceScope,
@@ -502,9 +509,6 @@ pub async fn write(
                         SqlValue::Text(change.value.clone()),
                         id.sql(),
                     ]);
-                    // Replay may meet another issuer's concurrent insert of
-                    // the entry: it keeps or replaces it rather than dropping
-                    // the whole record.
                     let conflict = match change.mode {
                         Mode::Replace => "DO UPDATE SET value = excluded.value",
                         _ => "DO NOTHING",

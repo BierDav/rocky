@@ -23,6 +23,9 @@ struct SavedNode {
 }
 
 impl Node {
+    /// Registers the saved line nodes as signers of what they wrote. An
+    /// expired or superseded author stays unusable: restoring a signer
+    /// never selects it for writes or changes its saved line.
     pub(crate) async fn restore_line_signers(&self) -> Result<(), Failure> {
         let Some(bytes) = self.vault.load_bytes(ROLE)? else {
             return Ok(());
@@ -32,8 +35,6 @@ impl Node {
             return Err("unsupported line node format".into());
         }
         for node in saved.nodes {
-            // Expired or superseded authors remain unusable; restoring a signer
-            // never selects it for writes or changes its persisted line.
             match self
                 .replica
                 .restore_line_node(rocky_secure::LineNode {
@@ -59,8 +60,9 @@ impl Node {
     pub(crate) async fn refresh_tip_node(&self) -> Result<(), Failure> {
         self.tip_node(true).await
     }
+    /// Holds the settings lock throughout, serializing number reservations
+    /// with grants and renewals.
     async fn tip_node(&self, refresh: bool) -> Result<(), Failure> {
-        // Serializes number reservations with grants and renewals.
         let mut settings = self.settings.lock().await;
         self.line_node(&mut settings, refresh).await
     }
@@ -71,6 +73,12 @@ impl Node {
     ) -> Result<(), Failure> {
         self.line_node(settings, true).await
     }
+    /// Registers the newest saved node of the followed line that still
+    /// registers, certified again when a schema change granted new tables;
+    /// one that crossed a fork or expired is not reused. Otherwise a new
+    /// node is certified, except for the genesis line, which writes under
+    /// the original node. An owner's line node stands alone, like each of
+    /// its devices.
     async fn line_node(
         &self,
         settings: &mut Shared<Settings>,
@@ -130,8 +138,6 @@ impl Node {
             .collect();
         for index in indexes {
             let key = PrivateKey::from_bytes(&saved.nodes[index].key);
-            // A schema change may grant new tables: the same node is
-            // certified again for the installed definition.
             if saved.nodes[index].credentials.certificate().is_some() {
                 let certificate = saved.nodes[index]
                     .credentials
@@ -147,19 +153,17 @@ impl Node {
                 };
                 if grants(&current)? != grants(&saved.nodes[index].credentials)? {
                     saved.nodes[index].credentials = current;
-                    self.vault.store_bytes(ROLE, &serde_json::to_vec(&saved)?)?;
+                    self.save_line_nodes(&saved)?;
                 }
             }
             let node = rocky_secure::LineNode {
                 key,
                 credentials: saved.nodes[index].credentials.clone(),
             };
-            // A saved node that crossed a fork or expired is not reused.
             if self.replica.register_line_node(node).await.is_ok() {
                 return Ok(());
             }
         }
-        // The genesis line writes under the original node.
         if !needed {
             return Ok(());
         }
@@ -170,7 +174,6 @@ impl Node {
             .personal()?
             .filter(|context| context.owner == settings.identity);
         let certificate = if let Some(context) = personal {
-            // An owner's line node stands alone, like each of its devices.
             let certificate = links
                 .clone()
                 .certify_personal(&*identity, &key, (context.owner, context.descriptor))?
@@ -206,12 +209,17 @@ impl Node {
             key: *node.key.as_bytes(),
             credentials: node.credentials.clone(),
         });
-        // Saved before registration, so a retry reuses this certificate.
-        self.vault.store_bytes(ROLE, &serde_json::to_vec(&saved)?)?;
+        self.save_line_nodes(&saved)?;
         settings.learn_revocations(&known)?;
         settings.save(&self.path)?;
         self.replica.learn_revocations(&known).await?;
         self.replica.register_line_node(node).await?;
+        Ok(())
+    }
+    /// Saves the line nodes before any is registered, so a retry reuses
+    /// the same certificates.
+    fn save_line_nodes(&self, saved: &SavedNodes) -> Result<(), Failure> {
+        self.vault.store_bytes(ROLE, &serde_json::to_vec(saved)?)?;
         Ok(())
     }
     /// Background callers keep their result; writes report a missing node.

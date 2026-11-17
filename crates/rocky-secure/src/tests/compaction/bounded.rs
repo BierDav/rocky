@@ -1,6 +1,9 @@
 use super::*;
 use crate::replica::CrashPoint;
 
+/// Writes during one unlocked step, more than the lock's starvation bound.
+const WRITES_PAST_STARVATION_YIELDS: usize = crate::replica::lock::STARVATION_YIELDS as usize + 4;
+
 async fn populate(replica: &Replica, count: usize) {
     let sql = session(replica).await;
     sql.run("BEGIN", vec![]).await.unwrap();
@@ -33,20 +36,28 @@ async fn base_preparation_keeps_reads_and_successful_writes_available() {
     let interleave = async {
         reached.await.unwrap();
         assert_eq!(titles(&replica).await.len(), count);
-        // More than STARVATION_YIELDS writes arrive during an unlocked step.
-        // They succeed and do not extend the immutable source cut.
-        for index in 0..12 {
+        for index in 0..WRITES_PAST_STARVATION_YIELDS {
             insert(&replica, &format!("live{index}"), "after seal").await;
         }
         update(&replica, "k0000", "after seal").await;
-        assert_eq!(titles(&replica).await.len(), count + 12);
+        assert_eq!(
+            titles(&replica).await.len(),
+            count + WRITES_PAST_STARVATION_YIELDS,
+            "writes during an unlocked compaction step succeed"
+        );
         resume.send(()).unwrap();
     };
     let (report, ()) = tokio::join!(compact, interleave);
     assert_eq!(report.unwrap().compacted, Some(sealed.id().unwrap()));
     let checkpoint = replica.checkpoint(lineage.scope("items")).await.unwrap();
-    assert_eq!(checkpoint.statement.rows.count, count as u64);
-    assert_eq!(titles(&replica).await.len(), count + 12);
+    assert_eq!(
+        checkpoint.statement.rows.count, count as u64,
+        "writes during an unlocked step do not extend the immutable source cut"
+    );
+    assert_eq!(
+        titles(&replica).await.len(),
+        count + WRITES_PAST_STARVATION_YIELDS
+    );
     replica.audit(lineage.scope("items")).await.unwrap();
     let measured = measurements.stop();
     let mut hashed = 0;
@@ -164,12 +175,11 @@ async fn interrupted_base_steps_resume_without_mixed_or_double_applied_state() {
             "{point:?}"
         );
         assert_eq!(replica.crashed().await, Some(point));
-        // The selector and signed checkpoint always agree, including after
-        // publication but before the first cleanup commit.
         let current = replica.checkpoint(lineage.scope("items")).await.unwrap();
         assert!(
             current.id().unwrap() == old.id().unwrap()
-                || current.statement.seal == Some(latest.id().unwrap())
+                || current.statement.seal == Some(latest.id().unwrap()),
+            "the selector and signed checkpoint agree at {point:?}"
         );
         assert_eq!(titles(&replica).await, expected);
         replica.audit(lineage.scope("items")).await.unwrap();
@@ -367,12 +377,15 @@ async fn an_old_cleanup_depth_preserves_current_uncompacted_snapshots() {
     replica.finalize_path(lineage.domain).await.unwrap();
     let pending = scalar(&replica, "SELECT count(*) FROM secure_replayed_seals s JOIN secure_finalized f ON f.seal=s.seal WHERE f.compacted=0").await;
     assert!(pending > 0);
-    // A losing branch can leave a queue whose depth exceeds every seal on
-    // the replacement path. Depth alone must not retire that path's input.
+    let past_every_depth = i64::MAX;
     replica
-        .cleanup_bases_through(lineage.scope("items"), i64::MAX)
+        .cleanup_bases_through(lineage.scope("items"), past_every_depth)
         .await;
-    assert_eq!(scalar(&replica, "SELECT count(*) FROM secure_replayed_seals s JOIN secure_finalized f ON f.seal=s.seal WHERE f.compacted=0").await, pending);
+    assert_eq!(
+        scalar(&replica, "SELECT count(*) FROM secure_replayed_seals s JOIN secure_finalized f ON f.seal=s.seal WHERE f.compacted=0").await,
+        pending,
+        "depth alone does not retire the replacement path's input"
+    );
     replica.compact(lineage.domain, 0).await.unwrap();
     let checkpoint = replica.checkpoint(lineage.scope("items")).await.unwrap();
     assert_eq!(checkpoint.statement.seal, Some(latest.id().unwrap()));
@@ -470,14 +483,16 @@ async fn uncompacted_seals_keep_a_bounded_number_of_row_snapshots() {
         .await,
         crate::replica::replay::SEAL_SNAPSHOTS
     );
-    // The newest two seals' rows: 3+4 and 3+5.
     assert_eq!(
         scalar(&replica, "SELECT count(*) FROM secure_replayed_seal_rows").await,
-        15
+        15,
+        "only the newest snapshots' rows stay"
     );
-    // A base never moves to a seal whose rows were released.
     let report = replica.compact(lineage.domain, 2).await.unwrap();
-    assert_eq!(report.compacted, None);
+    assert_eq!(
+        report.compacted, None,
+        "a base never moves to a seal whose rows were released"
+    );
     let report = replica.compact(lineage.domain, 1).await.unwrap();
     assert_eq!(report.compacted, Some(seals[3]));
     replica.audit(lineage.scope("items")).await.unwrap();
@@ -499,7 +514,6 @@ async fn finalizing_takes_rows_and_open_undo_a_page_at_a_time() {
     let count = 3 * STEP_ROWS;
     populate(&replica, count).await;
     let sealed = seal(&lineage, &replica).await.id().unwrap();
-    // Open members after the seal: each one's row is taken as the seal saw it.
     for index in 0..2 * STEP_OPERATIONS {
         update(&replica, &format!("k{index:04}"), "after seal").await;
     }
@@ -519,13 +533,15 @@ async fn finalizing_takes_rows_and_open_undo_a_page_at_a_time() {
     );
     assert_eq!(
         scalar(&replica, "SELECT count(*) FROM secure_replayed_seal_rows").await,
-        count as i64
+        count as i64,
+        "each open member's row is taken as the seal saw it"
     );
-    // The rows taken become the base: replaying the open members over it
-    // reaches the live rows, which the audit checks.
     let report = replica.compact(lineage.domain, 0).await.unwrap();
     assert_eq!(report.compacted, Some(sealed));
     let checkpoint = replica.checkpoint(lineage.scope("items")).await.unwrap();
     assert_eq!(checkpoint.statement.rows.count, count as u64);
-    replica.audit(lineage.scope("items")).await.unwrap();
+    replica
+        .audit(lineage.scope("items"))
+        .await
+        .expect("replaying the open members over the taken rows reaches the live rows");
 }

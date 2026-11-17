@@ -134,9 +134,9 @@ fn escrow(directory: &Path) -> Result<Vec<(String, RootEscrow)>, Failure> {
         Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
     })?;
     rows.map(|row| {
-        // Records of a key epoch are vouched for by their sealer.
         let (scope, record) = row?;
-        let record = if scope.is_empty() {
+        let is_root_record = scope.is_empty();
+        let record = if is_root_record {
             RootEscrow::from_bytes(&record)?
         } else {
             rocky_credentials::VouchedEscrow::from_bytes(&record)?
@@ -238,11 +238,13 @@ async fn the_root_phrase_and_a_backup_recover_every_partition_with_every_device_
         write_item(&issuer, list, "before").await;
     }
     write_note(&issuer, "before").await;
-    // Revoking a reader of notes and the payroll list rotates both keys;
-    // later rows are sealed under the new epochs only.
     rotate(&issuer, &root.path().join("reader"), LISTS[0]).await?;
     let held = identity(&creator)?;
-    assert_eq!(generations(&held, "notes"), [1, 2]);
+    assert_eq!(
+        generations(&held, "notes"),
+        [1, 2],
+        "revoking a reader of notes and the payroll list rotates both keys"
+    );
     write_item(&issuer, LISTS[0], "after").await;
     write_note(&issuer, "after").await;
     let expected = everything(&issuer).await;
@@ -253,16 +255,14 @@ async fn the_root_phrase_and_a_backup_recover_every_partition_with_every_device_
     issuer.close().await;
     drop(issuer);
     let kept = escrow(&creator)?;
-    // Every device is lost: its keys with it. What remains is the archive,
-    // which holds no key, and the phrase.
     std::fs::remove_dir_all(&creator)?;
     std::fs::remove_dir_all(root.path().join("reader"))?;
 
-    // Another root, or a phrase the user mistyped, recovers nothing.
+    let mistyped_phrase_root = RootKey::generate();
     let refused = Database::recover(
         open(&root.path().join("wrong"), &hub),
         &archive,
-        &RootKey::generate(),
+        &mistyped_phrase_root,
     )
     .err()
     .ok_or("another root recovered")?;
@@ -278,24 +278,26 @@ async fn the_root_phrase_and_a_backup_recover_every_partition_with_every_device_
         &RootKey::from_phrase(&phrase)?,
     )?;
     assert!(opened.root.is_none(), "the root is never handed back");
-    // The lost creator is revoked, which rotates every key.
     assert_eq!(names(&opened.revoked), [lost]);
     let device = Device::new(opened)?;
     assert_eq!(everything(&device).await, expected);
     let saved = identity(&recovered)?;
-    assert_eq!(generations(&saved, "notes"), [1, 2, 3]);
+    assert_eq!(
+        generations(&saved, "notes"),
+        [1, 2, 3],
+        "revoking the lost creator rotates every key"
+    );
     let now = escrow(&recovered)?;
-    // Every escrowed key stays sealed to the root, though the revoked
-    // creator's copies give way to the recovered node's (same tag).
     assert!(
         kept.iter()
             .all(|(tag, _)| now.iter().any(|(held, _)| held == tag)),
         "the records stay sealed to the root"
     );
     assert!(now.len() > kept.len(), "the rotated epochs are escrowed");
-    // The recovered node is a trusted node of its own identity: it writes
-    // under the current keys and its own node key.
-    assert_ne!(saved["identity"], held["identity"]);
+    assert_ne!(
+        saved["identity"], held["identity"],
+        "the recovered node is a trusted node of its own identity"
+    );
     write_item(&device, LISTS[1], "recovered").await;
     write_note(&device, "recovered").await;
     assert_eq!(everything(&device).await.len(), 8);
@@ -315,8 +317,6 @@ async fn the_root_phrase_and_a_backup_recover_every_partition_with_every_device_
         .map(|epoch| epoch["generation"].clone())
         .collect();
     assert_eq!(epochs, [json!(1), json!(2), json!(3)]);
-    // It seals and enrolls devices like any trusted node; a joining
-    // device imports the rows before the rotation from the sealed base.
     device.follow_main().await;
     device.seal_and_compact().await;
     let joined = Device::new(Database::join(
@@ -357,7 +357,6 @@ async fn a_revoked_trusted_node_gains_nothing_from_escrow_records() -> Result<()
         .await;
         write_item(&issuer, list, "before").await;
     }
-    // A second trusted node, which holds every key, is later compromised.
     let trusted = root.path().join("trusted");
     let t = Device::new(Database::join(
         open(&trusted, &hub),
@@ -389,9 +388,6 @@ async fn a_revoked_trusted_node_gains_nothing_from_escrow_records() -> Result<()
     .await;
     write_item(&issuer, LISTS[0], "after").await;
 
-    // No secret it held opens a record, its own or the creator's after the
-    // rotation, and no record carries a list's name, group address or
-    // naming secret.
     let after = escrow(&creator)?;
     let saved = identity(&creator)?;
     let bytes32 = |value: &Value| -> Vec<u8> {
@@ -414,26 +410,27 @@ async fn a_revoked_trusted_node_gains_nothing_from_escrow_records() -> Result<()
     assert!(named.iter().all(|name| name.len() >= 10));
     for (_, record) in t_records.iter().chain(&after) {
         for secret in &stolen {
-            assert!(record.open(&RootKey::from_secret(*secret)).is_err());
+            assert!(
+                record.open(&RootKey::from_secret(*secret)).is_err(),
+                "no secret the compromised node held opens a record"
+            );
         }
         let bytes = record.to_bytes()?;
         for name in &named {
             assert!(
                 !bytes
                     .windows(name.len())
-                    .any(|window| window == name.as_slice())
+                    .any(|window| window == name.as_slice()),
+                "no record carries a list's name, group address or naming secret"
             );
         }
     }
-    // The rotation's new keys are escrowed only where they are held.
     let fresh: Vec<_> = after
         .iter()
         .filter(|(tag, _)| t_records.iter().all(|(held, _)| held != tag))
         .collect();
     assert!(!fresh.is_empty(), "the rotation escrowed new epochs");
 
-    // A stolen key is not the root: the revoked node cannot recover a
-    // backup it made or forge one into a trusted node.
     let archive = root.path().join("creator.backup");
     issuer.database.backup(&archive).await?;
     for secret in &stolen {
@@ -446,10 +443,9 @@ async fn a_revoked_trusted_node_gains_nothing_from_escrow_records() -> Result<()
         .ok_or("a stolen key recovered")?;
         assert!(
             refused.to_string().contains("not the backup's domain root"),
-            "{refused}"
+            "a stolen key is not the root and recovers nothing: {refused}"
         );
     }
-    // The root opens every record, the rotated ones too.
     let root_key = RootKey::from_phrase(&phrase)?;
     for (_, record) in &after {
         record.open(&root_key)?;
@@ -551,15 +547,16 @@ async fn a_recovery_revokes_every_lost_trusted_identity_it_knows() -> Result<(),
     revoked.sort();
     assert_eq!(revoked, lost);
     let device = Device::new(opened)?;
-    // Both revocations are recorded and one more key epoch serves writes.
     let saved = identity(&recovered)?;
-    assert!(generations(&saved, "notes").len() >= 2);
+    assert!(
+        generations(&saved, "notes").len() >= 2,
+        "one more key epoch serves writes after both revocations"
+    );
     write_note(&device, "recovered").await;
     assert_eq!(
         column(&device, "SELECT key FROM notes ORDER BY key").await,
         ["before", "recovered"]
     );
-    // Revoking again is refused: nothing is left to revoke.
     for identity in &lost {
         let refused = device
             .database
@@ -627,7 +624,6 @@ async fn a_custodians_store_and_the_root_recover_what_it_holds() -> Result<(), F
     write_item(&issuer, LISTS[0], "before").await;
     write_note(&issuer, "before").await;
     issuer.sync().await.map_err(|error| error.to_string())?;
-    // A rotation: later rows travel under the new epochs and their records.
     rotate(&issuer, &root.path().join("reader"), LISTS[0]).await?;
     write_item(&issuer, LISTS[0], "after").await;
     write_note(&issuer, "after").await;
@@ -635,11 +631,13 @@ async fn a_custodians_store_and_the_root_recover_what_it_holds() -> Result<(), F
     let expected = everything(&issuer).await;
     assert_eq!(expected.len(), 4, "{expected:?}");
 
-    // The custodian holds no key, only records of the epochs it stores.
     let held = identity(&custody)?;
-    assert_eq!(held["keys"], json!({}));
+    assert_eq!(held["keys"], json!({}), "the custodian holds no key");
     let carried = escrow(&custody)?;
-    assert!(!carried.is_empty());
+    assert!(
+        !carried.is_empty(),
+        "the custodian holds the records of the epochs it stores"
+    );
     let name = created["name"].as_str().ok_or("name")?;
     for (_, record) in &carried {
         let bytes = record.to_bytes()?;
@@ -661,11 +659,13 @@ async fn a_custodians_store_and_the_root_recover_what_it_holds() -> Result<(), F
         &archive,
         &RootKey::from_phrase(&phrase)?,
     )?;
-    // The custodian's registry knows the lost creator.
-    assert_eq!(names(&opened.revoked), [lost]);
+    assert_eq!(
+        names(&opened.revoked),
+        [lost],
+        "the custodian's registry knows the lost creator"
+    );
     let device = Device::new(opened)?;
     assert_eq!(everything(&device).await, expected);
-    // The recovered trusted node writes on.
     write_item(&device, LISTS[0], "recovered").await;
     write_note(&device, "recovered").await;
     assert_eq!(everything(&device).await.len(), 6);
@@ -735,9 +735,10 @@ async fn a_recovery_ends_trusted_identities_its_backup_never_knew() -> Result<()
         &archive,
         &RootKey::from_phrase(&phrase)?,
     )?;
-    // Only what the backup's registry names is revoked by name: the
-    // creator at most, whose own record a backup this early may lack.
-    assert!(names(&opened.revoked).iter().all(|name| *name == lost));
+    assert!(
+        names(&opened.revoked).iter().all(|name| *name == lost),
+        "only what the backup's registry names is revoked by name: the creator at most"
+    );
     let device = Device::new(opened)?;
     let kept = principal(&device).await;
     for ended in [&trusted, &member] {
@@ -753,32 +754,38 @@ async fn a_recovery_ends_trusted_identities_its_backup_never_knew() -> Result<()
             json!({"type":"recovery","recovered":kept})
         );
     }
-    // The root adds trust again afterwards: a grant the recovery leaves.
-    let again = Device::new(Database::join(
+    let trusted_after_recovery = Device::new(Database::join(
         open(&root.path().join("again"), &hub),
         &device.invite_as(json!({"kind": "issuer"})).await,
     )?)?;
-    let identity = principal(&again).await;
+    let identity = principal(&trusted_after_recovery).await;
     let grant = snap::ok(device.session.trust(
         &(snap::text(&(identity))),
         std::sync::Arc::new(rocky_sdk::RootKey::from_phrase(&snap::text(&(phrase))).expect("root")),
     ))
     .await;
     snap::ok(
-        again
+        trusted_after_recovery
             .session
             .install_trust(&(snap::text(&(grant["grant"])))),
     )
     .await;
-    write_note(&again, "again").await;
-    common::introduce(&device, &again).await;
-    again.sync().await.map_err(|error| error.to_string())?;
-    assert_eq!(revocation_reason(&again).await, Value::Null);
+    write_note(&trusted_after_recovery, "again").await;
+    common::introduce(&device, &trusted_after_recovery).await;
+    trusted_after_recovery
+        .sync()
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        revocation_reason(&trusted_after_recovery).await,
+        Value::Null,
+        "the recovery leaves a grant the root adds afterwards"
+    );
     assert_eq!(
         column(&device, "SELECT key FROM notes ORDER BY key").await,
         ["again", "before"]
     );
-    for device in [&trusted, &member, &again, &device] {
+    for device in [&trusted, &member, &trusted_after_recovery, &device] {
         device.close().await;
     }
     Ok(())
@@ -838,8 +845,6 @@ async fn of_two_recoveries_that_meet_the_later_ends_the_earlier() -> Result<(), 
         alerts(kept, "recoveries_met").await,
         [json!({"type":"recoveries_met","kept":kept_identity,"ended":ended_identity})]
     );
-    // The earlier recovered node's writes, before or after they met, never
-    // reach the kept one.
     write_note(ended, "late").await;
     let _ = ended.sync().await;
     let _ = kept.sync().await;
@@ -849,7 +854,11 @@ async fn of_two_recoveries_that_meet_the_later_ends_the_earlier() -> Result<(), 
     } else {
         "second"
     };
-    assert_eq!(notes, ["before", own], "{notes:?}");
+    assert_eq!(
+        notes,
+        ["before", own],
+        "the ended recovery's writes never reach the kept one: {notes:?}"
+    );
     first.close().await;
     second.close().await;
     Ok(())
@@ -885,7 +894,6 @@ async fn survivors_report_the_trusted_identities_a_recovery_ended() -> Result<()
             .install_trust(&(snap::text(&(grant["grant"])))),
     )
     .await;
-    // Each signs a chained tip statement, which carries its trusted grant.
     issuer
         .session
         .create_bookmark("main", None)
@@ -941,17 +949,23 @@ async fn survivors_report_the_trusted_identities_a_recovery_ended() -> Result<()
     again.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(revocation_reason(&again).await, Value::Null);
     assert_eq!(sorted(alerts(&again, "recovery_ended").await), expected);
-    // A member holds no registry: the tip statements alone name them.
-    let member = Device::new(Database::join(
+    let member_without_registry = Device::new(Database::join(
         open(&root.path().join("member"), &hub),
         &device
             .invite_as(json!({"kind":"reader","scopes":["notes"]}))
             .await,
     )?)?;
-    common::introduce(&device, &member).await;
-    member.sync().await.map_err(|error| error.to_string())?;
-    assert_eq!(sorted(alerts(&member, "recovery_ended").await), expected);
-    for device in [&member, &again, &device] {
+    common::introduce(&device, &member_without_registry).await;
+    member_without_registry
+        .sync()
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        sorted(alerts(&member_without_registry, "recovery_ended").await),
+        expected,
+        "a member holds no registry: the tip statements alone name the ended identities"
+    );
+    for device in [&member_without_registry, &again, &device] {
         device.close().await;
     }
     Ok(())

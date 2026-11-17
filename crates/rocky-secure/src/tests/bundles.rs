@@ -72,18 +72,17 @@ async fn a_bundle_spans_scopes_and_frames_and_each_reader_applies_its_partitions
     );
     assert_eq!(live(&source, f.public).await, 40);
     assert_eq!(live(&source, f.private).await, 1);
-    // Only the private frame carries the salary, and only as ciphertext.
     for frame in &frames {
         assert!(
             !frame
                 .to_bytes()
                 .unwrap()
                 .windows(9)
-                .any(|bytes| bytes == b"987654321")
+                .any(|bytes| bytes == b"987654321"),
+            "the salary travels only as ciphertext"
         );
     }
 
-    // A full reader waits for every partition, in any order, across a restart.
     let carol = PrivateKey::new();
     let path = dir.path().join("c.db");
     let reader = open(&f, &path, &carol, f.full(), &both).await;
@@ -98,11 +97,18 @@ async fn a_bundle_spans_scopes_and_frames_and_each_reader_applies_its_partitions
         );
     }
     let page = reader.snapshot(f.public).await.unwrap();
-    assert!(page.rows.is_empty() && !page.complete);
+    assert!(
+        page.rows.is_empty() && !page.complete,
+        "a full reader waits for every partition"
+    );
     let revision = page.revision;
     drop(reader);
     let reader = open(&f, &path, &carol, f.full(), &both).await;
-    assert_eq!(live(&reader, f.public).await, 0);
+    assert_eq!(
+        live(&reader, f.public).await,
+        0,
+        "a full reader keeps waiting across a restart"
+    );
     assert_eq!(
         reader.receive(private_frame[0].clone()).await.unwrap(),
         ReceiveStatus::Applied
@@ -115,18 +121,17 @@ async fn a_bundle_spans_scopes_and_frames_and_each_reader_applies_its_partitions
     }
     let page = reader.snapshot(f.public).await.unwrap();
     assert_eq!((page.rows.len(), page.complete), (40, true));
-    // Both partitions became visible in the same commit.
     assert!(page.revision > revision);
     assert_eq!(
         reader.snapshot(f.private).await.unwrap().revision,
-        page.revision
+        page.revision,
+        "both partitions become visible in the same commit"
     );
     assert_eq!(
         reader.companion(f.private, [1; 32]).await.unwrap(),
         Companion::Present(f.app().salary("987654321"))
     );
 
-    // A public reader cannot open the private member and does not wait for it.
     let bob = PrivateKey::new();
     let public_only = open(
         &f,
@@ -136,27 +141,40 @@ async fn a_bundle_spans_scopes_and_frames_and_each_reader_applies_its_partitions
         &[f.public],
     )
     .await;
-    assert!(public_only.receive(private_frame[0].clone()).await.is_err());
+    assert!(
+        public_only.receive(private_frame[0].clone()).await.is_err(),
+        "a public reader cannot open the private member"
+    );
     for frame in &public_frames {
         public_only.receive(frame.clone()).await.unwrap();
     }
     let page = public_only.snapshot(f.public).await.unwrap();
-    assert_eq!((page.rows.len(), page.complete), (40, true));
+    assert_eq!(
+        (page.rows.len(), page.complete),
+        (40, true),
+        "a public reader does not wait for the private member"
+    );
 
-    // A full reader whose private key is evicted applies the public view;
-    // the private partition follows once the key is back.
     let dave = PrivateKey::new();
     let late = open(&f, &dir.path().join("d.db"), &dave, f.full(), &[f.public]).await;
     late.receive(private_frame[0].clone()).await.unwrap();
     for frame in &public_frames {
         late.receive(frame.clone()).await.unwrap();
     }
-    assert_eq!(live(&late, f.public).await, 40);
+    assert_eq!(
+        live(&late, f.public).await,
+        40,
+        "a full reader whose private key is evicted applies the public view"
+    );
     assert!(!late.snapshot(f.private).await.unwrap().complete);
     late.install_key(KeyMaterial::new(f.private, 1, [22; 32]))
         .await
         .unwrap();
-    assert_eq!(live(&late, f.private).await, 1);
+    assert_eq!(
+        live(&late, f.private).await,
+        1,
+        "the private partition follows once the key is back"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -168,7 +186,6 @@ async fn bundle_handles_return_the_same_frames_and_failures_commit_nothing() {
     let path = dir.path().join("a.db");
     let source = open(&f, &path, &alice, f.full(), &both).await;
 
-    // An injected failure before commit and a busy file leave no trace.
     source.inject_failure(1, 1).await;
     assert!(
         source
@@ -176,7 +193,11 @@ async fn bundle_handles_return_the_same_frames_and_failures_commit_nothing() {
             .await
             .is_err()
     );
-    assert_eq!(operations(&source).await, 0);
+    assert_eq!(
+        operations(&source).await,
+        0,
+        "a failure before commit leaves no trace"
+    );
     assert_eq!(live(&source, f.public).await, 0);
     let frames = source
         .author_bundle([1; 32], hiring(&f), vec![])
@@ -185,8 +206,6 @@ async fn bundle_handles_return_the_same_frames_and_failures_commit_nothing() {
     let ids: Vec<_> = frames.iter().map(|frame| frame.id().unwrap()).collect();
     assert_eq!(operations(&source).await, 3);
 
-    // The same handle returns the committed frames, also after a restart;
-    // other writes under it conflict.
     let again = source
         .author_bundle([1; 32], hiring(&f), vec![])
         .await
@@ -196,14 +215,18 @@ async fn bundle_handles_return_the_same_frames_and_failures_commit_nothing() {
             .iter()
             .map(|frame| frame.id().unwrap())
             .collect::<Vec<_>>(),
-        ids
+        ids,
+        "the same handle returns the committed frames"
     );
-    assert!(matches!(
-        source
-            .author_bundle([1; 32], vec![public(&f, 99, "other")], vec![])
-            .await,
-        Err(Error::Conflict)
-    ));
+    assert!(
+        matches!(
+            source
+                .author_bundle([1; 32], vec![public(&f, 99, "other")], vec![])
+                .await,
+            Err(Error::Conflict)
+        ),
+        "other writes under a committed handle conflict"
+    );
     drop(source);
     let source = open(&f, &path, &alice, f.full(), &both).await;
     let reopened = source
@@ -215,19 +238,11 @@ async fn bundle_handles_return_the_same_frames_and_failures_commit_nothing() {
             .iter()
             .map(|frame| frame.id().unwrap())
             .collect::<Vec<_>>(),
-        ids
+        ids,
+        "the same handle returns the committed frames after a restart"
     );
 
-    // A handle restored by a recovery import has no member records; the
-    // members are found through the first frame's sealed entries.
-    source
-        .inner
-        .lock(crate::replica::Class::Background)
-        .await
-        .conn
-        .execute("DELETE FROM secure_bundle_handles", ())
-        .await
-        .unwrap();
+    forget_bundle_members_as_a_recovery_import_does(&source).await;
     let recovered = source
         .author_bundle([1; 32], hiring(&f), vec![])
         .await
@@ -237,11 +252,10 @@ async fn bundle_handles_return_the_same_frames_and_failures_commit_nothing() {
             .iter()
             .map(|frame| frame.id().unwrap())
             .collect::<Vec<_>>(),
-        ids
+        ids,
+        "members are found through the first frame's sealed entries"
     );
 
-    // One denied member rolls back the whole bundle, including frames
-    // already signed for other scopes.
     let public_writer = vec![grant(
         f.public,
         &[Right::Read, Right::Insert, Right::Update, Right::Custody],
@@ -261,27 +275,36 @@ async fn bundle_handles_return_the_same_frames_and_failures_commit_nothing() {
             .await
             .is_err()
     );
-    assert_eq!(operations(&mixed).await, 0);
+    assert_eq!(
+        operations(&mixed).await,
+        0,
+        "one denied member rolls back frames already signed for other scopes"
+    );
     assert_eq!(live(&mixed, f.public).await, 0);
-    // The rolled back sequences are free: the next bundle starts at zero.
     let frames = mixed
         .author_bundle([3; 32], vec![public(&f, 1, "only")], vec![])
         .await
         .unwrap();
-    assert_eq!(frames[0].operation().unwrap().header.seq_num, 0);
+    assert_eq!(
+        frames[0].operation().unwrap().header.seq_num,
+        0,
+        "rolled back sequences are free again"
+    );
 
-    // An invalid row in any scope fails the application's check of the
-    // exact transaction; a row may appear only once.
     let mut invalid = hiring(&f);
     invalid.push(private(&f, 2, "not a number"));
     assert!(
         source
             .author_bundle([4; 32], invalid, vec![])
             .await
-            .is_err()
+            .is_err(),
+        "an invalid row in any scope fails the application's check"
     );
     let twice = vec![public(&f, 50, "a"), public(&f, 50, "b")];
-    assert!(source.author_bundle([5; 32], twice, vec![]).await.is_err());
+    assert!(
+        source.author_bundle([5; 32], twice, vec![]).await.is_err(),
+        "a row may appear only once in a bundle"
+    );
     let too_many: Vec<RowWrite> = (0..=MAX_BUNDLE_ROWS)
         .map(|row| {
             RowWrite::changed(RowChange {
@@ -298,16 +321,28 @@ async fn bundle_handles_return_the_same_frames_and_failures_commit_nothing() {
     ));
 }
 
+/// Deletes the bundle member records, as a handle restored by a recovery
+/// import lacks them.
+async fn forget_bundle_members_as_a_recovery_import_does(replica: &EncryptedReplica<Employees>) {
+    replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .conn
+        .execute("DELETE FROM secure_bundle_handles", ())
+        .await
+        .unwrap();
+}
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn members_that_disagree_reject_every_held_partition() {
     let f = Fixture::new();
     let dir = Scratch::new().await;
     let both = [f.public, f.private];
-    // Two files with one signing identity fork its private log: the private
-    // sequence zero of one bundle is another bundle's member.
     let mallory = PrivateKey::new();
     let first = open(&f, &dir.path().join("m1.db"), &mallory, f.full(), &both).await;
-    let second = open(&f, &dir.path().join("m2.db"), &mallory, f.full(), &both).await;
+    let second_file_forking_the_private_log =
+        open(&f, &dir.path().join("m2.db"), &mallory, f.full(), &both).await;
     let bundle = first
         .author_bundle(
             [1; 32],
@@ -316,7 +351,7 @@ async fn members_that_disagree_reject_every_held_partition() {
         )
         .await
         .unwrap();
-    let other = second
+    let other = second_file_forking_the_private_log
         .author_bundle([1; 32], vec![private(&f, 6, "6")], vec![])
         .await
         .unwrap();
@@ -344,7 +379,6 @@ async fn members_that_disagree_reject_every_held_partition() {
         ReceiveStatus::Rejected
     );
     assert_eq!(live(&reader, f.public).await, 0);
-    // The other bundle is complete by itself, but never with this member.
     let reversed = open(
         &f,
         &dir.path().join("d.db"),
@@ -354,14 +388,19 @@ async fn members_that_disagree_reject_every_held_partition() {
     )
     .await;
     reversed.receive(other[0].clone()).await.unwrap();
-    assert_eq!(live(&reversed, f.private).await, 1);
+    assert_eq!(
+        live(&reversed, f.private).await,
+        1,
+        "the other bundle is complete by itself"
+    );
     reversed.receive(public_member.clone()).await.unwrap();
     assert_eq!(
         reversed
             .receipt_status(public_member.id().unwrap())
             .await
             .unwrap(),
-        ReceiveStatus::Rejected
+        ReceiveStatus::Rejected,
+        "a member forking the log never completes with the other bundle"
     );
     assert_eq!(live(&reversed, f.public).await, 0);
 }
@@ -382,7 +421,6 @@ async fn a_session_is_bound_to_its_authority_and_ends_when_it_changes() {
     assert_eq!(status.revocations, crate::tests::unrevoked());
     assert_eq!(status.revoked, 0);
 
-    // A transaction reads its own writes and commits them as one bundle.
     let mut transaction = session.transaction();
     transaction
         .insert(f.public, [1; 32], f.app().name("Alice"))
@@ -394,25 +432,27 @@ async fn a_session_is_bound_to_its_authority_and_ends_when_it_changes() {
         .unwrap();
     assert_eq!(
         transaction.get(f.public, [1; 32]).await.unwrap(),
-        Companion::Present(f.app().name("Alice"))
+        Companion::Present(f.app().name("Alice")),
+        "a transaction reads its own writes"
     );
     assert_eq!(
         session.read(f.public, [1; 32]).await.unwrap(),
         Companion::Unavailable
     );
     let frames = transaction.commit([1; 32]).await.unwrap();
-    assert_eq!(frames.len(), 2);
+    assert_eq!(frames.len(), 2, "a transaction commits as one bundle");
     assert_eq!(
         session.read(f.private, [1; 32]).await.unwrap(),
         Companion::Present(f.app().salary("100"))
     );
 
-    // A narrower session cannot reach outside its set.
     let narrow = replica.session([f.public].into()).await.unwrap();
-    assert!(narrow.read(f.private, [1; 32]).await.is_err());
+    assert!(
+        narrow.read(f.private, [1; 32]).await.is_err(),
+        "a narrower session cannot reach outside its set"
+    );
     assert!(narrow.transaction().get(f.private, [1; 32]).await.is_err());
 
-    // A concurrent writer makes the stale before image conflict.
     let mut stale = session.transaction();
     stale
         .update(
@@ -434,10 +474,11 @@ async fn a_session_is_bound_to_its_authority_and_ends_when_it_changes() {
         .await
         .unwrap();
     fresh.commit([2; 32]).await.unwrap();
-    assert!(matches!(stale.commit([3; 32]).await, Err(Error::Conflict)));
+    assert!(
+        matches!(stale.commit([3; 32]).await, Err(Error::Conflict)),
+        "a concurrent writer makes the stale before image conflict"
+    );
 
-    // Attenuated credentials evict keys the new grants cannot read and end
-    // every session, including a transaction staged before.
     let mut pending = session.transaction();
     pending
         .update(
@@ -458,8 +499,14 @@ async fn a_session_is_bound_to_its_authority_and_ends_when_it_changes() {
         .await
         .unwrap();
     let before = operations(&replica).await;
-    assert!(pending.commit([4; 32]).await.is_err());
-    assert!(session.status().await.is_err());
+    assert!(
+        pending.commit([4; 32]).await.is_err(),
+        "attenuated credentials end a transaction staged before"
+    );
+    assert!(
+        session.status().await.is_err(),
+        "attenuated credentials end every session"
+    );
     assert!(session.read(f.public, [1; 32]).await.is_err());
     assert_eq!(operations(&replica).await, before);
     assert!(replica.session(both.into()).await.is_err());
@@ -468,10 +515,11 @@ async fn a_session_is_bound_to_its_authority_and_ends_when_it_changes() {
         renewed.read(f.public, [1; 32]).await.unwrap(),
         Companion::Present(f.app().name("Fresh"))
     );
-    assert!(replica.companion(f.private, [1; 32]).await.is_err());
+    assert!(
+        replica.companion(f.private, [1; 32]).await.is_err(),
+        "attenuated credentials evict keys the new grants cannot read"
+    );
 
-    // A learned revocation ends sessions; one of the session's own links
-    // ends its credentials.
     let mut racing = renewed.transaction();
     racing
         .update(
@@ -482,7 +530,7 @@ async fn a_session_is_bound_to_its_authority_and_ends_when_it_changes() {
         )
         .await
         .unwrap();
-    let root = replica
+    let sessions_own_root_link = replica
         .inner
         .lock(crate::replica::Class::Background)
         .await
@@ -496,12 +544,18 @@ async fn a_session_is_bound_to_its_authority_and_ends_when_it_changes() {
             &f.publisher,
             f.app().definition().app,
             &[],
-            &[root],
+            &[sessions_own_root_link],
         ))
         .await
         .unwrap();
-    assert!(racing.commit([5; 32]).await.is_err());
-    assert!(replica.session([f.public].into()).await.is_err());
+    assert!(
+        racing.commit([5; 32]).await.is_err(),
+        "a learned revocation ends sessions"
+    );
+    assert!(
+        replica.session([f.public].into()).await.is_err(),
+        "revoking one of the session's own links ends its credentials"
+    );
     assert_eq!(operations(&replica).await, before);
 }
 
@@ -560,9 +614,7 @@ async fn field_limited_and_read_only_principals_cannot_widen_their_writes() {
         .await
         .unwrap();
 
-    // Bob may update names only; the owner field controls permissions and
-    // no row write changes it.
-    let names = vec![grant(
+    let names_only = vec![grant(
         f.public,
         &[Right::Read, Right::Update, Right::Custody],
         &[f.app().field("display_name")],
@@ -571,7 +623,7 @@ async fn field_limited_and_read_only_principals_cannot_widen_their_writes() {
         &f,
         &dir.path().join("b.db"),
         &PrivateKey::new(),
-        names,
+        names_only,
         &[f.public],
     )
     .await;
@@ -587,9 +639,7 @@ async fn field_limited_and_read_only_principals_cannot_widen_their_writes() {
         )
         .await
         .unwrap();
-    // Setting the owner, inserting and deleting are refused, and the
-    // refused edits leave the staged row as it was.
-    for refused in [
+    let set_owner_insert_and_delete = [
         transaction
             .update(
                 f.public,
@@ -602,11 +652,19 @@ async fn field_limited_and_read_only_principals_cannot_widen_their_writes() {
             .insert(f.public, [2; 32], f.app().name("New"))
             .await,
         transaction.delete(f.public, [1; 32]).await,
-    ] {
-        assert!(refused.is_err());
+    ];
+    for refused in set_owner_insert_and_delete {
+        assert!(
+            refused.is_err(),
+            "a names-only writer cannot set the owner, insert or delete"
+        );
     }
     let writes = transaction.writes().await.unwrap();
-    assert_eq!(writes.len(), 1);
+    assert_eq!(
+        writes.len(),
+        1,
+        "refused edits leave the staged row as it was"
+    );
     assert_eq!(writes[0].assigned, [f.app().field("display_name")].into());
     assert_eq!(writes[0].change.after, Some(f.app().name("Bobby")));
     let frames = transaction.commit([2; 32]).await.unwrap();
@@ -619,7 +677,6 @@ async fn field_limited_and_read_only_principals_cannot_widen_their_writes() {
         Companion::Present(f.app().name("Bobby"))
     );
 
-    // Reading and custody rights are not write rights.
     let reader = vec![grant(
         f.public,
         &[Right::Read, Right::Custody],
@@ -634,7 +691,10 @@ async fn field_limited_and_read_only_principals_cannot_widen_their_writes() {
     )
     .await;
     let session = carol.session([f.public].into()).await.unwrap();
-    assert!(session.status().await.unwrap().writable.is_empty());
+    assert!(
+        session.status().await.unwrap().writable.is_empty(),
+        "reading and custody rights are not write rights"
+    );
     assert!(
         session
             .transaction()
@@ -647,7 +707,6 @@ async fn field_limited_and_read_only_principals_cannot_widen_their_writes() {
             .await
             .is_err()
     );
-    // Changed values publish nothing for an equal write; assigned values do.
     let session = alice.session([f.public].into()).await.unwrap();
     let mut equal = session.transaction();
     let current = f.app().name("Bobby");
@@ -656,13 +715,20 @@ async fn field_limited_and_read_only_principals_cannot_widen_their_writes() {
         .await
         .unwrap();
     assert!(equal.writes().await.unwrap().is_empty());
-    assert!(equal.commit([3; 32]).await.unwrap().is_empty());
+    assert!(
+        equal.commit([3; 32]).await.unwrap().is_empty(),
+        "changed values publish nothing for an equal write"
+    );
     let mut assigned = session.transaction();
     assigned
         .update(f.public, [1; 32], current, UpdateMode::Assigned)
         .await
         .unwrap();
-    assert_eq!(assigned.commit([4; 32]).await.unwrap().len(), 1);
+    assert_eq!(
+        assigned.commit([4; 32]).await.unwrap().len(),
+        1,
+        "assigned values publish an equal write"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -683,24 +749,26 @@ async fn checkpoints_prune_held_partitions_and_a_late_partition_still_applies() 
         .await
         .unwrap();
 
-    // Dave may read both scopes but holds only the public key for now.
+    let public_key_only = [f.public];
     let dave = open(
         &f,
         &dir.path().join("d.db"),
         &PrivateKey::new(),
         f.full(),
-        &[f.public],
+        &public_key_only,
     )
     .await;
     for status in dave.receive_all(frames.clone()).await {
         status.unwrap();
     }
     assert_eq!(live(&dave, f.public).await, 40);
-    // Replay of bundle members reproduces the checkpointed projection.
     compacted_base(&dave, &f.publisher, f.public).await;
-    assert_eq!(dave.audit(f.public).await.unwrap().replayed, 0);
+    assert_eq!(
+        dave.audit(f.public).await.unwrap().replayed,
+        0,
+        "replay of bundle members reproduces the checkpointed projection"
+    );
 
-    // Another node's custody lets the public members be pruned.
     let bob = PrivateKey::new();
     let custody = f.credentials(&bob, vec![grant(f.public, &[Right::Custody], &[])]);
     for frame in frames
@@ -722,13 +790,20 @@ async fn checkpoints_prune_held_partitions_and_a_late_partition_still_applies() 
     )
     .await
     .unwrap();
-    assert_eq!(dave.prune(f.public).await.unwrap().pruned, 2);
+    assert_eq!(
+        dave.prune(f.public).await.unwrap().pruned,
+        2,
+        "another node's custody lets the public members be pruned"
+    );
 
-    // The private partition finds its pruned partners settled by the log.
     dave.install_key(KeyMaterial::new(f.private, 1, [22; 32]))
         .await
         .unwrap();
-    assert_eq!(live(&dave, f.private).await, 1);
+    assert_eq!(
+        live(&dave, f.private).await,
+        1,
+        "the private partition finds its pruned partners settled by the log"
+    );
     assert_eq!(live(&dave, f.public).await, 40);
 }
 
@@ -759,16 +834,12 @@ async fn link_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
         .await
         .unwrap();
 
-    // The hub learns its peer from the link handshake; the stream is an
-    // in-memory pipe, as any reliable ordered transport would be.
     let hub_end = || (&source, hub.clone(), hub_credentials.clone());
     let serve = |mut session: NativeSession| {
         let source = source.clone();
         async move { session.serve(&source).await }
     };
 
-    // A full reader pulls the public partition first; nothing shows until
-    // the private member arrives, then both apply in one commit.
     let (session, served) =
         link::testing::sessions((&full, carol.clone(), carol_credentials.clone()), hub_end())
             .await
@@ -780,7 +851,11 @@ async fn link_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
             .await
             .unwrap();
         assert_eq!(public.catch_up.frames, 2);
-        assert_eq!(live(&full, f.public).await, 0);
+        assert_eq!(
+            live(&full, f.public).await,
+            0,
+            "nothing shows until the private member arrives"
+        );
         assert!(!full.snapshot(f.public).await.unwrap().complete);
         let private = session
             .sync_scope(&full, f.private, MAX_SECURE_FRAME / 2)
@@ -794,7 +869,8 @@ async fn link_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
     assert_eq!((page.rows.len(), page.complete), (40, true));
     assert_eq!(
         full.snapshot(f.private).await.unwrap().revision,
-        page.revision
+        page.revision,
+        "both partitions apply in one commit"
     );
     for frame in &frames {
         assert_eq!(
@@ -803,8 +879,6 @@ async fn link_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
         );
     }
 
-    // A public reader receives and applies its partition alone; the hub
-    // never sends it the private member.
     let (session, served) = link::testing::sessions(
         (&public_only, bob.clone(), bob_credentials.clone()),
         hub_end(),
@@ -821,17 +895,20 @@ async fn link_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
             session
                 .sync_scope(&public_only, f.private, MAX_SECURE_FRAME / 2)
                 .await
-                .is_err()
+                .is_err(),
+            "the hub never sends a public reader the private member"
         );
     };
     let (served, ()) = tokio::join!(serve(served), client);
     served.unwrap();
     let page = public_only.snapshot(f.public).await.unwrap();
-    assert_eq!((page.rows.len(), page.complete), (40, true));
+    assert_eq!(
+        (page.rows.len(), page.complete),
+        (40, true),
+        "a public reader applies its partition alone"
+    );
     assert!(public_only.companion(f.private, [1; 32]).await.is_err());
 
-    // A bundle authored by a peer is pushed scope by scope and applies at
-    // the hub once complete.
     let mut raise = hiring(&f);
     raise.truncate(1);
     raise[0] = RowWrite::changed(change(
@@ -869,14 +946,17 @@ async fn link_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
     assert_eq!(live(&source, f.public).await, 41);
     assert_eq!(
         source.companion(f.private, [41; 32]).await.unwrap(),
-        Companion::Present(f.app().salary("123"))
+        Companion::Present(f.app().salary("123")),
+        "a peer's bundle pushed scope by scope applies at the hub once complete"
     );
 
-    // A peer the hub does not admit fails the handshake.
     let (near, far) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
     let stranger = PrivateKey::new();
     let (dialed, accepted) =
         link::testing::links(near, far, (&full, stranger, carol_credentials), hub_end()).await;
-    assert!(accepted.is_err());
+    assert!(
+        accepted.is_err(),
+        "a peer the hub does not admit fails the handshake"
+    );
     assert!(dialed.is_err());
 }

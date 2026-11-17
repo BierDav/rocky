@@ -189,8 +189,11 @@ async fn a_sync_the_app_asks_for_dials_a_peer_in_backoff_and_reports_its_failure
             let hub = Arc::new(Hub::default());
             let a = unreachable(root.path(), &hub).await?;
             background(&a).await?;
-            // Background passes now wait out the failed peer's backoff.
-            assert_eq!(background(&a).await?["peers"][0]["skip"], "backoff");
+            assert_eq!(
+                background(&a).await?["peers"][0]["skip"],
+                "backoff",
+                "background passes wait out the failed peer's backoff"
+            );
             let dials = hub.dials_to("gone");
             let report = pass(&a).await?;
             assert!(hub.dials_to("gone") > dials, "the asked-for sync dials now");
@@ -203,8 +206,11 @@ async fn a_sync_the_app_asks_for_dials_a_peer_in_backoff_and_reports_its_failure
                     .any(|attempt| attempt["outcome"] == "failed"),
                 "{report}"
             );
-            // The failure grows the backoff the background passes wait out.
-            assert_eq!(background(&a).await?["peers"][0]["skip"], "backoff");
+            assert_eq!(
+                background(&a).await?["peers"][0]["skip"],
+                "backoff",
+                "the failure grows the backoff the background passes wait out"
+            );
             a.detach(None).await;
             Ok(())
         })
@@ -305,7 +311,6 @@ async fn revoked_peers_receive_no_contact_or_discovery_material_and_are_unknown_
                 .discovery_topics(&b.vault, now()?)?
                 .0;
             assert_eq!(a_topic, b_topic);
-            // Replica pages contain neither routes nor discovery material.
             let db = rusqlite::Connection::open(root.path().join("b/rocky.sqlite"))?;
             let dump: String =
                 db.query_row("SELECT group_concat(sql) FROM sqlite_master", [], |row| {

@@ -96,7 +96,8 @@ struct Hello {
     /// other's offset.
     clock: u64,
 }
-/// The label both sides sign the two hellos under.
+/// The label both sides sign the two hellos under. It carries the version,
+/// so every other session is refused.
 fn session_label(version: u32) -> String {
     format!("rocky.link.v{version}")
 }
@@ -250,6 +251,8 @@ families!(
 );
 
 /// Which side of the handshake this is: the dialer sends its hello first.
+/// The acceptor answers only once the initiator's chain verified, so an
+/// outsider is shown no chain.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Side {
     Initiator,
@@ -353,8 +356,6 @@ impl NativeSession {
             return Err(denied("unexpected link peer"));
         }
         if side == Side::Acceptor {
-            // An outsider is shown no chain: the acceptor speaks only once
-            // the initiator's chain verified.
             replica
                 .admit_peer(peer.node, &peer.credentials, peer.tip)
                 .await?;
@@ -362,18 +363,13 @@ impl NativeSession {
         }
         let mut parts = [(hello.node, local_bytes), (peer.node, peer_bytes)];
         parts.sort_by_key(|(key, _)| *key);
-        // The label carries the version: every other session is refused.
         let binding = signing_bytes(&session_label(version), &parts)?;
         write_frame(&mut stream, &encode(&local.sign(&binding))?).await?;
         let signature: Signature = decode(&read_frame(&mut stream).await?)?;
         if !peer.node.verify(&binding, &signature) {
             return Err(denied(AUTHENTICATION_FAILED));
         }
-        // A hello's clock is read before it is sent, the other's on
-        // receipt: the offset is off by the handshake's transit and waits,
-        // bounded by its timeouts and negligible against `MAX_CLOCK_AHEAD`.
-        let offset = i64::try_from(i128::from(peer.clock) - i128::from(received))
-            .map_err(|_| denied("link peer clock"))?;
+        let offset = clock_offset(peer.clock, received)?;
         if side == Side::Initiator {
             replica
                 .admit_peer(peer.node, &peer.credentials, peer.tip)
@@ -646,7 +642,8 @@ impl NativeSession {
             }
         }
     }
-    // The requester may be applying its previous answer before asking again.
+    /// The next request; the requester may be applying its previous answer
+    /// before asking again.
     async fn answered_request(&mut self) -> Result<Message, Error> {
         self.answered_with_idle(true).await
     }
@@ -712,11 +709,11 @@ impl NativeSession {
         }
     }
     /// Serve one authenticated pull or acknowledgment; callers own accept-loop shutdown.
+    /// Chains a push carries first are not a request of their own.
     pub async fn serve_once<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
     ) -> Result<(), Error> {
-        // Chains a push carries first are not a request of their own.
         let message = self.answered_request().await?;
         self.respond(replica, message, None, None).await
     }
@@ -801,7 +798,8 @@ impl NativeSession {
         }
     }
 }
-// A full chunk earns another deadline; single-byte trickles cannot hold a frame open.
+/// A full chunk earns another deadline; single-byte trickles cannot hold a
+/// frame open.
 async fn read_progress(
     stream: &mut (impl AsyncRead + Unpin),
     bytes: &mut [u8],
@@ -814,6 +812,14 @@ async fn read_progress(
             .map_err(Error::Io)?;
     }
     Ok(())
+}
+/// The offset of the peer's clock. A hello's clock is read before it is
+/// sent, the other's on receipt: the offset is off by the handshake's transit
+/// and waits, bounded by its timeouts and negligible against
+/// `MAX_CLOCK_AHEAD`.
+fn clock_offset(peer_clock: u64, received: u64) -> Result<i64, Error> {
+    i64::try_from(i128::from(peer_clock) - i128::from(received))
+        .map_err(|_| denied("link peer clock"))
 }
 async fn write_progress(
     stream: &mut (impl AsyncWrite + Unpin),
@@ -871,7 +877,6 @@ async fn read_frame_with_idle(
 mod tests {
     use super::*;
 
-    // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn native_requests_wait_while_the_peer_applies_its_answer() {
@@ -884,7 +889,6 @@ mod tests {
         assert_eq!(received.unwrap(), vec![7]);
     }
 
-    // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn native_requests_bound_a_started_header_after_idle() {
@@ -909,7 +913,6 @@ mod tests {
         assert_eq!(start.elapsed(), TIMEOUT * 3);
     }
 
-    // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn native_frame_reads_follow_bounded_chunk_progress() {
@@ -926,7 +929,6 @@ mod tests {
         assert_eq!(received.unwrap(), expected);
     }
 
-    // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn native_frame_writes_follow_a_slow_reader() {
@@ -946,7 +948,6 @@ mod tests {
         assert_eq!(received, vec![7; IO_CHUNK * 3]);
     }
 
-    // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn native_frame_trickles_still_time_out() {

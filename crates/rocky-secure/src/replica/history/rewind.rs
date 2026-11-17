@@ -52,8 +52,8 @@ pub(super) const ROWS_UPDATE: &str = concat!(
     needed!("OLD"),
     "; END"
 );
-// An upsert or a replace changes the row at the key without an update or
-// delete trigger of its own.
+/// Records an upsert or a replace, which changes the row at the key without
+/// an update or delete trigger of its own.
 pub(super) const ROWS_INSERT: &str = concat!(
     "CREATE TRIGGER IF NOT EXISTS secure_kept_rows_insert BEFORE INSERT ON secure_rows FOR EACH ROW WHEN ",
     active!(),
@@ -105,7 +105,6 @@ impl<A: RowApplication> Inner<A> {
         if active {
             match &result {
                 Ok(_) => self.end_rows_bulk(&blob, true).await?,
-                // The failed replacement's transaction rolls the copy back.
                 Err(_) => {
                     let _ = self.end_rows_bulk(&blob, false).await;
                 }
@@ -119,8 +118,8 @@ impl<A: RowApplication> Inner<A> {
             "SELECT 1 FROM secure_kept_marks WHERE COALESCE((SELECT rows_paused FROM secure_kept_clock WHERE id=1),0)=0 LIMIT 1",
         )
         .await?;
-        // Nothing is kept, or an enclosing replacement records.
-        if paused.is_empty() {
+        let nothing_to_record = paused.is_empty();
+        if nothing_to_record {
             return Ok(false);
         }
         for sql in [
@@ -244,8 +243,6 @@ impl<A: RowApplication> Inner<A> {
                 return Err(Error::Corrupt("kept seal".into()));
             };
             let seal = checkpoint::row_of(seal)?;
-            // Its rows are restored unfiltered: a path that removed a field
-            // since, even one re-added in the same schema, replays instead.
             if path.contains(&seal)
                 && manifest.as_slice() == self.manifest.as_slice()
                 && !self
@@ -318,8 +315,7 @@ impl<A: RowApplication> Inner<A> {
                 ]),
             )
             .await?;
-        // The replay's own fold is not used: the difference below is.
-        let mut fold = Sets {
+        let mut discarded_fold = Sets {
             rows: u64::MAX / 2,
             tombstones: u64::MAX / 2,
             ..Sets::new()
@@ -339,7 +335,7 @@ impl<A: RowApplication> Inner<A> {
                         limit: STEP_OPERATIONS,
                         mode: checkpoint::ReplayMode::Mint,
                     },
-                    &mut fold,
+                    &mut discarded_fold,
                     &mut ledger,
                 )
                 .await?

@@ -13,6 +13,22 @@ fn member_chain(
 
 const SCHEMA: &str = r#"{"format":6,"application":"holders","version":1,"tables":[{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"}]}"#;
 
+/// Another issuer of `issuer`'s domain that granted nothing, so it renews
+/// from the registry alone.
+fn issuer_that_granted_nothing(issuer: &Settings) -> Settings {
+    let mut other = issuer.clone();
+    other.authority = Some(Issuing::default());
+    other
+}
+
+/// Another issuer of `issuer`'s domain that never saw its devices, their
+/// records or its revocations.
+fn unaware_issuer(issuer: &Settings) -> Settings {
+    let mut other = issuer_that_granted_nothing(issuer);
+    other.revocations = RevocationSet::new();
+    other
+}
+
 /// The registry and an empty membership view.
 fn known(registry: &Registry) -> (&Registry, &'static Membership) {
     static EMPTY: std::sync::LazyLock<Membership> = std::sync::LazyLock::new(Membership::default);
@@ -84,15 +100,19 @@ fn revoking_an_identity_known_only_by_its_grant_ends_it_under_any_node_key() -> 
             .renew(&vault, &request.to_bytes()?, &registry, None)?
             .0)
     };
-    // Before revocation the same request renews, also under a new node key.
     renew(&issuer, &node)?;
     renew(&issuer, &PrivateKey::new())?;
-    // Revoking the identity ends every node of it, a fresh one too.
     issuer.begin_revocation(Revoke::Identity(user.public_key()), known(&registry), None)?;
     issuer.rotate(&vault)?;
     assert!(issuer.revoked_node(&device, &registry));
-    assert!(renew(&issuer, &node).is_err());
-    assert!(renew(&issuer, &PrivateKey::new()).is_err());
+    assert!(
+        renew(&issuer, &node).is_err(),
+        "revoking the identity ends every node of it"
+    );
+    assert!(
+        renew(&issuer, &PrivateKey::new()).is_err(),
+        "revoking the identity ends a fresh node of it too"
+    );
     let renamed = NodeKeys {
         identity: user.public_key(),
         node: PrivateKey::new().public_key(),
@@ -294,14 +314,19 @@ fn registry_grants_follow_only_the_issuer_and_custody_profiles() -> Result<(), F
             assert!(held.rights.contains(&right));
             assert_eq!(held.rights.contains(&Right::Read), profile.issues());
         }
-        // A renewal without a record recognizes the same profile.
-        assert_eq!(profile_of(&grants, &domain), profile);
+        assert_eq!(
+            profile_of(&grants, &domain),
+            profile,
+            "a renewal without a record recognizes the same profile"
+        );
     }
-    // No raw grant or profile names the registry itself.
     let named = Profile::Reader {
         scopes: [crate::domain::REGISTRY.into()].into(),
     };
-    assert!(grants_of(&named, &domain).is_err());
+    assert!(
+        grants_of(&named, &domain).is_err(),
+        "no raw grant or profile names the registry itself"
+    );
     assert!(issuer.keys.contains_key(crate::domain::REGISTRY));
     Ok(())
 }
@@ -332,8 +357,6 @@ fn issuer_at(
 fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
 -> Result<(), Failure> {
     use fault::Stage;
-    // An identity without a record may have read every collection, the
-    // registry included: three keys.
     let stops = [
         (Stage::Begun, 0),
         (Stage::Key, 0),
@@ -364,13 +387,12 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
                 ("items".into(), 2),
                 ("notes".into(), 2)
             ]
-            .into()
+            .into(),
+            "an identity without a record may have read every collection, the registry included"
         );
         fault::STOP.with(|at| at.set(Some(stop)));
         assert!(issuer.rotate(&vault).is_err(), "{stop:?}");
-        // The process stops: what remains is the saved intent and the keys
-        // already made.
-        let made: Vec<Option<[u8; 32]>> = intent
+        let made_before_the_stop: Vec<Option<[u8; 32]>> = intent
             .keys
             .iter()
             .map(|(name, epoch)| vault.find(&format!("rotation.reader.{name}.{epoch}")))
@@ -378,11 +400,11 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
         let mut reopened = Settings::load(&path)?;
         let keys = reopened.rotate(&vault)?.ok_or("the intent was lost")?;
         let domain = reopened.domain()?;
-        // No completion before the registry transaction has committed.
         assert!(
             reopened
                 .complete_revocation(&vault, &domain, known(&Registry::default()))
-                .is_err()
+                .is_err(),
+            "no completion before the registry transaction has committed"
         );
         let mut rows = BTreeMap::new();
         let mut changes = registry::Changes::default();
@@ -396,7 +418,7 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
             "{stop:?}"
         );
         assert_eq!(keys.len(), 3);
-        for ((name, epoch, key), before) in keys.iter().zip(made) {
+        for ((name, epoch, key), before) in keys.iter().zip(made_before_the_stop) {
             assert_eq!(intent.keys.get(name), Some(&epoch.generation));
             if let Some(before) = before {
                 assert_eq!(before, *key, "{stop:?}: {name}");
@@ -410,8 +432,10 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
                 .collect::<Vec<_>>(),
             [1, 2]
         );
-        // Completed once: nothing is left to do at the next open.
-        assert!(Settings::load(&path)?.rotate(&vault)?.is_none());
+        assert!(
+            Settings::load(&path)?.rotate(&vault)?.is_none(),
+            "completed once, nothing is left to do at the next open"
+        );
     }
     Ok(())
 }
@@ -503,22 +527,17 @@ fn a_tombstoned_user_renews_at_no_issuer_also_after_its_statement_left_the_set()
     };
     let (revoked_user, _, revoked_root) = enroll(&mut a, &mut registry)?;
     let (kept_user, _, kept_root) = enroll(&mut a, &mut registry)?;
-    // B is an issuer too but never saw either device or its record.
-    let mut b = a.clone();
-    b.authority = Some(Issuing::default());
-    b.revocations = RevocationSet::new();
+    let mut b = unaware_issuer(&a);
     a.begin_revocation(
         Revoke::Identity(revoked_user.public_key()),
         known(&registry),
         None,
     )?;
     a.rotate(&vault)?;
-    // B learns the statement as a renewal answer brings it.
     b.learn_revocations(&a.revocations)?;
     let mut changes = registry::Changes::default();
     changes.revoked(&revoked_user.public_key())?;
     registry = Registry::merged(&mut rows, &changes)?;
-    // The statement leaves both sets, as it does a year after it was made.
     let later = now()? + 2 * rocky_credentials::MAX_CHAIN_LIFETIME;
     for issuer in [&mut a, &mut b] {
         issuer.revocations = issuer.revocations.pruned(later);
@@ -597,10 +616,8 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
     b.installation = "second-issuer".into();
     let bv = b.vault(&store);
     for role in a.roles() {
-        // A second node of the owner's identity, with its own node key.
-        if role != "node"
-            && let Some(key) = av.load_bytes(&role)?
-        {
+        let second_node_keeps_its_own_node_key = role == "node";
+        if !second_node_keeps_its_own_node_key && let Some(key) = av.load_bytes(&role)? {
             bv.store_bytes(&role, &key)?;
         }
     }
@@ -653,8 +670,6 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
     let statements = b.revocations.clone();
     a.learn_revocations(&statements)?;
     b.learn_revocations(&a.revocations)?;
-    // Each issuer learns the other's keys and statements while partitioned from
-    // the resulting superseding secret, so both start generation 3.
     let (a_before, b_before) = (a.clone(), b.clone());
     for (from, source, to, target) in [(&a_before, &av, &mut b, &bv), (&b_before, &bv, &mut a, &av)]
     {
@@ -689,11 +704,13 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
     ];
     assert_ne!(superseding[0], superseding[1]);
     for epoch in superseding {
-        assert_eq!(epoch.generation, 3);
+        assert_eq!(
+            epoch.generation, 3,
+            "issuers that learned each other's keys and statements apart both start generation 3"
+        );
     }
-    // Every delivery is a real sealed renewal payload, including both current
-    // siblings. Ten exchange rounds must not create generation 4.
-    for round in 0..10 {
+    const EXCHANGE_ROUNDS: usize = 10;
+    for round in 0..EXCHANGE_ROUNDS {
         let (a_before, b_before) = (a.clone(), b.clone());
         for (source, source_vault, target, target_vault, path) in [
             (&a_before, &av, &mut b, &bv, root.path().join("b.json")),
@@ -734,14 +751,16 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
                     naming: None,
                 },
             )?;
-            assert!(!target.begin_exposure_rotation(&registry)?, "round {round}");
+            assert!(
+                !target.begin_exposure_rotation(&registry)?,
+                "round {round}: a sealed renewal of both current siblings creates no generation 4"
+            );
             assert_eq!(
                 target.groups[&address].current(),
                 superseding.into_iter().max()
             );
         }
     }
-    // A recorded custody identity read neither the collection nor the group.
     let nonreader = PrivateKey::new().public_key();
     registry.records.insert(
         nonreader,
@@ -897,9 +916,8 @@ fn a_tip_on_another_engine_leaves_the_same_schema_ahead() -> Result<(), Failure>
         installed.application(&schema)?,
         crate::DeclaredSchema::Current
     );
-    // The installed tip names an older engine: an owner on this build opens
-    // a tip with the same tables on its own.
-    installed.engine = rocky_core::EngineIdentity::of("3.0.0", rocky_core::REPLAY_SEMANTICS);
+    let older_engine = rocky_core::EngineIdentity::of("3.0.0", rocky_core::REPLAY_SEMANTICS);
+    installed.engine = older_engine;
     assert_ne!(
         installed.domain()?.manifest().hash(),
         crate::domain::Domain::new(
@@ -913,7 +931,8 @@ fn a_tip_on_another_engine_leaves_the_same_schema_ahead() -> Result<(), Failure>
     );
     assert_eq!(
         installed.application(&schema)?,
-        crate::DeclaredSchema::Ahead
+        crate::DeclaredSchema::Ahead,
+        "an owner on this build opens a tip of an older engine with the same tables on its own"
     );
     let mut older = schema;
     older.version = 0;
@@ -964,9 +983,9 @@ fn forged_tip_schema_records_are_refused_without_changing_the_installation() -> 
             value
         },
         {
-            // A record names the engine the tip's manifest commits.
             let mut value = value.clone();
-            value["engine"] = json!([7u8; 32].to_vec());
+            let engine_the_manifest_does_not_commit = json!([7u8; 32].to_vec());
+            value["engine"] = engine_the_manifest_does_not_commit;
             value
         },
         {
@@ -1011,7 +1030,6 @@ fn an_issuer_without_the_key_of_a_known_partition_may_not_migrate() -> Result<()
     )?;
     let domain = issuer.domain()?;
     assert!(issuer.may_migrate(&domain)?);
-    // A group whose secret this issuer never received: it cannot read it.
     let mut partition = GroupPartition::resolve(
         &domain,
         Some("list"),
@@ -1023,13 +1041,18 @@ fn an_issuer_without_the_key_of_a_known_partition_may_not_migrate() -> Result<()
     issuer
         .groups
         .insert(address.clone(), partition.record.clone());
-    assert!(!issuer.may_migrate(&domain)?);
-    // Holding it, under the wildcard grants of its own credentials, it may.
+    assert!(
+        !issuer.may_migrate(&domain)?,
+        "an issuer cannot read a group whose secret it never received"
+    );
     partition
         .record
         .hold(rocky_core::KeyEpoch::new(1, &[19; 32]))?;
     issuer.groups.insert(address, partition.record);
-    assert!(issuer.may_migrate(&domain)?);
+    assert!(
+        issuer.may_migrate(&domain)?,
+        "holding the group secret under its own wildcard grants, an issuer may migrate"
+    );
     Ok(())
 }
 
@@ -1072,10 +1095,7 @@ fn any_issuer_renews_a_recorded_claim_right_and_none_a_revoked_one() -> Result<(
         registry = Registry::merged(&mut rows, &changes)?;
         holders.push((user, supplied.credentials.chain(), grant));
     }
-    // B is another issuer that granted nothing: it renews from the registry
-    // alone, after A's links lapsed.
-    let mut b = a.clone();
-    b.authority = Some(Issuing::default());
+    let mut b = issuer_that_granted_nothing(&a);
     let request = |user: &PrivateKey, root: &CredentialChain, time: u64| {
         let fresh = PrivateKey::new();
         let chain = member_chain(root, user, fresh.public_key())?;
@@ -1102,7 +1122,6 @@ fn any_issuer_renews_a_recorded_claim_right_and_none_a_revoked_one() -> Result<(
     assert_eq!(right.counters, Some([b"invoices".to_vec()].into()));
     assert!(renewed.expires() > grant.expires);
 
-    // A revoked identity, a revoked grant and a removed row renew nowhere.
     let time = now()?;
     let revoke = |identities: BTreeSet<PublicKey>, capabilities: BTreeSet<Commitment>| {
         let statement = rocky_credentials::SignedRevocation::sign(
@@ -1143,7 +1162,10 @@ fn any_issuer_renews_a_recorded_claim_right_and_none_a_revoked_one() -> Result<(
     for issuer in [&a, &b] {
         for (user, root) in [(revoked_user, revoked_root), (ended_user, ended_root)] {
             let renewal = issuer.renew_claims(&vault, &request(user, root, time)?, &registry, time);
-            assert!(!matches!(renewal, Ok(Some(_))));
+            assert!(
+                !matches!(renewal, Ok(Some(_))),
+                "a revoked identity or grant renews nowhere"
+            );
         }
         let (_, changes) = issuer.revoke_claims(user.public_key(), &registry)?;
         let mut rows = rows.clone();
@@ -1151,7 +1173,8 @@ fn any_issuer_renews_a_recorded_claim_right_and_none_a_revoked_one() -> Result<(
         assert!(
             issuer
                 .renew_claims(&vault, &request(user, root, time)?, &unclaimed, time)?
-                .is_none()
+                .is_none(),
+            "a removed row renews nowhere"
         );
     }
     Ok(())

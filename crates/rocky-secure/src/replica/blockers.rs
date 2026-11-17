@@ -40,9 +40,8 @@ const STATE_TABLES: &[&str] = &[
     "secure_followed_tip",
 ];
 
-/// One domain's blockers: those every scope shares, kept domain-wide by the
-/// phase 7 inventory,
-/// and each scope's own.
+/// One domain's blockers: those every scope shares, kept domain-wide, and
+/// each scope's own.
 #[derive(Default)]
 pub(super) struct DomainReadiness {
     domain: Vec<Blocker>,
@@ -193,8 +192,6 @@ impl<A: RowApplication> Inner<A> {
     async fn derive_readiness(&self, domain: Scope) -> Result<DomainReadiness, Error> {
         let mut readiness = DomainReadiness::default();
         if self.graphs.contains_key(&domain) {
-            // An evicted scope reads as unavailable; its own log returning
-            // holds back only authoring.
             for (scope, id) in self.domain_scopes(domain).await? {
                 if let Some(staging) = self.staging(id).await?
                     && staging.signed.statement.seal.is_none()
@@ -236,8 +233,6 @@ impl<A: RowApplication> Inner<A> {
                     },
                     match need.replay {
                         FrameReplay::Local => ClearsBy::LocalWork,
-                        // Only a listed checkpoint replaces released existence
-                        // records; a trusted peer holding one lists it first.
                         FrameReplay::Peers => ClearsBy::AnyPeer,
                     },
                 ),
@@ -337,7 +332,6 @@ impl<A: RowApplication> Inner<A> {
             {
                 return Ok(Vec::new());
             }
-            // Only new credentials from the application's issuer clear it.
             Some(_) => ClearsBy::Application,
         };
         let writes = self.local_grants(time)?.iter().any(|grant| {
@@ -475,8 +469,6 @@ impl<A: RowApplication> Inner<A> {
             let [SqlValue::Blob(scope)] = record.as_slice() else {
                 return Err(Error::Corrupt("eviction guard".into()));
             };
-            // An evicted scope waits for nothing; its guard holds back
-            // authoring only once the scope is held again.
             let scope = decode::<ResourceScope>(scope)?;
             if !self.holds(scope).await? {
                 continue;
@@ -532,8 +524,6 @@ impl PendingCounts {
                 self.quarantined
                     .into_iter()
                     .map(|((scope, reason), count)| {
-                        // Another copy of the key or the frame comes from a peer; any
-                        // other failure is retried here as what it depends on changes.
                         let clears_by = if undecryptable(&reason) {
                             ClearsBy::AnyPeer
                         } else {
@@ -630,8 +620,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 result => return result,
             }
         }
-        // Under steady writes the listing runs once in one acquisition,
-        // which starts only when no interactive write waits.
         let inner = self.inner.lock(Class::Background).await;
         #[cfg(any(test, feature = "qualification"))]
         inner
@@ -678,7 +666,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await?
             {
                 Some(last) => after = last,
-                // This step checked the source; nothing it covers moved since.
                 None => return Ok(listed(blockers, pending)),
             }
         }

@@ -105,8 +105,11 @@ async fn a_revoked_authors_unheld_partition_header_is_omitted() {
                 .unwrap()
         }
     };
-    // A domain member sees a partition it does not hold by its keyed scope.
-    assert_eq!(page(*revoked_request).await.headers.len(), 1);
+    assert_eq!(
+        page(*revoked_request).await.headers.len(),
+        1,
+        "a domain member sees a partition it does not hold by its keyed scope"
+    );
     let grant = other
         .inner
         .lock(crate::replica::Class::Background)
@@ -125,12 +128,10 @@ async fn a_revoked_authors_unheld_partition_header_is_omitted() {
         ))
         .await
         .unwrap();
-    // Revoked candidates alone answer like an empty position: no header
-    // or chain.
     let omitted = page(*revoked_request).await;
     assert!(
         omitted.headers.is_empty() && omitted.chains.is_empty(),
-        "{omitted:?}"
+        "revoked candidates alone answer like an empty position: {omitted:?}"
     );
     assert_eq!(page(*eligible_request).await.headers.len(), 1);
     assert_eq!(

@@ -158,7 +158,6 @@ async fn three_failed_advised_imports_fall_back_only_for_that_scope_and_checkpoi
             b.replica.stage_checkpoint_page(page).await?;
             for _ in 0..rocky_secure::IMPORT_ATTEMPTS {
                 b.replica.import_failed(scope, checkpoint).await?;
-                // Other checkpoint and scope failures do not suppress this offer.
                 c.replica.import_failed(scope, [0; 32]).await?;
                 c.replica
                     .import_failed(a.domain().registry(), checkpoint)
@@ -190,7 +189,6 @@ async fn three_failed_advised_imports_fall_back_only_for_that_scope_and_checkpoi
                     .await?;
                 assert_eq!(rows.rows, vec![vec![SqlValue::Integer(64)]]);
                 if !imported {
-                    // An import already progressing with another signer is kept.
                     b.replica.compact(a.domain().scope, 0).await?;
                     let key = PrivateKey::from_bytes(&c.vault.get("node")?).public_key();
                     let credentials = c.settings.lock().await.credentials.clone();
@@ -407,10 +405,10 @@ async fn many_changed_scopes_reconcile_with_a_channel_left_for_publication() -> 
                         .any(|(known, moved)| known == scope && moved.pulled == 1)
                 );
             }
-            // Planning closes before row transfers fan out; one request slot stays free.
             assert!(
                 upstream.link.traffic().peak_channels
-                    <= usize::from(rocky_secure::network::link::CHANNELS) - 3
+                    <= usize::from(rocky_secure::network::link::CHANNELS) - 3,
+                "planning closes before row transfers fan out, leaving a request slot free"
             );
             for node in [&a, &b] {
                 node.detach(None).await;

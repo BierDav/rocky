@@ -55,7 +55,6 @@ impl Grant {
                 "a grant names no right, or one that is not a collection's",
             ));
         }
-        // Without columns the grant covers every field, in every generation.
         let fields = match &self.columns {
             None => FieldSelection::All,
             Some(names) => FieldSelection::Only(
@@ -245,14 +244,14 @@ impl Profile {
         {
             return Err(denied("grant profile names no or unknown reader scopes"));
         }
+        let ciphertext_only = matches!(self, Self::Custody { .. });
         Ok(resources
             .iter()
             .filter(|resource| names.is_none_or(|names| names.contains(&resource.name)))
             .map(|resource| Grant {
                 scope: resource.name.clone(),
                 rights: rights.iter().copied().collect(),
-                // Custody covers ciphertext only: no column at all.
-                columns: matches!(self, Self::Custody { .. }).then(BTreeSet::new),
+                columns: ciphertext_only.then(BTreeSet::new),
             })
             .collect())
     }
@@ -574,7 +573,9 @@ impl<'a> Authority<'a> {
             Some(last) => Ok(last.capability.delegations),
         }
     }
-    /// Signs one link below this authority's identity.
+    /// Signs one link below this authority's identity. Ranges between
+    /// issuers are not checked here: like those between the owner and its
+    /// issuers, they are an allocation discipline.
     pub(crate) fn sign_link(
         &self,
         subject: PublicKey,
@@ -639,8 +640,6 @@ impl<'a> Authority<'a> {
         if let Some(parent) = self.chain.0.last() {
             let parent = &parent.capability;
             let held = parent.extended()?;
-            // Ranges between issuers are an allocation discipline, as
-            // between the owner and its issuers.
             if !held.issues
                 || parent.subject != self.identity()?
                 || delegations >= parent.delegations

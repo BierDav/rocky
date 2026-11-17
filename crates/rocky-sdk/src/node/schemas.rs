@@ -12,6 +12,10 @@ pub(super) struct Acquisition {
 }
 
 impl Node {
+    /// Fetches the schemas the tip graph requires from peers. An authority
+    /// change cancels a request in flight, whose bytes grant nothing. The graph
+    /// can change while dialing: the replica checks the exact required pair
+    /// again in the transaction that saves the record.
     pub(super) async fn acquire_schemas(&self, transport: &dyn Transport) -> Result<bool, Failure> {
         let Ok(_active) = self.schema_fetch.try_lock() else {
             return Ok(false);
@@ -108,7 +112,6 @@ impl Node {
                 _ = authority.changed() => None,
                 response = rocky_platform::time::timeout_at(deadline, exchange(transport, &addresses, self.domain().scope, &request)) => response.ok().and_then(Result::ok),
             };
-            // Authority changes cancel an in-flight request. Its bytes grant nothing.
             if !self
                 .settings
                 .lock()
@@ -126,8 +129,6 @@ impl Node {
                 let record = Record::parse(&bytes)?;
                 let settings = self.settings.lock().await.clone();
                 let domain = record.domain(&settings, *manifest)?;
-                // The graph can change while dialing. The replica rechecks the
-                // exact required pair in the transaction that saves the record.
                 if !self
                     .replica
                     .required_schemas()
@@ -297,6 +298,7 @@ impl Node {
         Ok(false)
     }
 
+    /// A tip on another engine waits for an upgrade, which the status reports.
     pub(super) async fn follow_schema(&self) -> Result<bool, Failure> {
         let Some(pending) = self.replica.pending_schema().await? else {
             return Ok(false);
@@ -308,8 +310,8 @@ impl Node {
             return Ok(false);
         };
         let record = Record::parse(&bytes)?;
-        // A tip on another engine waits for an upgrade; the status says so.
-        if record.engine != rocky_core::EngineIdentity::current() {
+        let awaits_engine_upgrade = record.engine != rocky_core::EngineIdentity::current();
+        if awaits_engine_upgrade {
             return Ok(false);
         }
         let mut settings = self.settings.lock().await;

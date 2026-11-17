@@ -159,14 +159,21 @@ pub(in crate::replica) struct CarryObservation {
     pub target: TipId,
 }
 
-/// A claim on a normalized table identity: kind 0 is its one original
-/// assignment, kind 1 a carried observation of its provenance.
+/// A claim on a normalized table identity: its one original assignment or
+/// a carried observation of its provenance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::replica) struct Claim {
     pub(in crate::replica) kind: u8,
     pub(in crate::replica) provenance: Commitment,
     pub(in crate::replica) entry: u64,
     pub(in crate::replica) ordinal: u8,
+}
+
+impl Claim {
+    /// The one original assignment of an identity.
+    pub(in crate::replica) const ORIGINAL: u8 = 0;
+    /// A carried observation; it may repeat.
+    pub(in crate::replica) const OBSERVATION: u8 = 1;
 }
 
 type DerivedClaim = (i64, rocky_core::RowIdentity, u8, Commitment, u64, u8);
@@ -330,8 +337,8 @@ impl<A: RowApplication> Inner<A> {
             target,
             first,
         } = birth;
-        // A birth's writer is the key that signed its creation.
-        if identity.writer() != writer(&signer)
+        let writer_is_not_creation_signer = identity.writer() != writer(&signer);
+        if writer_is_not_creation_signer
             || [&snapshot.permanent, &snapshot.allocation]
                 .iter()
                 .any(|marks| {
@@ -366,14 +373,13 @@ impl<A: RowApplication> Inner<A> {
                     Ok(BirthClass::Carried)
                 };
             }
-            // The concrete mark is the author's own order in this partition;
-            // another partition's maximum proves no particular origin.
-            let reused = snapshot
+            let within_own_partition_order = snapshot
                 .own
                 .get(&identity.writer())
-                .is_some_and(|sequence| identity.sequence() <= *sequence)
+                .is_some_and(|sequence| identity.sequence() <= *sequence);
+            let reused = within_own_partition_order
                 || conflict
-                || claims.iter().any(|claim| claim.kind == 0);
+                || claims.iter().any(|claim| claim.kind == Claim::ORIGINAL);
             if reused {
                 if finalized && existing {
                     return Ok(BirthClass::Suppressed(Some(
@@ -413,7 +419,7 @@ impl<A: RowApplication> Inner<A> {
                     || *recorded != identity
                     || *original != provenance
                     || !claims.iter().any(|claim| {
-                        claim.kind == 0
+                        claim.kind == Claim::ORIGINAL
                             && claim.entry == *index
                             && claim.ordinal == ordinal
                             && claim.provenance == provenance
@@ -441,7 +447,7 @@ impl<A: RowApplication> Inner<A> {
                 }
                 if !claims
                     .iter()
-                    .any(|claim| claim.kind == 1 && claim.provenance == provenance)
+                    .any(|claim| claim.kind == Claim::OBSERVATION && claim.provenance == provenance)
                 {
                     return Err(corrupt("carried observation has no claim"));
                 }
@@ -452,8 +458,6 @@ impl<A: RowApplication> Inner<A> {
                 })
             }
             Disposition::Filtered => {
-                // Carry authority comes from the original proof and bundle,
-                // never from a filtered ordinary-creation grant.
                 if carried {
                     if conflict {
                         return Ok(BirthClass::Suppressed(None));
@@ -467,10 +471,9 @@ impl<A: RowApplication> Inner<A> {
                         {
                             return Err(corrupt("carry observation differs from its frame"));
                         }
-                        if !claims
-                            .iter()
-                            .any(|claim| claim.kind == 1 && claim.provenance == provenance)
-                        {
+                        if !claims.iter().any(|claim| {
+                            claim.kind == Claim::OBSERVATION && claim.provenance == provenance
+                        }) {
                             return Err(corrupt("carry observation has no claim"));
                         }
                         return Ok(BirthClass::Exact);
@@ -493,7 +496,7 @@ impl<A: RowApplication> Inner<A> {
                         || restoration.provenance != provenance
                         || restoration.allocation != allocation_scope
                         || !claims.iter().any(|claim| {
-                            claim.kind == 0
+                            claim.kind == Claim::ORIGINAL
                                 && claim.entry == grant_index
                                 && claim.ordinal == ordinal
                                 && claim.provenance == provenance
@@ -515,7 +518,7 @@ impl<A: RowApplication> Inner<A> {
                         "identity at or below its admission-time mark",
                     )));
                 }
-                if conflict || claims.iter().any(|claim| claim.kind == 0) {
+                if conflict || claims.iter().any(|claim| claim.kind == Claim::ORIGINAL) {
                     return Ok(BirthClass::Suppressed(None));
                 }
                 if snapshot
@@ -884,7 +887,7 @@ impl<A: RowApplication> Inner<A> {
                         } => claims.push((
                             allocation,
                             *identity,
-                            0,
+                            Claim::ORIGINAL,
                             *provenance,
                             entry.index,
                             birth.ordinal,
@@ -896,7 +899,7 @@ impl<A: RowApplication> Inner<A> {
                         } => claims.push((
                             allocation,
                             *identity,
-                            1,
+                            Claim::OBSERVATION,
                             *provenance,
                             entry.index,
                             birth.ordinal,
@@ -1062,13 +1065,12 @@ impl<A: RowApplication> Inner<A> {
         &self,
         (allocation, identity, kind, provenance, entry, ordinal): DerivedClaim,
     ) -> Result<(), Error> {
-        // An observation may repeat; a second original assignment may not.
-        if kind == 0 && !rows_with(&self.conn,
+        if kind == Claim::ORIGINAL && !rows_with(&self.conn,
             "SELECT entry FROM secure_admission_claims WHERE allocation=? AND identity=? AND kind=0",
             vec![SqlValue::Integer(allocation), identity.sql()]).await?.is_empty()
         { return Err(corrupt("a second original assignment of one identity")); }
         let sql = match kind {
-            0 => "INSERT INTO secure_admission_claims VALUES(?,?,?,?,?,?)",
+            Claim::ORIGINAL => "INSERT INTO secure_admission_claims VALUES(?,?,?,?,?,?)",
             _ => "INSERT OR IGNORE INTO secure_admission_claims VALUES(?,?,?,?,?,?)",
         };
         self.conn
@@ -1171,8 +1173,6 @@ impl<A: RowApplication> Inner<A> {
                 entry: *entry as u64,
                 ordinal: u8::try_from(*ordinal).map_err(|_| corrupt("claim ordinal"))?,
             };
-            // SQL claims are read and compared every time. Only their immutable
-            // signed source entry is shared across this frame's births.
             let derived = match verified.entries.entry(claim.entry) {
                 std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::btree_map::Entry::Vacant(entry) => entry.insert(

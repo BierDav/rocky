@@ -40,7 +40,6 @@ async fn warm_issuer_syntax_still_requires_current_time_and_unrevoked_writer() {
         );
         assert_eq!(snapshot(&inner).await, before);
     }
-    // Supported set reconciliation; revoke only the writer node, keeping the opening reachable.
     let time = now().unwrap();
     let statement = SignedRevocation::sign_in(
         Revocation {
@@ -82,8 +81,10 @@ async fn warm_issuer_syntax_still_requires_current_time_and_unrevoked_writer() {
     );
     assert_eq!(snapshot(&inner).await, before);
     drop(inner);
-    // Historical audit is deliberately independent of current acquisition expiry/revocation.
-    replica.audit(l.scope("items")).await.unwrap();
+    replica
+        .audit(l.scope("items"))
+        .await
+        .expect("historical audit is independent of current acquisition expiry and revocation");
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

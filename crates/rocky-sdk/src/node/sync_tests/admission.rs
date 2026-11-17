@@ -22,7 +22,6 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
                 Some((&a, writer.clone())),
             )
             .await?;
-            // 64 devices of the domain, none of them a contact of A.
             let issuer_node = PrivateKey::from_bytes(&a.vault.get("node")?);
             let grants = crate::enrollment::grants_of(&writer, &a.domain())?;
             let issuer_links = a.settings.lock().await.issuer_links();
@@ -49,7 +48,6 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
                     Ok((node.clone(), chain.complete(&user, node.public_key())?))
                 })
                 .collect::<Result<Vec<_>, Failure>>()?;
-            // The strangers share one replica: it only checks A's chain.
             let config = a.settings.lock().await.config(&a.vault, &a.domain())?;
             let replica = EncryptedReplica::open(
                 root.path().join("strangers.sqlite"),
@@ -60,13 +58,10 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
             let dialer = hub.connector("strangers").start(false, [7; 32]).await?;
             let own = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
             let link = a.current().ok_or("link")?;
-            // B's enrollment was served already.
             let (served, refused) = (
                 link.served.load(Ordering::Relaxed),
                 link.refused.load(Ordering::Relaxed),
             );
-            // One after another, each kept open: an admitted link holds its
-            // slot, so the 33rd and later are refused as busy.
             let mut links = Vec::new();
             for (node, chain) in strangers {
                 let stream = dialer.connect("a", Protocol::Link, None).await?;
@@ -82,17 +77,27 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
             }
             assert_eq!(link.served.load(Ordering::Relaxed), served + 64);
             assert_eq!(link.refused.load(Ordering::Relaxed), refused + 32);
-            assert_eq!(link.live_budget.available_permits(), 0);
-            // `peers` lists the served strangers, met without a contact.
+            assert_eq!(
+                link.live_budget.available_permits(),
+                0,
+                "each admitted link holds its slot"
+            );
             let peers = a.observed_peers().await;
-            assert_eq!(peers.iter().filter(|peer| !peer.is_configured).count(), 32);
+            assert_eq!(
+                peers.iter().filter(|peer| !peer.is_configured).count(),
+                32,
+                "`peers` lists the served strangers, met without a contact"
+            );
             drop(links);
             while link.live_budget.available_permits() < live_links::BUDGET {
                 tokio::task::yield_now().await;
             }
-            // A configured peer syncs afterwards.
             let synced = snap::value(b.sync_once()).await?;
-            assert_eq!(completed_peers(&synced), 1);
+            assert_eq!(
+                completed_peers(&synced),
+                1,
+                "a configured peer syncs afterwards"
+            );
             assert!(link.served.load(Ordering::Relaxed) > served + 64);
             assert_eq!(link.refused.load(Ordering::Relaxed), refused + 32);
             dialer.close().await;

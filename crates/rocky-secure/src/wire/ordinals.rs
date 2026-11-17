@@ -35,7 +35,7 @@ struct Bundle {
 
 pub(super) fn charge_publication(bytes: &[u8], used: &mut usize) -> Result<(), Error> {
     crate::network::publication::charge(bytes, used)?;
-    // These byte strings contain further CBOR which expansion decodes.
+    /// Its byte strings hold further CBOR, which expansion decodes.
     #[derive(Deserialize)]
     struct Metadata {
         origins: Vec<serde_bytes::ByteBuf>,
@@ -215,14 +215,14 @@ pub(super) fn expand(
         return Err(denied("unsupported bundle version"));
     }
     if let Some(intent) = &body.intent {
-        // An intent is one bundle member and carries no rows.
-        if !body.writes.is_empty() || body.membership.is_none() || !body.carried.is_empty() {
+        let is_lone_bundle_member =
+            body.writes.is_empty() && body.membership.is_some() && body.carried.is_empty();
+        if !is_lone_bundle_member {
             return Err(denied("an intent frame carries rows"));
         }
         intent.check().map_err(denied)?;
     }
     if let Some(outcome) = &body.outcome {
-        // An outcome record stands alone in its frame.
         if !body.writes.is_empty()
             || body.membership.is_some()
             || body.intent.is_some()

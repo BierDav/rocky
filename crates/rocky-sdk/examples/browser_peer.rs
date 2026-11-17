@@ -5,7 +5,10 @@
 //! relay, an invitation and the service's bundle as one JSON line, grants the
 //! browser's identity a claim right for the `invoices` counter once it asks,
 //! never trusting it on the service, serves until a line arrives on stdin,
-//! then checks that the browser node's writes and claims reached it.
+//! then checks that the browser node's writes and claims reached it. Before
+//! the script sends that line, the browser node joins, syncs, asks for a
+//! claim right, claims and writes, syncing each time; granting ends early
+//! only on a failure.
 #[cfg(target_family = "wasm")]
 fn main() {}
 
@@ -93,12 +96,10 @@ mod native {
             json!({ "relay": url, "invitation": invitation.uri, "bundle": bundle })
         );
 
-        // The browser node joins, syncs, asks for a claim right, claims and
-        // writes, syncing each time, before the script sends the line.
         let granting = tokio::spawn(grant_members(db.clone()));
         tokio::task::spawn_blocking(|| std::io::stdin().read_line(&mut String::new())).await??;
-        // It only ends early on a failure.
-        if granting.is_finished() {
+        let granting_failed_early = granting.is_finished();
+        if granting_failed_early {
             granting.await??;
         } else {
             granting.abort();

@@ -91,14 +91,8 @@ fn getter_conversions_match_the_engine() {
             value => Value::Real(value.to_real()),
         };
         assert_eq!(cast("REAL"), real, "{value:?} as REAL");
-        // Fifteen digits identify most doubles, and then the text is the
-        // engine's. Otherwise, and for subnormals, both texts read back as
-        // the same double; the engine's last digit is not always the nearest.
         let exact = match &value {
-            SqlValue::Real(real) => {
-                let real = real.get();
-                !real.is_subnormal() && format!("{real:.14e}").parse() == Ok(real)
-            }
+            SqlValue::Real(real) => engine_text_is_exact(real.get()),
             _ => true,
         };
         let text = value.to_text().map_or(Value::Null, Value::Text);
@@ -125,7 +119,6 @@ fn columns_store_the_class_their_affinity_names() {
     let conn = Connection::open_in_memory().expect("engine");
     conn.execute_batch("CREATE TABLE t(i INTEGER,r REAL,x TEXT,b BLOB)")
         .expect("table");
-    // Every conversion the strict codec accepts is the engine's own.
     for (column, affinity, value) in [
         ("i", Affinity::Integer, SqlValue::real(7.0).expect("real")),
         ("i", Affinity::Integer, SqlValue::Integer(i64::MIN)),
@@ -146,7 +139,6 @@ fn columns_store_the_class_their_affinity_names() {
             .expect("read");
         assert_eq!(read, engine(&stored), "{value:?} in {column}");
     }
-    // The engine reads negative zero back as zero from a REAL column.
     conn.execute("DELETE FROM t", []).expect("clear");
     conn.execute("INSERT INTO t(r) VALUES(?1)", [-0.0f64])
         .expect("insert");
@@ -155,16 +147,24 @@ fn columns_store_the_class_their_affinity_names() {
         .expect("read");
     assert_eq!(
         zero.to_bits(),
-        SqlValue::real(-0.0).expect("real").to_real().to_bits()
+        SqlValue::real(-0.0).expect("real").to_real().to_bits(),
+        "the engine reads negative zero back as zero from a REAL column"
     );
-    // NaN is not a REAL: the engine stores NULL.
     conn.execute("DELETE FROM t", []).expect("clear");
     conn.execute("INSERT INTO t(r) VALUES(?1)", [f64::NAN])
         .expect("insert");
     let class: String = conn
         .query_row("SELECT typeof(r) FROM t", [], |row| row.get(0))
         .expect("read");
-    assert_eq!(class, "null");
+    assert_eq!(class, "null", "NaN is not a REAL: the engine stores NULL");
+}
+
+/// Whether the engine's text of `real` is exactly ours: fifteen digits
+/// identify most doubles. Otherwise, and for subnormals, both texts only
+/// read back as the same double, since the engine's last digit is not
+/// always the nearest.
+fn engine_text_is_exact(real: f64) -> bool {
+    !real.is_subnormal() && format!("{real:.14e}").parse() == Ok(real)
 }
 
 #[test]
@@ -198,8 +198,6 @@ fn key_equality_is_the_engines_under_each_collation() {
             }
         }
     }
-    // Compound keys with every key class: a primary key conflicts exactly
-    // when the encodings are equal.
     conn.execute_batch(
         "CREATE TABLE k(t TEXT NOT NULL COLLATE NOCASE,i INTEGER NOT NULL,r REAL NOT NULL,b BLOB NOT NULL,PRIMARY KEY(t,i,r,b))",
     )

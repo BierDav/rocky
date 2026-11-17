@@ -131,8 +131,10 @@ mod tests {
         );
         assert!(signed.verify(20).is_err());
         assert!(signed.verify(9).is_err());
-        // Only the publisher signs, and a changed name breaks the signature.
-        assert!(SignedCoordinationGrant::sign(grant, &tenant).is_err());
+        assert!(
+            SignedCoordinationGrant::sign(grant, &tenant).is_err(),
+            "only the publisher signs a coordination grant"
+        );
         let mut renamed = signed.clone();
         renamed.grant.application = "other".into();
         assert!(renamed.verify(15).is_err());

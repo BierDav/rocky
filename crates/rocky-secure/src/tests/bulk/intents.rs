@@ -229,12 +229,12 @@ async fn the_execution_commits_staged_and_authoring_records_it_once() {
     let s = staged(3).await;
     let items =
         |replica| async move { select(replica, "SELECT key,title FROM items ORDER BY key").await };
-    // The issuer's execution is its result before anything is authored.
     assert_eq!(
         items(&s.replica).await,
         (0..3)
             .map(|i| vec![text(&format!("k{i}")), text(&format!("item{i}!"))])
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        "the issuer's execution is its result before anything is authored"
     );
     assert!(s.replica.publication_staged(s.publication).await.unwrap());
     assert!(authored(&s.replica, s.publication).await.is_empty());
@@ -245,7 +245,6 @@ async fn the_execution_commits_staged_and_authoring_records_it_once() {
             .unwrap()
             .is_none()
     );
-    // One unpartitioned partition: one bundle, then the record.
     assert!(
         s.replica
             .author_publication_step(s.publication)
@@ -253,7 +252,11 @@ async fn the_execution_commits_staged_and_authoring_records_it_once() {
             .unwrap()
     );
     let frames = authored(&s.replica, s.publication).await;
-    assert_eq!(frames.len(), 1);
+    assert_eq!(
+        frames.len(),
+        1,
+        "one unpartitioned partition authors one bundle, then the record"
+    );
     assert!(
         !s.replica
             .author_publication_step(s.publication)
@@ -269,11 +272,10 @@ async fn the_execution_commits_staged_and_authoring_records_it_once() {
         .unwrap();
     assert_eq!(statement.frames, 1);
     assert_eq!(authored(&s.replica, s.publication).await, frames);
-    // Nothing is left to author or record again.
     s.replica
         .author_staged_publication(s.publication)
         .await
-        .unwrap();
+        .expect("nothing is left to author or record again");
     assert_eq!(
         s.replica.publications().await.unwrap(),
         vec![crate::Publication {
@@ -360,8 +362,8 @@ async fn a_staged_publication_is_neither_offered_nor_served_before_its_record() 
     let scopes: Vec<_> = std::iter::once(s.l.scope("items"))
         .chain((0..LABELS).map(|label| s.l.tag_partition(&format!("t{label}")).0))
         .collect();
-    // A link starts after each chunk, before the record.
-    for authored_bundles in [8, 16, 17] {
+    let bundles_after_each_chunk = [8, 16, 17];
+    for authored_bundles in bundles_after_each_chunk {
         assert!(
             s.replica
                 .author_publication_step(s.publication)
@@ -381,7 +383,6 @@ async fn a_staged_publication_is_neither_offered_nor_served_before_its_record() 
             .unwrap();
         assert!(unsent.iter().all(|frame| held.contains(frame)));
     }
-    // Recorded, released and endorsed, the frames reach the member.
     s.replica
         .author_staged_publication(s.publication)
         .await
@@ -445,10 +446,13 @@ async fn a_revoked_writer_between_chunks_names_its_blocker_and_releases_nothing(
     );
     let first = authored(&s.replica, s.publication).await;
     assert_eq!(first.len(), 8);
-    // The writer's own capability; the issuer's identity keeps its others.
-    let capability = s.writer.0.last().unwrap().id().unwrap();
-    let revoked =
-        crate::tests::revoking(s.l.publisher(), s.l.definition(3).app, &[], &[capability]);
+    let writers_own_capability = s.writer.0.last().unwrap().id().unwrap();
+    let revoked = crate::tests::revoking(
+        s.l.publisher(),
+        s.l.definition(3).app,
+        &[],
+        &[writers_own_capability],
+    );
     assert_eq!(
         s.replica.learn_revocations(&revoked).await.unwrap().len(),
         1
@@ -474,7 +478,6 @@ async fn a_revoked_writer_between_chunks_names_its_blocker_and_releases_nothing(
         ) && refused.contains(&format!("blockers: [{line_node}]")),
         "{refused}"
     );
-    // The stage stays at its cursor, private, for the next attempt.
     for _ in 0..2 {
         assert!(
             s.replica
@@ -484,7 +487,11 @@ async fn a_revoked_writer_between_chunks_names_its_blocker_and_releases_nothing(
         );
     }
     assert!(s.replica.publication_staged(s.publication).await.unwrap());
-    assert_eq!(authored(&s.replica, s.publication).await, first);
+    assert_eq!(
+        authored(&s.replica, s.publication).await,
+        first,
+        "the stage stays at its cursor, private, for the next attempt"
+    );
     let unsent = s
         .replica
         .inner

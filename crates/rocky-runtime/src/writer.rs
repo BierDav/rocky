@@ -267,6 +267,12 @@ pub(crate) fn nanos(since: Instant) -> u64 {
     since.elapsed().as_nanos() as u64
 }
 
+/// `fullfsync` and `checkpoint_fullfsync`: flushes and checkpoints reach the
+/// device, not only its cache.
+const FLUSH_TO_DEVICE: i64 = 1;
+/// `wal_autocheckpoint`: off, since the writer checkpoints between groups;
+/// see `Writer::checkpoint`.
+const NO_AUTOCHECKPOINT: i64 = 0;
 /// Sets and verifies durability and checkpoint pragmas on the write connection.
 /// `fullfsync` is fixed here: SQLite refuses these inside a transaction.
 pub(crate) async fn configure(
@@ -285,15 +291,21 @@ pub(crate) async fn configure(
             synchronous.to_string(),
             SqlValue::Integer(synchronous),
         ),
-        // Flushes and checkpoints reach the device, not only its cache.
-        ("fullfsync", "1".to_string(), SqlValue::Integer(1)),
+        (
+            "fullfsync",
+            FLUSH_TO_DEVICE.to_string(),
+            SqlValue::Integer(FLUSH_TO_DEVICE),
+        ),
         (
             "checkpoint_fullfsync",
-            "1".to_string(),
-            SqlValue::Integer(1),
+            FLUSH_TO_DEVICE.to_string(),
+            SqlValue::Integer(FLUSH_TO_DEVICE),
         ),
-        // The writer checkpoints between groups instead; see `Writer::checkpoint`.
-        ("wal_autocheckpoint", "0".to_string(), SqlValue::Integer(0)),
+        (
+            "wal_autocheckpoint",
+            NO_AUTOCHECKPOINT.to_string(),
+            SqlValue::Integer(NO_AUTOCHECKPOINT),
+        ),
         (
             "cache_size",
             WRITER_CACHE_KIB.to_string(),
@@ -395,7 +407,8 @@ pub(crate) struct Writer<A: StoredApplication> {
     group: usize,
     cursor: usize,
     durability: Durability,
-    /// An exposure waits for the next flush.
+    /// An exposure waits for the next flush, or what survived a restart may
+    /// still sit unflushed in the OS cache.
     flush_wanted: bool,
     /// Domains whose first deferred request waits for that flush.
     waiting: Vec<usize>,
@@ -427,6 +440,8 @@ where
     A: StoredApplication,
     A::State: Clone,
 {
+    /// Must follow the write connection putting the file in WAL mode: the
+    /// domains' shared reader is opened here.
     pub(crate) fn new(
         owner: DatabaseOwner,
         conn: Arc<sqlite::Connection>,
@@ -435,7 +450,6 @@ where
         pool: Arc<crate::read::ReadPool>,
         metrics: Arc<Metrics>,
     ) -> Result<Self, Error> {
-        // Opened after the write connection has put the file in WAL mode.
         let reader = Arc::new(owner.connect_read_only()?);
         pool.attach(owner.path().to_path_buf());
         reader.set_query_only()?;
@@ -462,7 +476,6 @@ where
             group: options.group_commit.max(1),
             cursor: 0,
             durability: options.durability,
-            // What survived a restart may sit unflushed in the OS cache.
             flush_wanted: true,
             waiting: Vec::new(),
             checkpoint_frames: i64::from(options.checkpoint_frames),
@@ -478,8 +491,11 @@ where
             snapshots: None,
         })
     }
+    /// Runs groups until every domain retired or a fatal error stopped the
+    /// writer, which then stops every domain so queued callers see `Closed`.
+    /// It starts with a flush: what survived a restart may sit unflushed in
+    /// the OS cache.
     pub(crate) async fn run(mut self) {
-        // Whatever survived a restart may sit unflushed in the OS cache.
         let mut stopped = self.flush().await;
         while !stopped {
             self.retire().await;
@@ -494,12 +510,10 @@ where
                 stopped = self.flush_wanted && self.flush().await;
                 continue;
             }
-            // The next group starts at the next domain.
             self.cursor = (self.cursor + 1) % self.slots.len();
             let full = exposing || self.flush_wanted || self.durability == Durability::Full;
             stopped = self.commit(group, full).await;
         }
-        // After a fatal error: stop every domain; queued callers see `Closed`.
         let notifications: Vec<_> = self
             .slots
             .iter_mut()
@@ -614,13 +628,13 @@ where
             }
         }
     }
-    /// Reads, closes and test faults, which never join a group.
+    /// Reads, closes and test faults, which never join a group. A close stops
+    /// admission; work admitted before it still runs.
     async fn serve(&mut self, index: usize, command: Command<A::Row>) {
         let closing = self.slots[index].closing.is_some();
         match command {
             Command::Close(reply) if closing => drop(reply.send(Err(Error::Closed))),
             Command::Close(reply) => {
-                // Work admitted before the close still runs.
                 let slot = &mut self.slots[index];
                 slot.receiver.close();
                 slot.closing = Some(reply);
@@ -721,18 +735,7 @@ where
         let result = async {
             self.synchronous(&conn, true).await?;
             self.begin(&conn).await?;
-            // A changed header page guarantees a WAL frame for the flush to sync.
-            let written = async {
-                let current = rows_raw(&conn, "PRAGMA user_version").await?;
-                let next = match current.first().map(Vec::as_slice) {
-                    Some([SqlValue::Integer(value)]) => (value + 1).rem_euclid(i64::from(i32::MAX)),
-                    _ => 1,
-                };
-                conn.execute(format!("PRAGMA user_version={next}"), ())
-                    .await?;
-                Ok(())
-            }
-            .await;
+            let written = change_header_page(&conn).await;
             storage::finish_raw(&conn, written).await
         }
         .await;
@@ -790,8 +793,11 @@ where
         }
         Err(Error::RetryExhausted)
     }
-    /// Runs one group; `full` makes its commit a flush. Returns true when
-    /// the writer must stop.
+    /// Runs one group; `full` makes its commit a flush. Domains the group
+    /// wrote to also run their due checkpoint and prune steps in it. If the
+    /// commit fails nothing of the group is durable: every touched domain
+    /// rebuilds its memory from storage and every waiter fails. Returns true
+    /// when the writer must stop.
     async fn commit(&mut self, group: Vec<Work<A::Row>>, full: bool) -> bool {
         let Some(conn) = self.conn() else {
             for (_, queued) in group {
@@ -810,7 +816,6 @@ where
             );
             return false;
         }
-        // Off by default: the step timer and kind match never run unless asked.
         let instrument = self.instrument;
         let metrics = self.metrics.clone();
         #[cfg(test)]
@@ -835,8 +840,7 @@ where
         let started = Instant::now();
         let mut answers = Vec::new();
         let mut touched = vec![0usize; self.slots.len()];
-        // Domains whose steps changed rows; the others committed nothing.
-        let mut changed = vec![false; self.slots.len()];
+        let mut changed_rows = vec![false; self.slots.len()];
         let mut failure = None;
         let mut fatal = false;
         let mut skipped = Vec::new();
@@ -858,18 +862,15 @@ where
             if let Some((kind, step_started)) = timed {
                 metrics.add_step(kind, micros(step_started));
             }
-            // An unreadable counter counts as a change.
-            changed[index] |= before.is_none() || before != conn.total_changes().ok();
+            changed_rows[index] |= changed_since(&conn, before);
             if answer.fatal() {
                 fatal = true;
                 failure = Some(Error::Corrupt("a step could not roll back".into()));
             } else if conn.is_autocommit().unwrap_or(true) {
                 failure = Some(storage::group_lost());
             }
-            // Queue budgets stay reserved until the caller is answered.
             answers.push((answer, queued._budget));
         }
-        // Checkpoint and prune steps ride on the group of the domains it wrote.
         for (index, writes) in touched.iter().enumerate() {
             let Some(worker) = self.slots[index].worker.as_mut() else {
                 continue;
@@ -881,7 +882,7 @@ where
             worker.in_group = true;
             let result = worker.maintain(*writes).await;
             worker.in_group = false;
-            changed[index] |= before.is_none() || before != conn.total_changes().ok();
+            changed_rows[index] |= changed_since(&conn, before);
             if matches!(result, Err(Error::Rollback { .. })) {
                 fatal = true;
                 failure = Some(Error::Corrupt("a step could not roll back".into()));
@@ -889,7 +890,6 @@ where
                 failure = Some(storage::group_lost());
             }
         }
-        // A new checkpoint must be flushed before history behind it may go.
         if self
             .slots
             .iter()
@@ -945,8 +945,7 @@ where
                 for (index, slot) in self.slots.iter_mut().enumerate() {
                     if let (true, Some(worker)) = (touched[index] > 0, slot.worker.as_mut()) {
                         worker.publish();
-                        // A step that changed no row left nothing to flush.
-                        if changed[index] {
+                        if changed_rows[index] {
                             worker.buffered();
                         }
                     }
@@ -961,8 +960,6 @@ where
                 self.checkpoint(&conn).await || fatal
             }
             Err(error) => {
-                // Nothing of the group is durable: rebuild every touched
-                // domain's memory from storage and fail every waiter.
                 if full {
                     self.flush_failed(&error);
                 }
@@ -1014,28 +1011,8 @@ where
             copy_micros = copy;
             flush_micros = flush;
         } else {
-            // A reset must wait for readers of the old log. It first tries
-            // without waiting; while a reader pins the log, the bounded wait
-            // backs off over groups instead of stalling every one.
             kind = CheckpointKind::Truncate;
-            let mut reset = truncate(conn).await;
-            if !reset && self.reset_skip > 0 {
-                self.reset_skip -= 1;
-            } else if !reset {
-                self.metrics.truncate_waits.fetch_add(1, Relaxed);
-                if conn.set_busy_timeout(RESET_WAIT).is_ok() {
-                    reset = truncate(conn).await;
-                }
-                let _ = conn.set_busy_timeout(std::time::Duration::ZERO);
-                if !reset {
-                    self.reset_backoff = (self.reset_backoff * 2).clamp(1, MAX_RESET_BACKOFF);
-                    self.reset_skip = self.reset_backoff;
-                }
-            }
-            if reset {
-                self.reset_backoff = 0;
-                self.reset_skip = 0;
-            }
+            self.reset(conn).await;
             self.metrics.truncations.fetch_add(1, Relaxed);
             self.metrics
                 .truncate_micros
@@ -1058,12 +1035,36 @@ where
         }
         stop
     }
+    /// A resetting checkpoint, which must wait for readers of the old log. It
+    /// first tries without waiting; while a reader pins the log, the bounded
+    /// wait backs off over groups instead of stalling every one.
+    async fn reset(&mut self, conn: &sqlite::Connection) {
+        let mut reset = truncate(conn).await;
+        if !reset && self.reset_skip > 0 {
+            self.reset_skip -= 1;
+        } else if !reset {
+            self.metrics.truncate_waits.fetch_add(1, Relaxed);
+            if conn.set_busy_timeout(RESET_WAIT).is_ok() {
+                reset = truncate(conn).await;
+            }
+            let _ = conn.set_busy_timeout(std::time::Duration::ZERO);
+            if !reset {
+                self.reset_backoff = (self.reset_backoff * 2).clamp(1, MAX_RESET_BACKOFF);
+                self.reset_skip = self.reset_backoff;
+            }
+        }
+        if reset {
+            self.reset_backoff = 0;
+            self.reset_skip = 0;
+        }
+    }
     /// A passive checkpoint with SQLite's flushes taken out and issued here,
     /// in its order, so their time is measured apart from the page copy:
     /// the WAL before the copy, the database file after it. Nothing else
     /// writes between the copy and the second flush. Returns whether the
-    /// copy could not be flushed or the flush level not restored, plus the
-    /// copy and database-file flush time of this checkpoint.
+    /// writer must stop, because the copy could not be flushed (the log may
+    /// be reused once copied) or the flush level not restored, plus the copy
+    /// and database-file flush time of this checkpoint.
     async fn passive(&self, conn: &sqlite::Connection) -> (bool, u64, u64) {
         let Some(file) = &self.file else {
             return (false, 0, 0);
@@ -1095,7 +1096,6 @@ where
         self.metrics
             .checkpoint_copy_micros
             .fetch_add(copy_micros, Relaxed);
-        // The log may be reused once copied, so an unflushed copy must stop.
         let (flush_result, flush_micros) = flush(path, &self.metrics.checkpoint_flush_micros);
         let unflushed = copied.is_ok() && flush_result.is_err();
         let level = format!("PRAGMA synchronous={}", self.durability.synchronous());
@@ -1142,10 +1142,11 @@ where
             }
         }
     }
-    /// Checkpoints and truncates the WAL, then releases the connection and lock.
+    /// Closes the read pool, whose readers would keep the log from being
+    /// reset, checkpoints and truncates the WAL, then releases the connection
+    /// and lock.
     async fn close_file(&mut self) {
         if let Some(file) = self.file.take() {
-            // A reader still holding the log would keep it from being reset.
             file.pool.close();
             let _ = file.conn.execute("PRAGMA optimize", ()).await;
             let _ = file
@@ -1155,6 +1156,23 @@ where
             drop(file);
         }
     }
+}
+/// Whether the connection changed rows since its counter read `before`; an
+/// unreadable counter counts as a change.
+fn changed_since(conn: &sqlite::Connection, before: Option<u64>) -> bool {
+    before.is_none() || before != conn.total_changes().ok()
+}
+/// Changes the file header's counter: a changed header page guarantees a WAL
+/// frame for a flush to sync.
+async fn change_header_page(conn: &sqlite::Connection) -> Result<(), Error> {
+    let current = rows_raw(conn, "PRAGMA user_version").await?;
+    let next = match current.first().map(Vec::as_slice) {
+        Some([SqlValue::Integer(value)]) => (value + 1).rem_euclid(i64::from(i32::MAX)),
+        _ => 1,
+    };
+    conn.execute(format!("PRAGMA user_version={next}"), ())
+        .await?;
+    Ok(())
 }
 /// A resetting checkpoint; whether it reset the log. Busy readers make it
 /// copy what it can, as a passive one does.

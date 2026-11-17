@@ -175,6 +175,7 @@ async fn a_moved_bookmark_holds_its_abandoned_writes_a_page_at_a_time() {
 /// bounded number of times, and held intake not at all.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn holding_a_batch_reseeds_each_ledger_once() {
+    const APPLIED_FRAMES: u8 = 10;
     let f = Fixture::new();
     let dir = Scratch::new().await;
     let source = open(&f, &dir.path().join("reseed-source.db"), &PrivateKey::new()).await;
@@ -188,7 +189,7 @@ async fn holding_a_batch_reseeds_each_ledger_once() {
     }
     advance(&f, &source).await;
     let mut held = Vec::new();
-    for row in 5..=10 {
+    for row in 5..=APPLIED_FRAMES {
         held.push(insert(&f, &source, row, "Abandoned").await);
     }
     let from = source.followed_tip().await;
@@ -207,9 +208,10 @@ async fn holding_a_batch_reseeds_each_ledger_once() {
         .unwrap();
     let moved = ledger(&source) - before;
     assert_eq!(source.held_changes().await.unwrap().len(), held.len());
-    // Ten applied frames, reread for the held batch and for the move,
-    // however many are held.
-    assert!(moved <= 2 * 10, "{moved}");
+    assert!(
+        moved <= 2 * u64::from(APPLIED_FRAMES),
+        "the applied frames are reread once for the held batch and once for the move, however many are held: {moved}"
+    );
 
     target
         .receive_tip_statements(&source.tip_statements(None, 32).await.unwrap())
@@ -244,19 +246,25 @@ async fn tip_statement_batches_rescan_only_what_they_change() {
             units[WorkUnit::TransitionLedgerRecord as usize],
         )
     };
-    // Another bookmark leaves what the workspace sees as it was.
     let before = work();
     replica
         .receive_tip_statements(&[bookmark(&f, "other", None, Some(genesis))])
         .await
         .unwrap();
     let after = work();
-    assert_eq!((after.0 - before.0, after.1 - before.1), (0, 0));
-    // A seal and the move past it change it: its eight frames are reread once.
+    assert_eq!(
+        (after.0 - before.0, after.1 - before.1),
+        (0, 0),
+        "another bookmark leaves what the workspace sees as it was"
+    );
     let before = work();
     advance(&f, &replica).await;
     let after = work();
-    assert_eq!((after.0 - before.0, after.1 - before.1), (0, 8));
+    assert_eq!(
+        (after.0 - before.0, after.1 - before.1),
+        (0, 8),
+        "a seal and the move past it reread the workspace's eight frames once"
+    );
     assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 8);
 }
 
@@ -442,6 +450,15 @@ fn branch(f: &Fixture, seal: &SignedSeal) -> (TipId, Vec<TipStatement>) {
         ],
     )
 }
+/// Clones the stored row record `count - 1` times, so graph-metadata scaling
+/// is measured without row capture or encryption cost.
+async fn clone_stored_row_records(replica: &Replica, count: i64) {
+    replica.inner.lock(crate::replica::Class::Background).await.conn.execute(
+        "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<?) INSERT INTO secure_row_records SELECT scope,CAST(printf('%032d',i) AS BLOB),fields FROM secure_row_records,n",
+        [count - 1],
+    ).await.unwrap();
+}
+
 async fn scalar(replica: &Replica, sql: &str) -> i64 {
     match rows(
         &replica
@@ -481,12 +498,7 @@ async fn adopting_a_seal_changes_no_row_and_writes_the_same_metadata_with_ten_or
         let key = PrivateKey::new();
         let replica = open(&f, &dir.path().join(format!("{count}.db")), &key).await;
         insert(&f, &replica, 1, "Retained").await;
-        // Clone valid stored row materialization, excluding row capture and
-        // encryption cost from this graph-metadata scaling assertion.
-        replica.inner.lock(crate::replica::Class::Background).await.conn.execute(
-            "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<?) INSERT INTO secure_row_records SELECT scope,CAST(printf('%032d',i) AS BLOB),fields FROM secure_row_records,n",
-            [count - 1],
-        ).await.unwrap();
+        clone_stored_row_records(&replica, count).await;
         assert_eq!(
             scalar(&replica, "SELECT count(*) FROM secure_row_records").await,
             count
@@ -719,7 +731,7 @@ async fn concurrent_issuer_seals_choose_the_lower_continuation_on_every_device()
     );
 }
 
-// The coordinator's memory log is native-only, like the coordinator.
+/// Native only, like the coordinator and its memory log.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_coordinated_seal_enters_the_graph_only_after_ending_its_tips_log() {
@@ -742,7 +754,6 @@ async fn a_coordinated_seal_enters_the_graph_only_after_ending_its_tips_log() {
     replica.set_domain_log(Some(std::sync::Arc::new(
         coordinator.client(key.public_key()),
     )));
-    // A seal admission refuses never ends the log.
     let mut forged = signed.statement.clone();
     forged.frontier.clear();
     let forged = SignedSeal::sign(forged, &PrivateKey::new()).unwrap();
@@ -752,17 +763,26 @@ async fn a_coordinated_seal_enters_the_graph_only_after_ending_its_tips_log() {
             .await
             .is_err()
     );
-    assert_eq!(coordinator.head(log).unwrap().terminal, None);
-    // Unconfirmed, a received seal and the move riding on it wait outside
-    // the graph; this node's own publication fails.
+    assert_eq!(
+        coordinator.head(log).unwrap().terminal,
+        None,
+        "a seal admission refuses never ends the log"
+    );
     coordinator.set_available(false);
-    assert_eq!(replica.receive_tip_statements(&records).await.unwrap(), 0);
+    assert_eq!(
+        replica.receive_tip_statements(&records).await.unwrap(),
+        0,
+        "unconfirmed, a received seal and the move riding on it wait outside the graph"
+    );
     let message = replica
         .publish_tip_statements(&records)
         .await
         .unwrap_err()
         .to_string();
-    assert!(message.contains("did not confirm"), "{message}");
+    assert!(
+        message.contains("did not confirm"),
+        "unconfirmed, this node's own publication fails: {message}"
+    );
     assert!(
         replica
             .tip_graph(f.public.domain)
@@ -784,8 +804,6 @@ async fn a_coordinated_seal_enters_the_graph_only_after_ending_its_tips_log() {
         replica.followed_tip().await,
         signed.successor().unwrap().unwrap()
     );
-    // The log ended with a seal this node holds: a concurrent one of its
-    // own is not published, but one received is, and the graph decides.
     let mut late = signed.statement.clone();
     late.action = SealAction::Close;
     let late = SignedSeal::sign(late, &f.publisher).unwrap();
@@ -794,7 +812,10 @@ async fn a_coordinated_seal_enters_the_graph_only_after_ending_its_tips_log() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(message.contains("first"), "{message}");
+    assert!(
+        message.contains("first"),
+        "once the log ended with a held seal, a concurrent own seal is not published: {message}"
+    );
     assert_eq!(
         replica
             .tip_graph(f.public.domain)
@@ -809,14 +830,15 @@ async fn a_coordinated_seal_enters_the_graph_only_after_ending_its_tips_log() {
             .receive_tip_statements(&[TipStatement::Seal(late)])
             .await
             .unwrap(),
-        1
+        1,
+        "a concurrent received seal is admitted and the graph decides"
     );
     assert_eq!(coordinator.head(log).unwrap().terminal, Some(terminal));
 }
 
-// Two trusted nodes seal routinely at the same threshold. The loser of the
-// tip's log must not follow its own seal before the winner arrives: the
-// winner becomes final and the loser's author log would cross a fork.
+/// Two trusted nodes seal routinely at the same threshold. The loser of the
+/// tip's log must not follow its own seal before the winner arrives: the
+/// winner becomes final and the loser's author log would cross a fork.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_own_seal_that_lost_the_tips_log_is_not_published_before_the_winner_arrives() {
@@ -845,7 +867,6 @@ async fn an_own_seal_that_lost_the_tips_log_is_not_published_before_the_winner_a
         bookmark(&f, "main", Some(tip), won.successor().unwrap()),
     ];
     b.publish_tip_statements(&winner).await.unwrap();
-    // The same seal endorsed by another signer has another digest.
     let issuer = PrivateKey::new();
     let chain = CredentialChain(vec![
         Authority::owner_in(
@@ -865,7 +886,11 @@ async fn an_own_seal_that_lost_the_tips_log_is_not_published_before_the_winner_a
         &chain,
     )
     .unwrap();
-    assert_ne!(lost.id().unwrap(), won.id().unwrap());
+    assert_ne!(
+        lost.id().unwrap(),
+        won.id().unwrap(),
+        "the same seal endorsed by another signer has another digest"
+    );
     let message = a
         .publish_tip_statements(&[
             TipStatement::Seal(lost.clone()),
@@ -879,10 +904,9 @@ async fn an_own_seal_that_lost_the_tips_log_is_not_published_before_the_winner_a
     assert_eq!(a.followed_tip().await, tip);
     a.receive_tip_statements(&winner).await.unwrap();
     assert_eq!(a.followed_tip().await, won.successor().unwrap().unwrap());
-    // The node's author log continues on the winning line.
     b.receive(insert(&f, &a, 2, "After the race").await)
         .await
-        .unwrap();
+        .expect("the node's author log continues on the winning line");
     assert_eq!(b.snapshot(f.public).await.unwrap().rows.len(), 2);
 }
 
@@ -1458,7 +1482,6 @@ async fn native_sessions_exchange_original_held_frames_across_followed_tips() {
         .0;
     assert_eq!(held.len(), 1);
     assert_eq!(held[0].to_bytes().unwrap(), original.to_bytes().unwrap());
-    // Evicting the declaration must not reinterpret this peer as following main.
     a.inner
         .lock(crate::replica::Class::Background)
         .await
@@ -1473,7 +1496,8 @@ async fn native_sessions_exchange_original_held_frames_across_followed_tips() {
             MAX_SECURE_FRAME
         )
         .await
-        .is_err()
+        .is_err(),
+        "evicting the peer's tip declaration does not reinterpret it as following main"
     );
 }
 
@@ -1663,7 +1687,6 @@ async fn the_owners_backward_move_beats_an_issuers_forward_move_and_revocation_r
         )
     };
 
-    // Two issuers seal main's tip at once; among equals the lower digest wins.
     let statement = seal(&f, &a).await.statement;
     let mut variants = Vec::new();
     for (replica, (key, chain)) in [&a, &b].into_iter().zip(&issuers) {
@@ -1685,15 +1708,16 @@ async fn the_owners_backward_move_beats_an_issuers_forward_move_and_revocation_r
     let winner = usize::from(variants[1].0.id().unwrap() < variants[0].0.id().unwrap());
     let winning = variants[winner].0.successor().unwrap().unwrap();
     let next = variants[1 - winner].0.successor().unwrap().unwrap();
-    assert_eq!(a.followed_tip().await, winning);
+    assert_eq!(
+        a.followed_tip().await,
+        winning,
+        "among two equal seals of main's tip the lower digest wins"
+    );
     assert_eq!(b.followed_tip().await, winning);
     let on_winner = insert(&f, &a, 2, "On the winner").await;
     b.receive(on_winner).await.unwrap();
     assert_eq!(b.snapshot(f.public).await.unwrap().rows.len(), 2);
 
-    // Revoking the winning issuer leaves its seal and move out of
-    // resolution: both follow the next winner, and the write on the
-    // revoked line returns as a held change.
     let revoked = crate::tests::revoking(
         &f.publisher,
         f.public.domain.app,
@@ -1702,17 +1726,22 @@ async fn the_owners_backward_move_beats_an_issuers_forward_move_and_revocation_r
     );
     for replica in [&a, &b] {
         replica.learn_revocations(&revoked).await.unwrap();
-        assert_eq!(replica.followed_tip().await, next);
+        assert_eq!(
+            replica.followed_tip().await,
+            next,
+            "revoking the winning issuer leaves its seal and move out of resolution"
+        );
         let graph = replica.tip_graph(f.public.domain).await.unwrap();
         assert!(graph.revoked.contains(&variants[winner].0.id().unwrap()));
         assert_eq!(graph.seal(tip).unwrap(), Some(&variants[1 - winner].0));
         assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 1);
-        assert_eq!(replica.held_changes().await.unwrap().len(), 1);
+        assert_eq!(
+            replica.held_changes().await.unwrap().len(),
+            1,
+            "the write on the revoked line returns as a held change"
+        );
     }
 
-    // Apart: the remaining issuer on b seals main's tip and moves main
-    // forward; the owner on a closes it and moves main back to a tip on
-    // the earlier seal.
     let (key, chain) = &issuers[1 - winner];
     let forward = SignedSeal::endorse(
         seal(&f, &b).await.statement,
@@ -1721,41 +1750,62 @@ async fn the_owners_backward_move_beats_an_issuers_forward_move_and_revocation_r
     )
     .unwrap();
     let forward_tip = forward.successor().unwrap().unwrap();
-    let forward_records = vec![
+    let remaining_issuer_moves_main_forward_on_b = vec![
         TipStatement::Seal(forward.clone()),
         endorse_move(chain, key, Some(next), Some(forward_tip)),
     ];
-    b.receive_tip_statements(&forward_records).await.unwrap();
+    b.receive_tip_statements(&remaining_issuer_moves_main_forward_on_b)
+        .await
+        .unwrap();
     let forward_write = insert(&f, &b, 3, "Forward").await;
     let mut close = seal(&f, &a).await.statement;
     close.action = SealAction::Close;
     let close = SignedSeal::sign(close, &f.publisher).unwrap();
-    let (back, mut back_records) = branch(&f, earlier);
-    back_records.pop();
-    back_records.insert(0, TipStatement::Seal(close.clone()));
-    back_records.push(bookmark(&f, "main", Some(next), Some(back)));
-    a.receive_tip_statements(&back_records).await.unwrap();
+    let (back, mut owner_closes_and_moves_main_back_on_a) = branch(&f, earlier);
+    owner_closes_and_moves_main_back_on_a.pop();
+    owner_closes_and_moves_main_back_on_a.insert(0, TipStatement::Seal(close.clone()));
+    owner_closes_and_moves_main_back_on_a.push(bookmark(&f, "main", Some(next), Some(back)));
+    a.receive_tip_statements(&owner_closes_and_moves_main_back_on_a)
+        .await
+        .unwrap();
     assert_eq!(a.followed_tip().await, back);
 
-    // Whatever the digests and order, both end on the owner's move; the
-    // issuer's is listed as a loser and its write is held.
-    a.receive_tip_statements(&forward_records).await.unwrap();
-    b.receive_tip_statements(&back_records).await.unwrap();
+    a.receive_tip_statements(&remaining_issuer_moves_main_forward_on_b)
+        .await
+        .unwrap();
+    b.receive_tip_statements(&owner_closes_and_moves_main_back_on_a)
+        .await
+        .unwrap();
     a.receive(forward_write).await.unwrap();
     for replica in [&a, &b] {
-        assert_eq!(replica.followed_tip().await, back);
+        assert_eq!(
+            replica.followed_tip().await,
+            back,
+            "whatever the digests and order, both end on the owner's move"
+        );
         let graph = replica.tip_graph(f.public.domain).await.unwrap();
         assert_eq!(graph.seal(next).unwrap(), Some(&close));
         let losers = graph.losing_moves("main").unwrap();
         assert_eq!(losers.len(), 1);
-        assert_eq!(losers[0].statement.to, Some(forward_tip));
+        assert_eq!(
+            losers[0].statement.to,
+            Some(forward_tip),
+            "the issuer's move is listed as a loser"
+        );
         assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 1);
-        assert_eq!(replica.held_changes().await.unwrap().len(), 2);
+        assert_eq!(
+            replica.held_changes().await.unwrap().len(),
+            2,
+            "the losing issuer's write is held"
+        );
     }
-    // The resolution survives reopening.
     drop(a);
     let a = open(&f, &dir.path().join("a.db"), &a_key).await;
-    assert_eq!(a.followed_tip().await, back);
+    assert_eq!(
+        a.followed_tip().await,
+        back,
+        "the resolution survives reopening"
+    );
     assert!(
         a.tip_graph(f.public.domain)
             .await
@@ -1869,7 +1919,6 @@ async fn a_held_cut_refuses_and_prunes_what_follows_its_head() {
         let held = replica.tip_statements(None, 32).await.unwrap();
         assert!(!held.contains(&TipStatement::Bookmark(late.clone())));
     }
-    // Deleted for good: reopening keeps it out.
     drop(b);
     let b = open(&f, &dir.path().join("b.db"), &b_key).await;
     assert!(
@@ -1877,6 +1926,7 @@ async fn a_held_cut_refuses_and_prunes_what_follows_its_head() {
             .await
             .unwrap()
             .moves
-            .contains(&late)
+            .contains(&late),
+        "a deleted statement stays out after reopening"
     );
 }

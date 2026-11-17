@@ -114,19 +114,18 @@ impl NativeSession {
                 accepted.push(*scope);
             }
         }
-        // Registration is only for tuples whose proof and grants verified.
-        let offers: Vec<_> = partitions
+        let verified_offers: Vec<_> = partitions
             .iter()
             .filter(|(scope, ..)| accepted.contains(scope))
             .cloned()
             .collect();
         if link {
             replica
-                .accept_link_custody_offers(self.peer, &self.credentials, scopes, &offers)
+                .accept_link_custody_offers(self.peer, &self.credentials, scopes, &verified_offers)
                 .await?;
         } else {
             replica
-                .accept_custody_offers(self.peer, &self.credentials, scopes, &offers)
+                .accept_custody_offers(self.peer, &self.credentials, scopes, &verified_offers)
                 .await?;
         }
         self.proved.extend(accepted);
@@ -176,7 +175,9 @@ impl NativeSession {
         Ok(())
     }
 
-    /// A peer without a partition's key can refuse its proof without ending recovery of other scopes.
+    /// A peer without a partition's key can refuse its proof without ending
+    /// recovery of other scopes. Holding metadata is disclosed only to a
+    /// server granted each scope.
     pub(super) async fn try_scoped_holding<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -190,7 +191,6 @@ impl NativeSession {
             }
         }
         for batch in missing.chunks(64) {
-            // Retain the existing rule against disclosing metadata to an ungranted server.
             let allowed = if held {
                 for scope in batch {
                     replica

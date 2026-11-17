@@ -132,18 +132,20 @@ async fn a_checkpoint_recomputes_the_projection_and_pruning_waits_for_delivery()
     let first = laptop.checkpoint().await.unwrap();
     assert_eq!(first.record.sequence, 1);
     assert_eq!(sequence(&first.record.frontier, fixtures::LAPTOP), 4);
-    // Rows include the tombstone: deletion evidence is part of the state.
     assert_eq!(
         (first.record.state.count, first.record.history.count),
-        (2, 4)
+        (2, 4),
+        "rows include the tombstone: deletion evidence is part of the state"
     );
     assert_eq!(first.record.clock, 4);
     assert_eq!(
         CheckpointRecord::decode(&first.record.encode()).unwrap(),
         first.record
     );
-    // Nothing is acknowledged: the only other copy would be lost.
-    assert!(laptop.prune().await.unwrap().0.is_empty());
+    assert!(
+        laptop.prune().await.unwrap().0.is_empty(),
+        "nothing is acknowledged: the only other copy would be lost"
+    );
     assert_eq!(count(&dir, fixtures::LAPTOP, "rocky_operations").await, 4);
     assert!(sync(&laptop, &phone, fixtures::PHONE).await);
     assert_eq!(
@@ -153,17 +155,19 @@ async fn a_checkpoint_recomputes_the_projection_and_pruning_waits_for_delivery()
     for table in ["rocky_operations", "rocky_peer_ack", "rocky_outbox"] {
         assert_eq!(count(&dir, fixtures::LAPTOP, table).await, 0, "{table}");
     }
-    // Handles outlive their operations for retries.
     assert_eq!(
         count(&dir, fixtures::LAPTOP, "rocky_mutation_handles").await,
-        4
+        4,
+        "handles outlive their operations for retries"
     );
     let status = laptop.retention_status().await.unwrap();
     assert_eq!((status.retained_operations, status.retained_bytes), (0, 0));
-    // A second checkpoint is recomputed from the first.
     edit(&laptop, kept, Action::SetCompleted(true)).await;
     let second = laptop.checkpoint().await.unwrap();
-    assert_eq!(second.record.previous, first.commitment);
+    assert_eq!(
+        second.record.previous, first.commitment,
+        "a second checkpoint is recomputed from the first"
+    );
     assert_eq!(second.record.history.count, 5);
     let before = laptop.query().await.unwrap();
     laptop.close().await.unwrap();
@@ -171,15 +175,20 @@ async fn a_checkpoint_recomputes_the_projection_and_pruning_waits_for_delivery()
     assert_eq!(laptop.query().await.unwrap(), before);
     let state = laptop.sync_state().await.unwrap();
     assert_eq!(sequence(&state.pruned_prefix, fixtures::LAPTOP), 4);
-    // The one retained operation lies inside the held frontier.
-    assert_eq!(sequence(&state.held, fixtures::LAPTOP), 5);
+    assert_eq!(
+        sequence(&state.held, fixtures::LAPTOP),
+        5,
+        "the one retained operation lies inside the held frontier"
+    );
     assert!(state.received.is_empty());
     assert_eq!(sequence(&state.applied, fixtures::LAPTOP), 5);
     let report = laptop.audit().await.unwrap();
     assert!(report.recomputed);
     assert_eq!((report.rows, report.retained_operations), (2, 1));
-    // Replicas at one frontier commit to the same rows and history.
-    assert!(sync(&laptop, &phone, fixtures::PHONE).await);
+    assert!(
+        sync(&laptop, &phone, fixtures::PHONE).await,
+        "replicas at one frontier commit to the same rows and history"
+    );
     let remote = phone.checkpoint().await.unwrap().record;
     assert_eq!(
         (remote.frontier, remote.state, remote.history, remote.clock),
@@ -203,8 +212,7 @@ async fn an_unverifiable_checkpoint_blocks_pruning() {
     edit(&laptop, todo.id, Action::SetCompleted(true)).await;
     assert!(sync(&laptop, &phone, fixtures::PHONE).await);
     laptop.close().await.unwrap();
-    // The stored history no longer produces the stored projection.
-    let forged = Envelope {
+    let history_contradicting_projection = Envelope {
         payload: Action::CreateTodo {
             title: "forged".into(),
             completed: false,
@@ -216,7 +224,7 @@ async fn an_unverifiable_checkpoint_blocks_pruning() {
     let db = crate::sqlite::Connection::open(&dir.path().join("laptop.db")).unwrap();
     db.execute(
         "UPDATE rocky_operations SET bytes=? WHERE sequence=1",
-        [forged.encode().unwrap()],
+        [history_contradicting_projection.encode().unwrap()],
     )
     .await
     .unwrap();
@@ -230,12 +238,12 @@ async fn an_unverifiable_checkpoint_blocks_pruning() {
     assert_eq!(count(&dir, fixtures::LAPTOP, "rocky_operations").await, 2);
     assert!(matches!(laptop.audit().await, Err(Error::Corrupt(_))));
     laptop.close().await.unwrap();
-    // The hold survives a restart; automatic steps do not retry it.
     let laptop = open_at(dir.path(), fixtures::LAPTOP, RuntimeOptions::default()).await;
     create(&laptop, "later").await;
     assert_eq!(
         laptop.retention_status().await.unwrap().hold,
-        Some(CheckpointHold::Unverifiable)
+        Some(CheckpointHold::Unverifiable),
+        "the hold survives a restart; automatic steps do not retry it"
     );
     laptop.close().await.unwrap();
     phone.close().await.unwrap();
@@ -252,8 +260,6 @@ async fn an_offline_replica_converges_or_rebootstraps_with_its_local_edits() {
     let shared = create(&laptop, "shared").await.id;
     let doomed = create(&laptop, "doomed").await.id;
     assert!(sync(&laptop, &phone, fixtures::PHONE).await);
-    // Offline edits on the phone: to a row the laptop keeps, to one it
-    // deletes meanwhile, and a row of its own.
     let own = create(&phone, "phone only").await.id;
     edit(&phone, shared, Action::SetCompleted(true)).await;
     let late = edit(&phone, doomed, Action::SetTitle("revived?".into())).await;
@@ -261,13 +267,11 @@ async fn an_offline_replica_converges_or_rebootstraps_with_its_local_edits() {
     for index in 0..600 {
         create(&laptop, &format!("bulk-{index}")).await;
     }
-    // Not acknowledged, not declared behind: the phone still converges.
     laptop.checkpoint().await.unwrap();
     assert_eq!(
         sequence(&laptop.prune().await.unwrap(), fixtures::LAPTOP),
         2
     );
-    // By policy the laptop stops waiting for the phone.
     laptop.declare_behind(fixtures::PHONE).await.unwrap();
     let pruned_prefix = laptop.prune().await.unwrap();
     assert_eq!(sequence(&pruned_prefix, fixtures::LAPTOP), 603);
@@ -284,14 +288,14 @@ async fn an_offline_replica_converges_or_rebootstraps_with_its_local_edits() {
     assert_eq!(notice.pruned_prefix, pruned_prefix);
     let checkpoint = laptop.retention_status().await.unwrap().checkpoint.unwrap();
     assert_eq!(notice.checkpoint, checkpoint.commitment);
-    // The exact receipt set cannot tell a pruned peer from a missing one.
     assert!(
         laptop
             .missing_operations(Vec::new())
             .await
             .unwrap()
             .records
-            .is_empty()
+            .is_empty(),
+        "the exact receipt set cannot tell a pruned peer from a missing one"
     );
     let report = rebootstrap(&laptop, &phone).await;
     assert_eq!(report.checkpoint, checkpoint.commitment);
@@ -316,11 +320,15 @@ async fn an_offline_replica_converges_or_rebootstraps_with_its_local_edits() {
             .iter()
             .any(|row| row.id == shared && row.completed)
     );
-    // The late edit reached both replicas and the row stayed deleted.
-    assert!(ours.rows.iter().all(|row| row.id != doomed));
+    assert!(
+        ours.rows.iter().all(|row| row.id != doomed),
+        "the late edit reached both replicas and the row stayed deleted"
+    );
     assert_eq!(late.entity, doomed);
-    // The phone caught up, so the laptop waits for it again.
-    assert!(laptop.retention_status().await.unwrap().behind.is_empty());
+    assert!(
+        laptop.retention_status().await.unwrap().behind.is_empty(),
+        "the phone caught up, so the laptop waits for it again"
+    );
     for replica in [&laptop, &phone] {
         assert!(replica.audit().await.unwrap().recomputed);
     }
@@ -352,16 +360,18 @@ async fn a_late_operation_from_before_the_pruned_prefix_cannot_resurrect_a_delet
         2
     );
     assert_eq!(count(&dir, fixtures::LAPTOP, "rocky_operations").await, 0);
-    // The creation itself arrives again: a duplicate, not a new row.
     let ack = laptop.receive(created.encode().unwrap()).await.unwrap();
-    assert!(ack.applied);
-    // Its dependency is behind the pruned prefix; the tombstone still decides.
+    assert!(
+        ack.applied,
+        "the creation arriving again is a duplicate, not a new row"
+    );
     assert!(
         !laptop
             .receive(late.encode().unwrap())
             .await
             .unwrap()
-            .applied
+            .applied,
+        "its dependency is behind the pruned prefix; the tombstone still decides"
     );
     laptop.process_pending().await.unwrap();
     let snapshot = laptop.query().await.unwrap();
@@ -435,9 +445,11 @@ async fn retried_handles_from_before_the_pruned_prefix_do_not_execute_twice() {
     assert_eq!(snapshot.rows.len(), 1);
     assert_eq!(sequence(&snapshot.frontier, fixtures::LAPTOP), 1);
     laptop.close().await.unwrap();
-    // The pruned history reopens and audits.
     let laptop = open(&dir, fixtures::LAPTOP).await;
-    assert!(laptop.audit().await.unwrap().recomputed);
+    assert!(
+        laptop.audit().await.unwrap().recomputed,
+        "the pruned history reopens and audits"
+    );
     laptop.close().await.unwrap();
     phone.close().await.unwrap();
 }
@@ -462,8 +474,10 @@ async fn a_target_holding_back_the_pruned_prefix_too_long_is_declared_behind() {
         create(&laptop, &format!("todo-{index}")).await;
     }
     laptop.checkpoint().await.unwrap();
-    // Within the hour the phone still holds pruning back.
-    assert!(laptop.prune().await.unwrap().0.is_empty());
+    assert!(
+        laptop.prune().await.unwrap().0.is_empty(),
+        "within the hour the phone still holds pruning back"
+    );
     assert!(laptop.retention_status().await.unwrap().behind.is_empty());
     laptop.close().await.unwrap();
     let laptop = open_at(
@@ -484,8 +498,10 @@ async fn a_target_holding_back_the_pruned_prefix_too_long_is_declared_behind() {
     assert!(!sync(&laptop, &phone, fixtures::PHONE).await);
     let report = rebootstrap(&laptop, &phone).await;
     assert_eq!(report.reapplied.len(), 1);
-    // Contact clears the mark; the phone is waited for again.
-    assert!(sync(&laptop, &phone, fixtures::PHONE).await);
+    assert!(
+        sync(&laptop, &phone, fixtures::PHONE).await,
+        "contact clears the mark; the phone is waited for again"
+    );
     assert!(sync(&phone, &laptop, fixtures::LAPTOP).await);
     assert!(laptop.retention_status().await.unwrap().behind.is_empty());
     assert_eq!(laptop.query().await.unwrap().rows.len(), 11);
@@ -508,7 +524,6 @@ async fn retained_bytes_trigger_checkpoints_and_then_push_back() {
         },
         ..RuntimeOptions::default()
     };
-    // The phone never acknowledges: history cannot be released.
     let laptop = open_at(dir.path(), fixtures::LAPTOP, bounded(true)).await;
     let mut written = 0;
     let error = loop {
@@ -527,18 +542,22 @@ async fn retained_bytes_trigger_checkpoints_and_then_push_back() {
             Ok(_) => written += 1,
             Err(error) => break error,
         }
-        assert!(written < 1000, "the bound never pushed back");
+        assert!(
+            written < 1000,
+            "the bound never pushed back although the phone never acknowledges"
+        );
     };
     assert!(matches!(error, Error::Retention { .. }), "{error}");
     assert!(error.is_retryable());
     assert_eq!(error.reason(), FailureReason::Quota);
     let status = laptop.retention_status().await.unwrap();
-    // Half the bound started checkpoints; nothing was lost or pruned.
-    assert!(status.checkpoint.is_some());
+    assert!(
+        status.checkpoint.is_some(),
+        "half the bound started checkpoints; nothing was lost or pruned"
+    );
     assert!(status.pruned_prefix.0.is_empty());
     assert_eq!(status.retained_operations, written);
     assert_eq!(laptop.query().await.unwrap().rows.len(), written);
-    // Declared behind, the phone no longer holds history back.
     laptop.declare_behind(fixtures::PHONE).await.unwrap();
     laptop.checkpoint().await.unwrap();
     laptop.prune().await.unwrap();
@@ -546,14 +565,17 @@ async fn retained_bytes_trigger_checkpoints_and_then_push_back() {
         create(&laptop, &format!("again-{index}")).await;
     }
     let status = laptop.retention_status().await.unwrap();
-    assert!(status.retained_bytes <= status.policy.retained_bytes);
+    assert!(
+        status.retained_bytes <= status.policy.retained_bytes,
+        "declared behind, the phone no longer holds history back"
+    );
     assert_eq!(laptop.query().await.unwrap().rows.len(), 2 * written);
     laptop.checkpoint().await.unwrap();
     laptop.prune().await.unwrap();
-    // Only the newest handles remain for retries.
     assert_eq!(
         count(&dir, fixtures::LAPTOP, "rocky_mutation_handles").await,
-        4
+        4,
+        "only the newest handles remain for retries"
     );
     assert!(laptop.audit().await.unwrap().recomputed);
     laptop.close().await.unwrap();
@@ -597,11 +619,12 @@ async fn a_failure_at_any_step_leaves_a_file_that_reopens_and_audits() {
             Ok(Response::Audit(_))
         ));
     }
-    // Candidate, replay and verification, then pruned prefix and deletion.
-    assert!(failures >= 5, "{failures}");
+    assert!(
+        failures >= 5,
+        "a fault in each of candidate, replay, verification, pruned prefix and deletion: {failures}"
+    );
     assert_eq!(count(&dir, fixtures::LAPTOP, "rocky_operations").await, 0);
     assert!(laptop.audit().await.unwrap().recomputed);
-    // Every import page, the last of which switches the projection.
     let mut cursor = None;
     let mut pages = 0;
     let report = loop {
@@ -615,8 +638,11 @@ async fn a_failure_at_any_step_leaves_a_file_that_reopens_and_audits() {
         ));
         phone.close().await.unwrap();
         phone = open(&dir, fixtures::PHONE).await;
-        // Until the switch the phone keeps its own state.
-        assert_eq!(phone.query().await.unwrap().rows.len(), 1);
+        assert_eq!(
+            phone.query().await.unwrap().rows.len(),
+            1,
+            "until the switch the phone keeps its own state"
+        );
         assert!(!phone.audit().await.unwrap().recomputed || pages == 1);
         if let Some(report) = phone.import_checkpoint(page).await.unwrap() {
             break report;
@@ -636,7 +662,7 @@ async fn a_failure_at_any_step_leaves_a_file_that_reopens_and_audits() {
     phone.close().await.unwrap();
 }
 
-// Crashes a child process.
+/// Crashes a child process, which a browser cannot spawn.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_aborted_import_keeps_the_projection_and_a_superseded_export_restarts() {
@@ -660,17 +686,19 @@ async fn an_aborted_import_keeps_the_projection_and_a_superseded_export_restarts
         phone.retention_status().await.unwrap().hold,
         Some(CheckpointHold::Rebootstrap)
     );
-    // A gap is refused; a repeated page is not staged twice.
     let mut gap = first.clone();
     gap.record = None;
     gap.start.position += 100_000;
-    assert!(matches!(
-        phone.import_checkpoint(gap).await,
-        Err(Error::Rejected(_))
-    ));
+    assert!(
+        matches!(phone.import_checkpoint(gap).await, Err(Error::Rejected(_))),
+        "a gap is refused"
+    );
     let mut repeated = first.clone();
     repeated.record = None;
-    assert!(phone.import_checkpoint(repeated).await.unwrap().is_none());
+    assert!(
+        phone.import_checkpoint(repeated).await.unwrap().is_none(),
+        "a repeated page is not staged twice"
+    );
     phone.abort_rebootstrap().await.unwrap();
     assert_eq!(
         phone.retention_status().await.unwrap().hold,
@@ -678,13 +706,15 @@ async fn an_aborted_import_keeps_the_projection_and_a_superseded_export_restarts
     );
     assert_eq!(phone.query().await.unwrap().rows[0].id, local);
     assert!(!phone.audit().await.unwrap().recomputed);
-    // The laptop moved on: the old pass ends, a new one imports fully.
     create(&laptop, "newer").await;
     laptop.checkpoint().await.unwrap();
-    assert!(matches!(
-        laptop.checkpoint_page(first.next.clone()).await,
-        Err(Error::Rejected(_))
-    ));
+    assert!(
+        matches!(
+            laptop.checkpoint_page(first.next.clone()).await,
+            Err(Error::Rejected(_))
+        ),
+        "a newer checkpoint ends the old export pass"
+    );
     let mut tampered = laptop.checkpoint_page(None).await.unwrap();
     tampered.rows[0][2] = SqlValue::Text("not what was committed".into());
     assert!(
@@ -696,11 +726,10 @@ async fn an_aborted_import_keeps_the_projection_and_a_superseded_export_restarts
     );
     let rest = laptop.checkpoint_page(tampered.next).await.unwrap();
     assert!(rest.next.is_none());
-    // The rows do not match the record: nothing is switched.
-    assert!(matches!(
-        phone.import_checkpoint(rest).await,
-        Err(Error::Corrupt(_))
-    ));
+    assert!(
+        matches!(phone.import_checkpoint(rest).await, Err(Error::Corrupt(_))),
+        "the rows do not match the record: nothing is switched"
+    );
     assert_eq!(phone.query().await.unwrap().rows.len(), 1);
     let report = rebootstrap(&laptop, &phone).await;
     assert_eq!(report.reapplied, [local]);
@@ -735,7 +764,7 @@ async fn seed(dir: &Path) -> (Replica<TodoApp>, Replica<TodoApp>) {
     (laptop, phone)
 }
 /// Does nothing in an ordinary run; the parent selects the step to die in.
-// Needs threads, which a browser Worker lacks.
+/// Needs threads, which a browser Worker lacks.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crash_child() {

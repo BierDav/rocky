@@ -163,9 +163,8 @@ fn titles(items: &[(String, String, i64)]) -> Vec<&str> {
 
 async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    // The creator keeps its port across the restart.
-    let port = free_port();
-    let transport = || at(port);
+    let creator_port_kept_across_restart = free_port();
+    let transport = || at(creator_port_kept_across_restart);
     let a_keys = Arc::new(support::secrets::Keys::default());
     let b_keys = Arc::new(support::secrets::Keys::default());
     let creator = Db::with_secrets(
@@ -199,7 +198,6 @@ async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
     assert!(support::reconciled(&member.sync().await));
     assert_eq!(titles(&member.items().await), ["Milk"]);
 
-    // Offline edits of different fields converge; a delete is permanent.
     snap::ok(member.engine.session().set_networking_enabled(false)).await;
     assert_eq!(member.sync().await["skip"], "networking_disabled");
     creator
@@ -234,7 +232,8 @@ async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
         creator
             .items()
             .await
-            .contains(&(milk.clone(), "Oat milk".into(), 1))
+            .contains(&(milk.clone(), "Oat milk".into(), 1)),
+        "offline edits of different fields converge"
     );
     creator
         .mutate(
@@ -259,10 +258,13 @@ async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
         .await
         .map_err(|error| error.to_string())?;
     member.sync().await;
-    assert_eq!(titles(&member.items().await), ["Eggs"]);
+    assert_eq!(
+        titles(&member.items().await),
+        ["Eggs"],
+        "a delete is permanent: a later edit does not revive the row"
+    );
     assert_eq!(creator.items().await, member.items().await);
 
-    // Both sides survive a restart and keep syncing.
     tokio::join!(member.close(), creator.close());
     let creator = Db::with_secrets(
         &root.path().join("a"),
@@ -279,7 +281,11 @@ async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
     member.add(7, "Bread").await;
     creator.add(8, "Jam").await;
     member.sync().await;
-    assert_eq!(titles(&creator.items().await), ["Bread", "Eggs", "Jam"]);
+    assert_eq!(
+        titles(&creator.items().await),
+        ["Bread", "Eggs", "Jam"],
+        "both sides survive a restart and keep syncing"
+    );
     assert_eq!(creator.items().await, member.items().await);
     tokio::join!(member.close(), creator.close());
     Ok(())
@@ -296,7 +302,6 @@ async fn mutations_are_durable_once_and_definite_rejections_are_final() -> Resul
     let db = Db::create(root.path(), iroh())?;
     let id = db.add(9, "Tea").await;
     assert_eq!(id.len(), 64);
-    // The same handle reports its earlier commit and creates nothing else.
     let replay = db
         .mutate(
             9,
@@ -330,9 +335,16 @@ async fn mutations_are_durable_once_and_definite_rejections_are_final() -> Resul
         )
         .await
         .map_err(|error| error.to_string())?;
-    assert_eq!(replay["replayed"], json!(true));
-    assert_eq!(db.items().await.len(), 1);
-    // Rows of another collection, invalid values and unknown fields are definite.
+    assert_eq!(
+        replay["replayed"],
+        json!(true),
+        "the same handle reports its earlier commit after a restart"
+    );
+    assert_eq!(
+        db.items().await.len(),
+        1,
+        "a replayed handle creates nothing else"
+    );
     for (payload, entity) in [
         (
             snap::Action::Set {
@@ -371,9 +383,13 @@ async fn mutations_are_durable_once_and_definite_rejections_are_final() -> Resul
             .await
             .err()
             .ok_or("mutation should fail")?;
-        assert_eq!(error["retryable"], json!(false), "{error}");
+        assert_eq!(
+            error["retryable"],
+            json!(false),
+            "another collection, an invalid value, an unknown field or a missing \
+             field is a definite rejection: {error}"
+        );
     }
-    // Reads cannot reach protocol tables or write.
     for sql in ["SELECT * FROM secure_rows", "DELETE FROM items"] {
         assert!(
             snap::observe(db.engine.session().read(rocky_sdk::ReadQuery {
@@ -384,7 +400,8 @@ async fn mutations_are_durable_once_and_definite_rejections_are_final() -> Resul
                 cursor: None
             }))
             .await
-            .is_err()
+            .is_err(),
+            "reads cannot reach protocol tables or write: {sql}"
         );
     }
     db.close().await;
@@ -463,7 +480,6 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
     let creator = Db::create(&root.path().join("a"), iroh())?;
     let alice = Db::join(&root.path().join("b"), &creator.invite().await, iroh())?;
     let invitation = creator.invite().await;
-    // A wrong application schema does not consume the invitation.
     let wrong = rocky_sdk::EngineOptions {
         directory: root.path().join("wrong"),
         transport: Arc::new(iroh()),
@@ -472,10 +488,16 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
         },
     };
     let other = rocky_sdk::Schema::parse(&SCHEMA.replace("shopping", "other"))?;
-    assert!(Engine::open(wrong, &other, None).is_err());
-    let bob = Db::join(&root.path().join("c"), &invitation, iroh())?;
-    // A used invitation enrolls nobody else.
-    assert!(Db::join(&root.path().join("d"), &invitation, iroh()).is_err());
+    assert!(
+        Engine::open(wrong, &other, None).is_err(),
+        "a wrong application schema is refused"
+    );
+    let bob = Db::join(&root.path().join("c"), &invitation, iroh())
+        .map_err(|error| format!("a refused schema does not consume the invitation: {error}"))?;
+    assert!(
+        Db::join(&root.path().join("d"), &invitation, iroh()).is_err(),
+        "a used invitation enrolls nobody else"
+    );
 
     let status = snap::ok(alice.engine.session().info()).await;
     assert_eq!(status["revocations"]["statements"], 0);
@@ -487,10 +509,12 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
     .await;
     assert!(renewed["expires"].as_str() >= status["expires"].as_str());
 
-    // Revoking Bob adds a statement; Alice learns it on her next sync.
-    // The creator's identity, Alice's and Bob's.
     let identities = snap::ok(creator.engine.session().identities()).await;
-    assert_eq!(identities["identities"].as_array().map(Vec::len), Some(3));
+    assert_eq!(
+        identities["identities"].as_array().map(Vec::len),
+        Some(3),
+        "the creator's, Alice's and Bob's identities"
+    );
     let bob_identity = snap::ok(bob.engine.session().info()).await["principal"].clone();
     assert_eq!(
         snap::ok(
@@ -506,31 +530,35 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
     alice.sync().await;
     assert_eq!(
         snap::ok(alice.engine.session().info()).await["revocations"]["statements"],
-        1
+        1,
+        "Alice learns of Bob's revocation on her next sync"
     );
     assert_eq!(titles(&alice.items().await), ["After revocation"]);
-    // A refused link need not carry the signed revocation. Renewal fetches
-    // that statement before checking local sync refusal and revoked reads.
     assert!(
         snap::observe(async {
             bob.engine.session().renew().await?;
             bob.engine.session().info().await
         })
         .await
-        .is_err()
+        .is_err(),
+        "renewal fetches the revocation a refused link need not carry"
     );
     assert!(
         snap::observe(bob.engine.session().sync_once())
             .await
-            .is_err()
+            .is_err(),
+        "a revoked device refuses to sync"
     );
-    assert!(bob.items().await.is_empty());
+    assert!(
+        bob.items().await.is_empty(),
+        "a revoked device reads nothing"
+    );
 
-    // The creator cannot log out; a member can, and purging removes its data.
     assert!(
         snap::observe(creator.engine.session().logout(false))
             .await
-            .is_err()
+            .is_err(),
+        "the creator cannot log out"
     );
     snap::ok(alice.engine.session().logout(true)).await;
     assert!(
@@ -542,11 +570,18 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
             cursor: None
         }))
         .await
-        .is_err()
+        .is_err(),
+        "a logged-out member reads nothing"
     );
     alice.close().await;
-    assert!(!root.path().join("b/identity.json").exists());
-    assert!(!root.path().join("b/secrets").exists());
+    assert!(
+        !root.path().join("b/identity.json").exists(),
+        "purging removes the member's identity"
+    );
+    assert!(
+        !root.path().join("b/secrets").exists(),
+        "purging removes the member's secrets"
+    );
     assert!(Db::resume(&root.path().join("b"), iroh()).is_err());
     snap::ok(bob.engine.session().logout(false)).await;
     bob.close().await;
@@ -590,8 +625,10 @@ async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Fa
         "memory"
     );
     let invitation = creator.invite().await;
-    // A transport of another kind has no route in the invitation.
-    assert!(Db::join(&root.path().join("other"), &invitation, iroh()).is_err());
+    assert!(
+        Db::join(&root.path().join("other"), &invitation, iroh()).is_err(),
+        "a transport of another kind has no route in the invitation"
+    );
     let member = open(
         "b",
         rocky_sdk::EngineMode::Join {
@@ -605,14 +642,17 @@ async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Fa
     assert_eq!(titles(&creator.items().await), ["Eggs", "Milk"]);
     assert_eq!(creator.items().await, member.items().await);
 
-    // Both resume over it. Another kind opens too; see the peers suite.
     member.close().await;
     creator.close().await;
     let creator = open("a", rocky_sdk::EngineMode::Resume, "a")?;
     let member = open("b", rocky_sdk::EngineMode::Resume, "b")?;
     creator.add(3, "Jam").await;
     assert!(support::reconciled(&member.sync().await));
-    assert_eq!(titles(&member.items().await), ["Eggs", "Jam", "Milk"]);
+    assert_eq!(
+        titles(&member.items().await),
+        ["Eggs", "Jam", "Milk"],
+        "both resume over the application transport"
+    );
     member.close().await;
     creator.close().await;
     Ok(())

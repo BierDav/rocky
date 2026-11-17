@@ -220,7 +220,8 @@ impl Timestamp {
         }
     }
 }
-/// Rounds down to the microsecond; refuses instants outside `i64` microseconds.
+/// Rounds down to the microsecond, so a partial microsecond before the
+/// epoch rounds away from it; refuses instants outside `i64` microseconds.
 impl TryFrom<web_time::SystemTime> for Timestamp {
     type Error = DecodeError;
     fn try_from(time: web_time::SystemTime) -> Result<Self, DecodeError> {
@@ -230,7 +231,6 @@ impl TryFrom<web_time::SystemTime> for Timestamp {
             Err(before) => {
                 let before = before.duration();
                 let whole = i128::try_from(before.as_micros()).map_err(|_| out_of_range())?;
-                // A partial microsecond before the epoch rounds away from it.
                 let partial = i128::from(before.subsec_nanos() % 1_000 != 0);
                 i64::try_from(-whole - partial).map_err(|_| out_of_range())?
             }
@@ -309,9 +309,10 @@ pub struct Rows<'a> {
     done: bool,
 }
 impl<'a> Rows<'a> {
+    /// Runs `sql` with this result already guarding its statement before the
+    /// first await, so a cancellation also releases the statement.
     async fn new(source: Source<'a>, sql: &str, params: Vec<SqlValue>) -> Result<Self, SqlFailure> {
         let statement = source.connection().statement();
-        // Install the guard before awaiting so cancellation also releases this statement.
         let mut rows = Self {
             source,
             statement,
@@ -335,6 +336,8 @@ impl<'a> Rows<'a> {
     pub fn columns(&self) -> &[String] {
         &self.columns
     }
+    /// The next row. A cancelled page read retires this result rather than
+    /// skipping rows on reuse.
     pub async fn next(&mut self) -> Result<Option<Row>, SqlFailure> {
         loop {
             if let Some(values) = self.pending.pop_front() {
@@ -346,7 +349,6 @@ impl<'a> Rows<'a> {
             if self.done {
                 return Ok(None);
             }
-            // A cancelled page read retires this result rather than skipping rows on reuse.
             self.done = true;
             let page = self.source.connection().next(self.statement).await?;
             self.page(page);

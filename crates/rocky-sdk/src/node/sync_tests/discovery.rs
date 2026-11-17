@@ -62,19 +62,20 @@ async fn members_converge_with_discovery_as_their_only_source_of_contacts() -> R
             let b = enrolled(&root.path().join("b"), &hub, b_route, Some((&a, writer()))).await?;
             let c = enrolled(&root.path().join("c"), &hub, c_route, Some((&a, writer()))).await?;
             let (a_key, b_key, c_key) = (key(&a)?, key(&b)?, key(&c)?);
-            // Before its first admitted session a device holds no root: it
-            // derives no topic and announces nothing.
             announce(&b).await?;
-            assert!(hub.topics(b_route).is_empty());
+            assert!(
+                hub.topics(b_route).is_empty(),
+                "before its first admitted session a device holds no root and derives no topic"
+            );
             assert!(!b.discovery_status().announcing);
-            // C meets the issuer before the row exists; only B receives it.
             pass(&c).await?;
             add(&a, 1).await?;
             pass(&b).await?;
             until(async || hub.discoverable(b_route) == ["a", c_route]).await?;
-            assert!(titles(&c).await?.as_array().is_some_and(Vec::is_empty));
-            // The trusted node leaves; the members know no route to each other
-            // but what discovery reports.
+            assert!(
+                titles(&c).await?.as_array().is_some_and(Vec::is_empty),
+                "C met the issuer before the row existed"
+            );
             a.detach(None).await;
             for node in [&b, &c] {
                 node.configure(|settings| {
@@ -114,8 +115,10 @@ async fn members_converge_with_discovery_as_their_only_source_of_contacts() -> R
             assert_eq!(status["local"], json!({"state": "on", "reason": null}));
             assert_eq!(status["topic"]["state"], "unavailable");
             assert!(status["topic"]["reason"].is_string());
-            // A found route stays in the identity file; no replica table holds it.
-            assert!(std::fs::read_to_string(&b.path)?.contains(c_route));
+            assert!(
+                std::fs::read_to_string(&b.path)?.contains(c_route),
+                "a found route stays in the identity file"
+            );
             let db = rusqlite::Connection::open(root.path().join("b/rocky.sqlite"))?;
             let tables: Vec<String> = db
                 .prepare("SELECT name FROM sqlite_master WHERE type='table'")?
@@ -142,9 +145,11 @@ async fn members_converge_with_discovery_as_their_only_source_of_contacts() -> R
                     }
                 }
             }
-            // Detaching withdraws the announcement.
             b.detach(None).await;
-            assert!(hub.topics(b_route).is_empty());
+            assert!(
+                hub.topics(b_route).is_empty(),
+                "detaching withdraws the announcement"
+            );
             assert_eq!(
                 b.discovery_status().local.state,
                 crate::DiscoveryPathState::Off
@@ -165,8 +170,7 @@ async fn a_revoked_device_and_an_outsider_find_no_peer_after_the_window() -> Res
             let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
             let b = enrolled(&root.path().join("b"), &hub, "b", Some((&a, writer()))).await?;
             let c = enrolled(&root.path().join("c"), &hub, "c", Some((&a, writer()))).await?;
-            // Another domain on the same network, announcing under its own root.
-            let outsider = enrolled(&root.path().join("o"), &hub, "o", None).await?;
+            let outsider_domain = enrolled(&root.path().join("o"), &hub, "o", None).await?;
             pass(&b).await?;
             pass(&c).await?;
             until(async || hub.discoverable("c") == ["a", "b"]).await?;
@@ -177,8 +181,6 @@ async fn a_revoked_device_and_an_outsider_find_no_peer_after_the_window() -> Res
             until(async || b.settings.lock().await.peers.contains_key(&c_key)).await?;
             let c_contact = b.settings.lock().await.peers[&c_key].clone();
 
-            // The revoked device accepts no session, so nobody tells it; the
-            // others come to hold the statement and its discovery value.
             let c_port = c.current().ok_or("link")?.transport.clone();
             c_port.listen(None, false).expect("listen");
             let c_identity = c.settings.lock().await.identity;
@@ -189,13 +191,17 @@ async fn a_revoked_device_and_an_outsider_find_no_peer_after_the_window() -> Res
             let current = hub.topics("a")[0];
             assert_eq!(hub.topics("b"), [current, old]);
             assert_ne!(current, old);
-            // It derives no current topic, and is answered on the previous
-            // one only while the window lasts.
             announce(&c).await?;
-            assert_eq!(hub.topics("c"), [old]);
+            assert_eq!(
+                hub.topics("c"),
+                [old],
+                "a revoked device derives no current topic"
+            );
             assert_eq!(hub.discoverable("c"), ["a", "b"]);
-            // Being found is not being admitted.
-            assert!(!b.settings.lock().await.peers.contains_key(&key(&c)?));
+            assert!(
+                !b.settings.lock().await.peers.contains_key(&key(&c)?),
+                "being found is not being admitted"
+            );
 
             for node in [&a, &b, &c] {
                 node.discovery_skew.store(86_400, Ordering::SeqCst);
@@ -207,7 +213,6 @@ async fn a_revoked_device_and_an_outsider_find_no_peer_after_the_window() -> Res
             assert!(hub.discoverable("c").is_empty());
             assert_eq!(hub.discoverable("a"), ["b"]);
             assert!(hub.discoverable("o").is_empty());
-            // Once a peer reaches it, it is told and announces nothing more.
             for node in [&a, &b, &c] {
                 node.discovery_skew.store(0, Ordering::SeqCst);
             }
@@ -219,7 +224,7 @@ async fn a_revoked_device_and_an_outsider_find_no_peer_after_the_window() -> Res
             assert!(b.reconcile(&*b_port, c_key, &c_contact).await.is_err());
             let _ = pass(&c).await;
             until(async || hub.topics("c").is_empty()).await?;
-            for node in [&a, &b, &c, &outsider] {
+            for node in [&a, &b, &c, &outsider_domain] {
                 node.detach(None).await;
             }
             Ok(())
@@ -246,8 +251,11 @@ async fn a_transport_without_the_capability_reports_each_path_unavailable() -> R
                 );
             }
             assert!(hub.topics("b").is_empty());
-            // Contacts still carry the sync.
-            assert_eq!(completed_peers(&pass(&b).await?), 1);
+            assert_eq!(
+                completed_peers(&pass(&b).await?),
+                1,
+                "contacts still carry the sync"
+            );
             a.detach(None).await;
             b.detach(None).await;
             Ok(())

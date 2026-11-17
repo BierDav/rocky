@@ -77,11 +77,11 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
     let b_first = append(&b_exec, sb, 1, 2).await;
     assert_eq!(commit(&b_exec, sb, b_first).await, Ok(1));
 
-    // Cross-tenant log calls, controls and registrations fail.
     let b_on_a = b.client(&cluster, &b.executor).await;
     assert_eq!(
         b_on_a.coordinated_head(log(sa)).await,
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a tenant cannot read another tenant's log"
     );
     let head = a_exec.coordinated_head(log(sa)).await.unwrap();
     assert_eq!(
@@ -95,13 +95,15 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
                 },
             )
             .await,
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a tenant cannot join another tenant's log"
     );
     assert_eq!(
         b_owner
             .control(b.control(&cluster.genesis, sa, 2, &[&b.executor]), [8; 32])
             .await,
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a tenant cannot control another tenant's domain"
     );
     assert_eq!(
         b_owner
@@ -112,9 +114,9 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
                 [7; 32],
             )
             .await,
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a tenant cannot register in another tenant's namespace"
     );
-    // B cannot reuse A's admission, nor register without one.
     assert_eq!(
         b_owner
             .register(
@@ -124,10 +126,10 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
                 [6; 32],
             )
             .await,
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a tenant cannot reuse another tenant's admission"
     );
-    // Tenants never use the voters' TCP: it carries administration only.
-    let tcp = NetworkCoordinator::open(
+    let voter_tcp = NetworkCoordinator::open(
         cluster.genesis.clone(),
         cluster.genesis.root,
         cluster.genesis.genesis.mesh,
@@ -135,16 +137,17 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
     )
     .unwrap();
     assert_eq!(
-        tcp.coordinated_head(log(sa)).await,
-        Err(CoordinationError::Unavailable)
+        voter_tcp.coordinated_head(log(sa)).await,
+        Err(CoordinationError::Unavailable),
+        "the voters' TCP carries administration only, never tenants"
     );
 
-    // The owner changes trusted nodes: a node in the in-sync set stays.
     assert_eq!(
         a_owner
             .control(a.control(&cluster.genesis, sa, 2, &[&a.alternate]), [5; 32])
             .await,
-        Err(CoordinationError::Backpressure)
+        Err(CoordinationError::Backpressure),
+        "an owner's control change cannot drop a node of the in-sync set"
     );
     let a_alt = a.client(&cluster, &a.alternate).await;
     join(&a_alt, sa, 1).await;
@@ -154,7 +157,6 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
     else {
         panic!("assignment")
     };
-    // Both members must store it before it commits.
     assert_eq!(
         a_alt
             .coordinated(
@@ -165,7 +167,8 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
             )
             .await
             .unwrap(),
-        Outcome::Coordinated(LogResult::Acknowledged)
+        Outcome::Coordinated(LogResult::Acknowledged),
+        "an append commits only once both members store it"
     );
     assert!(matches!(
         a_exec
@@ -175,7 +178,6 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
         Outcome::Coordinated(LogResult::Committed { position: 2, .. })
     ));
 
-    // Quota: A's second domain fits, a third open domain does not; B is unaffected.
     a_owner
         .register(
             a.grant(),
@@ -184,7 +186,7 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
             [3; 32],
         )
         .await
-        .unwrap();
+        .expect("a tenant's second domain fits its quota");
     assert_eq!(
         a_owner
             .register(
@@ -194,7 +196,8 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
                 [2; 32],
             )
             .await,
-        Err(CoordinationError::Backpressure)
+        Err(CoordinationError::Backpressure),
+        "a third open domain exceeds the tenant quota"
     );
     assert_eq!(a_owner.usage().await.unwrap().open_domains, 2);
     b_owner
@@ -205,10 +208,8 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
             [1; 32],
         )
         .await
-        .unwrap();
+        .expect("another tenant's quota is unaffected");
 
-    // Fairness: four of A's connections flood its lanes; B commits within
-    // its latency budget.
     let (one, two, three, four) = tokio::join!(
         a.client(&cluster, &a.alternate),
         a.client(&cluster, &a.alternate),
@@ -223,15 +224,18 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
         })
         .collect();
     let b_second = append(&b_exec, sb, 2, 3).await;
-    assert_eq!(commit(&b_exec, sb, b_second).await, Ok(2));
-    // A's excess is refused or left without an answer.
+    assert_eq!(
+        commit(&b_exec, sb, b_second).await,
+        Ok(2),
+        "B commits while A floods its own lanes"
+    );
     let (mut refused, mut unanswered) = (0, 0);
     for task in flood {
         match task.await.unwrap() {
             Ok(()) => {}
             Err(CoordinationError::Backpressure) => refused += 1,
             Err(CoordinationError::Unavailable) => unanswered += 1,
-            Err(error) => panic!("{error:?}"),
+            Err(error) => panic!("A's excess must be refused or unanswered: {error:?}"),
         }
     }
     assert!(refused > 0, "A saturated its lanes");
@@ -257,11 +261,16 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
         "public service: tenant B committed while A had {refused}/64 requests refused and {unanswered} unanswered; leader state bytes={} disk bytes={} reads={} requests={}",
         status.state_bytes, status.disk_bytes, status.metrics.reads, status.metrics.requests
     );
-    // Voter logs hold lifecycle events, never request content.
     for id in 1..=3 {
         let log = cluster.log(id);
-        assert!(!log.contains(&format!("{:?}", [0x5au8; 32])));
-        assert!(log.lines().count() < 20, "{log}");
+        assert!(
+            !log.contains(&format!("{:?}", [0x5au8; 32])),
+            "voter logs never hold request content"
+        );
+        assert!(
+            log.lines().count() < 20,
+            "voter logs hold lifecycle events only: {log}"
+        );
     }
 }
 
@@ -275,16 +284,16 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
     let first = append(&exec, scope, 1, 2).await;
     commit(&exec, scope, first).await.unwrap();
 
-    // Leader loss: the remaining quorum continues.
     let leader = cluster.wait_leader(&admin).await;
     cluster.stop(leader);
     cluster.wait_leader(&admin).await;
     let second = append(&exec, scope, 2, 3).await;
-    commit(&exec, scope, second).await.unwrap();
+    commit(&exec, scope, second)
+        .await
+        .expect("the remaining quorum continues after leader loss");
     cluster.spawn(leader, false);
     cluster.wait_online(leader, &admin).await;
 
-    // Quorum outage: no authoritative answer, no fabricated success.
     let before = exec.coordinated_head(log(scope)).await.unwrap();
     let pending = append(&exec, scope, 3, 4).await;
     let survivor = cluster.wait_leader(&admin).await;
@@ -294,13 +303,14 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
     }
     assert_eq!(
         exec.coordinated(log(scope), pending.clone()).await,
-        Err(CoordinationError::Unavailable)
+        Err(CoordinationError::Unavailable),
+        "a quorum outage fabricates no success"
     );
     assert_eq!(
         exec.coordinated_head(log(scope)).await,
-        Err(CoordinationError::Unavailable)
+        Err(CoordinationError::Unavailable),
+        "a quorum outage gives no authoritative answer"
     );
-    // Controlled restart of every voter preserves the log.
     cluster.stop(survivor);
     for id in 1..=3 {
         cluster.spawn(id, false);
@@ -309,17 +319,22 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
         cluster.wait_online(id, &admin).await;
     }
     cluster.wait_leader(&admin).await;
-    // `Unavailable` was unknown, not failure: the survivor's log may hold
-    // the append. Retrying the same append yields its one assignment.
     assert_eq!(
         exec.coordinated_head(log(scope)).await.unwrap().commit,
-        before.commit
+        before.commit,
+        "a controlled restart of every voter preserves the log"
     );
-    assert_eq!(commit(&exec, scope, pending).await, Ok(before.commit + 1));
+    assert_eq!(
+        commit(&exec, scope, pending).await,
+        Ok(before.commit + 1),
+        "`Unavailable` was unknown, not failure: retrying the append yields its one assignment"
+    );
 
-    // A running voter cannot be backed up; a stopped one can.
     let backups = cluster.dir.path().join("backup-3");
-    assert!(backup(&cluster.data(3), cluster.genesis.clone(), 3, &backups).is_err());
+    assert!(
+        backup(&cluster.data(3), cluster.genesis.clone(), 3, &backups).is_err(),
+        "a running voter cannot be backed up"
+    );
     cluster.stop(3);
     let saved = backup(&cluster.data(3), cluster.genesis.clone(), 3, &backups).unwrap();
     cluster.spawn(3, false);
@@ -343,9 +358,11 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
         })
         .await;
 
-    // Restoring needs an empty directory and the same voter.
     cluster.stop(3);
-    assert!(restore(&backups, &cluster.genesis, 3, &cluster.data(3)).is_err());
+    assert!(
+        restore(&backups, &cluster.genesis, 3, &cluster.data(3)).is_err(),
+        "restoring needs an empty directory"
+    );
     assert!(
         restore(
             &backups,
@@ -353,33 +370,22 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
             2,
             &cluster.dir.path().join("empty")
         )
-        .is_err()
+        .is_err(),
+        "restoring needs the same voter"
     );
-    // Remove the stopped voter before rolling back its log. The live leader
-    // must discard its replication progress before the same ID returns.
-    membership_after_election(
-        &admin,
-        [0x40; 32],
-        Operation::Membership {
-            voters: [1, 2].into(),
-            expected: [1, 2, 3].into(),
-            expected_revision: 0,
-        },
-    )
-    .await
-    .unwrap();
+    remove_before_rolling_back(&admin).await;
     std::fs::remove_dir_all(cluster.data(3)).unwrap();
     let restored = restore(&backups, &cluster.genesis, 3, &cluster.data(3)).unwrap();
     assert_eq!(restored, saved);
     cluster.spawn(3, false);
     cluster.wait_online(3, &admin).await;
-    // Fenced: it serves no client and holds no vote, so its older state
-    // cannot answer for the service or elect a leader.
-    assert!(admin.status(3).await.unwrap().fenced);
+    assert!(
+        admin.status(3).await.unwrap().fenced,
+        "a restored voter is fenced, so its older state cannot answer for the service"
+    );
     let leader = cluster.wait_leader(&admin).await;
-    assert_ne!(leader, 3);
-    // The membership authority re-adds it as a learner before promotion.
-    let result = membership_after_election(
+    assert_ne!(leader, 3, "a fenced voter cannot be elected");
+    let readmission = membership_after_election(
         &admin,
         [0x41; 32],
         Operation::Membership {
@@ -389,13 +395,13 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
         },
     )
     .await;
-    if result.is_err() {
+    if readmission.is_err() {
         let mut statuses = Vec::new();
         for id in 1..=3 {
             statuses.push(admin.status(id).await);
         }
         panic!(
-            "readmission: {result:?}; {statuses:?}\n{}\n{}\n{}",
+            "readmission: {readmission:?}; {statuses:?}\n{}\n{}\n{}",
             cluster.log(1),
             cluster.log(2),
             cluster.log(3),
@@ -406,12 +412,31 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
             admin.status(3).await.is_ok_and(|s| !s.fenced)
         })
         .await;
-    // Voter 3 now votes with current state: with voter 1 down, 2 and 3 serve.
     cluster.stop(1);
     cluster.wait_leader(&admin).await;
-    assert_eq!(exec.coordinated_head(log(scope)).await.unwrap(), latest);
+    assert_eq!(
+        exec.coordinated_head(log(scope)).await.unwrap(),
+        latest,
+        "the readmitted voter 3 serves current state with voter 2 while voter 1 is down"
+    );
     let fifth = append(&exec, scope, 5, 6).await;
     commit(&exec, scope, fifth).await.unwrap();
+}
+
+/// Removes the stopped voter 3 before its log rolls back, so the live
+/// leader discards its replication progress before the same ID returns.
+async fn remove_before_rolling_back(admin: &NetworkCoordinator) {
+    membership_after_election(
+        admin,
+        [0x40; 32],
+        Operation::Membership {
+            voters: [1, 2].into(),
+            expected: [1, 2, 3].into(),
+            expected_revision: 0,
+        },
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -434,11 +459,10 @@ async fn a_completely_restored_service_stays_fenced() {
     for id in 1..=3 {
         cluster.wait_online(id, &admin).await;
     }
-    // Nobody may vote, so nothing answers: recovery of a whole service is an
-    // explicit new configuration, never a silent rollback.
     assert_eq!(
         exec.coordinated_head(log(scope)).await,
-        Err(CoordinationError::Unavailable)
+        Err(CoordinationError::Unavailable),
+        "recovering a whole service is an explicit new configuration, never a silent rollback"
     );
     for id in 1..=3 {
         let status = admin.status(id).await.unwrap();
@@ -470,12 +494,15 @@ async fn owner_closure_ends_the_log_and_frees_only_open_quota() {
     );
     assert_eq!(owner.usage().await.unwrap().closed_domains, 0);
     owner.close_domain(first, [9; 32]).await.unwrap();
-    // A retry answers the same; the closed log takes no further entry.
-    owner.close_domain(first, [9; 32]).await.unwrap();
+    owner
+        .close_domain(first, [9; 32])
+        .await
+        .expect("a retried closure answers the same");
     let action = append(&executor, first, 1, 2).await;
     assert_eq!(
         executor.coordinated(log(first), action).await,
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a closed log takes no further entry"
     );
     let usage = owner.usage().await.unwrap();
     assert_eq!((usage.open_domains, usage.closed_domains), (1, 1));

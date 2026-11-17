@@ -39,6 +39,10 @@ impl std::fmt::Display for RolloutConfirmationRequired {
 }
 impl std::error::Error for RolloutConfirmationRequired {}
 
+/// Refuses an issuer's schema rollout that removes data until the
+/// application confirms its exact removal impact, and one that would
+/// silently change what grants issued before mean: a `granted_like` entry
+/// goes only with its table, or with the table it followed.
 pub(crate) async fn confirm(
     settings: &Settings,
     path: &Path,
@@ -56,8 +60,6 @@ pub(crate) async fn confirm(
         format!("the application schema cannot replace the installed one: {refusal}")
     })?;
     let removed = rocky_core::removed(&current, &target);
-    // Grants issued before would silently change meaning. An entry goes
-    // with its table, or with the table it followed.
     let kept = |name: &str| schema.tables.iter().any(|table| table.name == name);
     let (installed, declared) = (settings.schema.granted_like(), schema.granted_like());
     if let Some(table) = settings.schema.tables.iter().find(|table| {

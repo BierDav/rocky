@@ -86,6 +86,8 @@ pub struct CheckpointRecord {
     pub sole_recovery: Vec<Commitment>,
 }
 const RECORD_MAGIC: &[u8] = b"rocky.checkpoint.v2";
+/// A runtime configures at most this many authors.
+const MAX_FRONTIER_AUTHORS: usize = 64;
 const NOTICE_MAGIC: &[u8] = b"rocky.pruned.v1";
 const PAGE_MAGIC: &[u8] = b"rocky.checkpoint.page.v3";
 
@@ -171,8 +173,7 @@ impl Reader<'_> {
     }
     fn frontier(&mut self) -> Result<AppliedFrontier, Error> {
         let count = self.u32()?;
-        // A runtime configures at most 64 authors.
-        if count > 64 {
+        if count as usize > MAX_FRONTIER_AUTHORS {
             return Err(malformed());
         }
         let mut frontier = Vec::new();
@@ -672,21 +673,21 @@ where
     ) -> Result<Catchup, Error> {
         if state.received.len() > crate::replication::MAX_SYNC_EXCEPTIONS
             || state.held.0.len() > 64
-            || state.applied.0.len() > 64
+            || state.applied.0.len() > MAX_FRONTIER_AUTHORS
         {
             return Err(Error::Quota {
                 resource: "sync state",
                 limit: crate::replication::MAX_SYNC_EXCEPTIONS,
             });
         }
-        // The applied frontier already covers what the peer holds below it.
-        state.received.retain(|id| {
-            !state
+        let covered_by_applied = |id: &OperationId| {
+            state
                 .applied
                 .0
                 .iter()
                 .any(|(node, applied)| *node == id.node && id.sequence <= *applied)
-        });
+        };
+        state.received.retain(|id| !covered_by_applied(id));
         match self
             .retention_request(Request::Catchup(peer, Box::new(state), after))
             .await?
@@ -832,10 +833,12 @@ mod tests {
         longer.push(0);
         assert!(CheckpointRecord::decode(&longer).is_err());
         assert!(CheckpointRecord::decode(&bytes[..bytes.len() - 1]).is_err());
-        // One current format: the previous record, with its strong anchor, is refused.
         let mut previous = bytes.clone();
         previous[b"rocky.checkpoint.v".len()] = b'1';
-        assert!(CheckpointRecord::decode(&previous).is_err());
+        assert!(
+            CheckpointRecord::decode(&previous).is_err(),
+            "one current format: the previous record, with its strong anchor, is refused"
+        );
         let notice = PrunedNotice {
             scope: fixtures::SCOPE,
             node: fixtures::LAPTOP,

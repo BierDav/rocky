@@ -156,10 +156,13 @@ async fn a_moved_bookmark_after_a_switch_crash_can_resume_the_saved_target() {
     )
     .await
     .unwrap();
-    // It finished at the staged target and advanced with the bookmark.
     assert!(a.projection_plan().await.unwrap().is_none());
     assert_eq!(scalar(&a, "SELECT count(*) FROM items").await, 1);
-    assert_eq!(a.followed_tip().await, next);
+    assert_eq!(
+        a.followed_tip().await,
+        next,
+        "the switch finished at the staged target and advanced with the bookmark"
+    );
     assert!(a.pending_schema().await.unwrap().is_none());
     assert_eq!(intents(&a).await, 0);
     assert_eq!(
@@ -401,8 +404,11 @@ async fn in_process_the_staged_intent_stays_the_only_authority_until_resumed() {
     let dir = Scratch::new().await;
     let key = PrivateKey::new();
     let (a, source, target) = interrupted(&lineage, &dir, &key).await;
-    // A failed plan leaves the source installed.
-    assert_eq!(a.followed_tip().await, source);
+    assert_eq!(
+        a.followed_tip().await,
+        source,
+        "a failed plan leaves the source installed"
+    );
     let seal = continued(&lineage, target, 4);
     let next = seal.successor().unwrap().unwrap();
     a.receive_tip_statements(&[
@@ -411,9 +417,12 @@ async fn in_process_the_staged_intent_stays_the_only_authority_until_resumed() {
     ])
     .await
     .unwrap();
-    // The move continues from the target: admission keeps the intent.
     assert_eq!(a.followed_tip().await, source);
-    assert_eq!(a.pending_schema().await.unwrap().unwrap().tip, target);
+    assert_eq!(
+        a.pending_schema().await.unwrap().unwrap().tip,
+        target,
+        "a move continuing from the target keeps the staged intent"
+    );
     assert_eq!(intents(&a).await, 1);
     assert!(switch(&lineage, &a, &key, target, 4).await.unwrap());
     assert_eq!(a.followed_tip().await, next);
@@ -505,9 +514,11 @@ async fn a_sideways_move_with_a_close_seal_withdraws_the_staged_switch() {
         .unwrap();
         withdrawn(&a).await;
         assert_eq!(a.followed_tip().await, sideways);
-        // The withdrawn target is refused like any other non-followed tip.
         let before = changes(&a).await;
-        assert!(switch(&lineage, &a, &key, target, 4).await.is_err());
+        assert!(
+            switch(&lineage, &a, &key, target, 4).await.is_err(),
+            "a withdrawn target is refused like any other non-followed tip"
+        );
         assert_eq!(changes(&a).await, before);
         drop(a);
         let a = lineage
@@ -577,7 +588,6 @@ async fn a_revoked_target_withdraws_the_staged_switch() {
     .unwrap();
     offer(&lineage, &a).await;
     let source = a.followed_tip().await;
-    // An issuer, later revoked, seals the source and moves `main`.
     let issuer = PrivateKey::new();
     let chain = CredentialChain(vec![
         Authority::owner_in(
@@ -719,7 +729,6 @@ async fn an_own_publication_withdraws_with_its_staged_switch() {
     assert_eq!(a.schema_context().await, context);
     assert_eq!(a.stored_and_memory_revision().await, revision);
     assert_eq!(super::audit::snapshot(&a).await, before);
-    // A failure after withdrawal has begun must restore the same live context.
     a.inner.lock(crate::replica::Class::Background).await.conn.execute(
         "CREATE TEMP TRIGGER fail_withdraw AFTER DELETE ON secure_projection_plan BEGIN SELECT RAISE(ABORT,'withdraw rollback'); END", ()
     ).await.unwrap();

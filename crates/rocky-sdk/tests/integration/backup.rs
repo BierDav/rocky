@@ -33,10 +33,9 @@ async fn a_backup_restores_into_a_fresh_identity_without_forking_or_resending()
     introduce(&a, &b).await;
     b.add(1, "apples").await;
     b.sync().await.expect("sync");
-    // Bread never left the device that is about to be lost.
-    b.add(2, "bread").await;
+    let unsent_before_loss = "bread";
+    b.add(2, unsent_before_loss).await;
     let lost = b.node().await;
-    // A retired cache beside the database is never copied into a current archive.
     std::fs::write(
         root.path().join("b/coordinator.evidence"),
         b"retired receipt cache",
@@ -51,7 +50,11 @@ async fn a_backup_restores_into_a_fresh_identity_without_forking_or_resending()
         .iter()
         .map(|file| file.name.as_str())
         .collect();
-    assert_eq!(names, ["identity.json", "rocky.sqlite"]);
+    assert_eq!(
+        names,
+        ["identity.json", "rocky.sqlite"],
+        "a retired cache beside the database is never archived"
+    );
     assert!(
         b.database.backup(&archive).await.is_err(),
         "never overwritten"
@@ -73,7 +76,6 @@ async fn a_backup_restores_into_a_fresh_identity_without_forking_or_resending()
     .to_string();
     assert!(error.contains("not a Rocky backup archive"), "{error}");
 
-    // A changed byte, or an invitation of another domain, is refused.
     let mut bytes = std::fs::read(&archive)?;
     let last = bytes.len() - 1;
     bytes[last] ^= 1;
@@ -86,7 +88,8 @@ async fn a_backup_restores_into_a_fresh_identity_without_forking_or_resending()
             &tampered,
             &invitation
         )
-        .is_err()
+        .is_err(),
+        "a tampered archive is refused"
     );
     let other = Device::create(&root.path().join("other"), network("other"))?;
     let foreign = other.invite().await;
@@ -106,8 +109,7 @@ async fn a_backup_restores_into_a_fresh_identity_without_forking_or_resending()
         &a.invite().await,
     )?)?;
     assert_ne!(c.node().await, lost, "a fresh signing identity");
-    assert_eq!(c.titles().await, ["apples", "bread"]);
-    // The lost device's handle still names its one operation.
+    assert_eq!(c.titles().await, ["apples", unsent_before_loss]);
     let replayed = snap::ok(snap::mutate(
         &c.session,
         vec![2; 32],
@@ -122,18 +124,25 @@ async fn a_backup_restores_into_a_fresh_identity_without_forking_or_resending()
         Some(snap::text(&(lost))),
     ))
     .await;
-    assert_eq!(replayed["replayed"], true);
+    assert_eq!(
+        replayed["replayed"], true,
+        "the lost device's handle still names its one operation"
+    );
     assert_eq!(c.titles().await, ["apples", "bread"]);
-    // Its unsent edit is delivered as the lost device signed it; new edits
-    // are the new identity's own.
     c.sync().await.expect("sync");
-    assert_eq!(a.titles().await, ["apples", "bread"]);
+    assert_eq!(
+        a.titles().await,
+        ["apples", unsent_before_loss],
+        "the unsent edit is delivered as the lost device signed it"
+    );
     c.add(3, "cheese").await;
     c.sync().await.expect("sync");
     assert_eq!(a.titles().await, ["apples", "bread", "cheese"]);
     c.close().await;
-    // The directory now holds a domain: the archive is not restored again.
-    assert!(Database::restore(open(&c_dir, network("c")), &archive, &a.invite().await).is_err());
+    assert!(
+        Database::restore(open(&c_dir, network("c")), &archive, &a.invite().await).is_err(),
+        "an archive is never restored over a directory that holds a domain"
+    );
     let c = Device::new(Database::open(open(&c_dir, None))?)?;
     assert_eq!(c.titles().await, ["apples", "bread", "cheese"]);
     c.close().await;

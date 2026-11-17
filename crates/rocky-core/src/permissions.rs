@@ -324,21 +324,27 @@ mod tests {
         assert!(assigned.permitted_by(&[grant(&[Right::Update], &[1, 2])]));
         assert_eq!(assigned.published_fields(), [[1; 32], [2; 32]].into());
 
-        // An equal row with a mask is an update; without one it is nothing.
         let equal = RowChange {
             after: change.before.clone(),
             ..change.clone()
         };
-        assert_eq!(RowWrite::changed(equal.clone()).right(), None);
+        assert_eq!(
+            RowWrite::changed(equal.clone()).right(),
+            None,
+            "an equal row without a mask is nothing"
+        );
         let republish = RowWrite {
             change: equal,
             assigned: [[2; 32]].into(),
         };
-        assert_eq!(republish.right(), Some(Right::Update));
+        assert_eq!(
+            republish.right(),
+            Some(Right::Update),
+            "an equal row with a mask is an update"
+        );
         assert!(republish.permitted_by(&[grant(&[Right::Update], &[2])]));
 
-        // Masks belong to updates, and to fields the after image holds.
-        for invalid in [
+        for misplaced_mask in [
             RowWrite {
                 change: RowChange {
                     before: None,
@@ -351,13 +357,20 @@ mod tests {
                 assigned: [[7; 32]].into(),
             },
         ] {
-            assert!(!invalid.valid());
-            assert!(!invalid.permitted_by(&[grant(&[Right::Update, Right::Insert], &[1, 2, 7])]));
+            assert!(
+                !misplaced_mask.valid(),
+                "masks belong to updates, and to fields the after image holds"
+            );
+            assert!(
+                !misplaced_mask.permitted_by(&[grant(&[Right::Update, Right::Insert], &[1, 2, 7])])
+            );
         }
-        // Reading or holding custody is not a write right.
-        assert!(!changed.permitted_by(&[grant(
-            &[Right::Read, Right::Custody, Right::PublishSchema],
-            &[1, 2],
-        )]));
+        assert!(
+            !changed.permitted_by(&[grant(
+                &[Right::Read, Right::Custody, Right::PublishSchema],
+                &[1, 2],
+            )]),
+            "reading or holding custody is not a write right"
+        );
     }
 }

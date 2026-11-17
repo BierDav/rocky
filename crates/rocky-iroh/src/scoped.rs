@@ -107,12 +107,18 @@ pub(super) async fn inbound(
     .await?;
     if result.is_err() {
         shared.refused.fetch_add(1, Ordering::Relaxed);
-        // Deliver the typed refusal before its dedicated link connection closes.
-        tokio::io::AsyncWriteExt::shutdown(io).await?;
-        let mut rest = [0; 1];
-        let _ = tokio::io::AsyncReadExt::read(io, &mut rest).await;
+        deliver_before_close(io).await?;
     }
     result.map_err(Into::into)
+}
+
+/// Finishes `io` and waits for the peer's end, so a typed refusal arrives
+/// before its dedicated link connection closes.
+async fn deliver_before_close(io: &mut impl SessionStream) -> Result<(), Failure> {
+    tokio::io::AsyncWriteExt::shutdown(io).await?;
+    let mut rest = [0; 1];
+    let _ = tokio::io::AsyncReadExt::read(io, &mut rest).await;
+    Ok(())
 }
 
 #[cfg(test)]

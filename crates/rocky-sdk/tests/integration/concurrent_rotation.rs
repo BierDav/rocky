@@ -1,4 +1,4 @@
-//! Phase 8: sibling histories and writer convergence through the in-process hub.
+//! Sibling histories and writer convergence through the in-process hub.
 use crate::common;
 use crate::registry_revocation::fixture;
 use crate::support::snapshot as snap;
@@ -89,6 +89,41 @@ async fn write_group(device: &Device, prefix: &str) {
     }
     snap::ok(device.session.execute("COMMIT", Vec::new())).await;
 }
+/// Seals each issuer while it is offline, so each reader imports its own
+/// issuer's post-rotation base and the two seals race until the issuers meet.
+async fn seal_each_issuer_apart(issuers: [&Device; 2]) {
+    for issuer in issuers {
+        snap::ok(issuer.session.set_networking_enabled(false)).await;
+        issuer.seal_and_compact().await;
+    }
+    for issuer in issuers {
+        snap::ok(issuer.session.set_networking_enabled(true)).await;
+    }
+}
+
+/// Renews and syncs `reader` while the issuer that revoked it is out of
+/// reach, so the reader can only retry the other issuer.
+async fn sync_away_from_revoking_issuer(reader: &Device, revoking: &Device) -> Result<(), Failure> {
+    snap::ok(revoking.session.set_networking_enabled(false)).await;
+    snap::ok(async {
+        reader.session.renew().await?;
+        reader.session.info().await
+    })
+    .await;
+    snap::ok(
+        reader
+            .session
+            .remove_peer(&(snap::text(&(revoking.node().await)))),
+    )
+    .await;
+    reader
+        .sync()
+        .await
+        .map_err(|e| format!("reader sync: {e}"))?;
+    snap::ok(revoking.session.set_networking_enabled(true)).await;
+    Ok(())
+}
+
 async fn rows(device: &Device, table: &str) -> Vec<String> {
     let page = snap::ok(device.session.read(rocky_sdk::ReadQuery {
         sql: snap::text(&(format!("SELECT key FROM {table} WHERE list='L' ORDER BY key"))),
@@ -282,36 +317,9 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
     .await;
     write(&a, "a").await;
     write(&b, "b").await;
-    // Each issuer's base after its own rotation is what its reader
-    // imports; their two seals race and resolve when they meet. Sealing
-    // offline keeps the issuers apart, as the rotations were.
-    for issuer in [&a, &b] {
-        snap::ok(issuer.session.set_networking_enabled(false)).await;
-        issuer.seal_and_compact().await;
-    }
-    for issuer in [&a, &b] {
-        snap::ok(issuer.session.set_networking_enabled(true)).await;
-    }
-    for (device, original) in [(&carol, &a), (&dave, &b)] {
-        // A reader that switched tips retries every issuer; the one that
-        // revoked it stays out of reach here, as the scenario requires.
-        snap::ok(original.session.set_networking_enabled(false)).await;
-        snap::ok(async {
-            device.session.renew().await?;
-            device.session.info().await
-        })
-        .await;
-        snap::ok(
-            device
-                .session
-                .remove_peer(&(snap::text(&(original.node().await)))),
-        )
-        .await;
-        device
-            .sync()
-            .await
-            .map_err(|e| format!("reader sync: {e}"))?;
-        snap::ok(original.session.set_networking_enabled(true)).await;
+    seal_each_issuer_apart([&a, &b]).await;
+    for (reader, revoking) in [(&carol, &a), (&dave, &b)] {
+        sync_away_from_revoking_issuer(reader, revoking).await?;
     }
     assert_eq!(rows(&carol, "parts").await, ["b", "before"]);
     assert_eq!(rows(&dave, "parts").await, ["a", "before"]);

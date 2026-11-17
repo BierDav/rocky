@@ -42,7 +42,9 @@ where
     /// The pruned prefix follows the durable checkpoint, less the retained window,
     /// as far as every delivery target has acknowledged or is declared behind.
     /// With `behind_after`, a target that holds it back that long is declared
-    /// behind.
+    /// behind. A target acknowledged what it reported applied or held, or
+    /// holds a receipt for. Custody counts only full nodes that applied; other
+    /// targets rebootstrap from them once they fall behind.
     pub(super) async fn advance_pruned_prefix(&self, stored: &mut Stored) -> Result<bool, Error> {
         let Some((record, _)) = &self.retention.record else {
             return Ok(false);
@@ -62,8 +64,6 @@ where
             let mut limit = wanted;
             let custody = self.retention.policy.custody;
             if custody > 0 {
-                // Only full nodes that applied count; other targets
-                // rebootstrap from them once they fall behind.
                 let mut covered = Vec::new();
                 for target in &self.config.full_nodes {
                     let peer = stored
@@ -112,8 +112,8 @@ where
                 continue;
             }
             for target in &self.config.delivery_targets {
-                // Without a time limit, which target holds it back is moot.
-                if limit <= current && timed.is_none() {
+                let holder_is_moot = limit <= current && timed.is_none();
+                if holder_is_moot {
                     break;
                 }
                 let peer = stored
@@ -124,7 +124,6 @@ where
                 if *target == node || peer.is_some_and(|mark| mark.behind) {
                     continue;
                 }
-                // Acknowledged: reported applied or held, or a receipt for each one.
                 let mut acknowledged = current
                     .max(peer.map_or(0, |mark| at(&mark.applied, node).max(at(&mark.held, node))));
                 let mut receipts = self
@@ -202,8 +201,9 @@ where
         changed
     }
     /// Deletes operations, acknowledgments, outgoing entries and forgotten
-    /// handles behind the pruned prefix. Returns the released records and bytes,
-    /// and whether rows remain.
+    /// handles behind the pruned prefix; a handle outlives its operation by
+    /// the retry window. Returns the released records and bytes, and whether
+    /// rows remain.
     pub(super) async fn delete_behind(
         &self,
         stored: &Stored,
@@ -251,7 +251,6 @@ where
                 .await?;
             more |= removed == PRUNE_BATCH as u64;
         }
-        // A handle outlives its operation by the retry window.
         let local = self.identity.node;
         let forgotten = at(&stored.pruned_prefix, local).min(
             self.sequence
@@ -271,7 +270,8 @@ where
     }
     /// The operations `state` lacks after `after`, or the notice that it is
     /// behind the pruned prefix. A named target's held and applied frontiers are
-    /// kept as acknowledgment, and clear the outgoing work they cover.
+    /// kept as acknowledgment, and clear the outgoing work they cover; a peer
+    /// in contact is not silent, so its holding time restarts.
     pub(super) async fn catch_up(
         &mut self,
         peer: Option<NodeId>,
@@ -308,7 +308,6 @@ where
             let mark = mark(&mut stored, peer);
             let mut advanced = mark.behind || mark.holding_since.is_some();
             mark.behind = false;
-            // A peer in contact is not silent; its holding time restarts.
             mark.holding_since = None;
             for (target, source) in [(&mut mark.applied, &applied), (&mut mark.held, &held)] {
                 for (node, sequence) in source {
@@ -328,7 +327,7 @@ where
         let mut records = Vec::new();
         let mut bytes = 0;
         let mut next = None;
-        let mut full = false;
+        let mut page_filled = false;
         let mut nodes: Vec<_> = self.config.authors.iter().map(|(node, _)| *node).collect();
         nodes.dedup();
         'authors: for node in nodes {
@@ -366,7 +365,7 @@ where
                     if records.len() == TRANSFER_PAGE_SIZE
                         || bytes + encoded.len() > crate::MAX_FRAME_BYTES
                     {
-                        full = true;
+                        page_filled = true;
                         break 'authors;
                     }
                     bytes += encoded.len();
@@ -378,8 +377,8 @@ where
                 }
             }
         }
-        // A page that ran to the end of every log ends the pass.
-        if !full {
+        let reached_end_of_every_log = !page_filled;
+        if reached_end_of_every_log {
             next = None;
         }
         self.inject_fault().await?;

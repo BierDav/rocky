@@ -203,9 +203,7 @@ async fn devices_signed_in_against_one_snapshot_write_and_merge_in_both_orders()
     snapshot
         .admit_personal(first_chain.certificate().unwrap().clone(), &owner.context)
         .unwrap();
-    // Laptop and phone each certify themselves against the same snapshot
-    // and write before they meet.
-    let mut devices = Vec::new();
+    let mut devices_that_wrote_before_meeting = Vec::new();
     for (index, name) in ["laptop", "phone"].into_iter().enumerate() {
         let node = PrivateKey::new();
         let chain = owner.device(&f, &node);
@@ -217,7 +215,7 @@ async fn devices_signed_in_against_one_snapshot_write_and_merge_in_both_orders()
         );
         let device = replica(&f, &directory, name, &node, (chain, &known)).await;
         let frame = write(&device, &f, index as u8 + 1).await;
-        devices.push((device, known, frame));
+        devices_that_wrote_before_meeting.push((device, known, frame));
     }
     for (order, name) in [([0, 1], "forward"), ([1, 0], "backward")] {
         let receiver = replica(
@@ -229,7 +227,7 @@ async fn devices_signed_in_against_one_snapshot_write_and_merge_in_both_orders()
         )
         .await;
         for index in order {
-            let (_, known, frame) = &devices[index];
+            let (_, known, frame) = &devices_that_wrote_before_meeting[index];
             receiver.learn_revocations(known).await.unwrap();
             receiver.receive(frame.clone()).await.unwrap();
         }
@@ -246,14 +244,17 @@ async fn devices_signed_in_against_one_snapshot_write_and_merge_in_both_orders()
             3
         );
     }
-    // Each sibling accepts the other's write under the merged authority.
-    let (laptop, _, laptop_frame) = &devices[0];
-    let (phone, phone_known, phone_frame) = &devices[1];
+    let (laptop, _, laptop_frame) = &devices_that_wrote_before_meeting[0];
+    let (phone, phone_known, phone_frame) = &devices_that_wrote_before_meeting[1];
     laptop.learn_revocations(phone_known).await.unwrap();
     laptop.receive(phone_frame.clone()).await.unwrap();
     phone.receive(laptop_frame.clone()).await.unwrap();
     for device in [laptop, phone] {
-        assert_eq!(device.snapshot(f.public).await.unwrap().rows.len(), 2);
+        assert_eq!(
+            device.snapshot(f.public).await.unwrap().rows.len(),
+            2,
+            "each sibling accepts the other's write under the merged authority"
+        );
     }
 }
 
@@ -290,12 +291,13 @@ async fn a_cloned_device_key_with_conflicting_history_is_still_a_fork() {
 async fn a_shared_database_refuses_personal_certificates() {
     let f = Fixture::new();
     let directory = Scratch::new().await;
-    // Any trusted identity of a shared database can hand-build one.
     let trusted = Owner::trusted(&f, PrivateKey::new());
     let node = PrivateKey::new();
-    let chain = trusted.device(&f, &node);
+    let hand_built_personal_chain = trusted.device(&f, &node);
     let mut known = f.policy.clone();
-    known.link(chain.certificate().unwrap().clone()).unwrap();
+    known
+        .link(hand_built_personal_chain.certificate().unwrap().clone())
+        .unwrap();
     let member = PrivateKey::new();
     let receiver = EncryptedReplica::open(
         directory.path().join("receiver"),
@@ -314,13 +316,15 @@ async fn a_shared_database_refuses_personal_certificates() {
         receiver.revocations().await.exchange_digest(0).unwrap(),
         before.exchange_digest(0).unwrap()
     );
-    // Nor does such a device open a replica of it.
     let mut config = f.config(&node, f.full(), &[f.public]);
-    config.credentials = chain;
+    config.credentials = hand_built_personal_chain;
     let error = EncryptedReplica::open(directory.path().join("device"), f.app(), config)
         .await
         .err()
         .unwrap()
         .to_string();
-    assert!(error.contains("another database mode"), "{error}");
+    assert!(
+        error.contains("another database mode"),
+        "a personal device cannot open a shared database replica either: {error}"
+    );
 }

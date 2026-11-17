@@ -1,6 +1,6 @@
 //! SQL sessions on typed tables of an encrypted replica.
 use super::*;
-// A server thread serves the catch-up over a socket.
+/// Native only: a server thread serves the catch-up over a socket.
 #[cfg(not(target_family = "wasm"))]
 mod catch_up;
 mod intents;
@@ -289,6 +289,20 @@ async fn select(session: &SecureSql<TypedRows>, sql: &str) -> Vec<Vec<SqlValue>>
     session.run(sql, vec![]).await.unwrap().rows
 }
 /// Every frame of `scope` that `source` may send to `target`.
+/// Whether `frame` is an author's outcome record of a bundle.
+fn is_outcome_record(t: &Typed, frame: &EncryptedFrame) -> bool {
+    let plaintext = crate::wire::Opened::open(
+        &t.key(frame.scope().unwrap()).key,
+        &frame.operation_ref().unwrap().header.extensions,
+        frame.body_bytes(),
+    )
+    .unwrap()
+    .payload;
+    crate::wire::RowPayload::decode_test(&plaintext, frame, &t.app())
+        .unwrap()
+        .outcome()
+        .is_some()
+}
 async fn transfer(
     source: &EncryptedReplica<TypedRows>,
     target: &EncryptedReplica<TypedRows>,
@@ -313,7 +327,7 @@ fn sql_error(result: Result<SecureRows, Error>) -> SqlError {
     }
 }
 
-// Historical SQL scenarios now allocate current identities.
+/// Runs an `INSERT ... VALUES` with a newly allocated row identity.
 async fn insert(
     session: &SecureSql<TypedRows>,
     sql: &str,
@@ -428,10 +442,10 @@ async fn a_sql_transaction_over_two_reader_scopes_commits_one_bundle() {
     )
     .await
     .unwrap();
-    // The transaction reads its own writes.
     assert_eq!(
         select(&session, "SELECT count(*) FROM items").await,
-        vec![vec![SqlValue::Integer(3)]]
+        vec![vec![SqlValue::Integer(3)]],
+        "the transaction reads its own writes"
     );
     let committed = session.commit([1; 32]).await.unwrap();
     assert_eq!(committed.state, SqlState::Idle);
@@ -444,8 +458,6 @@ async fn a_sql_transaction_over_two_reader_scopes_commits_one_bundle() {
         );
     }
 
-    // A public reader projects the public partition into its typed table and
-    // cannot read the private one.
     let bob = t
         .open(
             &dir.path().join("b.db"),
@@ -471,18 +483,19 @@ async fn a_sql_transaction_over_two_reader_scopes_commits_one_bundle() {
             vec![text("a"), text("apples")],
             vec![text("b"), text("bread")],
             vec![text("c"), text("cheese")],
-        ]
+        ],
+        "a public reader projects the public partition into its typed table"
     );
     assert_eq!(
         sql_error(reader.run("SELECT * FROM salaries", vec![]).await),
-        SqlError::Denied
+        SqlError::Denied,
+        "a public reader cannot read the private partition"
     );
     assert_eq!(
         select(&reader, "SELECT count(*) FROM drafts").await,
         vec![vec![SqlValue::Integer(0)]]
     );
 
-    // A full reader shows neither table before the whole bundle arrived.
     let carol = t
         .open(
             &dir.path().join("c.db"),
@@ -495,13 +508,13 @@ async fn a_sql_transaction_over_two_reader_scopes_commits_one_bundle() {
     let mut ordered = frames.clone();
     ordered.sort_by_key(|frame| frame.scope().unwrap() != t.items);
     carol.receive(ordered[0].clone()).await.unwrap();
-    // Incomplete, not empty: the read is refused until the bundle is whole.
     assert_eq!(
         sql_error(full.run("SELECT count(*) FROM items", vec![]).await),
         SqlError::Unavailable {
             table: "items".into(),
             reason: crate::sql::Unavailable::Incomplete
-        }
+        },
+        "a full reader refuses the read as incomplete, not empty, until the bundle is whole"
     );
     carol.receive(ordered[1].clone()).await.unwrap();
     assert_eq!(
@@ -513,8 +526,6 @@ async fn a_sql_transaction_over_two_reader_scopes_commits_one_bundle() {
         vec![vec![text("apples"), SqlValue::Integer(1000)]]
     );
 
-    // Single statements commit by themselves; peers follow updates and deletes.
-    // The items log also carries the author's outcome record of the bundle.
     for statement in [
         "UPDATE items SET done=1 WHERE key='b'",
         "DELETE FROM items WHERE key='c'",
@@ -522,6 +533,10 @@ async fn a_sql_transaction_over_two_reader_scopes_commits_one_bundle() {
         session.run(statement, vec![]).await.unwrap();
     }
     let page = transfer(&alice, &bob, t.items).await;
+    assert!(
+        page.frames.iter().any(|frame| is_outcome_record(&t, frame)),
+        "the items log also carries the author's outcome record of the bundle"
+    );
     for status in bob.receive_all(page.frames).await {
         status.unwrap();
     }
@@ -530,15 +545,16 @@ async fn a_sql_transaction_over_two_reader_scopes_commits_one_bundle() {
         vec![
             vec![text("a"), SqlValue::Integer(0)],
             vec![text("b"), SqlValue::Integer(1)],
-        ]
+        ],
+        "single statements commit by themselves and peers follow updates and deletes"
     );
-    // A deleted business key can be inserted with a fresh identity.
     insert(&session, "INSERT INTO items VALUES('c','again',0)", vec![])
         .await
         .unwrap();
     assert_eq!(
         select(&session, "SELECT count(*) FROM items WHERE key='c'").await,
-        vec![vec![SqlValue::Integer(1)]]
+        vec![vec![SqlValue::Integer(1)]],
+        "a deleted business key can be inserted with a fresh identity"
     );
 }
 
@@ -570,7 +586,6 @@ async fn statements_outside_the_session_and_unpermitted_fields_are_refused() {
         assert!(session.run(refused, vec![]).await.is_err(), "{refused}");
     }
 
-    // A narrower session cannot name the other scope's table.
     let narrow = sql(&alice, &[t.items]).await;
     assert_eq!(
         sql_error(
@@ -581,10 +596,10 @@ async fn statements_outside_the_session_and_unpermitted_fields_are_refused() {
                 )
                 .await
         ),
-        SqlError::Denied
+        SqlError::Denied,
+        "a narrower session cannot name the other scope's table"
     );
 
-    // A read-only principal reads but cannot write.
     let bob = t
         .open(
             &dir.path().join("b.db"),
@@ -608,24 +623,25 @@ async fn statements_outside_the_session_and_unpermitted_fields_are_refused() {
     );
     assert_eq!(
         sql_error(reader.run("UPDATE items SET title='x'", vec![]).await),
-        SqlError::Denied
+        SqlError::Denied,
+        "a read-only principal reads but cannot write"
     );
-    // A transaction that tried continues to report it until rolled back.
     reader.run("BEGIN", vec![]).await.unwrap();
     assert!(reader.run("DELETE FROM items", vec![]).await.is_err());
-    assert!(matches!(
-        sql_error(reader.run("SELECT 1", vec![]).await),
-        SqlError::Aborted(AbortReason::Poisoned(_))
-    ));
+    assert!(
+        matches!(
+            sql_error(reader.run("SELECT 1", vec![]).await),
+            SqlError::Aborted(AbortReason::Poisoned(_))
+        ),
+        "a transaction that tried a refused write reports it until rolled back"
+    );
     reader.run("ROLLBACK", vec![]).await.unwrap();
     assert_eq!(
         select(&reader, "SELECT title FROM items").await,
         vec![vec![text("apples")]]
     );
 
-    // A principal that may update titles only: the commit admits every
-    // changed field, and a refused commit leaves no row behind.
-    let carol = t
+    let title_only_editor = t
         .open(
             &dir.path().join("c.db"),
             &PrivateKey::new(),
@@ -637,11 +653,11 @@ async fn statements_outside_the_session_and_unpermitted_fields_are_refused() {
             &[t.items],
         )
         .await;
-    let page = transfer(&alice, &carol, t.items).await;
-    for status in carol.receive_all(page.frames).await {
+    let page = transfer(&alice, &title_only_editor, t.items).await;
+    for status in title_only_editor.receive_all(page.frames).await {
         status.unwrap();
     }
-    let editor = sql(&carol, &[t.items]).await;
+    let editor = sql(&title_only_editor, &[t.items]).await;
     let titled = editor
         .run("UPDATE items SET title='pears' WHERE key='a'", vec![])
         .await
@@ -651,20 +667,24 @@ async fn statements_outside_the_session_and_unpermitted_fields_are_refused() {
         editor
             .run("UPDATE items SET done=1 WHERE key='a'", vec![])
             .await
-            .is_err()
+            .is_err(),
+        "the commit admits every changed field against the grant"
     );
     assert_eq!(
         select(&editor, "SELECT title,done FROM items").await,
         vec![vec![text("pears"), SqlValue::Integer(0)]]
     );
-    // The table is writable, but inserting is not: the commit refuses it.
-    assert!(matches!(
-        insert(&editor, "INSERT INTO items VALUES('z','new',0)", vec![]).await,
-        Err(Error::Rejected(_))
-    ));
+    assert!(
+        matches!(
+            insert(&editor, "INSERT INTO items VALUES('z','new',0)", vec![]).await,
+            Err(Error::Rejected(_))
+        ),
+        "the table is writable, but the commit refuses an insert"
+    );
     assert_eq!(
         select(&editor, "SELECT count(*) FROM items").await,
-        vec![vec![SqlValue::Integer(1)]]
+        vec![vec![SqlValue::Integer(1)]],
+        "a refused commit leaves no row behind"
     );
 }
 
@@ -691,23 +711,29 @@ async fn authority_changes_wait_for_the_lease_and_end_the_session() {
     insert(&session, "INSERT INTO items VALUES('a','apples',0)", vec![])
         .await
         .unwrap();
-    // A revocation is linearized by the replica: it waits for the open
-    // transaction, which commits under the authority it began with.
     let learning = {
         let alice = alice.clone();
         let policy = crate::tests::revoking(&t.publisher, t.app().manifest().app, &[], &[root]);
         rocky_platform::task::spawn(async move { alice.learn_revocations(&policy).await })
     };
     rocky_platform::task::yield_now().await;
-    assert!(!learning.is_finished());
+    assert!(
+        !learning.is_finished(),
+        "a revocation waits for the open transaction"
+    );
     let committed = session.commit([1; 32]).await.unwrap();
-    assert_eq!(committed.committed.unwrap().frames.len(), 1);
+    assert_eq!(
+        committed.committed.unwrap().frames.len(),
+        1,
+        "the open transaction commits under the authority it began with"
+    );
     learning.await.unwrap().unwrap();
-    // Afterwards every statement of the old session is refused.
-    assert!(session.run("SELECT * FROM items", vec![]).await.is_err());
+    assert!(
+        session.run("SELECT * FROM items", vec![]).await.is_err(),
+        "after the revocation every statement of the old session is refused"
+    );
     assert!(alice.session(both.into()).await.is_err());
 
-    // Credentials no statement ends open a new session.
     alice
         .renew_credentials(t.credentials(&node, t.full()))
         .await
@@ -715,11 +741,14 @@ async fn authority_changes_wait_for_the_lease_and_end_the_session() {
     let renewed = sql(&alice, &both).await;
     assert_eq!(
         select(&renewed, "SELECT title FROM items").await,
-        vec![vec![text("apples")]]
+        vec![vec![text("apples")]],
+        "credentials no statement ends open a new session"
     );
-    // Logout ends it; a new session finds the rows unavailable, not empty.
     alice.logout().await;
-    assert!(renewed.run("SELECT * FROM items", vec![]).await.is_err());
+    assert!(
+        renewed.run("SELECT * FROM items", vec![]).await.is_err(),
+        "logout ends the session"
+    );
     let after = alice.session(both.into()).await.unwrap();
     let after = after.sql(SqlOptions::default()).await.unwrap();
     assert_eq!(
@@ -727,9 +756,13 @@ async fn authority_changes_wait_for_the_lease_and_end_the_session() {
         SqlError::Unavailable {
             table: "items".into(),
             reason: crate::sql::Unavailable::KeyMissing
-        }
+        },
+        "after logout a new session finds the rows unavailable, not empty"
     );
 }
+
+/// Clock skew past the one-hour credential expiry the test issues.
+const PAST_CREDENTIAL_EXPIRY_SECONDS: u64 = 7200;
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn credentials_expiring_inside_an_open_transaction_refuse_it() {
@@ -757,25 +790,26 @@ async fn credentials_expiring_inside_an_open_transaction_refuse_it() {
         expires
     );
 
-    // A SQL transaction began under valid credentials; the chain expires
-    // while it is open. Its next statement and its commit are refused.
     let session = sql(&alice, &both).await;
     session.run("BEGIN", vec![]).await.unwrap();
     insert(&session, "INSERT INTO items VALUES('a','apples',0)", vec![])
         .await
         .unwrap();
-    CLOCK_SKEW.with(|skew| skew.set(7200));
+    CLOCK_SKEW.with(|skew| skew.set(PAST_CREDENTIAL_EXPIRY_SECONDS));
     assert!(
         insert(&session, "INSERT INTO items VALUES('b','bread',0)", vec![])
             .await
-            .is_err()
+            .is_err(),
+        "the next statement after the chain expires inside the transaction is refused"
     );
-    // The refused commit rolls the transaction back and frees the replica.
     assert!(session.commit([1; 32]).await.is_err());
-    assert_eq!(session.state().await, SqlState::Idle);
+    assert_eq!(
+        session.state().await,
+        SqlState::Idle,
+        "the refused commit rolls the transaction back and frees the replica"
+    );
     assert!(session.run("SELECT * FROM items", vec![]).await.is_err());
 
-    // A staged secure transaction is admitted again at commit.
     CLOCK_SKEW.with(|skew| skew.set(0));
     let staged = alice.session(both.into()).await.unwrap();
     let table = t.schema.table("items").unwrap();
@@ -798,22 +832,28 @@ async fn credentials_expiring_inside_an_open_transaction_refuse_it() {
     };
     let mut transaction = staged.transaction();
     transaction.insert(t.items, id, fields).await.unwrap();
-    CLOCK_SKEW.with(|skew| skew.set(7200));
-    assert!(transaction.commit([2; 32]).await.is_err());
+    CLOCK_SKEW.with(|skew| skew.set(PAST_CREDENTIAL_EXPIRY_SECONDS));
+    assert!(
+        transaction.commit([2; 32]).await.is_err(),
+        "a staged secure transaction is admitted again at commit"
+    );
     assert!(alice.session(both.into()).await.is_err());
 
-    // Nothing committed; renewed credentials open a session again.
     CLOCK_SKEW.with(|skew| skew.set(0));
     assert!(alice.snapshot(t.items).await.unwrap().rows.is_empty());
     assert!(!alice.handle_committed([1; 32]).await.unwrap());
-    assert!(!alice.handle_committed([2; 32]).await.unwrap());
+    assert!(
+        !alice.handle_committed([2; 32]).await.unwrap(),
+        "nothing committed under expired credentials"
+    );
     alice
         .renew_credentials(t.credentials(&node, t.full()))
         .await
         .unwrap();
     assert_eq!(
         select(&sql(&alice, &both).await, "SELECT count(*) FROM items").await,
-        vec![vec![SqlValue::Integer(0)]]
+        vec![vec![SqlValue::Integer(0)]],
+        "renewed credentials open a session again"
     );
 }
 
@@ -843,7 +883,6 @@ async fn cancel_and_timeout_roll_back_and_free_the_replica() {
     session.run("ROLLBACK", vec![]).await.unwrap();
     assert!(select(&session, "SELECT * FROM items").await.is_empty());
 
-    // An expired transaction is rolled back and the replica is free again.
     let short = alice
         .session(both.into())
         .await
@@ -858,21 +897,24 @@ async fn cancel_and_timeout_roll_back_and_free_the_replica() {
     insert(&short, "INSERT INTO items VALUES('b','bread',0)", vec![])
         .await
         .unwrap();
-    // Another writer waits for the lease; the timeout releases it.
     let written = insert(&session, "INSERT INTO items VALUES('c','cheese',0)", vec![])
         .await
         .unwrap();
-    assert_eq!(written.committed.unwrap().frames.len(), 1);
+    assert_eq!(
+        written.committed.unwrap().frames.len(),
+        1,
+        "another writer waits for the lease until the timeout releases it"
+    );
     assert_eq!(
         sql_error(short.run("COMMIT", vec![]).await),
         SqlError::Aborted(AbortReason::Timeout)
     );
     assert_eq!(
         select(&session, "SELECT key FROM items").await,
-        vec![vec![text("c")]]
+        vec![vec![text("c")]],
+        "the expired transaction is rolled back"
     );
 
-    // A dropped session rolls its transaction back.
     let dropped = sql(&alice, &both).await;
     dropped.run("BEGIN", vec![]).await.unwrap();
     insert(&dropped, "INSERT INTO items VALUES('d','dates',0)", vec![])
@@ -881,7 +923,8 @@ async fn cancel_and_timeout_roll_back_and_free_the_replica() {
     drop(dropped);
     assert_eq!(
         select(&session, "SELECT key FROM items").await,
-        vec![vec![text("c")]]
+        vec![vec![text("c")]],
+        "a dropped session rolls its transaction back"
     );
 }
 
@@ -959,52 +1002,81 @@ async fn a_handle_recovers_its_commit_after_restart() {
         .await
         .unwrap();
     let first = session.commit([7; 32]).await.unwrap().committed.unwrap();
+    session.run("BEGIN", vec![]).await.unwrap();
+    session
+        .run("UPDATE items SET title='apples'", vec![])
+        .await
+        .unwrap();
+    let recorded = session.commit([6; 32]).await.unwrap().committed.unwrap();
     drop(session);
     drop(alice);
 
-    // The same handle and rows after a restart return the recorded frames
-    // and roll the repeated transaction back.
     let alice = t.open(&path, &node, t.full(), &both).await;
     let session = sql(&alice, &both).await;
     assert_eq!(
         select(&session, "SELECT title FROM items").await,
-        vec![vec![text("apples")]]
+        vec![vec![text("apples")]],
+        "the committed row survives a restart"
+    );
+    session.run("BEGIN", vec![]).await.unwrap();
+    session
+        .run("UPDATE items SET title='apples'", vec![])
+        .await
+        .unwrap();
+    let recovered = session.commit([6; 32]).await.unwrap().committed.unwrap();
+    assert_eq!(
+        recovered
+            .frames
+            .iter()
+            .map(|frame| frame.id().unwrap())
+            .collect::<Vec<_>>(),
+        recorded
+            .frames
+            .iter()
+            .map(|frame| frame.id().unwrap())
+            .collect::<Vec<_>>(),
+        "the same handle and rows after a restart return the recorded frames and author none"
     );
     session.run("BEGIN", vec![]).await.unwrap();
     session.run("DELETE FROM items", vec![]).await.unwrap();
     insert(&session, "INSERT INTO items VALUES('a','apples',0)", vec![])
         .await
         .unwrap();
-    // Deleting and reinserting a key republishes its row: a new transaction.
     let republished = session.commit([8; 32]).await.unwrap().committed.unwrap();
-    assert_eq!(republished.frames.len(), 1);
+    assert_eq!(
+        republished.frames.len(),
+        1,
+        "deleting and reinserting a key republishes its row in a new transaction"
+    );
     session.run("BEGIN", vec![]).await.unwrap();
     session
         .run("UPDATE items SET title='apples'", vec![])
         .await
         .unwrap();
-    // An intent publishes its statement, even an equal assignment.
     let assigned = session.commit([9; 32]).await.unwrap().committed.unwrap();
-    assert_eq!(assigned.frames.len(), 1);
+    assert_eq!(
+        assigned.frames.len(),
+        1,
+        "an intent publishes its statement, even an equal assignment"
+    );
     assert_ne!(
         assigned.frames[0].id().unwrap(),
         first.frames[0].id().unwrap()
     );
-    // Reusing a handle with other rows conflicts and changes nothing.
     session.run("BEGIN", vec![]).await.unwrap();
     session
         .run("UPDATE items SET done=1", vec![])
         .await
         .unwrap();
-    assert!(matches!(
-        session.commit([9; 32]).await,
-        Err(Error::Conflict)
-    ));
+    assert!(
+        matches!(session.commit([9; 32]).await, Err(Error::Conflict)),
+        "reusing a handle with other rows conflicts"
+    );
     assert_eq!(
         select(&session, "SELECT done FROM items").await,
-        vec![vec![SqlValue::Integer(0)]]
+        vec![vec![SqlValue::Integer(0)]],
+        "a conflicting handle changes nothing"
     );
-    // The same rows under the same handle replay.
     session.run("BEGIN", vec![]).await.unwrap();
     session
         .run("UPDATE items SET title='apples'", vec![])
@@ -1013,7 +1085,8 @@ async fn a_handle_recovers_its_commit_after_restart() {
     let replayed = session.commit([9; 32]).await.unwrap().committed.unwrap();
     assert_eq!(
         replayed.frames[0].id().unwrap(),
-        assigned.frames[0].id().unwrap()
+        assigned.frames[0].id().unwrap(),
+        "the same rows under the same handle replay the recorded frame"
     );
 }
 
@@ -1118,16 +1191,22 @@ async fn an_edit_concurrent_with_a_delete_applies_and_its_log_continues() {
         .committed
         .unwrap()
         .frames;
-    // The edit merges into the tombstone: the delete wins, and the
-    // editor's next frame is not left waiting for it.
     for frame in renamed.into_iter().chain(later) {
-        assert_eq!(alice.receive(frame).await.unwrap(), ReceiveStatus::Applied);
+        assert_eq!(
+            alice.receive(frame).await.unwrap(),
+            ReceiveStatus::Applied,
+            "the edit merges into the tombstone and the editor's next frame does not wait for it"
+        );
     }
     for frame in deleted {
         assert_eq!(carol.receive(frame).await.unwrap(), ReceiveStatus::Applied);
     }
     let rows = select(&a, "SELECT key,title FROM items").await;
-    assert_eq!(rows, vec![vec![text("b"), text("bread")]]);
+    assert_eq!(
+        rows,
+        vec![vec![text("b"), text("bread")]],
+        "the delete wins over the concurrent edit"
+    );
     assert_eq!(rows, select(&c, "SELECT key,title FROM items").await);
 }
 
@@ -1168,7 +1247,6 @@ async fn catalogs_cursors_and_joins_report_unavailable_rows_instead_of_absence()
     insert(&writer, "INSERT INTO salaries VALUES('a',1000)", vec![])
         .await
         .unwrap();
-    // A permitted absent companion is an ordinary NULL.
     let join = "SELECT i.key, s.amount FROM items i LEFT JOIN salaries s USING(key) ORDER BY i.key";
     let mut cursor = writer
         .cursor(join, vec![], CursorLimits::default())
@@ -1179,21 +1257,20 @@ async fn catalogs_cursors_and_joins_report_unavailable_rows_instead_of_absence()
         vec![
             vec![text("a"), SqlValue::Integer(1000)],
             vec![text("b"), SqlValue::Null]
-        ]
+        ],
+        "a permitted absent companion is an ordinary NULL"
     );
-    // The catalog names the session's tables and what it may write.
     let catalog = writer.catalog();
     assert_eq!(
         catalog
             .iter()
             .map(|table| (table.name.as_str(), table.writable))
             .collect::<Vec<_>>(),
-        [("drafts", true), ("items", true), ("salaries", true)]
+        [("drafts", true), ("items", true), ("salaries", true)],
+        "the catalog names the session's tables and what it may write"
     );
 
-    // Granted both scopes but holding only the public key: the join is
-    // unavailable, never NULL salaries.
-    let bob = t
+    let granted_both_holding_only_the_public_key = t
         .open(
             &dir.path().join("b.db"),
             &PrivateKey::new(),
@@ -1201,15 +1278,25 @@ async fn catalogs_cursors_and_joins_report_unavailable_rows_instead_of_absence()
             &[t.items],
         )
         .await;
-    for frame in transfer(&alice, &bob, t.items).await.frames {
-        bob.receive(frame).await.unwrap();
+    for frame in transfer(&alice, &granted_both_holding_only_the_public_key, t.items)
+        .await
+        .frames
+    {
+        granted_both_holding_only_the_public_key
+            .receive(frame)
+            .await
+            .unwrap();
     }
-    let reader = sql(&bob, &both).await;
+    let reader = sql(&granted_both_holding_only_the_public_key, &both).await;
     let unavailable = SqlError::Unavailable {
         table: "salaries".into(),
         reason: Unavailable::KeyMissing,
     };
-    assert_eq!(sql_error(reader.run(join, vec![]).await), unavailable);
+    assert_eq!(
+        sql_error(reader.run(join, vec![]).await),
+        unavailable,
+        "without the private key the join is unavailable, never NULL salaries"
+    );
     assert!(matches!(
         reader.cursor(join, vec![], CursorLimits::default()).await,
         Err(Error::Sql(error)) if error == unavailable
@@ -1226,7 +1313,6 @@ async fn catalogs_cursors_and_joins_report_unavailable_rows_instead_of_absence()
             .collect::<Vec<_>>(),
         ["drafts", "items"]
     );
-    // Denied objects stay denied for cursors too.
     for denied in [
         "SELECT * FROM secure_row_records",
         "SELECT name FROM sqlite_schema",
@@ -1235,7 +1321,8 @@ async fn catalogs_cursors_and_joins_report_unavailable_rows_instead_of_absence()
             reader
                 .cursor(denied, vec![], CursorLimits::default())
                 .await
-                .is_err()
+                .is_err(),
+            "denied objects stay denied for cursors too: {denied}"
         );
     }
 }
@@ -1273,24 +1360,25 @@ async fn secure_cursors_keep_their_snapshot_and_end_when_authority_changes() {
         .await
         .unwrap();
     let mut rows = cursor.next().await.unwrap().rows;
-    // The cursor holds no lease: a write commits while it is open.
     session
         .run("DELETE FROM items WHERE key='4'", vec![])
         .await
-        .unwrap();
+        .expect("an open cursor holds no lease, so a write commits");
     rows.extend(rows_of(&mut cursor).await);
-    assert_eq!(rows.len(), 5);
+    assert_eq!(rows.len(), 5, "the cursor keeps its snapshot");
     cursor.reset().await.unwrap();
     cursor.next().await.unwrap();
-    // Losing the key revokes the session: undelivered pages are discarded.
     alice.evict_key(t.salaries).await;
-    assert!(matches!(
-        cursor.next().await,
-        Err(Error::Sql(SqlError::Unavailable {
-            reason: crate::sql::Unavailable::Revoked,
-            ..
-        }))
-    ));
+    assert!(
+        matches!(
+            cursor.next().await,
+            Err(Error::Sql(SqlError::Unavailable {
+                reason: crate::sql::Unavailable::Revoked,
+                ..
+            }))
+        ),
+        "losing the key revokes the session and discards undelivered pages"
+    );
     assert!(cursor.next().await.is_err());
     assert!(
         session
@@ -1331,7 +1419,6 @@ async fn a_cursor_pinning_the_log_past_its_limit_is_preempted() {
         .await
         .unwrap();
     cursor.next().await.unwrap();
-    // Commits only check the limits they had; the check below sees new ones.
     add(1).await;
     alice.set_wal_limits(0, 0).await;
     let mut wal = path.as_os_str().to_owned();
@@ -1345,7 +1432,8 @@ async fn a_cursor_pinning_the_log_past_its_limit_is_preempted() {
         .await;
     assert_eq!(
         rocky_platform::fs::len(std::path::Path::new(&wal)).unwrap_or(0),
-        0
+        0,
+        "the explicit checkpoint sees limits lowered after the last commit"
     );
     assert!(matches!(
         cursor.next().await,
@@ -1404,25 +1492,31 @@ async fn secure_table_events_follow_commits_receipts_and_authority() {
     let revision = *alice.observe_revision().borrow();
     assert_eq!(change.revisions.values().copied().max(), Some(revision));
     assert_eq!(salaries.try_next().unwrap(), None);
-    // Audit's rolled-back typed rebuild must not leak into the next commit's events.
     alice.audit(t.salaries).await.unwrap();
     session
         .run("UPDATE items SET title='pears' WHERE key='a'", vec![])
         .await
         .unwrap();
     assert_eq!(items.next().await.unwrap().causes, [Cause::Local].into());
-    assert_eq!(salaries.try_next().unwrap(), None);
-    // A receipt wakes the receiver's observers.
+    assert_eq!(
+        salaries.try_next().unwrap(),
+        None,
+        "audit's rolled-back typed rebuild does not leak into the next commit's events"
+    );
     for frame in transfer(&alice, &bob, t.items).await.frames {
         bob.receive(frame).await.unwrap();
     }
     let change = received.next().await.unwrap();
-    assert_eq!(change.causes, [Cause::Sync].into());
-    // An authority change wakes every observer.
+    assert_eq!(
+        change.causes,
+        [Cause::Sync].into(),
+        "a receipt wakes the receiver's observers"
+    );
     alice.evict_key(t.salaries).await;
     assert_eq!(
         salaries.next().await.unwrap().causes,
-        [Cause::Authority].into()
+        [Cause::Authority].into(),
+        "an authority change wakes every observer"
     );
     assert_eq!(
         items.next().await.unwrap().causes,
@@ -1561,9 +1655,9 @@ async fn identity_descriptor_installs_shared_columns_and_reopens() {
     }
 }
 
+/// Generated from a schema definition, not handwritten identity DDL.
 fn identity_fixture() -> Typed {
     let publisher = PrivateKey::new();
-    // Use definition generation, not handwritten identity DDL.
     let definition = r#"{
         "format":6, "publisher": "PUBLISHER",
         "application": "identity-descriptor", "tables": [
@@ -1598,8 +1692,7 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
             &[fixture.items, fixture.salaries],
         )
         .await;
-    // The node chain is stored with its first operation.
-    let author_chain = crate::wire::Chain::new(
+    let chain_stored_with_the_first_operation = crate::wire::Chain::new(
         replica
             .inner
             .lock(crate::replica::Class::Background)
@@ -1654,7 +1747,10 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
         operation.header.extensions.row_format,
         crate::wire::ROW_FORMAT
     );
-    assert_eq!(operation.header.extensions.chain, author_chain);
+    assert_eq!(
+        operation.header.extensions.chain,
+        chain_stored_with_the_first_operation
+    );
     session_sql
         .run("DELETE FROM items WHERE key='a'", vec![])
         .await
@@ -1827,7 +1923,6 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
     )
     .unwrap()
     .payload;
-    // A frame that claims no table author cannot create a row identity.
     let mut extensions = operation.header.extensions;
     extensions.authored = false;
     let forged = crate::wire::author(
@@ -1856,7 +1951,10 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
         )
         .await;
     let error = peer.receive(forged).await.unwrap_err().to_string();
-    assert!(error.contains("node author missing"), "{error}");
+    assert!(
+        error.contains("node author missing"),
+        "a frame that claims no table author cannot create a row identity: {error}"
+    );
     assert_eq!(
         peer.receive(frame.clone()).await.unwrap(),
         ReceiveStatus::Applied
@@ -2048,20 +2146,17 @@ async fn two_nodes_of_one_principal_write_every_table_under_their_own_keys() {
     }
     assert_ne!(ids[0].0, ids[1].0);
     assert_ne!(ids[0].1, ids[1].1);
-    // The second's writes follow the outcome records it published for the
-    // first's transaction, which the first never receives.
     assert_eq!(
         select(
             &sql(&second, &[fixture.items]).await,
             "SELECT count(*) FROM items"
         )
         .await,
-        vec![vec![SqlValue::Integer(2)]]
+        vec![vec![SqlValue::Integer(2)]],
+        "the second's writes follow outcome records it published for the first's transaction"
     );
-    // A node key reused in a fresh database restarts its log and row
-    // sequence: a replica holding the log refuses the fork.
-    let forged = open("conflicting.sqlite", 0, 102).await;
-    let writer = sql(&forged, &[fixture.items]).await;
+    let node_key_reused_in_a_fresh_database = open("conflicting.sqlite", 0, 102).await;
+    let writer = sql(&node_key_reused_in_a_fresh_database, &[fixture.items]).await;
     writer.run("BEGIN", vec![]).await.unwrap();
     let id = writer.next_id("items").await.unwrap();
     writer
@@ -2078,8 +2173,10 @@ async fn two_nodes_of_one_principal_write_every_table_under_their_own_keys() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(error.contains("author log fork"), "{error}");
-    // Another membership sequence for the same node keeps its writer.
+    assert!(
+        error.contains("author log fork"),
+        "a replica holding the log refuses a restarted log and row sequence: {error}"
+    );
     let changed = prefix
         .certify_member(
             &principal,
@@ -2092,7 +2189,11 @@ async fn two_nodes_of_one_principal_write_every_table_under_their_own_keys() {
     let writer = sql(&first, &[fixture.items]).await;
     writer.run("BEGIN", vec![]).await.unwrap();
     let renewed = writer.next_id("items").await.unwrap();
-    assert_eq!(renewed.writer(), ids[0].0.writer());
+    assert_eq!(
+        renewed.writer(),
+        ids[0].0.writer(),
+        "another membership sequence for the same node keeps its writer"
+    );
     assert!(renewed > ids[0].0);
     writer.run("ROLLBACK", vec![]).await.unwrap();
 }
@@ -2142,7 +2243,6 @@ async fn devices_authoring_from_one_snapshot_merge_in_both_orders_without_collis
     };
     let (origin_key, origin) = open("origin.sqlite").await;
     let (old_ids, old) = author_salaries(&origin, scope, 2, 1).await;
-    // Both devices start from the same old state and then write offline.
     let ((left_key, left), (right_key, right)) =
         (open("left.sqlite").await, open("right.sqlite").await);
     for device in [&left, &right] {
@@ -2155,7 +2255,6 @@ async fn devices_authoring_from_one_snapshot_merge_in_both_orders_without_collis
     }
     let (left_ids, left_frames) = author_salaries(&left, scope, 3, 2).await;
     let (right_ids, right_frames) = author_salaries(&right, scope, 3, 3).await;
-    // Each device numbers its rows from its own key's first sequence.
     for (ids, key) in [
         (&old_ids, &origin_key),
         (&left_ids, &left_key),
@@ -2164,7 +2263,11 @@ async fn devices_authoring_from_one_snapshot_merge_in_both_orders_without_collis
         let writer = crate::writer::writer(&key.public_key());
         let sequences: Vec<u64> = ids.iter().map(|id| id.sequence()).collect();
         assert!(ids.iter().all(|id| id.writer() == writer));
-        assert_eq!(sequences, (1..=ids.len() as u64).collect::<Vec<_>>());
+        assert_eq!(
+            sequences,
+            (1..=ids.len() as u64).collect::<Vec<_>>(),
+            "each device numbers its rows from its own key's first sequence"
+        );
     }
     let (_, forward) = open("forward.sqlite").await;
     let (_, backward) = open("backward.sqlite").await;
@@ -2207,10 +2310,10 @@ async fn devices_authoring_from_one_snapshot_merge_in_both_orders_without_collis
         assert_eq!(replica.equivocations().await.unwrap(), 0);
         assert_eq!(replica.revocations().await.statements().count(), 0);
     }
-    // The former packed integer and its text are no row identities.
     let session = sql(&left, &[scope]).await;
-    for old in ["4294967297", "'4294967297'"] {
-        let statement = format!("INSERT INTO salaries(amount,id) VALUES(1,{old})");
+    for packed_integer_or_its_text in ["4294967297", "'4294967297'"] {
+        let statement =
+            format!("INSERT INTO salaries(amount,id) VALUES(1,{packed_integer_or_its_text})");
         let error = session
             .run(&statement, vec![])
             .await
@@ -2354,8 +2457,16 @@ async fn a_cursor_racing_a_commit_reads_once_readers_are_refreshed() {
     let opened = tokio::join!(
         session.cursor("SELECT key FROM items", vec![], CursorLimits::default()),
         async {
-            // Lets the cursor meet the stale epoch and queue for the lock.
-            rocky_platform::time::sleep(std::time::Duration::from_millis(20)).await;
+            for _ in 0..10_000 {
+                if replica.inner.interactive_waiting() {
+                    break;
+                }
+                rocky_platform::task::yield_now().await;
+            }
+            assert!(
+                replica.inner.interactive_waiting(),
+                "the cursor meets the stale epoch and queues for the lock"
+            );
             inner.refresh_readers().await;
             drop(inner);
         },

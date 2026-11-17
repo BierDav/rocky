@@ -80,7 +80,6 @@ async fn household() -> Result<Household, Failure> {
     common::introduce(&owner, &first).await;
     owner.add(1, "Milk").await;
     first.sync().await.map_err(|error| error.to_string())?;
-    // No issuer answers from here on.
     owner.close().await;
     let second = Device::new(
         common::link(
@@ -128,22 +127,26 @@ async fn further_nodes_of_an_identity_join_without_an_issuer() -> Result<(), Fai
     let mut nodes = Vec::new();
     for (device, name) in household.nodes.iter().zip(["m1", "m2", "m3"]) {
         let session = snap::ok(device.session.info()).await;
-        // One identity holds the grants; each node signs with its own key
-        // under its own certificate, and none of them holds an identity key.
-        assert_eq!(session["principal"], json!(key), "{name}");
+        assert_eq!(
+            session["principal"],
+            json!(key),
+            "{name}: one identity holds the grants"
+        );
         assert_eq!(
             session["profile"],
             json!({"kind": "writer", "scopes": ["items"]})
         );
         nodes.push(session["node"].clone());
-        assert!(!holds(root, name, "identity")?, "{name}");
+        assert!(
+            !holds(root, name, "identity")?,
+            "{name}: no node holds an identity key"
+        );
         assert!(!holds(root, name, "publisher")?, "{name}");
         assert_eq!(identity(root, name)?["identity"], json!(key));
     }
     nodes.sort_by_key(Value::to_string);
     nodes.dedup();
-    assert_eq!(nodes.len(), 3);
-    // The third node reads what the first wrote, through the second.
+    assert_eq!(nodes.len(), 3, "each node signs with its own key");
     household.nodes[1]
         .sync()
         .await
@@ -152,9 +155,11 @@ async fn further_nodes_of_an_identity_join_without_an_issuer() -> Result<(), Fai
         .sync()
         .await
         .map_err(|error| error.to_string())?;
-    assert_eq!(household.nodes[2].titles().await, ["Milk"]);
-    // Each node writes its identity's table under its own number: the rows
-    // never collide and every node reads them all.
+    assert_eq!(
+        household.nodes[2].titles().await,
+        ["Milk"],
+        "the third node reads what the first wrote, through the second"
+    );
     let mut ids = Vec::new();
     for (index, device) in household.nodes.iter().enumerate() {
         ids.push(device.add(10 + index as u8, &format!("Node {index}")).await);
@@ -167,14 +172,18 @@ async fn further_nodes_of_an_identity_join_without_an_issuer() -> Result<(), Fai
     }
     ids.sort();
     ids.dedup();
-    assert_eq!(ids.len(), 3);
+    assert_eq!(
+        ids.len(),
+        3,
+        "each node writes its identity's table under its own number, so rows never collide"
+    );
     for device in &household.nodes {
         assert_eq!(
             device.titles().await,
-            ["Milk", "Node 0", "Node 1", "Node 2"]
+            ["Milk", "Node 0", "Node 1", "Node 2"],
+            "every node reads every node's rows"
         );
     }
-    // A provider of another identity is refused by the identity's nodes.
     let stranger = Database::enroll_identity(
         open(
             &root.join("x"),
@@ -184,7 +193,10 @@ async fn further_nodes_of_an_identity_join_without_an_issuer() -> Result<(), Fai
         ),
         &household.nodes[0].contact().await,
     );
-    assert!(stranger.is_err());
+    assert!(
+        stranger.is_err(),
+        "a provider of another identity is refused by the identity's nodes"
+    );
     for device in household.nodes.iter().chain([&household.owner]) {
         device.close().await;
     }
@@ -210,18 +222,20 @@ async fn an_issuer_revokes_the_identity_never_one_of_its_nodes() -> Result<(), F
     for node in nodes {
         assert!(synced(node).await);
     }
-    // The identity: every node of it, those the owner never recorded too.
     snap::ok(owner.session.revoke_identity(&(snap::text(&(key))))).await;
     for node in nodes {
         let refused = node.sync().await.err().ok_or("a revoked identity synced")?;
-        assert_eq!(refused["code"], "revoked", "{refused}");
+        assert_eq!(
+            refused["code"], "revoked",
+            "revoking an identity revokes every node of it, unrecorded ones too: {refused}"
+        );
     }
-    // The owner's own identity is never revoked.
     let own = snap::ok(owner.session.info()).await["principal"].clone();
     assert!(
         snap::observe(owner.session.revoke_identity(&(snap::text(&(own)))))
             .await
-            .is_err()
+            .is_err(),
+        "the owner's own identity is never revoked"
     );
     for device in nodes.iter().chain([owner]) {
         device.close().await;
@@ -420,7 +434,6 @@ async fn approval_continuations_keep_identity_mode_and_phrase_until_admitted() -
                 .is_err()
         );
         assert!(!other_path.exists());
-        // A retry before approval keeps both the key and a generated phrase.
         let retry = config
             .resume_join(&invitation.uri, original)
             .await
@@ -429,7 +442,10 @@ async fn approval_continuations_keep_identity_mode_and_phrase_until_admitted() -
         let pending = retry
             .downcast_ref::<rocky_sdk::AwaitingAdmission>()
             .ok_or("pending retry")?;
-        assert_eq!(pending.code, original.code);
+        assert_eq!(
+            pending.code, original.code,
+            "a retry before approval keeps the key and the generated phrase"
+        );
         let listed = session.discovered().await?.pending;
         assert_eq!(listed[0].code, pending.code);
         for entry in std::fs::read_dir(path.join("secrets"))? {
@@ -706,8 +722,6 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
             members.push(member);
             siblings.push(sibling);
         }
-        // A valid invitation token cannot be replayed under another database's
-        // context, even when both databases pin the same root and identity.
         let invitation = owners[0].invite().await;
         let decode = |uri: &str, prefix: &str| -> Result<Value, Failure> {
             Ok(serde_json::from_slice(
@@ -716,8 +730,6 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
             )?)
         };
         let foreign_contact = decode(&owners[1].contact().await, "rocky://peer/")?;
-        // Discovery/link requests signed by this same reusable identity must still
-        // match the answering node's database before it records a pending request.
         let mut foreign_link = decode(&members[0].contact().await, "rocky://peer/")?;
         let other_member = decode(&members[1].contact().await, "rocky://peer/")?;
         foreign_link["database"] = other_member["database"].clone();
@@ -734,11 +746,15 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
         .network(Network::Owned(hub.connector("foreign_link")));
         let before = identity(path, "member0")?;
         let pending_before = members[0].database.session().discovered().await?.links;
-        assert!(config.link(&foreign_link, personal.clone()).await.is_err());
+        assert!(
+            config.link(&foreign_link, personal.clone()).await.is_err(),
+            "a link request by the same reusable identity must match the answering database"
+        );
         assert!(!rejected_link.join("identity.json").exists());
         assert_eq!(
             members[0].database.session().discovered().await?.links,
-            pending_before
+            pending_before,
+            "a foreign link request is refused before it is recorded as pending"
         );
         assert_eq!(identity(path, "member0")?, before);
 
@@ -755,7 +771,9 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
                 open(&rejected, &hub, "foreign_join", Some(personal.clone())),
                 &foreign_uri
             )
-            .is_err()
+            .is_err(),
+            "an invitation is never replayed under another database's context, \
+             even one pinning the same root and identity"
         );
         assert!(!rejected.join("identity.json").exists());
         assert_eq!(
@@ -912,12 +930,12 @@ async fn linking_requires_both_codes_before_credentials_are_released() -> Result
             .is_err()
     );
     assert!(session.confirm_link(&pending.node, wrong).await.is_err());
-    // Even the correct joining-side code cannot release a bundle until the answering side confirms.
     assert!(
         config
             .confirm_link(&contact, key.clone(), pending.clone(), &pending.code)
             .await
-            .is_err()
+            .is_err(),
+        "even the correct joining-side code releases no bundle before the answering side confirms"
     );
     assert!(!path.join("identity.json").exists());
     assert!(!session.discovered().await?.links[0].confirmed);

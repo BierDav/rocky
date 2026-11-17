@@ -1,6 +1,5 @@
 //! One sync pass between two nodes as a tree of spans whose fields name no
 //! row value, key or invitation.
-// The SDK's blocking constructors, native transports and paused clocks.
 #![cfg(not(target_family = "wasm"))]
 #[expect(
     dead_code,
@@ -175,7 +174,6 @@ async fn a_sync_pass_is_a_span_tree_without_application_data() -> Result<(), Fai
     for name in ["bytes", "duration_ms", "outcome", "channel"] {
         assert!(field(rows, name).is_some(), "{name}: {:?}", spans[&rows]);
     }
-    // No field carries a row value, a key or the invitation.
     let mut forbidden = vec![title.to_owned(), invitation.clone()];
     forbidden.extend(
         invitation

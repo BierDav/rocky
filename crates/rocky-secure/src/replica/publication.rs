@@ -8,13 +8,12 @@ pub use intents::CHUNK_PAGES;
 pub use intents::PUBLICATION_CHUNK_BUNDLES;
 pub(super) use intents::SCHEMA as INTENT_SCHEMA;
 
-pub(super) const SCHEMA: &[&str] = &[
-    // `published` counts the leading bundles some peer holds.
-    "CREATE TABLE IF NOT EXISTS secure_publications(publication BLOB PRIMARY KEY,bundles INTEGER NOT NULL,published INTEGER NOT NULL) WITHOUT ROWID",
-    // Retained frames of publications, outside the retained-history bound
-    // until they are pruned.
-    "CREATE TABLE IF NOT EXISTS secure_publication_frames(hash BLOB PRIMARY KEY,bytes INTEGER NOT NULL) WITHOUT ROWID",
-];
+/// `published` counts the leading bundles some peer holds.
+const PUBLICATIONS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_publications(publication BLOB PRIMARY KEY,bundles INTEGER NOT NULL,published INTEGER NOT NULL) WITHOUT ROWID";
+/// Retained frames of publications, outside the retained-history bound
+/// until they are pruned.
+const PUBLICATION_FRAMES_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_publication_frames(hash BLOB PRIMARY KEY,bytes INTEGER NOT NULL) WITHOUT ROWID";
+pub(super) const SCHEMA: &[&str] = &[PUBLICATIONS_TABLE, PUBLICATION_FRAMES_TABLE];
 
 /// How far a staged publication has left this replica.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,7 +151,6 @@ impl<A: RowApplication> Inner<A> {
     /// Whether some peer reported holding every member of the bundle.
     async fn bundle_published(&self, handle: &Commitment) -> Result<bool, Error> {
         for frame in self.bundle_frames(handle).await? {
-            // Pruning waits for the copies retention requires.
             let Some(frame) = frame else { continue };
             let header = frame.operation_ref()?.header.clone();
             let (held, _) = self
@@ -182,7 +180,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .iter()
             .position(|seal| seal.statement.tip == migration.tip)
         else {
-            // A losing branch is retained, but is not this workspace's to close.
             return Ok(inner.workspace.tip != migration.tip);
         };
         let graph = inner.graph_for(migration.scope)?;
@@ -210,8 +207,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         .line_nodes
                         .values()
                         .any(|author| author.key.public_key() == signer);
-                // Compaction moves all held bases atomically; listing publishes
-                // their records together. A retained own record proves completion.
                 if owned {
                     return Ok(true);
                 }
@@ -228,7 +223,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn publications(&self) -> Result<Vec<Publication>, Error> {
         let mut publications = Vec::new();
         let mut after = Vec::new();
-        // The publication being checked, with the count stored for it.
         let mut current: Option<(Publication, u64)> = None;
         let mut first = true;
         loop {
@@ -263,18 +257,20 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .as_slice()
                     .try_into()
                     .map_err(|_| Error::Corrupt("publication record".into()))?;
-                // A publication on a tip that lost its race stays retained on
-                // its branch; it is not this workspace's to publish.
-                if let Some(Some(frame)) = inner
+                let first_frame = inner
                     .bundle_frames(&bundle_handle(&id, 0))
                     .await?
                     .into_iter()
                     .next()
-                    && matches!(
+                    .flatten();
+                let on_losing_branch = match first_frame {
+                    Some(frame) => matches!(
                         inner.frame_reach(&frame)?,
                         super::tips::FrameReach::Held | super::tips::FrameReach::Unfollowed
-                    )
-                {
+                    ),
+                    None => false,
+                };
+                if on_losing_branch {
                     continue;
                 }
                 current = Some((

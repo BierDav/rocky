@@ -120,8 +120,9 @@ impl<A: RowApplication> Inner<A> {
         }
         let mut bounds = self.seal_bounds(id).await?;
         bounds.retain(|(_, bound)| *bound >= cursor && *bound <= through);
-        // The final segment also runs when there are no earlier seal bounds.
-        bounds.push((i64::MAX, through));
+        /// Depth of the segment ending at `through`, replayed even without earlier seal bounds.
+        const FINAL_SEGMENT: i64 = i64::MAX;
+        bounds.push((FINAL_SEGMENT, through));
         for (depth, end) in bounds {
             while let Some(last) = self
                 .replay(

@@ -63,10 +63,7 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_logs(scope INTEGER NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,pruned_prefix INTEGER NOT NULL,PRIMARY KEY(scope,author)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_stubs(hash BLOB PRIMARY KEY,scope INTEGER NOT NULL,clock INTEGER NOT NULL,creation INTEGER NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_checkpoints(scope INTEGER NOT NULL,sequence INTEGER NOT NULL,position INTEGER NOT NULL,sets BLOB NOT NULL,signed BLOB NOT NULL,PRIMARY KEY(scope,sequence))",
-    // The replay base. `fields` is NULL while the stored row holds the same
-    // record: a base row is kept once, and the stored row's change or
-    // removal first copies it here. Read and insert through the view.
-    "CREATE TABLE IF NOT EXISTS secure_checkpoint_base(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB,PRIMARY KEY(scope,row)) WITHOUT ROWID",
+    CHECKPOINT_BASE,
     "CREATE VIEW IF NOT EXISTS secure_checkpoint_rows AS SELECT b.scope,b.row,coalesce(b.fields,r.fields) AS fields FROM secure_checkpoint_base b LEFT JOIN secure_rows r ON b.fields IS NULL AND r.scope=b.scope AND r.row=b.row",
     "CREATE TRIGGER IF NOT EXISTS secure_checkpoint_rows_insert INSTEAD OF INSERT ON secure_checkpoint_rows BEGIN INSERT INTO secure_checkpoint_base VALUES(NEW.scope,NEW.row,CASE WHEN NEW.fields IS (SELECT fields FROM secure_rows WHERE scope=NEW.scope AND row=NEW.row) THEN NULL ELSE NEW.fields END); END",
     "CREATE TRIGGER IF NOT EXISTS secure_checkpoint_base_update BEFORE UPDATE OF fields ON secure_rows BEGIN UPDATE secure_checkpoint_base SET fields=OLD.fields WHERE scope=OLD.scope AND row=OLD.row AND fields IS NULL; END",
@@ -88,7 +85,12 @@ pub(crate) const SCHEMA: &[&str] = &[
 /// after a bulk rewrite of the stored rows copied them out.
 pub(super) const SHARE_BASE: &str = "UPDATE secure_checkpoint_base SET fields=NULL WHERE scope=?1 AND fields=(SELECT fields FROM secure_rows r WHERE r.scope=?1 AND r.row=secure_checkpoint_base.row)";
 
-// Walk applied positions before testing row membership, so LIMIT bounds the work.
+/// The replay base. `fields` is NULL while the stored row holds the same
+/// record: a base row is kept once, and the stored row's change or removal
+/// first copies it here. Read and insert through `secure_checkpoint_rows`.
+const CHECKPOINT_BASE: &str = "CREATE TABLE IF NOT EXISTS secure_checkpoint_base(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB,PRIMARY KEY(scope,row)) WITHOUT ROWID";
+
+/// Walks applied positions before testing row membership, so LIMIT bounds the work.
 pub(crate) const ROW_REPLAY_SQL: &str = "SELECT a.position,o.header,o.body,o.status FROM secure_applied a LEFT JOIN secure_operations o ON o.hash=a.hash WHERE a.scope=?1 AND a.position>?2 AND a.position<=?3 AND EXISTS(SELECT 1 FROM secure_row_positions p JOIN secure_finalization_rows r ON r.scope=p.scope AND r.row=p.row WHERE p.position=a.position AND p.scope=a.scope) ORDER BY a.position LIMIT ?4";
 
 /// Applied operations replayed, or pruned, per bounded step.
@@ -97,9 +99,10 @@ pub(super) const STEP_OPERATIONS: usize = 64;
 /// Checkpoint rows installed, staged or streamed per bounded step.
 #[cfg(not(test))]
 pub(super) const STEP_ROWS: usize = 256;
-// Small steps let tests cross every step boundary with little data.
+/// Small steps let tests cross every step boundary with little data.
 #[cfg(test)]
 pub(crate) const STEP_OPERATIONS: usize = 8;
+/// Small steps let tests cross every step boundary with little data.
 #[cfg(test)]
 pub(crate) const STEP_ROWS: usize = 16;
 /// Logs of one scope a checkpoint frontier may name.
@@ -154,6 +157,15 @@ pub struct SetSummary {
     pub count: u64,
     pub digest: Commitment,
 }
+impl SetSummary {
+    /// The summary of no members.
+    pub(super) const EMPTY: Self = Self {
+        count: 0,
+        digest: [0; 32],
+    };
+}
+/// The moves of a replayed base: replayed rows never move.
+pub(super) const REPLAYED_MOVES: SetSummary = SetSummary::EMPTY;
 /// Recovery copies of the covered operations when the checkpoint was sealed.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CustodySummary {
@@ -328,11 +340,7 @@ impl CheckpointStatement {
             && self.rows == empty.rows_summary()
             && self.tombstones == 0
             && self.creations == empty.creations_summary()
-            && self.moves
-                == (SetSummary {
-                    count: 0,
-                    digest: [0; 32],
-                })
+            && self.moves == SetSummary::EMPTY
             && self.custody == create::no_custody()?
             && self.outcomes == SealedOutcomes::default())
     }
@@ -474,7 +482,6 @@ impl SignedCheckpoint {
             )
             .map_err(credential)?;
         inner.admits(inner.manifest_of_tip(self.statement.tip)?)?;
-        // Only the registry binds a tuple to its keyed scope.
         if inner.authenticated_partition(self.statement.scope)? != self.statement.partition.as_ref()
         {
             return Err(denied("checkpoint partition differs from its keyed scope"));
@@ -1348,8 +1355,6 @@ impl<A: RowApplication> Inner<A> {
             .verify_signature()
             .map_err(|_| unverifiable("signature is invalid"))?;
         let statement = &signed.statement;
-        // A checkpoint made before an upgrade stays valid while its
-        // generation is admitted.
         let generation = self
             .generation_of(self.manifest_of_tip(statement.tip)?, false)
             .map_err(|_| unverifiable("names a definition this replica no longer admits"))?;
@@ -1470,9 +1475,6 @@ impl<A: RowApplication> Inner<A> {
             };
             let frame = self.chained_frame(header.clone(), body.clone()).await?;
             let operation = frame.operation_ref()?;
-            // A frame of another line, such as a branch this device left,
-            // or of an ancestor tip past the seal the path leaves it at, is
-            // no part of the target's state.
             let e = &operation.header.extensions;
             let visible = match self.graphs.get(&scope.domain) {
                 Some(graph) => {
@@ -1510,8 +1512,6 @@ impl<A: RowApplication> Inner<A> {
             }
             let writes = restore::replay_changes(scope, &payload)?;
             let mut created = false;
-            // Births compare with the marks the frame entered with, as live
-            // application loads them once per frame.
             if mode == ReplayMode::Rows {
                 *ledger = self
                     .row_replay_ledger(
@@ -1528,7 +1528,6 @@ impl<A: RowApplication> Inner<A> {
             let mut identities = BTreeSet::new();
             let path_fields =
                 self.path_fields_to(scope.domain, operation.header.extensions.tip, target)?;
-            // The live schema reads a write through its own path's fields.
             let live_fields = if target == self.workspace.tip {
                 None
             } else {
@@ -1813,8 +1812,6 @@ impl<A: RowApplication> Inner<A> {
                         .await?;
                 }
             }
-            // Own births retire sequences in replay order even without a row;
-            // another author's carry cannot retire that author's log.
             for birth in self.payload_birth_marks(&frame, &payload)? {
                 if !birth.carried {
                     ledger.merge(birth.mark)?;

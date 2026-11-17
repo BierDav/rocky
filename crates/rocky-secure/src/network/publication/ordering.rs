@@ -92,8 +92,7 @@ pub(super) fn pages(
     }
     let mut pending: BTreeSet<_> = units.keys().copied().collect();
     let mut frames: Vec<_> = frames.into_iter().map(Some).collect();
-    // Voids precede data; do not combine their intake with a following unit.
-    let mut append = false;
+    let mut last_page_holds_data = false;
     while !pending.is_empty() {
         let group = pending
             .iter()
@@ -115,7 +114,10 @@ pub(super) fn pages(
             Ok::<_, Error>(sum.saturating_add(frame.weight()))
         })?;
         let whole = unit.len() <= rows::MAX_SECURE_PAGE && weight <= MAX_PAGE_BYTES;
-        if !append || !whole || result.last().is_none_or(|p| !p.fits(unit.len(), weight)) {
+        if !last_page_holds_data
+            || !whole
+            || result.last().is_none_or(|p| !p.fits(unit.len(), weight))
+        {
             result.push(Page::default());
         }
         for index in unit {
@@ -135,7 +137,7 @@ pub(super) fn pages(
             page.weight += weight;
             page.frames.push(frame);
         }
-        append = true;
+        last_page_holds_data = true;
     }
     Ok(result)
 }

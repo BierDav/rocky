@@ -138,10 +138,9 @@ impl<T> ReplicaLock<T> {
         lock: L,
     ) -> impl Future<Output = Guard<G>> + use<T, G, F, L> {
         let site = Location::caller();
-        // With no sink only acquisition and release need clock reads.
-        let timing = cfg!(feature = "qualification")
+        let wait_has_sink = cfg!(feature = "qualification")
             || tracing::enabled!(target: "replica", tracing::Level::DEBUG);
-        let requested = timing.then(Instant::now);
+        let requested = wait_has_sink.then(Instant::now);
         let gate = self.gate.clone();
         #[cfg(any(test, feature = "qualification"))]
         let measurements = self.measurements.clone();
@@ -211,10 +210,11 @@ async fn background<G, F: Future<Output = G>>(gate: &Gate, lock: impl Fn() -> F)
             changed.await;
         };
         let guard = lock().await;
-        // A waiter that registered while this one queued goes first.
         let state = *gate.state();
         let first = *first_deferral.get_or_insert(state.acquired);
-        if starved || state.waiting == 0 || state.acquired - first >= STARVATION_YIELDS {
+        let waiter_registered_while_queued = state.waiting > 0;
+        if starved || !waiter_registered_while_queued || state.acquired - first >= STARVATION_YIELDS
+        {
             #[cfg(any(test, feature = "qualification"))]
             gate.update(|state| {
                 state.background_grants += 1;
@@ -227,7 +227,8 @@ async fn background<G, F: Future<Output = G>>(gate: &Gate, lock: impl Fn() -> F)
 }
 
 pub(crate) struct Guard<G> {
-    // Field order releases the mutex before recording its completed hold.
+    /// Declared before `_timing` so the mutex is released before the
+    /// completed hold is recorded.
     guard: G,
     _timing: Hold,
     #[cfg(any(test, feature = "qualification"))]
@@ -583,7 +584,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-    async fn slow_holds_report_the_request_site_and_class() {
+    async fn slow_holds_report_the_request_site_not_the_poll_site() {
         let events = Events::default();
         let _subscriber = tracing::subscriber::set_default(events.clone());
         let mutex = ReplicaLock::new(
@@ -593,7 +594,6 @@ mod tests {
         );
         let line = line!() + 1;
         let future = mutex.lock(Class::Interactive);
-        // Polling somewhere else must not change the attributed caller.
         let mut guard = future.await;
         guard._timing.acquired -= Duration::from_millis(2);
         drop(guard);
@@ -706,7 +706,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-    async fn cancelled_interactive_waiter_unregisters() {
+    async fn cancelled_interactive_waiter_unregisters_and_defers_no_background() {
         let (_, lock, _) = order();
         let holder = lock.lock(Class::Background).await;
         {
@@ -721,7 +721,6 @@ mod tests {
         }
         assert!(!lock.interactive_waiting());
         drop(holder);
-        // A background acquisition is not deferred by the cancelled waiter.
         drop(lock.lock(Class::Background).await);
     }
 
@@ -758,8 +757,8 @@ mod tests {
                 order.lock().unwrap().push("background");
             })
         };
-        // Overlapping interactive writes keep a waiter registered throughout.
-        for _ in 0..2 * STARVATION_YIELDS {
+        let overlapping_interactive_writes = 2 * STARVATION_YIELDS;
+        for _ in 0..overlapping_interactive_writes {
             let (lock, order) = (lock.clone(), order.clone());
             let next = rocky_platform::task::spawn(async move {
                 let guard = lock.lock_owned(Class::Interactive).await;

@@ -127,8 +127,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         identity::check_node_chain(&credentials)?;
         inner.chain = Chain::new(credentials.clone())?;
         inner.config.credentials = credentials;
-        // The renewed chain is the original node's; a line node of another
-        // line keeps authoring there.
         let original = identity::NodeAuthor::new(&inner.config)?;
         let root = inner
             .config
@@ -188,7 +186,6 @@ impl<A: RowApplication> Inner<A> {
         scopes: &BTreeSet<ResourceScope>,
         time: u64,
     ) -> Result<SessionStatus, Error> {
-        // Scope membership is checked against the bounded installed authority below.
         if scopes.is_empty() {
             return Err(denied("session scope quota"));
         }
@@ -238,7 +235,9 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(status)
     }
-    /// Refuses a session opened under an earlier authority.
+    /// Refuses a session opened under an earlier authority. A commit calls
+    /// it under the replica lock, inside the write transaction: that is the
+    /// commit's linearization point.
     pub(super) fn check_authority(&self, authority: Option<u64>) -> Result<(), Error> {
         match authority {
             Some(authority) if authority != self.authority => {

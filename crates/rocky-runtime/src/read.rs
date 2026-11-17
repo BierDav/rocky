@@ -84,15 +84,26 @@ fn reserved(name: &str) -> bool {
 fn unquoted(token: &str) -> &str {
     token.trim_matches(['"', '`', '[', ']'])
 }
+/// Whether `?` followed by `next` is a numbered parameter (`?NNN`), which
+/// names its position and so would not bind values in their given order.
+fn is_numbered_parameter(token: &str, next: Option<&str>) -> bool {
+    token == "?" && next.is_some_and(|next| next.as_bytes()[0].is_ascii_digit())
+}
+/// The shortest text that reads back as the same double; infinities become
+/// literals that overflow to them.
+fn real_literal(value: f64) -> String {
+    match value {
+        value if value.is_finite() => format!("{value:?}"),
+        value if value > 0.0 => "9e999".into(),
+        _ => "-9e999".into(),
+    }
+}
 /// A value as an SQL literal. Only installed view values are inlined.
 fn literal(value: &SqlValue) -> Result<String, Error> {
     Ok(match value {
         SqlValue::Null => "NULL".into(),
         SqlValue::Integer(value) => value.to_string(),
-        // The shortest text that reads back as the same double.
-        SqlValue::Real(value) if value.get().is_finite() => format!("{:?}", value.get()),
-        SqlValue::Real(value) if value.get() > 0.0 => "9e999".into(),
-        SqlValue::Real(_) => "-9e999".into(),
+        SqlValue::Real(value) => real_literal(value.get()),
         SqlValue::Text(text) if text.contains('\0') => return Err(invalid_view()),
         SqlValue::Text(text) => format!("'{}'", text.replace('\'', "''")),
         SqlValue::Blob(bytes) => {
@@ -140,14 +151,10 @@ impl ReadPlan {
                     .get(position + 1)
                     .map(|next| tokens[*next].as_str());
                 let token = tokens[*index].as_str();
-                if token == ";" {
+                if token == ";" || is_numbered_parameter(token, next) {
                     return Err(invalid_view());
                 }
                 if token == "?" {
-                    // Numbered parameters would not follow `values` in order.
-                    if next.is_some_and(|next| next.as_bytes()[0].is_ascii_digit()) {
-                        return Err(invalid_view());
-                    }
                     tokens[*index] = literal(values.next().ok_or_else(invalid_view)?)?;
                     continue;
                 }
@@ -240,15 +247,14 @@ impl ReadPlan {
         let table = *significant.get(from + 1).ok_or_else(denied)?;
         let name = unquoted(&tokens[table]).to_ascii_lowercase();
         let view = *self.by_name.get(&name).ok_or_else(denied)?;
-        // The view keeps its name unless the query gives the table an alias.
-        let aliased = significant.get(from + 2).is_some_and(|next| {
+        let query_aliases_table = significant.get(from + 2).is_some_and(|next| {
             !["WHERE", "GROUP", "ORDER", "LIMIT", "HAVING"]
                 .iter()
                 .any(|word| tokens[*next].eq_ignore_ascii_case(word))
         });
         let keyset = keyset(&tokens, &significant, from, &self.views[view]);
         let subquery = &self.views[view].subquery;
-        tokens[table] = if aliased {
+        tokens[table] = if query_aliases_table {
             format!("({subquery})")
         } else {
             format!("({subquery}) AS \"{name}\"")
@@ -269,14 +275,7 @@ impl ReadPlan {
             if values != keyset.terms.len() {
                 return Err(wrong_cursor());
             }
-            // A row value comparison is one index range, unlike its OR form.
-            // It comes first: of two lower bounds on an indexed column the
-            // engine seeks with the first, and the query may hold its own.
-            let after = format!(
-                "({columns}){}({})",
-                if keyset.descending { "<" } else { ">" },
-                vec!["?"; values].join(",")
-            );
+            let after = seek_predicate(&columns, keyset.descending, values);
             match keyset.filter {
                 Some(filter) => {
                     tokens[filter] = format!("WHERE {after} AND (");
@@ -300,8 +299,21 @@ impl ReadPlan {
         self.rewrite(sql, None).ok().and_then(|read| read.view)
     }
 }
-/// The ordering of a query whose pages can continue by key: a plain column
-/// list, no grouping or limit, and an `ORDER BY` of plain columns in one
+/// The comparison that starts a page after the row whose ordering values are
+/// bound to its parameters. A row value comparison is one index range, unlike
+/// its OR form; it goes before the query's own filter because, of two lower
+/// bounds on an indexed column, the engine seeks with the first.
+fn seek_predicate(columns: &str, descending: bool, values: usize) -> String {
+    format!(
+        "({columns}){}({})",
+        if descending { "<" } else { ">" },
+        vec!["?"; values].join(",")
+    )
+}
+/// The ordering of a query whose pages can continue by key: `*` or a column
+/// list without aliases or expressions (an alias could shadow an ordering
+/// column), no numbered parameters (the cursor's values bind first, by
+/// position), no grouping or limit, and an `ORDER BY` of plain columns in one
 /// direction. Descending orders must name only columns declared never NULL,
 /// because the engine sorts NULL last there and a seek would drop those rows.
 fn keyset(tokens: &[String], significant: &[usize], from: usize, view: &View) -> Option<Keyset> {
@@ -319,22 +331,19 @@ fn keyset(tokens: &[String], significant: &[usize], from: usize, view: &View) ->
     };
     let is =
         |position: usize, word: &str| token(position).is_some_and(|t| t.eq_ignore_ascii_case(word));
-    // The cursor's values are bound before the query's own, by position.
-    if (0..significant.len()).any(|at| {
-        is(at, "?") && token(at + 1).is_some_and(|next| next.as_bytes()[0].is_ascii_digit())
-    }) {
+    if (0..significant.len())
+        .any(|at| token(at).is_some_and(|t| is_numbered_parameter(t, token(at + 1))))
+    {
         return None;
     }
-    // `*`, or columns without aliases or expressions: an alias could shadow
-    // a column the ordering names.
     let selected = 1..from;
     let star = selected.len() == 1 && is(1, "*");
-    let columns = selected.len() % 2 == 1
+    let plain_columns = selected.len() % 2 == 1
         && selected.clone().all(|at| match (at - 1) % 2 {
             0 => token(at).and_then(column).is_some(),
             _ => is(at, ","),
         });
-    if !star && !columns {
+    if !star && !plain_columns {
         return None;
     }
     let mut at = from + 2;
@@ -458,30 +467,33 @@ fn validate(sql: &str) -> Result<(), Error> {
             return Err(denied());
         }
     }
-    if selects != 1 {
+    if selects != 1 || !reads_one_source(&tokens) {
         return Err(denied());
     }
-    // Multiple FROM sources can produce an unbounded Cartesian evaluation.
-    if let Some(start) = tokens
+    Ok(())
+}
+/// Whether a query without `FROM`, or with one named source after it: several
+/// sources could produce an unbounded Cartesian evaluation.
+fn reads_one_source(tokens: &[String]) -> bool {
+    let Some(start) = tokens
         .iter()
         .position(|token| token.eq_ignore_ascii_case("FROM"))
-    {
-        if start + 1 >= tokens.len() {
-            return Err(denied());
-        }
-        for token in tokens.get(start + 2..).unwrap_or(&[]) {
-            if ["WHERE", "ORDER", "GROUP", "LIMIT"]
+    else {
+        return true;
+    };
+    if start + 1 >= tokens.len() {
+        return false;
+    }
+    tokens
+        .get(start + 2..)
+        .unwrap_or(&[])
+        .iter()
+        .take_while(|token| {
+            !["WHERE", "ORDER", "GROUP", "LIMIT"]
                 .iter()
                 .any(|word| token.eq_ignore_ascii_case(word))
-            {
-                break;
-            }
-            if token == "," || token == "(" {
-                return Err(denied());
-            }
-        }
-    }
-    Ok(())
+        })
+        .all(|token| token != "," && token != "(")
 }
 
 struct Pooled {
@@ -806,11 +818,9 @@ impl Reads {
         };
         let read = self.plan.rewrite(&query.sql, seek.as_ref().map(Vec::len))?;
         Ok(Prepared {
-            // Without a key, skipping inside the engine decodes no skipped row.
-            sql: if seek.is_none() && offset > 0 {
-                format!("SELECT * FROM ({}) LIMIT -1 OFFSET {offset}", read.sql)
-            } else {
-                read.sql
+            sql: match seek {
+                None if offset > 0 => skipped_in_engine(&read.sql, offset),
+                _ => read.sql,
             },
             tables: read
                 .view
@@ -904,22 +914,20 @@ impl Reads {
                     });
                 }
                 let mut rows = page.rows;
-                // The ordering values of the last row. NULL sorts before every
-                // value, so such a row continues by offset.
-                let mut key = None;
+                let mut last_ordering = None;
                 if let Some(hidden) = prepared.hidden {
                     for row in &mut rows {
                         let visible = row
                             .len()
                             .checked_sub(hidden)
                             .ok_or_else(|| Error::Corrupt("read ordering columns".into()))?;
-                        key = Some(row.split_off(visible));
+                        last_ordering = Some(row.split_off(visible));
                     }
                 }
-                let key = key.and_then(|key| {
-                    sql_values(key)
+                let key = last_ordering.and_then(|ordering| {
+                    sql_values(ordering)
                         .ok()
-                        .filter(|key| !key.contains(&SqlValue::Null))
+                        .filter(|ordering| seekable_after(ordering))
                 });
                 let next = if page.more {
                     Some(ReadCursor {
@@ -940,10 +948,7 @@ impl Reads {
                     next,
                 })
             })();
-            // A read transaction has nothing to commit; always end it.
-            if !conn.is_autocommit()? {
-                conn.run_now("ROLLBACK")?;
-            }
+            end_read_transaction(conn)?;
             result
         })();
         conn.set_deadline(None)?;
@@ -995,19 +1000,18 @@ impl Reads {
         options: ReadOptions,
     ) -> Result<(Versions, ReadSnapshot), Error> {
         let mut latest = shared.latest.lock().await;
-        // Sampled before the read starts: its snapshot is at least this new.
-        let now = self.versions(self.plan.view(&query.sql));
+        let sampled_before_read = self.versions(self.plan.view(&query.sql));
         if let Some((as_of, snapshot)) = latest.as_ref()
-            && *as_of == now
+            && *as_of == sampled_before_read
         {
-            return Ok((now, snapshot.clone()));
+            return Ok((sampled_before_read, snapshot.clone()));
         }
         let snapshot = self.read(query.clone(), options).await?;
         #[cfg(test)]
         self.executed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        *latest = Some((now, snapshot.clone()));
-        Ok((now, snapshot))
+        *latest = Some((sampled_before_read, snapshot.clone()));
+        Ok((sampled_before_read, snapshot))
     }
 }
 /// The statements that read a domain's projection and applied frontier.
@@ -1024,6 +1028,23 @@ pub(crate) struct Projected {
     pub(crate) rows: Vec<Vec<SqlValue>>,
     pub(crate) revision: LocalRevision,
     pub(crate) frontier: rocky_core::AppliedFrontier,
+}
+/// Ends a read transaction, if one is open; it has nothing to commit.
+fn end_read_transaction(conn: &sqlite::Connection) -> Result<(), Error> {
+    if !conn.is_autocommit()? {
+        conn.run_now("ROLLBACK")?;
+    }
+    Ok(())
+}
+/// `sql` past its first `offset` rows, skipped inside the engine so that no
+/// skipped row is decoded. Used when no key can seek past them.
+fn skipped_in_engine(sql: &str, offset: u64) -> String {
+    format!("SELECT * FROM ({sql}) LIMIT -1 OFFSET {offset}")
+}
+/// Whether a page can continue after the row with these ordering values. NULL
+/// sorts before every value, so a row holding one continues by offset.
+fn seekable_after(ordering: &[SqlValue]) -> bool {
+    !ordering.contains(&SqlValue::Null)
 }
 /// One bounded read transaction over the projection. The frontier is
 /// derived as the writer restores it: the newest applied sequence of each
@@ -1082,9 +1103,7 @@ fn project(
                 frontier: rocky_core::AppliedFrontier(frontier.into_iter().collect()),
             })
         })();
-        if !conn.is_autocommit()? {
-            conn.run_now("ROLLBACK")?;
-        }
+        end_read_transaction(conn)?;
         result
     })();
     conn.set_deadline(None)?;
@@ -1241,12 +1260,17 @@ mod tests {
         assert_eq!(plan.views[0].tables, ["ns_notes"]);
         assert_eq!(plan.reading("notes").collect::<Vec<_>>(), [0]);
         assert_eq!(plan.reading("tags").count(), 0);
-        // A query's own alias replaces the view's name.
         let sql = plan.rewrite("SELECT n FROM notes AS n", None).unwrap().sql;
-        assert!(sql.ends_with(") AS n"), "{sql}");
-        // Without a table there is nothing to authorize.
+        assert!(
+            sql.ends_with(") AS n"),
+            "a query's own alias replaces the view's name: {sql}"
+        );
         let bare = plan.rewrite("SELECT 1", None).unwrap();
-        assert_eq!((bare.sql.as_str(), bare.view), ("SELECT 1", None));
+        assert_eq!(
+            (bare.sql.as_str(), bare.view),
+            ("SELECT 1", None),
+            "without a table there is nothing to authorize"
+        );
     }
     fn keyed() -> ReadPlan {
         ReadPlan::compile(
@@ -1265,7 +1289,6 @@ mod tests {
     fn ordered_plain_reads_continue_by_key_and_other_shapes_by_offset() {
         let plan = keyed();
         let source = "(SELECT id,owner,body FROM \"ns_notes\" WHERE owner<>'x') AS \"notes\"";
-        // The ordering columns follow the query's own; the key breaks ties.
         let first = plan
             .rewrite("SELECT body FROM notes WHERE body<>? ORDER BY owner", None)
             .unwrap();
@@ -1305,7 +1328,6 @@ mod tests {
             ),
             ("SELECT body FROM notes AS n ORDER BY id DESC", true),
             ("SELECT body FROM notes ORDER BY owner DESC", true),
-            // No order, or one the runtime cannot seek in.
             ("SELECT body FROM notes", false),
             ("SELECT body FROM notes WHERE id>?", false),
             ("SELECT body FROM notes ORDER BY id LIMIT 5", false),
@@ -1314,9 +1336,7 @@ mod tests {
             ("SELECT body FROM notes ORDER BY id, id", false),
             ("SELECT body FROM notes ORDER BY 1", false),
             ("SELECT body FROM notes ORDER BY body COLLATE NOCASE", false),
-            // `body` may be NULL, which a descending seek would drop.
             ("SELECT id FROM notes ORDER BY body DESC", false),
-            // Aliases, expressions, aggregates and groups.
             ("SELECT body AS id FROM notes ORDER BY id", false),
             ("SELECT body id FROM notes ORDER BY id", false),
             ("SELECT COUNT(*) FROM notes ORDER BY id", false),
@@ -1329,17 +1349,19 @@ mod tests {
         ] {
             let read = plan.rewrite(sql, None).unwrap();
             assert_eq!(read.hidden.is_some(), keyset, "{sql}");
-            // A key cursor is refused where only an offset can continue.
             let values = read.hidden.unwrap_or(1);
-            assert_eq!(plan.rewrite(sql, Some(values)).is_ok(), keyset, "{sql}");
+            assert_eq!(
+                plan.rewrite(sql, Some(values)).is_ok(),
+                keyset,
+                "a key cursor is accepted exactly where a key can continue: {sql}"
+            );
         }
         assert!(plan.rewrite("SELECT 1", Some(1)).is_err());
-        // A cursor with another number of values is not this query's.
         assert!(
             plan.rewrite("SELECT * FROM notes ORDER BY owner", Some(1))
-                .is_err()
+                .is_err(),
+            "a cursor with another number of values is not this query's"
         );
-        // A view without a key pages by offset only.
         let unkeyed = ReadPlan::compile(
             &names(),
             vec![view("notes", "SELECT id FROM notes", vec![])],
@@ -1372,7 +1394,6 @@ mod tests {
         ] {
             conn.rows(sql, ()).unwrap();
         }
-        // Ids 1..=9; every third body is NULL, the others repeat two values.
         for id in 1..=9i64 {
             let body = match id % 3 {
                 0 => "NULL",
@@ -1429,8 +1450,10 @@ mod tests {
         loop {
             let page = reads.read(query.clone(), options.clone()).await.unwrap();
             assert_eq!(page.revision.get(), 7);
-            // Only the selected column is returned.
-            assert!(page.rows.iter().all(|row| row.len() == 1));
+            assert!(
+                page.rows.iter().all(|row| row.len() == 1),
+                "hidden ordering columns are not returned"
+            );
             ids.extend(page.rows.into_iter().flatten());
             let Some(cursor) = page.next else { break };
             kinds.push(cursor.kind());
@@ -1465,8 +1488,8 @@ mod tests {
         pool.close();
     }
     /// The read's thread keeps the connection after its caller went away;
-    /// the slot stays taken until the connection is back.
-    // Needs blocking threads, which a browser Worker lacks.
+    /// the slot stays taken until the connection is back. Needs blocking
+    /// threads, which a browser Worker lacks.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_cancelled_read_keeps_its_slot_until_its_connection_is_back() {
@@ -1498,13 +1521,16 @@ mod tests {
         assert_eq!(pool.permits.available_permits(), 0);
         assert_eq!(pool.state.lock().unwrap().out, POOL_CONNECTIONS);
         drop(releases);
-        // Close waits for the reads, which return every connection and permit.
         pool.close();
-        assert_eq!(pool.state.lock().unwrap().out, 0);
+        assert_eq!(
+            pool.state.lock().unwrap().out,
+            0,
+            "close waits for the reads, which return every connection and permit"
+        );
     }
     /// A read that panics still returns its connection, closed, and its
-    /// slot: closing the pool does not wait for it forever.
-    // Needs blocking threads, which a browser Worker lacks.
+    /// slot: closing the pool does not wait for it forever. Needs blocking
+    /// threads, which a browser Worker lacks.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_panicking_read_returns_its_slot_and_close_finishes() {

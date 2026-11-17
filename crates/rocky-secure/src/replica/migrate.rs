@@ -112,13 +112,11 @@ impl<A: RowApplication> Inner<A> {
         else {
             return Err(incompatible("no typed tables are installed".into()));
         };
-        // A removed table leaves; every table that stays keeps its reader.
-        if installed_domain != domain
-            || installed_readers.iter().any(|(name, reader)| {
-                readers.get(name).is_some_and(|new| new != reader)
-                    || (readers.get(name).is_none() && schema.table(name).is_some())
-            })
-        {
+        let kept_table_changes_reader = installed_readers.iter().any(|(name, reader)| {
+            readers.get(name).is_some_and(|new| new != reader)
+                || (readers.get(name).is_none() && schema.table(name).is_some())
+        });
+        if installed_domain != domain || kept_table_changes_reader {
             return Err(incompatible(
                 "a projection plan keeps the domain and reader scopes".into(),
             ));
@@ -130,8 +128,6 @@ impl<A: RowApplication> Inner<A> {
             SchemaChange::Unchanged => {}
             SchemaChange::Local | SchemaChange::Replicated => {}
         }
-        // Local tables hold application data no stored row restores: they
-        // stay in place.
         for table in installed
             .tables
             .iter()
@@ -229,8 +225,7 @@ impl<A: RowApplication> Inner<A> {
                 "a staged schema switch resumes only with its target schema",
             ));
         }
-        // Values of fields some tip on the switch's path lacks are gone.
-        let path = match intent {
+        let fields_on_switch_path = match intent {
             Some((scope, ..)) => self.staged_row_fields(scope).await?,
             None => None,
         };
@@ -251,7 +246,6 @@ impl<A: RowApplication> Inner<A> {
             )?)
             .await?,
         );
-        // Resolution reads the installed projection.
         let previous = self.workspace.typed.replace(projected.clone());
         let switched = transaction!(self, |inner| {
             let switching = match &previous {
@@ -283,11 +277,16 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
             inner
-                .rebuild_replayed(&installed, &record.schema, &replayed, path.as_ref())
+                .rebuild_replayed(
+                    &installed,
+                    &record.schema,
+                    &replayed,
+                    fields_on_switch_path.as_ref(),
+                )
                 .await?;
             inner.install_delete_triggers(&projected).await?;
             inner
-                .reshape_undo(&installed, &record.schema, path.as_ref())
+                .reshape_undo(&installed, &record.schema, fields_on_switch_path.as_ref())
                 .await?;
             if removed {
                 inner.redo_removed_writes(now()?).await?;

@@ -22,31 +22,35 @@ pub(super) use constraints::{
 };
 pub(super) use restrictions::restricted;
 
+/// Replayed members. `violated` names what a `constraint` or `restricted`
+/// drop broke; `births` the identities an applied member created.
+const REPLAYED_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_replayed(scope INTEGER NOT NULL,era INTEGER NOT NULL,clock INTEGER NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,txn BLOB NOT NULL,member INTEGER NOT NULL,members INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,undo BLOB,violated TEXT,births BLOB,PRIMARY KEY(scope,era,clock,author,sequence)) WITHOUT ROWID";
+/// Unsealed transactions, counted at every routine seal check.
+const REPLAYED_UNSEALED_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS secure_replayed_unsealed ON secure_replayed(txn) WHERE sealed=0";
+/// The newest replayed clock, which a new intent passes.
+const REPLAYED_CLOCK_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS secure_replayed_clock ON secure_replayed(clock)";
+/// Outcomes of own members whose record a scope reset removed. `based`
+/// marks an outcome an installed base decided; a based member neither
+/// sealed nor dropped lay past the base's horizon and is unknown here.
+const KEPT_OUTCOMES_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_kept_outcomes(hash BLOB PRIMARY KEY,txn BLOB NOT NULL,scope INTEGER NOT NULL,clock INTEGER NOT NULL,sequence INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,violated TEXT,based INTEGER NOT NULL) WITHOUT ROWID";
+/// Scopes whose clear changed rows of other scopes: the domain's rows
+/// are derived again once none waits.
+const REPLAYED_REDERIVE_TABLE: &str =
+    "CREATE TABLE IF NOT EXISTS secure_replayed_rederive(scope INTEGER PRIMARY KEY)";
+/// The inputs of a rebuild that left a foreign key violated, and the
+/// violation; it is not retried until they change.
+const REPLAYED_STUCK_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_replayed_stuck(id INTEGER PRIMARY KEY CHECK(id=1),inputs BLOB NOT NULL,violation TEXT NOT NULL)";
 pub(super) const SCHEMA: &[&str] = &[
-    // `violated` names the constraint or assertion a `constraint` drop broke,
-    // or the restriction of a `restricted` one;
-    // `births` the identities an applied member created, for checkpoints.
-    "CREATE TABLE IF NOT EXISTS secure_replayed(scope INTEGER NOT NULL,era INTEGER NOT NULL,clock INTEGER NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,txn BLOB NOT NULL,member INTEGER NOT NULL,members INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,undo BLOB,violated TEXT,births BLOB,PRIMARY KEY(scope,era,clock,author,sequence)) WITHOUT ROWID",
+    REPLAYED_TABLE,
     "CREATE INDEX IF NOT EXISTS secure_replayed_txn ON secure_replayed(txn)",
-    // Unsealed transactions, counted at every routine seal check.
-    "CREATE INDEX IF NOT EXISTS secure_replayed_unsealed ON secure_replayed(txn) WHERE sealed=0",
-    // The newest replayed clock, which a new intent passes.
-    "CREATE INDEX IF NOT EXISTS secure_replayed_clock ON secure_replayed(clock)",
-    // Outcomes of members this node authored whose record a scope reset
-    // removed, so a transaction's outcome outlives an import or a replay
-    // from frames. `sealed` is the finality its record had; `based` that an
-    // installed base's sealed outcomes decided it instead, and records no
-    // longer change it. A based member neither sealed nor dropped lay past
-    // the base's horizon: its outcome is unknown here. `sequence` is the
-    // member's author sequence, which a later base's seal frontier covers.
-    "CREATE TABLE IF NOT EXISTS secure_kept_outcomes(hash BLOB PRIMARY KEY,txn BLOB NOT NULL,scope INTEGER NOT NULL,clock INTEGER NOT NULL,sequence INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,violated TEXT,based INTEGER NOT NULL) WITHOUT ROWID",
+    REPLAYED_UNSEALED_INDEX,
+    REPLAYED_CLOCK_INDEX,
+    KEPT_OUTCOMES_TABLE,
     "CREATE INDEX IF NOT EXISTS secure_kept_outcomes_txn ON secure_kept_outcomes(txn)",
-    // Scopes whose clear changed rows of other scopes: the domain's rows
-    // are derived again once none waits.
-    "CREATE TABLE IF NOT EXISTS secure_replayed_rederive(scope INTEGER PRIMARY KEY)",
-    // The inputs of a rebuild that left a foreign key violated, with what:
-    // it is not tried again until they change.
-    "CREATE TABLE IF NOT EXISTS secure_replayed_stuck(id INTEGER PRIMARY KEY CHECK(id=1),inputs BLOB NOT NULL,violation TEXT NOT NULL)",
+    REPLAYED_REDERIVE_TABLE,
+    REPLAYED_STUCK_TABLE,
 ];
 
 /// A transaction's members as replayed here, live records first, then the
@@ -320,7 +324,6 @@ impl<A: RowApplication> Inner<A> {
             let (rank, outcome) = match (reason, *sealed != 0, *based != 0) {
                 (Some(reason), true, _) => (0, drop(reason, true)),
                 (None, true, _) => (1, Some(TransactionOutcome::Applied { sealed: true })),
-                // Past the base's horizon: final there, unknown here.
                 (None, false, true) => (2, None),
                 (Some(reason), false, _) => (3, drop(reason, false)),
                 (None, false, false) => (4, Some(TransactionOutcome::Applied { sealed: false })),
@@ -487,8 +490,6 @@ impl<A: RowApplication> Inner<A> {
             .iter()
             .filter(|name| !name.eq_ignore_ascii_case(&logical.sql_name))
         {
-            // A linked table this projection does not install has no rows
-            // here to order.
             let (Some(projected), Some(other)) = (typed.by_name(name), schema.table(name)) else {
                 continue;
             };
@@ -568,7 +569,6 @@ impl<A: RowApplication> Inner<A> {
                 {
                     continue;
                 }
-                // Its other members rewind with it, and what follows them.
                 for other in collect_rows(
                     self.conn
                         .query(
@@ -601,7 +601,6 @@ impl<A: RowApplication> Inner<A> {
             #[cfg(any(test, feature = "qualification"))]
             self.crash_at(|point| point == CrashPoint::Rewind)?;
         }
-        // Their births are made again when they redo.
         let scopes: BTreeSet<i64> = rewound.keys().map(|(_, scope)| *scope).collect();
         for id in scopes {
             let based = self
@@ -660,8 +659,6 @@ impl<A: RowApplication> Inner<A> {
                     .ok_or_else(corrupt)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        // References settle at commit. Rows the member created go first, so
-        // a restored image never collides with one of them.
         self.conn
             .execute("PRAGMA defer_foreign_keys=ON", ())
             .await?;
@@ -673,34 +670,17 @@ impl<A: RowApplication> Inner<A> {
                     .await?;
             }
         }
-        // A row that stands is set back in place: deleting it would run its
-        // delete actions on rows outside this undo.
         let mut collided = Vec::new();
         for (table, undo) in tables.iter().zip(undo) {
             let Some(before) = &undo.before else {
                 continue;
             };
-            let mut values = table.stored(before);
-            values.extend(undo.key.iter().cloned());
-            let restored = match self
-                .conn
-                .execute(&table.update_image(), bindings(values))
-                .await
-            {
-                Ok(0) => {
-                    self.conn
-                        .execute(&table.insert_image(), bindings(table.stored(before)))
-                        .await
-                }
-                other => other,
-            };
-            match restored {
+            match self.restore_in_place(table, &undo.key, before).await {
                 Ok(_) => {}
                 Err(error) if error.is_constraint() => collided.push((table, undo, before)),
                 Err(error) => return Err(error.into()),
             }
         }
-        // Rows that held each other's unique values, as after a swap.
         for (table, undo, _) in &collided {
             self.conn
                 .execute(&table.delete_by_key(), bindings(undo.key.clone()))
@@ -714,6 +694,42 @@ impl<A: RowApplication> Inner<A> {
         self.conn
             .execute("PRAGMA defer_foreign_keys=OFF", ())
             .await?;
+        Ok(())
+    }
+    /// Sets a row that stands back in place by an update, and inserts only a
+    /// row that is gone: deleting a standing row would run its delete actions
+    /// on rows outside this undo.
+    async fn restore_in_place(
+        &self,
+        table: &rocky_storage::capture::Table,
+        key: &[SqlValue],
+        before: &[SqlValue],
+    ) -> rocky_storage::sqlite::Result<u64> {
+        let mut values = table.stored(before);
+        values.extend(key.iter().cloned());
+        match self
+            .conn
+            .execute(&table.update_image(), bindings(values))
+            .await
+        {
+            Ok(0) => {
+                self.conn
+                    .execute(&table.insert_image(), bindings(table.stored(before)))
+                    .await
+            }
+            other => other,
+        }
+    }
+    /// Lets a rename leave trigger bodies alone while the switch rebuilds its
+    /// tables: a history trigger may name a history table the switch already
+    /// dropped.
+    async fn keep_trigger_bodies_on_rename(&self, keep: bool) -> Result<(), Error> {
+        let pragma = if keep {
+            "PRAGMA legacy_alter_table=ON"
+        } else {
+            "PRAGMA legacy_alter_table=OFF"
+        };
+        self.conn.execute(pragma, ()).await?;
         Ok(())
     }
 
@@ -731,16 +747,10 @@ impl<A: RowApplication> Inner<A> {
         path: Option<&super::schemas::PathFields>,
     ) -> Result<(), Error> {
         let old = |name: &str| typed::quoted(&format!("secure_rebuild_{name}"));
-        // A rename leaves trigger bodies alone: a history trigger may name a
-        // history table the switch already dropped.
-        self.conn
-            .execute("PRAGMA legacy_alter_table=ON", ())
-            .await?;
+        self.keep_trigger_bodies_on_rename(true).await?;
         let mut copies = Vec::new();
         for table in tables {
             let name = &table.sql_name;
-            // A table of the installed schema this projection never created
-            // starts empty.
             let created = !rows(
                 &self.conn,
                 &format!(
@@ -759,8 +769,6 @@ impl<A: RowApplication> Inner<A> {
                         && path.fields.contains(&schema.field_id(table, column))
                 })
             };
-            // A field that became required takes its default where it held
-            // none.
             let kept: Vec<(String, String)> = before
                 .columns
                 .iter()
@@ -789,9 +797,7 @@ impl<A: RowApplication> Inner<A> {
                 .await?;
             copies.push((*table, before, kept));
         }
-        self.conn
-            .execute("PRAGMA legacy_alter_table=OFF", ())
-            .await?;
+        self.keep_trigger_bodies_on_rename(false).await?;
         for table in tables {
             self.conn.execute(table.create_sql.clone(), ()).await?;
         }
@@ -815,8 +821,6 @@ impl<A: RowApplication> Inner<A> {
                     .await?;
             }
         }
-        // Children first, so that no old row is left referencing a dropped
-        // parent.
         let mut left: Vec<_> = copies.iter().map(|(_, before, _)| *before).collect();
         while !left.is_empty() {
             let leaf = left
@@ -898,7 +902,6 @@ impl<A: RowApplication> Inner<A> {
             }
             changed.insert(table.sql_name.to_ascii_lowercase(), sources);
         }
-        // A removed table's rows are gone: a rewind restores none of them.
         let removed: BTreeSet<String> = before
             .tables
             .iter()
@@ -980,7 +983,6 @@ impl<A: RowApplication> Inner<A> {
         let floor = match self.checkpoint_record(id, true).await? {
             None => 0,
             Some(record) => {
-                // A base at a seal the path leaves holds another line's rows.
                 if let Some(seal) = record
                     .signed
                     .as_ref()
@@ -1051,8 +1053,6 @@ impl<A: RowApplication> Inner<A> {
         let mut covered = BTreeMap::new();
         let mut earlier = None;
         for (scope, through) in cuts {
-            // A scope verified for the first time, as one held again, may
-            // hold members an earlier seal covers in any later era.
             let first_verified = collect_rows(
                 self.conn
                     .query(
@@ -1094,7 +1094,6 @@ impl<A: RowApplication> Inner<A> {
                         continue;
                     }
                 }
-                // They rewind from where their seal's era places them.
                 let order = (target.min(current), stamp);
                 if start.as_ref().is_none_or(|start| order < *start) {
                     start = Some(order);
@@ -1277,8 +1276,6 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         self.conn.execute("SAVEPOINT intents", ()).await?;
-        // Members replay in scope order, not in the order the author ran
-        // their statements: references between them settle at the end.
         let several = intents.len() > 1;
         if several {
             self.conn
@@ -1330,7 +1327,6 @@ impl<A: RowApplication> Inner<A> {
                 era,
             )
             .await?;
-            // A created identity stays reserved, whatever later rewinds do.
             let scope = frame.scope()?;
             self.record_births(frame, births).await?;
             for birth in births {
@@ -1348,8 +1344,6 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         if members > 1 {
-            // The record names every member this replica replayed, also
-            // those an earlier pass replayed, as a full rebuild does.
             let mut others = Vec::new();
             for record in collect_rows(
                 self.conn
@@ -1421,9 +1415,6 @@ impl<A: RowApplication> Inner<A> {
             starts.push((self.scope_id(scope).await?, (era, stamp(header))));
         }
         let mut redo = self.rewind(starts).await?;
-        // Members of this transaction the rewind took back, as one held
-        // before the arrival's partition was replaced, replay with it: its
-        // references between members settle only together.
         let Some(own) = redo
             .iter()
             .position(|redo| redo.transaction == transaction.0)
@@ -1459,8 +1450,6 @@ impl<A: RowApplication> Inner<A> {
             joined.push((frame, intent, grants.as_deref().unwrap_or(&[]), *member));
         }
         if !admitted {
-            // A rewound member's admission no longer holds: the transaction
-            // drops whole, as a redo records it.
             for (frame, .., member) in &joined {
                 self.record_replayed(
                     frame,
@@ -1473,7 +1462,6 @@ impl<A: RowApplication> Inner<A> {
             }
             return self.redo(redo, time).await;
         }
-        // In the order a full replay runs them.
         joined.sort_by_key(|(frame, ..)| {
             frame
                 .operation_ref()
@@ -1579,8 +1567,6 @@ impl<A: RowApplication> Inner<A> {
                     .frame(hash)
                     .await?
                     .ok_or_else(|| Error::Corrupt("rewound frame is missing".into()))?;
-                // The caller's savepoint undoes the rewind; the arrival retries
-                // once the key is back.
                 let extension = &frame.operation_ref()?.header.extensions;
                 if self
                     .opening_key(extension.scope, extension.generation)
@@ -1589,7 +1575,6 @@ impl<A: RowApplication> Inner<A> {
                     return Err(Error::Rejected(KEY_WAITS.into()));
                 }
                 let payload = self.row_payload(&frame)?;
-                // A rewind never carries admission across a grant change.
                 let grants = match recorded.and_then(|recorded| recorded.get(&hash)) {
                     Some(true) => self.historical_frame_authority(&frame).ok(),
                     Some(false) => None,
@@ -1720,8 +1705,6 @@ impl<A: RowApplication> Inner<A> {
             .as_ref()
             .ok_or_else(|| denied("no typed tables"))?;
         let schema = typed.rows.schema();
-        // A table the installed schema removed no longer compiles; another
-        // tip may hold it again.
         let Some(table) = typed.rows.table(&scope.table) else {
             return Ok(Err(DropReason::Schema.into()));
         };
@@ -1729,8 +1712,6 @@ impl<A: RowApplication> Inner<A> {
             .table(&table.sql_name)
             .filter(|logical| logical.class == TableClass::Replayed)
             .ok_or_else(|| denied("an intent names a table that is not replayed"))?;
-        // Each statement is checked and confined to the frame's own
-        // partition again: a receiver runs only what its own split yields.
         let held = match self.authenticated_partition(scope)? {
             Some(tuple) => vec![super::partition::partition_values(schema, logical, tuple)?],
             None => Vec::new(),
@@ -1757,9 +1738,6 @@ impl<A: RowApplication> Inner<A> {
                 _ => return Ok(Err(DropReason::Schema.into())),
             }
         }
-        // A delete action changes rows of other replayed tables in the same
-        // transaction: they are captured, admitted and undone with it. The
-        // parents of what changes are read for its foreign keys.
         let reached = cascades(schema, &logical.sql_name);
         let off_path = self.off_path(header, schema, logical);
         let mut scopes = BTreeSet::from([scope]);
@@ -1815,7 +1793,6 @@ impl<A: RowApplication> Inner<A> {
                     Err(sqlite::Error::Denied | sqlite::Error::Unsupported(_)) => {
                         return Ok(Some(DropReason::Schema.into()));
                     }
-                    // A statement that no longer compiles against the schema.
                     Err(_) if conn.describe(&copy.statement.sql).is_err() => {
                         return Ok(Some(DropReason::Schema.into()));
                     }
@@ -1824,9 +1801,6 @@ impl<A: RowApplication> Inner<A> {
             }
             Ok::<_, Error>(None)
         })();
-        // `None` when the capture refused what the statements did, such as
-        // more rows than its budget or a changed id: the author's session
-        // refuses that, and nothing of it is admitted here.
         let touched = {
             let mut sink = capture.lock().map_err(|_| poisoned())?;
             let touched = match (&ran, sink.failure()) {
@@ -1846,7 +1820,6 @@ impl<A: RowApplication> Inner<A> {
         let Some(touched) = touched? else {
             return Ok(Err(DropReason::Engine.into()));
         };
-        // Admission runs on the rows this replay produced.
         let (mut undo, mut births, mut written) = (Vec::new(), Vec::new(), Vec::new());
         for touched in touched {
             let captured = &plan.tables[touched.table];
@@ -1865,8 +1838,6 @@ impl<A: RowApplication> Inner<A> {
             else {
                 continue;
             };
-            // A delete action follows from the parent's change, which the
-            // author's grants admitted.
             let mut named = change.clone();
             if let Some(after) = named.after.as_mut().filter(|_| named.before.is_none()) {
                 after.retain(|field, _| !off_path.iter().any(|(_, id, _)| id == field));
@@ -1874,8 +1845,6 @@ impl<A: RowApplication> Inner<A> {
             if own && (change.scope != scope || !named.permitted_by(grants)) {
                 return Ok(Err(DropReason::Admission.into()));
             }
-            // Delete actions are checked too: a cascade cannot remove what
-            // a restriction keeps.
             if let Some(violated) = restricted(
                 conn,
                 schema,
@@ -1963,7 +1932,6 @@ impl<A: RowApplication> Inner<A> {
         if Some(identity.writer()) != author {
             return Err(denied("a replayed insert names another author's identity"));
         }
-        // The scope's history created this identity before, retired or not.
         if !self
             .conn
             .connection()

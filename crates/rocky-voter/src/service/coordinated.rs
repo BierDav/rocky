@@ -92,10 +92,11 @@ impl VoterService {
                 }
             }
         }
-        // Do not return promises belonging to a term that just ended.
         let metrics = self.raft.metrics();
         let current = metrics.borrow();
-        if current.current_term != term || current.current_leader != Some(self.node) {
+        let promises_from_ended_term =
+            current.current_term != term || current.current_leader != Some(self.node);
+        if promises_from_ended_term {
             return Err(CoordinationError::Unavailable);
         }
         Ok(status)

@@ -116,9 +116,11 @@ async fn insert(
             let replica = node.replica.clone();
             let mut request =
                 Box::pin(async move { replica.author_buffered(handle, changes, vec![]).await });
-            // Preserve log order while enqueuing a shared transaction.
             std::future::poll_fn(|cx| {
-                assert!(request.as_mut().poll(cx).is_pending());
+                assert!(
+                    request.as_mut().poll(cx).is_pending(),
+                    "a shared transaction enqueues in log order before the next request starts"
+                );
                 std::task::Poll::Ready(())
             })
             .await;
@@ -179,14 +181,8 @@ async fn connect(
 ) -> (NativeSession, rocky_platform::task::JoinHandle<()>) {
     connect_with(node, server, MAX_SECURE_BYTES).await
 }
-/// A client session with its own byte budget; `server` answers it until the
-/// client ends the channel.
-async fn connect_with(
-    node: &Node,
-    server: &Node,
-    budget: usize,
-) -> (NativeSession, rocky_platform::task::JoinHandle<()>) {
-    // As a link's tip exchange does before rows move.
+/// Exchanges tip graphs as a link does before rows move.
+async fn exchange_tips_before_rows_move(node: &Node, server: &Node) {
     let domain = *server
         .replica
         .inner
@@ -197,6 +193,16 @@ async fn connect_with(
         .next()
         .unwrap();
     exchange_graphs(&node.replica, &server.replica, domain).await;
+}
+
+/// A client session with its own byte budget; `server` answers it until the
+/// client ends the channel.
+async fn connect_with(
+    node: &Node,
+    server: &Node,
+    budget: usize,
+) -> (NativeSession, rocky_platform::task::JoinHandle<()>) {
+    exchange_tips_before_rows_move(node, server).await;
     let (near, far) = network::link::testing::connected().await;
     let (session, mut served) = network::link::testing::sessions_over(
         near,
@@ -214,8 +220,8 @@ async fn connect_with(
     let task = rocky_platform::task::spawn(async move {
         loop {
             if let Err(error) = served.serve_once(&replica).await {
-                // A disconnect ends the session; anything else is printed for the failing test.
-                if !matches!(error, Error::Io(_)) {
+                let disconnected = matches!(error, Error::Io(_));
+                if !disconnected {
                     eprintln!("server: {error}");
                 }
                 return;
@@ -268,15 +274,21 @@ async fn range_sync_pages_by_frontier_and_rebootstraps_behind_a_pruned_gap() {
         .unwrap();
     assert!(!pass.behind);
     assert_eq!((pass.frames, pass.lag), (100, 0));
-    // At most 32 frames per page, and nothing is sent twice in the next pass.
-    assert!(pass.pages >= 4);
+    assert!(
+        pass.pages >= 4,
+        "a page carries at most 32 of the 100 frames"
+    );
     assert_eq!(session.sent_counts.ranges, pass.pages);
     assert_eq!(session.sent_counts.acknowledgments, 1);
     let again = session
         .catch_up(&device.replica, scope, QUOTA)
         .await
         .unwrap();
-    assert_eq!((again.frames, again.pages), (0, 1));
+    assert_eq!(
+        (again.frames, again.pages),
+        (0, 1),
+        "nothing is sent twice in the next pass"
+    );
     assert_eq!(
         all_rows(&device.replica, scope).await,
         all_rows(&full.replica, scope).await
@@ -286,18 +298,20 @@ async fn range_sync_pages_by_frontier_and_rebootstraps_behind_a_pruned_gap() {
         full.replica.frontier(scope).await.unwrap()
     );
 
-    // The device's frontier acknowledgment lets the full node prune.
     compacted_base(&full.replica, &f.publisher, scope).await;
     full.replica
         .set_retention_policy(scope, keep_one_copy())
         .await
         .unwrap();
     let report = full.replica.prune(scope).await.unwrap();
-    assert_eq!((report.pruned, report.blocked), (100, None));
+    assert_eq!(
+        (report.pruned, report.blocked),
+        (100, None),
+        "the device's frontier acknowledgment lets the full node prune"
+    );
     drop(session);
     server.await.unwrap();
 
-    // A fresh replica is behind the pruned gap and rebootstraps first.
     let late = open_node(
         &f,
         &dir.path().join("late.db"),
@@ -313,14 +327,18 @@ async fn range_sync_pages_by_frontier_and_rebootstraps_behind_a_pruned_gap() {
             .catch_up(&late.replica, scope, QUOTA)
             .await
             .unwrap()
-            .behind
+            .behind,
+        "a fresh replica is behind the pruned gap"
     );
     assert!(late.replica.frontier(scope).await.unwrap().logs.is_empty());
     let synced = session
         .sync_scope(&late.replica, scope, QUOTA)
         .await
         .unwrap();
-    assert!(synced.rebootstrap.is_some());
+    assert!(
+        synced.rebootstrap.is_some(),
+        "a replica behind the pruned gap rebootstraps first"
+    );
     assert_eq!(synced.catch_up.frames, 5);
     assert_eq!(
         all_rows(&late.replica, scope).await,
@@ -376,13 +394,19 @@ async fn a_partial_replica_holds_only_its_subscription() {
             .unwrap();
     }
     assert_eq!(all_rows(&device.replica, scopes[3]).await.len(), 20);
-    // Frames of another scope are refused, not stored.
     let refused = session.catch_up(&device.replica, scopes[4], QUOTA).await;
-    assert!(refused.is_err());
+    assert!(
+        refused.is_err(),
+        "frames of an unsubscribed scope are refused"
+    );
     drop(session);
     server.await.unwrap();
     for scope in scopes.iter().filter(|scope| **scope != scopes[3]) {
-        assert_eq!(stored_rows(&device.replica, *scope).await, 0);
+        assert_eq!(
+            stored_rows(&device.replica, *scope).await,
+            0,
+            "frames of an unsubscribed scope are not stored"
+        );
         let page = device
             .replica
             .snapshot_page(*scope, None, 16)
@@ -390,8 +414,10 @@ async fn a_partial_replica_holds_only_its_subscription() {
             .unwrap();
         assert!(!page.complete && page.rows.is_empty());
     }
-    // A full replica refuses to evict; a partial one cannot author outside its subscription.
-    assert!(full.replica.evict(scopes[0]).await.is_err());
+    assert!(
+        full.replica.evict(scopes[0]).await.is_err(),
+        "a full replica refuses to evict"
+    );
     let outside = device
         .replica
         .author(
@@ -405,15 +431,21 @@ async fn a_partial_replica_holds_only_its_subscription() {
             vec![],
         )
         .await;
-    assert!(outside.is_err());
-    // Leaving keeps the rows but stops calling them complete.
+    assert!(
+        outside.is_err(),
+        "a partial replica cannot author outside its subscription"
+    );
     device.replica.unsubscribe(scopes[3]).await.unwrap();
     let page = device
         .replica
         .snapshot_page(scopes[3], None, 64)
         .await
         .unwrap();
-    assert_eq!((page.rows.len(), page.complete), (20, false));
+    assert_eq!(
+        (page.rows.len(), page.complete),
+        (20, false),
+        "leaving keeps the rows but stops calling them complete"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -481,7 +513,6 @@ async fn eviction_needs_fresh_durable_custody_and_a_resubscribed_scope_converges
         "transport acknowledgments from an ineligible peer earn no custody credit"
     );
 
-    // The full node applies the pushed frames; its frontier is custody.
     let (mut session, server) = connect(&device, &full).await;
     assert_eq!(
         session
@@ -505,7 +536,8 @@ async fn eviction_needs_fresh_durable_custody_and_a_resubscribed_scope_converges
     assert!(
         entry
             .custody
-            .contains(&(rocky_credentials::PeerId::of(full.key.public_key()), 11))
+            .contains(&(rocky_credentials::PeerId::of(full.key.public_key()), 11)),
+        "the full node applies the pushed frames and its frontier counts as custody"
     );
     assert!(
         entry
@@ -524,7 +556,6 @@ async fn eviction_needs_fresh_durable_custody_and_a_resubscribed_scope_converges
     let audit = device.replica.audit(scope).await;
     assert!(audit.is_ok(), "{audit:?}");
 
-    // Meanwhile another replica edits, and the full node prunes.
     let (mut session, server) = connect(&other, &full).await;
     session
         .sync_scope(&other.replica, scope, QUOTA)
@@ -548,7 +579,6 @@ async fn eviction_needs_fresh_durable_custody_and_a_resubscribed_scope_converges
         .unwrap();
     assert!(full.replica.prune(scope).await.unwrap().pruned > 0);
 
-    // Resubscribed: authoring waits for the own log, then everything converges.
     device.replica.subscribe(scope).await.unwrap();
     let early = device
         .replica
@@ -563,7 +593,10 @@ async fn eviction_needs_fresh_durable_custody_and_a_resubscribed_scope_converges
             vec![],
         )
         .await;
-    assert!(early.is_err());
+    assert!(
+        early.is_err(),
+        "a resubscribed scope's authoring waits for its own log"
+    );
     let (mut session, server) = connect(&device, &full).await;
     let synced = session
         .sync_scope(&device.replica, scope, QUOTA)
@@ -588,9 +621,12 @@ async fn eviction_needs_fresh_durable_custody_and_a_resubscribed_scope_converges
     let rows = all_rows(&full.replica, scope).await;
     assert_eq!(all_rows(&device.replica, scope).await, rows);
     assert_eq!(rows[&row(0)], f.app().name("renamed"));
-    assert_eq!(rows[&row(1)], f.app().name("elsewhere"));
+    assert_eq!(
+        rows[&row(1)],
+        f.app().name("elsewhere"),
+        "another replica's edit made while the device was evicted converges"
+    );
     assert_eq!(rows[&row(2)], f.app().name("after"));
-    // The resumed log continues the evicted one instead of forking it.
     assert_eq!(
         device
             .replica
@@ -600,7 +636,8 @@ async fn eviction_needs_fresh_durable_custody_and_a_resubscribed_scope_converges
             .log(device.key.public_key())
             .unwrap()
             .applied,
-        12
+        12,
+        "the resumed log continues the evicted one instead of forking it"
     );
 }
 
@@ -652,10 +689,12 @@ async fn a_resubscribed_scope_without_own_writes_reads_incomplete_until_restored
     let expected = all_rows(&full.replica, scope).await;
     assert_eq!(all_rows(&device.replica, scope).await, expected);
 
-    // No own log to guard, yet the resubscribed scope is not complete.
     device.replica.evict(scope).await.unwrap();
     device.replica.subscribe(scope).await.unwrap();
-    assert!(restoring().await);
+    assert!(
+        restoring().await,
+        "with no own log to guard, the resubscribed scope is still not complete"
+    );
     sync().await;
     assert!(!restoring().await);
     assert_eq!(all_rows(&device.replica, scope).await, expected);
@@ -698,21 +737,23 @@ async fn pruning_requires_complete_escrow_and_counts_a_keyless_receipt() {
         .unwrap();
     compacted_base(&device.replica, &f.publisher, scope).await;
     custody::policy(&device, scope, &[&custodian], 1).await;
-    // A custody-only full node holds every frame but cannot apply them.
     let (mut session, server) = connect(&device, &custodian).await;
     session.push(&device.replica, scope, QUOTA).await.unwrap();
     drop(session);
     server.await.unwrap();
     let blocked = device.replica.prune(scope).await.unwrap();
     assert_eq!(blocked.pruned, 0);
-    assert!(matches!(
-        blocked.blocked,
-        Some(PruneBlock::Custody {
-            durable: 0,
-            needed: 1,
-            ..
-        })
-    ));
+    assert!(
+        matches!(
+            blocked.blocked,
+            Some(PruneBlock::Custody {
+                durable: 0,
+                needed: 1,
+                ..
+            })
+        ),
+        "a custody-only node holding every frame it cannot apply earns no durable custody without escrow"
+    );
     custody::escrow(&f, &device, &[scope]).await;
     let (mut session, server) = connect(&device, &custodian).await;
     session.push(&device.replica, scope, QUOTA).await.unwrap();
@@ -790,13 +831,13 @@ async fn a_remote_read_states_its_source_and_is_never_local_state() {
             .complete
     );
 
-    // Without read authority over the scope nothing is served.
     let (mut session, server) = connect(&stranger, &full).await;
     assert!(
         session
             .read_remote(&stranger.replica, scopes[1], None, 16)
             .await
-            .is_err()
+            .is_err(),
+        "without read authority over the scope nothing is served"
     );
     drop(session);
     server.await.unwrap();
@@ -892,7 +933,6 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
         .set_retention_policy(scopes[1], keep_one_copy())
         .await
         .unwrap();
-    // Another reader acknowledged everything, so the full node prunes scope 1.
     let reader = open_node(
         &f,
         &dir.path().join("reader.db"),
@@ -908,9 +948,12 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
         .unwrap();
     drop(session);
     server.await.unwrap();
-    assert_eq!(full.replica.prune(scopes[1]).await.unwrap().pruned, 100);
+    assert_eq!(
+        full.replica.prune(scopes[1]).await.unwrap().pruned,
+        100,
+        "another reader acknowledged everything, so the full node prunes scope 1"
+    );
 
-    // The full node dies after one range page.
     let (mut session, server) = connect(&device, &full).await;
     let frontier = device.replica.frontier(scopes[0]).await.unwrap();
     let page = full
@@ -931,10 +974,10 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
         session
             .catch_up(&device.replica, scopes[0], QUOTA)
             .await
-            .is_err()
+            .is_err(),
+        "the full node died after one range page"
     );
     drop(session);
-    // ... and midway through serving a checkpoint.
     let (session, server) = connect(&device, &full).await;
     let signed = full
         .replica
@@ -969,14 +1012,16 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
         .await
         .unwrap()
         .unwrap();
-    assert!(cursor.is_some() && !complete);
+    assert!(
+        cursor.is_some() && !complete,
+        "the full node died midway through serving a checkpoint"
+    );
     for scope in &scopes[..2] {
         assert!(device.replica.audit(*scope).await.is_ok());
     }
     let full = full.replica;
     drop(full);
 
-    // The full node restarts from its file; both transfers resume.
     let full = open_node(&f, &full_path, &full_key, &scopes, &scopes).await;
     assert!(full.replica.audit(scopes[0]).await.is_ok());
     let (mut session, server) = connect(&device, &full).await;
@@ -988,8 +1033,6 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
     }
     drop(session);
     server.await.unwrap();
-    // Scope 0 came as frames while scope 1's positions were pruned: its
-    // state at the seal is the full node's verified base.
     let imported = crate::tests::import_needed_bases(
         &full.replica,
         &device.replica,
@@ -1003,7 +1046,8 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
             .iter()
             .map(|signed| signed.statement.scope)
             .collect::<Vec<_>>(),
-        vec![scopes[0]]
+        vec![scopes[0]],
+        "scope 0 came as frames beside scope 1's pruned positions, so its state at the seal is the full node's verified base"
     );
     assert_eq!(
         imported[0].id().unwrap(),
@@ -1017,11 +1061,11 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
     for scope in &scopes[..2] {
         assert_eq!(
             all_rows(&device.replica, *scope).await,
-            all_rows(&full.replica, *scope).await
+            all_rows(&full.replica, *scope).await,
+            "both transfers resume after the full node restarts from its file"
         );
     }
 
-    // A replacement full node starts from the existing one.
     let replacement = open_node(
         &f,
         &dir.path().join("replacement.db"),
@@ -1041,8 +1085,6 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
     }
     drop(session);
     server.await.unwrap();
-    // Scopes that came as frames beside scope 1's pruned positions take
-    // the full node's verified bases at the seal.
     let imported = crate::tests::import_needed_bases(
         &full.replica,
         &replacement.replica,
@@ -1056,7 +1098,10 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
         .map(|signed| signed.statement.scope)
         .collect();
     assert!(needed.contains(&scopes[0]));
-    assert!(needed.is_subset(&BTreeSet::from([scopes[0], scopes[2]])));
+    assert!(
+        needed.is_subset(&BTreeSet::from([scopes[0], scopes[2]])),
+        "only scopes that came as frames beside scope 1's pruned positions take verified bases"
+    );
     for signed in &imported {
         assert_eq!(
             signed.id().unwrap(),
@@ -1071,10 +1116,10 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
     for scope in &scopes {
         assert_eq!(
             all_rows(&replacement.replica, *scope).await,
-            all_rows(&full.replica, *scope).await
+            all_rows(&full.replica, *scope).await,
+            "a replacement full node starts from the existing one"
         );
     }
-    // The device continues against the replacement.
     rename(&f, &device, scopes[0], 3, "row 3", "moved").await;
     device.replica.set_role(partial()).await.unwrap();
     let (mut session, server) = connect(&device, &replacement).await;
@@ -1094,7 +1139,8 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
     server.await.unwrap();
     assert_eq!(
         all_rows(&device.replica, scopes[0]).await,
-        all_rows(&replacement.replica, scopes[0]).await
+        all_rows(&replacement.replica, scopes[0]).await,
+        "the device continues against the replacement"
     );
     let status = device.replica.replica_status().await.unwrap();
     let entry = status
@@ -1184,9 +1230,14 @@ async fn a_far_behind_replica_catches_up_while_both_sides_keep_writing() {
         ),
         writes("full", full.replica.clone(), full.key.clone(), scopes[1]),
     );
-    // Bounded pages, and neither side's writes waited for the whole transfer.
-    assert!(pass.frames >= CATCH_UP_ROWS as usize && pass.pages >= (CATCH_UP_ROWS / 32) as usize);
-    assert!(local > 0 && remote > 0, "{local} {remote}");
+    assert!(
+        pass.frames >= CATCH_UP_ROWS as usize && pass.pages >= (CATCH_UP_ROWS / 32) as usize,
+        "catch-up pages are bounded"
+    );
+    assert!(
+        local > 0 && remote > 0,
+        "neither side's writes waited for the whole transfer: {local} {remote}"
+    );
     eprintln!(
         "writes during catch-up: device {local} (slowest {local_slowest:?}), full {remote} (slowest {remote_slowest:?})"
     );
@@ -1232,7 +1283,6 @@ async fn a_sync_larger_than_a_session_continues_on_the_next() {
     )
     .await;
     insert(&f, &full, scope, 0..500, 1).await;
-    // Both pruned history behind a checkpoint and frames after it.
     let (mut session, server) = connect(&reader, &full).await;
     session
         .catch_up(&reader.replica, scope, QUOTA)
@@ -1245,8 +1295,13 @@ async fn a_sync_larger_than_a_session_continues_on_the_next() {
         .set_retention_policy(scope, keep_one_copy())
         .await
         .unwrap();
-    assert_eq!(full.replica.prune(scope).await.unwrap().pruned, 500);
-    insert(&f, &full, scope, 500..2000, 1).await;
+    assert_eq!(
+        full.replica.prune(scope).await.unwrap().pruned,
+        500,
+        "history behind the checkpoint is pruned"
+    );
+    let frames_after_the_checkpoint = 500..2000;
+    insert(&f, &full, scope, frames_after_the_checkpoint, 1).await;
     let mut sessions = 0;
     let mut rebootstrapped = false;
     loop {

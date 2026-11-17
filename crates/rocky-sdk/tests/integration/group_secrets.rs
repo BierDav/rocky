@@ -308,7 +308,6 @@ async fn one_envelope_shares_a_group_and_installs_only_with_read_on_every_table(
     )
     .await;
     assert_eq!(created["epoch"]["generation"], 1);
-    // Creating again is idempotent: the same secret and epoch.
     assert_eq!(
         snap::ok(
             issuer
@@ -319,7 +318,8 @@ async fn one_envelope_shares_a_group_and_installs_only_with_read_on_every_table(
                 })
         )
         .await,
-        created
+        created,
+        "creating again is idempotent: the same secret and epoch"
     );
     assert_eq!(issuer.store.group_secrets(), 1);
     let (secrets, tables) = issuer.epochs("A").await;
@@ -341,9 +341,7 @@ async fn one_envelope_shares_a_group_and_installs_only_with_read_on_every_table(
         "pending"
     );
 
-    // A reader lacking read on one table of the group installs nothing, and
-    // a refused envelope leaves no secret, epoch or registration behind.
-    let (partial, partial_device) = granted(
+    let (reader_lacking_one_table, partial_device) = granted(
         &issuer,
         &root.path().join("partial"),
         "A",
@@ -352,8 +350,8 @@ async fn one_envelope_shares_a_group_and_installs_only_with_read_on_every_table(
     )
     .await;
     issuer.share("A", &[&partial_device]).await.unwrap();
-    partial.fetch(&issuer).await.unwrap();
-    let refused = partial.events("envelope_refused").await;
+    reader_lacking_one_table.fetch(&issuer).await.unwrap();
+    let refused = reader_lacking_one_table.events("envelope_refused").await;
     assert_eq!(refused.len(), 1, "only its own envelope reached it");
     assert!(
         refused[0]["error"]
@@ -362,33 +360,49 @@ async fn one_envelope_shares_a_group_and_installs_only_with_read_on_every_table(
             .contains("attachments lacks it"),
         "{refused:?}"
     );
-    assert_eq!(partial.store.group_secrets(), 0);
-    let (secrets, tables) = partial.epochs("A").await;
-    assert_eq!(secrets, json!([]));
+    assert_eq!(
+        reader_lacking_one_table.store.group_secrets(),
+        0,
+        "a refused envelope leaves no secret"
+    );
+    let (secrets, tables) = reader_lacking_one_table.epochs("A").await;
+    assert_eq!(secrets, json!([]), "a refused envelope leaves no epoch");
     assert!(uniform(&tables, json!([])));
     assert_eq!(
-        partial.status("A").await["tables"][0]["holding"],
-        Value::Null
+        reader_lacking_one_table.status("A").await["tables"][0]["holding"],
+        Value::Null,
+        "a refused envelope leaves no registration"
     );
-    // Its sender keeps the envelope; the other is still pending too.
     let states = issuer.recipients("A").await;
-    assert_eq!(states[&partial_device.node.to_hex()], "pending");
+    assert_eq!(
+        states[&partial_device.node.to_hex()],
+        "pending",
+        "the sender keeps a refused envelope"
+    );
     assert_eq!(states[&device.node.to_hex()], "pending");
 
-    // The recipient installs every table's key from the one envelope.
     reader.fetch(&issuer).await.unwrap();
     assert_eq!(reader.events("partition_key_installed").await.len(), 1);
     let (secrets, tables) = reader.epochs("A").await;
     assert_eq!(secrets, json!([1]));
-    assert!(uniform(&tables, json!([1])), "{tables:?}");
+    assert!(
+        uniform(&tables, json!([1])),
+        "the recipient installs every table's key from the one envelope: {tables:?}"
+    );
     assert_eq!(
         issuer.recipients("A").await[&device.node.to_hex()],
         "delivered"
     );
-    // The status of deliveries is the sharer's alone.
-    assert_eq!(reader.status("A").await["recipients"], json!([]));
-    // One secret is stored; table keys are derived, never stored.
-    assert_eq!(reader.store.group_secrets(), 1);
+    assert_eq!(
+        reader.status("A").await["recipients"],
+        json!([]),
+        "the status of deliveries is the sharer's alone"
+    );
+    assert_eq!(
+        reader.store.group_secrets(),
+        1,
+        "one secret is stored; table keys are derived, never stored"
+    );
     reader.database.close().await.unwrap();
     let reader = Peer::reopen(
         &root.path().join("reader"),
@@ -397,7 +411,7 @@ async fn one_envelope_shares_a_group_and_installs_only_with_read_on_every_table(
         reader.hub.clone(),
     );
     assert!(uniform(&reader.epochs("A").await.1, json!([1])));
-    for peer in [reader, partial, issuer] {
+    for peer in [reader, reader_lacking_one_table, issuer] {
         peer.database.close().await.unwrap();
     }
 }
@@ -441,22 +455,22 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
         peer.fetch(&issuer).await.unwrap();
     }
 
-    // The issuer knows the removed device only through its partition grant.
     let revoked = snap::ok(
         issuer
             .session
             .revoke_identity(&(snap::text(&(removed_device.identity.to_string())))),
     )
     .await;
-    assert_eq!(revoked["revocations"]["statements"], 1);
+    assert_eq!(
+        revoked["revocations"]["statements"], 1,
+        "the issuer revokes a device it knows only through its partition grant"
+    );
     for (list, expected) in [("A", json!([1, 2])), ("B", json!([1]))] {
         let (secrets, tables) = issuer.epochs(list).await;
         assert_eq!(secrets, expected, "{list}");
         assert!(uniform(&tables, expected), "{list}: {tables:?}");
     }
     assert_eq!(issuer.store.group_secrets(), 3);
-    // A partition created after the rotation starts at the first epoch:
-    // key epochs follow each scope, not the revocations.
     let created = snap::ok(
         issuer
             .session
@@ -466,11 +480,16 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
             }),
     )
     .await;
-    assert_eq!(created["epoch"]["generation"], 1);
+    assert_eq!(
+        created["epoch"]["generation"], 1,
+        "key epochs follow each scope, not the revocations"
+    );
 
-    // Sharing refuses the revoked device and any epoch but the current.
     let refused = issuer.share("A", &[&removed_device]).await.unwrap_err();
-    assert!(refused.contains("revoked"), "{refused}");
+    assert!(
+        refused.contains("revoked"),
+        "sharing refuses the revoked device: {refused}"
+    );
     let refused =
         snap::string(
             issuer.session.share_partition(
@@ -490,8 +509,10 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
         )
         .await
         .unwrap_err();
-    assert!(refused.contains("current epoch"), "{refused}");
-    // Its identity is revoked: a fresh node of it gets no grant.
+    assert!(
+        refused.contains("current epoch"),
+        "sharing refuses any epoch but the current: {refused}"
+    );
     let (_, fresh) = prepare(&root.path().join("fresh"));
     let renamed = NodeKeys {
         identity: removed_device.identity,
@@ -501,15 +522,23 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
         .grant(&renamed, issuer.grants("A", &TABLES, &["Read"]).await)
         .await
         .unwrap_err();
-    assert!(refused.contains("revoked"), "{refused}");
+    assert!(
+        refused.contains("revoked"),
+        "a fresh node of a revoked identity gets no grant: {refused}"
+    );
 
-    // The rotation sealed the new epoch to the remaining reader its
-    // registry records, with no share; sharing again adds nothing.
     let states = issuer.recipients("A").await;
     assert_eq!(states.get(&removed_device.node.to_hex()), None);
-    assert_eq!(states[&remaining_device.node.to_hex()], "pending");
+    assert_eq!(
+        states[&remaining_device.node.to_hex()],
+        "pending",
+        "the rotation seals the new epoch to the recorded remaining reader without a share"
+    );
     let shared = issuer.share("A", &[&remaining_device]).await.unwrap();
-    assert_eq!(shared["epoch"]["generation"], 2);
+    assert_eq!(
+        shared["epoch"]["generation"], 2,
+        "sharing again adds no epoch"
+    );
     assert!(removed.fetch(&issuer).await.is_err(), "revoked");
     remaining.fetch(&issuer).await.unwrap();
     let (secrets, tables) = remaining.epochs("A").await;
@@ -550,7 +579,6 @@ async fn a_partition_granted_after_enrollment_rotates_with_its_device() {
         )
         .await;
     }
-    // Enrolled to read only `notes`, then granted list A of the group.
     let (_, device) = prepare(&root.path().join("device"));
     snap::ok(issuer.session.grant(
         device,
@@ -576,9 +604,12 @@ async fn a_partition_granted_after_enrollment_rotates_with_its_device() {
     let (secrets, tables) = issuer.epochs("A").await;
     assert_eq!(secrets, json!([1, 2]), "the granted partition rotates");
     assert!(uniform(&tables, json!([1, 2])));
-    // Nothing the device could read selects B: it keeps its epoch.
     let (secrets, tables) = issuer.epochs("B").await;
-    assert_eq!(secrets, json!([1]));
+    assert_eq!(
+        secrets,
+        json!([1]),
+        "a partition the device could not read keeps its epoch"
+    );
     assert!(uniform(&tables, json!([1])));
     let renamed = NodeKeys {
         identity: device.identity,
@@ -689,7 +720,6 @@ async fn a_table_joining_the_group_later_derives_its_key_from_the_held_secret() 
     assert_eq!(secrets, json!([1]));
     assert!(uniform(&tables, json!([1])), "{tables:?}");
     assert_eq!(issuer.store.group_secrets(), 1, "no new secret or envelope");
-    // The derived key seals and opens a row of the new table.
     snap::ok(issuer.session.execute("BEGIN", Vec::new())).await;
     let id = snap::ok(
         issuer
@@ -711,7 +741,10 @@ async fn a_table_joining_the_group_later_derives_its_key_from_the_held_secret() 
         cursor: None,
     }))
     .await;
-    assert_eq!(rows["rows"][0][0]["value"], "photo");
+    assert_eq!(
+        rows["rows"][0][0]["value"], "photo",
+        "the derived key seals and opens a row of the new table"
+    );
     issuer.database.close().await.unwrap();
 }
 
@@ -791,7 +824,6 @@ async fn a_phone_holds_a_list_and_its_items_while_leaving_out_attachments() {
     assert_eq!(holding["lists"], "held");
     assert_eq!(holding["items"], "held");
     assert_eq!(holding["attachments"], "left");
-    // The whole group partition is released together.
     snap::ok(
         phone.session.unsubscribe_partition(
             rocky_sdk::PartitionTarget::Group {
@@ -810,7 +842,7 @@ async fn a_phone_holds_a_list_and_its_items_while_leaving_out_attachments() {
             .unwrap()
             .iter()
             .all(|table| table["holding"] == "left"),
-        "{status}"
+        "the whole group partition is released together: {status}"
     );
     phone.database.close().await.unwrap();
     issuer.database.close().await.unwrap();
@@ -819,8 +851,8 @@ async fn a_phone_holds_a_list_and_its_items_while_leaving_out_attachments() {
 /// Writes one row of list A.
 async fn write(peer: &Peer, table: &str, key: &str) {
     snap::ok(peer.session.execute("BEGIN", Vec::new())).await;
-    if table == "lists" && key != "before" {
-        // One row per list: a later write updates it.
+    let updates_the_one_row_per_list = table == "lists" && key != "before";
+    if updates_the_one_row_per_list {
         snap::ok(peer.session.execute(
             &(snap::text(&(format!("UPDATE lists SET title='{key}' WHERE name='A'")))),
             Vec::new(),
@@ -920,9 +952,12 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
     let shared = issuer.share("A", &devices).await.unwrap();
     assert_eq!(shared["recipients"].as_array().unwrap().len(), 2);
     for (reader, _) in &readers {
-        // One sync delivers the envelope and then the list's rows.
         snap::ok(reader.session.sync_once()).await;
-        assert_eq!(rows(reader).await, vec![vec!["before".to_owned()]; 3]);
+        assert_eq!(
+            rows(reader).await,
+            vec![vec!["before".to_owned()]; 3],
+            "one sync delivers the envelope and then the list's rows"
+        );
     }
 
     let (removed, removed_device) = &readers[0];
@@ -936,18 +971,25 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
     for table in TABLES {
         write(&issuer, table, "after").await;
     }
-    // The rotation's envelope reaches the remaining reader by sync alone.
     snap::ok(remaining.session.sync_once()).await;
     let both = vec!["after".to_owned(), "before".to_owned()];
     assert_eq!(
         rows(remaining).await,
-        [vec!["after".to_owned()], both.clone(), both]
+        [vec!["after".to_owned()], both.clone(), both],
+        "the rotation's envelope reaches the remaining reader by sync alone"
     );
-    // The removed reader is refused and holds no key of the new epoch.
     let _ = snap::string(removed.session.sync_once()).await;
-    assert_eq!(rows(removed).await, vec![vec!["before".to_owned()]; 3]);
+    assert_eq!(
+        rows(removed).await,
+        vec![vec!["before".to_owned()]; 3],
+        "the removed reader is refused later rows"
+    );
     let (secrets, tables) = removed.epochs("A").await;
-    assert_eq!(secrets, json!([1]));
+    assert_eq!(
+        secrets,
+        json!([1]),
+        "the removed reader holds no key of the new epoch"
+    );
     assert!(uniform(&tables, json!([1])));
     for (reader, _) in readers {
         reader.database.close().await.unwrap();
@@ -1016,25 +1058,11 @@ async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants(
     let mut grants = issuer
         .grants("A", &TABLES, &["Read", "Insert", "Update", "Delete"])
         .await;
-    // A writer needs paired field rights as well as rights on its selected rows.
-    let identity: Value =
-        serde_json::from_slice(&std::fs::read(root.path().join("issuer/identity.json")).unwrap())
-            .unwrap();
-    let credentials: rocky_sdk::credentials::CredentialChain =
-        serde_json::from_value(identity["credentials"].clone()).unwrap();
-    for grant in grants.as_array_mut().unwrap() {
-        let full = credentials
-            .grants()
-            .iter()
-            .find(|full| json!(full.scope.table) == grant["table"])
-            .unwrap();
-        grant["fields"] = json!(full.fields);
-    }
+    pair_field_rights(&root.path().join("issuer"), &mut grants);
     let supplied = issuer.grant(&device, grants).await.unwrap();
     let writer = install(&directory, store, supplied, &issuer.hub);
     introduce(&issuer, &writer).await;
     issuer.share("A", &[&device]).await.unwrap();
-    // The sync that delivers the envelope also obtains an author per table.
     snap::ok(writer.session.sync_once()).await;
     snap::ok(writer.session.sync_once()).await;
     snap::ok(writer.session.execute("BEGIN", Vec::new())).await;
@@ -1053,10 +1081,29 @@ async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants(
     snap::ok(writer.session.sync_once()).await;
     assert_eq!(
         rows(&issuer).await,
-        [vec!["before"], vec!["before", "writer"], vec!["before"]]
+        [vec!["before"], vec!["before", "writer"], vec!["before"]],
+        "syncing the envelope obtains an author per table for a partition-only writer"
     );
     writer.database.close().await.unwrap();
     issuer.database.close().await.unwrap();
+}
+
+/// Copies the issuer's field rights onto each granted table: a writer needs
+/// them paired with rights on its selected rows.
+fn pair_field_rights(issuer_directory: &std::path::Path, grants: &mut Value) {
+    let identity: Value =
+        serde_json::from_slice(&std::fs::read(issuer_directory.join("identity.json")).unwrap())
+            .unwrap();
+    let credentials: rocky_sdk::credentials::CredentialChain =
+        serde_json::from_value(identity["credentials"].clone()).unwrap();
+    for grant in grants.as_array_mut().unwrap() {
+        let full = credentials
+            .grants()
+            .iter()
+            .find(|full| json!(full.scope.table) == grant["table"])
+            .unwrap();
+        grant["fields"] = json!(full.fields);
+    }
 }
 
 #[tokio::test]
@@ -1178,7 +1225,6 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
     snap::ok(first.session.sync_once()).await;
     assert_eq!(rows(&first).await, vec![vec!["before".to_owned()]; 3]);
 
-    // The identity links a second node from the first; no issuer acts.
     let contact = snap::ok(first.session.contact_info()).await["uri"]
         .as_str()
         .unwrap()
@@ -1203,12 +1249,15 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
     );
     introduce(&issuer, &second).await;
     snap::ok(second.session.sync_once()).await;
-    assert_eq!(rows(&second).await, vec![vec!["before".to_owned()]; 3]);
+    assert_eq!(
+        rows(&second).await,
+        vec![vec!["before".to_owned()]; 3],
+        "a node the identity links from the first reads without an issuer acting"
+    );
     let session = snap::ok(second.session.info()).await;
     assert_eq!(session["principal"], json!(keys.identity));
     assert_ne!(session["node"], json!(keys.node));
 
-    // One record, by identity, holds the grant for every node of it.
     let listed = snap::ok(issuer.session.identities()).await;
     let record = listed["identities"]
         .as_array()
@@ -1225,10 +1274,8 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
             .unwrap()
             .iter()
             .any(|node| node["node"] == json!(keys.node)),
-        "{record}"
+        "one record, by identity, holds the grant for every node of it: {record}"
     );
-    // Unlinking one reader rotates its partition, keeps the identity's grant,
-    // and lets the sibling read the replacement epoch.
     let before = issuer.epochs("A").await.0;
     first
         .session
@@ -1241,10 +1288,14 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
     snap::ok(first.session.sync_once()).await;
     snap::ok(issuer.session.sync_once()).await;
     let (epochs, tables) = issuer.epochs("A").await;
-    assert_ne!(epochs, before);
+    assert_ne!(epochs, before, "unlinking one reader rotates its partition");
     assert!(uniform(&tables, epochs));
     snap::ok(first.session.sync_once()).await;
-    assert_eq!(rows(&first).await, vec![vec!["before".to_owned()]; 3]);
+    assert_eq!(
+        rows(&first).await,
+        vec![vec!["before".to_owned()]; 3],
+        "the sibling keeps the identity's grant and reads the replacement epoch"
+    );
     assert!(snap::string(second.session.sync_once()).await.is_err());
     for peer in [first, second, issuer] {
         peer.database.close().await.unwrap();

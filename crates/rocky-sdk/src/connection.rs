@@ -73,8 +73,9 @@ pub struct ConnectionOptions {
     pub binding: Option<Binding>,
 }
 impl ConnectionOptions {
+    /// The session options of this connection. A driver never hands frames
+    /// out: sync flushes before it sends them.
     fn sql(&self) -> rocky_secure::SqlOptions {
-        // A driver never hands frames out: sync flushes before it sends them.
         let mut options = rocky_secure::SqlOptions {
             acknowledge: match self.durability {
                 Durability::Buffered => rocky_secure::CommitClass::Buffered,
@@ -391,9 +392,9 @@ impl State {
                     .await?,
             ),
         };
+        let bound_to_a_seal = seal.is_some();
         let mut state = Self {
-            // A bound connection only reads.
-            read_only: options.read_only || seal.is_some(),
+            read_only: options.read_only || bound_to_a_seal,
             options,
             node,
             opened: None,
@@ -531,6 +532,8 @@ impl State {
             }
         }
     }
+    /// Answers Room's schema statements, once more on a fresh session when
+    /// a schema read raced a key install after the status check.
     async fn room_answer(
         &mut self,
         sql: &str,
@@ -548,12 +551,15 @@ impl State {
                 )
             })
         {
-            // Schema reads may race a key install after the status check.
             self.opened = None;
             return self.room_answer_once(sql, params).await;
         }
         answer
     }
+    /// Room's identity lives on the connection, so a bound connection keeps
+    /// it as a writer does. The session of an idle connection may have lost
+    /// its authority, and the installed generation with it: both are read
+    /// again.
     async fn room_answer_once(
         &mut self,
         sql: &str,
@@ -562,13 +568,9 @@ impl State {
         if self.options.profile.is_none() {
             return Ok(None);
         }
-        // Room's identity lives on the connection, so a bound connection
-        // keeps it as a writer does.
         let read_only = self.read_only && self.seal.is_none();
         let timeout = self.options.sql().transaction_timeout.as_millis();
-        // The session of an idle connection may have lost its authority.
         if !self.authority_pinned() {
-            // The installed generation may have changed with the authority.
             self.declared = self.node.declared_differences()?;
             self.sql().await?;
         }
@@ -634,6 +636,11 @@ impl State {
         Ok(Pending::rows(vec![NEXT_ID.into()], vec![vec![id.sql()]]))
     }
 
+    /// Runs a statement on a writable connection. A transaction begins
+    /// lazily: until a statement reaches the session, ending it is local. A
+    /// failed commit, an engine rollback or the release of the outermost
+    /// savepoint ends the transaction in the session; an abort stays open
+    /// until it is acknowledged.
     async fn write(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<Pending, Failure> {
         let control = classify_sql(sql).map_err(Error::Sql)?;
         match control {
@@ -648,7 +655,6 @@ impl State {
                 self.begin = Some(mode);
                 return Ok(Pending::rows(Vec::new(), Vec::new()));
             }
-            // Nothing reached the session: ending the transaction is local.
             SqlControl::Commit | SqlControl::Rollback if self.begin.is_some() => {
                 self.begin = None;
                 self.handle = None;
@@ -678,18 +684,22 @@ impl State {
                 self.committed = Some(rocky_core::TransactionToken(transaction));
             }
         }
-        if ending || ran.is_err() || matches!(control, SqlControl::Release(_)) {
-            // A failed commit, an engine rollback or the release of the
-            // outermost savepoint ends the transaction in the session; an
-            // abort stays open until it is acknowledged.
+        let session_may_have_ended =
+            ending || ran.is_err() || matches!(control, SqlControl::Release(_));
+        if session_may_have_ended {
             let aborted = matches!(&ran, Err(Error::Sql(SqlError::Aborted(_))));
             let active = self.sql().await?.state().await == rocky_secure::SqlState::Active;
-            self.open = active || (aborted && !ending);
+            let abort_awaits_acknowledgement = aborted && !ending;
+            self.open = active || abort_awaits_acknowledgement;
         }
         let rows = ran?;
         Ok(Pending::rows(rows.columns, rows.rows))
     }
 
+    /// Runs a statement on a read-only connection. A bound connection reads
+    /// in any transaction its ORM begins; its writes fail as statements. A
+    /// session that lost its authority is replaced by a new one, which may
+    /// read.
     async fn read(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<Pending, Failure> {
         let control = classify_sql(sql).map_err(Error::Sql)?;
         let none = || Ok(Pending::rows(Vec::new(), Vec::new()));
@@ -707,8 +717,6 @@ impl State {
                 "cannot start a transaction within a transaction",
             )
             .into()),
-            // A bound connection reads in any transaction its ORM begins;
-            // its writes fail as statements.
             SqlControl::Begin(_) if self.seal.is_some() && self.reading.is_none() => {
                 self.reading = Some(Reading::default());
                 none()
@@ -780,7 +788,6 @@ impl State {
                     return Ok(Pending::rows(columns, rows.rows));
                 }
                 let cursor = match opened.cursor(sql, params.clone(), limits).await {
-                    // The session lost its authority: a new one may read.
                     Err(Error::Sql(SqlError::Unavailable {
                         reason: Unavailable::Revoked,
                         ..

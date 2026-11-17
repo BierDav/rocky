@@ -28,7 +28,8 @@ async fn database_bytes(replica: &EncryptedReplica<TypedRows>) -> i64 {
     pages * size
 }
 
-// Same row/pruned_prefix sequence as rocky-sdk::sync::rows, over loopback TCP.
+/// The row and pruned-prefix sequence of `rocky-sdk::sync::rows`, over
+/// loopback TCP.
 async fn sync(
     writer: &EncryptedReplica<TypedRows>,
     reader: &EncryptedReplica<TypedRows>,
@@ -128,7 +129,6 @@ async fn frame_bytes(replica: &EncryptedReplica<TypedRows>, tables: usize) {
         header += head.len();
         body += payload.len();
     }
-    // Chains are stored once, beside the operations that name them.
     for record in crate::storage::rows(&inner.conn, "SELECT LENGTH(chain) FROM secure_chains")
         .await
         .unwrap()
@@ -225,9 +225,10 @@ async fn measure(tables: usize, partitions: i64) {
     let started = Instant::now();
     assert_eq!(sync(&writer, &reader, &scopes).await.len(), scopes.len());
     let catch_up = started.elapsed();
-    // The reader, a writer of every partition, publishes an outcome record
-    // of each multi-table transaction it replayed; the next sync carries them.
-    assert!(!sync(&writer, &reader, &scopes).await.is_empty());
+    assert!(
+        !sync(&writer, &reader, &scopes).await.is_empty(),
+        "the next sync carries the reader's outcome records of replayed multi-table transactions"
+    );
     let started = Instant::now();
     assert!(sync(&writer, &reader, &scopes).await.is_empty());
     let idle = started.elapsed();
@@ -239,14 +240,12 @@ async fn measure(tables: usize, partitions: i64) {
     assert_rows(&reader, &names, partitions).await;
     frame_bytes(&reader, tables).await;
     let started = Instant::now();
-    // One seal; compacting installs every scope's base there.
     seal_and_compact(&writer, &f.publisher, f.domain).await;
     let mut checkpoints = Vec::new();
     for scope in &scopes {
         checkpoints.push(writer.checkpoint(*scope).await.unwrap());
     }
     let checkpoint = started.elapsed();
-    // Each record carries the signer's whole chain.
     let chain = crate::encode(
         &writer
             .inner
@@ -327,7 +326,6 @@ async fn measure(tables: usize, partitions: i64) {
                 _ => None,
             })
             .unwrap_or(0);
-        // Its intent, and the outcome records replicas published for it.
         assert!(
             count >= 1,
             "actual authored and retained history of {scope:?}"

@@ -392,7 +392,6 @@ async fn incoming_keyless_custody_wakes_forwarding_and_connectivity_wakes_catch_
             enable(&relay).await?;
             let mut revisions = b.replica.observe_revision();
             add(&a, 1).await?;
-            // a's manual push is the only source; relay's committed receipt wakes its worker.
             let contact = {
                 let settings = relay.settings.lock().await;
                 let link = relay.network.read().await;
@@ -485,7 +484,6 @@ async fn failed_work_retries_on_clock_and_connectivity_interrupts_backoff() -> R
             tokio::time::advance(Duration::from_millis(500)).await;
             status.changed().await?;
             assert!(hub.counts()[1] > dials);
-            // Explicit connectivity wakes the retry now, despite its two-second deadline.
             tokio::time::resume();
             b.attach(Network::Owned(hub.connector("b"))).await?;
             let before = status.borrow_and_update().token;
@@ -574,8 +572,6 @@ async fn a_room_write_commits_while_a_renewal_waits_for_the_replica() -> Result<
             return Err("no row id".into());
         };
         let id = page.rows[0][0].clone();
-        // The transaction holds the replica: the renewal takes the settings
-        // and waits for the replica.
         let renewal = node.renew(None, false, None, false);
         tokio::pin!(renewal);
         tokio::select! {

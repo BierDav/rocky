@@ -158,6 +158,9 @@ struct Candidate {
 
 /// Installs a sign-in: from the discovered sources over `network`, or from
 /// a verified backup. Returns the installed settings and the started link.
+/// A revoked node never signs in again: its install is discarded, so the
+/// next attempt is a fresh node, as any passkey holder's may be. Only a
+/// signed statement this device verified reports a revoked node.
 pub(crate) async fn install(
     path: &Path,
     directory: &Path,
@@ -227,13 +230,11 @@ pub(crate) async fn install(
     let (settings, link, outcome) = match installed {
         Ok(installed) => installed,
         Err(error) => {
-            // A revoked node never signs in again: the next attempt is a
-            // fresh node, as any passkey holder's may be. Only a signed
-            // statement this device verified reports it.
-            if matches!(
+            let revoked_node = matches!(
                 error.downcast_ref::<PersonalSignInError>(),
                 Some(PersonalSignInError::RevokedNode { .. })
-            ) {
+            );
+            if revoked_node {
                 super::discard(directory, secrets)?;
             }
             return Err(error);
@@ -245,7 +246,10 @@ pub(crate) async fn install(
 
 /// Finds this account's sources under its discovery topic: each answered
 /// a hello with the genesis the passkey's root signed for this namespace.
-/// Sources whose authenticated genesis differs are a conflict.
+/// Sources whose authenticated genesis differs are a conflict. Hints
+/// already found are asked too, so a conflict is never decided by which
+/// answered first. A responder proving another account's or database's
+/// genesis is no source of this one.
 async fn discover(
     (transport, wait): (&Connected, rocky_platform::time::Duration),
     node: &PrivateKey,
@@ -265,8 +269,6 @@ async fn discover(
     let mut hints = Vec::new();
     if let Ok(Some(first)) = rocky_platform::time::timeout(wait, discovery.found()).await {
         hints.push(first);
-        // Hints already found are asked too, so a conflict is never decided
-        // by which answered first.
         while hints.len() < MAX_CANDIDATES
             && let Some(Some(found)) = discovery.found().now_or_never()
         {
@@ -296,8 +298,6 @@ async fn discover(
             continue;
         };
         let locator = account.locator();
-        // A responder proving another account's or database's genesis is
-        // no source of this one.
         let Ok((genesis, _)) =
             challenge.verify(&hello, database, (locator.owner, account.namespace()))
         else {
@@ -402,7 +402,14 @@ async fn fetch(
 }
 
 /// The discovered install: find sources, fetch and verify one's bootstrap,
-/// install from it and publish the node's certificate to it.
+/// install from it and publish the node's certificate to it. Only a source
+/// that answered makes this an install whose keys are kept, and once one
+/// did the intent stays for a retry to resume. A source's refusal or forged
+/// answer ends only its own attempt: only signed statements this device
+/// verifies end the install. Only vouched escrow records are kept, as only
+/// they name the unscoped naming root. Checkpoints come first, since the
+/// first sync brings the ciphertext; the identity is saved last, and until
+/// then the intent resumes.
 async fn discovered(
     (path, directory): (&Path, &Path),
     secrets: &Arc<dyn SecretStore>,
@@ -418,7 +425,6 @@ async fn discovered(
     if candidates.is_empty() {
         return Err(PersonalSignInError::SourceUnavailable.into());
     }
-    // Only a source that answered makes this an install: its keys are kept.
     let mut installing = Installing::sign_in(
         directory,
         secrets,
@@ -429,8 +435,6 @@ async fn discovered(
         (node, transport_key),
     )?;
     super::fault::check(directory, super::fault::Stage::Prepared)?;
-    // A source's refusal or forged answer ends only its own attempt: only
-    // signed statements this device verifies end the install.
     let mut last: Option<Failure> = None;
     let mut capacity = false;
     for candidate in &candidates {
@@ -457,7 +461,6 @@ async fn discovered(
             revocations: metadata.revocations,
             groups: metadata.groups,
             epoch_statements: metadata.epoch_statements,
-            // Only vouched records name the unscoped naming root.
             escrow: (
                 escrow
                     .into_iter()
@@ -477,8 +480,6 @@ async fn discovered(
             }
         };
         let vault = settings.vault(secrets);
-        // A custodian whose custody grant lapsed serves again under the
-        // same grant, renewed by the root.
         if let Err(error) = renew_custody(
             transport,
             (account, node),
@@ -528,14 +529,11 @@ async fn discovered(
             false,
             now()?,
         )?;
-        // The first sync brings the ciphertext; checkpoints first. The
-        // identity last: until it is saved, the intent resumes.
         rocky_credentials::write_private(&directory.join("bootstrap.json"), b"true")?;
         installing.installed(&vault, &coverage)?;
         settings.save(path)?;
         return Ok((settings, coverage, freshness));
     }
-    // A source answered: the intent stays, and a retry resumes it.
     if capacity {
         return Err(PersonalSignInError::Capacity {
             limit: rocky_credentials::MAX_PERSONAL_DEVICES,
@@ -656,7 +654,9 @@ async fn renew_custody(
 
 /// How far a bootstrap from `candidate` is witnessed: another owner device
 /// no statement it carries ended anchors it; a custodian alone does not.
-/// The responder must belong to the database the passkey's root signed.
+/// The responder must belong to the database the passkey's root signed,
+/// and hold a chain of it, checked before anything is kept: a forged one
+/// is no source.
 fn witness(
     metadata: &Metadata,
     account: &PersonalAccount,
@@ -667,8 +667,6 @@ fn witness(
     if metadata.responder.database_context(locator.publisher)? != database {
         return Err("the responder belongs to another database".into());
     }
-    // The responder holds a chain of this database, checked before anything
-    // is kept: a forged one is no source.
     let record = &metadata.record;
     let domain = crate::domain::Domain::at(
         &record.schema,
@@ -742,7 +740,9 @@ fn ends_install(error: &Failure) -> bool {
 /// one more owner device, not yet saved. Nothing is revoked or rotated;
 /// an epoch no record opens is reported, never replaced. Every check runs
 /// before anything is kept, so a source refused here leaves the install as
-/// it was for the next.
+/// it was for the next. Each key kept is recorded in the intent before the
+/// secret store holds it, so a discarded install forgets it too. A retry
+/// publishes the certificate it kept, never another.
 fn stage(
     secrets: &Arc<dyn SecretStore>,
     account: &PersonalAccount,
@@ -782,7 +782,6 @@ fn stage(
     settings.generation = source.record.generation;
     settings.engine = source.record.engine;
     settings.bootstrap = source.bootstrap;
-    // The genesis and followed graph authenticate the schema record.
     settings.verify_schema()?;
     source.revocations.verify_in(settings.database_context()?)?;
     settings.learn_revocations(&source.revocations)?;
@@ -817,30 +816,7 @@ fn stage(
     {
         return Err("key epoch capacity reached".into());
     }
-    // Partitions the source names without a key stay known, keyless.
-    let mut groups: BTreeMap<String, GroupRecord> = source
-        .groups
-        .into_iter()
-        .map(|record| {
-            (
-                record_key(&record.address),
-                GroupRecord {
-                    epochs: Vec::new(),
-                    ..record
-                },
-            )
-        })
-        .collect();
-    for (key, record) in std::mem::take(&mut recovered.groups) {
-        match groups.get_mut(&key) {
-            Some(named) if named.name != record.name => {
-                return Err("an escrowed partition differs from the one the source names".into());
-            }
-            Some(named) => named.epochs = record.epochs,
-            None => drop(groups.insert(key, record)),
-        }
-    }
-    settings.groups = groups;
+    settings.groups = escrowed_groups(source.groups, std::mem::take(&mut recovered.groups))?;
     settings.epoch_statements = source.epoch_statements;
     let mut authority = crate::enrollment::Issuing::default();
     crate::membership::observe_trusted(
@@ -857,10 +833,9 @@ fn stage(
     }
     settings.authority = Some(authority);
     settings.personal = Some(installing.device(source.freshness));
-    // A retry publishes the certificate it kept, never another.
-    if let Some(certificate) = installing.certificate() {
+    if let Some(kept_certificate) = installing.certificate() {
         let mut known = settings.revocations.clone();
-        known.link(certificate.clone())?;
+        known.link(kept_certificate.clone())?;
         settings.learn_revocations(&known)?;
     }
     let links = CredentialChain(vec![source.grant]);
@@ -893,10 +868,6 @@ fn stage(
         .filter(|(name, scope)| settings.reads_whole(&domain, scope) && !keys.contains_key(*name))
         .map(|(name, _)| name.to_owned())
         .collect();
-
-    // Verified: from here on the install keeps what this source brought.
-    // Each key is recorded in the intent before the secret store holds it,
-    // so a discarded install forgets it too.
     let directory = installing.directory().to_path_buf();
     installing.hold_secrets(recovered.secrets.keys().copied())?;
     installing.import(descriptor, keys)?;
@@ -923,8 +894,45 @@ fn stage(
     Ok((settings, coverage))
 }
 
+/// The group partitions a source names, keyless unless the escrow opened
+/// them.
+fn escrowed_groups(
+    named: Vec<GroupRecord>,
+    escrowed: BTreeMap<String, GroupRecord>,
+) -> Result<BTreeMap<String, GroupRecord>, Failure> {
+    let mut groups: BTreeMap<String, GroupRecord> = named
+        .into_iter()
+        .map(|record| {
+            (
+                record_key(&record.address),
+                GroupRecord {
+                    epochs: Vec::new(),
+                    ..record
+                },
+            )
+        })
+        .collect();
+    for (key, record) in escrowed {
+        match groups.get_mut(&key) {
+            Some(named) if named.name != record.name => {
+                return Err("an escrowed partition differs from the one the source names".into());
+            }
+            Some(named) => named.epochs = record.epochs,
+            None => drop(groups.insert(key, record)),
+        }
+    }
+    Ok(groups)
+}
+
 /// Installs from a verified backup without any network: the archived
-/// store, rebound to this node at open, under the archived owner grant.
+/// store, rebound to this node at open, under the archived owner grant,
+/// which keeps the archived device a trusted sibling. The escrow is the
+/// signed archive's own records, an owner device's naming root included;
+/// a custodian's archive holds its vouched record instead. The device
+/// admits itself as the sources it meets later will. The restore marker
+/// is written first, as an identity without it would open as if
+/// installed; the identity last, as until it exists nothing opens the
+/// placed store and a retry removes it.
 async fn from_backup(
     path: &Path,
     directory: &Path,
@@ -964,9 +972,8 @@ async fn from_backup(
     let archived = &opened.identity;
     let owner = account.locator().owner;
     let mut revocations = archived.revocations.clone();
-    // The archived device stays a trusted sibling.
-    if let Some(certificate) = archived.credentials.certificate() {
-        revocations.link(certificate.clone())?;
+    if let Some(archived_sibling) = archived.credentials.certificate() {
+        revocations.link(archived_sibling.clone())?;
     }
     let source = Source {
         genesis: archived.manifest()?,
@@ -981,8 +988,6 @@ async fn from_backup(
         revocations,
         groups: archived.groups.values().cloned().collect(),
         epoch_statements: archived.epoch_statements.clone(),
-        // The signed archive's own records, an owner device's naming root
-        // included; a custodian's archive holds its vouched record instead.
         escrow,
         naming: archived.naming_escrow.clone(),
         freshness: Freshness::Unwitnessed,
@@ -990,7 +995,6 @@ async fn from_backup(
     let (mut settings, coverage) = stage(secrets, account, &mut installing, source)?;
     settings.pending = archived.pending.clone();
     settings.pending_follow = archived.pending_follow.clone();
-    // The device admits itself as the sources it meets later will.
     let context = settings.personal()?.ok_or("a personal backup")?;
     let mut known = settings.revocations.clone();
     known.admit_personal(
@@ -1004,9 +1008,6 @@ async fn from_backup(
     settings.learn_revocations(&known)?;
     settings.learn_contacts(archived, &[node.public_key()]);
     let vault = settings.vault(secrets);
-    // The marker first: an identity without it would open as if installed.
-    // The identity last: until it exists nothing opens the placed store,
-    // and a retry removes it.
     crate::recovery::mark(
         directory,
         &crate::backup::Marker {

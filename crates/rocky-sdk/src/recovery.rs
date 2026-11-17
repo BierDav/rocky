@@ -42,9 +42,13 @@ pub(crate) fn mark(directory: &Path, marker: &Marker) -> Result<(), Failure> {
 /// root, saves a fresh trusted identity holding those keys and puts the
 /// archive's files in place, behind the marker that rebinds them at open.
 /// Nothing is written until every key opened. A recovery of the same
-/// archive left unfinished continues under the identity it saved. Returns
-/// it and the archived identity record, whose revocations say which
-/// trusted identities the recovery revokes.
+/// archive left unfinished continues under the identity it saved; a marker
+/// saved without its identity is a recovery not yet begun. The marker is
+/// written before the identity, which without it would open as if
+/// installed. Files not yet placed were never opened, so they are put in
+/// place again. Returns the saved identity and the archived identity
+/// record, whose revocations say which trusted identities the recovery
+/// revokes.
 pub(crate) async fn recover(
     path: &Path,
     directory: &Path,
@@ -59,7 +63,6 @@ pub(crate) async fn recover(
         return Err("the root key is not the backup's domain root".into());
     }
     let saved = match unfinished(directory)? {
-        // A marker saved without its identity is a recovery not yet begun.
         Some(saved) => rocky_platform::fs::exists(path).then_some(saved),
         None if rocky_platform::fs::exists(directory.join(MARKER)) => {
             return Err("a restore is unfinished in this directory".into());
@@ -91,8 +94,6 @@ pub(crate) async fn recover(
                 provider,
                 root,
             )?;
-            // The marker first: an identity without it would open as if
-            // installed.
             mark(
                 directory,
                 &Marker {
@@ -107,7 +108,6 @@ pub(crate) async fn recover(
         }
     };
     fault::check(directory, fault::Stage::Saved)?;
-    // Until placed, the files were never opened: they are put in place again.
     if stage == Some(Recovery::Placing) {
         crate::backup::place(&opened, directory)?;
         fault::check(directory, fault::Stage::Moved)?;

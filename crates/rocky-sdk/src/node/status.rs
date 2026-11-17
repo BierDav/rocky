@@ -172,6 +172,9 @@ impl Node {
                 .clone(),
         })
     }
+    /// The status this device observes. The watch read guard is dropped before
+    /// any replica call can publish a commit. A refreshed report wakes no wait;
+    /// a changed one or silence does.
     pub(super) async fn observed_status(&self) -> Result<DatabaseStatus, Failure> {
         self.refresh_trusted_watch().await?;
         let settings = self.settings.lock().await.clone();
@@ -191,7 +194,6 @@ impl Node {
             rocky_platform::fs::exists(self.path.with_file_name("bootstrap.json"))
                 || imports.iter().any(|scope| scope.checkpoint.is_some());
         let renewal_routes = settings.renewal_routes();
-        // Drop the watch read guard before any replica calls can publish a commit.
         let revision = *self.replica.observe_revision().borrow();
         let mut status = DatabaseStatus {
             token: String::new(),
@@ -300,7 +302,6 @@ impl Node {
         };
         let mut token_status = status.clone();
         token_status.observed_at_epoch_millis = None;
-        // A refreshed report wakes no wait; a changed one or silence does.
         for device in token_status.mesh.iter_mut().flatten() {
             device.report.produced_at_epoch_seconds = 0;
             device.received_at_epoch_seconds = 0;
@@ -513,6 +514,10 @@ impl Node {
         }
         report
     }
+    /// One reconciliation pass over the reachable peers. A pass that switched
+    /// the followed tip syncs the new tip once more, since a received move may
+    /// have switched this device to another line. Statements held or learned in
+    /// the pass reach the coordination service, whatever became of the peers.
     pub(super) async fn reconciliation_pass(
         &self,
         transport: Option<&dyn Transport>,
@@ -553,8 +558,9 @@ impl Node {
                     let result = self
                         .run_sync_pass(transport, automatic, retry_only, &peers, first_attempt_id)
                         .await;
-                    // A pass that switched the followed tip syncs the new tip once more.
-                    if result.is_ok() && self.replica.followed_tip().await != before {
+                    let switched_followed_tip =
+                        result.is_ok() && self.replica.followed_tip().await != before;
+                    if switched_followed_tip {
                         self.run_sync_pass(
                             transport,
                             automatic,
@@ -575,8 +581,6 @@ impl Node {
                 peers.lock().unwrap_or_else(PoisonError::into_inner).len() as u64,
             );
             span.record("outcome", if result.is_ok() { "ok" } else { "error" });
-            // Statements held or learned in this pass reach the coordination
-            // service, whatever became of the peers.
 
             if let Err(error) = self.push_revocations().await {
                 self.activity
@@ -587,7 +591,6 @@ impl Node {
             }
             result
         };
-        // A received move may have switched this device to another line.
         if result.is_ok() {
             self.try_ensure_tip_node().await;
         }

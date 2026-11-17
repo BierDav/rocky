@@ -165,7 +165,7 @@ impl Snapshot for Vec<sdk::HeldChange> {
         json!({"count":self.len(),"changes":self.into_iter().map(|change|json!({"id":data_encoding::HEXLOWER.encode(&change.id),"time":change.time,"rows":change.rows.into_iter().map(|row|json!({"table":row.table,"removed":row.removed,"row":data_encoding::HEXLOWER.encode(&row.row),"kind":match row.kind { sdk::HeldKind::Insert=>"insert",sdk::HeldKind::Update=>"update",sdk::HeldKind::Delete=>"delete" },"fields":row.fields.into_iter().map(|field|json!({"name":field.name,"value":decoded(&field.value),"written":field.written,"removed":field.removed,"current":field.current.map(|current|json!({"value":current.value.as_deref().map(decoded),"time":current.time,"author":current.author}))})).collect::<Vec<_>>()})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
     }
 }
-// Assertion values used again as scalar SQL bindings are explicit conversions.
+/// Explicit conversions of assertion values used again as scalar SQL bindings.
 pub trait Scalar {
     fn text(&self) -> String;
 }
@@ -267,10 +267,9 @@ pub fn field(value: Value) -> sdk::SqlValue {
         Value::Null => sdk::SqlValue::Null,
         Value::Bool(value) => sdk::SqlValue::Integer(i64::from(value)),
         Value::Number(value) => sdk::SqlValue::Integer(value.as_i64().expect("integer field")),
-        // A row identity's text names the row: it binds as its blob.
         Value::String(value) => match (value.parse::<i64>(), value.parse::<sdk::RowIdentity>()) {
             (Ok(number), _) if number.to_string() == value => sdk::SqlValue::Integer(number),
-            (_, Ok(id)) => id.sql(),
+            (_, Ok(row_identity_binds_as_its_blob)) => row_identity_binds_as_its_blob.sql(),
             _ => sdk::SqlValue::Text(value),
         },
         other => sdk::SqlValue::Text(other.to_string()),

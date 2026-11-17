@@ -239,9 +239,8 @@ impl Plan {
                     .await?;
             }
         }
-        // Include the worst possible repair set and every exported log in response preflight.
-        let mut frontiers = upper.clone();
-        for frontier in &mut frontiers {
+        let mut every_exported_log_applied = upper.clone();
+        for frontier in &mut every_exported_log_applied {
             for log in &mut frontier.logs {
                 log.applied = log.held;
             }
@@ -255,13 +254,14 @@ impl Plan {
             table: [255; 32],
             encryption: [255; 32],
         };
-        let receipt = Message::Publication(PublicationMessage::Receipt(PublicationReceipt {
-            repair: vec![largest_scope; link::SIGNAL_SCOPES],
-            frontiers,
-            repair_all: true,
-            reasons: vec![PublicationRepairReason::UnknownRequirements; 6],
-        }));
-        if bytes > MAX_BYTES || signed_size(&receipt)? > RECEIPT_BYTES {
+        let worst_case_receipt =
+            Message::Publication(PublicationMessage::Receipt(PublicationReceipt {
+                repair: vec![largest_scope; link::SIGNAL_SCOPES],
+                frontiers: every_exported_log_applied,
+                repair_all: true,
+                reasons: vec![PublicationRepairReason::UnknownRequirements; 6],
+            }));
+        if bytes > MAX_BYTES || signed_size(&worst_case_receipt)? > RECEIPT_BYTES {
             return Err(denied("publication byte/receipt quota"));
         }
         Ok(Self {
@@ -274,6 +274,8 @@ impl Plan {
 }
 
 impl link::channels::Handle {
+    /// Publishes committed frames, authorizing each scope again after
+    /// preflight and channel reservation, which may outlast a grant.
     pub async fn publish_committed<A: RowApplication>(
         &self,
         replica: &EncryptedReplica<A>,
@@ -303,7 +305,6 @@ impl link::channels::Handle {
             .publication_deadline()
             .ok_or_else(|| denied("publication channel"))?;
         let result = rocky_platform::time::timeout_at(deadline, async {
-            // Authorization may have changed during preflight or channel reservation.
             for fence in &plan.upper {
                 replica
                     .authorize_scope_peer(peer, credentials, fence.scope)
@@ -643,6 +644,9 @@ fn charge_chain(chain: &CredentialChain, used: &mut usize) -> Result<(), Error> 
     }
     Ok(())
 }
+/// Charges the chains a message references. Reconstructing a vouch clones
+/// its original credentials before verified storage, so each escrow record
+/// is charged its chain.
 pub(super) fn charge_references(
     message: &Message,
     table: &chains::ChainTable,
@@ -662,7 +666,6 @@ pub(super) fn charge_references(
                 .received
                 .get(&record.chain_digest())
                 .ok_or_else(|| denied("incomplete escrow chain"))?;
-            // Reconstructing a vouch clones its original credentials before verified storage.
             charge(&encode(chain)?, used)?;
             charge_chain(chain.credentials(), used)?;
         }
@@ -705,8 +708,9 @@ pub(super) fn charge_metadata(message: &Message, used: &mut usize) -> Result<(),
     Ok(())
 }
 
-// Scan definite CBOR before serde can allocate collections from hostile lengths.
-// Byte strings are opaque; their length is charged, never interpreted as metadata.
+/// Scans definite CBOR before serde can allocate collections from hostile
+/// lengths. Byte strings are opaque; their length is charged, never
+/// interpreted as metadata.
 pub(crate) fn charge(bytes: &[u8], used: &mut usize) -> Result<(), Error> {
     let mut cursor = 0;
     *used = used

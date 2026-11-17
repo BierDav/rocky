@@ -146,7 +146,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 }
             }
             if !result? {
-                // Frames a clear's marked scope waited for may stand now.
                 if let Some(domain) = inner.workspace.typed.as_ref().map(|typed| typed.domain) {
                     inner.retry_rederive(domain).await?;
                 }
@@ -346,7 +345,6 @@ impl<A: RowApplication> Inner<A> {
                 pass.advanced = false;
                 pass.received = false;
                 pass.phase = PendingPhase::Discover;
-                // A full round examines every log head.
                 self.take_settled();
             }
             PendingPhase::NewRound => {
@@ -371,7 +369,6 @@ impl<A: RowApplication> Inner<A> {
                     pass.phase = PendingPhase::Apply;
                     return Ok(true);
                 };
-                // The frame while pending, else its log's next pending frame.
                 let records = collect_rows(self.conn.query(
                     "SELECT o.sequence,o.hash,o.scope,o.author FROM secure_operations s JOIN secure_operations o ON o.scope=s.scope AND o.author=s.author AND o.sequence>=s.sequence WHERE s.hash=? AND o.status='pending' ORDER BY o.sequence LIMIT 1",
                     [id.as_bytes().to_vec()],
@@ -598,7 +595,6 @@ impl<A: RowApplication> Inner<A> {
         time: u64,
     ) -> Result<Outcome, Error> {
         let operation = frame.operation_ref()?;
-        // A bundle applies its members together; a later scan finds them settled.
         match self.stored_status(operation.hash).await?.as_deref() {
             Some("applied" | "abandoned" | "held") => return Ok(Outcome::Applied),
             Some("rejected") => return Ok(Outcome::Rejected("rejected earlier".into())),
@@ -612,7 +608,6 @@ impl<A: RowApplication> Inner<A> {
         if !self.frame_schema_ready(frame)? {
             return Ok(Outcome::Waiting(WaitReason::Schema));
         }
-        // A sibling line is a refusal, never dependency work for this workspace.
         if reach == tips::FrameReach::Unfollowed {
             self.reject(operation.hash).await?;
             return Ok(Outcome::Rejected(
@@ -620,20 +615,15 @@ impl<A: RowApplication> Inner<A> {
             ));
         }
         let extension = &operation.header.extensions;
-        // Verified checkpoint pages are filling the scope: its operations
-        // apply on top once the import ends.
         if self.direct.contains(&extension.scope) {
             return Ok(Outcome::Waiting(WaitReason::DirectImport));
         }
-        // Keyless custody does not owe retries for a key it may not receive.
-        // Current read authorization is also required while an old key is held.
         if !self.can_read_key(
             extension.scope,
             &self.local_grants(time).unwrap_or_default(),
         ) {
             return Ok(Outcome::Waiting(WaitReason::ReadGrant));
         }
-        // An authorized reader waits for an absent earlier or later epoch.
         let Some(key) = self.opening_key(extension.scope, extension.generation) else {
             return Ok(Outcome::Waiting(WaitReason::OpeningKey));
         };
@@ -651,9 +641,6 @@ impl<A: RowApplication> Inner<A> {
             }
             return self.hold_closed_one(frame, time).await;
         }
-        // Every frame of a revoked author is refused, also one whose
-        // dependencies, its author's earlier frames, never apply. An owner
-        // reset's fence keeps what its ended writers wrote before it.
         if self
             .header_revocations(&operation.header)
             .revoking(frame.chain()?.credentials())
@@ -669,8 +656,6 @@ impl<A: RowApplication> Inner<A> {
         {
             return Ok(Outcome::Waiting(WaitReason::OwnChain));
         }
-        // The key its header names is held: a frame that does not open
-        // under it is quarantined by the pass, not left waiting.
         let extension = &operation.header.extensions;
         let Some(Ok(opened)) = self
             .opening_key(extension.scope, extension.generation)
@@ -725,7 +710,6 @@ impl<A: RowApplication> Inner<A> {
         }
         self.conn.execute("SAVEPOINT pending", ()).await?;
         let materialized = match &payload {
-            // An outcome record changes no rows itself.
             Ok(payload) if payload.outcome().is_some() => Ok((Vec::new(), Default::default())),
             Ok(payload) => {
                 self.materialize(frame, payload.writes(), &grants, Some(payload))
@@ -750,7 +734,6 @@ impl<A: RowApplication> Inner<A> {
                 }
                 .await;
                 match applied {
-                    // A record's rewind needs a key this replica lacks yet.
                     Err(Error::Rejected(reason)) if reason == super::replay::KEY_WAITS => {
                         self.conn.execute("ROLLBACK TO pending", ()).await?;
                         self.invalidate_context();
@@ -877,10 +860,7 @@ impl<A: RowApplication> Inner<A> {
             }
         };
         let mut retired_creations = BTreeSet::new();
-        // Creations that retire once their row goes.
         let mut retirable = BTreeSet::new();
-        // Behind a finalized base, a creation whose row is gone is retired.
-        // A frame of another line stays as it was applied there.
         if self.on_workspace_path(
             operation.header.extensions.scope.domain,
             operation.header.extensions.tip,
@@ -894,7 +874,6 @@ impl<A: RowApplication> Inner<A> {
                 .filter(|signed| signed.statement.seal.is_some())
             && let Some(payload) = payload
         {
-            // The live schema names rows through the path's fields.
             let fields = self.path_fields(
                 operation.header.extensions.scope.domain,
                 operation.header.extensions.tip,
@@ -905,7 +884,6 @@ impl<A: RowApplication> Inner<A> {
                 .iter()
                 .filter_map(|write| fields.project(write))
                 .collect();
-            // A table off the path applies nothing, so it creates nothing.
             let creations = if fields
                 .tables
                 .contains(&operation.header.extensions.scope.table)
@@ -950,8 +928,6 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
         }
-        // An intent names the heads it read; those its base's seal covers
-        // may be pruned with no stub, and are then satisfied by the base.
         let mut covered_heads = self.covered_heads(&operation.header, payload).await?;
         for id in operation
             .header
@@ -970,8 +946,6 @@ impl<A: RowApplication> Inner<A> {
                     {
                         continue;
                     }
-                    // A head refused for its revoked author at the peer
-                    // that sent this frame, shown by the evidence it carried.
                     None if self.revoked_evidence(&operation.header, *id).await? => continue,
                     None => match self.voided_dependency(&operation.header, *id).await? {
                         Some(true) => continue,
@@ -981,7 +955,6 @@ impl<A: RowApplication> Inner<A> {
                             covered_heads -= 1;
                             continue;
                         }
-                        // Consumed once its log's earlier frames settle.
                         Some(false) => return Ok(Readiness::Other),
                         None if retirable.contains(id) => return Ok(Readiness::Other),
                         None => return Ok(Readiness::Dependency(*id)),
@@ -1002,16 +975,28 @@ impl<A: RowApplication> Inner<A> {
                 match self.status(*id).await? {
                     ReceiveStatus::Applied => {}
                     ReceiveStatus::Held if self.visible_held_in_workspace(predecessor)? => {}
-                    // A head read before its author's revocation arrived
-                    // never applies; the reader's write does without it.
                     ReceiveStatus::Rejected
-                        if operation.header.backlink != Some(*id)
-                            && self.revoked_chain(dependency.chain()?)? => {}
+                        if self.read_head_of_revoked_author(
+                            &operation.header,
+                            *id,
+                            &dependency,
+                        )? => {}
                     _ => return Ok(Readiness::Dependency(*id)),
                 }
             }
         }
         Ok(Readiness::Ready)
+    }
+    /// Whether a rejected dependency is a head the write read before its
+    /// author's revocation arrived: such a head never applies, and the
+    /// reader's write does without it. A log predecessor never qualifies.
+    fn read_head_of_revoked_author(
+        &self,
+        header: &p2panda_core::Header<Extensions>,
+        id: Hash,
+        dependency: &EncryptedFrame,
+    ) -> Result<bool, Error> {
+        Ok(header.backlink != Some(id) && self.revoked_chain(dependency.chain()?)?)
     }
     /// How many of an intent's base heads the seal of its scope's installed
     /// base covers.
@@ -1069,7 +1054,6 @@ impl<A: RowApplication> Inner<A> {
                 }
                 return Ok(Some(log.clock));
             }
-            // Deeper in the pruned prefix: covered, its clock is not kept.
             return Ok((predecessor <= log.pruned_prefix).then_some(0));
         }
         if let Some((stub, clock)) = self.stub(id).await? {
@@ -1078,7 +1062,6 @@ impl<A: RowApplication> Inner<A> {
             }
             return Ok(Some(clock));
         }
-        // The pruned tip of another log of the scope.
         let mut tip = self
             .conn
             .query(

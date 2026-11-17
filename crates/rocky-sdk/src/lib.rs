@@ -1,5 +1,4 @@
 #![recursion_limit = "256"]
-// The protocol suites run natively; their test support is unused in a browser.
 #![cfg_attr(
     all(test, target_family = "wasm"),
     expect(
@@ -154,13 +153,13 @@ mod backup;
 mod claims;
 mod configuration;
 mod connection;
-// The always-on peer drives its own runtime.
+/// The always-on peer drives its own runtime, which a browser cannot.
 #[cfg(not(target_family = "wasm"))]
 mod custody;
 mod database;
 mod delivery;
 mod domain;
-// The starter composition opens synchronously, which a browser cannot.
+/// The starter composition opens synchronously, which a browser cannot.
 #[cfg(not(target_family = "wasm"))]
 mod engine;
 mod enrollment;
@@ -188,15 +187,14 @@ mod secrets;
 mod self_enrollment;
 mod service;
 mod session;
-// Multi-node protocol suites: native transports, threads, paused clocks and
-// native temporary directories.
+/// Multi-node protocol suites: native transports, threads, paused clocks
+/// and native temporary directories.
 #[cfg(all(test, not(target_family = "wasm")))]
 mod simulation;
 mod sql;
 mod status;
 mod sync;
-// Multi-node protocol suites: native transports, threads, paused clocks and
-// native temporary directories.
+/// Native temporary directories for the multi-node protocol suites.
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_directory;
 mod tip_schemas;

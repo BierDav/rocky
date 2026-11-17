@@ -544,8 +544,9 @@ impl Metadata {
                 Err(CoordinationError::RequestConflict)
             };
         }
-        // Its retry record may be gone: an old signed request never applies again.
-        if request.time.saturating_add(self.state.limits.retry_window) < self.state.time {
+        let retry_record_may_be_gone =
+            request.time.saturating_add(self.state.limits.retry_window) < self.state.time;
+        if retry_record_may_be_gone {
             return Err(CoordinationError::Expired);
         }
         let tenant = self.retry_tenant(request);
@@ -568,9 +569,9 @@ impl Metadata {
             return Err(CoordinationError::Backpressure);
         }
         let result = self.transition(request);
-        // A refused registration changes nothing and holds no tenant budget.
-        let unregistered = matches!(request.operation, Operation::Register(_)) && result.is_err();
-        if request.retained() && !unregistered {
+        let refused_registration =
+            matches!(request.operation, Operation::Register(_)) && result.is_err();
+        if request.retained() && !refused_registration {
             self.retained.push(Retained {
                 key: request.key,
                 id: request.id,
@@ -966,8 +967,9 @@ impl Metadata {
             {
                 return Err(CoordinationError::Configuration);
             }
-            // Authority changes are a migration, not a control revision.
-            if old.issuer != certificate.issuer || old.control.publisher != control.publisher {
+            let changes_authority =
+                old.issuer != certificate.issuer || old.control.publisher != control.publisher;
+            if changes_authority {
                 return Err(CoordinationError::Denied);
             }
             let logs = &self.state.find(control.scope)?.coordinated;
@@ -1174,6 +1176,16 @@ impl Metadata {
         }
         Ok(())
     }
+    /// Whether the scope's authority or one of its trusted nodes sent `request`.
+    fn authority_or_trusted_node(
+        &self,
+        scope: Scope,
+        request: &Request,
+        time: u64,
+    ) -> Result<(), CoordinationError> {
+        self.closure_authorized(request, scope)
+            .or_else(|_| self.authorized(scope, request, time).map(|_| ()))
+    }
     fn log_authorized(
         &self,
         log: TipLog,
@@ -1184,19 +1196,15 @@ impl Metadata {
         use crate::coordinated::Action;
         let scope = log.scope;
         match action {
-            // The authority or a trusted node relays a tip's opening, seal
-            // or bookmark move.
-            Action::Configure { .. } | Action::Seal { .. } => self
-                .closure_authorized(request, scope)
-                .or_else(|_| self.authorized(scope, request, time).map(|_| ())),
-            // A trusted node or the authority submits; the authority signs.
+            Action::Configure { .. } | Action::Seal { .. } => {
+                self.authority_or_trusted_node(scope, request, time)
+            }
             Action::Recover { .. } => {
                 let owner = self.issuer(scope).ok_or(CoordinationError::UnknownDomain)?;
                 if !self.authority(scope, owner) {
                     return Err(CoordinationError::Denied);
                 }
-                self.closure_authorized(request, scope)
-                    .or_else(|_| self.authorized(scope, request, time).map(|_| ()))
+                self.authority_or_trusted_node(scope, request, time)
             }
             Action::Resolve { .. } => {
                 if self
@@ -1333,7 +1341,6 @@ impl Metadata {
             }
             Action::Join { .. } => {
                 let joined = next.apply(request.key, action, self.state.time, true);
-                // The in-sync set counts nodes and remembers whose they are.
                 let identity = request
                     .identity(self.state.time)
                     .ok_or(CoordinationError::Denied)?;
@@ -1399,9 +1406,9 @@ impl Metadata {
                 )?;
                 let scope = certificate.control.scope;
                 if let Some(known) = self.controls.iter().find(|c| c.control.scope == scope) {
-                    // A registered identity keeps its authority; a closed one is never reused.
-                    let open = self.state.find(scope).is_ok_and(Domain::open);
-                    return if known == certificate && open {
+                    let still_open = self.state.find(scope).is_ok_and(Domain::open);
+                    let same_registration_retried = known == certificate && still_open;
+                    return if same_registration_retried {
                         certificate.reference().map(Outcome::Controlled)
                     } else {
                         Err(CoordinationError::Denied)

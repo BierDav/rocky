@@ -11,8 +11,10 @@ fn a_flood_of_hellos_evicts_no_issued_nonce() {
     nonces
         .spend(&kept, act, 1_001)
         .expect("the first nonce still spends");
-    // Each act once; another act under the same nonce still spends.
-    assert!(nonces.spend(&kept, act, 1_002).is_err());
+    assert!(
+        nonces.spend(&kept, act, 1_002).is_err(),
+        "each act spends a nonce once"
+    );
     nonces
         .spend(&kept, PersonalAct::Bootstrap { page: 1 }, 1_002)
         .expect("the next page");
@@ -26,9 +28,14 @@ fn only_a_live_nonce_this_responder_issued_spends() {
     let mut forged = issued;
     forged[31] ^= 1;
     assert!(nonces.spend(&forged, act, 1_001).is_err());
-    // Another process's nonce, or one presented after its lifetime.
-    assert!(Nonces::default().spend(&issued, act, 1_001).is_err());
-    assert!(nonces.spend(&issued, act, 1_000 + NONCE_LIFETIME).is_err());
+    assert!(
+        Nonces::default().spend(&issued, act, 1_001).is_err(),
+        "another process's nonce"
+    );
+    assert!(
+        nonces.spend(&issued, act, 1_000 + NONCE_LIFETIME).is_err(),
+        "a nonce presented after its lifetime"
+    );
     assert!(nonces.spend(&issued, act, 999).is_err());
 }
 
@@ -42,7 +49,6 @@ fn spent_replay_state_is_bounded() {
     }
     let refused = nonces.issue(1_000);
     assert!(nonces.spend(&refused, act, 1_000).is_err());
-    // Expired records make room again.
     let later = nonces.issue(1_000 + NONCE_LIFETIME);
     nonces
         .spend(&later, act, 1_000 + NONCE_LIFETIME)
@@ -382,7 +388,6 @@ mod device_actions {
                 }
                 assert_eq!(hub.dials_to("lost"), 1);
 
-                // A second recipient gets its first attempt while the first waits.
                 let other = PrivateKey::new();
                 node.configure(|settings| {
                     settings.learn_found(
@@ -458,8 +463,6 @@ mod device_actions {
         let first = node.personal_device_notices().await?;
         assert_eq!(first.len(), 1);
         node.personal_device_notice(target, true).await?;
-        // Re-sign a distinct certificate for the same node; the first local
-        // observation and acknowledgement are independent of certificate ID.
         let account = PersonalAccount::derive(prf(), &namespace())?;
         let mut renewed = cert.capability.clone();
         renewed.not_before += 1;
@@ -471,7 +474,6 @@ mod device_actions {
         assert_eq!(retained.len(), 1);
         assert_eq!(retained[0].first_observed, first[0].first_observed);
         assert!(retained[0].read && retained[0].acknowledged);
-        // The observation clock is local, not the certificate's timestamp.
         let mut observations = BTreeMap::new();
         crate::membership::observe_trusted(
             &known,

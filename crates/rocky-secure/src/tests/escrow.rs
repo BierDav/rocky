@@ -41,7 +41,6 @@ async fn forged_escrow_records_sent_first_never_displace_the_genuine_one() {
     .unwrap();
     let epoch = *a.key_epochs(f.public).await.last().unwrap();
     let slot = (f.public, epoch);
-    // Alice holds the key and escrows it to the root.
     let root = RootKey::generate();
     let seal = |secret: [u8; 32]| {
         RootEscrow::seal(
@@ -55,9 +54,7 @@ async fn forged_escrow_records_sent_first_never_displace_the_genuine_one() {
     a.keep_escrow(vec![(Some(slot), genuine.clone())])
         .await
         .unwrap();
-    // Anyone can seal to the root and sign: four junk records, vouched for
-    // by keys that hold no chain of their own, go first.
-    let forged: Vec<VouchedEscrow> = (0..4)
+    let junk_vouched_by_keys_without_a_chain: Vec<VouchedEscrow> = (0..4)
         .map(|index| {
             VouchedEscrow::sign(
                 &PrivateKey::new(),
@@ -76,7 +73,7 @@ async fn forged_escrow_records_sent_first_never_displace_the_genuine_one() {
     .await
     .unwrap();
     let (mut server, mut client): (NativeSession, NativeSession) = (accepted, dialed);
-    server.forge_escrow(forged);
+    server.forge_escrow(junk_vouched_by_keys_without_a_chain);
     let (served, report) = tokio::join!(server.serve_to_end(&a), async {
         let report = client.catch_up(&b, f.public, MAX_SECURE_FRAME / 2).await;
         client.close().await.unwrap();
@@ -85,17 +82,23 @@ async fn forged_escrow_records_sent_first_never_displace_the_genuine_one() {
     served.unwrap();
     assert_eq!(report.unwrap().frames, 1);
 
-    // Bob kept the genuine record alone; the root recovers the key from it.
     let kept = b.escrow_of(&[slot].into()).await.unwrap();
-    assert_eq!(kept.len(), 1);
+    assert_eq!(kept.len(), 1, "only the genuine record is kept");
     assert_eq!(kept[0].signer(), alice.public_key());
     assert_eq!(kept[0].record(), &genuine);
-    assert_eq!(kept[0].record().open(&root).unwrap(), [7; 32]);
-    // The forgeries are refused and surfaced against the peer.
+    assert_eq!(
+        kept[0].record().open(&root).unwrap(),
+        [7; 32],
+        "the root recovers the key from the kept record"
+    );
     let refusals = b.escrow_refusals().await.unwrap();
     assert_eq!(refusals.len(), 1);
     let (peer, records, reason) = &refusals[0];
-    assert_eq!((*peer, *records), (alice.public_key(), 4));
+    assert_eq!(
+        (*peer, *records),
+        (alice.public_key(), 4),
+        "the forgeries are refused and surfaced against the peer"
+    );
     assert!(reason.contains("could not read"), "{reason}");
 }
 
@@ -150,8 +153,11 @@ async fn an_issuers_devices_fill_only_its_own_escrow_slot() {
     let dir = Scratch::new().await;
     let (b, _, _, genuine) = flooded(&f, &dir).await;
     let kept = b.escrow_of(&[genuine.slot()].into()).await.unwrap();
-    // One record per issuer: the flood's latest and the genuine one.
-    assert_eq!(kept.len(), 2);
+    assert_eq!(
+        kept.len(),
+        2,
+        "one record per issuer: the flood's latest and the genuine one"
+    );
     assert!(kept.contains(&genuine));
     assert!(b.escrow_refusals().await.unwrap().is_empty());
 }
@@ -171,14 +177,15 @@ async fn revoking_an_issuer_drops_its_kept_escrow_records() {
     .await
     .unwrap();
     assert_eq!(b.escrow_of(&[slot].into()).await.unwrap(), vec![genuine]);
-    // The drop is surfaced against the peer that carried the record.
     let refusals = b.escrow_refusals().await.unwrap();
     assert_eq!(refusals.len(), 1);
     let (peer, records, reason) = &refusals[0];
-    assert_eq!((*peer, *records), (carrier.public_key(), 1));
+    assert_eq!(
+        (*peer, *records),
+        (carrier.public_key(), 1),
+        "the drop is surfaced against the peer that carried the record"
+    );
     assert!(reason.contains("revocation"), "{reason}");
-    // The revoked issuer's records are refused when carried again; a
-    // holder under another issuer is kept.
     let later = vouched_under(&f, &PrivateKey::new(), slot, 1).remove(0);
     let mut records = vouched_under(&f, &compromised, slot, 2);
     records.push(later.clone());
@@ -187,8 +194,15 @@ async fn revoking_an_issuer_drops_its_kept_escrow_records() {
         .unwrap();
     let kept = b.escrow_of(&[slot].into()).await.unwrap();
     assert_eq!(kept.len(), 2);
-    assert!(kept.contains(&later));
-    assert_eq!(b.escrow_refusals().await.unwrap()[0].1, 3);
+    assert!(
+        kept.contains(&later),
+        "a holder under another issuer is kept"
+    );
+    assert_eq!(
+        b.escrow_refusals().await.unwrap()[0].1,
+        3,
+        "the revoked issuer's records are refused when carried again"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -210,8 +224,11 @@ async fn revoking_an_epochs_only_holder_keeps_its_record() {
     ))
     .await
     .unwrap();
-    // A lost holder's record is the epoch's only way back to the root.
-    assert_eq!(b.escrow_of(&[slot].into()).await.unwrap(), records);
+    assert_eq!(
+        b.escrow_of(&[slot].into()).await.unwrap(),
+        records,
+        "a lost holder's record is the epoch's only way back to the root"
+    );
     assert!(b.escrow_refusals().await.unwrap().is_empty());
 }
 
@@ -233,17 +250,23 @@ async fn an_accepted_record_drops_a_revoked_epochs_only_record() {
     ))
     .await
     .unwrap();
-    // A genuine record arrives: the revoked one goes without waiting for
-    // another revocation, counted against the peer that carried it.
     let genuine = vouched_under(&f, &PrivateKey::new(), slot, 1);
     b.keep_carried_escrow(PrivateKey::new().public_key(), genuine.clone())
         .await
         .unwrap();
-    assert_eq!(b.escrow_of(&[slot].into()).await.unwrap(), genuine);
+    assert_eq!(
+        b.escrow_of(&[slot].into()).await.unwrap(),
+        genuine,
+        "a genuine record arriving drops the revoked one without another revocation"
+    );
     let refusals = b.escrow_refusals().await.unwrap();
     assert_eq!(refusals.len(), 1);
     let (peer, records, reason) = &refusals[0];
-    assert_eq!((*peer, *records), (carrier.public_key(), 1));
+    assert_eq!(
+        (*peer, *records),
+        (carrier.public_key(), 1),
+        "the dropped record counts against the peer that carried it"
+    );
     assert!(reason.contains("revocation"), "{reason}");
 }
 
@@ -279,7 +302,6 @@ async fn evicting_a_scope_drops_its_carried_escrow_records_unless_frames_stay() 
     };
     let kept = || async { b.escrow_of(&[slot].into()).await.unwrap() };
 
-    // A frame of the scope still kept here keeps the records it needs.
     carry().await;
     {
         let mut inner = b.inner.lock(crate::replica::Class::Background).await;
@@ -301,9 +323,12 @@ async fn evicting_a_scope_drops_its_carried_escrow_records_unless_frames_stay() 
         .unwrap();
     }
     b.evict(f.public).await.unwrap();
-    assert_eq!(kept().await.len(), 2);
+    assert_eq!(
+        kept().await.len(),
+        2,
+        "a frame of the scope still kept here keeps the records it needs"
+    );
 
-    // With no frame left, the carried record goes; this node's own stays.
     {
         let mut inner = b.inner.lock(crate::replica::Class::Background).await;
         transaction!(@commit inner, |inner| {
@@ -318,6 +343,6 @@ async fn evicting_a_scope_drops_its_carried_escrow_records_unless_frames_stay() 
     b.subscribe(f.public).await.unwrap();
     b.evict(f.public).await.unwrap();
     let kept = kept().await;
-    assert_eq!(kept.len(), 1);
-    assert_eq!(kept[0].record(), &own);
+    assert_eq!(kept.len(), 1, "with no frame left the carried record goes");
+    assert_eq!(kept[0].record(), &own, "this node's own record stays");
 }

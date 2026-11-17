@@ -339,7 +339,6 @@ where
         let metrics = Arc::new(writer::Metrics::default());
         let writer_metrics = metrics.clone();
         let thread = rocky_platform::task::dedicated("rocky-writer", move || async move {
-            // One domain can use the file writer directly.
             let pool = read::ReadPool::new();
             let setup = async {
                 let (owner, raw) = database::DatabaseOwner::open(&path).await?;
@@ -539,13 +538,14 @@ where
         self.register_tables(&mut observer, labels.as_deref())?;
         Ok(observer)
     }
+    /// Registers `observer`, then reads the revision it starts at, so a commit
+    /// published before registering is in that revision.
     pub(crate) fn register_tables(
         &self,
         observer: &mut observe::TableObserver,
         tables: Option<&[(String, String)]>,
     ) -> Result<(), Error> {
         self.inner.reads()?.events()?.register(observer, tables)?;
-        // Read after registering: a commit published before is in this revision.
         observer.registered_at(self.inner.scope, self.inner.revisions.borrow().get());
         Ok(())
     }

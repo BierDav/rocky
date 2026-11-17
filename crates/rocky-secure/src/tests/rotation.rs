@@ -118,9 +118,6 @@ async fn a_rotation_seals_later_writes_out_of_a_revoked_readers_reach() {
         );
     }
 
-    // The issuer revokes carol: a statement, then a new key epoch. A
-    // session and a paged read opened before end with the change; the
-    // issuer's own chain stays current.
     let session = issuer.session([f.public].into()).await.unwrap();
     let mut staged = session.transaction();
     staged
@@ -143,15 +140,20 @@ async fn a_rotation_seals_later_writes_out_of_a_revoked_readers_reach() {
             .collect::<Vec<_>>(),
         vec![1, 2]
     );
-    assert!(staged.commit([9; 32]).await.is_err());
-    assert!(session.page(f.public, None, 1).await.is_err());
+    assert!(
+        staged.commit([9; 32]).await.is_err(),
+        "a session opened before revoking carol ends with the new key epoch"
+    );
+    assert!(
+        session.page(f.public, None, 1).await.is_err(),
+        "a paged read opened before revoking carol ends with the new key epoch"
+    );
     assert!(!issuer.handle_committed([9; 32]).await.unwrap());
     assert_eq!(*issuer.observe_revision().borrow(), revision);
-    // The same epoch again does nothing; other material for it is refused.
     issuer
         .install_key_epoch(key(f.public, 2, NEW))
         .await
-        .unwrap();
+        .expect("installing the same epoch again does nothing");
     assert!(
         issuer
             .install_key_epoch(KeyMaterial::at(
@@ -160,16 +162,23 @@ async fn a_rotation_seals_later_writes_out_of_a_revoked_readers_reach() {
                 [78; 32]
             ))
             .await
-            .is_err()
+            .is_err(),
+        "other material for an installed epoch is refused"
     );
 
     let second = insert(&issuer, &f, 2).await;
     assert_eq!(generation(&second), 2);
-    assert_eq!(rows(&issuer, &f).await, 2);
-    // The earlier bytes are untouched, and the old key does not open the new.
+    assert_eq!(
+        rows(&issuer, &f).await,
+        2,
+        "the issuer's own chain stays current after revoking carol"
+    );
     let operation = second.operation().unwrap();
     let aad = encode(&operation.header.extensions).unwrap();
-    assert!(crate::wire::decrypt(&OLD, &aad, second.body_bytes()).is_err());
+    assert!(
+        crate::wire::decrypt(&OLD, &aad, second.body_bytes()).is_err(),
+        "the old key does not open the new epoch"
+    );
     assert!(crate::wire::decrypt(&NEW, &aad, second.body_bytes()).is_ok());
     let page = issuer
         .transfer_page(
@@ -185,18 +194,24 @@ async fn a_rotation_seals_later_writes_out_of_a_revoked_readers_reach() {
     assert!(
         page.frames
             .iter()
-            .any(|frame| frame.to_bytes().unwrap() == original)
+            .any(|frame| frame.to_bytes().unwrap() == original),
+        "the earlier bytes are untouched by the rotation"
     );
 
-    // Carol obtains the new ciphertext elsewhere. Whether or not she has
-    // learned the statement, she holds no key for it and reads no new row.
     assert_eq!(
         revoked.receive(second.clone()).await.unwrap(),
         ReceiveStatus::MissingKey
     );
-    assert_eq!(rows(&revoked, &f).await, 1);
+    assert_eq!(
+        rows(&revoked, &f).await,
+        1,
+        "carol, given the new ciphertext before learning the statement, holds no key and reads no new row"
+    );
     revoked.learn_revocations(&next).await.unwrap();
-    assert!(revoked.receive(second.clone()).await.is_err());
+    assert!(
+        revoked.receive(second.clone()).await.is_err(),
+        "carol, having learned the statement, still reads no new row"
+    );
     assert!(revoked.snapshot(f.public).await.is_err());
     assert!(revoked.session([f.public].into()).await.is_err());
     assert!(
@@ -206,21 +221,27 @@ async fn a_rotation_seals_later_writes_out_of_a_revoked_readers_reach() {
             .is_err()
     );
 
-    // Bob learns the statement and keeps his chain. Until the new key
-    // reaches him the write waits; then it applies.
     member.learn_revocations(&next).await.unwrap();
     assert_eq!(
         member.receive(second.clone()).await.unwrap(),
         ReceiveStatus::MissingKey
     );
     let waiting = member.snapshot(f.public).await.unwrap();
-    assert_eq!((waiting.rows.len(), waiting.complete), (1, false));
+    assert_eq!(
+        (waiting.rows.len(), waiting.complete),
+        (1, false),
+        "Bob keeps his chain but the write waits until the new key reaches him"
+    );
     member
         .install_key_epoch(key(f.public, 2, NEW))
         .await
         .unwrap();
     let caught_up = member.snapshot(f.public).await.unwrap();
-    assert_eq!((caught_up.rows.len(), caught_up.complete), (2, true));
+    assert_eq!(
+        (caught_up.rows.len(), caught_up.complete),
+        (2, true),
+        "the waiting write applies once Bob has the new key"
+    );
     assert_eq!(member.audit(f.public).await.unwrap().operations, 2);
 }
 
@@ -237,9 +258,6 @@ async fn an_interrupted_rotation_completes_at_open_and_never_rolls_back() {
     insert(&replica, &f, 1).await;
     drop(replica);
 
-    // The key provider and the saved identity hold the new epoch; the
-    // process stopped before the replica heard of either. Opening with
-    // what was saved finishes the rotation.
     let both = || vec![key(f.public, 1, OLD), key(f.public, 2, NEW)];
     let replica = open(both()).await.unwrap();
     assert_eq!(
@@ -249,26 +267,34 @@ async fn an_interrupted_rotation_completes_at_open_and_never_rolls_back() {
             .into_iter()
             .map(|epoch| epoch.generation)
             .collect::<Vec<_>>(),
-        vec![1, 2]
+        vec![1, 2],
+        "opening with what was saved finishes the interrupted rotation"
     );
     assert_eq!(rows(&replica, &f).await, 1);
     assert_eq!(generation(&insert(&replica, &f, 2).await), 2);
     drop(replica);
-    // Again, and after that with nothing left to complete.
     let replica = open(both()).await.unwrap();
-    assert_eq!(rows(&replica, &f).await, 2);
+    assert_eq!(
+        rows(&replica, &f).await,
+        2,
+        "reopening with nothing left to complete keeps the rows"
+    );
     assert_eq!(replica.audit(f.public).await.unwrap().replayed, 2);
     drop(replica);
 
-    // The key epoch does not go back, a lost earlier key is reported while
-    // its operations are retained, and other material for a recorded epoch
-    // is refused.
-    assert!(open(vec![key(f.public, 1, OLD)]).await.is_err());
-    assert!(open(vec![key(f.public, 2, NEW)]).await.is_err());
+    assert!(
+        open(vec![key(f.public, 1, OLD)]).await.is_err(),
+        "the key epoch does not go back"
+    );
+    assert!(
+        open(vec![key(f.public, 2, NEW)]).await.is_err(),
+        "a lost earlier key is reported while its operations are retained"
+    );
     assert!(
         open(vec![key(f.public, 1, [12; 32]), key(f.public, 2, NEW)])
             .await
-            .is_err()
+            .is_err(),
+        "other material for a recorded earlier epoch is refused"
     );
     assert!(
         open(vec![
@@ -276,7 +302,8 @@ async fn an_interrupted_rotation_completes_at_open_and_never_rolls_back() {
             KeyMaterial::at(f.public, rocky_core::KeyEpoch::new(2, &NEW), [78; 32])
         ])
         .await
-        .is_err()
+        .is_err(),
+        "other material for the recorded current epoch is refused"
     );
     assert_eq!(rows(&open(both()).await.unwrap(), &f).await, 2);
 }
@@ -296,34 +323,39 @@ async fn earlier_epochs_retire_only_when_nothing_retained_needs_them() {
         .await
         .unwrap();
     insert(&replica, &f, 2).await;
-    // The current epoch is not retired, and epoch 1 still opens a retained write.
     assert!(
         replica
             .retire_key_epoch(f.public, rocky_core::KeyEpoch::new(2, &NEW))
             .await
-            .is_err()
+            .is_err(),
+        "the current epoch is not retired"
     );
     assert!(
         replica
             .retire_key_epoch(f.public, rocky_core::KeyEpoch::new(1, &OLD))
             .await
-            .is_err()
+            .is_err(),
+        "epoch 1 still opens a retained write"
     );
-    // A checkpoint under the new key covers both epochs.
     let signed = compacted_base(&replica, &f.publisher, f.public).await;
     assert_eq!(signed.statement.key_epoch().unwrap().generation, 2);
-    assert_eq!(signed.statement.operations, 2);
+    assert_eq!(
+        signed.statement.operations, 2,
+        "a checkpoint under the new key covers both epochs"
+    );
     assert_eq!(replica.audit(f.public).await.unwrap().rows, 2);
-    // A rotation with no later write still seals the next checkpoint.
     replica
         .install_key_epoch(key(f.public, 3, [79; 32]))
         .await
         .unwrap();
     let resealed = compacted_base(&replica, &f.publisher, f.public).await;
-    assert_eq!(resealed.statement.key_epoch().unwrap().generation, 3);
+    assert_eq!(
+        resealed.statement.key_epoch().unwrap().generation,
+        3,
+        "a rotation with no later write still seals the next checkpoint"
+    );
     assert_eq!(resealed.statement.operations, 2);
 
-    // A scope that never wrote under an earlier epoch drops it at once.
     replica
         .install_key(key(f.private, 2, [22; 32]))
         .await
@@ -345,7 +377,7 @@ async fn earlier_epochs_retire_only_when_nothing_retained_needs_them() {
     replica
         .retire_key_epoch(f.private, rocky_core::KeyEpoch::new(1, &[21; 32]))
         .await
-        .unwrap();
+        .expect("a scope that never wrote under an earlier epoch retires it at once");
     assert_eq!(
         replica
             .key_epochs(f.private)
@@ -380,9 +412,11 @@ async fn a_learned_revocation_alone_refreshes_the_base_at_its_seal_without_a_new
     let before = compacted_base(&replica, &f.publisher, f.public).await;
     let learned = revoking(&f, &[PrivateKey::new().public_key()]);
     replica.learn_revocations(&learned).await.unwrap();
-    // Compacting again signs the base anew at the same seal, without a write.
     let report = replica.compact(f.public.domain, 0).await.unwrap();
-    assert_eq!(report.compacted, before.statement.seal);
+    assert_eq!(
+        report.compacted, before.statement.seal,
+        "compacting again signs the base anew at the same seal, without a write"
+    );
     let status = replica.checkpoint_status(f.public).await.unwrap();
     assert!(status.maintenance_error.is_none());
     let after = status.checkpoint.unwrap();
@@ -492,7 +526,6 @@ async fn siblings_open_both_histories_converge_writers_and_retire_after_pruning(
         .unwrap();
     assert_eq!(rows(&left, &f).await, 2);
     assert_eq!(rows(&right, &f).await, 2);
-    // The base under the retired epoch is not offered; one at the next seal is.
     compacted_base(&left, &f.publisher, f.public).await;
     link_up(&left, &right, f.public.domain).await;
     assert_eq!(
@@ -502,7 +535,8 @@ async fn siblings_open_both_histories_converge_writers_and_retire_after_pruning(
             .unwrap()
             .statement
             .key_epoch(),
-        Some(epoch(&winner))
+        Some(epoch(&winner)),
+        "the base under the retired epoch is not offered; one at the next seal is"
     );
     assert!(
         left.retire_key_epoch(f.public, epoch(&loser))
@@ -633,10 +667,16 @@ async fn concurrent_revocations_list_the_exposure_window_and_close_it_at_the_sup
             })
             .collect()
     };
-    // Carol was revoked by A; B's concurrent rotation still delivered its
-    // sibling to her. Dave was revoked by B and still received A's sibling.
-    assert_eq!(opens(&[OLD, b_secret]), [1, 3]);
-    assert_eq!(opens(&[OLD, a_secret]), [1, 2]);
+    assert_eq!(
+        opens(&[OLD, b_secret]),
+        [1, 3],
+        "carol, revoked by A, still received the sibling of B's concurrent rotation"
+    );
+    assert_eq!(
+        opens(&[OLD, a_secret]),
+        [1, 2],
+        "dave, revoked by B, still received A's sibling"
+    );
     assert_eq!(opens(&[closed_secret]), [4, 5]);
     assert_eq!(generation(&frames[3]), 3);
     assert_eq!(generation(&frames[4]), 3);

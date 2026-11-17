@@ -105,7 +105,15 @@ impl Launch {
                 vec![DEVICE.into()],
             );
         }
-        // Panels for the installations already here, at least the defaults.
+        Workspace::new(
+            self.root.clone(),
+            Link::Demo(Arc::new(Hub::default())),
+            self.demo_installations(),
+        )
+    }
+    /// The demo's panels: the installations already here, at least the
+    /// defaults.
+    fn demo_installations(&self) -> Vec<String> {
         let mut names: Vec<String> = DEMO.iter().map(|name| (*name).into()).collect();
         if let Ok(entries) = std::fs::read_dir(&self.root) {
             let mut found: Vec<String> = entries
@@ -117,13 +125,26 @@ impl Launch {
             found.sort();
             names.extend(found);
         }
-        Workspace::new(
-            self.root.clone(),
-            Link::Demo(Arc::new(Hub::default())),
-            names,
-        )
+        names
     }
 }
+/// Exchanges contacts between `todos` and the `others` open in this process
+/// that share its database: in-process peers find each other only through
+/// contacts, and only within one database.
+async fn introduce_in_process_peers(todos: &Todos, others: Vec<Todos>) -> Result<(), Failure> {
+    let contact = todos.database().session().contact().await?;
+    let scope = todos.database().scope();
+    for other in others
+        .into_iter()
+        .filter(|other| other.database().scope() == scope)
+    {
+        other.database().session().add_peer(&contact).await?;
+        let theirs = other.database().session().contact().await?;
+        todos.database().session().add_peer(&theirs).await?;
+    }
+    Ok(())
+}
+
 const DEMO: [&str; 3] = ["laptop", "phone", "watch"];
 const DEVICE: &str = "device";
 
@@ -297,16 +318,7 @@ fn Start(name: String, phase: Signal<Phase>) -> Element {
                     Some(code) => roles::join(&configuration, code, &label()).await?,
                 };
                 if invitation.is_some() && matches!(workspace.link, Link::Demo(_)) {
-                    // In-process peers find each other only through
-                    // contacts, and only within one database.
-                    let contact = todos.database().session().contact().await?;
-                    let scope = todos.database().scope();
-                    let members = workspace.others(&name).into_iter();
-                    for other in members.filter(|other| other.database().scope() == scope) {
-                        other.database().session().add_peer(&contact).await?;
-                        let theirs = other.database().session().contact().await?;
-                        todos.database().session().add_peer(&theirs).await?;
-                    }
+                    introduce_in_process_peers(&todos, workspace.others(&name)).await?;
                 }
                 Ok::<_, Failure>(todos)
             }
@@ -465,7 +477,6 @@ fn Device(name: String, todos: Shared, closing: bool) -> Element {
                 Ok(events) => events,
                 Err(failure) => return error.set(Some(failure.to_string())),
             };
-            // A device that joined while this one was away gets the lists.
             let _ = todos.share_lists_with_members().await;
             loop {
                 revision += 1;

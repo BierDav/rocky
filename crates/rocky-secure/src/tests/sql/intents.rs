@@ -38,7 +38,6 @@ async fn replayed_writes_commit_as_intents() {
         )
         .await
         .unwrap();
-    // A savepoint rolled back takes its statements out of the intent.
     session.run("SAVEPOINT undo", vec![]).await.unwrap();
     session
         .run("UPDATE salaries SET amount=0", vec![])
@@ -55,10 +54,10 @@ async fn replayed_writes_commit_as_intents() {
         .frames;
     assert_eq!(frames.len(), 1);
 
-    // The author's execution is its local result.
     assert_eq!(
         select(&session, "SELECT key,amount FROM salaries").await,
-        vec![vec![text("ann"), SqlValue::Integer(15)]]
+        vec![vec![text("ann"), SqlValue::Integer(15)]],
+        "the author's execution is its local result"
     );
     let mut intents = Vec::new();
     for frame in &frames {
@@ -76,7 +75,11 @@ async fn replayed_writes_commit_as_intents() {
         .iter()
         .map(|statement| (statement.sql.as_str(), statement.params.clone()))
         .collect();
-    assert_eq!(statements.len(), 2);
+    assert_eq!(
+        statements.len(),
+        2,
+        "a savepoint rolled back takes its statements out of the intent"
+    );
     assert!(statements[0].0.starts_with("INSERT INTO salaries"));
     assert!(
         statements[1]
@@ -85,7 +88,6 @@ async fn replayed_writes_commit_as_intents() {
     );
     assert_eq!(statements[1].1, vec![SqlValue::Integer(5), text("ann")]);
 
-    // The next intent reads the first: its base names the author's frame.
     session.run("BEGIN", vec![]).await.unwrap();
     session
         .run(
@@ -117,7 +119,8 @@ async fn replayed_writes_commit_as_intents() {
         vec![rocky_core::replay::BaseMark {
             author: first.extensions.author(&first.public_key).unwrap(),
             sequence: first.extensions.author_sequence,
-        }]
+        }],
+        "the next intent reads the first, so its base names the author's frame"
     );
     assert!(header(latest).timestamp > first.timestamp);
 }
@@ -188,20 +191,26 @@ async fn a_single_row_intent_authors_within_its_statement_budget() {
                 }
             }
             let total = crate::sqlite::statements() - before;
-            // The transaction itself; session admission runs around it.
             let begin = trace
                 .iter()
                 .position(|sql| sql.starts_with("BEGIN"))
                 .unwrap();
             let commit = trace.iter().position(|sql| sql == "COMMIT").unwrap();
-            (total, commit - begin + 1)
+            let transaction_without_surrounding_session_admission = commit - begin + 1;
+            (total, transaction_without_surrounding_session_admission)
         }
     };
     let replayed = count("UPDATE salaries SET amount=amount+1 WHERE key='ann'").await;
     println!("P4 author_statements total/transaction replayed={replayed:?}");
-    // One of them finds the newest replayed clock the stamp passes.
-    assert!(replayed.1 <= 44, "{replayed:?} statements");
+    assert!(
+        replayed.1 <= REPLAYED_AUTHOR_TRANSACTION_STATEMENTS,
+        "{replayed:?} statements"
+    );
 }
+
+/// Statement budget of one authored replayed transaction, including the one
+/// that finds the newest replayed clock the stamp passes.
+const REPLAYED_AUTHOR_TRANSACTION_STATEMENTS: usize = 44;
 
 /// One update of `ann`'s amount, committed alone.
 async fn raise(session: &SecureSql<TypedRows>, by: i64) -> EncryptedFrame {
@@ -283,7 +292,6 @@ async fn concurrent_increments_replay_in_order_and_both_apply() {
         bob.receive(created.clone()).await.unwrap(),
         ReceiveStatus::Applied
     );
-    // Both raise the amount they read; neither has seen the other.
     let first = raise(&sql(&alice, &both).await, 1).await;
     let second = raise(&sql(&bob, &both).await, 1).await;
     assert!(replay_stamp(&first) < replay_stamp(&second));
@@ -291,13 +299,19 @@ async fn concurrent_increments_replay_in_order_and_both_apply() {
     for frame in [created, first.clone(), second.clone()] {
         assert_eq!(carol.receive(frame).await.unwrap(), ReceiveStatus::Applied);
     }
-    assert_eq!(amounts(&carol, &both).await, ann(12));
+    assert_eq!(
+        amounts(&carol, &both).await,
+        ann(12),
+        "both raises apply although neither author saw the other"
+    );
     assert_eq!(alice.receive(second).await.unwrap(), ReceiveStatus::Applied);
     assert_eq!(amounts(&alice, &both).await, ann(12));
-    // Bob already applied his later raise: it rewinds, the earlier one
-    // applies, and his redoes on top.
     assert_eq!(bob.receive(first).await.unwrap(), ReceiveStatus::Applied);
-    assert_eq!(amounts(&bob, &both).await, ann(12));
+    assert_eq!(
+        amounts(&bob, &both).await,
+        ann(12),
+        "Bob's already applied later raise rewinds, the earlier one applies and his redoes on top"
+    );
     for replica in [&alice, &bob, &carol] {
         assert_eq!(outcomes(replica).await, vec![None, None, None]);
         assert_eq!(undo_records(replica).await, 3);
@@ -314,6 +328,24 @@ async fn undo_records(replica: &EncryptedReplica<TypedRows>) -> i64 {
                 "SELECT COUNT(*) FROM secure_replayed WHERE undo IS NOT NULL",
                 (),
             )
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    match rows[0][0] {
+        SqlValue::Integer(count) => count,
+        _ => unreachable!(),
+    }
+}
+
+/// Row records `replica` stores for the identities of its rows.
+async fn row_records(replica: &EncryptedReplica<TypedRows>) -> i64 {
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    let rows = collect_rows(
+        inner
+            .conn
+            .query("SELECT COUNT(*) FROM secure_row_records", ())
             .await
             .unwrap(),
     )
@@ -357,34 +389,44 @@ async fn an_earlier_arrival_rewinds_and_redo_reevaluates_later_outcomes() {
         }
     };
     let (alice, bob, carol) = (open("a.db").await, open("b.db").await, open("c.db").await);
-    // Both create `ann`; Bob then raises his own row.
     let earlier = create(&alice, &both, 10).await;
     let later = create(&bob, &both, 20).await;
     let raised = raise(&sql(&bob, &both).await, 5).await;
     assert!(replay_stamp(&earlier) < replay_stamp(&later));
     assert_eq!(
         amounts(&bob, &both).await,
-        vec![vec![text("ann"), SqlValue::Integer(25)]]
+        vec![vec![text("ann"), SqlValue::Integer(25)]],
+        "Bob raises the row he created"
     );
-    // Alice's earlier create reaches Bob last: his create now fails its
-    // key and drops, and his raise replays on Alice's row.
     assert_eq!(
         bob.receive(earlier.clone()).await.unwrap(),
         ReceiveStatus::Applied
     );
     let ann = |amount| vec![vec![text("ann"), SqlValue::Integer(amount)]];
-    assert_eq!(amounts(&bob, &both).await, ann(15));
+    assert_eq!(
+        amounts(&bob, &both).await,
+        ann(15),
+        "once Alice's earlier create arrives, Bob's raise replays on her row"
+    );
     assert_eq!(
         outcomes(&bob).await,
-        vec![None, Some("constraint".into()), None]
+        vec![None, Some("constraint".into()), None],
+        "Bob's own create now fails its key and drops"
     );
-    // A dropped member keeps no undo; Carol, in the opposite order, agrees.
-    assert_eq!(undo_records(&bob).await, 2);
+    assert_eq!(
+        undo_records(&bob).await,
+        2,
+        "a dropped member keeps no undo"
+    );
     for frame in [later, raised, earlier] {
         assert_eq!(carol.receive(frame).await.unwrap(), ReceiveStatus::Applied);
     }
     assert_eq!(amounts(&carol, &both).await, ann(15));
-    assert_eq!(outcomes(&carol).await, outcomes(&bob).await);
+    assert_eq!(
+        outcomes(&carol).await,
+        outcomes(&bob).await,
+        "Carol, receiving in the opposite order, agrees"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -406,9 +448,12 @@ async fn a_seal_ends_rewinds_and_makes_drops_final() {
     for frame in [earlier.clone(), later.clone()] {
         assert_eq!(carol.receive(frame).await.unwrap(), ReceiveStatus::Applied);
     }
-    // A seal finalizes everything Carol applied so far.
     carol.seal_replayed_for_test(t.salaries).await.unwrap();
-    assert_eq!(undo_records(&carol).await, 0);
+    assert_eq!(
+        undo_records(&carol).await,
+        0,
+        "a seal finalizes everything Carol applied so far"
+    );
     use rocky_core::replay::{DropReason, TransactionOutcome};
     assert_eq!(
         carol
@@ -420,11 +465,11 @@ async fn a_seal_ends_rewinds_and_makes_drops_final() {
             sealed: true,
         })
     );
-    // Alice's raise orders before nothing unsealed and applies on top.
     assert_eq!(carol.receive(raised).await.unwrap(), ReceiveStatus::Applied);
     assert_eq!(
         amounts(&carol, &both).await,
-        vec![vec![text("ann"), SqlValue::Integer(11)]]
+        vec![vec![text("ann"), SqlValue::Integer(11)]],
+        "Alice's raise orders before nothing unsealed and applies on top"
     );
     assert_eq!(undo_records(&carol).await, 1);
 }
@@ -485,21 +530,21 @@ async fn a_failing_replay_drops_its_transaction_and_the_log_continues() {
             &both,
         )
         .await;
-    // Both create the same key; the later one fails its primary key.
     let earlier = create(&alice, &both, 10).await;
     let later = create(&bob, &both, 20).await;
     let after = raise(&sql(&bob, &both).await, 5).await;
     for frame in [earlier.clone(), later.clone(), after] {
         assert_eq!(carol.receive(frame).await.unwrap(), ReceiveStatus::Applied);
     }
-    // Bob's raise replays on Alice's row: a drop is not a tombstone.
     assert_eq!(
         amounts(&carol, &both).await,
-        vec![vec![text("ann"), SqlValue::Integer(15)]]
+        vec![vec![text("ann"), SqlValue::Integer(15)]],
+        "Bob's raise replays on Alice's row: a drop is not a tombstone"
     );
     assert_eq!(
         outcomes(&carol).await,
-        vec![None, Some("constraint".into()), None]
+        vec![None, Some("constraint".into()), None],
+        "the later create of the same key fails its primary key"
     );
     let transaction = |frame| transaction(&t, frame);
     use rocky_core::replay::{DropReason, TransactionOutcome};
@@ -520,10 +565,10 @@ async fn a_failing_replay_drops_its_transaction_and_the_log_continues() {
             sealed: false,
         })
     );
-    // Bob's own replay of his transaction applied; Carol's ordering dropped it.
     assert_eq!(
         bob.transaction_outcome(transaction(&later)).await.unwrap(),
-        Some(TransactionOutcome::Applied { sealed: false })
+        Some(TransactionOutcome::Applied { sealed: false }),
+        "Bob's own replay applied the transaction Carol's ordering dropped"
     );
 }
 
@@ -540,8 +585,7 @@ async fn replayed_effects_outside_the_authors_grants_drop_as_admission() {
             &both,
         )
         .await;
-    // Bob may insert salaries but not change them.
-    let inserter = grant(
+    let may_insert_but_not_change_salaries = grant(
         t.salaries,
         &[Right::Read, Right::Insert, Right::Custody],
         &t.every_field("salaries"),
@@ -550,7 +594,10 @@ async fn replayed_effects_outside_the_authors_grants_drop_as_admission() {
         .open(
             &dir.path().join("b.db"),
             &PrivateKey::new(),
-            vec![t.writer(t.items, "items"), inserter],
+            vec![
+                t.writer(t.items, "items"),
+                may_insert_but_not_change_salaries,
+            ],
             &both,
         )
         .await;
@@ -568,16 +615,14 @@ async fn replayed_effects_outside_the_authors_grants_drop_as_admission() {
     .unwrap();
     assert_eq!(bob.receive(created).await.unwrap(), ReceiveStatus::Applied);
     let raise = "UPDATE salaries SET amount=amount+1 WHERE key='ann'";
-    // The author's own commit admits its effects as every replica will.
-    assert!(matches!(
-        sql(&bob, &both).await.run(raise, vec![]).await,
-        Err(Error::Rejected(_))
-    ));
-    // An author that skips that check still cannot change other replicas.
-    bob.inner
-        .lock(crate::replica::Class::Background)
-        .await
-        .unchecked_replayed_admission = true;
+    assert!(
+        matches!(
+            sql(&bob, &both).await.run(raise, vec![]).await,
+            Err(Error::Rejected(_))
+        ),
+        "the author's own commit admits its effects as every replica will"
+    );
+    skip_the_authors_replayed_admission_check(&bob).await;
     let rows = sql(&bob, &both).await.run(raise, vec![]).await.unwrap();
     let [frame] = rows.committed.unwrap().frames.try_into().unwrap();
     assert_eq!(alice.receive(frame).await.unwrap(), ReceiveStatus::Applied);
@@ -585,7 +630,21 @@ async fn replayed_effects_outside_the_authors_grants_drop_as_admission() {
         amounts(&alice, &both).await,
         vec![vec![text("ann"), SqlValue::Integer(10)]]
     );
-    assert_eq!(outcomes(&alice).await, vec![None, Some("admission".into())]);
+    assert_eq!(
+        outcomes(&alice).await,
+        vec![None, Some("admission".into())],
+        "an author that skips the admission check still cannot change other replicas"
+    );
+}
+
+/// Lets `replica` commit replayed effects without checking them against its
+/// grants, as a modified author could.
+async fn skip_the_authors_replayed_admission_check(replica: &EncryptedReplica<TypedRows>) {
+    replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .unchecked_replayed_admission = true;
 }
 
 /// A replay installs the session's SQL change counters on the write
@@ -633,9 +692,8 @@ async fn a_replay_its_capture_refuses_drops() {
     let created = create(&alice, &both, 10).await;
     let ids = "SELECT key,id FROM salaries ORDER BY key";
     let before = select(&sql(&alice, &both).await, ids).await;
-    // Bob holds no `ann`: his statement changes nothing where he runs it.
-    let [moved] = sql(&bob, &both)
-        .await
+    let bobs = sql(&bob, &both).await;
+    let [moved] = bobs
         .run("UPDATE salaries SET id=id+1000 WHERE key='ann'", vec![])
         .await
         .unwrap()
@@ -644,10 +702,25 @@ async fn a_replay_its_capture_refuses_drops() {
         .frames
         .try_into()
         .unwrap();
-    assert!(replay_stamp(&created) < replay_stamp(&moved));
+    assert!(
+        select(&bobs, ids).await.is_empty(),
+        "Bob holds no `ann`: his statement changes nothing where he runs it"
+    );
+    assert!(
+        replay_stamp(&created) < replay_stamp(&moved),
+        "Bob's statement replays after Alice's insert"
+    );
     assert_eq!(alice.receive(moved).await.unwrap(), ReceiveStatus::Applied);
-    assert_eq!(select(&sql(&alice, &both).await, ids).await, before);
-    assert_eq!(outcomes(&alice).await, vec![None, Some("engine".into())]);
+    assert_eq!(
+        select(&sql(&alice, &both).await, ids).await,
+        before,
+        "the capture refuses the changed id, so Alice's rows stay"
+    );
+    assert_eq!(
+        outcomes(&alice).await,
+        vec![None, Some("engine".into())],
+        "Bob's transaction drops for the engine"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -681,7 +754,6 @@ async fn a_single_row_intent_receives_within_its_statement_budget() {
         .try_into()
         .unwrap();
     bob.receive(created).await.unwrap();
-    // The whole call, and the received frame's own application in it.
     let count = |frame: EncryptedFrame| {
         let bob = &bob;
         async move {
@@ -695,10 +767,10 @@ async fn a_single_row_intent_receives_within_its_statement_budget() {
                 }
             }
             let at = |sql: &str| trace.iter().position(|traced| traced == sql).unwrap();
-            (
-                crate::sqlite::statements() - before,
-                at("RELEASE received_application") - at("SAVEPOINT received_application") + 1,
-            )
+            let whole_call = crate::sqlite::statements() - before;
+            let received_frames_own_application =
+                at("RELEASE received_application") - at("SAVEPOINT received_application") + 1;
+            (whole_call, received_frames_own_application)
         }
     };
     let replayed = count(raise(&session, 1).await).await;
@@ -790,12 +862,13 @@ async fn a_thirty_two_row_intent_receives_within_its_statements_per_row() {
     .await;
     let mut per_row = Vec::new();
     for frame in [each, all] {
-        // The counter sees Rocky's statements; the replayed application
-        // statements run once each beside them.
-        let replayed = opened(&t, &frame).1.unwrap().statements.len() as u64;
+        let replayed_statements_beside_the_counter =
+            opened(&t, &frame).1.unwrap().statements.len() as u64;
         let before = crate::sqlite::statements();
         assert_eq!(bob.receive(frame).await.unwrap(), ReceiveStatus::Applied);
-        per_row.push((crate::sqlite::statements() - before + replayed) as f64 / ROWS as f64);
+        let rocky_statements = crate::sqlite::statements() - before;
+        per_row
+            .push((rocky_statements + replayed_statements_beside_the_counter) as f64 / ROWS as f64);
     }
     assert_eq!(
         select(&sql(&bob, &both).await, "SELECT sum(amount) FROM salaries").await,
@@ -842,7 +915,6 @@ async fn a_rewind_across_the_open_tip_redoes_every_transaction() {
         ReceiveStatus::Applied
     );
     let took = started.elapsed();
-    // Diagnostic only: the routine seal constant is chosen from this.
     println!(
         "P4 rewind transactions={LATER} total={took:?} per_transaction={:?}",
         took / LATER as u32
@@ -865,7 +937,6 @@ async fn replayed_inserts_take_their_authors_own_identities() {
     let (a, b) = (PrivateKey::new(), PrivateKey::new());
     let alice = t.open(&dir.path().join("a.db"), &a, t.full(), &both).await;
     let bob = t.open(&dir.path().join("b.db"), &b, t.full(), &both).await;
-    // Replayed tables keep no row records; the allocator still advances.
     let session = sql(&bob, &both).await;
     let mut frames = Vec::new();
     for key in ["ann", "ben"] {
@@ -882,22 +953,27 @@ async fn replayed_inserts_take_their_authors_own_identities() {
             .frames,
         );
     }
+    let bobs_ids = select(&session, "SELECT id FROM salaries ORDER BY key").await;
+    assert_ne!(
+        bobs_ids[0], bobs_ids[1],
+        "the allocator advances for a replayed table"
+    );
+    assert_eq!(
+        row_records(&bob).await,
+        0,
+        "replayed tables keep no row records"
+    );
     for frame in frames {
         assert_eq!(alice.receive(frame).await.unwrap(), ReceiveStatus::Applied);
     }
-    // An id of another author's number is refused at commit, and a
-    // replica drops it when the author skips that check.
     let alices =
         rocky_core::RowIdentity::next(crate::writer::writer(&a.public_key()), 100).unwrap();
     let forged = format!("INSERT INTO salaries(key,amount,id) VALUES('cy',1,X'{alices}')");
-    assert!(matches!(
-        session.run(&forged, vec![]).await,
-        Err(Error::Rejected(_))
-    ));
-    bob.inner
-        .lock(crate::replica::Class::Background)
-        .await
-        .unchecked_replayed_admission = true;
+    assert!(
+        matches!(session.run(&forged, vec![]).await, Err(Error::Rejected(_))),
+        "an id of another author's number is refused at commit"
+    );
+    skip_the_authors_replayed_admission_check(&bob).await;
     let [frame] = session
         .run(&forged, vec![])
         .await
@@ -920,7 +996,8 @@ async fn replayed_inserts_take_their_authors_own_identities() {
         Some(TransactionOutcome::Dropped {
             reason: DropReason::Admission,
             sealed: false,
-        })
+        }),
+        "a replica drops another author's id when the author skips the commit check"
     );
     assert_eq!(amounts(&alice, &both).await.len(), 2);
 }

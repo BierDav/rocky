@@ -212,7 +212,6 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn compound_slots_use_declaration_order_and_sql_collations() {
         let mut def = definition();
-        // Neither column identity nor the column's physical position defines its slot.
         def.tables[0] = def.tables[1].clone();
         def.tables[0].name = "lists".into();
         def.tables[0].columns[0].name = "customer".into();
@@ -243,7 +242,8 @@ mod tests {
                     "items",
                     &[SqlValue::Text("acme".into()), SqlValue::Text("x".into())]
                 )
-                .unwrap()
+                .unwrap(),
+            "neither column identity nor physical position defines a slot"
         );
         assert_ne!(
             schema

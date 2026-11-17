@@ -14,20 +14,20 @@ fn hex(bytes: &[u8]) -> String {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn hkdf_matches_the_published_vectors() {
-    // RFC 4231 test case 6: a key longer than the block is hashed first.
     assert_eq!(
         hex(&hmac(
             &[0xaa; 131],
             &[b"Test Using Larger Than Block-Size Key - Hash Key First"]
         )),
-        "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54",
+        "RFC 4231 test case 6: a key longer than the block is hashed first"
     );
-    // RFC 5869 test case 1, the first output block.
     let salt: Vec<u8> = (0..=0x0c).collect();
     let info: Vec<u8> = (0xf0..=0xf9).collect();
     assert_eq!(
         hex(&hkdf(&salt, &[0x0b; 22], &info)),
-        "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf"
+        "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf",
+        "RFC 5869 test case 1, the first output block"
     );
 }
 
@@ -52,8 +52,10 @@ fn table_keys_are_bound_to_domain_group_table_and_epoch() {
     ];
     let distinct: BTreeSet<_> = variants.iter().chain([&base]).collect();
     assert_eq!(distinct.len(), variants.len() + 1);
-    // Neither the secret nor a sibling's key is the derived key.
-    assert!(!distinct.contains(&secret));
+    assert!(
+        !distinct.contains(&secret),
+        "the secret is not the derived key"
+    );
     assert!(derive_table_key(&secret, domain(), [4; 32], [5; 32], 0).is_err());
 }
 
@@ -90,7 +92,6 @@ fn group_envelopes_open_only_for_the_pinned_recipient_group_and_epoch() {
         let mut tampered = decoded.clone();
         tampered.body.sealed[20] ^= 1;
         assert!(tampered.verify(issuer.public_key(), group, epoch).is_err());
-        // A valid issuer signature cannot transplant existing ciphertext.
         for change in [
             |body: &mut Body| body.epoch.generation = 2,
             |body: &mut Body| body.group = [5; 32],
@@ -105,14 +106,17 @@ fn group_envelopes_open_only_for_the_pinned_recipient_group_and_epoch() {
             assert!(
                 tampered
                     .open(recipient, issuer.public_key(), group, epoch)
-                    .is_err()
+                    .is_err(),
+                "a valid issuer signature cannot transplant existing ciphertext"
             );
         }
-        // The sealed length follows the secret length; any other is refused.
         let mut truncated = decoded.clone();
         truncated.body.sealed.pop();
         truncated.signature = issuer.sign(&signing_bytes(SIGNED, &truncated.body).unwrap());
-        assert!(GroupSecretEnvelope::from_bytes(&truncated.to_bytes().unwrap()).is_err());
+        assert!(
+            GroupSecretEnvelope::from_bytes(&truncated.to_bytes().unwrap()).is_err(),
+            "the sealed length follows the secret length"
+        );
         let mut versioned = decoded.clone();
         versioned.body.version = 3;
         versioned.signature = issuer.sign(&signing_bytes(SIGNED, &versioned.body).unwrap());

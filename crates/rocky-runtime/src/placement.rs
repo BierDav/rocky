@@ -33,6 +33,12 @@ where
     .await
     .map_err(|_| Error::Closed)?
 }
+/// Files installed at once: independent files install concurrently, with
+/// bounded disk pressure.
+const CONCURRENT_INSTALLS: usize = 4;
+/// Opens the placed files. Every selected identity is validated and every
+/// required file acquired before any write; pending domains keep the same
+/// ordered plan across interrupted opens.
 async fn prepare<A: StoredApplication>(
     path: PathBuf,
     files: usize,
@@ -117,7 +123,6 @@ async fn prepare<A: StoredApplication>(
             "a placement migration is pending; finish it with migrate_placement".into(),
         ));
     }
-    // Validate every selected identity and acquire every required file before writes.
     let mut selected: BTreeMap<usize, Vec<&DomainInstallation<A>>> = BTreeMap::new();
     for domain in installations {
         let scope = key(domain.identity.scope);
@@ -221,7 +226,6 @@ async fn prepare<A: StoredApplication>(
     storage::finish(&catalog, result).await?;
     let mut jobs = Vec::new();
     for (index, owner, conn, binding) in opened {
-        // Pending domains retain the same ordered plan across interrupted opens.
         let pending: Vec<_> = selected[&index]
             .iter()
             .copied()
@@ -283,8 +287,7 @@ async fn prepare<A: StoredApplication>(
     let mut result = Vec::new();
     let mut jobs = jobs.into_iter();
     loop {
-        // Independent files install concurrently, with bounded disk pressure.
-        let batch: Vec<_> = jobs.by_ref().take(4).collect();
+        let batch: Vec<_> = jobs.by_ref().take(CONCURRENT_INSTALLS).collect();
         if batch.is_empty() {
             break;
         }

@@ -77,7 +77,6 @@ impl<A: RowApplication> Inner<A> {
                 .execute("DELETE FROM secure_replayed WHERE scope=?", [id])
                 .await?;
         }
-        // A partition whose tuple never arrived holds no rows.
         let Some((table, condition, values)) = self.scope_rows(scope)? else {
             return Ok(());
         };
@@ -96,9 +95,6 @@ impl<A: RowApplication> Inner<A> {
                 bindings(values),
             )
             .await?;
-        // Delete actions and the `SET NULL` triggers count in the
-        // connection's total changes: more than the scope's rows reached
-        // others. (The SQL function is replaced for replay.)
         let changed = self.conn.connection().total_changes()? - before;
         if let Some(id) = id.filter(|_| changed > held as u64) {
             self.conn
@@ -233,7 +229,6 @@ impl<A: RowApplication> Inner<A> {
         for record in &marked {
             let (id, blob) = match record.as_slice() {
                 [SqlValue::Integer(id), SqlValue::Blob(blob)] => (*id, blob),
-                // A scope no longer stored has nothing to wait for.
                 [SqlValue::Integer(id), SqlValue::Null] => {
                     cleared.push(*id);
                     continue;
@@ -286,8 +281,6 @@ impl<A: RowApplication> Inner<A> {
         }
         self.conn.execute("SAVEPOINT rederive", ()).await?;
         let rebuilt = async {
-            // Unmarked first, so the rebuild publishes the outcomes it
-            // decides; a rollback marks the scopes again.
             for id in &cleared {
                 self.conn
                     .execute("DELETE FROM secure_replayed_rederive WHERE scope=?", [*id])
@@ -325,7 +318,6 @@ impl<A: RowApplication> Inner<A> {
                     .await?;
                 Ok(Rederived::Stuck(violation))
             }
-            // A rewound transaction's partition key is not held yet.
             Err(Error::Rejected(reason)) if reason == KEY_WAITS => {
                 undo().await?;
                 Ok(Rederived::Waiting(KEY_WAITS))
@@ -557,10 +549,6 @@ impl<A: RowApplication> Inner<A> {
                 _ => Err(corrupt()),
             })
             .collect::<Result<_, _>>()?;
-            // A start whose covered members lost their record, as when they
-            // left the path, cannot say how they ended: the scope starts
-            // from the next older rows instead.
-            // So does one whose rows lack a field the path keeps.
             let scanned = loop {
                 let serves = match &start.rows {
                     Some((tip, rows)) => self.images_serve(*scope, *tip, rows)?,
@@ -587,8 +575,6 @@ impl<A: RowApplication> Inner<A> {
                 bounds.insert(*id, *bound);
             }
         }
-        // Every replayed table empties, or returns to the kept seal's rows:
-        // a cascade reaches only rows cleared anyway.
         if let Some(kept) = kept {
             self.rewind_live(kept.mark()).await?;
         }
@@ -608,7 +594,6 @@ impl<A: RowApplication> Inner<A> {
                     .await?;
             }
         }
-        // Members keep the admission they were recorded with.
         let mut recorded = BTreeMap::new();
         for (id, _) in &scopes {
             let (floor, kept_members) = covered_members.remove(id).unwrap_or_default();
@@ -629,7 +614,6 @@ impl<A: RowApplication> Inner<A> {
                 let hash = super::super::checkpoint::hash_of(bytes)?;
                 let admitted = !matches!(dropped, SqlValue::Text(reason) if reason == "admission");
                 recorded.insert(hash, admitted);
-                // Members the start covers stay as they ended.
                 if *after != 0 && !kept_members.contains(&hash) {
                     self.conn
                         .execute(

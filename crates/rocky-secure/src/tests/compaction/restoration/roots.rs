@@ -47,7 +47,6 @@ async fn stage(f: &HeldPrefix) {
 async fn a_verified_lower_prefix_anchors_a_held_and_signed_void_suffix() {
     let mut f = HeldPrefix::with_anchor(2, 3).await;
     let scope = f.lineage.scope("items");
-    // Positions 0/1 are evicted and never returned as frames.
     f.replica.receive(f.frames[4].clone()).await.unwrap();
     let void = crate::SignedVoid::sign(&f.key, vec![f.frames[3].header_bytes().to_vec()]).unwrap();
     assert!(f.replica.receive_voids(&[void]).await[0].is_ok());
@@ -94,8 +93,7 @@ async fn an_exact_verified_installed_endpoint_covers_its_evicted_frames() {
         0
     );
     f.replica.finish_rebootstrap(scope).await.unwrap();
-    // Privileged obligation control over a genuine higher installed base:
-    // its frontier at 2 does not reveal the exact hash at 1.
+    let hash_at_sequence_one = f.frames[1].id().unwrap().as_bytes().to_vec();
     f.replica
         .inner
         .lock(crate::replica::Class::Background)
@@ -103,10 +101,7 @@ async fn an_exact_verified_installed_endpoint_covers_its_evicted_frames() {
         .conn
         .execute(
             "UPDATE secure_evicted_logs SET sequence=1,hash=? WHERE scope=?",
-            [
-                f.frames[1].id().unwrap().as_bytes().to_vec(),
-                crate::encode(&scope).unwrap(),
-            ],
+            [hash_at_sequence_one, crate::encode(&scope).unwrap()],
         )
         .await
         .unwrap();
@@ -136,14 +131,14 @@ async fn an_exact_verified_installed_endpoint_covers_its_evicted_frames() {
     );
     assert_eq!(titles(&f.replica).await.len(), 3);
     f.replica.audit(scope).await.unwrap();
-    // The sibling scope needs its own authenticated target state before writes.
     let (_, keeper) = f.keeper.as_ref().unwrap();
+    let sibling_needing_its_own_target_state_before_writes = f.lineage.scope("tags");
     import_checkpoint(
         &f.lineage,
         keeper,
         &f.replica,
         &f.key,
-        f.lineage.scope("tags"),
+        sibling_needing_its_own_target_state_before_writes,
     )
     .await;
     f = f.reopen().await;

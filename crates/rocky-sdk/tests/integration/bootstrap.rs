@@ -6,6 +6,27 @@ use rocky_sdk::{Network, transport::memory::Hub};
 use serde_json::json;
 use std::sync::Arc;
 
+/// Cuts `b`, which keeps the history `a` prunes and could catch `c` up
+/// without the base, off from `c`; only the pruned `a` may serve `c`.
+fn leave_only_the_pruned_issuer_to_serve_c(hub: &Hub) {
+    hub.set_down("b", "c", true);
+}
+
+/// A checkpoint intent for key epoch 2, newer than the member's identity:
+/// a fault at the renewal durability boundary.
+const INTENT_NEWER_THAN_IDENTITY: &[u8] = b"2";
+
+/// Retrying once authority is restored must signal connectivity explicitly.
+async fn retry_after_restoring_authority(device: &Device) {
+    snap::ok(device.session.set_networking_enabled(true)).await;
+}
+
+/// Going online again ends the backoff a cut caused.
+async fn end_backoff_by_going_online(device: &Device) {
+    snap::ok(device.session.set_networking_enabled(false)).await;
+    snap::ok(device.session.set_networking_enabled(true)).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn retention_defaults_preserve_sole_copies_and_configuration_survives_reopen()
 -> Result<(), Failure> {
@@ -90,9 +111,7 @@ async fn behind_pruned_sync_restores_the_base_and_preserves_unsent_work() -> Res
     )?;
     b.sync().await.expect("initial sync");
     c.sync().await.expect("initial sync");
-    // c learns b by mesh handover, and b keeps the history a prunes: c could
-    // catch up from b without the base. Only the pruned a may serve c.
-    hub.set_down("b", "c", true);
+    leave_only_the_pruned_issuer_to_serve_c(&hub);
     c.add(99, "unsent").await;
     for handle in 2..=12 {
         a.add(handle, &format!("row {handle}")).await;
@@ -119,7 +138,6 @@ async fn behind_pruned_sync_restores_the_base_and_preserves_unsent_work() -> Res
             .is_empty()
     );
     a.add(13, "tail").await;
-    // Pushing to a peer behind the pruned_prefix skips the scope; the pass succeeds.
     common::introduce(&a, &c).await;
     a.sync().await.expect("push to a behind peer");
     let behind = c.node().await;
@@ -131,7 +149,8 @@ async fn behind_pruned_sync_restores_the_base_and_preserves_unsent_work() -> Res
             .rev()
             .find(|attempt| attempt["operation"] == "reconcile")
             .ok_or("reconciliation")?["outcome"],
-        "completed"
+        "completed",
+        "pushing to a peer behind the pruned prefix skips the scope and the pass succeeds"
     );
     let activity = snap::ok(a.session.activity(0)).await;
     assert!(
@@ -215,7 +234,6 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
             .revoke_identity(&(snap::text(&(revoked.identity().await)))),
     )
     .await;
-    // The base a joiner imports sits at a seal after the rotation.
     a.seal_and_compact().await;
     let member_path = root.path().join("member");
     let member = Device::join(
@@ -394,7 +412,6 @@ async fn status_separates_bootstrap_progress_and_reconciliation_and_resumes_a_fa
     member.close().await;
     gate.close().await;
 
-    // Enrollment succeeds, but every sync fails: checkpoint intent survives reopen.
     let gate = Arc::new(Gate {
         inner: hub
             .connector("retry")
@@ -418,7 +435,8 @@ async fn status_separates_bootstrap_progress_and_reconciliation_and_resumes_a_fa
     let retry = Device::open(&path, None)?;
     assert_eq!(
         snap::ok(retry.session.status()).await["data"]["bootstrap_pending"],
-        true
+        true,
+        "an enrolled device whose every sync failed keeps its checkpoint intent across reopen"
     );
     gate.refuse
         .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -454,7 +472,6 @@ async fn a_join_stays_pending_until_it_meets_its_inviter() -> Result<(), Failure
         Network::Owned(hub.connector("b")),
     )?;
     b.sync().await.expect("b joins");
-    // Enrolled by A, but no exchange with it before A goes away.
     let gate = Arc::new(Gate {
         inner: hub
             .connector("gated")
@@ -477,7 +494,10 @@ async fn a_join_stays_pending_until_it_meets_its_inviter() -> Result<(), Failure
     let _ = c.sync().await;
     assert_eq!(c.titles().await, ["base"]);
     let status = snap::ok(c.session.status()).await;
-    assert_eq!(status["data"]["bootstrap_pending"], true);
+    assert_eq!(
+        status["data"]["bootstrap_pending"], true,
+        "a join enrolled by A with no exchange with it stays pending after B's checkpoint"
+    );
 
     let a = Device::open(&a_path, Some(Network::Owned(hub.connector("a"))))?;
     c.sync().await.expect("c meets its inviter");
@@ -581,7 +601,6 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
     )?)?;
     a.follow_main().await;
     a.add(1, "first scope").await;
-    // Each scope has a base at the seal, so each is its own import.
     snap::ok(snap::mutate(
         &a.session,
         vec![2; 32],
@@ -630,9 +649,10 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
         .as_array()
         .expect("pending scopes")
         .clone();
-    // Losing the transport while imports overlap can interrupt either or
-    // both scopes. Keep exactly that durable set across an offline reopen.
-    assert!((1..=2).contains(&pending.len()));
+    assert!(
+        (1..=2).contains(&pending.len()),
+        "losing the transport while imports overlap interrupts one or both scopes: {pending:?}"
+    );
     member.close().await;
     let member = Device::new(Database::open(Open {
         identity: None,
@@ -648,7 +668,11 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
     );
     let reopened: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path.join("bootstrap.json"))?)?;
-    assert_eq!(reopened["pending"].as_array(), Some(&pending));
+    assert_eq!(
+        reopened["pending"].as_array(),
+        Some(&pending),
+        "the interrupted scopes stay pending across an offline reopen"
+    );
     let before = *attempts.borrow_and_update();
     gate.max_attempts.store(u64::MAX, Ordering::SeqCst);
     member
@@ -721,16 +745,17 @@ async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Fa
         &invitation,
     )?)?;
     attempts.wait_for(|count| *count >= 2).await?;
-    // Fault at the renewal durability boundary: intent is newer than the identity.
-    rocky_credentials::write_private(&path.join("bootstrap.json"), b"2")?;
+    rocky_credentials::write_private(&path.join("bootstrap.json"), INTENT_NEWER_THAN_IDENTITY)?;
     gate.allowed.send_replace(true);
     assert!(common::exchange_failed(&member.sync().await));
-    assert_eq!(std::fs::read(path.join("bootstrap.json"))?, b"2");
+    assert_eq!(
+        std::fs::read(path.join("bootstrap.json"))?,
+        INTENT_NEWER_THAN_IDENTITY
+    );
     assert_eq!(
         snap::ok(member.session.status()).await["data"]["bootstrap_pending"],
         true
     );
-    // Once the issuer supplies epoch 2, renewal resets all scopes and catches up.
     let c_path = root.path().join("revoked");
     let invitation = a
         .invite_as(json!({"kind": "reader", "scopes": ["notes"]}))
@@ -757,12 +782,12 @@ async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Fa
         member.session.info().await
     })
     .await;
-    // Retry after restoring authority explicitly signals connectivity again.
-    snap::ok(member.session.set_networking_enabled(true)).await;
+    retry_after_restoring_authority(&member).await;
     member.sync().await.expect("fresh intent under epoch 2");
     assert_eq!(
         snap::ok(member.session.status()).await["data"]["bootstrap_pending"],
-        false
+        false,
+        "once the issuer supplies epoch 2, renewal resets all scopes and catches up"
     );
     assert_eq!(member.titles().await, ["base"]);
     member.close().await;
@@ -892,9 +917,7 @@ async fn a_cut_join_resumes_its_pages_and_keeps_edits_from_both_sides() -> Resul
             seen
         })
     };
-    // Going online again ends the backoff the cut caused.
-    snap::ok(b.session.set_networking_enabled(false)).await;
-    snap::ok(b.session.set_networking_enabled(true)).await;
+    end_backoff_by_going_online(&b).await;
     b.sync().await.expect("resume the join");
     for progress in observer
         .await?

@@ -136,14 +136,12 @@ fn range_write(log: bool, remove: bool) -> String {
         .collect::<Vec<_>>()
         .join(" AND ");
     let x = format!("{r}.{x}");
-    // Ranges are disjoint and never adjacent: none before the last one
-    // starting at or before x reaches x, so each statement seeks from it.
-    let from = format!(
+    let seek_from_last_range_at_or_before_x = format!(
         "start>=coalesce((SELECT max(start) FROM {table} WHERE {bucket} AND start<=({x})),({x}))"
     );
     if !remove {
         return format!(
-            "INSERT OR REPLACE INTO {table}({columns},start,end) SELECT {values},min(coalesce(min(start),{x}),{x}),max(coalesce(max(end),{x}),{x}) FROM {table} WHERE {bucket} AND {from} AND end>=({x})-1 AND start<=({x})+1; DELETE FROM {table} WHERE {bucket} AND start>({x}) AND start<=({x})+1;"
+            "INSERT OR REPLACE INTO {table}({columns},start,end) SELECT {values},min(coalesce(min(start),{x}),{x}),max(coalesce(max(end),{x}),{x}) FROM {table} WHERE {bucket} AND {seek_from_last_range_at_or_before_x} AND end>=({x})-1 AND start<=({x})+1; DELETE FROM {table} WHERE {bucket} AND start>({x}) AND start<=({x})+1;"
         );
     }
     let duplicate = if log {
@@ -155,9 +153,13 @@ fn range_write(log: bool, remove: bool) -> String {
         "NOT EXISTS(SELECT 1 FROM secure_position_sources WHERE {duplicate} AND NOT(hash=OLD.hash AND kind=OLD.kind))"
     );
     format!(
-        "INSERT INTO {table}({columns},start,end) SELECT {values},({x})+1,end FROM {table} WHERE {bucket} AND {from} AND start<=({x}) AND end>({x}) AND {guard}; UPDATE {table} SET end=({x})-1 WHERE {bucket} AND {from} AND start<({x}) AND end>=({x}) AND {guard}; DELETE FROM {table} WHERE {bucket} AND start=({x}) AND {guard};"
+        "INSERT INTO {table}({columns},start,end) SELECT {values},({x})+1,end FROM {table} WHERE {bucket} AND {seek_from_last_range_at_or_before_x} AND start<=({x}) AND end>({x}) AND {guard}; UPDATE {table} SET end=({x})-1 WHERE {bucket} AND {seek_from_last_range_at_or_before_x} AND start<({x}) AND end>=({x}) AND {guard}; DELETE FROM {table} WHERE {bucket} AND start=({x}) AND {guard};"
     )
 }
+
+/// `ON CONFLICT DO NOTHING`, because `OR IGNORE` would also suppress a
+/// trigger's range merge on conflict.
+const INSERT_POSITION_SOURCE: &str = "INSERT INTO secure_position_sources VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(hash,kind) DO NOTHING";
 
 pub(crate) async fn insert(
     conn: &ScopedConnection,
@@ -174,9 +176,8 @@ pub(crate) async fn insert(
         i64::try_from(e.author_sequence).map_err(|_| denied("author sequence overflow"))?;
     let log_sequence =
         i64::try_from(header.seq_num).map_err(|_| denied("log sequence overflow"))?;
-    // OR IGNORE here would also suppress a trigger's range merge on conflict.
     conn.execute(
-        "INSERT INTO secure_position_sources VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(hash,kind) DO NOTHING",
+        INSERT_POSITION_SOURCE,
         bindings(vec![
             SqlValue::Blob(header.hash().as_bytes().to_vec()),
             SqlValue::Integer(kind),
@@ -341,14 +342,7 @@ impl<A: RowApplication> Inner<A> {
             let domain_sequence = |n:u64| -> Result<u64,Error> { u64::try_from(i128::from(n)+i128::from(*delta)).map_err(|_| Error::Corrupt("log range coordinates".into())) };
             if !path.admits(domain_author,domain_sequence(start)?)? { continue; }
             if !path.admits(domain_author,domain_sequence(end)?)? {
-                // Admission is a prefix in domain coordinates. Clip the affine run.
-                let mut low=start;
-                let mut high=end;
-                while low<high {
-                    let middle=low+(high-low).div_ceil(2);
-                    if path.admits(domain_author,domain_sequence(middle)?)? { low=middle; } else { high=middle-1; }
-                }
-                end=low;
+                end = last_admitted(start, end, |n| path.admits(domain_author, domain_sequence(n)?))?;
             }
             let runs=positions.entry(author).or_default();
             runs.0.insert(start,end);
@@ -396,6 +390,26 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(frontier)
     }
+}
+
+/// The last of `start..=end` that `admits` accepts, given `start` is admitted
+/// and admission is a prefix in domain coordinates.
+fn last_admitted(
+    start: u64,
+    end: u64,
+    mut admits: impl FnMut(u64) -> Result<bool, Error>,
+) -> Result<u64, Error> {
+    let mut low = start;
+    let mut high = end;
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if admits(middle)? {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    Ok(low)
 }
 
 fn interval(start: i64, end: i64) -> Result<(u64, u64), Error> {
@@ -490,7 +504,6 @@ impl<A: RowApplication> Inner<A> {
                 let runs = actual
                     .entry(index_key(&row[..width])?)
                     .or_insert_with(Runs::default);
-                // Retain row boundaries: nonmaximal, overlapping runs are corrupt too.
                 runs.0.insert(start, end);
             }
             if actual != expected {
@@ -561,7 +574,7 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-// Reads the crate's sources from disk.
+/// Reads the crate's sources from disk.
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     #[test]

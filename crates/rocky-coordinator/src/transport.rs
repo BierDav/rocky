@@ -116,6 +116,9 @@ pub async fn write(
         .map_err(|_| CoordinationError::Unavailable)
 }
 /// One signed request and the signed answer of `voter` on `stream`.
+///
+/// The fresh request nonce binds the answer to this call even when the
+/// device's clock is wrong, so a reply may still report clock skew.
 pub async fn converse<T: Serialize + DeserializeOwned>(
     stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
     voter: PublicKey,
@@ -126,8 +129,6 @@ pub async fn converse<T: Serialize + DeserializeOwned>(
     let envelope = Envelope::sign(genesis, nonce(), &message, key)?;
     write(stream, &envelope).await?;
     let response = read(stream).await?;
-    // A fresh nonce binds the signed response to this call even when the
-    // device's clock is wrong; the reply can therefore report ClockSkew.
     response.authenticate(genesis)?;
     if response.key != voter || response.nonce != envelope.nonce {
         return Err(CoordinationError::Denied);

@@ -73,12 +73,18 @@ impl Node {
         }
         Ok(())
     }
-    /// One worker per link whose transport can discover.
+    /// Announces an empty topic set: a borrowed transport outlives this
+    /// service, so stopping must withdraw what it announced.
+    async fn withdraw_announcements(&self, discovery: &dyn Discovery) {
+        let _ = discovery.announce([0; 32], &[]).await;
+        self.announcing.store(false, Ordering::SeqCst);
+    }
+    /// One worker per link whose transport can discover. It first clears
+    /// the local marks: one describes the network this device is on now.
     pub(super) async fn discover(self: Arc<Self>, link: Arc<Link>, discovery: Arc<dyn Discovery>) {
         let mut stage = link.stage.subscribe();
         let mut topics = self.topics.subscribe();
         let mut check = rocky_platform::time::interval(TOPIC_CHECK);
-        // A local mark describes the network this device is on now.
         let marked = self
             .settings
             .lock()
@@ -103,9 +109,7 @@ impl Node {
             loop {
                 tokio::select! {
                     _ = stage.wait_for(|stage| *stage != Stage::Open) => {
-                        // A borrowed transport outlives this service.
-                        let _ = discovery.announce([0; 32], &[]).await;
-                        self.announcing.store(false, Ordering::SeqCst);
+                        self.withdraw_announcements(&*discovery).await;
                         return;
                     }
                     found = discovery.found(), if open => match found {

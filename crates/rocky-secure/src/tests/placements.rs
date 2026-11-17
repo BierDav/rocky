@@ -8,6 +8,10 @@ use crate::{PlacementPage, PlacementRequest};
 use std::collections::BTreeSet;
 mod conflicts;
 
+/// Same-database table grants added to each renewed chain, enough to force a
+/// page boundary despite small size variations in random signatures and keys.
+const PAGE_BOUNDARY_TABLE_GRANTS: u8 = 4;
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn placement_pages_bound_renewed_chains_and_continue_in_author_order() {
     let lineage = Lineage::new();
@@ -26,9 +30,7 @@ async fn placement_pages_bound_renewed_chains_and_continue_in_author_order() {
     let template = lineage.credentials(3, &alice_key);
     for index in 0..64 {
         let mut root = template.0[0].capability.clone();
-        // Same-database table grants force a page boundary independently of
-        // small encoding-size variations in random signatures and keys.
-        for table in 0u8..4 {
+        for table in 0..PAGE_BOUNDARY_TABLE_GRANTS {
             let mut grant = root.grants[0].clone();
             grant.scope.table = rocky_core::commitment("placement.fixture.table", &[table]);
             root.grants.push(grant);
@@ -163,7 +165,6 @@ async fn full_role_and_an_ungranted_key_do_not_turn_placements_into_payload_cust
         .unwrap()
         .clone();
     {
-        // Retained crypto state is not a current custody grant.
         let mut inner = pair
             .bob
             .1
@@ -187,7 +188,11 @@ async fn full_role_and_an_ungranted_key_do_not_turn_placements_into_payload_cust
             .compacted,
         Some(pair.seal)
     );
-    assert_eq!(scalar(&pair.bob.1, "SELECT count(*) FROM tags").await, 0);
+    assert_eq!(
+        scalar(&pair.bob.1, "SELECT count(*) FROM tags").await,
+        0,
+        "retained crypto state is not a current custody grant"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -207,7 +212,6 @@ async fn a_held_scope_requires_its_payload_even_when_its_key_is_missing() {
     insert(&alice, "a", "one").await;
     let seal = seal(&lineage, &alice).await.id().unwrap();
     crate::tests::exchange_graphs(&alice, &bob, lineage.domain).await;
-    // The grant still requires real payloads when no opening key is available.
     let keys = std::mem::take(
         &mut bob
             .inner
@@ -231,7 +235,8 @@ async fn a_held_scope_requires_its_payload_even_when_its_key_is_missing() {
     assert_eq!(bob.receive_placements(request, page).await.unwrap(), 0);
     assert_eq!(
         scalar(&bob, "SELECT count(*) FROM secure_placements").await,
-        0
+        0,
+        "the grant still requires real payloads when no opening key is available"
     );
     bob.inner
         .lock(crate::replica::Class::Background)
@@ -266,17 +271,20 @@ async fn a_member_finalizes_and_compacts_a_seal_whose_tail_lies_in_a_scope_it_ca
         bob.1.compact(lineage.domain, 0).await.unwrap().compacted,
         None
     );
-    // Two `tags` positions are placed by their headers, without bodies.
-    assert_eq!(place(&pair.alice, bob).await, 2);
+    assert_eq!(
+        place(&pair.alice, bob).await,
+        2,
+        "two `tags` positions are placed by their headers, without bodies"
+    );
     assert!(bob.1.wanted_placements().await.unwrap().is_empty());
     assert_eq!(
         bob.1.compact(lineage.domain, 0).await.unwrap().compacted,
         Some(pair.seal)
     );
-    // The base folded them: nothing consults them again.
     assert_eq!(
         scalar(&bob.1, "SELECT count(*) FROM secure_placements").await,
-        0
+        0,
+        "the base folded the placements, so nothing consults them again"
     );
     bob.1.audit(lineage.scope("items")).await.unwrap();
 }
@@ -317,7 +325,6 @@ async fn forged_out_of_range_held_scope_and_revoked_placements_are_refused() {
     };
     let PlacementPage { headers, chains } = answer(*request).await.unwrap();
     assert_eq!(headers.len(), 2);
-    // A forged signature.
     let mut forged = headers.clone();
     let last = forged[0].0.len() - 1;
     forged[0].0[last] ^= 1;
@@ -331,9 +338,9 @@ async fn forged_out_of_range_held_scope_and_revoked_placements_are_refused() {
                 },
             )
             .await
-            .is_err()
+            .is_err(),
+        "a forged signature is refused"
     );
-    // Headers outside the request, and a request past the seal's frontier.
     let narrow = PlacementRequest {
         to: request.from,
         ..*request
@@ -348,14 +355,17 @@ async fn forged_out_of_range_held_scope_and_revoked_placements_are_refused() {
                 },
             )
             .await
-            .is_err()
+            .is_err(),
+        "headers outside the request are refused"
     );
     let past = PlacementRequest {
         to: request.to + 1,
         ..*request
     };
-    assert!(answer(past).await.is_err());
-    // Without its chain a header is incomplete.
+    assert!(
+        answer(past).await.is_err(),
+        "a request past the seal's frontier is refused"
+    );
     assert!(
         bob.1
             .receive_placements(
@@ -366,9 +376,9 @@ async fn forged_out_of_range_held_scope_and_revoked_placements_are_refused() {
                 },
             )
             .await
-            .is_err()
+            .is_err(),
+        "a header without its chain is incomplete"
     );
-    // A genuine signature does not authorize a different domain or row format.
     let signer = alice
         .inner
         .lock(crate::replica::Class::Background)
@@ -396,22 +406,25 @@ async fn forged_out_of_range_held_scope_and_revoked_placements_are_refused() {
                     }
                 )
                 .await
-                .is_err()
+                .is_err(),
+            "a genuine signature does not authorize a different domain or row format"
         );
     }
-    // A position of a scope bob holds needs the frame itself.
     let items = PlacementRequest {
         from: 0,
         to: 0,
         ..*request
     };
     let page = answer(items).await.unwrap();
-    assert_eq!(bob.1.receive_placements(items, page).await.unwrap(), 0);
+    assert_eq!(
+        bob.1.receive_placements(items, page).await.unwrap(),
+        0,
+        "a position of a scope bob holds needs the frame itself"
+    );
     assert_eq!(
         scalar(&bob.1, "SELECT count(*) FROM secure_placements").await,
         0
     );
-    // A revoked requester is refused.
     let user = PrivateKey::from_bytes(&rocky_core::commitment(
         "lineage.user",
         bob.0.public_key().as_bytes(),
@@ -423,18 +436,22 @@ async fn forged_out_of_range_held_scope_and_revoked_placements_are_refused() {
         &[],
     );
     alice.learn_revocations(&revocations).await.unwrap();
-    assert!(answer(*request).await.is_err());
-    // Nothing was stored; the genuine page still places both.
+    assert!(
+        answer(*request).await.is_err(),
+        "a revoked requester is refused"
+    );
     assert_eq!(
         scalar(&bob.1, "SELECT count(*) FROM secure_placements").await,
-        0
+        0,
+        "no refused page stored anything"
     );
     assert_eq!(
         bob.1
             .receive_placements(*request, PlacementPage { headers, chains })
             .await
             .unwrap(),
-        2
+        2,
+        "the genuine page still places both positions"
     );
 }
 
@@ -476,8 +493,6 @@ async fn a_frame_at_a_placed_position_replaces_it_and_another_header_is_equivoca
     let pair = pair().await;
     let (lineage, alice, bob) = (&pair.lineage, &pair.alice, &pair.bob);
     assert_eq!(place(alice, bob).await, 2);
-    // Alice's next `items` frame takes the next position. Bob holds a
-    // placement there whose header is another frame's.
     let placed: Vec<u8> = {
         let inner = bob.1.inner.lock(crate::replica::Class::Background).await;
         match crate::storage::rows(&inner.conn, "SELECT header FROM secure_placements LIMIT 1")
@@ -492,7 +507,7 @@ async fn a_frame_at_a_placed_position_replaces_it_and_another_header_is_equivoca
     };
     let header: p2panda_core::Header<crate::wire::Extensions> = decode(&placed).unwrap();
     let author = header.extensions.author(&header.public_key).unwrap();
-    let next = {
+    let position_of_alices_next_items_frame = {
         let inner = bob.1.inner.lock(crate::replica::Class::Background).await;
         let mut highest = 0;
         for record in crate::storage::rows(&inner.conn, "SELECT header FROM secure_placements")
@@ -516,7 +531,7 @@ async fn a_frame_at_a_placed_position_replaces_it_and_another_header_is_equivoca
                 crate::storage::bindings(vec![
                     rocky_core::SqlValue::Blob(encode(&lineage.domain).unwrap()),
                     crate::writer::writer_value(author),
-                    rocky_core::SqlValue::Integer(next as i64),
+                    rocky_core::SqlValue::Integer(position_of_alices_next_items_frame as i64),
                     rocky_core::SqlValue::Blob(encode(&header.extensions.scope).unwrap()),
                     rocky_core::SqlValue::Blob(header.hash().as_bytes().to_vec()),
                     rocky_core::SqlValue::Blob(placed.clone()),
@@ -527,11 +542,17 @@ async fn a_frame_at_a_placed_position_replaces_it_and_another_header_is_equivoca
     }
     insert(alice, "b", "two").await;
     sync(lineage, alice, &bob.1, &bob.0).await;
-    assert_eq!(bob.1.equivocations().await.unwrap(), 1);
+    assert_eq!(
+        bob.1.equivocations().await.unwrap(),
+        1,
+        "a placement whose header is another frame's conflicts with the frame at its position"
+    );
     assert_eq!(
         scalar(
             &bob.1,
-            &format!("SELECT count(*) FROM secure_placements WHERE sequence={next}")
+            &format!(
+                "SELECT count(*) FROM secure_placements WHERE sequence={position_of_alices_next_items_frame}"
+            )
         )
         .await,
         0
@@ -620,16 +641,14 @@ async fn a_relay_omits_a_revoked_authors_placements_and_still_places_others() {
         .await
         .unwrap();
     };
-    // Alice writes an item and two tags; the relay holds them all.
     insert(&alice, "a", "one").await;
     tag(&alice, "t1").await;
     tag(&alice, "t2").await;
     for name in ["items", "tags"] {
         sync_scope(&lineage, &alice, &relay, &keys[1], lineage.scope(name)).await;
     }
-    // A third tag reaches the relay only as Alice's signed void.
     tag(&alice, "t3").await;
-    let voided = {
+    let third_tag_reaching_the_relay_only_as_a_void = {
         let inner = alice.inner.lock(crate::replica::Class::Background).await;
         match crate::storage::rows(
             &inner.conn,
@@ -644,11 +663,11 @@ async fn a_relay_omits_a_revoked_authors_placements_and_still_places_others() {
             other => panic!("{other:?}"),
         }
     };
-    let void = crate::SignedVoid::sign(&keys[0], vec![voided]).unwrap();
+    let void = crate::SignedVoid::sign(&keys[0], vec![third_tag_reaching_the_relay_only_as_a_void])
+        .unwrap();
     for status in relay.receive_voids(&[void]).await {
         status.unwrap();
     }
-    // The relay tags too, then seals what it holds.
     tag(&relay, "r1").await;
     let sealed = seal(&lineage, &relay).await.id().unwrap();
     crate::tests::exchange_graphs(&relay, &bob, lineage.domain).await;
@@ -693,17 +712,23 @@ async fn a_relay_omits_a_revoked_authors_placements_and_still_places_others() {
         }
     };
     let headers_of = |page: &PlacementPage| (page.headers.len(), page.chains.len());
-    // Before the revocation the relay places Alice's two tags and her void,
-    // and her `items` position bob holds.
     let alice_page = answer(alice_request).await;
-    assert_eq!(headers_of(&alice_page), (3, 1));
+    assert_eq!(
+        headers_of(&alice_page),
+        (3, 1),
+        "before the revocation the relay places Alice's two tags and her void"
+    );
     let items = PlacementRequest {
         from: 0,
         to: 0,
         ..alice_request
     };
     let items_page = answer(items).await;
-    assert_eq!(headers_of(&items_page).0, 1);
+    assert_eq!(
+        headers_of(&items_page).0,
+        1,
+        "before the revocation the relay places Alice's `items` position bob holds"
+    );
     let alice_headers = format!(
         "SELECT (SELECT count(*) FROM secure_operations WHERE author=x'{0}')+(SELECT count(*) FROM secure_voids WHERE author=x'{0}')",
         alice_node
@@ -719,10 +744,17 @@ async fn a_relay_omits_a_revoked_authors_placements_and_still_places_others() {
         .learn_revocations(&revoking_node(&lineage, alice_node))
         .await
         .unwrap();
-    // Still physically held, no longer offered as evidence.
-    assert_eq!(scalar(&relay, &alice_headers).await, retained);
+    assert_eq!(
+        scalar(&relay, &alice_headers).await,
+        retained,
+        "revoked headers stay physically held"
+    );
     let omitted = answer(alice_request).await;
-    assert_eq!(headers_of(&omitted), (0, 0));
+    assert_eq!(
+        headers_of(&omitted),
+        (0, 0),
+        "revoked headers are no longer offered as evidence"
+    );
     assert_eq!(headers_of(&answer(items).await), (0, 0));
     assert_eq!(
         bob.receive_placements(alice_request, omitted)
@@ -736,17 +768,15 @@ async fn a_relay_omits_a_revoked_authors_placements_and_still_places_others() {
             .unwrap()
             .contains(&alice_request)
     );
-    // An unrevoked author's position still transfers.
     let relay_page = answer(relay_request).await;
     assert_eq!(headers_of(&relay_page), (1, 1));
     assert_eq!(
         bob.receive_placements(relay_request, relay_page)
             .await
             .unwrap(),
-        1
+        1,
+        "an unrevoked author's position still transfers"
     );
-    // A page captured before the revocation is refused whole once bob
-    // learns it, for a held scope too, and changes nothing.
     bob.learn_revocations(&revoking_node(&lineage, alice_node))
         .await
         .unwrap();
@@ -755,15 +785,22 @@ async fn a_relay_omits_a_revoked_authors_placements_and_still_places_others() {
     assert!(
         bob.receive_placements(alice_request, alice_page)
             .await
-            .is_err()
+            .is_err(),
+        "a page captured before the revocation is refused whole once bob learns it"
     );
-    assert!(bob.receive_placements(items, items_page).await.is_err());
+    assert!(
+        bob.receive_placements(items, items_page).await.is_err(),
+        "a captured page of a held scope is refused too"
+    );
     assert_eq!(
         scalar(&bob, "SELECT count(*) FROM secure_placements").await,
         placed
     );
-    assert_eq!(bob.stored_and_memory_revision().await, revision);
-    // Reopened with its keys, the relay still omits them.
+    assert_eq!(
+        bob.stored_and_memory_revision().await,
+        revision,
+        "a refused captured page changes nothing"
+    );
     drop(relay);
     let relay = lineage.reopen(&relay_path, &keys[1], 3, 3).await.unwrap();
     relay.audit(lineage.scope("items")).await.unwrap();
@@ -772,6 +809,10 @@ async fn a_relay_omits_a_revoked_authors_placements_and_still_places_others() {
         .placement_page(peer, &credentials, alice_request)
         .await
         .unwrap();
-    assert_eq!(headers_of(&page), (0, 0));
+    assert_eq!(
+        headers_of(&page),
+        (0, 0),
+        "reopened with its keys, the relay still omits revoked headers"
+    );
     assert_eq!(scalar(&relay, &alice_headers).await, retained);
 }

@@ -70,6 +70,9 @@ where
             },
         }
     }
+    /// Answers one JSON request. A reply past the frame budget becomes a
+    /// quota error; a subscription update that cannot be sent ends the
+    /// subscription, so the consumer learns it and subscribes again to resync.
     pub async fn dispatch_json(&self, bytes: &[u8]) -> Vec<u8> {
         let mut next = None;
         let reply = if bytes.len() > MAX_FRAME_BYTES {
@@ -95,14 +98,11 @@ where
                 },
             }
         };
-        // Every variant contains only JSON-representable values.
         if let Ok(bytes) = serde_json::to_vec(&reply)
             && bytes.len() <= MAX_FRAME_BYTES
         {
             return bytes;
         }
-        // The observer is past the update it cannot send: the subscription
-        // ends, so the consumer learns it and subscribes again to resync.
         match next.map(|subscription| self.end(&subscription)) {
             Some(Ok(())) => br#"{"status":"error","version":1,"error":{"code":"quota","retryable":false,"message":"SDK subscription update exceeds frame budget; the subscription ended: subscribe again with a smaller page"}}"#.to_vec(),
             _ => br#"{"status":"error","version":1,"error":{"code":"quota","retryable":false,"message":"SDK response exceeds frame budget"}}"#.to_vec(),
@@ -233,6 +233,8 @@ where
 fn operation(id: OperationId) -> Value {
     json!({"node":id.node.0,"sequence":id.sequence.get().to_string()})
 }
+/// A read page as JSON; `next_kind` tells the consumer what the following
+/// page costs.
 fn snapshot(result: ReadSnapshot) -> Value {
     let completeness = match result.completeness {
         Completeness::Local { pending_operations } => {
@@ -244,7 +246,6 @@ fn snapshot(result: ReadSnapshot) -> Value {
         .into_iter()
         .map(|row| row.into_iter().map(BoundValue::from).collect())
         .collect();
-    // `next_kind` tells the consumer what the following page costs.
     let next_kind = result.next.as_ref().map(|cursor| match cursor.kind() {
         CursorKind::Keyset => "keyset",
         CursorKind::Offset => "offset",

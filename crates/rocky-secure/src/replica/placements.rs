@@ -6,15 +6,16 @@
 use super::*;
 use rocky_core::Scope;
 
+/// Two signed headers of one node at one position: kept as evidence.
+const EQUIVOCATIONS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_equivocations(domain BLOB NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,first BLOB NOT NULL,second BLOB NOT NULL,PRIMARY KEY(domain,author,sequence)) WITHOUT ROWID";
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_placements(domain BLOB NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,scope BLOB NOT NULL,hash BLOB NOT NULL,header BLOB NOT NULL,PRIMARY KEY(domain,author,sequence)) WITHOUT ROWID",
-    // Two signed headers of one node at one position: kept as evidence.
-    "CREATE TABLE IF NOT EXISTS secure_equivocations(domain BLOB NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,first BLOB NOT NULL,second BLOB NOT NULL,PRIMARY KEY(domain,author,sequence)) WITHOUT ROWID",
+    EQUIVOCATIONS_TABLE,
 ];
 
 /// Headers a placement page carries at most.
 pub const MAX_PLACEMENTS: usize = 64;
-// Leave room for the native message and its signature.
+/// Placement bytes, leaving room for the native message and its signature.
 const PLACEMENT_BYTES: usize = MAX_SECURE_FRAME - 1024;
 /// Placement requests one pass sends at most.
 const MAX_REQUESTS: usize = 16;
@@ -85,7 +86,6 @@ impl<A: RowApplication> Inner<A> {
         {
             checks.push((seal.clone(), None));
         }
-        // A line's first coordinated slot checks its parent seal from the start.
         let graph = self.graph_for(domain)?;
         if let Some((parent, _)) = Self::tip_parent(graph, self.workspace.tip)?
             && let Some(seal) = path.iter().find(|seal| seal.statement.tip == parent)
@@ -130,7 +130,6 @@ impl<A: RowApplication> Inner<A> {
                 .ok()
                 .map(|seal| (*domain, seal.clone()))
         }) else {
-            // A peer that has not learned the seal has nothing to place.
             return Ok(PlacementPage {
                 headers: Vec::new(),
                 chains: Vec::new(),
@@ -189,7 +188,6 @@ impl<A: RowApplication> Inner<A> {
             }
             candidates.push((decoded, header, has_body));
         }
-        // A short byte-bounded page must place the earliest missing positions first.
         candidates.sort_by(|a, b| {
             a.0.extensions
                 .author_sequence
@@ -202,7 +200,6 @@ impl<A: RowApplication> Inner<A> {
             if staged.contains(&decoded.hash()) {
                 continue;
             }
-            // A migration frame leaves only with its released publication.
             if has_body
                 && !matches!(
                     self.migration_membership(decoded.hash()).await,
@@ -215,8 +212,6 @@ impl<A: RowApplication> Inner<A> {
             {
                 continue;
             }
-            // A revoked author's header is no evidence, as in range serving;
-            // it is checked against the current set before any other gate.
             let chain = self.stored_chain(e.chain).await?;
             if self
                 .config
@@ -318,9 +313,8 @@ impl<A: RowApplication> Inner<A> {
                 return Err(denied("placement not inside the seal's state"));
             }
             self.placement_authority(&header, chain.credentials(), time)?;
-            // A scope this node keeps custody of needs the frame itself;
-            // one it evicted is placed like one it may not hold.
-            if custody.contains(&e.scope) && self.holds(e.scope).await? {
+            let needs_frame_itself = custody.contains(&e.scope) && self.holds(e.scope).await?;
+            if needs_frame_itself {
                 continue;
             }
             verified.push((header, bytes));
@@ -479,7 +473,6 @@ impl<A: RowApplication> Inner<A> {
         for (bytes, _) in self.headers_at(domain, author, sequence, sequence).await? {
             let header: p2panda_core::Header<Extensions> = decode(&bytes)?;
             let e = &header.extensions;
-            // An equal match must not hide evidence of another signed header.
             if e.scope.domain == domain
                 && e.author(&header.public_key) == Some(author)
                 && e.author_sequence == sequence
@@ -619,9 +612,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             for (scope, scope_id) in &plan.scopes {
                 rocky_platform::task::yield_now().await;
                 let inner = self.inner.lock(crate::replica::Class::Background).await;
-                // A plan from another authority or tip only asks for placements the
-                // peer refuses or this replica no longer needs.
-                if (inner.authority, inner.workspace.tip) != (plan.authority, plan.tip) {
+                let plan_outdated =
+                    (inner.authority, inner.workspace.tip) != (plan.authority, plan.tip);
+                if plan_outdated {
                     return Ok(requests);
                 }
                 let previous = previous

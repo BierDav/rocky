@@ -49,8 +49,6 @@ impl Domain {
             app: logical.app_id(),
             domain,
         };
-        // Reference-connected tables share the phase-12 reader scope. Table grants
-        // and encryption keys remain separate ResourceScopes.
         let mut readers: BTreeMap<String, String> = logical
             .tables
             .iter()
@@ -125,7 +123,8 @@ impl Domain {
             None => self.logical().table(name).is_none(),
         }
     }
-    /// Partition grants as this generation reads them: with the schema's
+    /// Partition grants as this generation reads them: grants on tables a
+    /// later generation removed are dropped, and with the schema's
     /// `granted_like`, a whole-row grant on a followed table also selects
     /// the same partitions of the table following it, slot by slot.
     pub fn effective_partitions(
@@ -133,8 +132,7 @@ impl Domain {
         grants: &[rocky_credentials::PartitionGrant],
     ) -> Vec<rocky_credentials::PartitionGrant> {
         let logical = self.logical();
-        // Grants on tables a later generation removed are dropped.
-        let grants: Vec<_> = grants
+        let grants_on_current_tables: Vec<_> = grants
             .iter()
             .filter(|grant| {
                 logical
@@ -144,7 +142,7 @@ impl Domain {
             })
             .cloned()
             .collect();
-        self.families.partitions(&grants)
+        self.families.partitions(&grants_on_current_tables)
     }
     pub fn verified(
         &self,
@@ -270,6 +268,8 @@ impl Domain {
                     .is_some_and(|table| !table.partition_by.is_empty())
         })
     }
+    /// Each table's reader scope. Reference-connected tables share one,
+    /// while their grants and encryption keys stay per table.
     pub fn readers(&self) -> BTreeMap<String, Commitment> {
         self.tables
             .iter()
@@ -341,10 +341,8 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn typed_app_and_sdk_definitions_refuse_historical_formats() {
         let json = r#"{"format":6,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text"}],"primary_key":["id"]}]}"#;
-        // The portable builder supplies both required columns.
         let mut definition = Schema::parse(json).unwrap().definition([1; 32]).unwrap();
         let descriptor = definition.build().unwrap();
-        // Definitions and descriptors use the current format.
         for format in [0, 1, 2, 3, 4, 5, 7] {
             definition.format = format;
             assert!(

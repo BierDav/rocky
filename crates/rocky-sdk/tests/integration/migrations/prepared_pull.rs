@@ -42,27 +42,41 @@ async fn retain(fixture: MemberFixture, destination: &Path) -> Result<(), Failur
     a.close().await;
     drop(a);
     drop(hub);
-    // Close/checkpoint before copying, including when SQLite retained an empty WAL.
     for role in ["a", "b"] {
-        let db = rusqlite::Connection::open(root.path().join(role).join("rocky.sqlite"))?;
-        let busy: i64 = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
-        if busy != 0 {
-            return Err("prepared fixture still has an active SQLite handle".into());
-        }
+        truncate_wal(&root.path().join(role).join("rocky.sqlite"))?;
     }
     fs::create_dir(destination)?;
     fs::set_permissions(destination, fs::metadata(root.path())?.permissions())?;
     for role in ["a", "b"] {
         copy_directory(&root.path().join(role), &destination.join(role))?;
     }
-    // Written last: a partial preparation is never accepted for replay.
-    fs::write(
-        destination.join("fixture.json"),
-        serde_json::to_vec(&Manifest {
+    write_manifest(
+        destination,
+        &Manifest {
             version: 1,
             rows: large,
             schema: fill,
-        })?,
+        },
+    )
+}
+
+/// Checkpoints `database` into its main file before copying, including
+/// when SQLite retained an empty WAL.
+fn truncate_wal(database: &Path) -> Result<(), Failure> {
+    let db = rusqlite::Connection::open(database)?;
+    let busy: i64 = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+    if busy != 0 {
+        return Err("prepared fixture still has an active SQLite handle".into());
+    }
+    Ok(())
+}
+
+/// Marks a prepared fixture complete. It is written last, so a partial
+/// preparation has no manifest and is never accepted for replay.
+fn write_manifest(destination: &Path, manifest: &Manifest) -> Result<(), Failure> {
+    fs::write(
+        destination.join("fixture.json"),
+        serde_json::to_vec(manifest)?,
     )?;
     Ok(())
 }
@@ -76,8 +90,6 @@ fn restore(source: &Path) -> Result<MemberFixture, Failure> {
         return Err("unsupported prepared member-pull fixture".into());
     }
     let root = crate::support::small_directory()?;
-    // File secrets are relative to each installation directory. Copy all of them;
-    // reopening validates the retained identity against those relocated keys.
     for role in ["a", "b"] {
         copy_directory(&source.join(role), &root.path().join(role))?;
     }
@@ -102,8 +114,8 @@ async fn relocated_fixture_can_be_pulled_twice() -> Result<(), Failure> {
     let cache = crate::support::small_directory()?;
     let fixture = cache.path().join("prepared");
     retain(prepare_member_fixture(8, 0).await?, &fixture).await?;
-    // Retain dropped the original directories; both trials must work independently.
-    for _ in 0..2 {
+    let independent_trials_after_the_originals_were_dropped = 2;
+    for _ in 0..independent_trials_after_the_originals_were_dropped {
         pull_member_fixture(restore(&fixture)?).await?;
     }
     Ok(())

@@ -427,7 +427,7 @@ pub(crate) struct Membership {
     #[serde(with = "member_bytes")]
     pub members: Vec<Vec<u8>>,
 }
-// Ciphertexts are byte strings, not arrays of encoded integer values.
+/// Encodes ciphertexts as byte strings, not arrays of encoded integers.
 mod member_bytes {
     use serde::{Deserialize, Serialize};
 

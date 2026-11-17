@@ -399,8 +399,6 @@ async fn pending_processing_yields_to_queued_query_between_transactions() {
     let processing = b.clone();
     let task = rocky_platform::task::spawn(async move { processing.process_pending().await });
     waiting.await.unwrap();
-    // The query's turn comes between the passes; the next pass pauses again
-    // so the snapshot read beside the writer holds exactly the first one.
     let (reply, turn) = oneshot::channel();
     b.inner.commands.send(Command::Query(reply)).await.unwrap();
     let (entered, waiting) = oneshot::channel();
@@ -419,7 +417,11 @@ async fn pending_processing_yields_to_queued_query_between_transactions() {
     let projected = b.inner.reads().unwrap().projection().await.unwrap();
     next.send(()).unwrap();
     let snapshot = crate::decode(&b.inner, projected).await.unwrap();
-    assert_eq!(snapshot.rows.len(), 32);
+    assert_eq!(
+        snapshot.rows.len(),
+        32,
+        "the query's turn comes between the passes; the next pass pauses again so the snapshot read beside the writer holds exactly the first one"
+    );
     task.await.unwrap().unwrap();
     assert_eq!(b.query().await.unwrap().rows.len(), 65);
     a.close().await.unwrap();
@@ -628,8 +630,11 @@ async fn the_previous_trusted_file_identity_is_refused_before_writes() {
         let SqlValue::Blob(mut identity) = values[0][0].clone() else {
             panic!("identity")
         };
-        // Five 16-byte identities precede the file format version.
-        assert_eq!(&identity[80..84], &4u32.to_le_bytes());
+        assert_eq!(
+            &identity[80..84],
+            &4u32.to_le_bytes(),
+            "five 16-byte identities precede the file format version"
+        );
         identity[80..84].copy_from_slice(&3u32.to_le_bytes());
         db.execute("UPDATE rocky_replica SET identity=? WHERE id=1", [identity])
             .await

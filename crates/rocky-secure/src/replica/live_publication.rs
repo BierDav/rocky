@@ -18,7 +18,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         for frame in frames {
             let extension = &frame.operation_ref()?.header.extensions;
             let Some(key) = inner.opening_key(extension.scope, extension.generation) else {
-                // Opaque held bodies allocate no decoded row metadata.
                 continue;
             };
             let raw = crate::wire::decrypt(&key.key, &encode(extension)?, frame.body_bytes())?;
@@ -74,8 +73,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         weight = weight.saturating_add(frame.weight());
                         let required = inner.publication_members(frame).await?;
                         for &(scope, author, sequence) in &required {
-                            // An unauthorized sibling is not a recipient requirement.
-                            if inner.authorize_peer(peer, credentials, scope).is_err() {
+                            let recipient_may_not_read_sibling =
+                                inner.authorize_peer(peer, credentials, scope).is_err();
+                            if recipient_may_not_read_sibling {
                                 continue;
                             }
                             let covered = cursors.iter().any(|c| {
@@ -106,7 +106,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     }
                 }
             }
-            // Exact log coverage catches staged records and unavailable gaps.
             for fence in &upper {
                 let cursor = cursors
                     .iter()
@@ -201,8 +200,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut reasons = BTreeSet::new();
         let mut inspect: BTreeMap<_, _> =
             received.iter().map(|(scope, id)| (*id, *scope)).collect();
-        // Earlier held receipts can leave unresolved records below this publication's
-        // cursors. A terminal with no new frames must still report those blockers.
         let mut pending = 0;
         let grants = inner.local_grants(now()?)?;
         for fence in expected {
@@ -254,7 +251,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     });
                     repair.insert(scope);
                     if let Some(frame) = inner.frame(id).await? {
-                        // A missing key has no readable member openings yet.
                         if let Ok(members) = inner.publication_members(&frame).await {
                             repair.extend(members.into_iter().map(|(scope, _, _)| scope));
                         } else {
@@ -362,7 +358,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(export.pages[0].frames[0].id().unwrap(), id);
-        // A deterministic preflight/offer gate: retirement may run after export ownership ends.
         a.inner
             .lock(Class::Background)
             .await

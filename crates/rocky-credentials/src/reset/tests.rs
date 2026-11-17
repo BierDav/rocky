@@ -182,20 +182,24 @@ fn a_reset_ends_every_node_it_does_not_keep_even_one_never_seen() {
     assert!(!ended(&held, &this_chain));
     assert!(!ended(&held, &custodian_chain));
     assert!(ended(&held, &laptop_chain));
-    // A node certified before the reset that its signer never saw.
     let (hidden, hidden_chain) = owner.node();
-    assert!(ended(&held, &hidden_chain));
+    assert!(
+        ended(&held, &hidden_chain),
+        "a node certified before the reset that its signer never saw is ended"
+    );
     assert!(held.ends_node(hidden, true) && held.revokes(&hidden));
     assert_eq!(
         held.ending_resets(&PeerId::of(hidden)),
         vec![reset.id().unwrap()]
     );
-    // The identity's own trusted link stays: only node links end.
-    assert!(!held.ends_chain(&owner.chain).unwrap());
-    // Later operations of a fenced writer stay refused; an unseen writer keeps nothing.
+    assert!(
+        !held.ends_chain(&owner.chain).unwrap(),
+        "the identity's own trusted link stays; only node links end"
+    );
     assert_eq!(
         held.reset_standing(&scope(1), &laptop, 2),
-        ResetStanding::Covered
+        ResetStanding::Covered,
+        "later operations of a fenced writer stay refused"
     );
     assert_eq!(
         held.reset_standing(&scope(1), &laptop, 3),
@@ -217,8 +221,10 @@ fn a_reset_ends_every_node_it_does_not_keep_even_one_never_seen() {
         held.reset_standing(&scope(1), &custodian, 99),
         ResetStanding::Live
     );
-    // Covered operations are judged as if no reset ended their writer.
-    assert!(!held.unfenced().ends_chain(&laptop_chain).unwrap());
+    assert!(
+        !held.unfenced().ends_chain(&laptop_chain).unwrap(),
+        "covered operations are judged as if no reset ended their writer"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -238,10 +244,10 @@ fn concurrent_resets_end_each_other_and_a_following_reset_admits_a_new_node() {
             [first.id().unwrap(), second.id().unwrap()].into()
         );
         assert_eq!(held.reset_kept(), [PeerId::of(custodian)].into());
-        // Each writer keeps what the other's fence covers.
         assert_eq!(
             held.reset_standing(&scope(1), &a, 1),
-            ResetStanding::Covered
+            ResetStanding::Covered,
+            "each writer keeps what the other's fence covers"
         );
         assert_eq!(held.reset_standing(&scope(1), &a, 2), ResetStanding::Fenced);
         assert_eq!(
@@ -250,7 +256,6 @@ fn concurrent_resets_end_each_other_and_a_following_reset_admits_a_new_node() {
         );
         assert_eq!(held.reset_standing(&scope(1), &b, 4), ResetStanding::Fenced);
     }
-    // The owner signs in again as a new node, following both resets.
     let (fresh, fresh_chain) = owner.node();
     let third = owner.reset(
         &[&first, &second],
@@ -263,22 +268,27 @@ fn concurrent_resets_end_each_other_and_a_following_reset_admits_a_new_node() {
         [&second, &third, &first],
     ] {
         let held = set(&order);
-        assert!(!ended(&held, &fresh_chain) && !ended(&held, &custodian_chain));
+        assert!(
+            !ended(&held, &fresh_chain) && !ended(&held, &custodian_chain),
+            "the owner signs in again as a new node, following both resets"
+        );
         assert!(ended(&held, &a_chain) && ended(&held, &b_chain));
         assert_eq!(held.reset_heads(), [third.id().unwrap()].into());
         assert_eq!(
             held.reset_standing(&scope(1), &fresh, 0),
             ResetStanding::Live
         );
-        // Fences only shrink: every reset ending a writer must cover.
         assert_eq!(
             held.reset_standing(&scope(1), &a, 1),
-            ResetStanding::Covered
+            ResetStanding::Covered,
+            "fences only shrink: every reset ending a writer must cover"
         );
         assert_eq!(held.reset_standing(&scope(1), &a, 2), ResetStanding::Fenced);
     }
-    // Before the following reset arrives, the new node is ended too.
-    assert!(ended(&set(&[&first, &second]), &fresh_chain));
+    assert!(
+        ended(&set(&[&first, &second]), &fresh_chain),
+        "before the following reset arrives, the new node is ended too"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -290,14 +300,15 @@ fn a_node_a_kept_node_admits_after_a_reset_stays_and_one_a_signed_out_node_admit
     let (phone, phone_chain) = owner.device();
     let (tablet, tablet_chain) = owner.node();
     let (stolen, stolen_chain) = owner.node();
+    let kept_admits_phone = owner.admit(&this, phone.public_key(), &[&reset]);
+    let admitted_phone_admits_tablet = owner.admit(&phone, tablet, &[&reset]);
+    let signed_out_admits_stolen = owner.admit(&laptop, stolen, &[&reset]);
+    let signed_out_vouches_for_itself = owner.admit(&laptop, laptop.public_key(), &[&reset]);
     let admissions = [
-        owner.admit(&this, phone.public_key(), &[&reset]),
-        // An admitted node admits in turn.
-        owner.admit(&phone, tablet, &[&reset]),
-        // The signed-out laptop admits nobody, nor does an admission vouch
-        // for its own signer.
-        owner.admit(&laptop, stolen, &[&reset]),
-        owner.admit(&laptop, laptop.public_key(), &[&reset]),
+        kept_admits_phone,
+        admitted_phone_admits_tablet,
+        signed_out_admits_stolen,
+        signed_out_vouches_for_itself,
     ];
     for order in [[0, 1, 2, 3], [3, 2, 1, 0]] {
         let mut held = set(&[&reset]);
@@ -311,36 +322,42 @@ fn a_node_a_kept_node_admits_after_a_reset_stays_and_one_a_signed_out_node_admit
             held.reset_standing(&scope(1), &tablet, 0),
             ResetStanding::Live
         );
-        // The admissions travel with the set, in its one current format.
         let decoded = RevocationSet::from_bytes(&held.to_bytes().unwrap()).unwrap();
-        assert_eq!(decoded, held);
+        assert_eq!(
+            decoded, held,
+            "the admissions travel with the set, in its one current format"
+        );
         assert!(!decoded.reset_ends(&PeerId::of(tablet)));
-        // A following reset that keeps neither ends both again, and an
-        // admission naming only the earlier reset does not get past it.
         let again = owner.reset(&[&reset], &[this.public_key()], Vec::new());
         let mut later = held.clone();
         later
             .merge(&set(&[&again]), owner.root.public_key(), APP, NOW)
             .unwrap();
-        assert!(ended(&later, &phone_chain) && ended(&later, &tablet_chain));
+        assert!(
+            ended(&later, &phone_chain) && ended(&later, &tablet_chain),
+            "a following reset that keeps neither ends both again"
+        );
         assert_eq!(
             later.ending_resets(&PeerId::of(tablet)),
             vec![again.id().unwrap()]
         );
     }
-    // Naming a reset the set does not hold admits nothing yet; a forged
-    // signature is refused outright.
     let mut early = RevocationSet::new();
     early.admit(admissions[0].clone()).unwrap();
-    assert!(!early.reset_ends(&PeerId::of(phone.public_key())));
+    assert!(
+        !early.reset_ends(&PeerId::of(phone.public_key())),
+        "naming a reset the set does not hold admits nothing yet"
+    );
     let mut forged = admissions[2].clone();
     forged.admission.signer = this.public_key();
     assert!(set(&[&reset]).admit(forged).is_err());
-    // A statement ending the admitter by name voids its admissions.
     let lost = owner.revoke(RevocationMode::Lost, &[this.public_key()], &[]);
     let mut held = set(&[&reset, &lost]);
     held.admit(admissions[0].clone()).unwrap();
-    assert!(held.reset_ends(&PeerId::of(phone.public_key())));
+    assert!(
+        held.reset_ends(&PeerId::of(phone.public_key())),
+        "a statement ending the admitter by name voids its admissions"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -365,25 +382,27 @@ fn lost_and_compromised_dominate_a_fence_in_every_merge_order() {
     ] {
         let held = set(&order.map(|index| statements[index]));
         digests.insert(held.digest(NOW).unwrap());
-        // The fence keeps covered operations of a node ended only by the reset.
         assert_eq!(
             held.reset_standing(&scope(1), &phone, 4),
-            ResetStanding::Covered
+            ResetStanding::Covered,
+            "the fence keeps covered operations of a node ended only by the reset"
         );
         assert!(!held.unfenced().ends_chain(&phone_chain).unwrap());
-        // A Lost unlink of the same node refuses them anyway.
         assert_eq!(
             held.reset_standing(&scope(1), &laptop, 4),
-            ResetStanding::Covered
+            ResetStanding::Covered,
+            "a Lost unlink of the same node refuses them anyway"
         );
         assert!(held.unfenced().ends_chain(&laptop_chain).unwrap());
         assert!(held.revokes_trusted(&other) && held.revokes_origin(&other));
     }
     assert_eq!(digests.len(), 1);
-    // A reset keeping a node never revives what Lost ended.
     let keeping = owner.reset(&[&reset], &[this, laptop], Vec::new());
     let held = set(&[&reset, &lost, &keeping]);
-    assert!(!held.reset_ends(&PeerId::of(laptop)));
+    assert!(
+        !held.reset_ends(&PeerId::of(laptop)),
+        "a reset keeping a node never revives what Lost ended"
+    );
     assert!(ended(&held, &laptop_chain));
 }
 
@@ -398,11 +417,11 @@ fn forged_malformed_and_old_resets_are_refused() {
         fence: fence(&[(1, laptop, 1)]),
     };
     owner.sign(valid.clone(), RevocationMode::Lost).unwrap();
-    // Only the root resets, never cascading or naming other targets.
     assert!(
         owner
             .sign(valid.clone(), RevocationMode::Compromised)
-            .is_err()
+            .is_err(),
+        "only the root resets"
     );
     assert!(
         SignedRevocation::sign(
@@ -454,9 +473,11 @@ fn forged_malformed_and_old_resets_are_refused() {
     for reset in malformed {
         assert!(owner.sign(reset, RevocationMode::Lost).is_err());
     }
-    // Another root's statement, and a tampered keep-list, fail verification.
     let signed = owner.sign(valid.clone(), RevocationMode::Lost).unwrap();
-    assert!(signed.verify(PrivateKey::new().public_key(), APP).is_err());
+    assert!(
+        signed.verify(PrivateKey::new().public_key(), APP).is_err(),
+        "another root's statement fails verification"
+    );
     let mut tampered = signed.clone();
     if let Some(RootDecision::Reset(reset)) = &mut tampered.statement.recovery {
         reset.keep.insert(PeerId::of(laptop));
@@ -468,7 +489,6 @@ fn forged_malformed_and_old_resets_are_refused() {
             .merge(&forged, owner.root.public_key(), APP, NOW)
             .is_err()
     );
-    // A set in an earlier replicated format is refused.
     #[derive(serde::Serialize)]
     struct Earlier {
         format: u32,
@@ -483,7 +503,10 @@ fn forged_malformed_and_old_resets_are_refused() {
         certificates: Vec::new(),
     })
     .unwrap();
-    assert!(RevocationSet::from_bytes(&earlier).is_err());
+    assert!(
+        RevocationSet::from_bytes(&earlier).is_err(),
+        "a set in an earlier replicated format is refused"
+    );
     let current = RevocationSet::try_from(vec![signed]).unwrap();
     assert_eq!(
         RevocationSet::from_bytes(&current.to_bytes().unwrap()).unwrap(),
@@ -495,7 +518,6 @@ fn forged_malformed_and_old_resets_are_refused() {
 fn a_reset_keeps_the_links_an_ended_node_signed() {
     let owner = Owner::new();
     let publisher = owner.root.public_key();
-    // The owner's phone, which the reset ends, enrolled the laptop's identity.
     let (phone, phone_chain) = crate::testing::node(&owner.identity, &owner.chain);
     let laptop_identity = PrivateKey::new();
     let link = Authority::issuer(&phone, &phone_chain)
@@ -518,13 +540,13 @@ fn a_reset_keeps_the_links_an_ended_node_signed() {
     laptop_chain
         .verify(publisher, laptop.public_key(), &held, NOW)
         .unwrap();
-    // Naming the phone in a Lost revocation still ends what it signed.
     let lost = owner.revoke(RevocationMode::Lost, &[phone.public_key()], &[]);
     let held = set(&[&reset, &lost]);
     assert!(
         laptop_chain
             .verify(publisher, laptop.public_key(), &held, NOW)
-            .is_err()
+            .is_err(),
+        "naming the phone in a Lost revocation still ends what it signed"
     );
 }
 
@@ -551,7 +573,6 @@ fn resets_never_crowd_out_other_revocations() {
         assert!(resets * 64 * 1024 <= crate::MAX_RESET_SET_BYTES);
     }
     assert!(resets >= 1);
-    // Lost and Compromised revocations still merge once resets are full.
     let lost = owner.revoke(RevocationMode::Lost, &[laptop], &[]);
     let compromised = owner.revoke(
         RevocationMode::Compromised,
@@ -567,5 +588,8 @@ fn resets_never_crowd_out_other_revocations() {
         )
         .unwrap();
     }
-    assert!(ended(&held, &laptop_chain) && ended(&held, &this_chain));
+    assert!(
+        ended(&held, &laptop_chain) && ended(&held, &this_chain),
+        "Lost and Compromised revocations still merge once resets are full"
+    );
 }

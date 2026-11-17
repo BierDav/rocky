@@ -21,7 +21,6 @@ async fn frames_from_a_clock_ahead_apply_when_this_clock_is_near_them() -> Resul
         Heal(0, 1),
         Sync(1),
         Ahead(1),
-        // Nothing arrives from here on: only b's own timer applies them.
         Sever(0, 1),
         Advance(early),
         Ahead(1),
@@ -46,11 +45,10 @@ async fn frames_from_a_clock_ahead_apply_when_this_clock_is_near_them() -> Resul
         .filter(|step| step.contains(" ahead b "))
         .filter_map(|step| step.split(" -> ").nth(1))
         .collect();
-    // Two writes of two items each; the second follows the first's clock.
     assert_eq!(
         outcomes,
         ["2 ahead, 2 keys", "2 ahead, 2 keys", "0 ahead, 6 keys"],
-        "{}",
+        "two writes of two items each, the second following the first's clock: {}",
         report.dump()
     );
     Ok(())
@@ -63,7 +61,6 @@ async fn frames_from_a_clock_ahead_apply_when_this_clock_is_near_them() -> Resul
 #[tokio::test(start_paused = true)]
 async fn a_link_tells_both_devices_when_one_clock_runs_ahead() -> Result<(), Failure> {
     let hour = Duration::from_secs(3600);
-    // Severing the pair ends its link: the next sync makes a new one.
     let relink = [Sever(0, 1), Heal(0, 1), Sync(0)];
     let mut steps = vec![Watch(0), Watch(1), Clock(0, hour)];
     steps.extend(relink.clone());
@@ -77,7 +74,6 @@ async fn a_link_tells_both_devices_when_one_clock_runs_ahead() -> Result<(), Fai
     ]);
     steps.extend(relink);
     steps.extend([Alerts(0), Alerts(1), Clock(0, Duration::ZERO)]);
-    // b's own clock reaches a's held frames.
     steps.push(Advance(hour));
     let scenario = Scenario {
         nodes: 2,

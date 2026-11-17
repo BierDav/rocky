@@ -2,6 +2,8 @@
 use super::*;
 
 impl<A: RowApplication> EncryptedReplica<A> {
+    /// Learns revocations from the frames' chains. Membership is independently
+    /// signed, so it holds even if the application payload is refused.
     pub(super) async fn learn_carried_membership(
         &self,
         frames: &[EncryptedFrame],
@@ -42,8 +44,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
             evidence
         };
-        // Membership is an independently signed declaration, even if the
-        // subsequent application payload is refused. Notifications follow commit.
         if !evidence.is_empty() {
             self.learn_revocations(&evidence).await?;
         }

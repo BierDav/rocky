@@ -125,12 +125,15 @@ async fn concurrent_authors_share_one_flush_and_keep_their_own_frames() {
         .collect();
     assert_eq!(sequences, (0..8).collect());
     for (row, frame) in &authored {
-        // Each caller got the frame stored for its own handle.
         let again = replica
             .author([*row; 32], insert(&f, *row), vec![])
             .await
             .unwrap();
-        assert_eq!(again.to_bytes().unwrap(), frame.to_bytes().unwrap());
+        assert_eq!(
+            again.to_bytes().unwrap(),
+            frame.to_bytes().unwrap(),
+            "each caller got the frame stored for its own handle"
+        );
     }
     assert!(observer.has_changed().unwrap());
     assert_eq!(*observer.borrow_and_update(), 8);
@@ -147,8 +150,8 @@ async fn concurrent_authors_share_one_flush_and_keep_their_own_frames() {
 
 /// A group's flush runs after the replica lock is released, so other callers
 /// lead the next group or read meanwhile. Every exposed result still arrives,
-/// and only after a flush that covers it.
-// Needs threads, which a browser Worker lacks.
+/// and only after a flush that covers it. Needs threads, which a browser
+/// Worker lacks.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn exposed_results_arrive_while_other_leaders_and_readers_run_during_the_flush() {
@@ -162,8 +165,6 @@ async fn exposed_results_arrive_while_other_leaders_and_readers_run_during_the_f
         let (replica, changes, scope) = (replica.clone(), insert(&f, row), f.public);
         tasks.spawn(async move {
             let frame = replica.author([row; 32], changes, vec![]).await.unwrap();
-            // Returned frames may be sent: the watermark covers them, and a
-            // reader beside the writers sees a committed state.
             let durable = replica.durable_commit().await;
             let rows = replica.snapshot(scope).await.unwrap().rows.len();
             (frame.operation().unwrap().header.seq_num, durable, rows)
@@ -172,7 +173,10 @@ async fn exposed_results_arrive_while_other_leaders_and_readers_run_during_the_f
     let mut sequences = BTreeSet::new();
     while let Some(result) = tasks.join_next().await {
         let (sequence, durable, rows) = result.unwrap();
-        assert!(durable > 0 && rows > 0);
+        assert!(
+            durable > 0 && rows > 0,
+            "a returned frame is covered by the watermark and a reader beside the writers sees committed state"
+        );
         sequences.insert(sequence);
     }
     assert_eq!(sequences, (0..u64::from(AUTHORS)).collect());
@@ -189,7 +193,6 @@ async fn failing_request_in_a_group_rolls_back_alone() {
     let node = PrivateKey::new();
     let replica = open(&f, &dir.path().join("a.db"), &node).await;
     let before = replica.group_commits().await;
-    // The first request in the group fails before its savepoint is released.
     replica.inject_failure(0, 1).await;
     let conflicting = vec![change(
         f.public,
@@ -202,19 +205,25 @@ async fn failing_request_in_a_group_rolls_back_alone() {
         replica.author([2; 32], conflicting, vec![]),
         replica.author([3; 32], insert(&f, 3), vec![]),
     );
-    assert!(matches!(first, Err(Error::InjectedFailure)));
+    assert!(
+        matches!(first, Err(Error::InjectedFailure)),
+        "the first request fails before its savepoint is released"
+    );
     assert!(matches!(second, Err(Error::Conflict)));
     assert_eq!(third.unwrap().operation().unwrap().header.seq_num, 0);
     assert_eq!(replica.group_commits().await - before, 2);
     let snapshot = replica.snapshot(f.public).await.unwrap();
     assert_eq!(snapshot.rows.len(), 1);
     assert_eq!(snapshot.revision, 1);
-    // The failed handles were not recorded; a retry commits them once.
     let retried = replica
         .author([1; 32], insert(&f, 1), vec![])
         .await
         .unwrap();
-    assert_eq!(retried.operation().unwrap().header.seq_num, 1);
+    assert_eq!(
+        retried.operation().unwrap().header.seq_num,
+        1,
+        "a failed handle was not recorded, so its retry commits once"
+    );
     assert_eq!(frames(&replica, &f, &node).await, 2);
 }
 
@@ -246,7 +255,6 @@ async fn nothing_is_observable_when_the_group_does_not_commit() {
         .unwrap();
     assert_eq!(frame.operation().unwrap().header.seq_num, 0);
 
-    // Incoming frames follow the same rule.
     let target_key = PrivateKey::new();
     let target = open(&f, &dir.path().join("b.db"), &target_key).await;
     let observer = target.observe_revision();
@@ -254,7 +262,10 @@ async fn nothing_is_observable_when_the_group_does_not_commit() {
         .inject_group_fault(Some(GroupFault::FailBeforeCommit))
         .await;
     assert!(target.receive(frame.clone()).await.is_err());
-    assert!(!observer.has_changed().unwrap());
+    assert!(
+        !observer.has_changed().unwrap(),
+        "an incoming frame whose group does not commit is not observable"
+    );
     assert!(target.receipt_status(frame.id().unwrap()).await.is_err());
     assert_eq!(frames(&target, &f, &target_key).await, 0);
     target.inject_group_fault(None).await;
@@ -424,19 +435,26 @@ async fn wal_stays_bounded_under_sustained_authoring() {
         largest = largest.max(rocky_platform::fs::len(&wal).unwrap());
     }
     assert!(replica.checkpoints().await > 0);
-    // One group's frames may land after the last check.
-    assert!(largest <= limit + 128 * 1024, "WAL reached {largest} bytes");
+    assert!(
+        largest <= limit + ONE_GROUP_AFTER_THE_LAST_CHECK,
+        "WAL reached {largest} bytes"
+    );
     replica.optimize().await;
     drop(replica);
-    // Closing the connections checkpoints and removes the WAL.
-    assert!(rocky_platform::fs::len(&wal).unwrap_or(0) == 0);
+    assert!(
+        rocky_platform::fs::len(&wal).unwrap_or(0) == 0,
+        "closing the connections checkpoints and removes the WAL"
+    );
     let replica = open(&f, &path, &node).await;
     assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 200);
 }
 
+/// WAL bytes one group's frames may add after the last size check.
+const ONE_GROUP_AFTER_THE_LAST_CHECK: u64 = 128 * 1024;
+
 const CRASH_PHASES: [&str; 3] = ["inside-group", "before-commit", "after-commit"];
 
-// Crashes a child process.
+/// Runs to an injected process exit in `ROCKY_GROUP_CRASH_PHASE`.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 #[ignore = "invoked by process_exit_inside_a_group_leaves_each_handle_whole_or_absent"]
@@ -456,11 +474,9 @@ async fn group_crash_child() {
         replica.author([3; 32], insert(&f, 3), vec![]),
         replica.author([4; 32], insert(&f, 4), vec![]),
     );
-    // The fault exits the process; reaching this line is a failure.
-    std::process::exit(1);
+    panic!("the injected group fault did not exit the process");
 }
 
-// Crashes a child process.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn process_exit_inside_a_group_leaves_each_handle_whole_or_absent() {
@@ -473,10 +489,9 @@ async fn process_exit_inside_a_group_leaves_each_handle_whole_or_absent() {
             .env("ROCKY_GROUP_CRASH_PHASE", phase)
             .status()
             .unwrap();
-        assert_eq!(status.code(), Some(77), "{phase}");
+        assert_eq!(status.code(), Some(super::CRASH_EXIT_CODE), "{phase}");
         let f = Fixture::with_publisher(PrivateKey::from_bytes(&[41; 32]));
         let node = PrivateKey::from_bytes(&[42; 32]);
-        // Open verifies history, projection and dependency closure.
         let replica = open(&f, &path, &node).await;
         let committed = phase == "after-commit";
         let expected = if committed { 2 } else { 0 };
@@ -484,7 +499,6 @@ async fn process_exit_inside_a_group_leaves_each_handle_whole_or_absent() {
         assert_eq!(snapshot.rows.len(), expected, "{phase}");
         assert_eq!(snapshot.revision, expected as u64, "{phase}");
         assert_eq!(frames(&replica, &f, &node).await, expected, "{phase}");
-        // Retrying every handle yields one operation each, numbered without gaps.
         let mut sequences = BTreeSet::new();
         for row in 1..=4u8 {
             let frame = replica
@@ -493,7 +507,11 @@ async fn process_exit_inside_a_group_leaves_each_handle_whole_or_absent() {
                 .unwrap();
             sequences.insert(frame.operation().unwrap().header.seq_num);
         }
-        assert_eq!(sequences, (0..4).collect(), "{phase}");
+        assert_eq!(
+            sequences,
+            (0..4).collect(),
+            "after a crash {phase}, retrying every handle yields one gapless operation each"
+        );
         assert_eq!(frames(&replica, &f, &node).await, 4, "{phase}");
     }
 }
@@ -526,7 +544,6 @@ async fn buffered_commits_are_flushed_before_they_leave_the_device() {
         .unwrap();
     assert!(!covered(&a).await);
     assert!(a.durable_commit().await < first.commit);
-    // A transfer page flushes before it reads.
     let page = a
         .transfer_page(
             b_key.public_key(),
@@ -537,10 +554,9 @@ async fn buffered_commits_are_flushed_before_they_leave_the_device() {
         )
         .await
         .unwrap();
-    assert!(covered(&a).await);
+    assert!(covered(&a).await, "a transfer page flushes before it reads");
     assert!(a.durable_commit().await >= first.commit);
     assert_eq!(page.frames[0].id().unwrap(), first.value);
-    // A buffered receipt is not covered until a status is read for the sender.
     let received = b.receive_buffered(page.frames.clone()).await;
     assert_eq!(received[0].as_ref().unwrap().value, ReceiveStatus::Applied);
     assert!(!covered(&b).await);
@@ -548,8 +564,10 @@ async fn buffered_commits_are_flushed_before_they_leave_the_device() {
         b.receipt_status(first.value).await.unwrap(),
         ReceiveStatus::Applied
     );
-    assert!(covered(&b).await);
-    // Recording a peer's acknowledgment flushes before the peer hears back.
+    assert!(
+        covered(&b).await,
+        "a buffered receipt is covered once a status is read for the sender"
+    );
     a.author_buffered([2; 32], insert(&f, 2), vec![])
         .await
         .unwrap();
@@ -562,17 +580,22 @@ async fn buffered_commits_are_flushed_before_they_leave_the_device() {
     )
     .await
     .unwrap();
-    assert!(covered(&a).await);
-    // `author` returns only flushed frames; the handle keeps its operation.
+    assert!(
+        covered(&a).await,
+        "recording a peer's acknowledgment flushes before the peer hears back"
+    );
     let buffered = a
         .author_buffered([3; 32], insert(&f, 3), vec![])
         .await
         .unwrap();
     assert!(!covered(&a).await);
     let frame = a.author([3; 32], insert(&f, 3), vec![]).await.unwrap();
-    assert_eq!(frame.id().unwrap(), buffered.value);
-    assert!(covered(&a).await);
-    // `receive_all` answers only after its receipts are flushed.
+    assert_eq!(
+        frame.id().unwrap(),
+        buffered.value,
+        "the handle keeps its buffered operation"
+    );
+    assert!(covered(&a).await, "`author` returns only flushed frames");
     let page = a
         .transfer_page(
             b_key.public_key(),
@@ -591,12 +614,14 @@ async fn buffered_commits_are_flushed_before_they_leave_the_device() {
     for status in b.receive_all(page.frames).await {
         status.unwrap();
     }
-    assert!(covered(&b).await);
+    assert!(
+        covered(&b).await,
+        "`receive_all` answers only after its receipts are flushed"
+    );
     assert_eq!(
         b.receipt_status(frame.id().unwrap()).await.unwrap(),
         ReceiveStatus::Applied
     );
-    // Exposed and buffered requests share one flush across their bounded commits.
     let (_, _, flushes) = a.watermark().await;
     let commits = a.group_commits().await;
     let (one, two, three) = tokio::join!(
@@ -606,7 +631,11 @@ async fn buffered_commits_are_flushed_before_they_leave_the_device() {
     );
     assert!(one.is_ok() && two.is_ok() && three.is_ok());
     assert_eq!(a.group_commits().await - commits, 2);
-    assert_eq!(a.watermark().await.2 - flushes, 1);
+    assert_eq!(
+        a.watermark().await.2 - flushes,
+        1,
+        "exposed and buffered requests share one flush across their commits"
+    );
     assert!(covered(&a).await);
 }
 
@@ -649,7 +678,6 @@ async fn power_loss_keeps_everything_exposed_and_drops_only_unexposed_work() {
             .unwrap();
         to.receive_all(page.frames).await
     };
-    // Row 1 is buffered, then covered by the flush that exposes row 2.
     a.author_buffered([1; 32], insert(&f, 1), vec![])
         .await
         .unwrap();
@@ -657,7 +685,6 @@ async fn power_loss_keeps_everything_exposed_and_drops_only_unexposed_work() {
     for status in pull(&a, &b).await {
         assert_eq!(status.unwrap(), ReceiveStatus::Applied);
     }
-    // Never exposed: rows 3 and 4 at A, and an unacknowledged receipt at B.
     let lost = a
         .author_buffered([3; 32], insert(&f, 3), vec![])
         .await
@@ -668,9 +695,8 @@ async fn power_loss_keeps_everything_exposed_and_drops_only_unexposed_work() {
     let c_key = PrivateKey::new();
     let c = open(&f, &dir.path().join("c.db"), &c_key).await;
     let other = c.author([9; 32], insert(&f, 9), vec![]).await.unwrap();
-    b.receive_buffered(vec![other.clone()]).await[0]
-        .as_ref()
-        .unwrap();
+    let unacknowledged_receipt = &b.receive_buffered(vec![other.clone()]).await[0];
+    unacknowledged_receipt.as_ref().unwrap();
     drop((a, b));
     lose_unflushed(&a_copy, &a_path);
     lose_unflushed(&b_copy, &b_path);
@@ -678,19 +704,25 @@ async fn power_loss_keeps_everything_exposed_and_drops_only_unexposed_work() {
     let a = open(&f, &a_path, &a_key).await;
     let b = open(&f, &b_path, &b_key).await;
     let rows = a.snapshot(f.public).await.unwrap();
-    assert_eq!(rows.rows.len(), 2);
-    assert!(rows.rows.contains_key(&[1; 32]) && rows.rows.contains_key(&[2; 32]));
+    assert_eq!(rows.rows.len(), 2, "unexposed rows 3 and 4 are lost");
+    assert!(
+        rows.rows.contains_key(&[1; 32]) && rows.rows.contains_key(&[2; 32]),
+        "buffered row 1 survives, covered by the flush that exposes row 2"
+    );
     assert_eq!(rows.revision, 2);
     assert_eq!(b.snapshot(f.public).await.unwrap().rows.len(), 2);
-    assert!(b.receipt_status(other.id().unwrap()).await.is_err());
-    // An exposed handle keeps its frame; a lost one commits exactly once.
+    assert!(
+        b.receipt_status(other.id().unwrap()).await.is_err(),
+        "an unacknowledged receipt is lost"
+    );
     assert_eq!(
         a.author([2; 32], insert(&f, 2), vec![])
             .await
             .unwrap()
             .to_bytes()
             .unwrap(),
-        exposed.to_bytes().unwrap()
+        exposed.to_bytes().unwrap(),
+        "an exposed handle keeps its frame"
     );
     let retried = a.author([3; 32], insert(&f, 3), vec![]).await.unwrap();
     assert_eq!(retried.operation().unwrap().header.seq_num, 2);
@@ -701,17 +733,18 @@ async fn power_loss_keeps_everything_exposed_and_drops_only_unexposed_work() {
             .unwrap()
             .id()
             .unwrap(),
-        retried.id().unwrap()
+        retried.id().unwrap(),
+        "a lost handle commits exactly once"
     );
     assert_eq!(frames(&a, &f, &a_key).await, 3);
-    // The peer converges without a fork; the sender re-offers what B lost.
     let statuses: Vec<_> = pull(&a, &b).await.into_iter().map(Result::unwrap).collect();
     assert_eq!(
         statuses
             .iter()
             .filter(|s| **s == ReceiveStatus::Applied)
             .count(),
-        1
+        1,
+        "the sender re-offers what the peer lost, without a fork"
     );
     assert_eq!(b.receive(other).await.unwrap(), ReceiveStatus::Applied);
     let (a_rows, b_rows) = (
@@ -750,8 +783,6 @@ async fn incoming_frames_cache_their_chain_after_membership_learning_and_revocat
         ReceiveStatus::Applied
     );
     let after = member.crypto_stats().await;
-    // Membership learning changes authority. Once it settles, a new frame
-    // of this author reuses the verified chain under the unchanged set.
     assert_eq!(after.0, before.0 + 1);
     assert!(after.1 > before.1);
     assert_eq!(
@@ -759,7 +790,11 @@ async fn incoming_frames_cache_their_chain_after_membership_learning_and_revocat
         ReceiveStatus::Applied
     );
     let cached = member.crypto_stats().await;
-    assert_eq!(cached, (after.0 + 1, after.1));
+    assert_eq!(
+        cached,
+        (after.0 + 1, after.1),
+        "once membership settles, a new frame of this author reuses the verified chain"
+    );
     assert_eq!(
         member.receive(first.clone()).await.unwrap(),
         ReceiveStatus::Duplicate
@@ -775,7 +810,7 @@ async fn incoming_frames_cache_their_chain_after_membership_learning_and_revocat
     assert!(member.receive(third).await.is_err());
 }
 
-// Pauses work that natively runs on a blocking thread; a Worker runs it in place.
+/// Pauses work that natively runs on a blocking thread; a Worker runs it in place.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_paused_group_flush_leaves_the_replica_and_executor_available() {
@@ -847,7 +882,7 @@ async fn a_failure_between_group_steps_keeps_committed_handles_retryable() {
     assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 8);
 }
 
-// Pauses work that natively runs on a blocking thread; a Worker runs it in place.
+/// Pauses work that natively runs on a blocking thread; a Worker runs it in place.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_passive_checkpoint_runs_while_the_replica_is_held() {
@@ -875,10 +910,13 @@ async fn a_passive_checkpoint_runs_while_the_replica_is_held() {
     resume.send(()).unwrap();
     inner.passive.wait().await;
     assert_eq!(inner.passive.completed(), before + 1);
-    // A second check at the same WAL size does not run another checkpoint.
     inner.checkpoint_if_due().await;
     inner.passive.wait().await;
-    assert_eq!(inner.passive.completed(), before + 1);
+    assert_eq!(
+        inner.passive.completed(),
+        before + 1,
+        "a second check at the same WAL size runs no other checkpoint"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -1015,13 +1053,18 @@ async fn received_frames_revisit_only_the_frames_they_may_ready() {
             ReceiveStatus::PendingDependencies
         );
     }
-    // The first frame of an author learns its certificate, a full pass.
     let source = open(&f, &dir.path().join("other.db"), &PrivateKey::new()).await;
-    let known = source
+    let learns_its_authors_certificate = source
         .author([50; 32], insert(&f, 50), vec![])
         .await
         .unwrap();
-    assert_eq!(target.receive(known).await.unwrap(), ReceiveStatus::Applied);
+    assert_eq!(
+        target
+            .receive(learns_its_authors_certificate)
+            .await
+            .unwrap(),
+        ReceiveStatus::Applied
+    );
     let other = source
         .author([51; 32], insert(&f, 51), vec![])
         .await
@@ -1032,8 +1075,11 @@ async fn received_frames_revisit_only_the_frames_they_may_ready() {
     for first in firsts {
         let before = target.pending_attempts().await;
         assert_eq!(target.receive(first).await.unwrap(), ReceiveStatus::Applied);
-        // The frame itself and the one frame that waited for it.
-        assert_eq!(target.pending_attempts().await - before, 2);
+        assert_eq!(
+            target.pending_attempts().await - before,
+            2,
+            "attempts only the frame itself and the one frame that waited for it"
+        );
     }
     assert_eq!(
         target.snapshot(f.public).await.unwrap().rows.len(),
@@ -1056,10 +1102,13 @@ async fn stored_work_invalidates_pending_discovery_before_application() {
         .unwrap();
     let revision = target.observe_revision();
     let after_store = *revision.borrow();
-    // The old discovered heads are discarded before any application can use them.
     for _ in 0..2 {
         assert!(target.pending_step_for_test().await.unwrap());
-        assert_eq!(*revision.borrow(), after_store);
+        assert_eq!(
+            *revision.borrow(),
+            after_store,
+            "old discovered heads are discarded before any application can use them"
+        );
     }
     target.settle().await.unwrap();
     assert_eq!(target.snapshot(f.public).await.unwrap().rows.len(), 4);
@@ -1305,9 +1354,11 @@ async fn reclamation_releases_between_page_steps_and_resumes_after_reopen() {
     assert_eq!(counts, [(initial - remaining) as u64]);
     drop(replica);
     let replica = open(&f, &path, &node).await;
-    // Open may reclaim the durable remainder before returning.
     let mut previous = free(replica.clone()).await;
-    assert!(previous <= remaining);
+    assert!(
+        previous <= remaining,
+        "open may reclaim the durable remainder before returning"
+    );
     while previous >= RECLAIM_PAGES {
         replica.reclaim_free_pages_for_test().await;
         let next = free(replica.clone()).await;

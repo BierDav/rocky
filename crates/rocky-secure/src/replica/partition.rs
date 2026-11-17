@@ -318,7 +318,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .schema()
             .group_address(typed.domain, name, &[identity.sql()])
             .map_err(|error| denied(&error.to_string()))?;
-        // This node creates the partition, so it names it.
         let naming = created_name(naming, &address.commitment);
         let scope = tuple
             .scope(typed.domain, table.table.id, &naming)
@@ -341,8 +340,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("own-id partition requires an insert grant"));
         }
         if inner.graphs.contains_key(&scope.domain) {
-            // Known positions predate this unused own identity, including
-            // those a later checkpoint will summarize before the first seal.
             let frontier = encode(&inner.seal_frontier(scope.domain, false).await?)?;
             let logical = typed.rows.schema();
             let group = logical
@@ -399,8 +396,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .collect::<Result<Vec<_>, Error>>()?;
             transaction!(inner, |inner| {
                 for scope in scopes.iter().copied() {
-                    // A repeated preparation preserves materialized state.
-                    if inner.find_scope_id(scope).await?.is_none() {
+                    let first_preparation = inner.find_scope_id(scope).await?.is_none();
+                    if first_preparation {
                         let id = inner.scope_id(scope).await?;
                         inner
                             .conn
@@ -573,7 +570,6 @@ impl<A: RowApplication> Inner<A> {
                     continue;
                 }
                 let values = partition_values(typed.rows.schema(), logical, tuple)?;
-                // Only this partition's own state holds it back.
                 if self.partition_waits(&readiness, *scope).await? {
                     complete = false;
                     waiting.push(values);
@@ -770,8 +766,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scopes: &[ResourceScope],
     ) -> Result<Vec<PartitionOffer>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
-        // One chain verification per batch. A peer without custody gets no
-        // offer.
         let Ok((_, selectors)) = credentials
             .verified_with_families(
                 inner.config.publisher,

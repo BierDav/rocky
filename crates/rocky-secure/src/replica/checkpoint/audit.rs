@@ -117,7 +117,6 @@ impl<A: RowApplication> Inner<A> {
         mut ledger: identity::IdentityLedger,
     ) -> Result<Sets, Error> {
         loop {
-            // Both advance only with a committed page.
             let (last, next, marks) = transaction!(@commit self, |inner| {
                 let mut next = sets.clone();
                 let mut marks = ledger.clone();
@@ -260,9 +259,6 @@ impl<A: RowApplication> Inner<A> {
             return Ok((None, 0));
         };
         let record = self.checkpoint_record(id, true).await?;
-        // A base signed off the followed path, such as one imported while
-        // the owner followed a branch, is replaced by a rebootstrap before
-        // the rows are this path's: its blockers answer instead.
         if let Some(signed) = record.as_ref().and_then(|record| record.signed.as_ref())
             && self
                 .path_fields_to(scope.domain, signed.statement.tip, self.workspace.tip)
@@ -279,8 +275,6 @@ impl<A: RowApplication> Inner<A> {
                 let ledger = identity::IdentityLedger::based(&signed.statement.identities)?;
                 (Some(signed), record.position, record.sets, ledger)
             }
-            // The pages a direct import stored so far are the base that
-            // local writes applied over; its statement names their marks.
             None => match self.staging(id).await?.filter(|staging| staging.direct) {
                 Some(staging) => {
                     let ledger =
@@ -312,15 +306,11 @@ impl<A: RowApplication> Inner<A> {
             Some([SqlValue::Integer(count)]) => *count as u64,
             _ => return Err(Error::Corrupt("applied positions".into())),
         };
-        // Positions applied on another tip stay stored; the replay reads
-        // only what the workspace sees, over the base it keeps.
         (self.rebuilding_tip, self.tip_base) = (true, true);
         let replay = self.audit_replay(scope, id, cursor, sets, ledger).await;
         (self.rebuilding_tip, self.tip_base) = (rebuilding, based);
         let (sets, transformed) = self.audit_staged_rows(scope, id, replay?).await?;
         let (rows, tombstones, digest, _) = self.scope_state(id).await?;
-        // A staged transform's scratch holds every expected row, its base
-        // rows included: a stored row it lacks differs.
         let unchanged = if transformed {
             ""
         } else {
@@ -380,7 +370,6 @@ impl<A: RowApplication> Inner<A> {
                 };
                 cursor = hash.clone();
                 count += 1;
-                // Every retained operation has the chain its header names.
                 let frame = self.stored_frame(header.clone(), body.clone()).await?;
                 let operation = frame.operation_ref()?;
                 if operation.hash.as_bytes().as_slice() != hash
@@ -391,7 +380,6 @@ impl<A: RowApplication> Inner<A> {
                     || operation.header.extensions.scope != scope
                     || !["applied", "pending", "rejected", "held", "abandoned"]
                         .contains(&status.as_str())
-                    // A held or abandoned frame keeps the position it had.
                     || (status == "applied" && *positioned != 1)
                     || (["pending", "rejected"].contains(&status.as_str()) && *positioned == 1)
                 {
@@ -582,7 +570,6 @@ impl<A: RowApplication> Inner<A> {
         }
         self.audit_admission().await?;
         self.verify_identity_ledgers().await?;
-        // Keyless records are checked before the key decides the rest.
         self.verify_no_frames_records().await?;
         Ok(())
     }
@@ -595,7 +582,6 @@ impl<A: RowApplication> Inner<A> {
         let (Some(id), Ok(_)) = (id, self.scope_key(scope)) else {
             return Ok(report);
         };
-        // A replayed scope's rows are its table's; `verify_tail` checks its base.
         let replayed = self.replayed_scope(scope);
         let live = self
             .row_sets(

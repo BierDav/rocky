@@ -10,7 +10,6 @@ use super::*;
 use crate::wire::{Chain, RevokedHead};
 
 pub(super) const SCHEMA: &[&str] = &[
-    // Evidence a peer sent for a head this replica lacks.
     "CREATE TABLE IF NOT EXISTS secure_revoked_heads(hash BLOB PRIMARY KEY,scope BLOB NOT NULL,header BLOB NOT NULL,chain BLOB NOT NULL) WITHOUT ROWID",
 ];
 /// Heads one request names: one header's dependency bound.

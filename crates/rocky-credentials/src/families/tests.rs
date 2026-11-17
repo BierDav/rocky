@@ -237,11 +237,11 @@ fn compact_families_and_per_table_credentials_verify_without_changing_signed_byt
                 .unwrap();
             assert_eq!(grants[0].rights, f.resources[table].rights);
             assert_eq!(grants[0].fields, FieldSelection::All);
-            // Another key never writes under this node's certificate.
             assert!(
                 verified
                     .partition_author(PrivateKey::new().public_key(), scope, &tuple, TIME)
-                    .is_err()
+                    .is_err(),
+                "another key never writes under this node's certificate"
             );
             let (scope, tuple) = f.tuple(table, "B");
             assert!(
@@ -355,7 +355,6 @@ fn delegation_checks_resolved_authority_and_cannot_remove_follower_restrictions(
             )
             .is_err()
     );
-    // A correctly signed chain crafted with the schema-free API must fail receipt too.
     let mut forged = delegable.clone();
     let mut capability = forged.0.last().unwrap().capability.clone();
     capability.subject = identity.public_key();
@@ -373,7 +372,8 @@ fn delegation_checks_resolved_authority_and_cannot_remove_follower_restrictions(
                 TIME,
                 &f.families
             )
-            .is_err()
+            .is_err(),
+        "a correctly signed chain crafted with the schema-free API fails receipt"
     );
     let mut narrow = f.resources[1].clone();
     narrow.rights = [Right::Read].into();

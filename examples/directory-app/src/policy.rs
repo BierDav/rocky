@@ -195,7 +195,6 @@ impl DirectoryApp {
                     }
                 }
                 directory.delegations.retain(|g| !revoked.contains(&g.id));
-                // Tombstones prohibit grant ID reuse as well as credential key reuse.
                 directory.deleted_keys.extend(revoked);
             }
             Transition::TrackArtifacts(artifacts) => {

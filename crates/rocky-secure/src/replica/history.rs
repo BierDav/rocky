@@ -9,19 +9,21 @@ use rocky_core::Scope;
 mod rewind;
 pub(super) use rewind::{KeptBound, Rewind};
 
+/// The live tables' change counter. A change made at `version` records the
+/// version it replaces with that number; `paused` while a bulk rebuild
+/// records its difference itself, `rows_paused` for stored rows.
+const KEPT_CLOCK: &str = "CREATE TABLE IF NOT EXISTS secure_kept_clock(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL,paused INTEGER NOT NULL,rows_paused INTEGER NOT NULL DEFAULT 0)";
+/// Kept seals: the counter's value while the live tables held each one,
+/// the schema then and each scope's last applied position the seal includes.
+const KEPT_MARKS: &str = "CREATE TABLE IF NOT EXISTS secure_kept_marks(seal BLOB PRIMARY KEY,mark INTEGER NOT NULL UNIQUE,manifest BLOB NOT NULL,bounds BLOB NOT NULL) WITHOUT ROWID";
+/// Each kept seal's tables as they were: their columns, and the frozen copy
+/// a later removal or migration left in their place.
+const KEPT_TABLES: &str = "CREATE TABLE IF NOT EXISTS secure_kept_tables(seal BLOB NOT NULL,tab TEXT NOT NULL,columns BLOB NOT NULL,frozen TEXT,PRIMARY KEY(seal,tab)) WITHOUT ROWID";
 pub(super) const SCHEMA: &[&str] = &[
-    // The live tables' change counter. A change made at `version` records
-    // the version it replaces with that number; `paused` while a bulk
-    // rebuild records its difference itself, `rows_paused` for stored rows.
-    "CREATE TABLE IF NOT EXISTS secure_kept_clock(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL,paused INTEGER NOT NULL,rows_paused INTEGER NOT NULL DEFAULT 0)",
-    // Kept seals: the counter's value while the live tables held each one,
-    // the schema then and each scope's last applied position the seal
-    // includes.
-    "CREATE TABLE IF NOT EXISTS secure_kept_marks(seal BLOB PRIMARY KEY,mark INTEGER NOT NULL UNIQUE,manifest BLOB NOT NULL,bounds BLOB NOT NULL) WITHOUT ROWID",
+    KEPT_CLOCK,
+    KEPT_MARKS,
     "CREATE TABLE IF NOT EXISTS secure_kept_config(id INTEGER PRIMARY KEY CHECK(id=1),bookmarked INTEGER NOT NULL,latest INTEGER NOT NULL,every INTEGER NOT NULL)",
-    // Each kept seal's tables as they were: their columns, and the frozen
-    // copy a later removal or migration left in their place.
-    "CREATE TABLE IF NOT EXISTS secure_kept_tables(seal BLOB NOT NULL,tab TEXT NOT NULL,columns BLOB NOT NULL,frozen TEXT,PRIMARY KEY(seal,tab)) WITHOUT ROWID",
+    KEPT_TABLES,
     rewind::ROWS,
     rewind::ROWS_BY_VERSION,
     rewind::ROWS_DELETE,
@@ -266,8 +268,6 @@ impl History {
             self.differs("OLD", "NEW"),
             update.join(" ")
         ));
-        // An upsert or a replace changes the row at the key without an
-        // update or delete trigger of its own.
         let mut insert = vec![
             self.record_absent("NEW"),
             self.record_rows(&format!(
@@ -414,8 +414,6 @@ impl<A: RowApplication> Inner<A> {
     /// `install_history` for the live tables of `typed`.
     pub(super) async fn install_history_for(&self, typed: &Typed) -> Result<(), Error> {
         for history in History::of(typed) {
-            // A history table keeps the columns of earlier schemas and
-            // gains those a later one adds.
             let known: BTreeSet<String> = collect_rows(
                 self.conn
                     .query(
@@ -815,7 +813,6 @@ impl<A: RowApplication> Inner<A> {
             .map(Vec::as_slice)
             {
                 Some([SqlValue::Integer(position)]) => *position,
-                // A compacted seal: its replay base holds the position.
                 None => match self.checkpoint_record(id, true).await? {
                     Some(record)
                         if record
@@ -864,8 +861,6 @@ impl<A: RowApplication> Inner<A> {
         if self.live_at(domain, seal).await? {
             return Ok(Some(HeldSeal::Live));
         }
-        // A replay base there, or a state pulled from a node that keeps it
-        // that still passes the import checks.
         let scopes = self.domain_scopes(domain).await?;
         let mut based = !scopes.is_empty();
         for (_, id) in scopes {
@@ -925,7 +920,6 @@ impl<A: RowApplication> Inner<A> {
                 readable.push(holder);
             }
         }
-        // A table added after the seal had no rows there.
         for history in &histories {
             if !kept
                 .iter()

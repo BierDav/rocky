@@ -132,7 +132,6 @@ async fn a_quarantined_frame_waits_alone_until_its_cause_changes() {
         target.receipt_status(failing_id).await.unwrap(),
         ReceiveStatus::Applied
     );
-    // Advancing another log must not retry the failed head in this pass.
     {
         let inner = target.inner.lock(crate::replica::Class::Background).await;
         assert_eq!(
@@ -140,6 +139,7 @@ async fn a_quarantined_frame_waits_alone_until_its_cause_changes() {
                 .await
                 .unwrap(),
             vec![vec![SqlValue::Integer(1)]],
+            "advancing another log does not retry the failed head in the same pass"
         );
     }
     let label = rocky_core::scope_label(&f.public);
@@ -150,7 +150,6 @@ async fn a_quarantined_frame_waits_alone_until_its_cause_changes() {
         .is_some()
     };
     assert!(quarantined(&target.blockers().await.unwrap()));
-    // Fixed, but nothing it depends on changed: it waits for its backoff.
     target
         .inner
         .lock(crate::replica::Class::Background)
@@ -158,8 +157,10 @@ async fn a_quarantined_frame_waits_alone_until_its_cause_changes() {
         .poisoned
         .clear();
     target.recover_locally().await.unwrap();
-    assert!(quarantined(&target.blockers().await.unwrap()));
-    // A key arrives: every quarantined frame is due again.
+    assert!(
+        quarantined(&target.blockers().await.unwrap()),
+        "a fixed frame whose dependencies did not change waits for its backoff"
+    );
     target
         .install_key(KeyMaterial::new(f.private, 1, [22; 32]))
         .await
@@ -167,7 +168,8 @@ async fn a_quarantined_frame_waits_alone_until_its_cause_changes() {
     target.recover_locally().await.unwrap();
     assert_eq!(
         target.receipt_status(failing_id).await.unwrap(),
-        ReceiveStatus::Applied
+        ReceiveStatus::Applied,
+        "an arriving key makes every quarantined frame due again"
     );
     assert!(target.blockers().await.unwrap().is_empty());
 }

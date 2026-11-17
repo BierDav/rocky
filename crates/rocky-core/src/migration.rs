@@ -54,6 +54,25 @@ pub fn migration_split(frames: u64) -> Result<u64, MigrationError> {
     }
     Ok(1u64 << (63 - (frames - 1).leading_zeros()))
 }
+/// The root-to-leaf path to frame `index`: whether each step goes right and
+/// the frames of its sibling. At most 64 steps, independent of the
+/// advertised extent, because each split halves a `u64` count.
+fn migration_proof_shape(frames: u64, index: u64) -> Result<Vec<(bool, u64)>, MigrationError> {
+    let (mut count, mut index) = (frames, index);
+    let mut shape = Vec::new();
+    while count > 1 {
+        let left = migration_split(count)?;
+        if index < left {
+            shape.push((false, count - left));
+            count = left;
+        } else {
+            shape.push((true, left));
+            index -= left;
+            count -= left;
+        }
+    }
+    Ok(shape)
+}
 impl MigrationPublicationStatement {
     pub fn validate(&self) -> Result<(), MigrationError> {
         if self.format != MIGRATION_PUBLICATION_FORMAT {
@@ -131,20 +150,7 @@ impl MigrationPublicationStatement {
         {
             return Err(MigrationError("invalid migration inclusion proof"));
         }
-        // At most 64 entries, independent of the advertised extent.
-        let (mut count, mut index) = (self.frames, proof.index);
-        let mut shape = Vec::new();
-        while count > 1 {
-            let left = migration_split(count)?;
-            if index < left {
-                shape.push((false, count - left));
-                count = left;
-            } else {
-                shape.push((true, left));
-                index -= left;
-                count -= left;
-            }
-        }
+        let shape = migration_proof_shape(self.frames, proof.index)?;
         if shape.len() != proof.siblings.len() {
             return Err(MigrationError("migration proof shape"));
         }

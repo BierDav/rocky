@@ -336,8 +336,6 @@ async fn fill_of_100000_replayed_rows() -> Result<(), Failure> {
         if let Some(mut profile) = profile {
             profile.wait()?;
         }
-        // With ROCKY_MEASURE_PUBLICATION_PAGES set: each authoring
-        // transaction's bundles and WAL pages, seed's then fill's.
         for (bundles, pages) in rocky_secure::CHUNK_PAGES
             .lock()
             .map_err(|_| "chunk pages")?
@@ -435,8 +433,7 @@ fn publication_state(path: &Path) -> Result<PublicationState, Failure> {
 async fn an_interrupted_fill_resumes_and_converges() -> Result<(), Failure> {
     let chunk = rocky_secure::PUBLICATION_CHUNK_BUNDLES as i64;
     let lists = FEW_LISTS as i64;
-    // Each point, with the cursor and authored frames the crash leaves.
-    for (point, cursor, authored) in [
+    for (crash_point, cursor_left, authored_frames_left) in [
         ("after", (0, lists), 0),
         ("publication-staged", (0, lists), 0),
         ("publication-chunk", (chunk, lists), chunk),
@@ -451,28 +448,27 @@ async fn an_interrupted_fill_resumes_and_converges() -> Result<(), Failure> {
                 "migrations::replayed::crash_fill_child",
                 "--ignored",
             ])
-            .env("ROCKY_SQL_KILL_AT", point)
+            .env("ROCKY_SQL_KILL_AT", crash_point)
             .env("ROCKY_CRASH_DIRECTORY", listed.path("a"))
             .status()?;
-        assert_eq!(status.code(), Some(87), "{point}");
+        assert_eq!(status.code(), Some(87), "{crash_point}");
         assert_eq!(
             publication_state(&listed.path("a"))?,
             PublicationState {
                 stage: "staged".into(),
-                cursor: Some(cursor),
-                unsent: (authored, authored),
+                cursor: Some(cursor_left),
+                unsent: (authored_frames_left, authored_frames_left),
             },
-            "{point}"
+            "{crash_point}"
         );
         listed.pull(CRASH_ROWS).await?;
         let [issuer, member] = listed.digests().await?;
-        assert_eq!(issuer.count, CRASH_ROWS as u64, "{point}");
-        assert_eq!(issuer, member, "{point}");
+        assert_eq!(issuer.count, CRASH_ROWS as u64, "{crash_point}");
+        assert_eq!(issuer, member, "{crash_point}");
         let db = rusqlite::Connection::open_with_flags(
             listed.path("a").join("rocky.sqlite"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
-        // Seed and fill: one bundle of one frame per partition each.
         let (publications, bundles, frames): (i64, i64, i64) = db.query_row(
             "SELECT count(*),sum(bundles),(SELECT count(*) FROM secure_publication_frames) FROM secure_publications",
             [],
@@ -481,7 +477,7 @@ async fn an_interrupted_fill_resumes_and_converges() -> Result<(), Failure> {
         assert_eq!(
             (publications, bundles, frames),
             (2, 2 * lists, 2 * lists),
-            "{point}"
+            "seed and fill publish one bundle of one frame per partition each after {crash_point}"
         );
     }
     Ok(())

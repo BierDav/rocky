@@ -172,14 +172,12 @@ impl Cache {
         families: Option<&rocky_credentials::GrantFamilies>,
     ) -> Result<rocky_credentials::VerifiedChain, Error> {
         let default_families = rocky_credentials::GrantFamilies::default();
-        // Exact chains are independent of the schema, including before typed
-        // projections are installed. Marked ancestors still need their context.
-        let marked = chain.0.iter().any(|link| {
+        let needs_schema_families = chain.0.iter().any(|link| {
             link.capability
                 .extended()
                 .is_ok_and(|extended| extended.families)
         });
-        let families = if marked {
+        let families = if needs_schema_families {
             families.unwrap_or(&default_families)
         } else {
             &default_families
@@ -232,7 +230,6 @@ impl Cache {
         )?);
         #[cfg(test)]
         self.opens.fetch_add(1, Ordering::Relaxed);
-        // Evict older frames first, retaining the whole newly prepared page.
         cache.remember(operation.hash, key.key, bytes.clone())?;
         Ok(bytes)
     }
@@ -258,6 +255,13 @@ impl<A: RowApplication> Inner<A> {
         Ok(opened)
     }
 }
+/// Verifies and caches each frame's immutable signature before replica state
+/// is touched.
+fn verify_signatures(frames: &[EncryptedFrame]) {
+    for frame in frames {
+        let _ = frame.operation_ref();
+    }
+}
 impl<A: RowApplication> EncryptedReplica<A> {
     #[cfg(test)]
     pub(crate) async fn crypto_stats(&self) -> (u64, u64) {
@@ -271,11 +275,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         frames: Vec<EncryptedFrame>,
     ) -> Result<Vec<EncryptedFrame>, Error> {
-        // Verify immutable frame signatures before touching replica state.
         let frames = rocky_platform::task::spawn_blocking(move || {
-            for frame in &frames {
-                let _ = frame.operation_ref();
-            }
+            verify_signatures(&frames);
             frames
         })
         .await

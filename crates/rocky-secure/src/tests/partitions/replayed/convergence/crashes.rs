@@ -25,16 +25,14 @@ async fn crash(point: CrashPoint, before: &[usize], during: &[usize]) {
         assert!(replica.seal_replayed_for_test(f.scope("A")).await.is_err());
     } else {
         for unit in during {
-            // The interrupted receive fails; nothing of it may remain.
-            let _ = replica.receive_all(units[*unit].clone()).await;
+            let _interrupted_receive_leaves_nothing_behind =
+                replica.receive_all(units[*unit].clone()).await;
         }
     }
     assert_eq!(replica.crashed().await, Some(point));
     let unsealed = replica.unsealed_replayed_transactions().await.unwrap();
     drop(replica);
 
-    // Received frames were kept before the interrupted step: the reopened
-    // replica finishes it whole, as a replay of what it was given.
     let replica = receiver(&f, &path, &node).await;
     let given: Vec<_> = before
         .iter()
@@ -43,13 +41,14 @@ async fn crash(point: CrashPoint, before: &[usize], during: &[usize]) {
         .collect();
     assert_eq!(
         state(&f, &replica, &canonical(&f, &given)).await,
-        canonical(&f, &given)
+        canonical(&f, &given),
+        "frames kept before the interrupted step finish whole as a replay of what was given"
     );
     if point == CrashPoint::UndoDeletion {
-        // The seal did not happen: every undo record is still there.
         assert_eq!(
             replica.unsealed_replayed_transactions().await.unwrap(),
-            unsealed
+            unsealed,
+            "the interrupted seal leaves every undo record in place"
         );
     }
     for status in replica.receive_all(frames).await {
@@ -68,8 +67,14 @@ async fn a_crash_while_applying_an_intent_reopens_and_converges() {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_crash_inside_a_rewind_reopens_and_converges() {
-    // W1's doubling applies first; its earlier create rewinds it.
-    crash(CrashPoint::Rewind, &[1, 2, 3], &[0]).await;
+    let later_units_including_w1_doubling = [1, 2, 3];
+    let w1_earlier_create_that_rewinds_the_doubling = [0];
+    crash(
+        CrashPoint::Rewind,
+        &later_units_including_w1_doubling,
+        &w1_earlier_create_that_rewinds_the_doubling,
+    )
+    .await;
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

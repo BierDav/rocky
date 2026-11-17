@@ -100,7 +100,7 @@ pub struct FileIdentityProvider {
 }
 impl FileIdentityProvider {
     /// Opens the identity in `directory`, creating a fresh key when it holds
-    /// none.
+    /// none. Of concurrent creators, the first file written wins.
     pub fn open(directory: impl Into<PathBuf>) -> Result<Self, Error> {
         let directory = directory.into();
         let path = directory.join("identity");
@@ -115,7 +115,6 @@ impl FileIdentityProvider {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 fs::create_private_dir_all(&directory).map_err(provider)?;
                 let key = PrivateKey::from_bytes(&rocky_platform::entropy::random());
-                // Two processes creating at once: the first file wins.
                 match fs::create_new(&path, key.as_bytes()) {
                     Ok(()) => key,
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {

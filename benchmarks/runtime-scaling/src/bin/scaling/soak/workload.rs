@@ -7,12 +7,18 @@ pub(super) fn scope(domain: u16) -> Scope {
         domain: domain_id(domain),
     }
 }
+/// Tables that receive every row after each table was seeded once.
+const HOT_TABLES: u16 = 50;
+/// Every this many steps a write replaces a live row, which keeps the live
+/// row count fixed and exercises permanent deletion.
+const REPLACE_EVERY: usize = 128;
+/// The table of row `index`: each cold table is seeded once, then all other
+/// rows go to the hot set.
 pub(super) fn table(index: usize, tables: u16) -> u16 {
-    // Seed each cold table once, then put all other rows in the hot set.
     if index < usize::from(tables) {
         index as u16
     } else {
-        (index % usize::from(tables.min(50))) as u16
+        (index % usize::from(tables.min(HOT_TABLES))) as u16
     }
 }
 pub(super) async fn open(
@@ -99,8 +105,7 @@ impl Writer {
         while !self.stop.load(Relaxed) {
             let slot = step % live.len();
             let (table, entity) = live[slot];
-            // Replacement keeps live rows fixed and exercises permanent deletion.
-            if step % 128 == 127 {
+            if step % REPLACE_EVERY == REPLACE_EVERY - 1 {
                 commit(
                     &self.replica,
                     Some(entity),

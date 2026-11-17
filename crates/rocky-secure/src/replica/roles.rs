@@ -4,13 +4,14 @@ use super::*;
 use rocky_credentials::PeerId;
 mod restoration;
 
+/// The peers covering one log's operation, asked per prune candidate.
+const PEER_FRONTIERS_LOG_INDEX: &str = "CREATE INDEX IF NOT EXISTS secure_peer_frontiers_log ON secure_peer_frontiers(scope,author,held)";
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_roles(id INTEGER PRIMARY KEY CHECK(id=1),config BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_subscriptions(scope BLOB PRIMARY KEY,state TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_evicted_logs(scope BLOB PRIMARY KEY,sequence INTEGER NOT NULL,hash BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_peer_frontiers(peer BLOB NOT NULL,scope BLOB NOT NULL,author BLOB NOT NULL,held INTEGER NOT NULL,applied INTEGER NOT NULL,PRIMARY KEY(peer,scope,author)) WITHOUT ROWID",
-    // The peers covering one log's operation, asked per prune candidate.
-    "CREATE INDEX IF NOT EXISTS secure_peer_frontiers_log ON secure_peer_frontiers(scope,author,held)",
+    PEER_FRONTIERS_LOG_INDEX,
     "CREATE INDEX IF NOT EXISTS secure_operations_scope ON secure_operations(scope,author,sequence)",
 ];
 
@@ -579,7 +580,6 @@ impl<A: RowApplication> Inner<A> {
             }
             Ok(())
         })?;
-        // A lost report only delays pruning, which flushes before publishing.
         Ok(())
     }
     /// Peers whose frontier covers one operation: held, and applied.
@@ -650,7 +650,6 @@ impl<A: RowApplication> Inner<A> {
                 });
             }
         }
-        // Frames leave the device: they count as offered from here on.
         let hashes = page
             .frames
             .iter()
@@ -725,7 +724,6 @@ impl<A: RowApplication> Inner<A> {
         }
         let blob = encode(&scope)?;
         let mut used = 0;
-        // A log stops at a frame of a publication still being authored.
         let staged = self.unsent().await?;
         for log in &own.logs {
             let mut start = request.held(log.author);
@@ -756,7 +754,6 @@ impl<A: RowApplication> Inner<A> {
                     .await?,
             )
             .await?;
-            // Voided positions interleave with the log's frames.
             let mut voids = self
                 .voids_from(scope, log.author, start, RANGE_FRAMES + 1)
                 .await?
@@ -812,8 +809,6 @@ impl<A: RowApplication> Inner<A> {
                     break;
                 }
 
-                // Every frame of a revoked author is refused, so none is
-                // sent; a reset's fence keeps what it covers.
                 let operation = frame.operation_ref()?;
                 if !self.visible_in_workspace(operation)?
                     || !self.offered(&operation.header).await?
@@ -866,7 +861,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 )
                 .await?;
             if config.role == ReplicaRole::Full {
-                // A full replica holds every scope again.
                 inner
                     .conn
                     .execute(
@@ -958,7 +952,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if !inner.holds(scope).await? {
             return Ok(());
         }
-        // The completion check and the guard's removal commit together.
         let cleared = transaction!(inner, |inner| {
             let Some(guard) = inner.eviction_guard(scope).await? else {
                 return Ok(false);
@@ -1069,7 +1062,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await
     }
     /// Frames `request` lacks, at most 32 and `byte_quota` bytes, after
-    /// `after`; or the signal that the peer must rebootstrap.
+    /// `after`; or the signal that the peer must rebootstrap. The frames
+    /// leave the device, so every commit they may include is flushed before
+    /// they are returned, outside the lock so local writes continue meanwhile.
     pub async fn range_page(
         &self,
         peer: PublicKey,
@@ -1085,8 +1080,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await?;
             (page, inner.commit, inner.flusher.clone())
         };
-        // Frames leave the device: flush every commit they may include,
-        // outside the lock so local writes continue meanwhile.
         flusher.run(commit).await?;
         Ok(page)
     }
@@ -1265,7 +1258,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if peer == inner.config.node.public_key() {
             return Err(denied("a replica cannot acknowledge itself"));
         }
-        // Verify the entire request before publishing any scope's metadata.
         let scopes: Vec<_> = frontiers.iter().map(|frontier| frontier.scope).collect();
         let grants = inner.verify_chain_scopes(credentials, peer, now()?, &scopes)?;
         let held: Vec<_> = frontiers
@@ -1276,7 +1268,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.store_frontiers(peer, &grants, &held).await?;
         let mut replies = Vec::new();
         for frontier in frontiers {
-            // A scope this replica does not hold is not its to serve.
             if !holds_whole(&grants, frontier.scope) || !inner.holds(frontier.scope).await? {
                 replies.push(FrontierReply::Refused(frontier.scope));
                 continue;

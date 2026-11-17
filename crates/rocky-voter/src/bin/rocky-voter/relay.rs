@@ -1,11 +1,14 @@
 use iroh_relay::server::{ClientRateLimit, RelayConfig, Server, ServerConfig};
 use std::{net::SocketAddr, num::NonZeroU32};
 
+/// Bytes per second each relay client may send; admission stays open to
+/// independent keys.
+const CLIENT_RATE: u32 = 1024 * 1024;
+
 async fn start(address: SocketAddr) -> Result<Server, super::voter::Failure> {
     let mut relay = RelayConfig::new(address);
-    // Bound each client's traffic; admission remains open to independent keys.
     relay.limits.client_rx = Some(ClientRateLimit::new(
-        NonZeroU32::new(1024 * 1024).ok_or("relay rate must be positive")?,
+        NonZeroU32::new(CLIENT_RATE).ok_or("relay rate must be positive")?,
     ));
     let mut config = ServerConfig::default();
     config.relay = Some(relay);

@@ -34,8 +34,8 @@ impl<A: RowApplication> Inner<A> {
             let capacity = memo.capacity.unwrap_or(RAW_BYTES).min(RAW_BYTES);
             #[cfg(not(test))]
             let capacity = RAW_BYTES;
-            // Oversized input reaches the original parser before hashing or copying.
-            let hash = (bytes.len() <= capacity).then(|| Hash::new(bytes));
+            let memoizable = bytes.len() <= capacity;
+            let hash = memoizable.then(|| Hash::new(bytes));
             if let Some(hash) = hash
                 && let Some(entry) = &memo.last
                 && entry.hash == hash
@@ -90,6 +90,8 @@ impl<A: RowApplication> Inner<A> {
             memo.last.as_ref().map_or(0, |e| e.bytes.len()),
         )
     }
+    /// Keeps the memo's digest but changes its retained bytes, so the next
+    /// lookup must miss.
     #[cfg(test)]
     pub(crate) fn migration_syntax_mismatch(&self) {
         let mut memo = self
@@ -97,7 +99,7 @@ impl<A: RowApplication> Inner<A> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = memo.last.as_mut().unwrap();
-        entry.bytes[0] ^= 1; // Same digest, unequal retained bytes: must miss.
+        entry.bytes[0] ^= 1;
         entry.signed.statement.bytes += 1;
     }
     #[cfg(test)]

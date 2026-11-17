@@ -74,7 +74,6 @@ async fn pass(
         to.process_pending().await.unwrap();
         after = page.next;
         if after.is_none() {
-            // Report the applied frontier, which acknowledges the pass.
             from.catch_up(Some(peer), to.sync_state().await.unwrap())
                 .await
                 .unwrap();
@@ -119,16 +118,20 @@ async fn range_reconciliation_exchanges_frontiers_not_receipt_sets() {
         pass(&laptop, &phone, fixtures::PHONE).await,
         Some((10, 300))
     );
-    // The state stays small however long the history is.
     let state = phone.sync_state().await.unwrap();
     assert_eq!(at(&state.held, fixtures::LAPTOP), 300);
-    assert!(state.received.is_empty());
+    assert!(
+        state.received.is_empty(),
+        "the state stays small however long the history is"
+    );
     assert_eq!(pass(&laptop, &phone, fixtures::PHONE).await, Some((1, 0)));
-    // The frontier counts as receipt: the outbox is cleared for that peer.
     let progress = laptop.peer_progress(fixtures::PHONE).await.unwrap();
-    assert_eq!((progress.received, progress.applied), (300, 300));
+    assert_eq!(
+        (progress.received, progress.applied),
+        (300, 300),
+        "the frontier counts as receipt: the outbox is cleared for that peer"
+    );
 
-    // Out of order: more held operations above a gap than a state lists.
     let bytes = |id: OperationId| {
         let laptop = laptop.clone();
         async move {
@@ -152,11 +155,18 @@ async fn range_reconciliation_exchanges_frontiers_not_receipt_sets() {
         }
     }
     let state = server.sync_state().await.unwrap();
-    assert_eq!(at(&state.held, fixtures::LAPTOP), 0);
+    assert_eq!(
+        at(&state.held, fixtures::LAPTOP),
+        0,
+        "out of order: more held operations above a gap than a state lists"
+    );
     assert_eq!(state.received.len(), MAX_SYNC_EXCEPTIONS);
-    // The pass still ends, resending only what the state could not list.
     let (_, records) = pass(&laptop, &server, SERVER).await.unwrap();
-    assert_eq!(records, 1 + 299 - MAX_SYNC_EXCEPTIONS);
+    assert_eq!(
+        records,
+        1 + 299 - MAX_SYNC_EXCEPTIONS,
+        "the pass still ends, resending only what the state could not list"
+    );
     let state = server.sync_state().await.unwrap();
     assert_eq!(at(&state.applied, fixtures::LAPTOP), 300);
     assert_eq!(
@@ -176,7 +186,6 @@ async fn full_node_custody_moves_the_pruned_prefix_without_waiting_for_devices()
         create(&laptop, &format!("todo {index}")).await;
     }
     laptop.checkpoint().await.unwrap();
-    // Receipt is not custody, and the phone is no full node.
     for envelope in [&first] {
         let bytes = laptop
             .operation(rocky_core::ScopedOperationId {
@@ -190,10 +199,16 @@ async fn full_node_custody_moves_the_pruned_prefix_without_waiting_for_devices()
         ack.applied = false;
         laptop.acknowledge(SERVER, ack).await.unwrap();
     }
-    assert_eq!(pass(&laptop, &phone, fixtures::PHONE).await, Some((2, 41)));
+    assert_eq!(
+        pass(&laptop, &phone, fixtures::PHONE).await,
+        Some((2, 41)),
+        "receipt is not custody, and the phone is no full node"
+    );
     assert_eq!(at(&laptop.prune().await.unwrap(), fixtures::LAPTOP), 0);
-    // The full node applied everything: the pruned prefix follows it alone.
-    assert!(pass(&laptop, &server, SERVER).await.is_some());
+    assert!(
+        pass(&laptop, &server, SERVER).await.is_some(),
+        "the full node applied everything: the pruned prefix follows it alone"
+    );
     let edit = laptop
         .mutate(mutation(Some(first.id), Action::SetCompleted(true)))
         .unwrap()
@@ -216,7 +231,6 @@ async fn full_node_custody_moves_the_pruned_prefix_without_waiting_for_devices()
             .any(|peer| peer.peer == fixtures::PHONE && !peer.full_node)
     );
 
-    // A device that fell behind takes the full node's checkpoint.
     let late = Replica::open_with_options(
         dir.path().join("late.db"),
         TodoApp,
@@ -230,7 +244,11 @@ async fn full_node_custody_moves_the_pruned_prefix_without_waiting_for_devices()
     )
     .await
     .unwrap();
-    assert_eq!(pass(&laptop, &late, fixtures::PHONE).await, None);
+    assert_eq!(
+        pass(&laptop, &late, fixtures::PHONE).await,
+        None,
+        "a device that fell behind takes the full node's checkpoint"
+    );
     assert!(pass(&laptop, &server, SERVER).await.is_some());
     server.checkpoint().await.unwrap();
     let mut cursor = None;
@@ -291,7 +309,6 @@ async fn a_reported_frontier_clears_only_the_outbox_range_it_newly_covers() {
     let dir = Scratch::new().await;
     let laptop = open(&dir, fixtures::LAPTOP, &[], 0).await;
     let server = open(&dir, SERVER, &[], 0).await;
-    // The phone never reports, so every entry stays in the outbox.
     let mut cost = Vec::new();
     for backlog in [1, 200] {
         for index in 0..backlog {
@@ -308,7 +325,8 @@ async fn a_reported_frontier_clears_only_the_outbox_range_it_newly_covers() {
         crate::tests::rows(&file, "SELECT COUNT(*) FROM rocky_outbox")
             .await
             .unwrap(),
-        vec![vec![rocky_core::SqlValue::Integer(203)]]
+        vec![vec![rocky_core::SqlValue::Integer(203)]],
+        "the phone never reports, so every entry stays in the outbox"
     );
     assert!(cost[1] < cost[0] + 100, "{cost:?}");
     laptop.close().await.unwrap();

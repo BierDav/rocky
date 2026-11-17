@@ -38,8 +38,6 @@ impl<A: RowApplication> Inner<A> {
         let name = match written_table(sql, &schema.views) {
             Some(name) if replayed(&name) => name,
             Some(_) => return Ok(None),
-            // A write the splitter cannot name gets its refusal below when it
-            // names a replayed table.
             None => match crate::statement::analyze(sql, |_| None) {
                 Ok(analyzed)
                     if analyzed.kind != crate::statement::Kind::Read
@@ -53,7 +51,6 @@ impl<A: RowApplication> Inner<A> {
         let rules = self.partition_rules(None, status).await?;
         let conn = self.conn.connection();
         let split = split_intent_within(sql, params, &schema.views, &rules, limit, |read| {
-            // A migration's reads of its parents run on the frozen tables.
             let sql = match parents.is_empty() {
                 true => read.sql.clone(),
                 false => {
@@ -73,7 +70,6 @@ impl<A: RowApplication> Inner<A> {
             Ok(copies) => copies,
             Err(SplitError::Evaluate(error)) => return Err(error),
             Err(SplitError::Refused(refusal)) => {
-                // A table that waits names what it waits for.
                 if let IntentRefusal::Unavailable {
                     table,
                     reason: crate::sql::Unavailable::Incomplete,
@@ -219,11 +215,7 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         base.sort();
-        // Canonical order puts the transaction after everything it read:
-        // past every transaction replayed here, of any scope, so a row it
-        // references replays before it even when that row's clock is ahead
-        // of this wall clock.
-        let replayed = match collect_rows(
+        let latest_replayed_clock = match collect_rows(
             self.conn
                 .query("SELECT COALESCE(MAX(clock),0) FROM secure_replayed", ())
                 .await?,
@@ -236,7 +228,7 @@ impl<A: RowApplication> Inner<A> {
             _ => None,
         }
         .ok_or_else(|| Error::Corrupt("replayed clock".into()))?;
-        let clock = next_clock(clock.max(replayed))?;
+        let clock = next_clock(clock.max(latest_replayed_clock))?;
         let author_sequence = self
             .reserve_author_sequence(signing_key.public_key())
             .await?;
@@ -266,8 +258,6 @@ impl<A: RowApplication> Inner<A> {
             },
         )?;
         self.verify_frame(&frame, time)?;
-        // A range page carries at most this much; a larger frame could
-        // never reach another replica.
         if frame.weight() > crate::network::MAX_PAGE_BYTES {
             return Err(Error::Quota {
                 resource: "intent frame bytes",
@@ -355,8 +345,6 @@ impl<A: RowApplication> Inner<A> {
                 heads.push((hash, header));
                 continue;
             }
-            // An author's later frames on another line: its newest frame
-            // here, if any.
             let mut before = header.seq_num as i64;
             'author: loop {
                 let older = collect_rows(

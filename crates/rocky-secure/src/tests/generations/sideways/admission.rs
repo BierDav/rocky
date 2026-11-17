@@ -73,8 +73,9 @@ async fn a_write_to_a_removed_table_applies_once_its_path_returns() {
         .unwrap();
     let security = || {
         let mut config = lineage.config(4, &keys[0]);
-        // Removing a local table need not discard already granted reader authority.
-        config.credentials = lineage.certified(3, &identity, &keys[0]);
+        let reader_authority_kept_past_the_table_removal =
+            lineage.certified(3, &identity, &keys[0]);
+        config.credentials = reader_authority_kept_past_the_table_removal;
         config.manifest = lineage.manifest(3);
         config
             .keys
@@ -102,9 +103,12 @@ async fn a_write_to_a_removed_table_applies_once_its_path_returns() {
     assert_eq!(select(&alice, "SELECT key,label FROM tags").await, restored);
     alice.rebuild_projection(scope).await.unwrap();
     alice.audit(scope).await.unwrap();
-    // A duplicate changes nothing.
     alice.receive(frame.clone()).await.unwrap();
-    assert_eq!(select(&alice, "SELECT key,label FROM tags").await, restored);
+    assert_eq!(
+        select(&alice, "SELECT key,label FROM tags").await,
+        restored,
+        "a duplicate changes nothing"
+    );
     drop(alice);
     let alice = lineage.reopen(&path, &keys[0], 3, 3).await.unwrap();
     alice.audit(scope).await.unwrap();

@@ -108,16 +108,19 @@ pub mod simulation {
                 return false;
             };
             for chunk in bytes.chunks_mut(8) {
-                // SplitMix64: reproducible, not secret.
-                source.state = source.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-                let mut mixed = source.state;
-                mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-                mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-                mixed ^= mixed >> 31;
+                let mixed = split_mix64(&mut source.state);
                 chunk.copy_from_slice(&mixed.to_le_bytes()[..chunk.len()]);
             }
             true
         })
+    }
+    /// Advances SplitMix64: reproducible, not secret.
+    fn split_mix64(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut mixed = *state;
+        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        mixed ^ (mixed >> 31)
     }
     pub(crate) fn since_epoch() -> Option<Duration> {
         SOURCE.with(|source| {

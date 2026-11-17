@@ -460,7 +460,9 @@ where
             .await?;
         Ok(())
     }
-    /// Rereads the digests and checkpoint state from storage.
+    /// Rereads the digests and checkpoint state from storage. The record
+    /// counts as unflushed: the file writer flushes once at open, before
+    /// anything is exposed.
     pub(super) async fn load_retention(&mut self) -> Result<(), Error> {
         let row = rows(
             self.conn(),
@@ -483,7 +485,6 @@ where
         let stored: Stored = serde_json::from_slice(state).map_err(|_| corrupt())?;
         self.retention.stored = Stored::default();
         self.retention.adopt(stored)?;
-        // The file writer flushes once at open, before anything is exposed.
         self.retention.record_flushed = false;
         self.retention.prune_wanted = true;
         let stored = &self.retention.stored;
@@ -584,7 +585,8 @@ where
             && retention.stored.candidate.is_none()
     }
     /// One bounded step of whatever is due. Failures stay in the status; a
-    /// failed step rolled back alone.
+    /// failed step rolled back alone. A step held by an import or a missing
+    /// base is retried beside a later group.
     pub(crate) async fn maintain(&mut self, writes: usize) -> Result<(), Error> {
         let retention = &self.retention;
         if retention.stored.candidate.is_none()
@@ -596,7 +598,6 @@ where
         }
         let budget = (2 * writes).clamp(ADVANCE_BOUNDS.0, ADVANCE_BOUNDS.1);
         match self.checkpoint_step(false, budget).await {
-            // Held by an import or a missing base; retried beside a later group.
             Err(Error::Rejected(_)) => Ok(()),
             result => result.map(|_| ()),
         }
@@ -673,7 +674,6 @@ where
                 Ok(Response::Unit)
             }
             Request::Audit => {
-                // Reads all retained history: no time bound, unlike a query.
                 self.unbounded = true;
                 let result = self
                     .read_transaction(async |worker| worker.audit().await)
@@ -763,6 +763,8 @@ where
         }
         Ok(advanced.step)
     }
+    /// Advances the checkpoint by one bounded step. Only an explicit
+    /// `requested` step retries a checkpoint that failed.
     pub(super) async fn advance(
         &mut self,
         requested: bool,
@@ -784,7 +786,6 @@ where
                 .record
                 .as_ref()
                 .is_none_or(|(record, _)| marks(&record.frontier) != applied),
-            // Only an explicit request retries a checkpoint that failed.
             Some(candidate) if candidate.failed => {
                 if !requested {
                     return Ok(None);

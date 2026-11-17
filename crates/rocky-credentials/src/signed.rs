@@ -54,6 +54,8 @@ impl Certificate {
 /// its writer identity, no grants, no authority and no expiry.
 fn node_shape(capability: &Capability) -> Result<(), Error> {
     let extended = capability.extended()?;
+    let is_shared_node = extended.sequence.is_some();
+    let is_personal_device = extended.personal.is_some();
     if capability.kind != PrincipalKind::Node
         || capability.delegations != 0
         || !capability.grants.is_empty()
@@ -66,9 +68,7 @@ fn node_shape(capability: &Capability) -> Result<(), Error> {
         || extended.claims.is_some()
         || extended.origin.is_some()
         || extended.database.is_none()
-        // A shared node takes a membership sequence; a personal device an
-        // owner binding instead.
-        || extended.sequence.is_none() == extended.personal.is_none()
+        || is_shared_node == is_personal_device
         || extended
             .sequence
             .is_some_and(|sequence| (sequence == 0) != extended.previous.is_none())
@@ -186,6 +186,17 @@ impl Attestation {
                 || revocations.ends_node_of(identity, certificate.node(), protected)
         })
     }
+    /// Whether the node that signed a link has ended, judged without resets:
+    /// a reset ends nodes, not the links they signed. Every node such a link
+    /// admits is ended instead, unless the reset keeps it.
+    pub(crate) fn link_signer_ended(
+        &self,
+        (revocations, time): (&RevocationSet, u64),
+        protected: bool,
+        identity: PublicKey,
+    ) -> bool {
+        self.node_ended((revocations.unfenced(), time), protected, identity)
+    }
     pub fn certificate(&self) -> Option<&Certificate> {
         self.certificate.as_ref()
     }
@@ -288,12 +299,14 @@ impl Endorsement {
             }
         }
         let node = self.attestation.verify(signer, message)?;
-        // A trusted identity's node only the root revokes.
-        let protected = self
+        let only_root_revokes = self
             .chain
             .trusted_subject()
             .is_ok_and(|trusted| trusted == Some(signer));
-        if current.is_some_and(|current| self.attestation.node_ended(current, protected, signer)) {
+        if current.is_some_and(|current| {
+            self.attestation
+                .node_ended(current, only_root_revokes, signer)
+        }) {
             return Err(denied("the signing node is revoked"));
         }
         Ok(node)
@@ -322,15 +335,12 @@ impl Endorsement {
                 return Err(denied("tip statements require an identity"));
             }
             let trusted = self.chain.0.len() == 1 && leaf.extended()?.trusted == Some(scope);
-            // A trusted grant's issuer authority holds in its own domain only.
-            if !trusted
-                && self.chain.0.iter().any(|link| {
-                    !link
-                        .capability
-                        .extended()
-                        .is_ok_and(|e| e.issues && e.trusted.is_none_or(|held| held == scope))
-                })
-            {
+            let issues_in_this_domain = |link: &SignedCapability| {
+                link.capability
+                    .extended()
+                    .is_ok_and(|e| e.issues && e.trusted.is_none_or(|held| held == scope))
+            };
+            if !trusted && !self.chain.0.iter().all(issues_in_this_domain) {
                 return Err(denied("the chain ends at no issuer"));
             }
             (leaf.subject, trusted)
@@ -994,27 +1004,24 @@ impl CredentialChain {
                     capability.not_before > time
                         || capability.expires <= time
                         || revocations.ends_at(signed, self.protected(index)?)?
-                        // A reset ends nodes, not the links they signed:
-                        // every node such a link admits is ended unless kept.
-                        || signed.attestation.node_ended(
-                            (revocations.unfenced(), time),
+                        || signed.attestation.link_signer_ended(
+                            (revocations, time),
                             self.protected_signer(index)?,
                             signed.issuer,
                         )
                 }
                 None => false,
             };
-            // Only the root's trusted grant, and its identity's own links
-            // and node certificates, live until the root revokes them.
-            let forever = match &parent {
+            let lives_until_root_revokes = match &parent {
                 None => extended.trusted.is_some() && extended.issues,
                 Some((parent, _)) => parent.expires == crate::NEVER && self.protected(index)?,
             };
-            let lifetime = if node || (capability.expires == crate::NEVER && forever) {
-                0
-            } else {
-                capability.expires - capability.not_before
-            };
+            let lifetime =
+                if node || (capability.expires == crate::NEVER && lives_until_root_revokes) {
+                    0
+                } else {
+                    capability.expires - capability.not_before
+                };
             let held = capability.grants.len() + extended.partitions.len();
             if signed.issuer != issuer
                 || stale
@@ -1044,7 +1051,6 @@ impl CredentialChain {
             if node {
                 self.check_personal(index)?;
             }
-            // A set pinned to the genesis judges the database mode.
             if let Some(genesis) = current.and_then(|(revocations, _)| revocations.genesis()) {
                 if extended.trusted.is_some() {
                     genesis.check_trusted(capability.subject)?;
@@ -1052,29 +1058,26 @@ impl CredentialChain {
                 if node {
                     genesis.check_node(signed.issuer, capability)?;
                 }
-                // A link a node signed names that node's certificate.
-                if let Some(certificate) = signed.attestation.certificate() {
-                    genesis.check_node(signed.issuer, &certificate.capability)?;
+                if let Some(signing_node) = signed.attestation.certificate() {
+                    genesis.check_node(signed.issuer, &signing_node.capability)?;
                 }
             }
             if let Some((parent, parent_extended)) = &parent {
-                // Issuer authority grants anything; other links narrow.
                 let authority = parent_extended.issues;
-                // An issuer can grant anything; a grant-free node certificate
-                // narrows only identity and lifetime.
-                let compare = !authority && !node;
-                let parent_families = families.enabled(compare && parent_extended.families);
-                let child_families = families.enabled(compare && extended.families);
-                let (allowed, allowed_partitions, requested, requested_partitions) = if compare {
-                    (
-                        parent_families.resources(&parent.grants),
-                        parent_families.partitions(&parent_extended.partitions),
-                        child_families.resources(&capability.grants),
-                        child_families.partitions(&extended.partitions),
-                    )
-                } else {
-                    (Vec::new(), Vec::new(), Vec::new(), Vec::new())
-                };
+                let narrows_grants = !authority && !node;
+                let parent_families = families.enabled(narrows_grants && parent_extended.families);
+                let child_families = families.enabled(narrows_grants && extended.families);
+                let (allowed, allowed_partitions, requested, requested_partitions) =
+                    if narrows_grants {
+                        (
+                            parent_families.resources(&parent.grants),
+                            parent_families.partitions(&parent_extended.partitions),
+                            child_families.resources(&capability.grants),
+                            child_families.partitions(&extended.partitions),
+                        )
+                    } else {
+                        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                    };
                 if parent.kind == PrincipalKind::Node
                     || parent.delegations == 0
                     || capability.delegations >= parent.delegations
@@ -1105,9 +1108,7 @@ impl CredentialChain {
                 {
                     return Err(denied("delegation expands authority"));
                 }
-                // An origin naming the signer, or the signer's origin, has
-                // that grant's time: a recovery judges the origin by it.
-                let named = if parent_extended.trusted.is_some() {
+                let signer_grant_time = if parent_extended.trusted.is_some() {
                     Some((parent.subject, parent.not_before))
                 } else {
                     parent_extended
@@ -1115,7 +1116,7 @@ impl CredentialChain {
                         .map(|held| (held.identity, held.since))
                 };
                 if extended.origin.is_some_and(|origin| {
-                    named.is_some_and(|(identity, since)| {
+                    signer_grant_time.is_some_and(|(identity, since)| {
                         identity == origin.identity && since != origin.since
                     })
                 }) {

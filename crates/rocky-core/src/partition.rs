@@ -230,7 +230,8 @@ impl PartitionSelector {
     }
 }
 
-// Pairs also cross JSON without map keys or lossy integer conversions.
+/// Serializes partition columns as pairs, so they also cross JSON without
+/// map keys or lossy integer conversions.
 mod components {
     use super::*;
     use serde::{Deserializer, Serializer, de::Error};
@@ -313,22 +314,23 @@ mod tests {
             a.scope(domain, [5; 32], &name),
             c.scope(domain, [5; 32], &name)
         );
-        // Another naming secret gives the same tuple an unrelated identity.
         assert_ne!(
             a.scope(domain, [5; 32], &name),
-            a.scope(domain, [5; 32], &[10; 32])
+            a.scope(domain, [5; 32], &[10; 32]),
+            "another naming secret gives the same tuple an unrelated identity"
         );
         assert!(PartitionTuple::new([([4; 32], text("a")), ([4; 32], text("b"))]).is_err());
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn keyed_commitments_are_standard_hmac_sha256() {
-        // Python: hmac.new(bytes([9] * 32), b"\x01\0\0\0px", sha256).
+        let python_reference = r#"hmac.new(bytes([9] * 32), b"\x01\0\0\0px", sha256)"#;
         assert_eq!(
             keyed_commitment(&[9; 32], "p", b"x"),
             [
                 5, 44, 102, 36, 219, 207, 151, 172, 191, 113, 162, 41, 17, 194, 167, 215, 66, 224,
                 161, 72, 209, 239, 137, 33, 60, 254, 132, 182, 163, 242, 88, 14
-            ]
+            ],
+            "{python_reference}"
         );
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]

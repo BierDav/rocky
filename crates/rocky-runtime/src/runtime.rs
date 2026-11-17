@@ -40,6 +40,10 @@ pub(crate) const MAX_GROUP_COMMIT: usize = 256;
 /// Bounds of `RuntimeOptions::checkpoint_frames`: 1 MiB to 4 GiB of WAL.
 pub(crate) const MIN_CHECKPOINT_FRAMES: u32 = 256;
 pub(crate) const MAX_CHECKPOINT_FRAMES: u32 = 1 << 20;
+/// Enough for 16 domains with 8 waiting writers each to share one commit. A
+/// group takes only what is already queued, so the bound adds no delay under
+/// light load.
+const DEFAULT_GROUP_COMMIT: usize = 128;
 /// Experimental scaling controls; defaults reproduce the qualified behaviour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RuntimeOptions {
@@ -67,10 +71,7 @@ impl Default for RuntimeOptions {
     fn default() -> Self {
         Self {
             durability: Durability::Buffered,
-            // Enough for 16 domains with 8 waiting writers each to share one
-            // commit. A group takes only what is already queued, so the bound
-            // adds no delay under light load.
-            group_commit: 128,
+            group_commit: DEFAULT_GROUP_COMMIT,
             retention: RetentionPolicy::default(),
             files: 1,
             checkpoint_frames: crate::writer::CHECKPOINT_FRAMES,
@@ -128,7 +129,9 @@ where
         Self::open_layout(path, installations, options, None).await
     }
     /// Opens only files serving these installations. Assignments are persisted
-    /// independently of sorted scope order and may only be extended.
+    /// independently of sorted scope order and may only be extended. Fewer
+    /// domains than files use only as many files as domains. If a file fails
+    /// to open, dropping the domain queues stops the writers that did.
     pub async fn open_placed(
         path: impl AsRef<Path>,
         installations: Vec<DomainInstallation<A>>,
@@ -202,7 +205,6 @@ where
             binding.extend(bytes);
         }
         let path = path.as_ref().to_path_buf();
-        // Fewer domains than files use only as many files as domains.
         let used = if placement.is_some() {
             options.files
         } else {
@@ -268,7 +270,6 @@ where
                         submissions: std::sync::atomic::AtomicU64::new(0),
                         observers: Arc::new(tokio::sync::Semaphore::new(MAX_OBSERVERS)),
                         reads: std::sync::OnceLock::new(),
-                        // File assignment follows the validated routes.
                         metrics: metrics[routes[index]].clone(),
                     }),
                 },
@@ -282,7 +283,6 @@ where
                 crate::layout::install(path, options.files, used, binding, installations).await?;
             (installations, files.into_iter().enumerate().collect())
         };
-        // File assignment follows the validated routes.
         let mut assigned: Vec<Vec<_>> = (0..used).map(|_| Vec::new()).collect();
         for (index, domain) in installations.into_iter().zip(channels).enumerate() {
             assigned[routes[index]].push(domain);
@@ -370,7 +370,6 @@ where
             }
         }
         if let Some(error) = failure {
-            // Dropping the queues stops the writers that did open.
             drop(domains);
             for thread in threads {
                 let _ = thread.join().await;

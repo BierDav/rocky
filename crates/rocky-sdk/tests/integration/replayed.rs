@@ -86,20 +86,21 @@ async fn replayed_counters_keep_both_increments_and_report_drops() -> Result<(),
 
     let created = create(&a.database, "c", 0).await?;
     sync().await?;
-    // Both raise the amount they read; replay keeps both.
     raise(&a.database, "c").await?;
     raise(&b.database, "c").await?;
     sync().await?;
     for device in [&a, &b] {
-        assert_eq!(counters(&device.database).await?, [("c".into(), 2)]);
+        assert_eq!(
+            counters(&device.database).await?,
+            [("c".into(), 2)],
+            "replay keeps both raises of the amount each device read"
+        );
     }
     assert_eq!(
         a.database.transaction_outcome(created).await?,
         Some(TransactionOutcome::Applied { sealed: false })
     );
 
-    // Both create `k`; the later one drops wherever it replays, and its
-    // author's observer hears of it after the commit that records it.
     let events = b.database.observe_tables(None).await?;
     create(&a.database, "k", 1).await?;
     let later = create(&b.database, "k", 2).await?;
@@ -113,7 +114,11 @@ async fn replayed_counters_keep_both_increments_and_report_drops() -> Result<(),
         sealed: false,
     });
     for device in [&a, &b] {
-        assert_eq!(device.database.transaction_outcome(later).await?, dropped);
+        assert_eq!(
+            device.database.transaction_outcome(later).await?,
+            dropped,
+            "the later of two creates of one key drops wherever it replays"
+        );
         assert_eq!(
             counters(&device.database).await?,
             [("c".into(), 2), ("k".into(), 1)]

@@ -12,7 +12,6 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<identity::IdentityLedger, Error> {
         let base = self.checkpoint_record(id, true).await?;
         let base_position = base.as_ref().map_or(0, |base| base.position);
-        // Births only accumulate: a later replay step extends the last ledger.
         let cached = self
             .tip_frontiers
             .lock()
@@ -36,7 +35,6 @@ impl<A: RowApplication> Inner<A> {
         if !self.tables.contains(&scope.table) {
             return Ok(ledger);
         }
-        // The walk depends only on the frame's tip, and each signer recurs.
         let mut paths = HashMap::new();
         let mut signers = HashMap::new();
         let records = collect_rows(self.conn.query(
@@ -55,8 +53,6 @@ impl<A: RowApplication> Inner<A> {
             else {
                 return Err(Error::Corrupt("birth position prefix".into()));
             };
-            // As replay sees it: a frame written on an ancestor tip past
-            // the seal the path leaves it at is not in the target's state.
             if let Some(graph) = self.graphs.get(&scope.domain) {
                 let source = TipId(checkpoint::row_of(tip)?);
                 let path = match paths.entry(source) {
@@ -127,7 +123,6 @@ impl<A: RowApplication> Inner<A> {
         frame: &EncryptedFrame,
         payload: &RowPayload,
     ) -> Result<(BTreeSet<Commitment>, Vec<checkpoint::IdentityMark>), Error> {
-        // An intent writes no row images.
         if payload.writes().is_empty() {
             return Ok(Default::default());
         }

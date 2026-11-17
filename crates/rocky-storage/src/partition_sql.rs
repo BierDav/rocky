@@ -185,7 +185,6 @@ fn value(expr: &Expr, bindings: &Bindings<'_>) -> Option<SqlValue> {
                 .get(&(value.span.start.line, value.span.start.column))
                 .cloned(),
             Value::Boolean(value) => Some(SqlValue::Integer(i64::from(*value))),
-            // A row identity's blob literal, as in `X'…'`.
             Value::HexStringLiteral(hex) => blob_literal(hex).map(SqlValue::Blob),
             _ => None,
         },
@@ -263,6 +262,17 @@ fn proof(expr: &Expr, aliases: &[(String, String)], bindings: &Bindings<'_>, to:
         _ => {}
     }
 }
+/// Inner join `ON` conditions, which constrain every participant; an outer
+/// `ON` constrains only the input it does not preserve.
+fn inner_join_conditions(from: &[TableWithJoins]) -> impl Iterator<Item = &Expr> {
+    from.iter()
+        .flat_map(|item| &item.joins)
+        .filter_map(|join| match &join.join_operator {
+            JoinOperator::Join(JoinConstraint::On(on))
+            | JoinOperator::Inner(JoinConstraint::On(on)) => Some(on),
+            _ => None,
+        })
+}
 fn propagate(proof: &mut Proof) {
     for _ in 0..proof.equal.len() + 1 {
         let mut changed = false;
@@ -320,15 +330,8 @@ impl Checker<'_> {
         if let Some(selection) = selection {
             proof(selection, &references, self.bindings, &mut where_proof);
         }
-        // Inner join conditions constrain all participants. Outer ON clauses only constrain the non-preserved input.
-        for item in from {
-            for join in &item.joins {
-                if let JoinOperator::Join(JoinConstraint::On(on))
-                | JoinOperator::Inner(JoinConstraint::On(on)) = &join.join_operator
-                {
-                    proof(on, &references, self.bindings, &mut where_proof);
-                }
-            }
+        for on in inner_join_conditions(from) {
+            proof(on, &references, self.bindings, &mut where_proof);
         }
         propagate(&mut where_proof);
         for (name, alias) in &references {
@@ -363,9 +366,8 @@ impl Checker<'_> {
                     .values
                     .get(&(alias.clone(), column.name.to_ascii_lowercase()))
                 else {
-                    // Every partition may be read: one that waits refuses
-                    // it, and the filter hides those not held.
-                    if !rule.waiting.is_empty() && !self.assertion {
+                    let may_read_a_waiting_partition = !rule.waiting.is_empty() && !self.assertion;
+                    if may_read_a_waiting_partition {
                         return Err(incomplete());
                     }
                     tuples.clear();
@@ -526,6 +528,11 @@ impl Prepared {
         })
     }
 }
+/// Reparses an expanded statement: spans identify placeholders and reads,
+/// so they must come from the statement's own text.
+fn with_own_spans(statement: &Statement) -> Result<Statement, String> {
+    parse(&statement.to_string())
+}
 /// Expands `sql`'s views. Statements and their expansions are prepared
 /// once while they stay in use.
 pub fn prepare(sql: &str, views: &[rocky_core::LogicalView]) -> Result<Arc<Prepared>, Refusal> {
@@ -537,9 +544,7 @@ pub fn prepare(sql: &str, views: &[rocky_core::LogicalView]) -> Result<Arc<Prepa
     }
     let (mut statement, expanded) = expand_views(sql, views)?;
     if expanded {
-        // Spans identify placeholders and reads: an expanded statement
-        // takes them from its own text.
-        statement = parse(&statement.to_string())?;
+        statement = with_own_spans(&statement)?;
     }
     struct References(BTreeSet<String>);
     impl Visitor for References {
@@ -648,6 +653,14 @@ fn held_partitions(rule: &TablePartitions, alias: Option<&str>) -> String {
     };
     format!("{names} IN ({values})")
 }
+/// The shortest text that reads back as the same double.
+fn shortest_real_text(value: f64) -> String {
+    format!("{value:?}")
+}
+/// Whether `text` holds a NUL, which would end a statement's text.
+fn would_end_statement_text(text: &str) -> bool {
+    text.contains('\0')
+}
 /// A held value as SQL that reads back as the same value and storage class.
 fn held_value(value: &SqlValue) -> String {
     let hex = |bytes: &[u8]| {
@@ -663,12 +676,10 @@ fn held_value(value: &SqlValue) -> String {
     match value {
         SqlValue::Null => "NULL".into(),
         SqlValue::Integer(value) => value.to_string(),
-        // The shortest text that reads back as the same double.
-        SqlValue::Real(value) if value.get().is_finite() => format!("{:?}", value.get()),
+        SqlValue::Real(value) if value.get().is_finite() => shortest_real_text(value.get()),
         SqlValue::Real(value) if value.get() > 0.0 => "9e999".into(),
         SqlValue::Real(_) => "-9e999".into(),
-        // A NUL would end the statement's text.
-        SqlValue::Text(text) if text.contains('\0') => {
+        SqlValue::Text(text) if would_end_statement_text(text) => {
             format!("CAST({} AS TEXT)", hex(text.as_bytes()))
         }
         SqlValue::Text(text) => format!("'{}'", text.replace('\'', "''")),
@@ -1098,9 +1109,11 @@ mod tests {
         ] {
             assert!(incomplete(sql), "{sql}");
         }
-        // A partition neither held nor waiting is not here at all.
         assert!(check("SELECT * FROM items WHERE list='C'", &[], &rules).is_err());
-        assert!(!incomplete("SELECT * FROM items WHERE list='C'"));
+        assert!(
+            !incomplete("SELECT * FROM items WHERE list='C'"),
+            "a partition neither held nor waiting is not here at all"
+        );
     }
     fn bound(params: &[SqlValue]) -> Vec<rusqlite::types::Value> {
         params
@@ -1136,9 +1149,12 @@ mod tests {
             &prepare(sql, &[]).unwrap(),
             &prepare(sql, &[]).unwrap()
         ));
-        // A held value never fills a parameter the caller left out.
         let short = check_with_views(sql, &params[..1], &rules(), &[]).unwrap();
-        assert_eq!(short.params, params[..1]);
+        assert_eq!(
+            short.params,
+            params[..1],
+            "a held value never fills a parameter the caller left out"
+        );
         assert!(
             conn.query_row(
                 &short.sql,
@@ -1165,22 +1181,24 @@ mod tests {
             SqlValue::Blob(Vec::new()),
         ];
         for value in values {
-            // Through the parser and back, as a filter is.
             let sql = parse(&format!("SELECT {}", held_value(&value)))
                 .unwrap()
                 .to_string();
             let read = conn
                 .query_row(&sql, [], |row| row.get::<_, rusqlite::types::Value>(0))
                 .unwrap();
-            assert_eq!(vec![read], bound(std::slice::from_ref(&value)), "{sql}");
+            assert_eq!(
+                vec![read],
+                bound(std::slice::from_ref(&value)),
+                "{sql}: reads back through the parser, as a filter does"
+            );
         }
     }
     /// Holdings past SQLite's variable limit still filter: the statement
     /// binds the caller's parameters only, however many partitions are held.
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn holdings_past_the_variable_limit_bind_no_parameters() {
-        // The bundled engine's SQLITE_MAX_VARIABLE_NUMBER.
-        const LIMIT: usize = 32766;
+        const SQLITE_MAX_VARIABLE_NUMBER: usize = 32766;
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE items(list TEXT COLLATE NOCASE,pos REAL,tag BLOB,amount INTEGER);
@@ -1195,7 +1213,7 @@ mod tests {
                 collation: rocky_core::Collation::Nocase,
             },
         };
-        let mut held: Vec<Vec<SqlValue>> = (0..LIMIT as i64 + 10)
+        let mut held: Vec<Vec<SqlValue>> = (0..SQLITE_MAX_VARIABLE_NUMBER as i64 + 10)
             .map(|index| {
                 vec![
                     SqlValue::Text(format!("filler-{index}")),
@@ -1238,8 +1256,11 @@ mod tests {
             &[],
         )
         .unwrap();
-        // The bound parameters are the caller's alone.
-        assert_eq!(checked.params.len(), params.len());
+        assert_eq!(
+            checked.params.len(),
+            params.len(),
+            "the bound parameters are the caller's alone"
+        );
         let sum = conn
             .query_row(
                 &checked.sql,
@@ -1247,8 +1268,11 @@ mod tests {
                 |row| row.get::<_, i64>(0),
             )
             .unwrap();
-        // NOCASE matches 'X''1'; the BLOB and REAL values match exactly.
-        assert_eq!(sum, 1 + 2 + 8);
+        assert_eq!(
+            sum,
+            1 + 2 + 8,
+            "NOCASE matches 'X''1'; the BLOB and REAL values match exactly"
+        );
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn nested_views_are_expanded_and_cycles_refused() {

@@ -1,6 +1,9 @@
 use super::*;
 use crate::network::{PublicationOutcome, link};
 
+/// Exceeds 64 KiB only together with the parameter copy in the signed SQL intent.
+const TITLE_BYTES_DOUBLED_BY_THE_SIGNED_INTENT: usize = 36 * 1024;
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn publication_delivers_an_individual_operation_above_64_kib() {
     let f = Typed::new();
@@ -13,8 +16,7 @@ async fn publication_delivers_an_individual_operation_above_64_kib() {
         .open(&dir.path().join("b.db"), &bob, f.full(), &[f.items])
         .await;
     let cursor = b.frontier(f.items).await.unwrap();
-    // The signed SQL intent also carries its encoded parameter bytes.
-    let title = "x".repeat(36 * 1024);
+    let title = "x".repeat(TITLE_BYTES_DOUBLED_BY_THE_SIGNED_INTENT);
     insert(
         &sql(&a, &[f.items]).await,
         "INSERT INTO items VALUES('large',?,0)",

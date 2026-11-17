@@ -9,7 +9,7 @@ const CASE: &str = "ROCKY_RELOCATION_CRASH_STEP";
 const DIR: &str = "ROCKY_RELOCATION_CRASH_DIR";
 
 /// Does nothing in an ordinary run; a parent test selects where to die.
-// Needs threads, which a browser Worker lacks.
+/// Needs threads, which a browser Worker lacks.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crash_child() {
@@ -79,7 +79,6 @@ async fn an_interrupted_migration_resumes_from_every_step() {
             rocky_platform::fs::copy(entry.path(), dir.path().join(entry.file_name())).unwrap();
         }
         crash(step, dir.path());
-        // Neither assignment opens while the migration is pending.
         for file in [0, 2] {
             assert!(
                 matches!(serve(&path, file).await, Err(Error::Incompatible(_))),
@@ -90,10 +89,13 @@ async fn an_interrupted_migration_resumes_from_every_step() {
             scope: test_scope(0),
             file: 3,
         }];
-        assert!(matches!(
-            migrate_placement(&path, other).await,
-            Err(Error::Incompatible(_))
-        ));
+        assert!(
+            matches!(
+                migrate_placement(&path, other).await,
+                Err(Error::Incompatible(_))
+            ),
+            "neither assignment opens while the migration is pending"
+        );
         assert_eq!(
             migrate_placement(&path, Vec::new()).await.unwrap(),
             placed(2)
@@ -113,7 +115,6 @@ async fn an_interrupted_migration_resumes_from_every_step() {
             assert!(replica.audit().await.unwrap().recomputed, "step {step}");
         }
         runtime.close().await.unwrap();
-        // The file the domain left keeps only the other domain's tables.
         let left = crate::sqlite::Connection::open(&path).unwrap();
         let moved = format!("{}\\_%", crate::runtime::namespace(test_scope(0)));
         let stayed = format!("{}\\_%", crate::runtime::namespace(test_scope(1)));
@@ -121,7 +122,11 @@ async fn an_interrupted_migration_resumes_from_every_step() {
             let sql = "SELECT count(*) FROM sqlite_schema WHERE name LIKE ? ESCAPE '\\'";
             left.rows(sql, [like]).unwrap()
         };
-        assert_eq!(count(moved), [[crate::sqlite::Value::Integer(0)]]);
+        assert_eq!(
+            count(moved),
+            [[crate::sqlite::Value::Integer(0)]],
+            "the file the domain left keeps only the other domain's tables"
+        );
         assert_ne!(count(stayed), [[crate::sqlite::Value::Integer(0)]]);
     }
 }

@@ -501,8 +501,10 @@ mod tests {
             hello.requirements(),
             (PeerTrust::Public, PeerAdmission::Metadata)
         );
-        // A hello never takes a sealed answer or a shared link reply.
-        assert!(!hello.accepts(&PeerReply::Identity(IdentityReply::ConfirmationRequired)));
+        assert!(
+            !hello.accepts(&PeerReply::Identity(IdentityReply::ConfirmationRequired)),
+            "a hello never takes a sealed answer"
+        );
         assert!(!hello.accepts(&PeerReply::Identity(IdentityReply::Enrolled(Vec::new()))));
         let root = crate::RootKey::from_secret([1; 32]);
         let owner = root.identity();
@@ -541,11 +543,10 @@ mod tests {
                 answer
             ))))
         );
-        // The other paths keep the trust they had: personal bootstrap is no
-        // credential for epochs, renewal, unlink or a staged close.
         assert_eq!(
             PeerRequest::Policy.requirements(),
-            (PeerTrust::Public, PeerAdmission::Metadata)
+            (PeerTrust::Public, PeerAdmission::Metadata),
+            "personal bootstrap is no credential for the other paths"
         );
         assert_eq!(
             PeerRequest::Unlink(RevocationSet::default()).requirements(),

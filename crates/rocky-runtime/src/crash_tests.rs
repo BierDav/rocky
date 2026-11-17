@@ -35,7 +35,7 @@ fn child(case: &str, dir: &Scratch) -> Child {
 }
 
 /// Does nothing in an ordinary run; a parent test selects the case to die in.
-// Needs threads, which a browser Worker lacks.
+/// Needs threads, which a browser Worker lacks.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crash_child() {
@@ -82,10 +82,10 @@ async fn crash_child() {
     }
     if case == "page" {
         let page = crate::write_concurrency_tests::peer_operations(dir, GROUP).await;
-        // Dies after half of the page's receipts released their savepoints.
+        let half_the_page_released = GROUP as usize / 2;
         crate::tests::fault(
             &replica,
-            worker::Fault::AbortAfterWrites(GROUP as usize / 2),
+            worker::Fault::AbortAfterWrites(half_the_page_released),
         )
         .await;
         let _ = replica.receive_page(page).await;
@@ -103,13 +103,18 @@ async fn crash_child() {
             .await
             .unwrap();
         }
-        // A reader at the newest frame lets the checkpoint copy every frame,
-        // then makes it wait to reset the log, where the process dies.
-        let reader = crate::sqlite::Connection::open_read_only(&dir.join("crash.db")).unwrap();
-        reader.execute("BEGIN", ()).await.unwrap();
-        crate::tests::rows(&reader, "SELECT COUNT(*) FROM sqlite_schema")
+        let reader_blocking_log_reset =
+            crate::sqlite::Connection::open_read_only(&dir.join("crash.db")).unwrap();
+        reader_blocking_log_reset
+            .execute("BEGIN", ())
             .await
             .unwrap();
+        crate::tests::rows(
+            &reader_blocking_log_reset,
+            "SELECT COUNT(*) FROM sqlite_schema",
+        )
+        .await
+        .unwrap();
         let (reply, injected) = oneshot::channel();
         enqueue(
             &replica.inner.commands,
@@ -121,14 +126,12 @@ async fn crash_child() {
         panic!("the checkpoint did not end the process");
     }
     let fault = match case.as_str() {
-        // Steps alternate between the domains, so this dies after steps of both.
         "mid-group" => worker::Fault::AbortAfterWrites(GROUP as usize / 2),
         "before-commit" => worker::Fault::AbortBeforeCommit,
         "after-commit" => worker::Fault::AbortAfterCommit,
         other => panic!("unknown crash case {other}"),
     };
-    // One mutation commits alone; the fault then meets the group queued behind it.
-    let (first, resume) = pause(&replica).await;
+    let (committed_alone, resume) = pause(&replica).await;
     let (reply, injected) = oneshot::channel();
     enqueue(&replica.inner.commands, Command::Fault(fault, reply)).unwrap();
     let queued: Vec<_> = (0..GROUP)
@@ -141,7 +144,7 @@ async fn crash_child() {
         })
         .collect();
     resume.send(()).unwrap();
-    first.committed().await.unwrap();
+    committed_alone.committed().await.unwrap();
     injected.await.unwrap().unwrap();
     for receipt in queued {
         let _ = receipt.committed().await;
@@ -224,7 +227,6 @@ async fn group_dies(case: &str, survives: bool) {
             .chain(&other)
             .all(|found| found.is_some() == survives)
     );
-    // Retrying each handle returns the committed operation or commits it once.
     let replicas = [
         runtime.domain(scope(1)).unwrap(),
         runtime.domain(scope(2)).unwrap(),
@@ -247,7 +249,10 @@ async fn group_dies(case: &str, survives: bool) {
     runtime.close().await.unwrap();
     let (runtime, found) = recovered(&dir, &first).await;
     let other = consistent(&runtime.domain(scope(2)).unwrap(), &second).await;
-    assert!(found.iter().chain(&other).all(Option::is_some));
+    assert!(
+        found.iter().chain(&other).all(Option::is_some),
+        "retrying each handle returns the committed operation or commits it once"
+    );
     runtime.close().await.unwrap();
 }
 
@@ -271,7 +276,6 @@ async fn death_inside_a_checkpoint_keeps_every_committed_handle() {
     let dir = Scratch::new().await;
     let status = child("checkpoint", &dir).wait().unwrap();
     assert_eq!(status.signal(), Some(6), "child must abort: {status:?}");
-    // It died after copying the log into the database file, before resetting it.
     let copy = dir.path().join("copy.db");
     rocky_platform::fs::copy(dir.path().join("crash.db"), &copy).unwrap();
     let copied = crate::scoped_connection::ScopedConnection::new(
@@ -283,7 +287,8 @@ async fn death_inside_a_checkpoint_keeps_every_committed_handle() {
         crate::storage::rows(&copied, "SELECT COUNT(*) FROM rocky_operations")
             .await
             .unwrap(),
-        vec![vec![rocky_core::SqlValue::Integer(i64::from(GROUP / 2))]]
+        vec![vec![rocky_core::SqlValue::Integer(i64::from(GROUP / 2))]],
+        "it died after copying the log into the database file, before resetting it"
     );
     let mut wal = dir.path().join("crash.db").into_os_string();
     wal.push("-wal");
@@ -336,9 +341,8 @@ async fn killed_writers_keep_every_acknowledged_group() {
         let acknowledged = || {
             let text = rocky_platform::fs::read_to_string(dir.path().join("acknowledged"))
                 .unwrap_or_default();
-            // A line without its newline may be a torn final write.
-            let complete = text.rfind('\n').map_or("", |end| &text[..end]);
-            complete
+            let without_torn_final_write = text.rfind('\n').map_or("", |end| &text[..end]);
+            without_torn_final_write
                 .lines()
                 .map(|line| line.parse::<usize>().unwrap())
                 .collect::<Vec<_>>()

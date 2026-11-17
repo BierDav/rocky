@@ -171,7 +171,6 @@ impl Domain {
             )
             .await;
         }
-        // B collects both envelopes from A.
         sync(&b).await?;
         Ok(Self { a, b })
     }

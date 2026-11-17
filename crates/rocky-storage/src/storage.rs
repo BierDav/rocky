@@ -310,6 +310,8 @@ pub async fn finish_raw<T>(
     }
     result
 }
+/// Commits after `result` succeeded, otherwise rolls back unless SQLite
+/// already ended the transaction itself, as after a full disk.
 pub async fn finish<T>(conn: &Connection, result: Result<T, Error>) -> Result<T, Error> {
     let result = match result {
         Ok(value) => match conn.execute("COMMIT", ()).await {
@@ -318,8 +320,8 @@ pub async fn finish<T>(conn: &Connection, result: Result<T, Error>) -> Result<T,
         },
         Err(e) => Err(e),
     };
-    // SQLite ends the transaction itself after some errors, such as a full disk.
-    if conn.is_autocommit()? {
+    let sqlite_already_ended_transaction = conn.is_autocommit()?;
+    if sqlite_already_ended_transaction {
         return result;
     }
     if let Err(rollback) = conn.execute("ROLLBACK", ()).await {

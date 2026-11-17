@@ -35,6 +35,9 @@ impl Node {
         }
         Ok(name)
     }
+    /// Resolves the group partition `target` names, under its known name, a
+    /// sealed or created one, or the one a custody offer names. Issuers derive
+    /// the same name for every partition an issuer creates.
     async fn group_partition(
         &self,
         target: &crate::PartitionTarget,
@@ -60,7 +63,6 @@ impl Node {
             match known.get(&record_key(address)) {
                 Some(record) => Ok(record.name),
                 None if let Naming::Sealed(name) = naming => Ok(name),
-                // Issuers name every partition an issuer creates alike.
                 None if naming == Naming::Create || issuer => {
                     Ok(rocky_secure::created_name(&naming_key, address))
                 }
@@ -209,6 +211,8 @@ impl Node {
         })
         .await
     }
+    /// An issuer grants and delegates through its authority, and records the
+    /// holder durably before the chain leaves it.
     pub(super) async fn issue_partitions(
         &self,
         device: crate::NodeKeys,
@@ -257,7 +261,6 @@ impl Node {
                         &families,
                     )?)
                 } else {
-                    // An issuer grants and delegates through its authority.
                     let authority = settings.authority(&node)?;
                     let issue = if self.domain().families.is_empty() {
                         rocky_credentials::Authority::issue_partition_terms
@@ -275,7 +278,6 @@ impl Node {
                 }
             })
             .await?;
-        // An issuer records the holder durably before the chain leaves it.
         if settings.issuer() {
             Box::pin(self.record_holder(&device, &grants, delegations, &chain)).await?;
         }
@@ -294,8 +296,9 @@ impl Node {
         };
         Ok(supplied)
     }
-    /// Prepares the group secret after issuer or own-id insert authorization: the current epoch of a known
-    /// partition, otherwise the first.
+    /// Prepares the group secret after issuer or own-id insert authorization:
+    /// the current epoch of a known partition, otherwise the first. Sessions
+    /// name the partition only once the replica grants it.
     async fn create_group(
         &self,
         partition: GroupPartition,
@@ -341,7 +344,6 @@ impl Node {
         let partition = GroupPartition::of(&self.domain(), &record)?;
         self.hold_keys(&settings, std::slice::from_ref(&partition))
             .await?;
-        // Sessions name the partition only once the replica grants it.
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = granted;
         Ok(crate::PreparedPartition {
             address: record_key(&record.address),
@@ -352,6 +354,7 @@ impl Node {
     /// Accepts one group envelope after it opens and the device reads every
     /// member in whole; only then is anything registered or stored. Returns
     /// whether it was new: an epoch already held installs nothing again.
+    /// Sessions name the partition only once the replica grants it.
     pub(super) async fn install_envelope(
         &self,
         partition: GroupPartition,
@@ -450,12 +453,12 @@ impl Node {
         let partition = GroupPartition::of(&self.domain(), &record)?;
         self.hold_keys(&settings, std::slice::from_ref(&partition))
             .await?;
-        // Sessions name the partition only once the replica grants it.
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = granted;
         Ok(true)
     }
-    /// Seals the current epoch's group secret to each recipient and saves
-    /// the deliveries before any network call; sync delivers them.
+    /// Seals the current epoch's group secret to each recipient and saves the
+    /// deliveries before any network call; sync delivers them. Every sharer, an
+    /// issuer too, signs with its node key under its chain.
     async fn share(
         &self,
         partition: GroupPartition,
@@ -509,7 +512,6 @@ impl Node {
             .get(&secret_role(&record.address, epoch))
             .cloned()
             .unwrap_or_default();
-        // Every sharer, an issuer too, signs with its node key under its chain.
         let sender = Some(settings.credentials.clone());
         let signer = PrivateKey::from_bytes(&self.vault.get("node")?);
         let secret = self.vault.get(&secret_role(&record.address, epoch))?;
@@ -893,7 +895,9 @@ impl Node {
         }
     }
     /// Saves a checkpoint-first intent for the covered members this device
-    /// reads; the next sync imports them before catching up.
+    /// reads; the next sync imports them before catching up. Later partitions
+    /// join a pending intent; one without a scope list covers every granted
+    /// scope.
     async fn bootstrap_partition(&self, covered: &[&crate::groups::Member]) -> Result<(), Failure> {
         let domain = self.domain();
         let added: Vec<ResourceScope> = {
@@ -908,14 +912,12 @@ impl Node {
     }
     fn save_bootstrap(&self, added: Vec<ResourceScope>) -> Result<(), Failure> {
         let marker = self.path.with_file_name("bootstrap.json");
-        // Later partitions join a pending checkpoint-first intent.
         let mut intent = if rocky_platform::fs::exists(&marker) {
             serde_json::from_slice::<Value>(&rocky_platform::fs::read(&marker)?)?
         } else {
             json!({"intent": true, "pending": []})
         };
         let Some(pending) = intent.get_mut("pending").and_then(Value::as_array_mut) else {
-            // An intent without a scope list covers every granted scope.
             return Ok(());
         };
         for scope in &added {

@@ -73,8 +73,10 @@ fn a_holder_claims_only_its_counters_of_its_domain() {
     );
     assert!(claim("credits", 3, node.public_key()).is_err());
     assert!(claim("invoices", 4, node.public_key()).is_err());
-    // Another node, the identity itself or another publisher are refused.
-    assert!(claim("invoices", 3, holder.public_key()).is_err());
+    assert!(
+        claim("invoices", 3, holder.public_key()).is_err(),
+        "another node is refused as claimant"
+    );
     assert!(
         chain
             .claimant(
@@ -97,12 +99,12 @@ fn a_holder_claims_only_its_counters_of_its_domain() {
         )
         .is_ok()
     );
-    // A claim chain grants nothing in the domain itself.
     assert!(
         chain
             .verify(owner.public_key(), node.public_key(), &none, NOW)
             .unwrap()
-            .is_empty()
+            .is_empty(),
+        "a claim chain grants nothing in the domain itself"
     );
 }
 
@@ -123,8 +125,6 @@ fn claim_links_expire_within_a_day_and_end_with_their_revocation() {
     assert!(at(NOW + CLAIM_LIFETIME - 1, &none).is_ok());
     assert!(at(NOW + CLAIM_LIFETIME, &none).is_err());
 
-    // Issuing refuses a longer link, and a longer link signed by hand is
-    // refused by every verifier.
     assert!(
         Authority::owner_in(
             &owner,
@@ -135,7 +135,8 @@ fn claim_links_expire_within_a_day_and_end_with_their_revocation() {
         )
         .unwrap()
         .issue_claims(holder.public_key(), every(), 1, (NOW, CLAIM_LIFETIME + 1),)
-        .is_err()
+        .is_err(),
+        "issuing refuses a longer link"
     );
     let mut long = chain.0[0].capability.clone();
     long.expires = long.not_before + CLAIM_LIFETIME + CLAIM_SKEW + 1;
@@ -152,7 +153,6 @@ fn claim_links_expire_within_a_day_and_end_with_their_revocation() {
         )
         .is_err()
     );
-    // Nor does a claim link carry grants.
     let mut granting = chain.0[0].capability.clone();
     granting.grants = vec![rocky_core::ResourceGrant {
         scope: rocky_core::ResourceScope {
@@ -165,7 +165,10 @@ fn claim_links_expire_within_a_day_and_end_with_their_revocation() {
         fields: rocky_core::FieldSelection::All,
     }];
     let granting = CredentialChain(vec![SignedCapability::sign(granting, &owner).unwrap()]);
-    assert!(granting.links(owner.public_key(), None).is_err());
+    assert!(
+        granting.links(owner.public_key(), None).is_err(),
+        "a claim link carries no grants"
+    );
 
     let statement = SignedRevocation::sign(
         Revocation {
@@ -237,13 +240,14 @@ fn delegation_never_exceeds_the_delegators_claim_right() {
     };
     assert_eq!(claim(&chain, "invoices").unwrap(), delegate.public_key());
     assert!(claim(&chain, "credits").is_err());
-    // Wider counters, every counter or another domain are refused.
-    assert!(delegate_with(only(&["invoices", "refunds"])).is_err());
+    assert!(
+        delegate_with(only(&["invoices", "refunds"])).is_err(),
+        "wider counters are refused"
+    );
     assert!(delegate_with(every()).is_err());
     let mut elsewhere = only(&["invoices"]);
     elsewhere.scope = scope(4);
     assert!(delegate_with(elsewhere).is_err());
-    // A delegate with no delegation left delegates nothing further.
     assert!(
         narrowed
             .delegate_claims(
@@ -253,9 +257,9 @@ fn delegation_never_exceeds_the_delegators_claim_right() {
                 1,
                 (NOW, CLAIM_LIFETIME),
             )
-            .is_err()
+            .is_err(),
+        "a delegate with no delegation left delegates nothing further"
     );
-    // A wider link signed by hand under the holder is refused by verifiers.
     let mut wide = narrowed.0[1].capability.clone();
     wide.extension = Extension::new(Extended {
         claims: Some(every()),
@@ -268,7 +272,10 @@ fn delegation_never_exceeds_the_delegators_claim_right() {
     ])
     .certify_claims(&delegate, node.public_key())
     .unwrap();
-    assert!(claim(&wide, "refunds").is_err());
+    assert!(
+        claim(&wide, "refunds").is_err(),
+        "a wider link signed by hand under the holder is refused by verifiers"
+    );
     assert!(claim(&wide, "invoices").is_err());
 }
 
@@ -318,12 +325,14 @@ fn an_issuer_grants_claims_and_a_node_certificate_carries_none() {
             .unwrap(),
         holder.public_key()
     );
-    // A node certificate that names a claim right itself is malformed.
     let mut leaf = chain.0[2].capability.clone();
     let mut extended = leaf.extended().unwrap();
     extended.claims = Some(every());
     leaf.extension = Extension::new(extended).unwrap();
-    assert!(SignedCapability::sign(leaf, &holder).is_err());
+    assert!(
+        SignedCapability::sign(leaf, &holder).is_err(),
+        "a node certificate that names a claim right itself is malformed"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -359,8 +368,6 @@ fn revoking_a_grant_ends_every_issuers_links_of_it_and_no_other_grant() {
             .certify_claims(&holder, node.public_key())
             .unwrap()
     };
-    // The first issuer signs the right; the second renews it after the
-    // first link's lifetime.
     let first = chain(&issuers[0], every(), NOW);
     let later = NOW + CLAIM_LIFETIME + 60;
     let renewed = chain(&issuers[1], every(), later);

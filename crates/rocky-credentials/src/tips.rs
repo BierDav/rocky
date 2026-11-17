@@ -339,10 +339,8 @@ macro_rules! signed_statement {
                 if let Some(link) = &self.link {
                     link.validate()?;
                 }
-                // A cut chain's statements are judged by the cut, not refused;
-                // only the identity the cut names signs on that chain.
                 let signer = self.endorsement.signer(publisher);
-                let current = current.filter(|(revocations, _)| {
+                let current_unless_cut = current.filter(|(revocations, _)| {
                     self.link
                         .is_none_or(|link| revocations.cut(&signer, &link.lane).is_none())
                 });
@@ -351,7 +349,7 @@ macro_rules! signed_statement {
                     self.statement.scope,
                     $label,
                     &(&self.statement, &self.link),
-                    current,
+                    current_unless_cut,
                 )?;
                 if self.link.is_some_and(|link| Some(link.lane) != node) {
                     return Err(denied("a chained statement's lane is its signing node"));
@@ -564,11 +562,12 @@ struct Walk {
     held: Vec<(u64, Option<Commitment>)>,
 }
 impl Walk {
+    /// Hash IDs cannot cycle; the walk stops after `links.len()` items
+    /// only to guard against a hang.
     fn new(links: &BTreeMap<Commitment, (PublicKey, ChainLink)>, head: &Head) -> Self {
         let mut held = Vec::new();
         let mut cursor = Some(head.id);
         let mut lowest = u64::MAX;
-        // IDs are hashes, so a walk cannot cycle; the bound only stops a hang.
         while let Some(id) = cursor.filter(|_| held.len() <= links.len()) {
             let Some((_, link)) = links.get(&id) else {
                 break;
@@ -607,8 +606,8 @@ fn beyond(walks: &[Walk], link: &ChainLink, id: Commitment) -> bool {
         if walk.head.id == id {
             return false;
         }
-        // A head reaches only lower places.
-        if link.sequence < walk.head.sequence && walk.reaches(link.sequence, id) {
+        let below_head = link.sequence < walk.head.sequence;
+        if below_head && walk.reaches(link.sequence, id) {
             return false;
         }
     }
@@ -828,15 +827,15 @@ impl TipGraph {
     /// Refuses a chained statement whose predecessor in its lane, signed
     /// by the same identity one place before, the graph lacks, or that
     /// enters a stage branch other than by continuing it or by being the
-    /// seal `opens` names its tag.
+    /// seal `opens` names its tag. The predecessor may sit on any branch of
+    /// the lane: a stage branches off the live chain, which continues after a
+    /// published stage.
     pub(crate) fn check_predecessor(
         &self,
         signer: PublicKey,
         link: &ChainLink,
         opens: Option<Commitment>,
     ) -> Result<(), Error> {
-        // A stage branch starts at its own schema seal; a statement enters
-        // it only by continuing it.
         let enters = |held: Option<Commitment>| {
             link.stage
                 .is_none_or(|stage| held == Some(stage) || opens == Some(stage))
@@ -847,8 +846,6 @@ impl TipGraph {
                 false => Err(denied("a stage branch opens with its own schema seal")),
             };
         };
-        // On any branch of the same identity's lane: a stage branches off
-        // the live chain, which continues after a published stage.
         let index = self.indexed()?;
         let Some((identity, held)) = index.links.get(&previous) else {
             return Err(denied(
@@ -1020,28 +1017,14 @@ impl TipGraph {
         };
         revoked.extend(judge(&statements, &kept_statements, false)?);
         let ended_acks = judge(&acknowledgments, &kept_acks, true)?;
-        // Unchained statements: the owner's and issuers'.
         for (id, chain, link) in self.signed() {
-            if link.is_none() && revocations.ends_chain(chain)? {
+            let unchained = link.is_none();
+            if unchained && revocations.ends_chain(chain)? {
                 revoked.insert(id()?);
             }
         }
-        // Revoked acknowledgments no longer count toward a seal's finality,
-        // nor revoked genesis lines toward its minimum.
-        let statements_revoked = revoked.clone();
-        for record in &self.finalities {
-            let minimum = match self.finality_minimum_in(record, &statements_revoked) {
-                Ok(minimum) => minimum,
-                Err(_) => continue,
-            };
-            let mut ended = 0;
-            for ack in &record.acknowledgments {
-                ended += usize::from(ended_acks.contains(&ack.id()?));
-            }
-            if record.acknowledgments.len() - ended < minimum {
-                revoked.insert(record.id()?);
-            }
-        }
+        let unfinal = self.unfinal_records(&revoked, &ended_acks)?;
+        revoked.extend(unfinal);
         let changed = revoked != self.revoked;
         self.revoked = revoked;
         self.past_cut = past_cut;
@@ -1174,7 +1157,6 @@ impl TipGraph {
         pinned: &BTreeSet<Commitment>,
     ) -> Result<BTreeSet<Commitment>, Error> {
         let index = self.indexed()?;
-        // Only the chains a cut names hold statements past it.
         let mut prunable = BTreeSet::new();
         for ((identity, lane), heads) in revocations.cut_lanes() {
             let Some(ids) = index.lanes.get(&(*identity, *lane)) else {
@@ -1189,8 +1171,7 @@ impl TipGraph {
                 }
             }
         }
-        // What a kept statement refers to stays, and so on.
-        let mut needed: Vec<Commitment> = prunable
+        let mut referenced_by_kept: Vec<Commitment> = prunable
             .iter()
             .filter(|id| {
                 index
@@ -1200,9 +1181,9 @@ impl TipGraph {
             })
             .copied()
             .collect();
-        while let Some(id) = needed.pop() {
+        while let Some(id) = referenced_by_kept.pop() {
             if prunable.remove(&id) {
-                needed.extend(
+                referenced_by_kept.extend(
                     index
                         .refs
                         .get(&id)
@@ -1461,6 +1442,29 @@ impl TipGraph {
         }
         Ok(owner.or(trusted))
     }
+    /// The finality records that fall below their minimum once revoked
+    /// acknowledgments stop counting and revoked genesis lines stop setting
+    /// the minimum.
+    fn unfinal_records(
+        &self,
+        revoked: &BTreeSet<Commitment>,
+        ended_acks: &BTreeSet<Commitment>,
+    ) -> Result<Vec<Commitment>, Error> {
+        let mut unfinal = Vec::new();
+        for record in &self.finalities {
+            let Ok(minimum) = self.finality_minimum_in(record, revoked) else {
+                continue;
+            };
+            let mut ended = 0;
+            for ack in &record.acknowledgments {
+                ended += usize::from(ended_acks.contains(&ack.id()?));
+            }
+            if record.acknowledgments.len() - ended < minimum {
+                unfinal.push(record.id()?);
+            }
+        }
+        Ok(unfinal)
+    }
     fn finality_minimum(&self, record: &SealFinality) -> Result<usize, Error> {
         self.finality_minimum_in(record, &self.revoked)
     }
@@ -1568,12 +1572,10 @@ impl TipGraph {
     pub fn schema_any(&self, tip: TipId) -> Result<Commitment, Error> {
         self.schema_inner(tip, false)
     }
-    fn schema_inner(&self, tip: TipId, active: bool) -> Result<Commitment, Error> {
-        if tip == self.genesis() {
-            return Ok(self.genesis_schema);
-        }
-        // Each ancestor lookup otherwise rehashes every earlier signed seal.
-        let mut continuations = std::collections::BTreeMap::new();
+    /// This scope's first seal of each continuation, built once per walk:
+    /// looking up each ancestor's seal otherwise rehashes every earlier one.
+    fn seals_by_continuation(&self) -> BTreeMap<TipId, &SignedSeal> {
+        let mut continuations = BTreeMap::new();
         for seal in &self.seals {
             if seal.statement.scope == self.scope
                 && let Ok(Some(successor)) = seal.successor()
@@ -1581,6 +1583,13 @@ impl TipGraph {
                 continuations.entry(successor).or_insert(seal);
             }
         }
+        continuations
+    }
+    fn schema_inner(&self, tip: TipId, active: bool) -> Result<Commitment, Error> {
+        if tip == self.genesis() {
+            return Ok(self.genesis_schema);
+        }
+        let continuations = self.seals_by_continuation();
         let mut cursor = tip;
         let mut requested = None;
         let mut visited = std::collections::BTreeSet::new();
@@ -1738,8 +1747,8 @@ impl TipGraph {
     }
     /// A losing forward continuation resolves to the winner's continuation.
     pub fn canonical_tip(&self, tip: TipId) -> Result<TipId, Error> {
-        // Active ancestry also proves structural ancestry; valid tips need one walk.
-        if self.schema(tip).is_ok() {
+        let actively_valid = self.schema(tip).is_ok();
+        if actively_valid {
             return Ok(tip);
         }
         self.schema_any(tip)?;
@@ -1827,6 +1836,14 @@ impl TipGraph {
     pub fn bookmark_path(&self, name: &str) -> Result<Vec<(TipId, TipId)>, Error> {
         Ok(self.bookmark_walk(name)?.2)
     }
+    /// The continuation the owner's recovery of `tip` carries its bookmarks
+    /// to, after any explicit move from `tip`.
+    fn recovery_continuation(&self, tip: TipId) -> Result<Option<TipId>, Error> {
+        match self.seal(tip)? {
+            Some(seal) if seal.statement.recovery.is_some() => seal.successor(),
+            _ => Ok(None),
+        }
+    }
     /// The target, losing moves and resolved edges of a bookmark.
     fn bookmark_walk(&self, name: &str) -> Result<BookmarkWalk<'_>, Error> {
         let mut cursor = None;
@@ -1871,12 +1888,8 @@ impl TipGraph {
                     cursor = target;
                 }
                 None => {
-                    // The owner's recovery carries the tip's bookmarks to
-                    // its continuation; an explicit move from it comes first.
                     if let Some(tip) = cursor
-                        && let Some(seal) = self.seal(tip)?
-                        && seal.statement.recovery.is_some()
-                        && let Some(next) = seal.successor()?
+                        && let Some(next) = self.recovery_continuation(tip)?
                     {
                         path.push((tip, next));
                         cursor = Some(next);

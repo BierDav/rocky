@@ -3,9 +3,10 @@ use super::*;
 use crate::network::holdings::{HoldingProof, key_proof};
 
 impl<A: RowApplication> EncryptedReplica<A> {
+    /// Whether a peer must prove holding `scope`: partitioned and unknown
+    /// scopes need proof, known unpartitioned tables keep their grant-only rule.
     pub(crate) async fn holding_required(&self, scope: ResourceScope) -> bool {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
-        // Known unpartitioned tables retain their grant-only rule.
         if inner.partitioned(scope) {
             return true;
         }
@@ -64,9 +65,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             };
             let grants =
                 inner.partition_grants(&inner.config.credentials, own, *scope, &offer.1)?;
-            // The tuple and its naming secret go only to a peer entitled
-            // to the partition, never to one that merely asks.
-            let entitled = inner
+            let peer_entitled_to_partition = inner
                 .partition_grants(credentials, peer, *scope, &offer.1)
                 .is_ok_and(|grants| {
                     grants.iter().any(|g| {
@@ -75,7 +74,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                                 || g.rights.contains(&Right::Custody))
                     })
                 });
-            if entitled
+            if peer_entitled_to_partition
                 && grants.iter().any(|g| g.rights.contains(&Right::Custody))
                 && !grants.iter().any(|g| g.rights.contains(&Right::Read))
                 && !offers.iter().any(|(offered, ..)| offered == scope)

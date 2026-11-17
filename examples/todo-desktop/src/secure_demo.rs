@@ -12,6 +12,19 @@ use rocky_secure::{
 use std::{collections::BTreeSet, path::Path};
 use tokio::net::{TcpListener, TcpStream};
 
+/// A public fixture secret: this demo holds reproducible development data
+/// only.
+const FIXTURE_PUBLISHER: [u8; 32] = [81; 32];
+const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+/// Credentials live under a year; each start issues them afresh.
+const CREDENTIAL_LIFETIME: std::time::Duration = DAY.saturating_mul(300);
+
+/// Each permission set belongs to its own identity, apart from the node key
+/// `index` names.
+fn identity_key(index: u8) -> PrivateKey {
+    PrivateKey::from_bytes(&[index ^ 0x80; 32])
+}
+
 #[derive(Clone)]
 pub struct SecureDemo {
     pub admin: EncryptedReplica<Employees>,
@@ -23,8 +36,7 @@ pub struct SecureDemo {
 }
 impl SecureDemo {
     pub async fn open(dir: &Path) -> Result<Self, Error> {
-        // Public fixture secrets make this reproducible development data only.
-        let publisher = PrivateKey::from_bytes(&[81; 32]);
+        let publisher = PrivateKey::from_bytes(&FIXTURE_PUBLISHER);
         let app = Employees::new(*publisher.public_key().as_bytes());
         let scopes = [
             app.scope(MeshId([1; 16]), false),
@@ -73,8 +85,6 @@ impl SecureDemo {
             &publisher,
         )
         .map_err(signing)?;
-        // Credentials live at most a year; each start issues them afresh.
-        const DAY: u64 = 24 * 60 * 60;
         let time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| Error::Rejected("clock before the epoch".into()))?
@@ -83,8 +93,7 @@ impl SecureDemo {
                       grants: Vec<ResourceGrant>,
                       keys: Vec<KeyMaterial>|
          -> Result<SecureConfig, Error> {
-            // Different permissions belong to different identities.
-            let identity = PrivateKey::from_bytes(&[index ^ 0x80; 32]);
+            let identity = identity_key(index);
             let node = PrivateKey::from_bytes(&[index; 32]);
             let root = rocky_secure::credentials::Authority::owner(&publisher)
                 .issue(
@@ -92,8 +101,8 @@ impl SecureDemo {
                     grants,
                     rocky_secure::credentials::Validity {
                         issued_at: time,
-                        lifetime: std::time::Duration::from_secs(300 * DAY),
-                        clock_skew: std::time::Duration::from_secs(DAY),
+                        lifetime: CREDENTIAL_LIFETIME,
+                        clock_skew: DAY,
                     },
                 )
                 .map_err(signing)?;

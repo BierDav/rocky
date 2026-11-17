@@ -54,8 +54,8 @@ async fn an_interrupted_create_resumes_under_the_same_node_and_publication() -> 
 {
     let directory = rocky_platform::fs::Scratch::new().await;
     let store = Arc::new(Store::default());
-    // The capability is stored after the epochs and genesis are pinned.
-    *store.fail.lock().unwrap() = Some(".personal-discovery");
+    let stored_after_epochs_and_genesis_are_pinned = ".personal-discovery";
+    *store.fail.lock().unwrap() = Some(stored_after_epochs_and_genesis_are_pinned);
     let config = configuration(directory.path(), &store, "title");
     let Err(error) = config.create_personal(prf(1), namespace()).await else {
         return Err("the injected failure did not interrupt the create".into());
@@ -82,7 +82,6 @@ async fn an_interrupted_create_resumes_under_the_same_node_and_publication() -> 
         PrivateKey::from_bytes(&vault.get("node")?).public_key(),
         interrupted.node
     );
-    // No second device was prepared, and the finished intent is gone.
     let nodes = store
         .secrets
         .lock()
@@ -90,8 +89,11 @@ async fn an_interrupted_create_resumes_under_the_same_node_and_publication() -> 
         .keys()
         .filter(|name| name.ends_with(".node"))
         .count();
-    assert_eq!(nodes, 1);
-    assert!(Intent::load(directory.path())?.is_none());
+    assert_eq!(nodes, 1, "no second device was prepared");
+    assert!(
+        Intent::load(directory.path())?.is_none(),
+        "the finished intent is gone"
+    );
     Ok(())
 }
 
@@ -196,13 +198,12 @@ async fn a_sign_in_intent_resumes_its_node_publication_and_certificate() -> Resu
         .clone();
     first.certify(certificate.clone())?;
 
-    // Another node offered on retry is ignored: the saved one continues.
-    let other = PrivateKey::new();
+    let ignored_on_retry = PrivateKey::new();
     let mut again = Installing::sign_in(
         directory.path(),
         &store,
         (&account, capability()),
-        (&other, [8; 32]),
+        (&ignored_on_retry, [8; 32]),
     )?;
     assert!(again.resumed());
     assert_eq!(again.publication(), first.publication());
@@ -211,7 +212,6 @@ async fn a_sign_in_intent_resumes_its_node_publication_and_certificate() -> Resu
     let saved = Installing::saved_keys(directory.path(), &store, &account)?.ok_or("keys")?;
     assert_eq!(saved.0.public_key(), node.public_key());
     assert_eq!(saved.1, transport);
-    // A later import merges its epochs and keeps the certificate.
     let later = KeyEpoch::new(2, &[6; 32]);
     again.import([1; 32], BTreeMap::from([("notes".to_owned(), vec![later])]))?;
     assert_eq!(again.certificate(), Some(&certificate));
@@ -222,8 +222,11 @@ async fn a_sign_in_intent_resumes_its_node_publication_and_certificate() -> Resu
     else {
         return Err("the certified stage was not kept".into());
     };
-    assert_eq!(epochs["notes"], vec![epoch, later]);
-    // Another genesis conflicts and changes nothing.
+    assert_eq!(
+        epochs["notes"],
+        vec![epoch, later],
+        "a later import merges its epochs and keeps the certificate"
+    );
     let intent = std::fs::read(Intent::path(directory.path()))?;
     let Err(error) = again.import([2; 32], epochs.clone()) else {
         return Err("another genesis was imported".into());
@@ -232,12 +235,17 @@ async fn a_sign_in_intent_resumes_its_node_publication_and_certificate() -> Resu
         error.downcast_ref::<PersonalSignInError>(),
         Some(PersonalSignInError::GenesisConflict)
     ));
-    assert_eq!(std::fs::read(Intent::path(directory.path()))?, intent);
-    // Another account's intent is refused.
+    assert_eq!(
+        std::fs::read(Intent::path(directory.path()))?,
+        intent,
+        "another genesis conflicts and changes nothing"
+    );
     let stranger =
         PersonalAccount::derive(prf(2), &namespace()).map_err(|error| error.to_string())?;
-    assert!(Installing::saved_keys(directory.path(), &store, &stranger).is_err());
-    // A revoked node's install goes with its keys and partition secrets.
+    assert!(
+        Installing::saved_keys(directory.path(), &store, &stranger).is_err(),
+        "another account's intent is refused"
+    );
     let vault = Vault::new(store.clone(), again.installation());
     let secret = crate::groups::secret_role(&[3; 32], later);
     again.hold_secrets([([3; 32], later)])?;
@@ -245,8 +253,14 @@ async fn a_sign_in_intent_resumes_its_node_publication_and_certificate() -> Resu
     discard(directory.path(), &store)?;
     assert!(Intent::load(directory.path())?.is_none());
     assert!(Installing::saved_keys(directory.path(), &store, &account)?.is_none());
-    assert!(vault.find("node")?.is_none());
-    assert!(vault.find(&secret)?.is_none());
+    assert!(
+        vault.find("node")?.is_none(),
+        "a revoked node's install goes with its keys"
+    );
+    assert!(
+        vault.find(&secret)?.is_none(),
+        "a revoked node's install goes with its partition secrets"
+    );
     Ok(())
 }
 
@@ -271,7 +285,6 @@ async fn a_create_and_a_sign_in_never_resume_each_others_intent() -> Result<(), 
     );
     assert_eq!(std::fs::read(&path)?, created);
 
-    // A sign-in's intent is no create's to resume.
     let other = rocky_platform::fs::Scratch::new().await;
     let account =
         PersonalAccount::derive(prf(1), &namespace()).map_err(|error| error.to_string())?;
@@ -294,11 +307,10 @@ async fn a_create_and_a_sign_in_never_resume_each_others_intent() -> Result<(), 
     };
     assert!(
         matches!(error, PersonalSignInError::ExistingState),
-        "{error}"
+        "a sign-in's intent is no create's to resume: {error}"
     );
     assert_eq!(std::fs::read(Intent::path(other.path()))?, signing_in);
     assert!(!other.path().join("identity.json").exists());
-    // The create itself still resumes.
     config
         .create_personal(prf(1), namespace())
         .await?

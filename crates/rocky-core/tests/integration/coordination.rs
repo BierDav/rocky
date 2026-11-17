@@ -16,8 +16,11 @@ fn request_sequences_carry_issue_time_and_strictly_increase() {
     assert_eq!(issued_at(first), now);
     let second = next_request_sequence(first, now).unwrap().get();
     assert_eq!((second, issued_at(second)), (first + 1, now));
-    // A clock that moved backwards keeps the sequence increasing.
     let third = next_request_sequence(second, now - 60).unwrap().get();
-    assert_eq!((third, issued_at(third)), (second + 1, now));
+    assert_eq!(
+        (third, issued_at(third)),
+        (second + 1, now),
+        "a clock that moved backwards keeps the sequence increasing"
+    );
     assert!(next_request_sequence(0, u64::MAX >> 8).is_err());
 }

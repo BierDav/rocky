@@ -53,16 +53,19 @@ fn arm(timers: &mut Timers) {
     if let Some((_, handle)) = timers.armed.take() {
         global().clear_timeout_with_handle(handle);
     }
-    let delay = deadline.saturating_duration_since(Instant::now());
-    // The browser counts whole milliseconds; round up so a timer never
-    // fires before its deadline.
-    let millis = i32::try_from(delay.as_micros().div_ceil(1000)).unwrap_or(i32::MAX);
+    let millis = browser_timeout_millis(deadline.saturating_duration_since(Instant::now()));
     let callback = Closure::once_into_js(fire);
     if let Ok(handle) = global()
         .set_timeout_with_callback_and_timeout_and_arguments_0(callback.unchecked_ref(), millis)
     {
         timers.armed = Some((deadline, handle));
     }
+}
+
+/// The browser counts whole milliseconds, so `delay` rounds up and a timer
+/// never fires before its deadline.
+fn browser_timeout_millis(delay: Duration) -> i32 {
+    i32::try_from(delay.as_micros().div_ceil(1000)).unwrap_or(i32::MAX)
 }
 
 /// A future that completes at its deadline.

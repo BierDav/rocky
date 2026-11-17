@@ -8,7 +8,7 @@ use crate::{
 
 impl Node {
     /// Every record this device holds; empty on a non-issuer, which holds
-    /// no registry key.
+    /// no registry key. Takes the settings lock, so call it before holding them.
     pub(crate) async fn registry(&self) -> Result<Registry, Failure> {
         if !self.settings.lock().await.issuer() {
             return Ok(Registry::default());
@@ -71,7 +71,6 @@ impl Node {
         self.expire_requests().await?;
         let registry = self.registry().await?;
         let bootstrap = self.enrollment_bootstrap().await?;
-        // Resets synced since are what an admission must name.
         let held = self.replica.revocations().await;
         let (reply, changes, notes) = {
             let mut settings = self.settings.lock().await;
@@ -79,7 +78,6 @@ impl Node {
             draft.learn_revocations(&held)?;
             draft.bootstrap = Some(bootstrap);
             let answer = draft.pair(&self.vault, request, &registry);
-            // Attempts count even when the request is refused.
             draft.bootstrap = None;
             draft.save(&self.path)?;
             *settings = draft;

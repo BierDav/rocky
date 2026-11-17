@@ -144,7 +144,6 @@ async fn refused_received_batches_leave_the_journal() {
     let statement = seals::seal(&fixture.lineage, alice, tip_log(&fixture.lineage).tip)
         .await
         .statement;
-    // Journaled as received, then refused: no trusted node signed them.
     let stranger = PrivateKey::new();
     let pending = || async {
         crate::storage::rows(
@@ -179,7 +178,15 @@ async fn refused_received_batches_leave_the_journal() {
                 .unwrap();
         }
     }
-    assert_eq!(pending().await, vec![vec![SqlValue::Integer(32)]]);
+    assert_eq!(
+        pending().await,
+        vec![vec![SqlValue::Integer(32)]],
+        "statements are journaled as received"
+    );
     alice.settle_tip_statements().await.unwrap();
-    assert_eq!(pending().await, vec![vec![SqlValue::Integer(0)]]);
+    assert_eq!(
+        pending().await,
+        vec![vec![SqlValue::Integer(0)]],
+        "settling refuses statements no trusted node signed"
+    );
 }

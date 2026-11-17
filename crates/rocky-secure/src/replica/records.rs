@@ -437,6 +437,11 @@ impl checkpoint::Sets {
     }
 }
 
+/// Bytes per field by which page legend and stamp indices can exceed local ones.
+const PAGE_INDEX_SLACK_PER_FIELD: usize = 4;
+/// Bytes by which a page's index header can exceed a local one.
+const PAGE_INDEX_SLACK: usize = 4;
+
 impl Record {
     pub(super) fn creation_index(&self) -> u32 {
         self.5
@@ -453,8 +458,7 @@ impl Record {
             .map(|(id, field)| (field, id as i64))
             .collect();
         let packed = Self::pack(row, &fields, row.proof.as_ref().map(|_| 0), 0, 0)?;
-        // Page legend and stamp indices can use two more bytes than local indices.
-        Ok(encode(&packed)?.len() + 4 * fields.len() + 4)
+        Ok(encode(&packed)?.len() + PAGE_INDEX_SLACK_PER_FIELD * fields.len() + PAGE_INDEX_SLACK)
     }
 }
 

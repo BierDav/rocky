@@ -116,7 +116,6 @@ pub const CLIENT_LANES: u32 = 64;
 impl PublicService {
     pub(crate) fn validate(&self, voters: &[Voter]) -> Result<(), CoordinationError> {
         self.limits.validate()?;
-        let tenants = self.tenants as usize;
         if self.endpoints.is_empty()
             || self.endpoints.len() > voters.len()
             || self
@@ -133,11 +132,8 @@ impl PublicService {
                     || e.address.is_empty()
                     || e.address.len() > 1024
             })
-            || tenants == 0
-            // No tenant can take another's state or retry budget.
-            || tenants.saturating_mul(self.limits.tenant_bytes) > self.limits.total_bytes
-            || tenants.saturating_mul(self.limits.retry_records)
-                > MAX_RECORDS - self.limits.retry_records
+            || self.tenants == 0
+            || !self.every_tenant_budget_fits()
             || self.registrations_per_day == 0
             || self.tenant_lanes == 0
             || self.tenant_lanes > CLIENT_LANES / 2
@@ -145,6 +141,15 @@ impl PublicService {
             return Err(CoordinationError::Configuration);
         }
         Ok(())
+    }
+    /// Whether every tenant's full state and retry budget fit at once, so no
+    /// tenant can take another's.
+    fn every_tenant_budget_fits(&self) -> bool {
+        let tenants = self.tenants as usize;
+        tenants.saturating_mul(self.limits.tenant_bytes) <= self.limits.total_bytes
+            && MAX_RECORDS
+                .checked_sub(self.limits.retry_records)
+                .is_some_and(|room| tenants.saturating_mul(self.limits.retry_records) <= room)
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

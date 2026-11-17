@@ -125,14 +125,14 @@ impl AuthorBinding {
             return Err(denied("author binding chain quota"));
         }
         let mut issuer = publisher;
-        // Only the publisher or an issuer hands on issuer authority.
-        let mut authority = true;
+        let mut parent_hands_on_issuance = true;
         for (index, binding) in chain.iter().enumerate() {
             if binding.version != BINDING_VERSION
                 || binding.issuer != issuer
                 || (binding.kind != PrincipalKind::Node
                     && !(binding.issues || families.authorizes_binding(&binding.tables, table)))
-                || (binding.issues && (binding.kind != PrincipalKind::User || !authority))
+                || (binding.issues
+                    && (binding.kind != PrincipalKind::User || !parent_hands_on_issuance))
                 || binding
                     .attestation
                     .verify(issuer, &binding.bytes()?)
@@ -144,7 +144,7 @@ impl AuthorBinding {
                 return Err(denied("invalid portable author binding"));
             }
             issuer = binding.subject;
-            authority = binding.issues;
+            parent_hands_on_issuance = binding.issues;
         }
         let leaf = &chain[chain.len() - 1];
         if leaf.kind != PrincipalKind::Node || issuer != signer {

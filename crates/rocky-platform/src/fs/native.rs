@@ -124,11 +124,11 @@ pub fn len(path: impl AsRef<Path>) -> io::Result<u64> {
     Ok(std::fs::metadata(path)?.len())
 }
 
-/// Makes the file at `path` durable; `false` if there is none.
+/// Makes the file at `path` durable; `false` if there is none. `sync_all`
+/// is `F_FULLFSYNC` on Apple platforms, and Windows needs write access to
+/// flush, so the file opens writable.
 pub fn sync(path: impl AsRef<Path>) -> io::Result<bool> {
     let path = path.as_ref();
-    // `sync_all` is `F_FULLFSYNC` on Apple platforms, like `fullfsync=1`.
-    // Windows requires write access for FlushFileBuffers.
     match OpenOptions::new().read(true).write(true).open(path) {
         Ok(file) => file.sync_all().map(|()| true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -152,6 +152,12 @@ fn lock_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Lock attempts before the file counts as owned elsewhere. A child process
+/// being spawned briefly shares a just-closed owner's lock until it execs,
+/// so a reopen right after close retries for a moment.
+const LOCK_ATTEMPTS: u32 = 10;
+const LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// The lock file excludes a second process, so one writer owns the file.
 /// Holding it holds the lock.
 pub struct Owner {
@@ -165,18 +171,16 @@ impl Owner {
             .create(true)
             .truncate(false)
             .open(lock_path(path))?;
-        // A child process being spawned briefly shares a just-closed owner's
-        // lock until it execs, so a reopen right after close waits a moment.
         let mut attempt = 0;
         while let Err(error) = lock.try_lock() {
             attempt += 1;
-            if attempt == 10 {
+            if attempt == LOCK_ATTEMPTS {
                 return Err(io::Error::new(
                     io::ErrorKind::ResourceBusy,
                     format!("already open or file lock unavailable: {error}"),
                 ));
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(LOCK_RETRY_DELAY).await;
         }
         Ok(Self { _lock: lock })
     }
@@ -212,10 +216,10 @@ mod tests {
         let scratch = Scratch::new().await;
         let root = scratch.path();
         create_new(root.join("a/b/new"), b"new")?;
-        // The new directories' entries too, outermost first.
         assert_eq!(
             synced(),
-            [root.to_path_buf(), root.join("a"), root.join("a/b")]
+            [root.to_path_buf(), root.join("a"), root.join("a/b")],
+            "new directories sync their entries too, outermost first"
         );
         write_database(root.join("db"), b"db")?;
         assert_eq!(synced(), [root.to_path_buf()]);

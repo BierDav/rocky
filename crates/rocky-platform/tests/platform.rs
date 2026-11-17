@@ -104,8 +104,10 @@ async fn one_owner_per_file() {
     let path = scratch.path().join("owned.sqlite");
     fs::prepare(&path).await.unwrap();
     let owner = fs::Owner::acquire(&path).await.unwrap();
-    // Natively a second lock waits a moment before it is refused.
-    assert!(fs::Owner::acquire(&path).await.is_err());
+    assert!(
+        fs::Owner::acquire(&path).await.is_err(),
+        "a second owner is refused, natively after briefly retrying"
+    );
     drop(owner);
     fs::Owner::acquire(&path).await.unwrap();
 }

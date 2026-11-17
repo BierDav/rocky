@@ -2,18 +2,15 @@
 //! the earlier ones kept to open retained ciphertext.
 use super::*;
 
-pub(super) const SCHEMA: &[&str] = &[
-    // Earlier epochs of a scope; `secure_keys` holds the current one.
-    "CREATE TABLE IF NOT EXISTS secure_key_epochs(scope BLOB NOT NULL,generation BLOB NOT NULL,key_hash BLOB NOT NULL,PRIMARY KEY(scope,generation))",
-    // Root escrow records, opaque here, by the key epoch whose frames they
-    // travel with and the root-issued identity atop the vouching chain, so
-    // an issuer fills one slot per epoch; empty scope and epoch for a
-    // record of the whole domain, which stays local. `carrier` is the peer
-    // that carried it, this node for its own.
-    "CREATE TABLE IF NOT EXISTS secure_escrow(scope BLOB NOT NULL,generation BLOB NOT NULL,issuer BLOB NOT NULL,carrier BLOB NOT NULL,record BLOB NOT NULL,PRIMARY KEY(scope,generation,issuer))",
-    // Carried records refused, by the peer that carried them.
-    "CREATE TABLE IF NOT EXISTS secure_escrow_refused(peer BLOB PRIMARY KEY,records INTEGER NOT NULL,reason TEXT NOT NULL)",
-];
+/// Earlier epochs of a scope; `secure_keys` holds the current one.
+const KEY_EPOCHS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_key_epochs(scope BLOB NOT NULL,generation BLOB NOT NULL,key_hash BLOB NOT NULL,PRIMARY KEY(scope,generation))";
+/// Opaque root escrow records, one per key epoch and root-issued identity
+/// atop the vouching chain; an empty epoch slot holds a local whole-domain
+/// record. `carrier` is the peer that carried it, this node for its own.
+const ESCROW_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_escrow(scope BLOB NOT NULL,generation BLOB NOT NULL,issuer BLOB NOT NULL,carrier BLOB NOT NULL,record BLOB NOT NULL,PRIMARY KEY(scope,generation,issuer))";
+/// Carried records refused, by the peer that carried them.
+const ESCROW_REFUSED_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_escrow_refused(peer BLOB PRIMARY KEY,records INTEGER NOT NULL,reason TEXT NOT NULL)";
+pub(super) const SCHEMA: &[&str] = &[KEY_EPOCHS_TABLE, ESCROW_TABLE, ESCROW_REFUSED_TABLE];
 use rocky_credentials::{RootEscrow, VouchedEscrow};
 type Slot = Option<(ResourceScope, rocky_core::KeyEpoch)>;
 fn slot_values(slot: &Slot) -> Result<[SqlValue; 2], Error> {
@@ -311,7 +308,6 @@ impl<A: RowApplication> Inner<A> {
             .iter()
             .any(|current| current.scope == key.scope && current.generation == key.generation);
         if !current {
-            // Members given only the current epoch need a later seal for it.
             self.earlier_epoch.store(true, Ordering::Relaxed);
         }
         let sql = if current {

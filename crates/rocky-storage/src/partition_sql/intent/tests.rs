@@ -114,7 +114,6 @@ fn read(conn: &Connection, checked: &Checked) -> Result<Rows, String> {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn assertions_see_only_the_held_partition_of_their_own_tables() {
-    // A holds two rows, B and C one each.
     let conn = db(&["A", "B", "C"]);
     let capped = |list: &str| {
         let checked = check_assertion(
@@ -126,8 +125,12 @@ fn assertions_see_only_the_held_partition_of_their_own_tables() {
         assert!(checked.params.is_empty());
         read(&conn, &checked).unwrap()
     };
-    assert_eq!(capped("A"), vec![vec![text("A"), int(2)]]);
-    assert_eq!(capped("B"), Rows::new());
+    assert_eq!(
+        capped("A"),
+        vec![vec![text("A"), int(2)]],
+        "A holds two rows"
+    );
+    assert_eq!(capped("B"), Rows::new(), "B holds one row");
     let rules = items(&["B"], &[]);
     for (sql, refusal) in [
         (
@@ -434,12 +437,15 @@ fn a_filter_that_pins_one_partition_yields_one_copy() {
             "{sql}"
         );
     }
-    // An unpartitioned table is one partition and needs no filter.
     let copies = split("UPDATE totals SET value = value + ?", &[int(1)], &held()).unwrap();
-    assert_eq!(partitions(&copies), [Vec::<SqlValue>::new()]);
     assert_eq!(
-        copies[0].statement.sql,
-        "UPDATE totals SET value = checked_add(value, ?1)"
+        partitions(&copies),
+        [Vec::<SqlValue>::new()],
+        "an unpartitioned table is one partition"
+    );
+    assert_eq!(
+        copies[0].statement.sql, "UPDATE totals SET value = checked_add(value, ?1)",
+        "an unpartitioned table needs no filter"
     );
 }
 
@@ -457,7 +463,6 @@ fn a_statement_reaching_several_partitions_splits_into_equivalent_copies() {
                  ON CONFLICT(id) DO UPDATE SET amount = amount + excluded.amount",
             vec![],
         ),
-        // Reads within the row's own partition stay SQL.
         (
             "UPDATE items SET pos = (SELECT count(*) FROM items AS o
                  WHERE o.list = items.list AND o.id <= items.id) + ?",
@@ -470,7 +475,10 @@ fn a_statement_reaching_several_partitions_splits_into_equivalent_copies() {
             [vec![text("A")], vec![text("B")]],
             "{sql}"
         );
-        assert_eq!(reads, 0, "{sql}");
+        assert_eq!(
+            reads, 0,
+            "{sql}: reads within the row's own partition stay SQL"
+        );
     }
 }
 
@@ -503,7 +511,6 @@ fn reads_of_other_partitions_are_evaluated_once_and_bound() {
             assert!(!copy.statement.sql.contains("SELECT"), "{}", copy.statement.sql);
         }
     }
-    // Another partition of the same table is bound; the copy's own stays SQL.
     let (copies, reads) = equivalent(
         "UPDATE items SET amount = (SELECT max(amount) FROM items AS m WHERE m.list = 'B')
              + (SELECT max(pos) FROM items AS o WHERE o.list = 'A') WHERE list = 'A'",
@@ -513,23 +520,24 @@ fn reads_of_other_partitions_are_evaluated_once_and_bound() {
     assert_eq!(partitions(&copies), [vec![text("A")]]);
     assert!(
         copies[0].statement.sql.contains("max(pos)"),
-        "{}",
+        "the copy's own partition stays SQL: {}",
         copies[0].statement.sql
     );
     assert!(
         !copies[0].statement.sql.contains("max(amount)"),
-        "{}",
+        "another partition of the same table is bound: {}",
         copies[0].statement.sql
     );
-    // Appending in the own partition keeps the read, so replay sees other appends.
     let (copies, reads) = equivalent(
         "INSERT INTO items(id, list, pos, amount)
              SELECT 20, ?, coalesce(max(pos), 0) + 1, 0 FROM items WHERE list = ?",
         &[text("B"), text("b")],
     );
     assert_eq!((partitions(&copies), reads), (vec![vec![text("B")]], 0));
-    assert!(copies[0].statement.sql.contains("max(pos)"));
-    // An unpartitioned table binds its reads of other tables, not its own.
+    assert!(
+        copies[0].statement.sql.contains("max(pos)"),
+        "appending in the own partition keeps the read, so replay sees other appends"
+    );
     let device = db(&["A", "B", "C"]);
     let mut reads = 0;
     let copies = split_intent(
@@ -545,20 +553,26 @@ fn reads_of_other_partitions_are_evaluated_once_and_bound() {
     )
     .unwrap();
     assert_eq!((partitions(&copies), reads), (vec![Vec::new()], 1));
-    assert!(!copies[0].statement.sql.contains("items"));
+    assert!(
+        !copies[0].statement.sql.contains("items"),
+        "an unpartitioned table binds its reads of other tables"
+    );
     let copies = split(
         "INSERT INTO totals(name, value) SELECT 'all', sum(value) FROM totals",
         &[],
         &held(),
     )
     .unwrap();
-    assert!(copies[0].statement.sql.contains("sum(value)"));
-    // A read of other partitions that names the outer row has no single value.
+    assert!(
+        copies[0].statement.sql.contains("sum(value)"),
+        "an unpartitioned table keeps its reads of itself"
+    );
     assert_eq!(
         refused(
             "UPDATE items SET amount = (SELECT value FROM totals WHERE totals.name = items.list)"
         ),
-        IntentRefusal::CorrelatedSubquery
+        IntentRefusal::CorrelatedSubquery,
+        "a read of other partitions that names the outer row has no single value"
     );
 }
 

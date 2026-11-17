@@ -300,7 +300,6 @@ fn deadlines_evict_missing_nodes_and_minimum_prevents_success() {
 fn serialized_leader_recovery_keeps_pending_but_requires_new_acknowledgments() {
     let mut f = Fixture::new(1, Limits::default());
     let pending = f.append(0, 2, 6);
-    // Volatile acknowledgments are not a machine operation and cannot persist success.
     assert_eq!(
         f.run(
             0,
@@ -309,7 +308,8 @@ fn serialized_leader_recovery_keeps_pending_but_requires_new_acknowledgments() {
             },
             T + 1
         ),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "volatile acknowledgments are not a machine operation"
     );
     f.state = decode(&encode(&f.state).unwrap()).unwrap();
     assert_eq!(
@@ -409,8 +409,11 @@ fn tenant_rate_deadline_and_byte_budgets_fail_closed() {
             ..
         }))
     ));
-    // Reserved capacity prevents a fully admitted domain from getting stuck on commit.
-    assert_eq!(f.state.log_head(tip_log(f.scope)).unwrap().commit, 61);
+    assert_eq!(
+        f.state.log_head(tip_log(f.scope)).unwrap().commit,
+        61,
+        "reserved capacity lets a fully admitted domain commit"
+    );
     f.state.state.domain(f.scope).unwrap().coordinated =
         crate::coordinated::Logs::new(f.scope, [4; 16]);
     f.state.state.limits.tenant_bytes = 4096;
@@ -510,10 +513,10 @@ fn log_roles_and_signed_proofs_cannot_bypass_domain_control() {
     let mut f = Fixture::new(1, Limits::default());
     let head = f.request(&f.owner, Action::Head, T);
     assert_eq!(f.state.read(&head), Err(CoordinationError::Denied));
-    // A trusted node relays a tip's opening, never after the first join.
     assert_eq!(
         f.run(0, Action::Configure { minimum: 1 }, T),
-        Err(CoordinationError::Configuration)
+        Err(CoordinationError::Configuration),
+        "a trusted node relays a tip's opening only before the first join"
     );
     let mut control = f.state.controls[0].control.clone();
     control.revision = 2;
@@ -583,7 +586,6 @@ fn log_roles_and_signed_proofs_cannot_bypass_domain_control() {
         f.state.apply_at(T + 2, &request),
         Err(CoordinationError::Denied)
     );
-    // Closure cannot strand a pending log entry.
     let close = crate::machine::self_certified(
         f.state.genesis.id().unwrap(),
         [8; 32],
@@ -594,7 +596,8 @@ fn log_roles_and_signed_proofs_cannot_bypass_domain_control() {
     .unwrap();
     assert_eq!(
         f.state.apply_at(T + 2, &close),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "closure cannot strand a pending log entry"
     );
     assert_eq!(
         f.state.log_head(tip_log(f.scope)).unwrap().pending,
@@ -668,7 +671,6 @@ fn controls_trust_identities_whose_certified_nodes_join_as_nodes() {
         )
         .unwrap()
     };
-    // Two nodes of the trusted identity join; the set counts them apart.
     let (first, second) = (PrivateKey::new(), PrivateKey::new());
     for node in [&first, &second] {
         let head = f.state.log_head(tip_log(scope)).unwrap();
@@ -687,12 +689,15 @@ fn controls_trust_identities_whose_certified_nodes_join_as_nodes() {
         f.state.apply_at(T, &request).unwrap();
     }
     let members = f.state.log_head(tip_log(scope)).unwrap().members;
-    assert_eq!(members.len(), 4);
+    assert_eq!(
+        members.len(),
+        4,
+        "two nodes of the trusted identity count apart in the in-sync set"
+    );
     for node in [&first, &second] {
         let member = members.iter().find(|m| m.key == node.public_key()).unwrap();
         assert_eq!(member.identity, identity.public_key());
     }
-    // No certificate, another identity's, or one for another node.
     let stranger = PrivateKey::new();
     let other = PrivateKey::new();
     let head = f.state.log_head(tip_log(scope)).unwrap();
@@ -725,15 +730,16 @@ fn controls_trust_identities_whose_certified_nodes_join_as_nodes() {
     ] {
         assert_eq!(
             f.state.apply_at(T, &request),
-            Err(CoordinationError::Denied)
+            Err(CoordinationError::Denied),
+            "a join needs the trusted identity's certificate for that very node"
         );
     }
-    // A control that drops the identity waits while its nodes are in the set.
     control.revision = 3;
     control.trusted.retain(|key| *key != identity.public_key());
     assert_eq!(
         f.state.apply_at(T, &revise(control, 10)),
-        Err(CoordinationError::Backpressure)
+        Err(CoordinationError::Backpressure),
+        "a control that drops an identity waits while its nodes are in the set"
     );
 }
 
@@ -804,11 +810,13 @@ fn sixty_second_clock_skew_is_explicit_and_correction_reuses_the_append() {
     );
     let corrected = f.request(&f.nodes[0], action.clone(), now);
     corrected.fresh().unwrap();
-    // The fixture's durable authority time is fixed independently of the device.
-    assert!(matches!(
-        f.run(0, action, T),
-        Ok(Outcome::Coordinated(LogResult::Assigned(_)))
-    ));
+    assert!(
+        matches!(
+            f.run(0, action, T),
+            Ok(Outcome::Coordinated(LogResult::Assigned(_)))
+        ),
+        "the fixture's durable authority time is independent of the device clock"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]

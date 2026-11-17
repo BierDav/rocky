@@ -142,6 +142,16 @@ async fn fixture() -> (
     (f, dir, a, vec![a0, b0, b1, c0], statement)
 }
 
+/// Direct SQL bypasses the replica's refresh generations, so the held refresh
+/// must be dropped by hand before the next page observes the change.
+async fn forget_held_refresh_after_direct_sql(replica: &Replica) {
+    replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .invalidate_held_refresh();
+}
+
 async fn page(replica: &Replica, scope: ResourceScope) -> Result<Vec<EncryptedFrame>, Error> {
     let (key, credentials) = {
         let inner = replica.inner.lock(crate::replica::Class::Background).await;
@@ -469,11 +479,7 @@ async fn refresh_checks_index_coordinates_and_only_opens_candidate_frames() {
             )
             .await
             .unwrap();
-        // Direct SQL corruption bypasses the replica's refresh generations.
-        a.inner
-            .lock(crate::replica::Class::Background)
-            .await
-            .invalidate_held_refresh();
+        forget_held_refresh_after_direct_sql(&a).await;
         let before = snapshot(&a).await;
         let error = page(&a, f.public).await.unwrap_err();
         if column == "author" {
@@ -873,7 +879,6 @@ async fn held_listing_bounds_current_rows_and_refuses_a_changed_source() {
     }
     assert_eq!(a.snapshot(f.public).await.unwrap().rows, projection);
 
-    // An interactive waiter registered between steps acquires before the next one.
     let (reached, waiting) = tokio::sync::oneshot::channel();
     let (resume, paused) = tokio::sync::oneshot::channel();
     a.pause_held_listing_for_test(reached, paused).await;
@@ -895,8 +900,11 @@ async fn held_listing_bounds_current_rows_and_refuses_a_changed_source() {
             rocky_platform::task::yield_now().await;
             drop(holder);
         };
-        let (seen, ()) = tokio::join!(interactive, release);
-        assert_eq!(seen, at_pause);
+        let (rows_listed_before_interactive_acquired, ()) = tokio::join!(interactive, release);
+        assert_eq!(
+            rows_listed_before_interactive_acquired, at_pause,
+            "an interactive waiter registered between listing steps acquires before the next step"
+        );
     };
     let (result, ()) = tokio::join!(listing, interleave);
     assert_eq!(result.unwrap(), expected);

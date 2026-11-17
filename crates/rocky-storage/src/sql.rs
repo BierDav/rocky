@@ -144,14 +144,15 @@ impl SqlError {
                 code: failure.extended_code,
                 message: message.clone().unwrap_or_else(|| failure.to_string()),
             },
-            // Binding and conversion errors of the adapter: a misused call.
             other => Self::Statement {
-                code: 21,
+                code: SQLITE_MISUSE,
                 message: other.to_string(),
             },
         }
     }
 }
+/// `SQLITE_MISUSE`, for binding and conversion errors of the adapter.
+const SQLITE_MISUSE: i32 = 21;
 /// What a caller knows after a failed call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Certainty {
@@ -252,8 +253,8 @@ pub fn classify(sql: &str) -> Result<Control, SqlError> {
         return name(1).map(Control::Savepoint);
     }
     if is(0, "RELEASE") {
-        // `RELEASE savepoint` names a savepoint called "savepoint".
-        let next = if words.len() > 2 {
+        let keyword_precedes_name = words.len() > 2;
+        let next = if keyword_precedes_name {
             optional(1, "SAVEPOINT")
         } else {
             1

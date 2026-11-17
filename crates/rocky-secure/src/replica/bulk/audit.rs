@@ -40,8 +40,6 @@ impl<A: RowApplication> Inner<A> {
                             .map_err(credential)?;
                     }
                     SqlValue::Null => {
-                        // An unsigned local intent is never transferable. Its private journal
-                        // and historically certified writer authenticate its provenance until signing.
                         let staged=collect_rows(self.conn.query("SELECT stage FROM secure_staged_schema WHERE publication=? AND state='committed'",[publication.clone()]).await?).await?;
                         let Some([SqlValue::Blob(encoded)]) = staged.first().map(Vec::as_slice)
                         else {

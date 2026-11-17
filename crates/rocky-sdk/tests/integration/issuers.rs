@@ -82,6 +82,13 @@ async fn synced_titles(device: &Device) -> Result<Vec<String>, Failure> {
 async fn session(device: &Device) -> rocky_sdk::SessionInfo {
     device.session().info().await.expect("session")
 }
+/// Closes `device` and deletes its directory `name`, as when it is lost.
+async fn destroy(root: &Path, name: &str, device: Device) -> Result<(), Failure> {
+    device.close().await;
+    drop(device);
+    std::fs::remove_dir_all(root.join(name))?;
+    Ok(())
+}
 
 #[tokio::test]
 async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Result<(), Failure> {
@@ -99,7 +106,6 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
     let hub = Arc::new(Hub::default());
     let a = create(root, &hub, "a")?;
     a.follow_main().await;
-    // Enrolled before a second issuer exists: it knows only the creator.
     let early = join(root, &hub, "early", &a.invite().await)?;
     a.add(1, "Milk").await;
     synced(&early).await?;
@@ -110,35 +116,41 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         "b",
         &a.session().invitation_with(GrantProfile::Issuer).await?.uri,
     )?;
-    // The root trusts the second issuer; only it may later revoke the creator.
     let principal = session(&b).await.principal.to_hex();
     let grant = a.session().trust(&principal, a.root_signer()?).await?;
     b.session().install_trust(&grant.grant).await?;
     let root_key = a.root_signer()?;
     let (a_node, b_node) = (a.node().await, b.node().await);
     let (a_identity, b_identity) = (a.identity().await, b.identity().await);
-    // Each issuer knows the other's routes; no keys are shared beyond the
-    // publisher key.
     assert_issuers(root, "a", &[&b_node])?;
     assert_issuers(root, "b", &[&a_node])?;
     assert_eq!(
         identity(root, "a")?["contact_refs"][peer_id(&b_node)?]["contact"]["routes"][0]["address"],
         "b"
     );
-    assert_ne!(session(&a).await.principal, session(&b).await.principal);
-    assert_ne!(session(&a).await.writer, session(&b).await.writer);
+    assert_ne!(
+        session(&a).await.principal,
+        session(&b).await.principal,
+        "paired issuers share no identity key"
+    );
+    assert_ne!(
+        session(&a).await.writer,
+        session(&b).await.writer,
+        "paired issuers share no writer key"
+    );
     synced(&b).await?;
     assert_eq!(b.titles().await, ["Milk"]);
 
-    // Devices enrolled or renewed after the pairing learn the second issuer.
     let late = join(root, &hub, "late", &a.invite().await)?;
     assert_issuers(root, "late", &[&a_node, &b_node])?;
     assert_issuers(root, "early", &[&a_node])?;
     early.session().renew().await?;
     assert_issuers(root, "early", &[&a_node, &b_node])?;
-    // The second issuer serves a device it never saw: its chain admits it.
     let report = synced(&late).await?;
-    assert!(reconciled_with(&report, &b_node), "{report:?}");
+    assert!(
+        reconciled_with(&report, &b_node),
+        "the second issuer serves a device it never saw by its chain: {report:?}"
+    );
     let late_node = late.node().await;
     assert!(
         b.session()
@@ -155,13 +167,8 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         Some(2)
     );
 
-    // The creator device is destroyed.
-    a.close().await;
-    drop(a);
-    std::fs::remove_dir_all(root.join("a"))?;
+    destroy(root, "a", a).await?;
 
-    // A trusted node revokes no trusted node, itself included, without
-    // the root; with it, it revokes the lost one.
     let error = b
         .session()
         .revoke_identity(&b_identity)
@@ -171,7 +178,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
     assert_eq!(
         CallFailure::from_failure(&error).code(),
         "publisher_required",
-        "{error}"
+        "a trusted node does not revoke itself without the root: {error}"
     );
     let error = b
         .session()
@@ -182,13 +189,16 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
     assert_eq!(
         CallFailure::from_failure(&error).code(),
         "publisher_required",
-        "{error}"
+        "a trusted node revokes no trusted node without the root: {error}"
     );
     let revoked = b
         .session()
         .revoke_trusted(&a_identity, mode, root_key)
         .await?;
-    assert_eq!(revoked.revocations.statements, 1);
+    assert_eq!(
+        revoked.revocations.statements, 1,
+        "with the root, a trusted node revokes the lost one"
+    );
     assert_issuers(root, "b", &[])?;
     assert!(
         identity(root, "b")?["contact_refs"]
@@ -243,46 +253,59 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         return Ok(());
     }
 
-    // The second issuer invites a third device, which syncs with it: the
-    // rows before the rotation reach it through a base at a seal.
     b.seal_and_compact().await;
     let c = join(root, &hub, "c", &b.invite().await)?;
     assert_eq!(session(&c).await.revocations.statements, 1);
     let report = synced(&c).await?;
     assert!(reconciled_with(&report, &b_node), "{report:?}");
-    assert_eq!(c.titles().await, ["Milk"]);
+    assert_eq!(
+        c.titles().await,
+        ["Milk"],
+        "the second issuer's invitee gets pre-rotation rows through a base at a seal"
+    );
 
-    // A device the creator enrolled renews through the second issuer and
-    // forgets the revoked creator.
     let before = session(&early).await;
     assert_eq!(before.revocations.statements, 0);
     early.session().renew().await?;
     let after = session(&early).await;
-    assert_eq!(after.revocations.statements, 1);
-    // A device chain keeps its own lifetime; the trusted grant above it
-    // never expires.
-    assert_eq!(session(&b).await.expires, u64::MAX);
-    assert!(before.expires <= after.expires && after.expires < u64::MAX);
+    assert_eq!(
+        after.revocations.statements, 1,
+        "a device the creator enrolled renews through the second issuer"
+    );
+    assert_eq!(
+        session(&b).await.expires,
+        u64::MAX,
+        "a trusted grant never expires"
+    );
+    assert!(
+        before.expires <= after.expires && after.expires < u64::MAX,
+        "a device chain below a trusted grant keeps its own lifetime"
+    );
     assert_issuers(root, "early", &[&b_node])?;
     assert!(
         identity(root, "early")?["contact_refs"]
             .get(peer_id(&a_node)?)
-            .is_none()
+            .is_none(),
+        "a renewed device forgets the revoked creator"
     );
     early.add(2, "Eggs").await;
     assert_eq!(early.titles().await, ["Eggs", "Milk"]);
-    // Each sync completes with the second issuer, not only returns.
     let report = synced(&early).await?;
-    assert!(reconciled_with(&report, &b_node), "{report:?}");
+    assert!(
+        reconciled_with(&report, &b_node),
+        "each sync completes with the second issuer, not only returns: {report:?}"
+    );
     assert_eq!(b.titles().await, ["Eggs", "Milk"]);
     let report = synced(&c).await?;
     assert!(reconciled_with(&report, &b_node), "{report:?}");
     assert_eq!(c.titles().await, ["Eggs", "Milk"]);
 
-    // A refused sync renews from the second issuer, learning the
-    // revocation; its earlier chain stays current.
     synced(&late).await?;
-    assert_eq!(session(&late).await.revocations.statements, 1);
+    assert_eq!(
+        session(&late).await.revocations.statements,
+        1,
+        "a refused sync renews from the second issuer and learns the revocation"
+    );
     assert_issuers(root, "late", &[&b_node])?;
     late.add(3, "Bread").await;
     synced(&late).await?;
@@ -295,13 +318,16 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         device.close().await;
     }
     drop((c, early));
-    // The rows survive reopening.
     for (name, titles) in [
         ("c", &["Bread", "Eggs", "Milk"][..]),
         ("early", &["Eggs", "Milk"][..]),
     ] {
         let device = Device::new(Database::open(open(&root.join(name), &hub, name))?)?;
-        assert_eq!(device.titles().await, titles);
+        assert_eq!(
+            device.titles().await,
+            titles,
+            "{name}: rows survive reopening"
+        );
         device.close().await;
     }
     Ok(())
@@ -320,8 +346,9 @@ async fn a_granted_credential_close_to_expiry_renews_through_the_second_issuer()
         "b",
         &a.session().invitation_with(GrantProfile::Issuer).await?.uri,
     )?;
-    // Finish the second issuer's key bootstrap before destroying its source.
-    synced(&b).await?;
+    synced(&b).await.map_err(|error| {
+        format!("the second issuer bootstraps its keys before their source is lost: {error}")
+    })?;
     let keys = common::node_keys(&root.join("g"), None)?;
     let supplied = a
         .session()
@@ -342,14 +369,15 @@ async fn a_granted_credential_close_to_expiry_renews_through_the_second_issuer()
         supplied,
     )?)?;
     let granted = session(&g).await.expires;
-    a.close().await;
-    drop(a);
-    std::fs::remove_dir_all(root.join("a"))?;
+    destroy(root, "a", a).await?;
 
     g.session().renew().await?;
     let renewed = session(&g).await.expires;
-    // The second issuer renews it for the domain's lifetime, not 60 seconds.
-    assert!(renewed > granted + 24 * 60 * 60, "{granted} {renewed}");
+    let one_day = 24 * 60 * 60;
+    assert!(
+        renewed > granted + one_day,
+        "the second issuer renews for the domain's lifetime, not the 60 s grant: {granted} {renewed}"
+    );
     g.add(1, "Milk").await;
     let report = synced(&g).await?;
     assert_eq!(b.titles().await, ["Milk"], "{report:?}");
@@ -383,21 +411,20 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
     let (a_node, t_node) = (a.node().await, t.node().await);
     a.add(1, "Milk").await;
     synced(&t).await?;
-    // `d` is the second trusted node's enrollment, `e` the creator's.
-    let d = join(root, &hub, "d", &t.invite().await)?;
-    assert_eq!(synced_titles(&d).await?, ["Milk"]);
-    let e = join(root, &hub, "e", &a.invite().await)?;
-    assert_eq!(synced_titles(&e).await?, ["Milk"]);
-    // `d` learned both trusted nodes when it synced.
+    let enrolled_by_t = join(root, &hub, "d", &t.invite().await)?;
+    assert_eq!(synced_titles(&enrolled_by_t).await?, ["Milk"]);
+    let enrolled_by_a = join(root, &hub, "e", &a.invite().await)?;
+    assert_eq!(synced_titles(&enrolled_by_a).await?, ["Milk"]);
     assert_issuers(root, "d", &[&a_node, &t_node])?;
 
-    // The second trusted node goes away; `d` renews through the creator,
-    // which never enrolled it.
     t.close().await;
     drop(t);
-    d.session().renew().await?;
+    enrolled_by_t
+        .session()
+        .renew()
+        .await
+        .map_err(|error| format!("renews through the creator, which never enrolled it: {error}"))?;
 
-    // Only the root revokes a trusted identity.
     let error = a
         .session()
         .revoke_identity(&t_identity)
@@ -407,16 +434,15 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
     assert_eq!(
         CallFailure::from_failure(&error).code(),
         "publisher_required",
-        "{error}"
+        "only the root revokes a trusted identity: {error}"
     );
     a.session()
         .revoke_trusted(&t_identity, RevocationMode::Compromised, a.root_signer()?)
         .await?;
 
-    // `d` learns it is cut off, and that the revoked trusted node is why.
-    let _ = d.sync().await;
-    let _ = d.session().renew().await;
-    let status = d.session().status().await?;
+    let _ = enrolled_by_t.sync().await;
+    let _ = enrolled_by_t.session().renew().await;
+    let status = enrolled_by_t.session().status().await?;
     assert_eq!(
         status
             .authority
@@ -426,22 +452,26 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
         Some(&rocky_sdk::RevocationReason::Cascade {
             trusted: t_identity
         }),
-        "{status:?}"
+        "the cut-off device learns the revoked trusted node is why: {status:?}"
     );
-    assert!(d.session().renew().await.is_err());
+    assert!(enrolled_by_t.session().renew().await.is_err());
 
-    // `e` keeps working with the creator.
-    e.add(2, "Eggs").await;
-    let report = synced(&e).await?;
-    assert!(reconciled_with(&report, &a_node), "{report:?}");
+    enrolled_by_a.add(2, "Eggs").await;
+    let report = synced(&enrolled_by_a).await?;
+    assert!(
+        reconciled_with(&report, &a_node),
+        "the creator's enrollee keeps working: {report:?}"
+    );
     assert_eq!(a.titles().await, ["Eggs", "Milk"]);
 
-    // The cut-off user enrolls again through the honest trusted node; the
-    // rows before the rotation reach it through a base at a seal.
     a.seal_and_compact().await;
     let again = join(root, &hub, "d2", &a.invite().await)?;
-    assert_eq!(synced_titles(&again).await?, ["Eggs", "Milk"]);
-    for device in [&a, &d, &e, &again] {
+    assert_eq!(
+        synced_titles(&again).await?,
+        ["Eggs", "Milk"],
+        "the cut-off user enrolls again through the honest node and gets pre-rotation rows from a base"
+    );
+    for device in [&a, &enrolled_by_t, &enrolled_by_a, &again] {
         device.close().await;
     }
     Ok(())

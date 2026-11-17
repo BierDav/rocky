@@ -237,6 +237,8 @@ impl TypedRows {
         .map(Some)
         .map_err(|error| error.to_string())
     }
+    /// The partition tuple a change's images name, which the replica binds
+    /// to the change's keyed scope; partition columns cannot change.
     pub fn change_partition(
         &self,
         change: &RowChange,
@@ -247,7 +249,6 @@ impl TypedRows {
             .ok_or("unknown typed table")?;
         let mut tuple = None;
         for fields in change.before.iter().chain(change.after.iter()) {
-            // The replica binds the tuple to the change's keyed scope.
             let next = self.partition(table, &self.values(table, fields)?)?;
             if tuple.is_some() && tuple != next {
                 return Err("partition columns cannot change".into());
@@ -421,8 +422,11 @@ mod tests {
             rows.row_id(DomainId([2; 16]), &table, &image(id, 1))
                 .unwrap()
         };
-        // A respelled NOCASE key names the same row; another key does not.
-        assert_eq!(row("a"), row("A"));
+        assert_eq!(
+            row("a"),
+            row("A"),
+            "a respelled NOCASE key names the same row"
+        );
         assert_ne!(row("a"), row("b"));
         let fields = |id: &str, n: i64| rows.fields(&table, &image(id, n)).unwrap();
         assert_eq!(rows.values(&table, &fields("a", 1)).unwrap(), image("a", 1));
@@ -433,13 +437,12 @@ mod tests {
             after: Some(fields("a", 1)),
         };
         assert_eq!(rows.row_identity(&change).unwrap(), Some(identity()));
-        // Typed tables replicate intents: no row image is admitted.
         assert!(
             rows.validate_changes(std::slice::from_ref(&change))
-                .is_err()
+                .is_err(),
+            "typed tables replicate intents: no row image is admitted"
         );
         assert!(rows.validate_write(&RowWrite::changed(change)).is_err());
-        // Every column, each in its declared type.
         let mut missing = fields("a", 1);
         missing.pop_last();
         let mut text = fields("a", 1);
@@ -447,7 +450,10 @@ mod tests {
         SqlValue::Text("one".into()).encode(&mut bytes);
         text.insert(table.fields[1], bytes);
         for invalid in [missing, text] {
-            assert!(rows.values(&table, &invalid).is_err());
+            assert!(
+                rows.values(&table, &invalid).is_err(),
+                "values need every column, each in its declared type"
+            );
         }
     }
 

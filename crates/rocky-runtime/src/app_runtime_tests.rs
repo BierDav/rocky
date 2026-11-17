@@ -98,12 +98,13 @@ async fn shared_file_domains_share_groups_with_independent_revisions_and_author_
     };
     let receipt = a.mutate(mutation("paused")).unwrap();
     paused.await.unwrap();
-    // The writer holds the file's only write transaction; b's write waits for
-    // the next group together with a's second one.
     let mut independent = b.mutate(mutation("independent")).unwrap();
     let second = a.mutate(mutation("second")).unwrap();
     rocky_platform::time::sleep(std::time::Duration::from_millis(20)).await;
-    assert!(independent.result.try_recv().is_err());
+    assert!(
+        independent.result.try_recv().is_err(),
+        "the writer holds the file's only write transaction; b's write waits for the next group together with a's second one"
+    );
     assert_eq!(b.inner.revisions.borrow().get(), 0);
     resume.send(()).unwrap();
     let first = receipt.committed().await.unwrap();
@@ -313,7 +314,6 @@ async fn cancelled_progress_reads_recover_and_named_peer_evidence_coalesces() {
             ..
         }
     ));
-    // Poll a pending next then cancel it, without timing-based sleeps.
     {
         let mut pending = std::pin::pin!(observer.next());
         std::future::poll_fn(|cx| {

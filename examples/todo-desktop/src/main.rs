@@ -94,8 +94,7 @@ fn main() {
             )
             .with_menu(menu().map_err(|e| e.to_string())?)
             .with_close_behaviour(WindowCloseBehaviour::WindowHides);
-        // Dioxus drives its own executor; the SDK's calls need this runtime.
-        let _guard = runtime.enter();
+        let _sdk_runtime_under_dioxus_executor = runtime.enter();
         dioxus::LaunchBuilder::desktop()
             .with_context(launch)
             .with_cfg(config)

@@ -144,7 +144,7 @@ where
         &self,
         records: Vec<Vec<u8>>,
     ) -> Result<Vec<Result<Acknowledgment, Error>>, Error> {
-        // Room for the queue's fixed weight within one frame.
+        /// Leaves room for the queue's fixed weight within one frame.
         const BATCH_BYTES: usize = crate::MAX_FRAME_BYTES - 1024;
         let mut results: Vec<Option<Result<Acknowledgment, Error>>> = Vec::new();
         let mut batch = Vec::new();

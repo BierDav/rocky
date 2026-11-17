@@ -65,17 +65,20 @@ fn a_held_table_keeps_the_in_group_tables_it_references() {
             .covered(&set(&["lists", "items", "attachments"]))
             .is_err()
     );
-    // Releasing keeps the named tables; a kept child needs its parent.
     assert_eq!(
         names(group.released(&set(&[])).unwrap()),
-        ["lists", "items", "attachments"]
+        ["lists", "items", "attachments"],
+        "releasing keeps the named tables"
     );
     assert_eq!(
         names(group.released(&set(&["lists", "items"])).unwrap()),
         ["attachments"]
     );
     let refused = group.released(&set(&["items"])).unwrap_err().to_string();
-    assert!(refused.contains("keeping it without lists"), "{refused}");
+    assert!(
+        refused.contains("keeping it without lists"),
+        "a kept child needs its parent: {refused}"
+    );
 }
 
 #[test]

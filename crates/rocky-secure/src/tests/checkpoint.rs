@@ -96,11 +96,12 @@ async fn sync(
             .map(|frame| frame.id().unwrap())
             .collect();
         for (id, status) in ids.into_iter().zip(replica.receive_all(page.frames).await) {
-            // A duplicate was acknowledged by the pass that delivered it.
-            let applied = match status.unwrap() {
-                ReceiveStatus::Duplicate => continue,
-                status => matches!(status, ReceiveStatus::Applied | ReceiveStatus::Pruned),
-            };
+            let status = status.unwrap();
+            let acknowledged_by_delivering_pass = status == ReceiveStatus::Duplicate;
+            if acknowledged_by_delivering_pass {
+                continue;
+            }
+            let applied = matches!(status, ReceiveStatus::Applied | ReceiveStatus::Pruned);
             source
                 .acknowledge(key.public_key(), credentials, id, applied)
                 .await
@@ -120,13 +121,15 @@ async fn all_rows(f: &Fixture, replica: &Replica) -> BTreeMap<Commitment, RowFie
             .snapshot_page(f.public, cursor, MAX_SNAPSHOT_ROWS)
             .await
             .unwrap();
-        // An unfinished import never reads as complete.
         let importing = replica
             .rebootstrap_progress(f.public)
             .await
             .unwrap()
             .is_some();
-        assert_eq!(page.complete, !importing);
+        assert_eq!(
+            page.complete, !importing,
+            "an unfinished import never reads as complete"
+        );
         rows.extend(page.rows);
         cursor = page.next;
         if cursor.is_none() {
@@ -201,15 +204,12 @@ async fn a_base_at_a_seal_binds_the_scope_and_survives_a_failed_compaction() {
         .await
         .unwrap();
     let expected = all_rows(&f, &replica).await;
-    // No base forms anywhere but at a seal.
-    assert!(matches!(
-        replica.checkpoint(f.public).await,
-        Err(Error::Rejected(_))
-    ));
+    assert!(
+        matches!(replica.checkpoint(f.public).await, Err(Error::Rejected(_))),
+        "no base forms anywhere but at a seal"
+    );
     let genesis = replica.followed_tip().await;
     seal_main(&replica, &f.publisher, f.public.domain).await;
-    // The fault rolls the scope's compaction back; the file must reopen,
-    // pass the audit and compact again.
     replica.inject_stage_fault(Stage::Compact, 0).await;
     assert!(matches!(
         replica.compact(f.public.domain, 0).await,
@@ -219,11 +219,14 @@ async fn a_base_at_a_seal_binds_the_scope_and_survives_a_failed_compaction() {
     replica = open(&f, &path, &node).await.0;
     replica.audit(f.public).await.unwrap();
     assert_eq!(all_rows(&f, &replica).await, expected);
-    assert!(replica.checkpoint(f.public).await.is_err());
-    // The seal is marked compacted with its last scope: still pending.
+    assert!(
+        replica.checkpoint(f.public).await.is_err(),
+        "a failed compaction rolls the scope's base back"
+    );
     assert_eq!(
         finalized_compacted(&replica).await,
-        [vec![SqlValue::Integer(0)]]
+        [vec![SqlValue::Integer(0)]],
+        "the seal is marked compacted only with its last scope"
     );
     replica.compact(f.public.domain, 0).await.unwrap();
     assert_eq!(
@@ -242,25 +245,31 @@ async fn a_base_at_a_seal_binds_the_scope_and_survives_a_failed_compaction() {
     assert_eq!(statement.frontier.len(), 1);
     assert_eq!(statement.frontier[0].author, node.public_key());
     assert_eq!(statement.frontier[0].sequence, 41);
-    // Stamps are hybrid time: the checkpoint's clock is its last frame's.
     assert_eq!(statement.operations, 42);
-    assert_eq!(statement.clock, statement.frontier[0].clock);
-    // Compaction keeps live rows only; the deleted row is dead at the seal.
-    assert_eq!((statement.rows.count, statement.tombstones), (39, 0));
+    assert_eq!(
+        statement.clock, statement.frontier[0].clock,
+        "a checkpoint's hybrid clock is its last frame's"
+    );
+    assert_eq!(
+        (statement.rows.count, statement.tombstones),
+        (39, 0),
+        "compaction keeps live rows only; the deleted row is dead at the seal"
+    );
     assert_eq!(statement.creations.count, 39);
     assert_eq!(statement.handles.count, 42);
-    // Nobody acknowledged anything: every covered operation is a sole copy.
-    assert_eq!(statement.custody.superseded, 0);
-    assert_eq!(statement.custody.sole.count, 42);
+    assert_eq!(
+        (statement.custody.superseded, statement.custody.sole.count),
+        (0, 42),
+        "without acknowledgments every covered operation is a sole copy"
+    );
     let report = replica.audit(f.public).await.unwrap();
     assert_eq!(report.checkpoint, Some(signed.id().unwrap()));
     assert_eq!((report.rows, report.replayed), (39, 0));
-    // Nothing new: the same base. One more operation replays over it, and
-    // the next seal's base follows it in the chain.
     replica.compact(f.public.domain, 0).await.unwrap();
     assert_eq!(
         replica.checkpoint(f.public).await.unwrap().id().unwrap(),
-        signed.id().unwrap()
+        signed.id().unwrap(),
+        "compacting with nothing new keeps the same base"
     );
     replica
         .author(handle(1002), insert(&f, 400, "later"), vec![])
@@ -270,16 +279,20 @@ async fn a_base_at_a_seal_binds_the_scope_and_survives_a_failed_compaction() {
     seal_and_compact(&replica, &f.publisher, f.public.domain).await;
     let next = replica.checkpoint(f.public).await.unwrap();
     assert_eq!(next.statement.sequence, 2);
-    assert_eq!(next.statement.previous, Some(signed.id().unwrap()));
+    assert_eq!(
+        next.statement.previous,
+        Some(signed.id().unwrap()),
+        "the next seal's base follows the last in the chain"
+    );
     assert_eq!(next.statement.rows.count, 40);
     drop(replica);
     let replica = open(&f, &path, &node).await.0;
     assert_eq!(replica.audit(f.public).await.unwrap().replayed, 0);
     assert_eq!(all_rows(&f, &replica).await.len(), 40);
-    // The deleted row was dead at the seal: compaction released it.
     assert_eq!(
         replica.companion(f.public, id(4)).await.unwrap(),
-        Companion::Unavailable
+        Companion::Unavailable,
+        "compaction released the row that was dead at the seal"
     );
 }
 
@@ -341,24 +354,28 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
         blocked(PruneBlock::NoCheckpoint)
     );
     compacted(&f, &a).await;
-    // The base is flushed before any operation it covers may go.
     let (commit, durable, _) = a.watermark().await;
-    assert_eq!(commit, durable);
+    assert_eq!(
+        commit, durable,
+        "the base is flushed before any operation it covers may go"
+    );
     assert_eq!(
         a.prune(f.public).await.unwrap(),
         blocked(PruneBlock::NoPolicy)
     );
-    // Missing custody evidence: nobody holds another copy.
     a.set_retention_policy(f.public, policy(&[], &[]))
         .await
         .unwrap();
-    assert!(matches!(
-        a.prune(f.public).await.unwrap(),
-        PruneReport {
-            pruned: 0,
-            blocked: Some(PruneBlock::SoleCopy { .. })
-        }
-    ));
+    assert!(
+        matches!(
+            a.prune(f.public).await.unwrap(),
+            PruneReport {
+                pruned: 0,
+                blocked: Some(PruneBlock::SoleCopy { .. })
+            }
+        ),
+        "without custody evidence nobody holds another copy"
+    );
     a.set_retention_policy(f.public, policy(&[&b_key], &[]))
         .await
         .unwrap();
@@ -367,10 +384,8 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
         Some(PruneBlock::Unacknowledged { peer, .. }) if peer == rocky_credentials::PeerId::of(b_key.public_key())
     ));
     assert!(sync(&f, &a, (&b, &b_key, &b_credentials)).await.is_empty());
-    // A checkpoint that no longer verifies blocks pruning.
     let signed = {
         let inner = a.inner.lock(crate::replica::Class::Background).await;
-        // The public base; the keyless private scope has its own.
         let stored = rows(
             &inner.conn,
             &format!("SELECT signed FROM secure_checkpoints WHERE {PUBLIC_BASE}"),
@@ -392,7 +407,10 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
             .unwrap();
         signed
     };
-    assert!(matches!(a.prune(f.public).await, Err(Error::Corrupt(_))));
+    assert!(
+        matches!(a.prune(f.public).await, Err(Error::Corrupt(_))),
+        "a checkpoint that no longer verifies blocks pruning"
+    );
     assert!(matches!(a.audit(f.public).await, Err(Error::Corrupt(_))));
     assert_eq!(
         count(&a, "SELECT COUNT(*) FROM secure_operations").await,
@@ -408,7 +426,6 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
         )
         .await
         .unwrap();
-    // A failure in the second batch keeps the first one pruned and the file whole.
     let measurements = a.lock_measurements();
     measurements.start();
     a.inject_stage_fault(Stage::Prune, 1).await;
@@ -434,7 +451,8 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
     a = open(&f, &path, &a_key).await.0;
     assert_eq!(
         count(&a, "SELECT COUNT(*) FROM secure_operations").await,
-        12
+        12,
+        "a failure in the second batch keeps the first one pruned and the file whole"
     );
     a.audit(f.public).await.unwrap();
     assert_eq!(
@@ -465,16 +483,23 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
         (status.covered, status.uncovered, status.retained_bytes),
         (0, 0, 0)
     );
-    // The pruned file reopens, audits, keeps its rows and continues its log.
     drop(a);
     a = open(&f, &path, &a_key).await.0;
     assert_eq!(a.audit(f.public).await.unwrap().operations, 0);
-    assert_eq!(all_rows(&f, &a).await.len(), 20);
+    assert_eq!(
+        all_rows(&f, &a).await.len(),
+        20,
+        "the pruned file reopens with its rows"
+    );
     let frame = a
         .author(handle(500), update(&f, 7, "new", Some("after")), vec![])
         .await
         .unwrap();
-    assert_eq!(frame.operation().unwrap().header.seq_num, 20);
+    assert_eq!(
+        frame.operation().unwrap().header.seq_num,
+        20,
+        "the pruned file continues its log"
+    );
     let late = frame.id().unwrap();
     assert_eq!(b.receive(frame).await.unwrap(), ReceiveStatus::Applied);
     a.acknowledge(b_key.public_key(), &b_credentials, late, true)
@@ -484,7 +509,6 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
     a.rebuild_projection(f.public).await.unwrap();
     assert_eq!(all_rows(&f, &a).await, all_rows(&f, &b).await);
     a.audit(f.public).await.unwrap();
-    // The retained window keeps the newest covered operations.
     let mut windowed = policy(&[], &[]);
     windowed.window = 1;
     a.set_retention_policy(f.public, windowed).await.unwrap();
@@ -494,7 +518,11 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
     sync(&f, &a, (&b, &b_key, &b_credentials)).await;
     seal_main(&a, &f.publisher, f.public.domain).await;
     assert_eq!(a.compact(f.public.domain, 0).await.unwrap().pruned, 1);
-    assert_eq!(count(&a, "SELECT COUNT(*) FROM secure_operations").await, 1);
+    assert_eq!(
+        count(&a, "SELECT COUNT(*) FROM secure_operations").await,
+        1,
+        "the retained window keeps the newest covered operation"
+    );
     a.audit(f.public).await.unwrap();
 }
 
@@ -513,8 +541,7 @@ async fn late_frames_and_retried_handles_from_before_the_pruned_prefix_do_nothin
         .await
         .unwrap();
     sync(&f, &a, (&b, &b_key, &b_credentials)).await;
-    // B edits the row while A deletes it; B's edit reaches A only after the prune.
-    let concurrent = b
+    let concurrent_edit_reaching_a_after_prune = b
         .author(handle(3), update(&f, 1, "alive", Some("edited")), vec![])
         .await
         .unwrap();
@@ -529,27 +556,29 @@ async fn late_frames_and_retried_handles_from_before_the_pruned_prefix_do_nothin
         .unwrap();
     assert_eq!(a.prune(f.public).await.unwrap().pruned, 3);
     let before = a.snapshot(f.public).await.unwrap().rows;
-    // The original creation and deletion frames come back late.
-    for frame in [&created, &deleted] {
+    for late_frame in [&created, &deleted] {
         assert_eq!(
-            a.receive(frame.clone()).await.unwrap(),
+            a.receive(late_frame.clone()).await.unwrap(),
             ReceiveStatus::Pruned
         );
     }
-    // An edit that predates the deletion names a creation compaction
-    // released with the dead row: it waits, and changes nothing.
     assert_eq!(
-        a.receive(concurrent).await.unwrap(),
-        ReceiveStatus::PendingDependencies
+        a.receive(concurrent_edit_reaching_a_after_prune)
+            .await
+            .unwrap(),
+        ReceiveStatus::PendingDependencies,
+        "an edit naming a creation compaction released with the dead row waits"
     );
     assert_eq!(a.snapshot(f.public).await.unwrap().rows, before);
     assert_eq!(count(&a, "SELECT COUNT(*) FROM secure_operations").await, 1);
-    // A retried handle from before the pruned_prefix never authors again.
     let operations = count(&a, "SELECT COUNT(*) FROM secure_handles").await;
-    assert!(matches!(
-        a.author(handle(1), insert(&f, 1, "alive"), vec![]).await,
-        Err(Error::Rejected(message)) if message.contains("before the pruned prefix")
-    ));
+    assert!(
+        matches!(
+            a.author(handle(1), insert(&f, 1, "alive"), vec![]).await,
+            Err(Error::Rejected(message)) if message.contains("before the pruned prefix")
+        ),
+        "a retried handle from before the pruned prefix never authors again"
+    );
     assert_eq!(
         a.author_buffered(handle(1), insert(&f, 1, "alive"), vec![])
             .await
@@ -572,7 +601,6 @@ async fn late_frames_and_retried_handles_from_before_the_pruned_prefix_do_nothin
     );
     assert_eq!(count(&a, "SELECT COUNT(*) FROM secure_operations").await, 1);
     assert_eq!(a.snapshot(f.public).await.unwrap().rows, before);
-    // An acknowledgment for a pruned operation is accepted and records nothing.
     a.acknowledge(
         b_key.public_key(),
         &b_credentials,
@@ -581,13 +609,15 @@ async fn late_frames_and_retried_handles_from_before_the_pruned_prefix_do_nothin
     )
     .await
     .unwrap();
-    // B converges with the pruned replica.
     sync(&f, &b, (&a, &a_key, &a_credentials)).await;
-    assert_eq!(all_rows(&f, &a).await, all_rows(&f, &b).await);
+    assert_eq!(
+        all_rows(&f, &a).await,
+        all_rows(&f, &b).await,
+        "a peer converges with the pruned replica"
+    );
     a.audit(f.public).await.unwrap();
 }
 
-/// Serves `source` until the client closes the session.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn handles_beyond_the_window_are_forgotten_once_pruned() {
     let f = Fixture::new();
@@ -607,30 +637,39 @@ async fn handles_beyond_the_window_are_forgotten_once_pruned() {
     a.author(handle(2), insert(&f, 2, "second"), vec![])
         .await
         .unwrap();
-    // Both handles stay while their operations are retained.
     a.author(handle(3), insert(&f, 3, "third"), vec![])
         .await
         .unwrap();
-    assert_eq!(count(&a, "SELECT COUNT(*) FROM secure_handles").await, 3);
+    assert_eq!(
+        count(&a, "SELECT COUNT(*) FROM secure_handles").await,
+        3,
+        "handles stay while their operations are retained"
+    );
     sync(&f, &a, (&b, &b_key, &b_credentials)).await;
     compacted(&f, &a).await;
     a.set_retention_policy(f.public, policy(&[&b_key], &[]))
         .await
         .unwrap();
     assert_eq!(a.prune(f.public).await.unwrap().pruned, 3);
-    // Only the newest handle survives; the audit checks the handle digest.
-    assert_eq!(count(&a, "SELECT COUNT(*) FROM secure_handles").await, 1);
+    assert_eq!(
+        count(&a, "SELECT COUNT(*) FROM secure_handles").await,
+        1,
+        "only the newest handle survives pruning"
+    );
     a.audit(f.public).await.unwrap();
     assert_eq!(a.lookup_mutation(handle(1)).await.unwrap(), None);
     assert!(matches!(
         a.author(handle(3), insert(&f, 3, "third"), vec![]).await,
         Err(Error::Rejected(message)) if message.contains("before the pruned prefix")
     ));
-    // A forgotten handle authors again.
     a.author(handle(1), insert(&f, 4, "fourth"), vec![])
         .await
         .unwrap();
-    assert_eq!(count(&a, "SELECT COUNT(*) FROM secure_operations").await, 1);
+    assert_eq!(
+        count(&a, "SELECT COUNT(*) FROM secure_operations").await,
+        1,
+        "a forgotten handle authors again"
+    );
 }
 
 async fn serve(mut session: NativeSession, source: &Replica) {
@@ -653,7 +692,6 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
     }
     sync(&f, &a, (&b, &keys[1], &b_credentials)).await;
     sync(&f, &a, (&c, &keys[2], &c_credentials)).await;
-    // C is offline from here. A moves on, checkpoints and prunes.
     for index in 5..45 {
         a.author_buffered(handle(index), insert(&f, index, "base"), vec![])
             .await
@@ -671,21 +709,16 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
     a.author(handle(102), update(&f, 0, "base", Some("after")), vec![])
         .await
         .unwrap();
-    // Deleted after the seal, so its tombstone is still held.
     a.author(handle(100), update(&f, 2, "base", None), vec![])
         .await
         .unwrap();
-    // C's unsent edits: an update, a new row, an edit of a row A deleted, and
-    // an insert that collides with a row A created meanwhile.
-    let kept: Vec<_> = [
+    let unsent_edits = [
         (handle(200), update(&f, 3, "base", Some("local"))),
         (handle(201), insert(&f, 301, "from c")),
         (handle(202), update(&f, 2, "base", Some("lost"))),
-    ]
-    .into_iter()
-    .collect();
+    ];
     let mut local = Vec::new();
-    for (handle, changes) in kept {
+    for (handle, changes) in unsent_edits {
         local.push(
             c.author(handle, changes, vec![])
                 .await
@@ -694,27 +727,31 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
                 .unwrap(),
         );
     }
-    let collision = c
+    let insert_colliding_with_a = c
         .author(handle(203), insert(&f, 300, "from c"), vec![])
         .await
         .unwrap()
         .id()
         .unwrap();
-    // B was online and acknowledged everything: it is not behind and converges.
     share_graph(&f, &a, (&b, &keys[1], &b_credentials)).await;
     let pruned_prefix = a
         .pruned_page(keys[1].public_key(), &b_credentials, f.public, None)
         .await
         .unwrap();
     assert_eq!(pruned_prefix.logs, vec![(keys[0].public_key(), 45)]);
-    assert!(!b.behind_pruned(&pruned_prefix).await.unwrap());
+    assert!(
+        !b.behind_pruned(&pruned_prefix).await.unwrap(),
+        "a peer that acknowledged everything is not behind"
+    );
     assert_eq!(
         sync(&f, &a, (&b, &keys[1], &b_credentials)).await,
         vec![f.public]
     );
     assert_eq!(all_rows(&f, &a).await, all_rows(&f, &b).await);
-    assert!(c.behind_pruned(&pruned_prefix).await.unwrap());
-    // Over the link C is told so, and no frame is received into a gap.
+    assert!(
+        c.behind_pruned(&pruned_prefix).await.unwrap(),
+        "an offline peer learns it is behind the pruned prefix"
+    );
     let quota = 8192;
     let before = all_rows(&f, &c).await;
     for fault in [Some((Stage::Import, 1)), Some((Stage::Switch, 0)), None] {
@@ -729,7 +766,6 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
         .unwrap();
         let client = async {
             let mut session = session;
-            // C learns the seal and follows `main` on, then says so.
             session.sync_tip_graph(&c).await.unwrap();
             if c.followed_bookmark().await.is_none() {
                 c.follow_bookmark(f.public.domain, "main").await.unwrap();
@@ -739,8 +775,12 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
                 .catch_up(&c, f.public, MAX_SECURE_FRAME / 2)
                 .await
                 .unwrap();
-            assert!(pulled.behind);
-            assert_eq!(all_rows(&f, &c).await, before);
+            assert!(pulled.behind, "over the link the peer is told it is behind");
+            assert_eq!(
+                all_rows(&f, &c).await,
+                before,
+                "no frame is received into a gap"
+            );
             if let Some((stage, skip)) = fault {
                 c.inject_stage_fault(stage, skip).await;
             }
@@ -754,23 +794,27 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
             assert_eq!(report.reapplied, local);
             assert_eq!(report.pending, vec![]);
             assert_eq!(report.rejected.len(), 1);
-            assert_eq!(report.rejected[0].0, collision);
-            // A created the row before the seal C's insert comes late to.
-            assert!(report.rejected[0].1.contains("behind the finalized seal"));
+            assert_eq!(report.rejected[0].0, insert_colliding_with_a);
+            assert!(
+                report.rejected[0].1.contains("behind the finalized seal"),
+                "an insert colliding with a row created before the seal comes too late"
+            );
             break;
         };
-        // A failed import leaves the old state; the file reopens and audits.
         assert!(matches!(report, Err(Error::InjectedFailure)));
         drop(c);
         c = open(&f, &c_path, &keys[2]).await.0;
         c.audit(f.public).await.unwrap();
-        assert_eq!(all_rows(&f, &c).await, before);
+        assert_eq!(
+            all_rows(&f, &c).await,
+            before,
+            "a failed import leaves the old state"
+        );
         assert!(c.rebootstrap_progress(f.public).await.unwrap().is_some());
     }
     assert_eq!(c.rebootstrap_progress(f.public).await.unwrap(), None);
     c.audit(f.public).await.unwrap();
     import_no_frames(&f, &a, (&c, &keys[2], &c_credentials)).await;
-    // C now syncs the frames after the checkpoint and A receives C's edits.
     assert!(!c.behind_pruned(&pruned_prefix).await.unwrap());
     sync(&f, &a, (&c, &keys[2], &c_credentials)).await;
     sync(&f, &c, (&a, &keys[0], &a_credentials)).await;
@@ -781,28 +825,34 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
     assert_eq!(rows[&id(3)], f.app().name("local"));
     assert_eq!(rows[&id(301)], f.app().name("from c"));
     assert_eq!(rows[&id(300)], f.app().name("from a"));
-    assert!(!rows.contains_key(&id(2)));
-    // C's handles survive: none of its local edits can be authored twice.
+    assert!(
+        !rows.contains_key(&id(2)),
+        "an edit of a row deleted after the seal does not revive it"
+    );
     assert_eq!(
         c.author_buffered(handle(200), update(&f, 3, "base", Some("local")), vec![])
             .await
             .unwrap()
             .value,
-        local[0]
+        local[0],
+        "local handles survive rebootstrap, so no edit is authored twice"
     );
     assert_eq!(
         c.lookup_mutation(handle(203)).await.unwrap(),
-        Some(collision)
+        Some(insert_colliding_with_a)
     );
     drop(c);
     let c = open(&f, &c_path, &keys[2]).await.0;
     c.audit(f.public).await.unwrap();
     a.audit(f.public).await.unwrap();
     assert_eq!(all_rows(&f, &c).await, rows);
-    // C checkpoints on top of the imported one and can prune in turn.
     let next = compacted(&f, &c).await;
     assert_eq!(next.statement.sequence, 2);
-    assert_eq!(next.statement.previous, Some(signed.id().unwrap()));
+    assert_eq!(
+        next.statement.previous,
+        Some(signed.id().unwrap()),
+        "a rebootstrapped replica checkpoints on top of the imported base"
+    );
     assert_eq!(next.signer(), keys[2].public_key());
 }
 
@@ -834,13 +884,12 @@ async fn an_imported_base_is_served_onward_but_never_back_to_its_signer() {
     b.stage_checkpoint_page(page).await.unwrap();
     b.finish_rebootstrap(f.public).await.unwrap();
     introduce(&b, &a, &a_key, &a_credentials).await;
-    // A base is signed where it forms, at a seal: its signer is not offered
-    // its own signature back.
     assert!(
         b.checkpoint_offer(a_key.public_key(), &a_credentials, f.public)
             .await
             .unwrap()
-            .is_none()
+            .is_none(),
+        "a base's signer is not offered its own signature back"
     );
     let c_key = PrivateKey::new();
     let reader_grants = f
@@ -876,7 +925,6 @@ async fn an_imported_base_is_served_onward_but_never_back_to_its_signer() {
     introduce(&c, &a, &a_key, &a_credentials).await;
     share_graph(&f, &b, (&c, &b_key, &b_credentials)).await;
     introduce(&c, &b, &b_key, &b_credentials).await;
-    // Holders serve it onward, a read-only one too, unchanged.
     assert!(
         c.checkpoint_offer(a_key.public_key(), &a_credentials, f.public)
             .await
@@ -888,7 +936,11 @@ async fn an_imported_base_is_served_onward_but_never_back_to_its_signer() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(forwarded.id().unwrap(), original.id().unwrap());
+    assert_eq!(
+        forwarded.id().unwrap(),
+        original.id().unwrap(),
+        "a read-only holder serves the base onward unchanged"
+    );
     assert!(a.begin_rebootstrap(original).await.is_err());
 }
 
@@ -910,12 +962,13 @@ async fn rebootstrap_refuses_unverifiable_checkpoints() {
     let signed = compacted(&f, &a).await;
     share_graph(&f, &a, (&c, &c_key, &c_credentials)).await;
     let before = all_rows(&f, &c).await;
-    // A statement that was changed after signing.
-    let mut forged = signed.clone();
-    forged.statement.rows.count += 1;
-    assert!(c.begin_rebootstrap(forged).await.is_err());
-    // Its own checkpoint, and a page that belongs to no import.
-    assert!(a.begin_rebootstrap(signed.clone()).await.is_err());
+    let mut changed_after_signing = signed.clone();
+    changed_after_signing.statement.rows.count += 1;
+    assert!(c.begin_rebootstrap(changed_after_signing).await.is_err());
+    assert!(
+        a.begin_rebootstrap(signed.clone()).await.is_err(),
+        "a replica does not import its own checkpoint"
+    );
     let checkpoint = signed.id().unwrap();
     let page = a
         .checkpoint_page(
@@ -929,13 +982,15 @@ async fn rebootstrap_refuses_unverifiable_checkpoints() {
         .await
         .unwrap();
     assert!(page.next.is_some());
-    assert!(c.stage_checkpoint_page(page.clone()).await.is_err());
+    assert!(
+        c.stage_checkpoint_page(page.clone()).await.is_err(),
+        "a page that belongs to no import is refused"
+    );
     c.begin_rebootstrap(signed.clone()).await.unwrap();
     assert!(c.finish_rebootstrap(f.public).await.is_err());
-    // A page out of order, then a row set that stops early.
-    let mut skipped = page.clone();
-    skipped.after = page.next;
-    assert!(c.stage_checkpoint_page(skipped).await.is_err());
+    let mut out_of_order = page.clone();
+    out_of_order.after = page.next;
+    assert!(c.stage_checkpoint_page(out_of_order).await.is_err());
     let mut truncated = page.clone();
     truncated.next = None;
     assert!(c.stage_checkpoint_page(truncated).await.is_err());
@@ -943,7 +998,6 @@ async fn rebootstrap_refuses_unverifiable_checkpoints() {
     assert!(c.finish_rebootstrap(f.public).await.is_err());
     assert_eq!(all_rows(&f, &c).await, before);
     c.audit(f.public).await.unwrap();
-    // A superseded checkpoint is not served any more.
     a.author(handle(60), insert(&f, 60, "newer"), vec![])
         .await
         .unwrap();
@@ -958,7 +1012,8 @@ async fn rebootstrap_refuses_unverifiable_checkpoints() {
             4096
         )
         .await
-        .is_err()
+        .is_err(),
+        "a superseded checkpoint is not served any more"
     );
 }
 
@@ -983,8 +1038,6 @@ async fn compaction_at_seals_keeps_retained_bytes_bounded_then_backpressure() {
     a.set_retention_policy(f.public, policy(&[&b_key], &[]))
         .await
         .unwrap();
-    // With an acknowledging peer, compacting at a seal now and then keeps
-    // history inside the bound.
     let mut peak = 0;
     crate::tests::check_frontier_cache(&a, f.public).await;
     for index in 1..80 {
@@ -999,14 +1052,15 @@ async fn compaction_at_seals_keeps_retained_bytes_bounded_then_backpressure() {
     }
     let status = a.checkpoint_status(f.public).await.unwrap();
     assert_eq!(status.maintenance_error, None);
-    assert!(peak <= 40 * size as u64, "{peak}");
+    assert!(
+        peak <= 40 * size as u64,
+        "with an acknowledging peer, periodic compaction keeps history inside the bound: {peak}"
+    );
     assert!(status.checkpoint.unwrap().statement.operations > 60);
     assert!(!status.pruned_prefix.is_empty());
     crate::tests::check_frontier_cache(&a, f.public).await;
     assert!(count(&a, "SELECT COUNT(*) FROM secure_operations").await < 40);
     a.audit(f.public).await.unwrap();
-    // Without acknowledgments nothing may be pruned: the hard bound answers
-    // with a retryable error instead of losing anything.
     let mut refused = None;
     for index in 80..200 {
         if let Err(error) = a
@@ -1017,12 +1071,14 @@ async fn compaction_at_seals_keeps_retained_bytes_bounded_then_backpressure() {
             break;
         }
     }
-    let (index, error) = refused.expect("backpressure");
-    assert!(matches!(error, Error::Backpressure) && error.is_retryable());
+    let (index, error) = refused.expect("without acknowledgments the hard bound refuses");
+    assert!(
+        matches!(error, Error::Backpressure) && error.is_retryable(),
+        "the hard bound answers with a retryable error instead of losing anything"
+    );
     assert_eq!(a.lookup_mutation(handle(index)).await.unwrap(), None);
     crate::tests::check_frontier_cache(&a, f.public).await;
     assert!(a.checkpoint_status(f.public).await.unwrap().retained_bytes <= 40 * size as u64);
-    // Acknowledgments release it; the same handle then commits once.
     sync(&f, &a, (&b, &b_key, &b_credentials)).await;
     seal_main(&a, &f.publisher, f.public.domain).await;
     assert!(a.compact(f.public.domain, 0).await.unwrap().pruned > 0);
@@ -1031,7 +1087,11 @@ async fn compaction_at_seals_keeps_retained_bytes_bounded_then_backpressure() {
         .unwrap();
     sync(&f, &a, (&b, &b_key, &b_credentials)).await;
     assert_eq!(all_rows(&f, &a).await, all_rows(&f, &b).await);
-    assert_eq!(all_rows(&f, &a).await.len(), index as usize + 1);
+    assert_eq!(
+        all_rows(&f, &a).await.len(),
+        index as usize + 1,
+        "once acknowledgments release the bound, the refused handle commits once"
+    );
     a.audit(f.public).await.unwrap();
     b.audit(f.public).await.unwrap();
 }
@@ -1054,8 +1114,7 @@ async fn late_copy_of_a_pruned_dependency_releases_a_waiting_frame() {
         .await
         .unwrap();
     sync(&f, &a, (&b, &b_key, &b_credentials)).await;
-    // B, which keeps its history, names an ordinary old operation explicitly.
-    let dependent = b
+    let dependent_naming_old_operation = b
         .author(
             handle(4),
             insert(&f, 3, "depends"),
@@ -1068,15 +1127,18 @@ async fn late_copy_of_a_pruned_dependency_releases_a_waiting_frame() {
         .await
         .unwrap();
     assert_eq!(a.prune(f.public).await.unwrap().pruned, 3);
-    // A cannot tell a pruned dependency from a missing one: the frame waits.
     assert_eq!(
-        a.receive(dependent).await.unwrap(),
-        ReceiveStatus::PendingDependencies
+        a.receive(dependent_naming_old_operation).await.unwrap(),
+        ReceiveStatus::PendingDependencies,
+        "a pruned dependency is indistinguishable from a missing one"
     );
     assert_eq!(a.checkpoint_status(f.public).await.unwrap().pending, 1);
-    // A pass from the peer that still holds it settles the frame.
     sync(&f, &b, (&a, &a_key, &a_credentials)).await;
-    assert_eq!(a.checkpoint_status(f.public).await.unwrap().pending, 0);
+    assert_eq!(
+        a.checkpoint_status(f.public).await.unwrap().pending,
+        0,
+        "a pass from the peer that still holds the dependency settles the frame"
+    );
     assert_eq!(all_rows(&f, &a).await, all_rows(&f, &b).await);
     a.audit(f.public).await.unwrap();
 }
@@ -1124,7 +1186,7 @@ async fn crash_rebootstrap(
     replica.finish_rebootstrap(f.public).await
 }
 
-// Crashes a child process.
+/// Runs to an injected process exit inside `ROCKY_CHECKPOINT_CRASH_STEP`.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 #[ignore = "invoked by process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_audits"]
@@ -1174,14 +1236,12 @@ async fn checkpoint_crash_child() {
         }
         other => panic!("unknown crash step {other}"),
     }
-    // The fault exits the process; reaching this line is a failure.
-    std::process::exit(1);
+    panic!("the injected fault at {step} did not exit the process");
 }
 
 /// Process exit inside each step of checkpoint creation, pruning and
 /// rebootstrap: the step's transaction is gone, every file opens and passes
 /// the audit, and the work completes afterwards.
-// Crashes a child process.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_audits() {
@@ -1199,7 +1259,7 @@ async fn process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_au
             .stderr(std::process::Stdio::null())
             .status()
             .unwrap();
-        assert_eq!(status.code(), Some(77), "{step}");
+        assert_eq!(status.code(), Some(super::CRASH_EXIT_CODE), "{step}");
         let (f, keys) = crash_keys();
         let (a, a_credentials) = open(&f, &dir.path().join("a.db"), &keys[0]).await;
         let (c, c_credentials) = open(&f, &dir.path().join("c.db"), &keys[2]).await;
@@ -1215,9 +1275,12 @@ async fn process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_au
             matches!(step, "import" | "switch"),
             "{step}"
         );
-        // The interrupted work completes from what was committed.
         compacted(&f, &a).await;
-        assert_eq!(a.prune(f.public).await.unwrap().blocked, None, "{step}");
+        assert_eq!(
+            a.prune(f.public).await.unwrap().blocked,
+            None,
+            "the work interrupted at {step} completes from what was committed"
+        );
         assert_eq!(
             count(&a, "SELECT COUNT(*) FROM secure_operations").await,
             0,
@@ -1276,15 +1339,14 @@ async fn bootstrap_refuses_a_valid_checkpoint_signed_by_a_read_only_device() {
             .is_none()
     );
     assert!(all_rows(&f, &target).await.is_empty());
-    // Nor does the reader offer a base it lacks the authority to sign.
     assert!(
         reader
             .checkpoint_offer(target_key.public_key(), &target_credentials, f.public)
             .await
             .unwrap()
-            .is_none()
+            .is_none(),
+        "a reader offers no base it lacks the authority to sign"
     );
-    // The same rows from a writer pass authority and stage normally.
     let signed = compacted(&f, &writer).await;
     share_graph(&f, &writer, (&target, &target_key, &target_credentials)).await;
     target.begin_rebootstrap(signed).await.unwrap();
@@ -1293,7 +1355,8 @@ async fn bootstrap_refuses_a_valid_checkpoint_signed_by_a_read_only_device() {
             .rebootstrap_progress(f.public)
             .await
             .unwrap()
-            .is_some()
+            .is_some(),
+        "the same rows from a writer pass authority and stage normally"
     );
 }
 
@@ -1360,7 +1423,6 @@ async fn maintenance_waits_for_a_scope_being_imported() {
     b.maintain_checkpoint_for_test(f.public).await;
     let status = b.checkpoint_status(f.public).await.unwrap();
     assert!(status.checkpoint.is_none());
-    // The owner's intent holds back a scope that holds no rows yet.
     let (c, _) = open(&f, &dir.path().join("c.db"), &PrivateKey::new()).await;
     c.set_importing([f.public].into()).await;
     assert!(
@@ -1369,7 +1431,8 @@ async fn maintenance_waits_for_a_scope_being_imported() {
             .await
             .importing(f.public)
             .await
-            .unwrap()
+            .unwrap(),
+        "the owner's intent holds back a scope that holds no rows yet"
     );
     c.author(handle(7), insert(&f, 7, "own"), vec![])
         .await
@@ -1450,7 +1513,6 @@ async fn a_fresh_import_shows_each_verified_page_and_resumes_after_reopen() {
     }
     let report = b.finish_rebootstrap(f.public).await.unwrap();
     assert_eq!(report.checkpoint, signed.id().unwrap());
-    // With the public base installed the keyless scope needs its own.
     import_no_frames(&f, &a, (&b, &b_key, &b_credentials)).await;
     assert_eq!(all_rows(&f, &b).await, all_rows(&f, &a).await);
     let status = b.checkpoint_status(f.public).await.unwrap();
@@ -1545,10 +1607,9 @@ async fn a_tampered_checkpoint_page_is_refused_before_anything_is_stored() {
     });
     let mut reordered = first.clone();
     crate::replica::checkpoint::forge_page(&mut reordered, &key, |rows| rows.swap(0, 1));
-    // The second page's sealed rows under the first page's place.
-    let mut moved = first.clone();
-    moved.rows = second.rows.clone();
-    for forged in [changed, dropped, reordered, moved] {
+    let mut second_rows_in_first_place = first.clone();
+    second_rows_in_first_place.rows = second.rows.clone();
+    for forged in [changed, dropped, reordered, second_rows_in_first_place] {
         assert!(b.stage_checkpoint_page(forged).await.is_err());
         assert!(all_rows(&f, &b).await.is_empty());
         let (_, cursor, _) = b.rebootstrap_progress(f.public).await.unwrap().unwrap();
@@ -1611,7 +1672,6 @@ async fn a_direct_page_never_overwrites_an_existing_row() {
     });
     {
         let inner = b.inner.lock(crate::replica::Class::Background).await;
-        // Simulate a conflicting stored row without touching the import cursor.
         inner
             .conn
             .execute(
@@ -1718,7 +1778,6 @@ async fn an_import_asks_for_the_next_page_while_it_stores_the_current_one() {
     }
     compacted(&f, &a).await;
     let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &b_key).await;
-    // Enrollment hands the joiner the graph and the bookmark to follow.
     share_graph(&f, &a, (&b, &b_key, &b_credentials)).await;
     let (mut session, mut serving) = network::link::testing::sessions(
         (&b, b_key.clone(), b_credentials),
@@ -1729,8 +1788,7 @@ async fn an_import_asks_for_the_next_page_while_it_stores_the_current_one() {
     b.inject_stage_fault(Stage::Import, 0).await;
     let (pages, imported) = tokio::join!(serving.serve_counting_pages(&a), async {
         let imported = session.bootstrap_scope(&b, f.public, 4096).await;
-        // As a failed sync does: the answer on its way is never read.
-        drop(session);
+        drop_like_a_failed_sync(session);
         imported
     });
     assert!(
@@ -1740,9 +1798,16 @@ async fn an_import_asks_for_the_next_page_while_it_stores_the_current_one() {
     );
     assert_eq!(pages, 1);
     assert!(all_rows(&f, &b).await.is_empty());
-    // The failed page was not stored: the import resumes from it.
     let (_, cursor, _) = b.rebootstrap_progress(f.public).await.unwrap().unwrap();
-    assert_eq!(cursor, None);
+    assert_eq!(
+        cursor, None,
+        "the failed page was not stored, so the import resumes from it"
+    );
+}
+
+/// Closes `session` without reading the answer on its way, as a failed sync does.
+fn drop_like_a_failed_sync(session: NativeSession) {
+    drop(session);
 }
 
 /// Frames for a scope its import fills wait and apply after the switch; a
@@ -1770,14 +1835,15 @@ async fn writes_during_a_fresh_import_apply_over_its_rows_after_the_switch() {
     let first = page_of(&a, (&b_key, &b_credentials), &signed, after).await;
     after = first.next;
     b.stage_checkpoint_page(first).await.unwrap();
-    // The source's later frame waits, so reads report the scope
-    // incomplete; a local write applies at once.
     b.receive(later).await.unwrap();
     let shown = b
         .snapshot_page(f.public, None, MAX_SNAPSHOT_ROWS)
         .await
         .unwrap();
-    assert!(!shown.complete && !shown.rows.contains_key(&id(41)));
+    assert!(
+        !shown.complete && !shown.rows.contains_key(&id(41)),
+        "the source's later frame waits, so reads report the scope incomplete"
+    );
     b.author(handle(50), insert(&f, 50, "local"), vec![])
         .await
         .unwrap();
@@ -1785,7 +1851,10 @@ async fn writes_during_a_fresh_import_apply_over_its_rows_after_the_switch() {
         .snapshot_page(f.public, None, MAX_SNAPSHOT_ROWS)
         .await
         .unwrap();
-    assert!(shown.rows.contains_key(&id(50)));
+    assert!(
+        shown.rows.contains_key(&id(50)),
+        "a local write applies at once during the import"
+    );
     while let Some(cursor) = after {
         let page = page_of(&a, (&b_key, &b_credentials), &signed, Some(cursor)).await;
         after = page.next;
@@ -1832,11 +1901,11 @@ async fn an_imported_checkpoint_is_served_onward_with_its_signer_pages() {
             }
         }
         target.finish_rebootstrap(f.public).await.unwrap();
-        // B relays A's original no-frames statement without a key.
         let empty = import_no_frames(&f, source, (target, peer.0, peer.1)).await;
         assert_eq!(
             empty.id().unwrap(),
-            a.checkpoint(f.private).await.unwrap().id().unwrap()
+            a.checkpoint(f.private).await.unwrap().id().unwrap(),
+            "a keyless relay serves the original no-frames statement"
         );
     }
     assert_eq!(all_rows(&f, &c).await, all_rows(&f, &a).await);

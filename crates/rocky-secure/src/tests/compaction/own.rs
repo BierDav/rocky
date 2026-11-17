@@ -41,10 +41,10 @@ async fn a_signed_own_floor_must_cover_own_rows_before_a_direct_page_or_install(
         1
     );
     let scope = lineage.scope("items");
-    // A malicious issuer can sign an internally inconsistent own maximum.
+    let maliciously_lowered = &lowered;
     source.inner.lock(crate::replica::Class::Background).await.conn.execute(
         "UPDATE secure_checkpoints SET signed=? WHERE scope=(SELECT id FROM secure_scope_state WHERE scope=?)",
-        bindings(vec![SqlValue::Blob(lowered.to_bytes().unwrap()),SqlValue::Blob(encode(&scope).unwrap())]),
+        bindings(vec![SqlValue::Blob(maliciously_lowered.to_bytes().unwrap()),SqlValue::Blob(encode(&scope).unwrap())]),
     ).await.unwrap();
     let credentials = lineage.credentials(3, &keys[1]);
     source
@@ -82,8 +82,10 @@ async fn a_signed_own_floor_must_cover_own_rows_before_a_direct_page_or_install(
         bindings(vec![SqlValue::Blob(signed.to_bytes().unwrap()),SqlValue::Blob(encode(&scope).unwrap())]),
     ).await.unwrap();
     let staged = open(&lineage, &dir, "staged", &keys[2]).await;
-    // Local state makes this a staged import, so refusal must preserve it.
-    staged.receive(frame).await.unwrap();
+    staged
+        .receive(frame)
+        .await
+        .expect("local state makes this a staged import, which a refusal must preserve");
     crate::tests::exchange_graphs(&source, &staged, lineage.domain).await;
     staged.begin_rebootstrap(signed.clone()).await.unwrap();
     assert_eq!(

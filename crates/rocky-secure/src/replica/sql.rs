@@ -145,8 +145,6 @@ impl<A: RowApplication> SecureSession<A> {
             .inner
             .lock(crate::replica::Class::Background)
             .await;
-        // The program's transaction is the largest a migration writes; it
-        // starts on a cut WAL.
         inner
             .checkpoint_over(super::group::WAL_CHECKPOINT_BYTES)
             .await;
@@ -342,13 +340,11 @@ impl<A: RowApplication> SecureSql<A> {
             None => table.scope,
         };
         if !self.session.status.writable.contains(&scope) {
-            // While this device imports, or for a known partition this
-            // session predates, the table may become writable: retry.
-            if !inner.importing.is_empty()
+            let may_become_writable = !inner.importing.is_empty()
                 || inner.importing(scope).await?
                 || (inner.partitions.contains_key(&scope)
-                    && !self.session.status.scopes.contains(&scope))
-            {
+                    && !self.session.status.scopes.contains(&scope));
+            if may_become_writable {
                 return Err(Error::Sql(SqlError::Unavailable {
                     table: table.table.sql_name.clone(),
                     reason: crate::sql::Unavailable::Incomplete,
@@ -356,8 +352,6 @@ impl<A: RowApplication> SecureSql<A> {
             }
             return Err(denied("identity allocation requires a writable table"));
         }
-        // Later reservations of this transaction continue the first, whose
-        // author it verified; the commit verifies every inserted id again.
         let number = author.writer;
         let allocation = inner.identity_allocation_scope(scope);
         if let Some(&(reserved, sequence)) = lease.identities.get(&allocation)
@@ -450,8 +444,6 @@ impl<A: RowApplication> SecureSql<A> {
         params: Vec<SqlValue>,
         target: Target,
     ) -> Result<SecureRows, Error> {
-        // A bound session reads the seal through cursors; the live tables
-        // are not its to read or write.
         if self.seal.is_some() {
             return Err(Error::Sql(SqlError::Unsupported(
                 "a connection bound to a seal only reads".into(),
@@ -562,8 +554,6 @@ impl<A: RowApplication> SecureSql<A> {
                     }
                 };
                 let (sql, params) = (checked.sql.as_str(), checked.params);
-                // A read of a table whose rows are not all here is refused,
-                // never answered as absence.
                 if let Ok(analyzed) = crate::statement::analyze(sql, |_| None)
                     && analyzed.kind == crate::statement::Kind::Read
                 {
@@ -585,8 +575,6 @@ impl<A: RowApplication> SecureSql<A> {
                     }
                 }
                 if active {
-                    // A refused intent ends the transaction like any refused
-                    // statement.
                     let copies = match self.intent_copies(&lease, original).await {
                         Ok(copies) => copies,
                         Err(error) => {
@@ -644,7 +632,6 @@ impl<A: RowApplication> SecureSql<A> {
             .await;
         inner.invalidate_frontiers();
         admit(&inner, &self.session)?;
-        // Each written scope's own blockers refuse its frames at commit.
         let domains: BTreeSet<_> = self
             .session
             .status
@@ -705,8 +692,6 @@ impl<A: RowApplication> SecureSql<A> {
         lease.turn += 1;
         lease.deadline = Instant::now() + self.options.transaction_timeout;
         self.cancelled.store(false, Ordering::Relaxed);
-        // The watcher waits on the runtime's clock; `deadline` bounds the
-        // engine's work by the wall clock.
         let (watched, turn, timeout) = (
             self.lease.clone(),
             lease.turn,
@@ -728,7 +713,6 @@ impl<A: RowApplication> SecureSql<A> {
                 limit: crate::sql::MAX_SAVEPOINTS,
             });
         }
-        // The engine sees positions, never a caller's name.
         self.engine(
             lease,
             &format!("SAVEPOINT rocky_user_{}", lease.savepoints.len()),
@@ -763,7 +747,6 @@ impl<A: RowApplication> SecureSql<A> {
         single: bool,
         copies: Option<Vec<super::intents::Recorded>>,
     ) -> Result<SecureRows, Error> {
-        // A replayed write runs here with the checked arithmetic its replay runs.
         let checked = copies
             .is_some()
             .then(|| rocky_storage::exact::checked_statement(sql))
@@ -790,14 +773,11 @@ impl<A: RowApplication> SecureSql<A> {
         };
         let ended = conn.is_autocommit().unwrap_or(true);
         let outside = touched.iter().any(|table| !lease.writable.contains(table));
-        // Only a split statement may change a replayed table; anything else
-        // would change rows no replica replays.
         let unreplayed = copies.is_none()
             && touched
                 .iter()
                 .any(|table| lease.plan.tables[*table].class == TableClass::Replayed);
         let mut poison = |reason: String, error: Error| {
-            // `held` drops here and rolls back.
             if !single {
                 lease.aborted = Some(AbortReason::Poisoned(reason));
             }
@@ -965,12 +945,10 @@ impl<A: RowApplication> SecureSql<A> {
         let inner = &mut *held.0;
         #[cfg(feature = "qualification")]
         super::crash::qualification_kill("before");
-        // Only a plain bundle is local authoring alone.
         let local = matches!(target, Target::Bundle(_));
         let intents = std::mem::take(&mut lease.intents);
         let sealed = self.seal(inner, &lease.plan, target, &intents).await;
         let committed = match sealed? {
-            // `held` rolls the repeated transaction back.
             Sealed::Replayed(committed) => {
                 drop(held);
                 rows.committed = Some(committed);
@@ -1000,11 +978,9 @@ impl<A: RowApplication> SecureSql<A> {
             .map(EncryptedFrame::scope)
             .collect::<Result<BTreeSet<_>, _>>()?;
         let flushed = self.options.acknowledge == CommitClass::Flushed;
-        // Queue before announcing the revision, including when the caller flushes.
         inner.deferred_maintenance.extend(scopes);
         inner.publish_revision().await?;
         if flushed {
-            // The frames may leave the device.
             let (flusher, committed_at) = (inner.flusher.clone(), inner.commit);
             drop(held);
             flusher.run(committed_at).await?;
@@ -1048,8 +1024,6 @@ impl<A: RowApplication> SecureSql<A> {
             .typed
             .clone()
             .ok_or_else(|| Error::Incompatible("no typed tables are installed".into()))?;
-        // Every replica captures at most this much of one replay; the author
-        // refuses what they would drop.
         let replayed = touched
             .iter()
             .filter(|touched| plan.tables[touched.table].class == TableClass::Replayed)
@@ -1065,7 +1039,6 @@ impl<A: RowApplication> SecureSql<A> {
         let mut written = Vec::new();
         for touched in touched {
             let table = &plan.tables[touched.table];
-            // The author admits its replayed effects as every replica will.
             if table.class != TableClass::Replayed {
                 continue;
             }
@@ -1084,7 +1057,6 @@ impl<A: RowApplication> SecureSql<A> {
                 .table(&table.name)
                 .ok_or_else(|| Error::Corrupt("replayed table".into()))?;
             super::replay::note(&mut written, super::replay::written(logical, &image)?);
-            // Restrictions judge every changed row, delete actions included.
             if !unchecked
                 && let Some(violated) = super::replay::restricted(
                     conn,
@@ -1099,12 +1071,13 @@ impl<A: RowApplication> SecureSql<A> {
                     message: violated,
                 }));
             }
-            // Rows only a delete action changed need no grant, as on
-            // every replica.
-            let direct = intents
+            let changed_by_statement = intents
                 .iter()
                 .any(|recorded| recorded.scope.table == change.scope.table);
-            if !unchecked && direct && !change.permitted_by(&inner.local_grants(now()?)?) {
+            if !unchecked
+                && changed_by_statement
+                && !change.permitted_by(&inner.local_grants(now()?)?)
+            {
                 return Err(denied(
                     "row/field transition denied; the replayed effects are not granted",
                 ));
@@ -1138,8 +1111,6 @@ impl<A: RowApplication> SecureSql<A> {
                     before: touched.before,
                 });
         }
-        // Receivers refuse only a reused id; the author's own ids continue
-        // its creation log in each allocation scope.
         let mut allocated = BTreeMap::<ResourceScope, Vec<u64>>::new();
         let own = inner.node_author.as_ref().map(|author| author.writer);
         for (scope, marks) in &births {
@@ -1171,8 +1142,6 @@ impl<A: RowApplication> SecureSql<A> {
             }
         }
         admit(inner, &self.session)?;
-        // Every replica checks these before releasing the transaction's
-        // savepoint; the author refuses what they would drop.
         let intents = super::intents::grouped(intents)?;
         if intents.len() > 1 {
             let named: Vec<(&str, &[rocky_core::replay::IntentStatement])> = intents

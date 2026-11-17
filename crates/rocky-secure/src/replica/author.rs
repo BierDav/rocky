@@ -179,7 +179,6 @@ impl<A: RowApplication> Inner<A> {
             .iter()
             .find(|key| key.scope == scope)
             .ok_or_else(|| denied("author needs an authorized row key"))?;
-        // The log tip outlives its pruned operation, so counters continue.
         let id = self.scope_id(scope).await?;
         let tip = self.author_tip(scope, id, signing_key.public_key()).await?;
         self.admit_author(scope, tip.as_ref().map(|log| log.sequence))
@@ -208,14 +207,13 @@ impl<A: RowApplication> Inner<A> {
                 .row(scope, self.storage_row(change)?)
                 .await?
                 .and_then(|record| (!record.deleted).then_some(record.fields));
-            // A finalized seal may have dropped a row the commit leaves untouched.
-            if held != change.before && !(finalized && held.is_none() && change.before.is_some()) {
+            let dropped_by_finalized_seal = finalized && held.is_none() && change.before.is_some();
+            if held != change.before && !dropped_by_finalized_seal {
                 return Err(Error::Conflict);
             }
             if let Some(row) = self.row(scope, self.storage_row(change)?).await? {
                 previous.insert(row.creation);
                 witnesses.insert(self.storage_row(change)?, *row.creation.as_bytes());
-                // A write wins over every value it saw.
                 clock = row
                     .stamps
                     .values()
@@ -228,7 +226,6 @@ impl<A: RowApplication> Inner<A> {
         }
         for dependency in &previous {
             let Some(frame) = self.frame(*dependency).await? else {
-                // A pruned dependency is usable while its stub is kept.
                 match self.stub(*dependency).await? {
                     Some((stub, known)) if stub == id => clock = clock.max(known),
                     _ => return Err(denied("missing encrypted dependency")),

@@ -90,8 +90,10 @@ async fn pending_survives_reopen_clock_observers_and_no_echo() {
     phone.process_pending().await.unwrap();
     assert_eq!(phone.query().await.unwrap().revision, revision);
     let state = phone.sync_state().await.unwrap();
-    // Everything held is contiguous now: the frontier covers it.
-    assert_eq!(state.held, state.applied);
+    assert_eq!(
+        state.held, state.applied,
+        "everything held is contiguous now: the frontier covers it"
+    );
     assert!(state.received.is_empty());
     assert_eq!(
         state.applied.0,
@@ -126,9 +128,12 @@ async fn durable_receipt_before_apply_and_atomic_apply_rollback() {
     phone.receive(op.encode().unwrap()).await.unwrap();
     assert!(phone.query().await.unwrap().rows.is_empty());
     phone.close().await.unwrap();
-    // Startup applies durably received ready operations, without a transport queue.
     let phone = open(&dir, fixtures::PHONE, StaticPolicy::default()).await;
-    assert_eq!(phone.query().await.unwrap().rows[0].title, "receipt only");
+    assert_eq!(
+        phone.query().await.unwrap().rows[0].title,
+        "receipt only",
+        "startup applies durably received ready operations, without a transport queue"
+    );
     let second = edit(&laptop, op.id, Action::SetTitle("batch final".into())).await;
     let third = edit(&laptop, op.id, Action::SetCompleted(true)).await;
     phone.receive(third.encode().unwrap()).await.unwrap();
@@ -223,10 +228,10 @@ async fn concurrent_edits_delete_race_and_full_merge_replay_converge() {
         laptop.sync_state().await.unwrap().applied,
         replay.applied.frontier()
     );
-    // Phone's retained internal stamps/tombstones are also checked on reopen.
     assert_eq!(
         laptop.query().await.unwrap().rows,
-        phone.query().await.unwrap().rows
+        phone.query().await.unwrap().rows,
+        "phone's retained internal stamps/tombstones are also checked on reopen"
     );
     laptop.close().await.unwrap();
     phone.close().await.unwrap();
@@ -460,12 +465,14 @@ async fn tracking_a_mutation_reads_only_its_acknowledgment() {
         assert!(progress.committed.is_some() && !progress.peers[0].received);
     }
     assert!(costs[1] < costs[0] + 50, "{costs:?}");
-    // An unknown peer is refused whether or not the handle committed.
     for handle in [MutationHandle([1; 32]), MutationHandle([9; 32])] {
-        assert!(matches!(
-            laptop.track_mutation(handle, &[NodeId([0x42; 16])]).await,
-            Err(Error::Rejected(_))
-        ));
+        assert!(
+            matches!(
+                laptop.track_mutation(handle, &[NodeId([0x42; 16])]).await,
+                Err(Error::Rejected(_))
+            ),
+            "an unknown peer is refused whether or not the handle committed"
+        );
     }
     laptop.close().await.unwrap();
 }
@@ -492,7 +499,6 @@ async fn sync_steps_wake_read_observers_only_when_the_backlog_changes() {
         laptop.process_pending().await.unwrap();
     }
     assert_eq!(meta(), start);
-    // An edit whose creation is missing waits: the backlog grew.
     let created = create(&phone, "phone todo").await;
     let renamed = edit(&phone, created.id, Action::SetTitle("renamed".into())).await;
     assert!(
@@ -500,16 +506,16 @@ async fn sync_steps_wake_read_observers_only_when_the_backlog_changes() {
             .receive(renamed.encode().unwrap())
             .await
             .unwrap()
-            .applied
+            .applied,
+        "an edit whose creation is missing waits: the backlog grew"
     );
     let waiting = meta();
     assert!(waiting > start);
     laptop.process_pending().await.unwrap();
     assert_eq!(meta(), waiting);
-    // Its creation arrives and both apply.
     laptop.receive(created.encode().unwrap()).await.unwrap();
     laptop.process_pending().await.unwrap();
-    assert!(meta() > waiting);
+    assert!(meta() > waiting, "its creation arrives and both apply");
     assert_eq!(
         laptop
             .read(

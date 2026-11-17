@@ -74,9 +74,12 @@ async fn a_failing_step_rolls_back_alone_while_its_group_commits() {
         Err(Error::Conflict)
     ));
     assert_eq!(neighbour.committed().await.unwrap().id.sequence.get(), 1);
-    // All four steps of both domains shared the group after the paused one.
     let groups = groups(&log);
-    assert_eq!(groups.len(), 2);
+    assert_eq!(
+        groups.len(),
+        2,
+        "all four steps of both domains shared the group after the paused one"
+    );
     let mut domains: Vec<_> = groups[1].iter().map(|(domain, _)| *domain).collect();
     domains.sort();
     assert_eq!(domains, [0, 0, 0, 1]);
@@ -89,7 +92,6 @@ async fn a_failing_step_rolls_back_alone_while_its_group_commits() {
     assert_eq!(a.query().await.unwrap().revision.get(), 2);
     assert_eq!(b.query().await.unwrap().revision.get(), 1);
     runtime.close().await.unwrap();
-    // Reopen replays both domains' history against counters and projections.
     let runtime = open(&dir, one_file()).await;
     for (domain, revision) in [(1, 2), (2, 1)] {
         let snapshot = runtime
@@ -100,7 +102,8 @@ async fn a_failing_step_rolls_back_alone_while_its_group_commits() {
             .unwrap();
         assert_eq!(
             (snapshot.rows.len() as u64, snapshot.revision.get()),
-            (revision, revision)
+            (revision, revision),
+            "reopen replays both domains' history against counters and projections"
         );
     }
     runtime.close().await.unwrap();
@@ -116,7 +119,6 @@ async fn nothing_of_a_group_is_observable_before_its_commit() {
     );
     let log = record(&a).await;
     let (first, resume) = pause(&a).await;
-    // The next group runs b's step, then pauses inside a's.
     let (entered, waiting) = oneshot::channel();
     let (proceed, held) = oneshot::channel();
     let (reply, _set) = oneshot::channel();
@@ -135,8 +137,10 @@ async fn nothing_of_a_group_is_observable_before_its_commit() {
     revisions.borrow_and_update();
     changes.borrow_and_update();
     rocky_platform::time::sleep(std::time::Duration::from_millis(20)).await;
-    // b's step has released its savepoint, yet nothing of it is visible.
-    assert!(released.result.try_recv().is_err());
+    assert!(
+        released.result.try_recv().is_err(),
+        "b's step has released its savepoint, yet nothing of it is visible"
+    );
     assert!(!revisions.has_changed().unwrap());
     assert!(!changes.has_changed().unwrap());
     assert_eq!(b.inner.revisions.borrow().get(), 0);
@@ -210,14 +214,13 @@ async fn a_failed_commit_fails_the_group_and_restores_memory() {
                 .unwrap()
                 .is_none()
         );
-        // Reads check memory against the stored revision.
         let snapshot = replica.query().await.unwrap();
         assert_eq!(
             (snapshot.rows.len() as u64, snapshot.revision.get()),
-            (revision, revision)
+            (revision, revision),
+            "reads check memory against the stored revision"
         );
     }
-    // Retried handles commit once, at the sequences the failed group used.
     assert_eq!(
         note(&a, 1, "lost")
             .committed()
@@ -226,7 +229,8 @@ async fn a_failed_commit_fails_the_group_and_restores_memory() {
             .id
             .sequence
             .get(),
-        2
+        2,
+        "retried handles commit once, at the sequences the failed group used"
     );
     assert_eq!(
         note(&b, 1, "lost")
@@ -258,11 +262,14 @@ async fn groups_are_bounded_and_fair_across_domains() {
         runtime.domain(scope(2)).unwrap(),
     );
     let log = record(&a).await;
-    // Light load: an awaited write commits alone, without waiting for company.
     for handle in 1..=3 {
         note(&a, handle, "alone").committed().await.unwrap();
     }
-    assert_eq!(groups(&log), vec![vec![(0, 256 + 5)]; 3]);
+    assert_eq!(
+        groups(&log),
+        vec![vec![(0, 256 + 5)]; 3],
+        "light load: an awaited write commits alone, without waiting for company"
+    );
     let (first, resume) = pause(&a).await;
     let flood: Vec<_> = (10..34).map(|handle| note(&a, handle, "flood")).collect();
     let late: Vec<_> = (1..=2).map(|handle| note(&b, handle, "late")).collect();
@@ -273,14 +280,14 @@ async fn groups_are_bounded_and_fair_across_domains() {
     }
     let groups = groups(&log);
     assert!(groups.iter().all(|group| group.len() <= 4), "{groups:?}");
-    // The busy domain's backlog did not delay the other domain's writes.
     let first_after_pause = &groups[4];
     assert_eq!(
         first_after_pause
             .iter()
             .filter(|(domain, _)| *domain == 1)
             .count(),
-        2
+        2,
+        "the busy domain's backlog did not delay the other domain's writes"
     );
     assert_eq!(groups.iter().map(Vec::len).sum::<usize>(), 3 + 1 + 24 + 2);
     runtime.close().await.unwrap();
@@ -314,8 +321,10 @@ async fn groups_are_bounded_by_queued_bytes() {
     resume.send(()).unwrap();
     first.committed().await.unwrap();
     for reply in replies {
-        // Undecodable requests fail in their own savepoints.
-        assert!(reply.await.unwrap().is_err());
+        assert!(
+            reply.await.unwrap().is_err(),
+            "undecodable requests fail in their own savepoints"
+        );
     }
     let groups = groups(&log);
     let sizes: Vec<_> = groups[1..].iter().map(Vec::len).collect();
@@ -329,7 +338,7 @@ async fn groups_are_bounded_by_queued_bytes() {
 
 /// Reads run on the read-only connection between groups: the reported
 /// revision is the one their rows and memory-derived fields belong to.
-// Needs threads, which a browser Worker lacks.
+/// Needs threads, which a browser Worker lacks.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reads_report_the_revision_their_rows_were_read_at() {
@@ -450,13 +459,13 @@ async fn reads_leave_no_transaction_or_cursor_open() {
     runtime.close().await.unwrap();
 }
 
-// Needs threads, which a browser Worker lacks.
+/// Needs threads, which a browser Worker lacks.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_wal_stays_bounded_under_sustained_writes_with_readers() {
     let dir = Scratch::new().await;
     let runtime = open(&dir, one_file()).await;
-    // Small thresholds, so a short test crosses them many times.
+    /// Small, so a short test crosses the checkpoint threshold many times.
     const FRAMES: i64 = 1000;
     crate::tests::fault(
         &runtime.domain(scope(1)).unwrap(),
@@ -468,7 +477,6 @@ async fn the_wal_stays_bounded_under_sustained_writes_with_readers() {
     wal.push("-wal");
     let wal = std::path::PathBuf::from(wal);
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Another connection keeps taking short read transactions.
     let reader = {
         let (path, done) = (path.clone(), done.clone());
         rocky_platform::task::spawn(async move {
@@ -530,13 +538,15 @@ async fn the_wal_stays_bounded_under_sustained_writes_with_readers() {
     let largest = largest.load(std::sync::atomic::Ordering::Relaxed);
     assert!(largest > 0 && largest <= bound, "{largest} > {bound}");
     runtime.close().await.unwrap();
-    // A clean close checkpoints and truncates the log.
-    assert!(rocky_platform::fs::len(&wal).unwrap_or(0) == 0);
+    assert!(
+        rocky_platform::fs::len(&wal).unwrap_or(0) == 0,
+        "a clean close checkpoints and truncates the log"
+    );
 }
 
 /// While a reader pins the log, resets that wait for it back off over
 /// groups instead of stalling every group; once it ends the log resets.
-// A second connection to the file, which the browser target keeps out.
+/// A second connection to the file, which the browser target keeps out.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test]
 async fn a_pinned_log_backs_off_waiting_resets() {
@@ -556,7 +566,6 @@ async fn a_pinned_log_backs_off_waiting_resets() {
             .unwrap();
     };
     mutate(0).await;
-    // A read transaction that started on the log keeps it from resetting.
     let reader = crate::sqlite::Connection::open_read_only(&dir.path().join(FILE)).unwrap();
     reader.execute("BEGIN", ()).await.unwrap();
     crate::tests::rows(&reader, "SELECT COUNT(*) FROM sqlite_schema")
@@ -569,9 +578,14 @@ async fn a_pinned_log_backs_off_waiting_resets() {
     let pinned = replica.writer_stats();
     let truncations = pinned.truncations - before.truncations;
     let waits = pinned.truncate_waits - before.truncate_waits;
-    assert!(truncations >= 48, "{truncations}");
-    // Backoff doubles from one group: 1 + 2 + 4 + ... covers 64 in seven.
-    assert!(waits <= 7, "{waits} waits over {truncations} resets");
+    assert!(
+        truncations >= 48,
+        "a read transaction that started on the log keeps it from resetting: {truncations}"
+    );
+    assert!(
+        waits <= 7,
+        "backoff doubles from one group: 1 + 2 + 4 + ... covers 64 in seven: {waits} waits over {truncations} resets"
+    );
     reader.execute("COMMIT", ()).await.unwrap();
     mutate(65).await;
     mutate(66).await;

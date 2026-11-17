@@ -358,6 +358,11 @@ impl Todos {
     }
 }
 
+/// An empty blob is no row identity, so `None` excludes nothing.
+fn excluded_identity(except: Option<RowIdentity>) -> SqlValue {
+    except.map_or(SqlValue::Blob(Vec::new()), RowIdentity::sql)
+}
+
 /// `list`'s positions in order, without `except`.
 async fn positions(
     transaction: &mut Transaction,
@@ -367,11 +372,7 @@ async fn positions(
     let rows = transaction
         .query(
             "SELECT position FROM todos WHERE list=? AND id<>? ORDER BY position",
-            // An empty blob is no identity, so it excludes nothing.
-            params![
-                list,
-                except.map_or(rocky_sdk::SqlValue::Blob(Vec::new()), RowIdentity::sql)
-            ],
+            params![list, excluded_identity(except)],
         )
         .await?
         .collect()

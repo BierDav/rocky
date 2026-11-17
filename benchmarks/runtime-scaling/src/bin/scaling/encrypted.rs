@@ -114,6 +114,9 @@ fn report(label: &str, started: Instant, result: Result<String, Error>) {
         Err(error) => println!("{label}: refused: {error}"),
     }
 }
+/// Encrypted replica costs, including one complete catch-up pass as a peer
+/// with nothing would request it, and the single mutex under contention:
+/// concurrent submitters queue, and reads wait behind writes.
 pub async fn run() -> Result<(), Failure> {
     let publisher = PrivateKey::new();
     let scope = Employees::new(*publisher.public_key().as_bytes()).scope(MeshId([1; 16]), false);
@@ -218,7 +221,6 @@ pub async fn run() -> Result<(), Failure> {
             timings.push(step.elapsed());
         }
         line(&format!("{rows} point read"), timings, started.elapsed());
-        // One complete catch-up pass, as a peer with nothing would request it.
         let started = Instant::now();
         let pass = async {
             let (mut cursor, mut pages, mut transferred) = (None, 0, 0);
@@ -263,7 +265,6 @@ pub async fn run() -> Result<(), Failure> {
             resident_mib()
         );
     }
-    // The single mutex: concurrent submitters queue, and reads wait behind writes.
     let contention = EncryptedReplica::open(
         dir.path().join("contention.db"),
         fixture.app(),

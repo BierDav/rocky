@@ -224,6 +224,19 @@ pub fn split_intent<E>(
     split_intent_within(sql, params, views, tables, MAX_INTENT_PARTITIONS, evaluate)
 }
 
+/// Numbers each anonymous parameter in place, so parameters keep their
+/// places wherever values are added.
+fn number_parameters(statement: &mut Statement, numbers: &BTreeMap<(u64, u64), usize>) {
+    let _ = VisitMut::visit(
+        statement,
+        &mut Filter {
+            tables: &BTreeMap::new(),
+            reads: Vec::new(),
+            numbers,
+        },
+    );
+}
+
 /// [`split_intent`] reaching at most `limit` partitions. A migration
 /// replays each partition's copy as its own transaction, so it is not
 /// bound by one bundle's frames.
@@ -275,16 +288,7 @@ pub fn split_intent_within<E>(
     }) {
         return Err(refusal.into());
     }
-    // Numbered parameters keep their places wherever values are added.
-    let unfiltered = BTreeMap::new();
-    let _ = VisitMut::visit(
-        &mut statement,
-        &mut Filter {
-            tables: &unfiltered,
-            reads: Vec::new(),
-            numbers: &bindings.numbers,
-        },
-    );
+    number_parameters(&mut statement, &bindings.numbers);
     let (name, seed) = target(&statement)?;
     let rule = tables.get(&name).cloned().unwrap_or(TablePartitions {
         columns: Vec::new(),
@@ -932,13 +936,13 @@ impl<E> Split<'_, E> {
         self.values.push(value);
         Expr::Value(Value::Placeholder(format!("?{}", self.values.len())).with_empty_span())
     }
-    /// The rows of a read, evaluated once with the held filters applied.
+    /// The rows of a read, evaluated once with the held filters applied and
+    /// with checked arithmetic, since its values are bound into the intent.
     fn rows(&mut self, sql: String) -> Result<Rows, SplitError<E>> {
         if let Some(rows) = self.reads.get(&sql) {
             return Ok(rows.clone());
         }
         let mut read = parse(&sql).map_err(IntentRefusal::Unsupported)?;
-        // Its values are bound into the intent, so they must be exact too.
         let _ = VisitMut::visit(&mut read, &mut crate::exact::Checked);
         let params = compact(&mut read, &self.values)?;
         let checked = prepare(&read.to_string(), &[])?.check(&params, self.tables)?;
@@ -1054,14 +1058,18 @@ fn blocks<'q>(body: &'q SetExpr, out: &mut Vec<&'q Select>) -> bool {
         _ => false,
     }
 }
+/// A table function or a table of another database, which a write never
+/// targets, named without an alias.
+fn never_the_target(name: &ObjectName) -> (String, String) {
+    (name.to_string(), String::new())
+}
 /// Tables a FROM item reads directly, as `(name, alias)`.
 fn sources(item: &TableWithJoins, out: &mut Vec<(String, String)>) {
     fn factor(factor: &TableFactor, out: &mut Vec<(String, String)>) {
         match factor {
             TableFactor::Table { name, args, .. } => out.push(match table(factor) {
                 Some(reference) if args.is_none() => reference,
-                // A table function or another database is never the target.
-                _ => (name.to_string(), String::new()),
+                _ => never_the_target(name),
             }),
             TableFactor::NestedJoin {
                 table_with_joins, ..

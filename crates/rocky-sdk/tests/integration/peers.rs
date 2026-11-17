@@ -41,8 +41,10 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
         return Err("devices".into());
     };
     introduce(b, c).await;
-    // The creator accepts contacts of devices it enrolled, and no others.
-    assert!(a.add_peer(&b.contact().await).await.is_ok());
+    assert!(
+        a.add_peer(&b.contact().await).await.is_ok(),
+        "the creator accepts contacts of devices it enrolled"
+    );
     let foreign = Device::create(&root.path().join("x"), Some(memory(&hub, "x")))?;
     for device in [a, b] {
         let error = device.add_peer(&foreign.contact().await).await;
@@ -59,13 +61,13 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
     assert!(common::reconciled(&synced));
     assert_eq!(c.titles().await, ["Eggs", "Milk"]);
     assert_eq!(b.items().await, c.items().await);
-    // The network reports each peer on its own; the database is unaffected.
     assert!(
         c.peer(&b.node().await).await["attempts"]
             .as_array()
             .expect("attempts")
             .iter()
-            .any(|attempt| attempt["outcome"] == "completed")
+            .any(|attempt| attempt["outcome"] == "completed"),
+        "the network reports each peer on its own"
     );
     let creator = snap::ok(c.session.info()).await;
     let creators: Vec<Value> = snap::ok(async {
@@ -94,15 +96,19 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
     assert_eq!(network["inbound"]["limit"], 32);
 
     assert_eq!(c.peer(&b.node().await).await["is_configured"], true);
-    // A removed contact is no longer dialed; it is still served.
     snap::ok(b.session.remove_peer(&(snap::text(&(c.node().await))))).await;
     b.add(4, "Tea").await;
-    assert!(common::exchange_failed(&b.sync().await));
+    assert!(
+        common::exchange_failed(&b.sync().await),
+        "a removed contact is no longer dialed"
+    );
     assert_eq!(c.titles().await, ["Eggs", "Milk"]);
     c.sync().await.map_err(|error| error.to_string())?;
-    assert_eq!(c.titles().await, ["Eggs", "Milk", "Tea"]);
-    // Any issuer renews any device: the last one can be removed, and the
-    // member then lists no known renewal candidates.
+    assert_eq!(
+        c.titles().await,
+        ["Eggs", "Milk", "Tea"],
+        "a removed contact is still served"
+    );
     let creator_node = creators[0]["node"].clone();
     assert!(
         !b.session
@@ -119,7 +125,8 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
             .await?
             .authority
             .renewal_routes
-            .is_empty()
+            .is_empty(),
+        "the last issuer contact can be removed, leaving no known renewal candidates"
     );
     assert!(
         snap::ok(b.session.status()).await["authority"]["renewal_routes"]
@@ -149,7 +156,6 @@ async fn edits_relayed_in_any_order_and_repeated_converge() -> Result<(), Failur
         device.sync().await.map_err(|error| error.to_string())?;
     }
     a.close().await;
-    // Concurrent edits of one row, a delete and new rows, known to one device each.
     b.set(2, &milk, "title", json!("Oat milk")).await;
     c.set(3, &milk, "completed", json!(true)).await;
     d.add(4, "Eggs").await;
@@ -164,8 +170,9 @@ async fn edits_relayed_in_any_order_and_repeated_converge() -> Result<(), Failur
         None,
     ))
     .await;
-    // The later edit reaches a device before the earlier one, and again.
-    for order in [[d, b, c], [c, d, b], [b, b, d], [c, c, c], [d, b, c]] {
+    let later_edits_arrive_before_earlier_ones =
+        [[d, b, c], [c, d, b], [b, b, d], [c, c, c], [d, b, c]];
+    for order in later_edits_arrive_before_earlier_ones {
         for device in order {
             device.sync().await.map_err(|error| error.to_string())?;
         }
@@ -196,22 +203,30 @@ async fn a_revoked_peer_stays_denied_without_the_creator() -> Result<(), Failure
             .revoke_identity(&(snap::text(&(c.identity().await)))),
     )
     .await;
-    // Revoking forgets the device's contact and refuses it again.
-    assert_eq!(a.peer(&c.node().await).await, Value::Null);
-    assert!(a.add_peer(&c.contact().await).await.is_err());
-    // The other member learns the revocation from the creator.
+    assert_eq!(
+        a.peer(&c.node().await).await,
+        Value::Null,
+        "revoking forgets the device's contact"
+    );
+    assert!(
+        a.add_peer(&c.contact().await).await.is_err(),
+        "a revoked device's contact is refused again"
+    );
     b.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(
         snap::ok(b.session.info()).await["revocations"]["statements"],
-        1
+        1,
+        "the other member learns the revocation from the creator"
     );
     a.close().await;
 
     b.add(1, "Fresh").await;
     c.add(2, "Late").await;
     assert!(common::exchange_failed(&c.sync().await));
-    // Its still-configured peer neither takes its rows nor gives it any.
-    assert!(common::exchange_failed(&b.sync().await));
+    assert!(
+        common::exchange_failed(&b.sync().await),
+        "a still-configured peer neither takes a revoked device's rows nor gives it any"
+    );
     assert_eq!(b.titles().await, ["Fresh"]);
     assert_eq!(c.titles().await, ["Late"]);
     b.close().await;
@@ -239,7 +254,6 @@ async fn a_domain_survives_a_change_of_routes_and_transport_kind() -> Result<(),
         device.close().await;
     }
 
-    // Both devices come back on another transport kind.
     let a = Device::open(&root.path().join("a"), Some(iroh()))?;
     let b = Device::open(&root.path().join("b"), Some(iroh()))?;
     assert_eq!(a.database.scope(), scope);
@@ -250,25 +264,29 @@ async fn a_domain_survives_a_change_of_routes_and_transport_kind() -> Result<(),
     assert_eq!(snap::ok(a.session.domain()).await["transport"], "iroh");
     assert_eq!(b.titles().await, ["Milk"]);
     b.add(2, "Eggs").await;
-    // The member only knows the creator's old route.
-    let error = b.sync().await.err().ok_or("no route yet")?;
+    let error = b
+        .sync()
+        .await
+        .err()
+        .ok_or("the member only knows the creator's old route")?;
     assert_eq!(error["code"], "rejected", "{error}");
     assert!(
         error["message"]
             .as_str()
             .is_some_and(|m| m.contains("iroh"))
     );
-    // A fresh contact adds the route; the old one is kept for its kind.
     b.add_peer(&a.contact().await)
         .await
         .map_err(|e| e.to_string())?;
     let routes = b.peer(&a.node().await).await["routes"].clone();
-    assert_eq!(routes.as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        routes.as_array().map(Vec::len),
+        Some(2),
+        "a fresh contact adds the route and the old one is kept for its kind"
+    );
     b.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(a.titles().await, ["Eggs", "Milk"]);
 
-    // An address is a hint, not a grant: another enrolled device behind
-    // the creator's route is not taken for the creator.
     let c = Device::open(&root.path().join("c"), Some(iroh()))?;
     let c_contact: Value = decode(&c.contact().await, "rocky://peer/")?;
     let mut forged: Value = decode(&a.contact().await, "rocky://peer/")?;
@@ -281,12 +299,65 @@ async fn a_domain_survives_a_change_of_routes_and_transport_kind() -> Result<(),
         .map_err(|e| e.to_string())?;
     b.add(3, "Jam").await;
     assert!(common::exchange_failed(&b.sync().await));
-    assert!(c.titles().await.is_empty());
+    assert!(
+        c.titles().await.is_empty(),
+        "an address is a hint, not a grant: another device behind the creator's route is not the creator"
+    );
     assert_eq!(a.titles().await, ["Eggs", "Milk"]);
     for device in [&a, &b, &c] {
         device.close().await;
     }
     Ok(())
+}
+
+/// Whether `path` is the database, where signed node chains and durable
+/// number bindings belong.
+fn is_database_file(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with("rocky.sqlite"))
+}
+
+/// The identity file without its verified signed authority: node-signed
+/// capabilities carry their issuer's certificate, and permanent signed
+/// membership is authority, not a stored route key.
+fn identity_without_signed_authority(bytes: &[u8]) -> Result<Vec<u8>, Failure> {
+    let mut settings: Value = serde_json::from_slice(bytes)?;
+    let chain: rocky_sdk::credentials::CredentialChain =
+        serde_json::from_value(settings["credentials"].clone())?;
+    let database =
+        chain.database_context(serde_json::from_value(settings["publisher"].clone())?)?;
+    let authority: rocky_sdk::credentials::RevocationSet =
+        serde_json::from_value(settings["revocations"].clone())?;
+    authority.verify_in(database)?;
+    settings["revocations"]
+        .as_object_mut()
+        .ok_or("authority set")?
+        .remove("certificates");
+    settings
+        .as_object_mut()
+        .ok_or("settings object")?
+        .remove("credentials");
+    Ok(serde_json::to_vec(&settings)?)
+}
+
+/// A discovery secret without the endorsements that carry the signing
+/// node's certificate.
+fn discovery_without_endorsements(bytes: &[u8]) -> Result<Vec<u8>, Failure> {
+    let mut discovery: Value = serde_json::from_slice(bytes)?;
+    if let Some(root) = discovery["root"].as_object_mut() {
+        root.remove("endorsement");
+    }
+    for value in discovery["values"]
+        .as_object_mut()
+        .ok_or("discovery values")?
+        .values_mut()
+    {
+        value
+            .as_object_mut()
+            .ok_or("discovery value")?
+            .remove("endorsement");
+    }
+    Ok(serde_json::to_vec(&discovery)?)
 }
 
 fn decode(uri: &str, prefix: &str) -> Result<Value, Failure> {
@@ -385,7 +456,6 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
 
 #[tokio::test]
 async fn a_started_connector_is_a_borrowed_network() -> Result<(), Failure> {
-    // An application keeps one transport across two databases' lifetimes.
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let transport = hub.connector("a").start(true, [0; 32]).await?;
@@ -434,54 +504,17 @@ async fn reopened_member_resolves_saved_routes_without_foreign_node_keys_outside
                 directories.push(path);
                 continue;
             }
-            // Signed node chains and durable number bindings belong in the database.
-            if path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with("rocky.sqlite"))
-            {
+            if is_database_file(&path) {
                 continue;
             }
             let bytes = std::fs::read(&path)?;
             let bytes = if path.file_name().is_some_and(|name| name == "identity.json") {
-                // Node-signed capabilities carry their issuer's certificate.
-                let mut settings: Value = serde_json::from_slice(&bytes)?;
-                let chain: rocky_sdk::credentials::CredentialChain =
-                    serde_json::from_value(settings["credentials"].clone())?;
-                let database = chain
-                    .database_context(serde_json::from_value(settings["publisher"].clone())?)?;
-                let authority: rocky_sdk::credentials::RevocationSet =
-                    serde_json::from_value(settings["revocations"].clone())?;
-                authority.verify_in(database)?;
-                // Permanent signed membership is authority, not a stored route key.
-                settings["revocations"]
-                    .as_object_mut()
-                    .ok_or("authority set")?
-                    .remove("certificates");
-                settings
-                    .as_object_mut()
-                    .ok_or("settings object")?
-                    .remove("credentials");
-                serde_json::to_vec(&settings)?
+                identity_without_signed_authority(&bytes)?
             } else if path
                 .extension()
                 .is_some_and(|extension| extension == "discovery")
             {
-                // Discovery secrets also carry the signing node's certificate.
-                let mut discovery: Value = serde_json::from_slice(&bytes)?;
-                if let Some(root) = discovery["root"].as_object_mut() {
-                    root.remove("endorsement");
-                }
-                for value in discovery["values"]
-                    .as_object_mut()
-                    .ok_or("discovery values")?
-                    .values_mut()
-                {
-                    value
-                        .as_object_mut()
-                        .ok_or("discovery value")?
-                        .remove("endorsement");
-                }
-                serde_json::to_vec(&discovery)?
+                discovery_without_endorsements(&bytes)?
             } else {
                 bytes
             };

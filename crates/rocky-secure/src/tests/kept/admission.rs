@@ -1,13 +1,30 @@
 //! Re-signing kept history uses its covered inputs while live evidence grows.
 use super::*;
 
+/// Clears only the serving cache, so the next offer must run `sign_kept`.
+async fn clear_serving_cache_so_the_offer_resigns_kept_history(
+    keeper: &Replica,
+    scope: &ResourceScope,
+) {
+    let inner = keeper.inner.lock(crate::replica::Class::Background).await;
+    for table in ["secure_served", "secure_served_rows"] {
+        inner
+            .conn
+            .execute(
+                format!("DELETE FROM {table} WHERE scope=(SELECT id FROM secure_scope_state WHERE scope=?)"),
+                [encode(scope).unwrap()],
+            )
+            .await
+            .unwrap();
+    }
+}
+
 async fn resigned_bytes(
     lineage: &Lineage,
     keeper: &Replica,
     peer: &PrivateKey,
     sealed: Commitment,
 ) -> (Vec<u8>, Vec<Vec<SqlValue>>) {
-    // Invalidate only the serving cache, so the offer must run sign_kept.
     let scope = lineage.scope("items");
     keeper
         .admit_peer(
@@ -17,11 +34,7 @@ async fn resigned_bytes(
         )
         .await
         .unwrap();
-    let inner = keeper.inner.lock(crate::replica::Class::Background).await;
-    for table in ["secure_served", "secure_served_rows"] {
-        inner.conn.execute(format!("DELETE FROM {table} WHERE scope=(SELECT id FROM secure_scope_state WHERE scope=?)"),[encode(&scope).unwrap()]).await.unwrap();
-    }
-    drop(inner);
+    clear_serving_cache_so_the_offer_resigns_kept_history(keeper, &scope).await;
     let offered = keeper
         .seal_checkpoint_offer(
             peer.public_key(),

@@ -28,10 +28,10 @@ pub enum Error {
 /// a browser through `rocky-sqlite`.
 pub const SQLITE_SOURCE_ID: &str =
     "2026-06-03 19:12:13 d6e03d8c777cfa2d35e3b60d8ec3e0187f3e9f99d8e2ee9cac695fd6fcdf1a24";
-/// Replay results depend on the SQLite build, so another one is refused at
-/// open instead of diverging. A wasm32 application whose own rusqlite enables
-/// `ffi-sqlite-wasm-rs` (a default feature) links upstream's SQLite and fails
-/// here.
+/// Replay results and the engine identity tips commit depend on the SQLite
+/// build, so another one is refused at open instead of diverging. A wasm32
+/// application whose own rusqlite enables `ffi-sqlite-wasm-rs` (a default
+/// feature) links upstream's SQLite and fails here.
 fn check_build(raw: &rusqlite::Connection) -> Result<()> {
     static CHECKED: std::sync::OnceLock<std::result::Result<(), String>> =
         std::sync::OnceLock::new();
@@ -459,8 +459,12 @@ pub struct Connection(
     /// The session gate.
     std::sync::Arc<Mutex<crate::capture::Gate>>,
 );
+/// No busy wait: busy files are retried by whole transactions with bounded
+/// backoff.
+const WHOLE_TRANSACTIONS_RETRY_BUSY_FILES: std::time::Duration = std::time::Duration::ZERO;
 /// The name prefix of the runtime's history triggers, which a session's
-/// statements fire.
+/// statements fire. They write what a session's change replaces, so the
+/// session gate allows them although the session never names their tables.
 pub const HISTORY_TRIGGERS: &str = "secure_kept_";
 /// The name prefix of the history tables those triggers write.
 pub const HISTORY_TABLES: &str = "secure_history_";
@@ -475,21 +479,24 @@ impl Connection {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?)?;
         connection.rows("PRAGMA mmap_size=67108864", ())?;
-        // SQLite loads the file's schema lazily. Do that during connection
-        // setup, before a bounded application snapshot starts its deadline.
-        connection.rows("SELECT name FROM sqlite_schema LIMIT 0", ())?;
+        connection.load_schema()?;
         Ok(connection)
+    }
+    /// Loads the file's schema, which SQLite does lazily, during connection
+    /// setup rather than after a bounded application snapshot starts its
+    /// deadline.
+    fn load_schema(&self) -> Result<()> {
+        self.rows("SELECT name FROM sqlite_schema LIMIT 0", ())
+            .map(drop)
     }
     /// A private database that lives as long as the connection.
     pub fn open_in_memory() -> Result<Self> {
         Self::configure(rusqlite::Connection::open_in_memory()?)
     }
     fn configure(raw: rusqlite::Connection) -> Result<Self> {
-        // Tips commit the engine identity, which names the bundled SQLite.
         check_build(&raw)?;
         raw.set_prepared_statement_cache_capacity(512);
-        // Busy files are retried by whole transactions with bounded backoff.
-        raw.busy_timeout(std::time::Duration::ZERO)?;
+        raw.busy_timeout(WHOLE_TRANSACTIONS_RETRY_BUSY_FILES)?;
         crate::exact::register(&raw)?;
         Ok(Self(
             Mutex::new(raw),
@@ -676,20 +683,17 @@ impl Connection {
                 } => Access::Update(table_name, column_name),
                 _ => Access::Other,
             };
-            // The runtime's history triggers write what a session's change
-            // replaces; the session never names their tables.
-            if context
+            let fired_by_history_trigger = context
                 .accessor
-                .is_some_and(|trigger| trigger.starts_with(HISTORY_TRIGGERS))
-            {
+                .is_some_and(|trigger| trigger.starts_with(HISTORY_TRIGGERS));
+            if fired_by_history_trigger {
                 return Authorization::Allow;
             }
-            // Statements of another schema, such as `temp`, are never a session's.
-            let foreign = context.database_name.is_some_and(|name| name != "main");
+            let outside_session_schema = context.database_name.is_some_and(|name| name != "main");
             let Ok(mut gate) = gate.lock() else {
                 return Authorization::Deny;
             };
-            if gate.allows(access) && !(foreign && gate.armed()) {
+            if gate.allows(access) && !(outside_session_schema && gate.armed()) {
                 Authorization::Allow
             } else {
                 Authorization::Deny
@@ -1148,9 +1152,11 @@ mod tests {
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn another_sqlite_build_is_refused() {
         assert!(bundled(rocky_core::BUNDLED_SQLITE_VERSION, SQLITE_SOURCE_ID).is_ok());
-        // Upstream sqlite-wasm-rs 0.5, which rusqlite's default features link.
-        let upstream = bundled("3.53.0", "2026-04-09 11:41:38 other").unwrap_err();
-        assert!(upstream.contains("default-features = false"));
+        let upstream_sqlite_wasm_rs = bundled("3.53.0", "2026-04-09 11:41:38 other").unwrap_err();
+        assert!(
+            upstream_sqlite_wasm_rs.contains("default-features = false"),
+            "rusqlite's default features link upstream sqlite-wasm-rs"
+        );
         assert!(bundled(rocky_core::BUNDLED_SQLITE_VERSION, "another source").is_err());
     }
 

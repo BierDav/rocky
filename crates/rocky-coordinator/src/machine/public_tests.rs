@@ -279,8 +279,6 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
         service.join(&mut m, &tenant.executor, scope, 1);
     }
 
-    // Nobody acts on another tenant's domain: its log, control, closure or
-    // registration of its application.
     let head = service.head(&m, &a.executor, sa);
     let log_head = Operation::Coordinated {
         log: tip_log(sa),
@@ -310,7 +308,7 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
         assert_eq!(
             service.apply(&mut m, key, operation.clone(), T),
             Err(CoordinationError::Denied),
-            "{operation:?}"
+            "nobody acts on another tenant's domain: {operation:?}"
         );
         if operation == log_head {
             assert_eq!(
@@ -319,18 +317,16 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
             );
         }
     }
-    // Every accounted byte belongs to a tenant, including its account record.
     assert_eq!(
         m.total_used().unwrap(),
-        m.tenant_used(a.key.public_key()).unwrap() + m.tenant_used(b.key.public_key()).unwrap()
+        m.tenant_used(a.key.public_key()).unwrap() + m.tenant_used(b.key.public_key()).unwrap(),
+        "every accounted byte belongs to a tenant, including its account record"
     );
-    // B's grant names B's application; A's scope belongs to A's.
     assert_eq!(
         service.register(&mut m, &b, b.control(a.scope(3), 1, &[&b.executor]), T),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "B's grant names B's application, and A's scope belongs to A's"
     );
-    // Even a grant from A's publisher cannot take over a registered scope:
-    // a changed authority is a migration, not an edit.
     let squatter = Tenant {
         publisher: a.publisher.clone(),
         ..Tenant::new()
@@ -342,22 +338,25 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
             squatter.control(sa, 1, &[&squatter.executor]),
             T
         ),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a changed authority is a migration, not an edit, even under A's publisher"
     );
-    // The same registration again is the retained answer.
-    assert!(matches!(
-        service.register(
-            &mut m,
-            &a,
-            a.control(sa, 1, &[&a.executor, &a.alternate]),
-            T
+    assert!(
+        matches!(
+            service.register(
+                &mut m,
+                &a,
+                a.control(sa, 1, &[&a.executor, &a.alternate]),
+                T
+            ),
+            Ok(Outcome::Controlled(_))
         ),
-        Ok(Outcome::Controlled(_))
-    ));
-    // Linearizable reads answer as the log would.
+        "the same registration again is the retained answer"
+    );
     assert_eq!(
         service.read(&m, &a.executor, log_head.clone()).unwrap(),
-        service.apply(&mut m, &a.executor, log_head, T).unwrap()
+        service.apply(&mut m, &a.executor, log_head, T).unwrap(),
+        "linearizable reads answer as the log would"
     );
     assert_eq!(
         service.read(&m, &a.key, Operation::Usage).unwrap(),
@@ -385,7 +384,6 @@ fn owners_change_trusted_nodes_and_keep_the_log() {
         .unwrap();
     service.join(&mut m, &a.executor, scope, 1);
     let before = service.head(&m, &a.executor, scope);
-    // A node of the in-sync set cannot be dropped; one can be added.
     assert_eq!(
         service.apply(
             &mut m,
@@ -393,7 +391,8 @@ fn owners_change_trusted_nodes_and_keep_the_log() {
             Operation::Control(a.control(scope, 2, &[&a.alternate])),
             T,
         ),
-        Err(CoordinationError::Backpressure)
+        Err(CoordinationError::Backpressure),
+        "a node of the in-sync set cannot be dropped"
     );
     service
         .apply(
@@ -410,7 +409,6 @@ fn owners_change_trusted_nodes_and_keep_the_log() {
         (before.commit, before.running_hash)
     );
     assert_eq!(after.members.len(), 2);
-    // A revision signed by another key, even a trusted node, is refused.
     assert_eq!(
         service.apply(
             &mut m,
@@ -418,7 +416,8 @@ fn owners_change_trusted_nodes_and_keep_the_log() {
             Operation::Control(a.signed_control(scope, 3, &[&a.alternate], &a.alternate)),
             T
         ),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a revision signed by another key, even a trusted node, is refused"
     );
 }
 
@@ -427,7 +426,6 @@ fn admission_quotas_and_churn_bound_every_tenant() {
     let service = Service::new(true);
     let mut m = service.open();
     let (a, b, c) = (Tenant::new(), Tenant::new(), Tenant::new());
-    // Without the provider's admission, or with another tenant's, nothing registers.
     let unadmitted = Operation::Register(Box::new(Registration {
         grant: a.grant(),
         admission: None,
@@ -435,7 +433,8 @@ fn admission_quotas_and_churn_bound_every_tenant() {
     }));
     assert_eq!(
         service.apply(&mut m, &a.key, unadmitted, T),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "without the provider's admission nothing registers"
     );
     let borrowed = Operation::Register(Box::new(Registration {
         grant: a.grant(),
@@ -446,10 +445,8 @@ fn admission_quotas_and_churn_bound_every_tenant() {
         service.apply(&mut m, &a.key, borrowed, T),
         Err(CoordinationError::Denied)
     );
-    // Refusals hold no retry records.
-    assert_eq!(m.retry_records(), 0);
+    assert_eq!(m.retry_records(), 0, "refusals hold no retry records");
 
-    // Two open domains per tenant.
     for n in 1..=2 {
         service
             .register(&mut m, &a, a.control(a.scope(n), 1, &[&a.executor]), T)
@@ -457,19 +454,18 @@ fn admission_quotas_and_churn_bound_every_tenant() {
     }
     assert_eq!(
         service.register(&mut m, &a, a.control(a.scope(3), 1, &[&a.executor]), T),
-        Err(CoordinationError::Backpressure)
+        Err(CoordinationError::Backpressure),
+        "a tenant holds at most two open domains"
     );
-    // Another tenant is unaffected; a third exceeds the tenant cap.
     service
         .register(&mut m, &b, b.control(b.scope(1), 1, &[&b.executor]), T)
-        .unwrap();
+        .expect("another tenant is unaffected by A's domain cap");
     assert_eq!(
         service.register(&mut m, &c, c.control(c.scope(1), 1, &[&c.executor]), T),
-        Err(CoordinationError::Backpressure)
+        Err(CoordinationError::Backpressure),
+        "a third tenant exceeds the tenant cap"
     );
 
-    // Churn: closing frees a domain slot, but registrations per day and the
-    // tenant's bytes stay bounded, and closed identities never return.
     let mut time = T;
     let mut registered = 2;
     let mut outcome = Ok(());
@@ -485,7 +481,6 @@ fn admission_quotas_and_churn_bound_every_tenant() {
                 Ok(())
             }
             Err(CoordinationError::Backpressure) => {
-                // A full day may still admit a registration tomorrow.
                 time += DAY;
                 match service.register(&mut m, &a, a.control(a.scope(n), 1, &[&a.executor]), time) {
                     Ok(_) => {
@@ -503,8 +498,11 @@ fn admission_quotas_and_churn_bound_every_tenant() {
             break;
         }
     }
-    // The tenant's closed markers exhaust its own bytes, never the service's.
-    assert_eq!(outcome, Err(CoordinationError::Backpressure));
+    assert_eq!(
+        outcome,
+        Err(CoordinationError::Backpressure),
+        "churn ends when the tenant's closed markers exhaust its own bytes, never the service's"
+    );
     assert!(registered > 3 && registered < 40, "{registered}");
     assert!(time > T, "the daily limit applied");
     service
@@ -516,9 +514,12 @@ fn admission_quotas_and_churn_bound_every_tenant() {
         Err(CoordinationError::Denied),
         "a closed identity is never registered again"
     );
-    // The image round-trips canonically with its tenants.
     let roundtrip: Metadata = decode(&encode(&m).unwrap()).unwrap();
-    assert_eq!(encode(&roundtrip).unwrap(), encode(&m).unwrap());
+    assert_eq!(
+        encode(&roundtrip).unwrap(),
+        encode(&m).unwrap(),
+        "the image round-trips canonically with its tenants"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -535,7 +536,6 @@ fn retained_outcomes_are_bounded_per_tenant() {
             T,
         )
         .unwrap();
-    // Control revisions keep their outcome within the tenant's retry budget.
     let mut accepted = 0;
     for revision in 2..limits().retry_records as u64 * 2 {
         let control = a.control(scope, revision, &[&a.executor, &a.alternate]);
@@ -545,8 +545,11 @@ fn retained_outcomes_are_bounded_per_tenant() {
             Err(error) => panic!("{error:?}"),
         }
     }
-    // The registration itself holds one record.
-    assert_eq!(accepted, limits().retry_records - 1);
+    assert_eq!(
+        accepted,
+        limits().retry_records - 1,
+        "the registration itself holds one retry record"
+    );
     assert_eq!(m.retry_records(), limits().retry_records);
 }
 
@@ -594,8 +597,6 @@ fn a_shared_device_key_uses_each_requested_tenants_own_budget() {
             .unwrap();
     }
     assert_eq!(m.tenant_lane(&pending), Some(a.key.public_key()));
-    // The shared trusted node's calls count against the tenant of the domain
-    // it names.
     for (scope, tenant) in [(sa, &a), (sb, &b)] {
         let request = crate::machine::self_certified(
             service.genesis.id().unwrap(),
@@ -608,7 +609,11 @@ fn a_shared_device_key_uses_each_requested_tenants_own_budget() {
             T,
         )
         .unwrap();
-        assert_eq!(m.retry_tenant(&request), Some(tenant.key.public_key()));
+        assert_eq!(
+            m.retry_tenant(&request),
+            Some(tenant.key.public_key()),
+            "the shared trusted node's calls count against the tenant of the domain it names"
+        );
         assert_eq!(m.tenant_lane(&request), Some(tenant.key.public_key()));
     }
 }
@@ -676,7 +681,6 @@ fn limits_at_1_gib_bounds_validate_correctly() {
         .endpoints
         .clone();
 
-    // 768 tenants * 1 MiB = 768 MiB, 768 * 64 = 49152 <= 65536 - 64
     let public = PublicService {
         endpoints: endpoints.clone(),
         admission: None,
@@ -685,19 +689,21 @@ fn limits_at_1_gib_bounds_validate_correctly() {
         registrations_per_day: 256,
         tenant_lanes: 4,
     };
-    assert!(public.validate(voters).is_ok());
+    assert!(
+        public.validate(voters).is_ok(),
+        "768 tenants of 1 MiB and 64 retry records each fit the service"
+    );
 
-    // 769 tenants * 1 MiB > 768 MiB fails
     let starved = PublicService {
         tenants: 769,
         ..public.clone()
     };
     assert_eq!(
         starved.validate(voters).err(),
-        Some(CoordinationError::Configuration)
+        Some(CoordinationError::Configuration),
+        "769 tenants of 1 MiB exceed the 768 MiB total"
     );
 
-    // Exceeding retry records budget fails: 768 * 128 = 98304 > 65536 - 128
     let too_many_retries = PublicService {
         limits: Limits {
             retry_records: 128,
@@ -707,6 +713,7 @@ fn limits_at_1_gib_bounds_validate_correctly() {
     };
     assert_eq!(
         too_many_retries.validate(voters).err(),
-        Some(CoordinationError::Configuration)
+        Some(CoordinationError::Configuration),
+        "768 tenants of 128 retry records each exceed the record budget"
     );
 }

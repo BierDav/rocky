@@ -90,7 +90,6 @@ impl<A: RowApplication> Inner<A> {
         let mut states = Vec::new();
         for (scope, id) in &scopes {
             let state = match id {
-                // A pulled state counts once installed, never before.
                 Some(id) => self.base_seal(*id).await?,
                 None => None,
             };

@@ -283,24 +283,24 @@ async fn two_phones_never_online_together_pass_the_release_gate_through_custody(
     let milk = a.add(&weekly, "Milk", Some(&dairy)).await?;
     a.add(&weekly, "Butter", Some(&dairy)).await?;
     a.add(&party, "Cake", None).await?;
-    // One envelope per list; B receives all three while it only meets
-    // custody, which holds them as a mailbox.
     for list in [&weekly, &weekend, &party] {
         a.share(list, b).await?;
     }
     relay(a, b).await?;
-    assert_eq!(b.items().await?, a.items().await?);
+    assert_eq!(
+        b.items().await?,
+        a.items().await?,
+        "custody holds one envelope per list as a mailbox for a device it relays to"
+    );
     assert_eq!(b.items().await?.len(), 3);
-    // Custody holds every list's frames but cannot read them.
     assert!(
         custody
             .rows("SELECT title FROM items")
             .await
-            .map_or(true, |rows| rows.is_empty())
+            .map_or(true, |rows| rows.is_empty()),
+        "custody holds every list's frames but cannot read them"
     );
 
-    // Offline from each other: B ticks Milk and adds Bread; A adds Bread too
-    // and moves Milk to the weekend without having seen the tick.
     b.execute(&format!(
         "UPDATE items SET completed = 1 WHERE list = X'{weekly}' AND id = X'{milk}'"
     ))
@@ -312,17 +312,21 @@ async fn two_phones_never_online_together_pass_the_release_gate_through_custody(
     a.move_item(&weekly, &milk, &weekend).await?;
     relay(a, b).await?;
     relay(b, a).await?;
+    let moved_with_the_values_a_read_not_b_s_tick =
+        vec![json!(weekend), json!("Milk"), json!("0"), Value::Null];
     let converged = vec![
         vec![json!(weekly), json!("Bread"), json!("0"), Value::Null],
         vec![json!(weekly), json!("Butter"), json!("0"), json!(dairy)],
-        // The move wrote the values A read: B's tick changed the old row.
-        vec![json!(weekend), json!("Milk"), json!("0"), Value::Null],
+        moved_with_the_values_a_read_not_b_s_tick,
         vec![json!(party), json!("Cake"), json!("0"), Value::Null],
     ];
-    assert_eq!(a.items().await?, converged);
+    assert_eq!(
+        a.items().await?,
+        converged,
+        "offline edits converge, and B's tick changed only the row A moved away"
+    );
     assert_eq!(b.items().await?, converged);
 
-    // Deleting the category nulls only the reference; deleting a list cascades.
     a.online(true).await?;
     a.execute(&format!(
         "DELETE FROM categories WHERE list = X'{weekly}' AND id = X'{dairy}'"
@@ -336,7 +340,11 @@ async fn two_phones_never_online_together_pass_the_release_gate_through_custody(
         vec![json!(weekly), json!("Butter"), json!("0"), Value::Null],
         vec![json!(weekend), json!("Milk"), json!("0"), Value::Null],
     ];
-    assert_eq!(b.items().await?, deleted);
+    assert_eq!(
+        b.items().await?,
+        deleted,
+        "deleting a category nulls only the reference and deleting a list cascades"
+    );
     assert_eq!(
         b.rows("SELECT title FROM lists ORDER BY title").await?,
         [[json!("Weekend")], [json!("Weekly")]]
@@ -364,7 +372,6 @@ async fn a_device_joining_after_a_move_starts_the_list_from_a_checkpoint() -> Re
     let weekend = a.create_list("Weekend").await?;
     let milk = a.add(&weekly, "Milk", None).await?;
     a.move_item(&weekly, &milk, &weekend).await?;
-    // The weekly checkpoint no longer holds the moved row.
     let c = Peer::new(
         Database::join(
             open(&_root.path().join("c"), &hub, "c"),
@@ -380,7 +387,8 @@ async fn a_device_joining_after_a_move_starts_the_list_from_a_checkpoint() -> Re
     assert_eq!(c.items().await?, a.items().await?);
     assert_eq!(
         c.items().await?,
-        [[json!(weekend), json!("Milk"), json!("0"), Value::Null]]
+        [[json!(weekend), json!("Milk"), json!("0"), Value::Null]],
+        "the weekly checkpoint no longer holds the moved row"
     );
     for peer in [a, b, c, custody] {
         peer.database.close().await?;
@@ -403,7 +411,6 @@ async fn custody_keeps_offered_partitions_across_restart() -> Result<(), Failure
     b.online(false).await?;
     a.sync().await?;
     a.online(false).await?;
-    // The custody peer registered the list from A's offer and persists it.
     custody.database.close().await?;
     let custody =
         Peer::new(Database::open(open(&_root.path().join("custody"), &hub, "custody"))?.database)?;
@@ -411,7 +418,8 @@ async fn custody_keeps_offered_partitions_across_restart() -> Result<(), Failure
     b.sync().await?;
     assert_eq!(
         b.items().await?,
-        [[json!(list), json!("Milk"), json!("0"), Value::Null]]
+        [[json!(list), json!("Milk"), json!("0"), Value::Null]],
+        "custody persists a list registered from an offer across restart"
     );
     for peer in [a, b, custody] {
         peer.database.close().await?;

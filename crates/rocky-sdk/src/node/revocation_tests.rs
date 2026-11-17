@@ -219,9 +219,8 @@ async fn a_saved_root_revocation_preserves_its_mode_and_cascade_targets() -> Res
             saved.revocations.revokes_origin(&target),
             mode == RevocationMode::Compromised
         );
-        // An already lost identity can be escalated when its keys are later
-        // found compromised. The earlier direct tombstone does not block it.
-        if mode == RevocationMode::Lost {
+        let lost_identity_escalates_to_compromised = mode == RevocationMode::Lost;
+        if lost_identity_escalates_to_compromised {
             let mut committed = registry.clone();
             committed.records.entry(target).or_default().revoked = true;
             saved.complete_revocation(&node.vault, &node.domain(), (&committed, &membership))?;
@@ -288,7 +287,6 @@ fn reopen_at_revocation_boundaries(stops: &[(fault::Stage, usize)]) -> Result<()
             .enable_all()
             .build()
     };
-    // One issuer with two partitions, copied for each stop.
     let template = tempfile::tempdir()?;
     let keys = Keys::default();
     runtime()?.block_on(async {
@@ -298,7 +296,6 @@ fn reopen_at_revocation_boundaries(stops: &[(fault::Stage, usize)]) -> Result<()
         }
         Ok::<_, Failure>(())
     })?;
-    // The stops are independent, and the injected stop is per thread.
     std::thread::scope(|scope| {
         let runs: Vec<_> = stops
             .chunks(2)
@@ -368,7 +365,6 @@ async fn stop_at(
     );
     let vault = node.vault.clone();
     drop(node);
-    // Exercise the real database open, before any network attaches.
     let open = || crate::Open {
         identity: None,
         directory: root.path(),
@@ -461,13 +457,15 @@ async fn holding_every_group_partition_keeps_escrow_in_one_pass() -> Result<(), 
     assert!(count > 0);
     crate::escrow::keep(&node.replica, &settings, &node.vault, &node.domain()).await?;
     let pass = crate::escrow::CONSIDERED.with(|considered| considered.replace(0));
-    // Every member table of every partition is one key to consider.
-    assert!(pass >= lists * 3, "{pass}");
+    assert!(
+        pass >= lists * 3,
+        "every member table of every partition is one key to consider: {pass}"
+    );
     node.hold_keys(&settings, &partitions).await?;
-    // One pass for all partitions, not one per partition.
     assert_eq!(
         crate::escrow::CONSIDERED.with(|considered| considered.get()),
-        pass
+        pass,
+        "one pass for all partitions, not one per partition"
     );
     Ok(())
 }
@@ -493,7 +491,6 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
     let settings = node.settings.lock().await.clone();
     let record = settings.groups.values().next().ok_or("group")?;
     let secret = [245; 32];
-    // The node signs under its chain, as every sender does.
     let sender = settings.credentials.clone();
     let envelope = rocky_credentials::GroupSecretEnvelope::seal(
         &PrivateKey::from_bytes(&node.vault.get("node")?),
@@ -688,7 +685,6 @@ async fn foreign_membership_and_unlinks_are_refused_before_runtime_mutation() ->
             foreign_context.scope.app,
             now()?,
         )?;
-        // These bytes are what authority-set pages and the unlink transport import.
         let evidence = RevocationSet::from_bytes(&evidence.to_bytes()?)?;
         let before = local.replica.revocations().await;
         let revision = *local.replica.observe_revision().borrow();
@@ -758,8 +754,8 @@ async fn link_challenges_are_bounded_retryable_and_expire_before_bundle_release(
             node.answer_link(&settings, wire)?,
             rocky_credentials::IdentityReply::ConfirmationRequired
         ));
-        // Give the first arrival an unambiguous oldest timestamp without sleeping.
-        if index == 0 {
+        let make_first_arrival_oldest = index == 0;
+        if make_first_arrival_oldest {
             node.link_requests
                 .lock()
                 .map_err(|_| "poisoned requests")?
@@ -777,7 +773,6 @@ async fn link_challenges_are_bounded_retryable_and_expire_before_bundle_release(
     let request = &requests[32];
     let code = request.confirmation_code()?;
     node.confirm_link(request.node, &code).await?;
-    // Retrying the same challenge preserves the answering device's confirmation.
     let wire = LinkRequest {
         request: request.clone(),
         code: None,

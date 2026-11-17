@@ -448,7 +448,6 @@ mod tests {
         let held = BTreeSet::from([(scope, one), (scope, two)]);
         let records = vec![
             (Some((scope, one)), record(&root, &reader(1, [3; 32]))),
-            // Sealed to another root, or under the wrong epoch: skipped.
             (
                 Some((scope, two)),
                 record(&RootKey::generate(), &reader(2, [4; 32])),
@@ -461,17 +460,20 @@ mod tests {
         assert_eq!(recovered.readers.len(), 2);
         assert_eq!(recovered.readers[&("notes".into(), two)], [4; 32]);
         assert_eq!(recovered.naming, Some([5; 32]));
-        // An epoch the store holds ciphertext of without a record fails.
-        let mut gap = held;
-        gap.insert((scope, KeyEpoch::new(3, &[6; 32])));
-        let error = Recovered::open(&archived, (records.clone(), gap), &root)
-            .err()
-            .ok_or("recovered a gap")?
-            .to_string();
+        let mut epoch_held_without_record = held;
+        epoch_held_without_record.insert((scope, KeyEpoch::new(3, &[6; 32])));
+        let error = Recovered::open(
+            &archived,
+            (records.clone(), epoch_held_without_record),
+            &root,
+        )
+        .err()
+        .ok_or("recovered a gap")?
+        .to_string();
         assert!(error.contains("key epoch 3"), "{error}");
-        // Another root opens nothing.
         assert!(
-            Recovered::open(&archived, (records, BTreeSet::new()), &RootKey::generate()).is_err()
+            Recovered::open(&archived, (records, BTreeSet::new()), &RootKey::generate()).is_err(),
+            "another root opens nothing"
         );
         Ok(())
     }

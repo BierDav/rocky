@@ -106,8 +106,7 @@ async fn exchange(
                     return;
                 }
             }
-            // EOF deliberately exercises a missing terminal request as well.
-            let _ = session.close().await;
+            let _eof_also_misses_the_terminal_request = session.close().await;
         },
         async {
             let mut session = incoming.recv().await.unwrap();
@@ -168,10 +167,13 @@ async fn terminal_barrier_keeps_a_missing_sibling_pending_after_a_successful_fra
             .contains(&PublicationRepairReason::PendingDependencies)
     );
     assert!(b.snapshot(f.private).await.unwrap().rows.is_empty());
-    // Ordinary retry on a new publication supplies the missing sibling and settles the bundle.
     let outcome = crate::tests::live_publication::publish(&f, &a, &b, &alice, &bob, &cursors).await;
     assert!(outcome.1.repair.is_empty());
-    assert_eq!(b.snapshot(f.public).await.unwrap().rows.len(), 2);
+    assert_eq!(
+        b.snapshot(f.public).await.unwrap().rows.len(),
+        2,
+        "an ordinary retry supplies the missing sibling and settles the bundle"
+    );
     assert_eq!(b.snapshot(f.private).await.unwrap().rows.len(), 1);
 }
 
@@ -232,8 +234,11 @@ async fn terminal_rejects_incomplete_conflicting_and_duplicate_parts() {
         .await;
         assert!(result.is_err(), "fault {fault} accepted");
     }
-    // A rejected terminal does not erase data already durably admitted.
-    assert_eq!(b.snapshot(f.public).await.unwrap().rows.len(), 1);
+    assert_eq!(
+        b.snapshot(f.public).await.unwrap().rows.len(),
+        1,
+        "a rejected terminal does not erase data already durably admitted"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -472,8 +477,10 @@ async fn publication_rechecks_membership_after_an_earlier_page_commits() {
             changed.send(()).unwrap();
         }
     );
-    // The second scope was never admitted under the now-revoked membership.
-    assert!(b.frontier(unadmitted).await.unwrap().logs.is_empty());
+    assert!(
+        b.frontier(unadmitted).await.unwrap().logs.is_empty(),
+        "the second scope was never admitted under the now-revoked membership"
+    );
     left.abort();
     right.abort();
 }

@@ -104,15 +104,16 @@ async fn overflow_fails_the_author_commit_instead_of_becoming_real() -> Result<(
     create(&a.database, "high", i64::MAX - 1).await?;
     let before = balances(&a.database).await?;
 
-    // SQLite alone would compute -2^63 - 1 as a REAL, round it to -2^63 and
-    // store i64::MIN without an error.
     let error = refused(
         &a.database,
         "UPDATE balances SET amount = amount - ? WHERE key = ?",
         params![2_i64, "low"],
     )
     .await;
-    assert!(error.contains("integer overflow"), "{error}");
+    assert!(
+        error.contains("integer overflow"),
+        "an underflow is refused, not rounded through REAL to i64::MIN: {error}"
+    );
     let error = refused(
         &a.database,
         "UPDATE balances SET amount = amount * 2 WHERE key = 'high'",
@@ -120,15 +121,16 @@ async fn overflow_fails_the_author_commit_instead_of_becoming_real() -> Result<(
     )
     .await;
     assert!(error.contains("integer overflow"), "{error}");
-    // The CHECK's sum leaves i64.
     let error = refused(
         &a.database,
         "UPDATE balances SET fee = ? WHERE key = 'high'",
         params![5_i64],
     )
     .await;
-    assert!(error.contains("integer overflow"), "{error}");
-    // So does the assertion's, at commit.
+    assert!(
+        error.contains("integer overflow"),
+        "a CHECK whose sum leaves i64 is refused: {error}"
+    );
     let error = refused(
         &a.database,
         "UPDATE balances SET bonus = ? WHERE key = 'high'",
@@ -137,7 +139,7 @@ async fn overflow_fails_the_author_commit_instead_of_becoming_real() -> Result<(
     .await;
     assert!(
         error.contains("bonus_fits") && error.contains("integer overflow"),
-        "{error}"
+        "an assertion whose sum leaves i64 is refused at commit: {error}"
     );
     assert_eq!(balances(&a.database).await?, before);
     a.close().await;
@@ -173,10 +175,8 @@ async fn concurrent_overflows_drop_with_the_same_reason_on_every_replica() -> Re
     }
     sync().await?;
 
-    // Each pair succeeds alone on its author; together they leave i64 in
-    // the statement, the CHECK or the assertion, whichever replays second.
     let raise = "UPDATE balances SET amount = amount + ? WHERE key = ?";
-    let pairs = [
+    let pairs_overflowing_only_together = [
         (
             write(&a.database, raise, params![6_i64, "update"]).await?,
             write(&b.database, raise, params![6_i64, "update"]).await?,
@@ -205,7 +205,7 @@ async fn concurrent_overflows_drop_with_the_same_reason_on_every_replica() -> Re
         reason: DropReason::Constraint,
         sealed: false,
     };
-    for (first, second) in pairs {
+    for (first, second) in pairs_overflowing_only_together {
         let mut outcomes = Vec::new();
         for device in [&a, &b] {
             outcomes.push((
@@ -222,7 +222,7 @@ async fn concurrent_overflows_drop_with_the_same_reason_on_every_replica() -> Re
                     | (Some(outcome), Some(TransactionOutcome::Applied { sealed: false }))
                     if outcome == dropped
             ),
-            "{first:?} {second:?}"
+            "whichever of the pair replays second leaves i64 and drops: {first:?} {second:?}"
         );
     }
     let rows = balances(&a.database).await?;
@@ -275,10 +275,10 @@ async fn uuids_timestamps_json_and_extreme_integers_round_trip() -> Result<(), F
     assert_eq!(row.get::<[u8; 16]>("uuid")?, uuid);
     assert_eq!(row.get::<Timestamp>("at")?, at);
     assert_eq!(row.get::<serde_json::Value>("doc")?, doc);
-    // JSON is stored as the compact text bound, never rewritten.
     assert_eq!(
         row.get::<String>("doc")?,
-        r#"{"a":{"y":true,"z":"x"},"b":[1,2.5,null]}"#
+        r#"{"a":{"y":true,"z":"x"},"b":[1,2.5,null]}"#,
+        "JSON is stored as the compact text bound, never rewritten"
     );
     assert_eq!(
         (
@@ -300,12 +300,19 @@ async fn uuids_timestamps_json_and_extreme_integers_round_trip() -> Result<(), F
         ]
     );
 
-    // A SystemTime rounds down to its microsecond, also before the epoch.
     let epoch = std::time::UNIX_EPOCH;
     let later = epoch + std::time::Duration::from_nanos(1_500);
     let earlier = epoch - std::time::Duration::from_nanos(1_500);
-    assert_eq!(Timestamp::try_from(later)?.unix_micros(), 1);
-    assert_eq!(Timestamp::try_from(earlier)?.unix_micros(), -2);
+    assert_eq!(
+        Timestamp::try_from(later)?.unix_micros(),
+        1,
+        "a SystemTime rounds down to its microsecond"
+    );
+    assert_eq!(
+        Timestamp::try_from(earlier)?.unix_micros(),
+        -2,
+        "a SystemTime before the epoch rounds down too"
+    );
     assert_eq!(
         Timestamp::from_unix_micros(-2).system_time(),
         Some(epoch - std::time::Duration::from_micros(2))

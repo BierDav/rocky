@@ -85,12 +85,11 @@ fn every_interleaving_of_merges_yields_one_digest() {
         })
         .collect();
     let target = PrivateKey::new().public_key();
-    // Conflicting root decisions about one identity remain in the union.
-    // The later Lost statement cannot undo the earlier Compromised one.
-    for (mode, time) in [
+    let conflicting_root_decisions = [
         (RevocationMode::Lost, NOW),
         (RevocationMode::Compromised, NOW - DAY),
-    ] {
+    ];
+    for (mode, time) in conflicting_root_decisions {
         let body = Revocation {
             identities: [target].into(),
             mode,
@@ -101,7 +100,7 @@ fn every_interleaving_of_merges_yields_one_digest() {
     }
     let mut digests = BTreeSet::new();
     let mut order: Vec<usize> = (0..statements.len()).collect();
-    // Heap's algorithm: every order of single-statement merges.
+    /// Heap's algorithm: every order of single-statement merges.
     fn permutations(k: usize, order: &mut Vec<usize>, each: &mut dyn FnMut(&[usize])) {
         if k <= 1 {
             each(order);
@@ -120,9 +119,11 @@ fn every_interleaving_of_merges_yields_one_digest() {
             set.merge(&single(&statements[*index]), anchor, APP, NOW)
                 .unwrap();
         }
-        // Merging a set again, or a subset, adds nothing.
         let again = set.clone();
-        assert!(set.merge(&again, anchor, APP, NOW).unwrap().is_empty());
+        assert!(
+            set.merge(&again, anchor, APP, NOW).unwrap().is_empty(),
+            "merging a set again adds nothing"
+        );
         assert!(set.revokes(&target));
         assert!(set.revokes_origin(&target));
         let decoded = RevocationSet::from_bytes(&set.to_bytes().unwrap()).unwrap();
@@ -132,7 +133,6 @@ fn every_interleaving_of_merges_yields_one_digest() {
     };
     let count = order.len();
     permutations(count, &mut order, &mut each);
-    // Partial sets merged into each other in either direction.
     for split in 1..statements.len() {
         let (left, right) = statements.split_at(split);
         let mut a = RevocationSet::try_from(left.to_vec()).unwrap();
@@ -140,7 +140,10 @@ fn every_interleaving_of_merges_yields_one_digest() {
         let (a_copy, b_copy) = (a.clone(), b.clone());
         a.merge(&b_copy, anchor, APP, NOW).unwrap();
         b.merge(&a_copy, anchor, APP, NOW).unwrap();
-        assert_eq!(a, b);
+        assert_eq!(
+            a, b,
+            "partial sets merge into each other in either direction"
+        );
         digests.insert(a.digest(NOW).unwrap());
     }
     assert_eq!(digests.len(), 1);
@@ -218,7 +221,6 @@ fn the_mode_is_required_signed_and_only_the_root_may_cascade() {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn statements_past_the_cutoff_leave_the_digest_and_the_set() {
-    // An issuer signs: the root's statements are permanent (below).
     let publisher = PrivateKey::new();
     let sign = |time| {
         let issuing = issuer_at(&publisher, time);
@@ -232,9 +234,11 @@ fn statements_past_the_cutoff_leave_the_digest_and_the_set() {
     let fresh = sign(NOW);
     let old = sign(NOW - MAX_CHAIN_LIFETIME - LIFETIME_SKEW - DAY);
     assert!(!old.live(NOW));
-    // The same day-rounded cutoff on either side of the expiry instant.
     let expiry = fresh.expiry_day() * DAY;
-    assert!(fresh.live(expiry - 1));
+    assert!(
+        fresh.live(expiry - 1),
+        "the same day-rounded cutoff applies on either side of the expiry instant"
+    );
     assert!(!fresh.live(expiry));
     assert!(expiry >= fresh.statement.time + MAX_CHAIN_LIFETIME + LIFETIME_SKEW);
 
@@ -243,12 +247,12 @@ fn statements_past_the_cutoff_leave_the_digest_and_the_set() {
     with_old.statements.insert(old.id().unwrap(), old.clone());
     assert_eq!(with_old.digest(NOW).unwrap(), held.digest(NOW).unwrap());
     assert_eq!(with_old.live(NOW), 1);
-    // An expired statement is not learned, and a merge drops held ones.
     let mut set = single(&fresh);
     assert!(
         set.merge(&single(&old), publisher.public_key(), APP, NOW)
             .unwrap()
-            .is_empty()
+            .is_empty(),
+        "an expired statement is not learned"
     );
     assert_eq!(set, held);
     let mut later = with_old.clone();
@@ -256,10 +260,10 @@ fn statements_past_the_cutoff_leave_the_digest_and_the_set() {
         .merge(&RevocationSet::new(), publisher.public_key(), APP, NOW)
         .unwrap();
     assert_eq!(later.len(), 1);
-    // Past its own cutoff the fresh one leaves too.
     assert_eq!(
         held.digest(expiry).unwrap(),
-        RevocationSet::new().digest(expiry).unwrap()
+        RevocationSet::new().digest(expiry).unwrap(),
+        "past its own cutoff the fresh statement leaves too"
     );
 }
 
@@ -282,13 +286,11 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
         .insert(crate::PeerId::of(PrivateKey::new().public_key()));
     let mut other_app = good.clone();
     other_app.statement.app = AppId([8; 16]);
-    // Another domain's issuer, a member identity that holds no issuer
-    // authority and an issuer chain not valid at the statement's time.
     let other_publisher = signed(
         statement(issuer, NOW, PrivateKey::new().public_key()),
         &(issuer.clone(), self::issuer(&PrivateKey::new()).1),
     );
-    let member = {
+    let member_without_issuer_authority = {
         let key = PrivateKey::new();
         let link = Authority::owner(&publisher)
             .issue_terms(
@@ -335,28 +337,30 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
         forged,
         other_app,
         other_publisher,
-        member,
+        member_without_issuer_authority,
         expired,
         owner_revoked,
     ] {
-        // The good statement beside it is not learned either.
         if let Ok(incoming) = RevocationSet::try_from(vec![fresh.clone(), bad]) {
             assert!(
                 set.merge(&incoming, publisher.public_key(), APP, NOW)
-                    .is_err()
+                    .is_err(),
+                "a bad statement keeps the good one beside it from being learned"
             );
         }
         assert_eq!(set, before);
     }
-    // Over the size limit: refused when signed and when decoded.
     let mut huge = statement(issuer, NOW, node);
     huge.identities = (0..300).map(|_| PrivateKey::new().public_key()).collect();
     assert!(
         SignedRevocation::sign(huge, crate::testing::signer(issuer, &issuing.1), &issuing.1)
-            .is_err()
+            .is_err(),
+        "a statement over the size limit is refused when signed"
     );
-    // An identity signs only statements naming it, which name something.
-    assert!(SignedRevocation::sign(statement(issuer, NOW, node), &publisher, &issuing.1).is_err());
+    assert!(
+        SignedRevocation::sign(statement(issuer, NOW, node), &publisher, &issuing.1).is_err(),
+        "an identity signs only statements naming it"
+    );
     let empty = Revocation {
         nodes: BTreeSet::new(),
         identities: BTreeSet::new(),
@@ -371,11 +375,13 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
         )
         .is_err()
     );
-    // The encoding is canonical: a set in another order is refused.
     let pair = RevocationSet::try_from(vec![good.clone(), fresh.clone()]).unwrap();
     let mut reversed: Vec<SignedRevocation> = pair.clone().into();
     reversed.reverse();
-    assert!(RevocationSet::from_bytes(&encode(&reversed).unwrap()).is_err());
+    assert!(
+        RevocationSet::from_bytes(&encode(&reversed).unwrap()).is_err(),
+        "the encoding is canonical; a set in another order is refused"
+    );
     assert_eq!(
         RevocationSet::from_bytes(&pair.to_bytes().unwrap()).unwrap(),
         pair
@@ -406,7 +412,6 @@ fn only_the_root_ends_its_links_and_issuers_below_revoke_each_other() {
         b.1.issuer(publisher.public_key(), Some((&set, NOW)))
             .is_ok()
     );
-    // Below `a`, two issuers end each other's chains.
     let below = |parent: &(PrivateKey, CredentialChain)| {
         let key = PrivateKey::new();
         let link = crate::testing::authority(&parent.0, &parent.1)
@@ -429,13 +434,13 @@ fn only_the_root_ends_its_links_and_issuers_below_revoke_each_other() {
         .unwrap();
     assert!(
         c.1.issuer(publisher.public_key(), Some((&set, NOW)))
-            .is_err()
+            .is_err(),
+        "below a, two issuers end each other's chains"
     );
     assert!(
         d.1.issuer(publisher.public_key(), Some((&set, NOW)))
             .is_err()
     );
-    // The root ends `a`, and with it every chain below.
     let root = SignedRevocation::sign(
         Revocation {
             identities: [a.0.public_key()].into(),
@@ -448,7 +453,8 @@ fn only_the_root_ends_its_links_and_issuers_below_revoke_each_other() {
     let set = single(&root);
     assert!(
         a.1.issuer(publisher.public_key(), Some((&set, NOW)))
-            .is_err()
+            .is_err(),
+        "the root ends a, and with it every chain below"
     );
     assert!(
         c.1.issuer(publisher.public_key(), Some((&set, NOW)))
@@ -530,8 +536,8 @@ fn forked_links() -> (PrivateKey, Vec<SignedCapability>) {
         let previous = certificates.last().unwrap().id().unwrap();
         certificates.push(certify(sequence, Some(previous)));
     }
-    // A second certificate at sequence 1 forks the identity's links.
-    certificates.push(certify(1, Some(certificates[0].id().unwrap())));
+    let fork_at_sequence_one = certify(1, Some(certificates[0].id().unwrap()));
+    certificates.push(fork_at_sequence_one);
     (root, certificates)
 }
 
@@ -590,8 +596,10 @@ fn whole_set_derivations_are_computed_once_per_change() {
 
     set.link(certificates[5].clone()).unwrap();
     let before = derivations();
-    // The fork ends the nodes linked past its place.
-    assert!(judge(&set) > 0);
+    assert!(
+        judge(&set) > 0,
+        "the fork ends the nodes linked past its place"
+    );
     assert_ne!(set.fingerprint().unwrap(), fingerprint);
     assert_eq!(derivations() - before, 2);
 }

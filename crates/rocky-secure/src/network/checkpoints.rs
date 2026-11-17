@@ -272,7 +272,10 @@ impl NativeSession {
     ) -> Result<bool, Error> {
         self.rebootstrap_scopes_at_seals(replica, &[]).await
     }
-    /// Limits recovery to the selected scopes; an empty selection means every scope.
+    /// Limits recovery to the selected scopes; an empty selection means every
+    /// scope. Placements may show positions a scope seemed to miss. A peer on
+    /// another tip or outside a scope leaves its recovery to another peer, and
+    /// a failing scope leaves the others to recover.
     pub async fn rebootstrap_scopes_at_seals<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -289,7 +292,6 @@ impl NativeSession {
         };
         let mut needs = wanted(replica.seal_rebootstraps(domain).await?);
         if !needs.is_empty() {
-            // Placements may show the positions a scope seemed to miss.
             self.pull_placements(replica).await?;
             needs = wanted(replica.seal_rebootstraps(domain).await?);
         }
@@ -302,7 +304,6 @@ impl NativeSession {
         {
             return Ok(true);
         }
-        // A peer on another tip or outside a scope leaves its recovery to another peer.
         let shared = replica
             .peer_holds(
                 self.peer,
@@ -310,20 +311,18 @@ impl NativeSession {
                 &needs.iter().map(|need| need.scope).collect::<Vec<_>>(),
             )
             .await?;
-        // A scope that fails leaves the others to recover; the first
-        // failure is returned once every scope ran.
-        let mut failed = None;
+        let mut first_failure = None;
         for need in needs {
             match self.rebootstrap_need(replica, &shared, need).await {
                 Ok(true) => {}
                 Ok(false) => return Ok(false),
                 Err(error) => {
-                    failed.get_or_insert(error);
+                    first_failure.get_or_insert(error);
                 }
             }
         }
         replica.finish_seal_rebootstrap(domain).await?;
-        failed.map_or(Ok(true), Err)
+        first_failure.map_or(Ok(true), Err)
     }
     /// One scope of `rebootstrap_scopes_at_seals`; false once the session's
     /// budget runs low.
@@ -359,7 +358,9 @@ impl NativeSession {
     /// Imports the peer's checkpoint of `scope` when the graph lists it at
     /// a seal of the followed path that the scope cannot finalize from the
     /// history it caught up: a revoked author's rows, for one, come only so.
-    /// Returns false once the session's budget runs low.
+    /// Positions of other scopes come first as placements, because an import
+    /// would discard records that frames could still finalize. Returns false
+    /// once the session's budget runs low.
     pub async fn replace_with_listed<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -367,8 +368,6 @@ impl NativeSession {
     ) -> Result<bool, Error> {
         let mut listed = replica.listed_replacements(scope).await?;
         if !listed.is_empty() {
-            // Positions of other scopes come as placements, not frames: an
-            // import would discard records that frames could still finalize.
             self.pull_placements(replica).await?;
             listed = replica.listed_replacements(scope).await?;
         }
@@ -405,8 +404,9 @@ impl NativeSession {
         Ok(page.logs.is_empty())
     }
     /// The checkpoint the peer offers for each scope, in order, with its
-    /// stored rows; `None` where it offers none this replica may import:
-    /// what a bootstrap plans with before it imports anything.
+    /// stored rows; `None` where it offers none this replica may import,
+    /// including for an evicted scope until it is held again: what a
+    /// bootstrap plans with before it imports anything.
     pub async fn offered_rows<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -415,7 +415,6 @@ impl NativeSession {
         self.ensure_holding(replica, scopes).await?;
         let mut offered = Vec::with_capacity(scopes.len());
         for scope in scopes {
-            // An evicted scope imports nothing until it is held again.
             if replica.evicted(*scope).await? {
                 offered.push(None);
                 continue;
@@ -528,18 +527,17 @@ impl NativeSession {
             if last {
                 left = 0;
             }
-            // Request the next window before storing the end of this one.
-            let window = self.checkpoint_window(quota);
-            if last && !complete && window > 0 {
+            let next_window = self.checkpoint_window(quota);
+            if last && !complete && next_window > 0 {
                 self.send(CheckpointMessage::CheckpointPull {
                     scope,
                     checkpoint,
                     after,
                     quota,
-                    window,
+                    window: next_window,
                 })
                 .await?;
-                left = window;
+                left = next_window;
             }
             let mut page = *page;
             page.carrier = Some(self.peer);
@@ -621,13 +619,12 @@ impl NativeSession {
         if signed.statement.seal.is_none() && replica.owns_checkpoint_signer(&signed).await {
             return Ok(None);
         }
-        // Switching to the installed checkpoint again would only rewrite its rows.
-        let installed = replica.checkpoint_installed(&signed).await?;
-        let rebootstrap = match installed {
+        let already_installed = replica.checkpoint_installed(&signed).await?;
+        let rebootstrap = match already_installed {
             true => None,
             false => self.import_within(replica, signed, CHECKPOINT_PAGE).await?,
         };
-        let catch_up = if installed || rebootstrap.is_some() {
+        let catch_up = if already_installed || rebootstrap.is_some() {
             self.catch_up(replica, scope, quota).await?
         } else {
             CatchUp {

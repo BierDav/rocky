@@ -200,7 +200,6 @@ impl<A: RowApplication> Inner<A> {
         s.root = root.1.hash;
         s.validate().map_err(|e| denied(&e.to_string()))?;
         self.conn.execute("INSERT INTO secure_migration_publications(publication,tip,statement,writer) VALUES(?,?,?,?)",[s.publication.to_vec(),encode(&s.tip)?,encode(&s)?,encode(&author.credentials)?]).await?;
-        // Existing authoring owns this slice; proof construction adds no publication-sized vector.
         for frame in frames {
             let index = frame.operation_ref()?.header.extensions.author_sequence;
             let proof = self.migration_proof(&s, index).await?;

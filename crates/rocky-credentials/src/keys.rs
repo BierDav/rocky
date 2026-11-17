@@ -193,11 +193,12 @@ mod tests {
         assert_eq!(vault.get("node")?, node);
         assert!(vault.create("node").is_err());
         assert_eq!(vault.get("node")?, node);
-        // Another installation's roles are other secrets.
-        assert!(Vault::new(provider.clone(), "b").get("node").is_err());
-        // A deleted secret stays missing; a truncated one is corrupt.
+        assert!(
+            Vault::new(provider.clone(), "b").get("node").is_err(),
+            "another installation's roles are other secrets"
+        );
         vault.forget(["node".to_owned()])?;
-        assert!(vault.get("node").is_err());
+        assert!(vault.get("node").is_err(), "a deleted secret stays missing");
         provider
             .store("rocky.a.user", &[1; 5])
             .map_err(Error::Provider)?;

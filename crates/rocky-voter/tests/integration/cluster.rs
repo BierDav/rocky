@@ -29,13 +29,13 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
     else {
         panic!("assignment")
     };
-    // A retried append returns its first answer; another with its sequence conflicts.
     assert_eq!(
         alice
             .coordinated(log(cluster.scope), first.clone())
             .await
             .unwrap(),
-        Outcome::Coordinated(LogResult::Assigned(pending.clone()))
+        Outcome::Coordinated(LogResult::Assigned(pending.clone())),
+        "a retried append returns its first answer"
     );
     let Action::Append {
         expected,
@@ -60,7 +60,8 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
                 }
             )
             .await,
-        Err(CoordinationError::RequestConflict)
+        Err(CoordinationError::RequestConflict),
+        "another append with the same sequence conflicts"
     );
     assert!(matches!(
         alice
@@ -119,7 +120,6 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
     )
     .await
     .unwrap();
-    // The retained plan neither reapplies nor reverses the later one.
     assert_eq!(
         membership_after_election(
             &admin,
@@ -132,12 +132,14 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
         )
         .await
         .unwrap(),
-        Outcome::Membership(BTreeSet::from([1, 2]))
+        Outcome::Membership(BTreeSet::from([1, 2])),
+        "the retained plan answers as before without reapplying"
     );
     let leader = cluster.wait_leader(&admin).await;
     assert_eq!(
         admin.status(leader).await.unwrap().voters,
-        BTreeSet::from([1, 2, 3])
+        BTreeSet::from([1, 2, 3]),
+        "the retained plan does not reverse the later one"
     );
     for id in 1..=3 {
         admin.snapshot(id).await.unwrap();
@@ -163,7 +165,6 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
             .await
             .is_err()
     );
-    // A revision cannot drop a trusted node the in-sync set still holds.
     let mut narrowed = cluster.app_control(2);
     narrowed.control.trusted = vec![cluster.alternate.public_key()];
     let narrowed =
@@ -171,7 +172,8 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
             .unwrap();
     assert_eq!(
         issuer.call([8; 32], Operation::Control(narrowed)).await,
-        Err(CoordinationError::Backpressure)
+        Err(CoordinationError::Backpressure),
+        "a revision cannot drop a trusted node the in-sync set still holds"
     );
     issuer
         .call([9; 32], Operation::Control(cluster.app_control(2)))
@@ -192,12 +194,14 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
         alternate.coordinated_head(log(cluster.scope)).await,
         Err(CoordinationError::Unavailable)
     );
-    // A surviving provisioning marker prevents a missing store from becoming genesis again.
     std::fs::remove_file(cluster.store_path(1)).unwrap();
     cluster.spawn(1, true, None);
     cluster.wait_exit(1).await;
     let log = std::fs::read_to_string(cluster.dir.path().join("voter-1.log")).unwrap();
-    assert!(log.contains("CoordinationStateLost"), "{log}");
+    assert!(
+        log.contains("CoordinationStateLost"),
+        "the surviving provisioning marker keeps a missing store from becoming genesis again: {log}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -229,7 +233,6 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
         let _ = alice.coordinated(log(cluster.scope), action.clone()).await;
         cluster.wait_exit(leader).await;
         cluster.wait_leader(&admin).await;
-        // The retry answers what the crashed call may have applied, once.
         let Outcome::Coordinated(LogResult::Assigned(pending)) = alice
             .coordinated(log(cluster.scope), action.clone())
             .await
@@ -237,7 +240,11 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
         else {
             panic!("{stage}: assignment")
         };
-        assert_eq!(pending.position, before.commit + 1, "{stage}");
+        assert_eq!(
+            pending.position,
+            before.commit + 1,
+            "{stage}: the retry answers what the crashed call may have applied, once"
+        );
         assert_eq!(
             alice
                 .coordinated(log(cluster.scope), action.clone())
@@ -286,11 +293,10 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
     let lagging = if leader == 1 { 2 } else { 1 };
     let lagging_applied = admin.status(lagging).await.unwrap().applied.unwrap();
     cluster.stop(lagging);
-    // Reads add no log entries; retries of a decided append do, unchanged.
-    let last = last.unwrap();
-    for _ in 0..80 {
+    let decided_append = last.unwrap();
+    for _ in 0..RETRIES_PAST_THE_LAGGING_LOG {
         alice
-            .coordinated(log(cluster.scope), last.clone())
+            .coordinated(log(cluster.scope), decided_append.clone())
             .await
             .unwrap();
     }
@@ -343,6 +349,10 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
     );
 }
 
+/// Retries of a decided append add log entries, unlike reads, so this many
+/// leave a stopped voter needing a snapshot.
+const RETRIES_PAST_THE_LAGGING_LOG: usize = 80;
+
 fn claim(n: u8) -> Claim {
     Claim {
         id: [n; 32],
@@ -385,8 +395,6 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
     let scope = cluster.scope;
     let invoices = Name::new("company-1/invoices").unwrap();
 
-    // Concurrent claims from both trusted nodes take distinct values, and
-    // each node's own sequence of answers strictly increases.
     let claims: Vec<Claim> = (0..24).map(claim).collect();
     let tasks: Vec<_> = (0..2)
         .map(|node| {
@@ -408,23 +416,27 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
         let ordered: Vec<u64> = values.iter().map(|(_, v)| *v.as_ref().unwrap()).collect();
         assert!(
             ordered.windows(2).all(|pair| pair[0] < pair[1]),
-            "{ordered:?}"
+            "each node's own answers strictly increase: {ordered:?}"
         );
         taken.extend(values.into_iter().map(|(claim, v)| (claim, v.unwrap())));
     }
     let distinct: BTreeSet<u64> = taken.iter().map(|(_, value)| *value).collect();
-    assert_eq!(distinct, (1..=24).collect());
-    // Either node's retry of either node's claim answers the same value.
+    assert_eq!(
+        distinct,
+        (1..=24).collect(),
+        "concurrent claims from both trusted nodes take distinct values"
+    );
     for (n, (claim, value)) in taken.iter().enumerate() {
         let retried = nodes[n % 2]
             .claim(scope, invoices.clone(), *claim)
             .await
             .unwrap();
-        assert_eq!(retried, *value);
+        assert_eq!(
+            retried, *value,
+            "either node's retry of either node's claim answers the same value"
+        );
     }
 
-    // The leader crashes after applying a claim and before replying: the
-    // retry answers the value it took, once.
     let leader = cluster.wait_leader(&admin).await;
     let crashed = claim(100);
     cluster.arm(leader, "reply.before_send");
@@ -432,7 +444,8 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
     cluster.wait_exit(leader).await;
     assert_eq!(
         claim_definitely(&nodes[1], scope, &invoices, crashed).await,
-        Ok(25)
+        Ok(25),
+        "a retry answers the value a claim took before its leader crashed, once"
     );
     assert_eq!(
         claim_definitely(&nodes[0], scope, &invoices, claim(101)).await,
@@ -441,14 +454,14 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
     cluster.spawn(leader, false, None);
     cluster.wait_online(leader, &admin).await;
 
-    // A leader change keeps every value: the new leader answers retries.
     let leader = cluster.wait_leader(&admin).await;
     cluster.stop(leader);
     assert_ne!(cluster.wait_leader(&admin).await, leader);
     for (claim, value) in &taken {
         assert_eq!(
             claim_definitely(&nodes[1], scope, &invoices, *claim).await,
-            Ok(*value)
+            Ok(*value),
+            "a new leader answers retries with every value"
         );
     }
     assert_eq!(
@@ -458,7 +471,6 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
     cluster.spawn(leader, false, None);
     cluster.wait_online(leader, &admin).await;
 
-    // Every voter restarts from its snapshot with the same counter.
     for id in 1..=3 {
         admin.snapshot(id).await.unwrap();
     }
@@ -470,7 +482,8 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
     cluster.wait_leader(&admin).await;
     assert_eq!(
         claim_definitely(&nodes[0], scope, &invoices, crashed).await,
-        Ok(25)
+        Ok(25),
+        "every voter restarts from its snapshot with the same counter"
     );
     let reading = nodes[0]
         .counter(scope, invoices.clone(), Some(taken[3].0))
@@ -483,17 +496,17 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
         Ok(28)
     );
 
-    // Only the domain's trusted nodes claim or read; the control authority
-    // and other keys are refused.
     let stranger = cluster.client(&cluster.user);
     for client in [&issuer, &stranger] {
         assert_eq!(
             client.claim(scope, invoices.clone(), claim(104)).await,
-            Err(CoordinationError::Denied)
+            Err(CoordinationError::Denied),
+            "only the domain's trusted nodes claim"
         );
         assert_eq!(
             client.counter(scope, invoices.clone(), None).await,
-            Err(CoordinationError::Denied)
+            Err(CoordinationError::Denied),
+            "only the domain's trusted nodes read a counter"
         );
     }
     assert_eq!(

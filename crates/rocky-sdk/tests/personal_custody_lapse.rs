@@ -85,14 +85,16 @@ async fn a_lapsed_custodian_alone_restores_under_its_same_renewed_grant() -> Res
             .iter()
             .all(|grant| grant.rights == [rocky_core::Right::Custody].into())
     );
-    // Every full node is gone, no coordinator exists, and the custody
-    // grant lapses while the custodian keeps running.
     owner.close().await;
     std::fs::remove_dir_all(&owner_path)?;
+    let an_hour_past_the_custody_grant = original.capability.expires - now()? + 3600;
     rocky_platform::entropy::simulation::skip(std::time::Duration::from_secs(
-        original.capability.expires - now()? + 3600,
+        an_hour_past_the_custody_grant,
     ));
-    assert!(custody_link(&custodian_path)?.capability.expires <= now()?);
+    assert!(
+        custody_link(&custodian_path)?.capability.expires <= now()?,
+        "with every full node gone, the custody grant lapses while the custodian runs"
+    );
 
     let path = directory.path().join("phone");
     let personal = config(&path, &hub, "phone")?
@@ -108,13 +110,15 @@ async fn a_lapsed_custodian_alone_restores_under_its_same_renewed_grant() -> Res
         .map_err(|error| format!("sync: {error}"))?;
     assert_eq!(phone.titles().await, ["kept by custody"]);
 
-    // The custodian holds the same grant, renewed: nothing widened.
     let renewed = custody_link(&custodian_path)?;
     assert!(renewed.capability.expires > now()?);
     assert_ne!(renewed.id()?, original.id()?);
     assert_eq!(renewed.capability.subject, original.capability.subject);
     assert_eq!(renewed.capability.kind, original.capability.kind);
-    assert_eq!(renewed.capability.grants, original.capability.grants);
+    assert_eq!(
+        renewed.capability.grants, original.capability.grants,
+        "the renewed custody grant widened nothing"
+    );
     assert_eq!(
         renewed.capability.delegations,
         original.capability.delegations
@@ -124,9 +128,11 @@ async fn a_lapsed_custodian_alone_restores_under_its_same_renewed_grant() -> Res
         original.capability.extended()?
     );
     assert!(!custodian.session.status().await?.authority.expired);
-    // The phone's writes reach the custodian under the renewed grant.
     phone.add(2, "after renewal").await;
-    phone.sync().await.map_err(|error| error.to_string())?;
+    phone
+        .sync()
+        .await
+        .map_err(|error| format!("the renewed grant takes the phone's writes: {error}"))?;
     phone.close().await;
     custodian.close().await;
     Ok(())

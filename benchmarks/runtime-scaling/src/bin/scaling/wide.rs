@@ -224,7 +224,6 @@ pub async fn run(tables: u16, checkpoints: &[usize]) -> Result<(), Failure> {
             break;
         }
         let rows = format!("{tag} rows={target}");
-        // Create, edit and delete in equal parts; the live row count is unchanged.
         timed(&format!("{rows} mixed writes"), 60, async |index| {
             match index % 3 {
                 0 => load.create().await,
@@ -329,22 +328,22 @@ mod tests {
             plan[0].starts_with("SEARCH") && plan[0].contains("_t0_a (a>? AND a<?)"),
             "{plan:?}"
         );
-        // Ordered by the indexed column, so a page stops early. The key that
-        // the runtime appends for its cursor is sorted only among rows with
-        // equal `a`, because the index does not hold the key columns.
         assert!(
             plan[1..]
                 .iter()
                 .all(|step| step == "USE TEMP B-TREE FOR LAST 2 TERMS OF ORDER BY"),
-            "{plan:?}"
+            "ordered by the indexed column, so a page stops early. The key that the runtime appends for its cursor is sorted only among rows with equal `a`, because the index does not hold the key columns: {plan:?}"
         );
-        // Table 0 holds every third row; the deleted one was in table 2.
         let range = load
             .replica
             .read(load.range(), options.clone())
             .await
             .unwrap();
-        assert_eq!(range.rows.len(), 10);
+        assert_eq!(
+            range.rows.len(),
+            10,
+            "table 0 holds every third row; the deleted one was in table 2"
+        );
         let first = load
             .replica
             .read(load.range(), ReadOptions::new(scope(), 4))
@@ -363,7 +362,6 @@ mod tests {
                 .rows,
             vec![vec![SqlValue::Integer(9)]]
         );
-        // Editing a deleted row keeps it deleted: its tombstone is stored.
         let entity = OperationId {
             node: NODE,
             sequence: AuthorSequence::new(30).unwrap(),
@@ -372,7 +370,11 @@ mod tests {
             .await
             .unwrap();
         let snapshot = load.replica.query().await.unwrap();
-        assert_eq!(snapshot.rows.len(), 29);
+        assert_eq!(
+            snapshot.rows.len(),
+            29,
+            "editing a deleted row keeps it deleted: its tombstone is stored"
+        );
         runtime.close().await.unwrap();
         let runtime = open(
             &dir.path().join("plans.db"),

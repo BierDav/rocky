@@ -30,11 +30,17 @@ async fn lists_reach_devices_by_role() -> Result<(), Failure> {
     let groceries = phone.create_list("Groceries").await?.id;
     phone.add(groceries, "Milk").await?;
     world.sync().await?;
-    // Full and trusted devices hold every list; the partial one none yet.
     for device in [&laptop, &phone] {
-        assert_eq!(device.lists().await?.len(), 2);
+        assert_eq!(
+            device.lists().await?.len(),
+            2,
+            "trusted and full devices hold every list"
+        );
     }
-    assert!(watch.lists().await?.is_empty());
+    assert!(
+        watch.lists().await?.is_empty(),
+        "a partial device holds no list until one is shared with it"
+    );
 
     laptop.share(errands, &[watch.node().await?]).await?;
     world.sync().await?;
@@ -49,17 +55,21 @@ async fn lists_reach_devices_by_role() -> Result<(), Failure> {
     world.sync().await?;
     assert_eq!(titles(&laptop, errands).await?, ["Post", "Bank"]);
 
-    // A full device joining later receives the existing lists.
     let tablet = world.join("tablet", Role::Full).await?;
     world.sync().await?;
     laptop.share_lists_with_members().await?;
     world.sync().await?;
-    assert_eq!(tablet.lists().await?.len(), 2);
+    assert_eq!(
+        tablet.lists().await?.len(),
+        2,
+        "a full device joining later receives the existing lists"
+    );
 
-    // Removing a device revokes it and drops it from every member list;
-    // a device cannot remove itself.
     let watch_node = watch.node().await?;
-    assert!(laptop.remove_device(&laptop.node().await?).await.is_err());
+    assert!(
+        laptop.remove_device(&laptop.node().await?).await.is_err(),
+        "a device cannot remove itself"
+    );
     laptop.remove_device(&watch_node).await?;
     world
         .devices
@@ -74,7 +84,10 @@ async fn lists_reach_devices_by_role() -> Result<(), Failure> {
             .map(|member| member.node)
             .collect();
         assert_eq!(nodes.len(), 3);
-        assert!(!nodes.contains(&watch_node));
+        assert!(
+            !nodes.contains(&watch_node),
+            "a removed device is dropped from every member list"
+        );
     }
     world.close().await
 }
@@ -93,14 +106,12 @@ async fn offline_edits_converge_in_one_order() -> Result<(), Failure> {
     world.sync().await?;
     assert_eq!(titles(&phone, list).await?, ["Post", "Bank", "Bakery"]);
 
-    // Offline from each other: both move a todo into the first gap, both
-    // raise one priority, and both add "Pharmacy".
     laptop.move_to(list, ids[2], 1).await?;
     phone.move_to(list, ids[1], 0).await?;
     laptop.raise_priority(list, ids[0]).await?;
     phone.raise_priority(list, ids[0]).await?;
-    let first = laptop.add(list, "Pharmacy").await?;
-    let second = phone.add(list, "Pharmacy").await?;
+    let laptop_pharmacy = laptop.add(list, "Pharmacy").await?;
+    let phone_pharmacy = phone.add(list, "Pharmacy").await?;
     assert_eq!(
         titles(&phone, list).await?,
         ["Bank", "Post", "Bakery", "Pharmacy"]
@@ -114,18 +125,18 @@ async fn offline_edits_converge_in_one_order() -> Result<(), Failure> {
             .iter()
             .find(|todo| todo.id == ids[0])
             .map(|todo| todo.priority),
-        Some(2)
+        Some(2),
+        "both offline raises count"
     );
-    // Each move rewrote only its own todo, so both placements hold.
     assert_eq!(
         titles(&laptop, list).await?,
-        ["Bank", "Post", "Bakery", "Pharmacy"]
+        ["Bank", "Post", "Bakery", "Pharmacy"],
+        "each move rewrote only its own todo, so both placements hold"
     );
 
-    // Exactly one of the two "Pharmacy" inserts dropped, the same on both.
     let tokens = [
-        first.token.ok_or("published")?,
-        second.token.ok_or("published")?,
+        laptop_pharmacy.token.ok_or("published")?,
+        phone_pharmacy.token.ok_or("published")?,
     ];
     let mut outcomes = Vec::new();
     for device in [&laptop, &phone] {
@@ -135,15 +146,21 @@ async fn offline_edits_converge_in_one_order() -> Result<(), Failure> {
         }
         outcomes.push(here);
     }
-    assert_eq!(outcomes[0], outcomes[1]);
+    assert_eq!(
+        outcomes[0], outcomes[1],
+        "both devices agree on which insert dropped"
+    );
     assert_eq!(
         outcomes[0].iter().flatten().collect::<Vec<_>>(),
-        [&(DropReason::Constraint, false)]
+        [&(DropReason::Constraint, false)],
+        "exactly one of the two \"Pharmacy\" inserts dropped"
     );
 
-    // Deleting the list cascades on both.
     laptop.delete_list(list).await?;
     world.sync().await?;
-    assert!(phone.all_todos().await?.is_empty());
+    assert!(
+        phone.all_todos().await?.is_empty(),
+        "deleting a list cascades to its todos on every device"
+    );
     world.close().await
 }

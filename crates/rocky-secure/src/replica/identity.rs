@@ -24,6 +24,9 @@ type LedgerBasis = (Option<tips::LedgerView>, u64);
 /// The basis per domain during one tip statement admission.
 pub(super) type SeededLedgers = BTreeMap<rocky_core::Scope, LedgerBasis>;
 
+/// `key` is a 16-byte digest of the business key, keyed by the interned
+/// scope id; lookups confirm the full key from the row.
+const ROW_KEYS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_row_keys(scope INTEGER NOT NULL,row BLOB NOT NULL,key BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID";
 pub(super) const SCHEMA: &[&str] = &[
     receipts::SCHEMA[0],
     receipts::SCHEMA[1],
@@ -39,9 +42,7 @@ pub(super) const SCHEMA: &[&str] = &[
     receipts::SCHEMA[11],
     receipts::SCHEMA[12],
     "CREATE TABLE IF NOT EXISTS secure_author_sequences(node BLOB PRIMARY KEY,sequence INTEGER NOT NULL) WITHOUT ROWID",
-    // `key` is a 16-byte digest of the business key, keyed by the interned
-    // scope id; lookups confirm the full key from the row.
-    "CREATE TABLE IF NOT EXISTS secure_row_keys(scope INTEGER NOT NULL,row BLOB NOT NULL,key BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
+    ROW_KEYS_TABLE,
     "CREATE INDEX IF NOT EXISTS secure_row_keys_key ON secure_row_keys(scope,key,row)",
     "CREATE TRIGGER IF NOT EXISTS secure_row_keys_delete AFTER DELETE ON secure_rows BEGIN DELETE FROM secure_row_keys WHERE scope=OLD.scope AND row=OLD.row; END",
 ];
@@ -280,7 +281,6 @@ impl<A: RowApplication> Inner<A> {
     }
     /// Backfills the derived index after open or a bulk restore, in bounded pages.
     pub(super) async fn index_row_keys(&self) -> Result<(), Error> {
-        // A key cursor, so no page scans the rows an earlier one indexed.
         let mut after = (0, Vec::new());
         loop {
             let chunk = collect_rows(self.conn.query(
@@ -509,7 +509,6 @@ impl<A: RowApplication> Inner<A> {
                 bindings(vec![SqlValue::Blob(encode(&scope)?), writer_value(mark.author), SqlValue::Integer(own as i64)]),
             ).await?;
         }
-        // S records only the statement's own-birth maximum in this partition.
         if matches!(raise, Raise::Statement { .. }) && own > 0 {
             self.conn.execute(
                 "INSERT INTO secure_identity_summary VALUES(?,?,?) ON CONFLICT(scope,author) DO UPDATE SET sequence=MAX(sequence,excluded.sequence)",
@@ -561,8 +560,6 @@ impl<A: RowApplication> Inner<A> {
         {
             return Ok(true);
         }
-        // A rebootstrap need alone does not: a reset replay refills from
-        // nothing, and its returning frames must fold into an empty L.
         if !self.has_pruned_prefix(scope).await? {
             return Ok(false);
         }
@@ -636,8 +633,8 @@ impl<A: RowApplication> Inner<A> {
         ledger: IdentityLedger,
     ) -> Result<(), Error> {
         let marks = ledger.into_marks();
-        // An unchanged ledger writes nothing, so in-place switches stay row-free.
-        if self.ledger_marks(scope).await? == marks {
+        let ledger_unchanged = self.ledger_marks(scope).await? == marks;
+        if ledger_unchanged {
             return Ok(());
         }
         self.conn
@@ -798,7 +795,6 @@ impl<A: RowApplication> Inner<A> {
             let scope: ResourceScope = decode(scope)?;
             let permanent = self.identity_marks(scope).await?;
             let ledger = self.ledger_marks(scope).await?;
-            // A queued scope reseeds before use; a keyless one cannot be replayed.
             let queued = self.ledger_queued(scope).await?;
             if (queued && !ledger.is_empty())
                 || (!queued
@@ -980,7 +976,6 @@ impl<A: RowApplication> Inner<A> {
                     }
                     marks.merge(birth.mark)?;
                 }
-                // A replayed member's own births, as its replay recorded them.
                 for mark in self.replayed_births(frame.id()?).await? {
                     own.merge(mark.clone())?;
                     marks.merge(mark)?;
@@ -1139,7 +1134,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-// Checkpoint row identities use the same canonical string boundary as callers.
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Test access: the `(author, sequence)` marks a replay of kept `seal`
     /// starts from, or None when that prefix is unavailable.

@@ -28,6 +28,10 @@ const READ_STALENESS: u64 = 30;
 /// Concurrent client requests one voter serves without a public service.
 const MESH_LANES: usize = 16;
 
+/// A transient accept failure, such as descriptor exhaustion or an aborted
+/// connection, pauses the voter listener this long instead of ending it.
+const ACCEPT_RETRY: std::time::Duration = std::time::Duration::from_millis(50);
+
 #[derive(Default)]
 struct Counters {
     requests: AtomicU64,
@@ -107,6 +111,7 @@ impl VoterService {
         let store = Store::open(path, genesis.clone(), provision, genesis.limits())?;
         store.set_node(node);
         let fence = store.fence().await;
+        let fenced_after_restore = fence.is_some();
         let config = openraft::Config {
             cluster_name: format!("{:?}", genesis.id()?),
             heartbeat_interval: 100,
@@ -116,8 +121,7 @@ impl VoterService {
             max_in_snapshot_log_to_keep: 8,
             snapshot_max_chunk_size: 64 * 1024,
             max_payload_entries: 8,
-            // A restored voter stays out of elections until it is re-added.
-            enable_elect: fence.is_none(),
+            enable_elect: !fenced_after_restore,
             ..Default::default()
         }
         .validate()
@@ -147,18 +151,18 @@ impl VoterService {
             counters: Counters::default(),
             clients: Arc::new(Semaphore::new(lanes)),
             lanes: Default::default(),
-            fenced: AtomicBool::new(fence.is_some()),
+            fenced: AtomicBool::new(fenced_after_restore),
             acknowledgments: Default::default(),
         });
         log(
             node,
-            if fence.is_some() {
+            if fenced_after_restore {
                 "opened, fenced after restore"
             } else {
                 "opened"
             },
         );
-        if fence.is_some() {
+        if fenced_after_restore {
             tokio::spawn(service.clone().await_readmission());
         }
         Self::watch_log_deadlines(&service);
@@ -197,16 +201,17 @@ impl VoterService {
             }
         }
     }
-    /// The authorized request's tenant share on a public service.
+    /// The authorized request's tenant share on a public service. Beyond
+    /// the tenant cap, idle lanes are dropped, so departed tenants hold none.
     async fn lane(&self, request: &Request) -> Result<Option<Arc<Semaphore>>, CoordinationError> {
         let Some(public) = &self.genesis.genesis.public else {
             return Ok(None);
         };
         let tenant = self.store.lane(request).await;
         let mut lanes = self.lanes.lock().map_err(|_| CoordinationError::Corrupt)?;
-        // Bounded by the tenant cap; departed tenants' lanes are dropped when idle.
         if lanes.len() > public.tenants as usize {
-            lanes.retain(|_, lane| lane.available_permits() < public.tenant_lanes as usize);
+            let tenant_lanes = public.tenant_lanes as usize;
+            lanes.retain(|_, lane| lane.available_permits() < tenant_lanes);
         }
         Ok(Some(
             lanes
@@ -215,7 +220,8 @@ impl VoterService {
                 .clone(),
         ))
     }
-    /// Admits one client request within its lanes, then answers it.
+    /// Admits one client request within its lanes, then answers it while
+    /// holding both its permits.
     async fn admit(&self, request: Request) -> Reply {
         let refuse = |error| Reply {
             leader: self.raft.metrics().borrow().current_leader,
@@ -228,24 +234,10 @@ impl VoterService {
             Ok(lane) => lane,
             Err(error) => return refuse(error),
         };
-        // Both permits are held until the answer is ready.
         let tenant = lane.as_ref().map(|lane| lane.try_acquire()).transpose();
-        let (Ok(_client), Ok(_tenant)) = (self.clients.try_acquire(), tenant) else {
+        let (Ok(_client_permit), Ok(_tenant_permit)) = (self.clients.try_acquire(), tenant) else {
             self.counters.busy.fetch_add(1, Ordering::Relaxed);
-            // Admission cannot know whether an earlier timed-out append was
-            // assigned. Only the replicated machine gives a definite refusal.
-            let error = if matches!(
-                &request.operation,
-                Operation::Coordinated {
-                    action: rocky_coordinator::coordinated::Action::Append { .. },
-                    ..
-                }
-            ) {
-                CoordinationError::Unavailable
-            } else {
-                CoordinationError::Backpressure
-            };
-            return refuse(error);
+            return refuse(busy_refusal(&request.operation));
         };
         let reply = self.client(request).await;
         self.counters.record(&reply.result);
@@ -316,7 +308,6 @@ impl VoterService {
             }
             let response = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
-                // The leader proposes authority time; followers never read their clocks.
                 self.raft.client_write(Proposal {
                     time: now()?,
                     request,
@@ -326,34 +317,7 @@ impl VoterService {
             .map_err(|_| CoordinationError::Unavailable)?
             .map_err(|_| CoordinationError::Unavailable)?;
             if let Ok(Outcome::Membership(voters)) = &response.data {
-                // Retry completes an interrupted membership plan using the current durable target.
-                if &self.store.desired_voters().await != voters {
-                    // An older retained plan must not reverse a later membership change.
-                    return Ok((response.data, response.log_id));
-                }
-                let membership = self.raft.metrics().borrow().membership_config.clone();
-                if membership.membership().get_joint_config().len() == 1
-                    && membership.voter_ids().collect::<BTreeSet<_>>() == *voters
-                {
-                    return Ok((response.data, response.log_id));
-                }
-                for id in voters {
-                    let voter = self
-                        .genesis
-                        .genesis
-                        .voters
-                        .iter()
-                        .find(|v| v.id == *id)
-                        .ok_or(CoordinationError::Configuration)?;
-                    self.raft
-                        .add_learner(*id, BasicNode::new(voter.address.clone()), true)
-                        .await
-                        .map_err(|_| CoordinationError::Unavailable)?;
-                }
-                self.raft
-                    .change_membership(voters.clone(), false)
-                    .await
-                    .map_err(|_| CoordinationError::Unavailable)?;
+                self.complete_membership(voters).await?;
             }
             Ok((response.data, response.log_id))
         }
@@ -371,6 +335,39 @@ impl VoterService {
                 }
             }
         }
+    }
+    /// Moves the raft membership to `voters`, so a retried plan completes an
+    /// interrupted one. A plan that is no longer the durable target is left
+    /// alone: an older retained plan never reverses a later change.
+    async fn complete_membership(&self, voters: &BTreeSet<u64>) -> Result<(), CoordinationError> {
+        let is_durable_target = &self.store.desired_voters().await == voters;
+        if !is_durable_target {
+            return Ok(());
+        }
+        let membership = self.raft.metrics().borrow().membership_config.clone();
+        let already_applied = membership.membership().get_joint_config().len() == 1
+            && membership.voter_ids().collect::<BTreeSet<_>>() == *voters;
+        if already_applied {
+            return Ok(());
+        }
+        for id in voters {
+            let voter = self
+                .genesis
+                .genesis
+                .voters
+                .iter()
+                .find(|v| v.id == *id)
+                .ok_or(CoordinationError::Configuration)?;
+            self.raft
+                .add_learner(*id, BasicNode::new(voter.address.clone()), true)
+                .await
+                .map_err(|_| CoordinationError::Unavailable)?;
+        }
+        self.raft
+            .change_membership(voters.clone(), false)
+            .await
+            .map_err(|_| CoordinationError::Unavailable)?;
+        Ok(())
     }
     pub async fn serve(self: Arc<Self>) -> Result<(), CoordinationError> {
         let voter = self
@@ -390,10 +387,8 @@ impl VoterService {
         let slots = Arc::new(Semaphore::new(64));
         log(self.node, &format!("serving voters at {}", voter.address));
         loop {
-            // A transient accept failure, such as descriptor exhaustion or an
-            // aborted connection, must not end the listener.
             let Ok((mut stream, _)) = listener.accept().await else {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                tokio::time::sleep(ACCEPT_RETRY).await;
                 continue;
             };
             let Some(slot) = self.counters.connection_slot(&slots) else {
@@ -429,12 +424,9 @@ impl VoterService {
                                 .is_some_and(|id| membership.membership().get_node(&id).is_some()));
                     let administrative =
                         envelope.key == service.genesis.genesis.membership_authority;
+                    let tenants_use_client_lane = service.genesis.genesis.public.is_some();
                     let body = match message {
-                        // Tenants use the confidential client lane; voter TCP
-                        // carries only administration on a public service.
-                        Message::Client(request)
-                            if service.genesis.genesis.public.is_none() || administrative =>
-                        {
+                        Message::Client(request) if !tenants_use_client_lane || administrative => {
                             if request.key != envelope.key {
                                 return Err(CoordinationError::Denied);
                             }
@@ -521,6 +513,18 @@ impl VoterService {
         }
     }
 }
+/// Admission cannot know whether an earlier timed-out append was assigned,
+/// so a busy append is `Unavailable`; only the replicated machine refuses it
+/// definitely. Other busy requests are `Backpressure`.
+fn busy_refusal(operation: &Operation) -> CoordinationError {
+    match operation {
+        Operation::Coordinated {
+            action: rocky_coordinator::coordinated::Action::Append { .. },
+            ..
+        } => CoordinationError::Unavailable,
+        _ => CoordinationError::Backpressure,
+    }
+}
 /// Copies the store of the stopped voter `node` at `path` into the new
 /// directory `out`. A running voter holds the store lock and is refused.
 pub fn backup(
@@ -546,8 +550,9 @@ pub fn restore(
 impl VoterService {
     /// Serves client requests that arrive on `transport` as
     /// `Protocol::Coordinate`, such as an iroh attachment built with
-    /// `Attachment::serving`. Returns when the transport closes; the
-    /// transport stays its owner's.
+    /// `Attachment::serving`. Streams beyond the client lanes are dropped
+    /// unread. Returns when the transport closes; the transport stays its
+    /// owner's.
     pub async fn serve_clients(self: Arc<Self>, transport: Arc<dyn Transport>) {
         if transport.listen(None, true).is_err() {
             return;
@@ -558,8 +563,8 @@ impl VoterService {
             else {
                 continue;
             };
-            // Streams beyond the client lanes are dropped before reading.
-            if self.clients.available_permits() == 0 {
+            let lanes_full = self.clients.available_permits() == 0;
+            if lanes_full {
                 self.counters.busy.fetch_add(1, Ordering::Relaxed);
                 continue;
             }

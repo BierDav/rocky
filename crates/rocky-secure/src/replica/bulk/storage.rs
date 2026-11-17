@@ -1,7 +1,7 @@
 //! Validated accounting over bounded input pages, including support history.
 use super::*;
 
-/// Input records per acquisition; provisional until phone calibration.
+/// Input records per acquisition.
 const STORAGE_RECORDS: usize = if cfg!(test) { 1 } else { 32 };
 const TABLES: [&str; 3] = [
     "secure_migration_publications",
@@ -179,8 +179,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 cursor = row[..3].to_vec();
             }
         }
-
-        // The empty final page validated every table.
         Ok(totals)
     }
 }

@@ -40,9 +40,11 @@ async fn open(
     Runtime::open_with_options(path, installations, options).await
 }
 type Timings = Vec<Duration>;
+/// One measured round of a receiver opened with `options`. The author only
+/// supplies operations, so its own flushes are not under test; the closing
+/// reopen replays history against counters and projections.
 async fn round(options: RuntimeOptions) -> Result<Timings, Failure> {
     let dir = tempfile::tempdir()?;
-    // The author only supplies operations; its own flushes are not under test.
     let author = RuntimeOptions::default();
     let source = open(dir.path().join("author.db"), PEER, author).await?;
     let runtime = open(dir.path().join("receiver.db"), NODE, options).await?;
@@ -88,7 +90,6 @@ async fn round(options: RuntimeOptions) -> Result<Timings, Failure> {
     }
     runtime.close().await?;
     source.close().await?;
-    // Reopen replays history against counters and projections.
     open(
         dir.path().join("receiver.db"),
         NODE,

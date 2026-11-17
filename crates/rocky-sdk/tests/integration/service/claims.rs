@@ -107,11 +107,11 @@ async fn a_member_claims_through_its_claim_right_until_it_is_revoked() -> Result
     let (owner_db, member_db) = (&a.opened.database, &m.opened.database);
     let invoices = counters::Name::new("invoices")?;
 
-    // Not trusted and holding no right: refused, though it asked its issuer.
     let first = counters::Claim::fresh()?;
-    assert!(denied(
-        &member_db.claim(invoices.clone(), first).await.unwrap_err()
-    ));
+    assert!(
+        denied(&member_db.claim(invoices.clone(), first).await.unwrap_err()),
+        "a member without trust or a right is refused, though it asked its issuer"
+    );
 
     let grant = a
         .session
@@ -132,19 +132,21 @@ async fn a_member_claims_through_its_claim_right_until_it_is_revoked() -> Result
         (reading.value, reading.claim),
         (2, Some(counters::Lookup::Claimed(1)))
     );
-    // The right names one counter.
     let credits = counters::Name::new("credits")?;
-    assert!(denied(
-        &member_db
-            .claim(credits, counters::Claim::fresh()?)
-            .await
-            .unwrap_err()
-    ));
-    // Revoking it reaches the service at once; even a retry is refused.
+    assert!(
+        denied(
+            &member_db
+                .claim(credits, counters::Claim::fresh()?)
+                .await
+                .unwrap_err()
+        ),
+        "a right names one counter"
+    );
     a.session.revoke_claims(&member).await?;
-    assert!(denied(
-        &member_db.claim(invoices.clone(), first).await.unwrap_err()
-    ));
+    assert!(
+        denied(&member_db.claim(invoices.clone(), first).await.unwrap_err()),
+        "revoking the right reaches the service at once and even a retry is refused"
+    );
     assert!(denied(
         &member_db
             .claim(invoices.clone(), counters::Claim::fresh()?)
@@ -194,14 +196,16 @@ async fn granting_again_revokes_the_previous_grant() -> Result<(), Failure> {
         .session
         .grant_claims(&member, Some(&[b"invoices"]), 1)
         .await?;
-    // The member still presents the wide link; its grant was revoked.
-    assert!(denied(
-        &m.opened
-            .database
-            .claim(credits.clone(), counters::Claim::fresh()?)
-            .await
-            .unwrap_err()
-    ));
+    assert!(
+        denied(
+            &m.opened
+                .database
+                .claim(credits.clone(), counters::Claim::fresh()?)
+                .await
+                .unwrap_err()
+        ),
+        "the still-presented wide link was revoked"
+    );
     m.session.install_claims(&narrow).await?;
     assert_eq!(
         m.opened
@@ -296,7 +300,6 @@ async fn another_issuer_renews_a_right_after_its_granting_issuer_is_gone() -> Re
             .await?,
         1
     );
-    // B receives the grant's registry row; the member learns B as an issuer.
     b.sync().await?;
     snap::value(async {
         m.session.renew().await?;
@@ -311,7 +314,11 @@ async fn another_issuer_renews_a_right_after_its_granting_issuer_is_gone() -> Re
     })
     .await?;
     let held = m.session.held_claims().await?.ok_or("a held right")?;
-    assert_eq!(Some(json!(held.issuer)), Some(b_node));
+    assert_eq!(
+        Some(json!(held.issuer)),
+        Some(b_node),
+        "the member renews through B once B received the grant's registry row"
+    );
     assert!(held.expires >= grant.expires);
     assert_eq!(held.counters, grant.counters);
     assert_eq!(
@@ -367,25 +374,25 @@ async fn a_revocation_pushed_while_the_service_was_down_reaches_it_at_a_later_sy
         1
     );
 
-    // The owner tells no peer: a link handshake carries its statements even
-    // to a peer that then refuses the link.
     a.session.set_networking_enabled(false).await?;
     gate.store(false, Ordering::SeqCst);
     snap::value(a.session.revoke_identity(&(snap::text(&(admin))))).await?;
     assert!(unpushed(&a).await?);
-    // The dismissed issuer keeps signing; its holder installs the link.
-    let fresh = b
+    let fresh_from_dismissed_issuer = b
         .session
         .grant_claims(&member, Some(&[b"invoices"]), 1)
         .await?;
-    m.session.install_claims(&fresh).await?;
+    m.session
+        .install_claims(&fresh_from_dismissed_issuer)
+        .await?;
 
     gate.store(true, Ordering::SeqCst);
     a.session.set_networking_enabled(true).await?;
-    // The member, not the revoking owner, syncs first: it learns the
-    // statement from the owner and pushes it in the same pass.
     m.sync().await?;
-    assert!(!unpushed(&m).await?);
+    assert!(
+        !unpushed(&m).await?,
+        "a member syncing first learns the owner's statement and pushes it in the same pass"
+    );
     assert!(denied(
         &m.opened
             .database
@@ -430,10 +437,6 @@ async fn an_unpushed_revocation_survives_a_restart() -> Result<(), Failure> {
     m.session.install_claims(&grant).await?;
     let first = counters::Claim::fresh()?;
     assert_eq!(m.opened.database.claim(invoices.clone(), first).await?, 1);
-    // The member stops syncing with peers, so it never learns the statement
-    // and never pushes it itself; its claims still reach the service. The
-    // owner tells no peer either: a link handshake carries its statements
-    // even to a peer that then refuses the link.
     m.session.set_networking_enabled(false).await?;
     a.session.set_networking_enabled(false).await?;
 
@@ -443,8 +446,11 @@ async fn an_unpushed_revocation_survives_a_restart() -> Result<(), Failure> {
     a.close().await?;
 
     gate.store(true, Ordering::SeqCst);
-    // The member's link is still live: until the push, the service answers.
-    assert_eq!(m.opened.database.claim(invoices.clone(), first).await?, 1);
+    assert_eq!(
+        m.opened.database.claim(invoices.clone(), first).await?,
+        1,
+        "until the revocation is pushed, the member's link is live"
+    );
     let a = Peer::start(&root.path().join("a"), SCHEMA, Some(&bundle), None, false).await?;
     assert!(unpushed(&a).await?);
     a.sync().await?;

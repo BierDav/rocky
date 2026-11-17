@@ -117,10 +117,11 @@ impl Node {
         self.sign_out_everywhere_else(&Root(Some(Arc::new(root))), keep)
             .await
     }
+    /// Reads the replica too: a sync may have committed membership before the
+    /// settings absorbed it.
     pub(super) async fn personal_device_notices(
         &self,
     ) -> Result<Vec<crate::PersonalDeviceNotice>, Failure> {
-        // A sync may have committed membership before settings absorbed it.
         self.absorb_revocations(None).await?;
         let settings = self.settings.lock().await;
         let context = settings
@@ -251,8 +252,12 @@ impl Node {
     }
 
     /// One bootstrap page for a node the root, the owner and the node key
-    /// authorized: the signed descriptor, schema, owner grant, membership
-    /// and policy, and opaque root escrow. Sealed to that node alone.
+    /// authorized: the signed descriptor, schema, owner grant, membership and
+    /// policy, and opaque root escrow. Sealed to that node alone. A node a
+    /// statement ended learns only the metadata that carries those signed
+    /// statements, never escrow: it verifies them itself and starts over as a
+    /// fresh node. Escrow records of no key epoch are unvouched and left out;
+    /// the naming root travels in the metadata as a vouched record instead.
     pub(super) async fn answer_personal_bootstrap(
         &self,
         authorization: PersonalAuthorization,
@@ -268,9 +273,6 @@ impl Node {
             .spend(&authorization.nonce(), authorization.act(), now()?)?;
         let mut known = self.personal_known(&settings).await?;
         let node = authorization.node();
-        // A node a statement ended learns only the metadata that carries
-        // those signed statements, never escrow: it verifies them itself
-        // and starts over as a fresh node.
         let ended = Self::personal_ended(&known, audience.owner, node);
         if ended && page != 0 {
             return Err(crate::enrollment::personal_refusal(
@@ -284,9 +286,7 @@ impl Node {
         } else {
             self.replica.escrow_inventory().await?
         };
-        // Records of no key epoch are unvouched: the naming root travels
-        // in the metadata as a vouched record instead.
-        escrow.retain(|(slot, _)| slot.is_some());
+        escrow.retain(|(key_epoch, _)| key_epoch.is_some());
         escrow.sort_by_key(|(slot, record)| (*slot, record.tag()));
         let mut pages = vec![Vec::new()];
         let mut bytes = 0;
@@ -376,10 +376,12 @@ impl Node {
         Ok(authorization.answer(&rocky_credentials::encode(&page)?)?)
     }
 
-    /// Persists an owner device's independent certificate that the root,
-    /// the owner and the node authorized: idempotent by certificate ID,
-    /// after the pinned mode, owner, binding, tombstone and device limit.
-    /// Owner devices and custodians alike keep and relay it.
+    /// Persists an owner device's independent certificate that the root, the
+    /// owner and the node authorized: idempotent by certificate ID, after the
+    /// pinned mode, owner, binding, tombstone and device limit. Owner devices
+    /// and custodians alike keep and relay it. The replica commit is retried
+    /// even if the settings kept the certificate before an interrupted
+    /// publication.
     pub(super) async fn accept_personal(
         &self,
         publication: PersonalPublication,
@@ -419,8 +421,6 @@ impl Node {
                 "personal device certificate recorded"
             );
         }
-        // Retry the replica commit even if settings already kept the
-        // certificate before an interrupted publication.
         self.replica.learn_revocations(&known).await?;
         drop(current);
         if added {
@@ -461,10 +461,11 @@ impl Node {
         Ok(())
     }
 
-    /// Takes a lapsed custody link back from an owner device the passkey
-    /// just certified: the same subject, grants, partitions and delegations
-    /// as the link this custodian holds, under the same owner grant, only
-    /// valid anew. Its rights never widen.
+    /// Takes a lapsed custody link back from an owner device the passkey just
+    /// certified: the same subject, grants, partitions and delegations as the
+    /// link this custodian holds, under the same owner grant, only valid anew.
+    /// Its rights never widen. The renewed link certifies the chain this node
+    /// already holds.
     pub(super) async fn accept_custody_renewal(
         &self,
         renewal: PersonalCustodyRenewal,
@@ -514,7 +515,6 @@ impl Node {
         if renewed.capability.expires <= prior.expires.max(time) {
             return Err(refused("the renewal does not extend the custody grant"));
         }
-        // The chain this node already certified, under the renewed link.
         let links = rocky_credentials::CredentialChain(vec![owner_grant.clone(), renewed]);
         let chain = current.certify(&self.vault, links, &self.domain())?;
         let renewed = crate::enrollment::Renewed {

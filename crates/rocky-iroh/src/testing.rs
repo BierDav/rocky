@@ -16,12 +16,15 @@ use tokio::{
 pub use iroh::test_utils::run_relay_server;
 
 type Packets = Arc<Mutex<HashMap<EndpointId, SignedPacket>>>;
+/// Counts the packets the server stored, so a check waits for one.
+type Stored = Arc<tokio::sync::watch::Sender<u64>>;
 /// A pkarr relay on loopback: stores the newest signed packet per key and
 /// returns it, as the lookup service does. It stops when dropped.
 pub struct LookupServer {
     /// What `Options::lookup` names.
     pub url: String,
     packets: Packets,
+    stored: Stored,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for LookupServer {
@@ -34,16 +37,32 @@ impl LookupServer {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let url = format!("http://{}/pkarr", listener.local_addr()?);
         let packets = Packets::default();
-        let served = packets.clone();
+        let stored = Stored::new(tokio::sync::watch::channel(0).0);
+        let (served, storing) = (packets.clone(), stored.clone());
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                let packets = served.clone();
+                let (packets, stored) = (served.clone(), storing.clone());
                 tokio::spawn(async move {
-                    let _ = serve(stream, packets).await;
+                    let _ = serve(stream, packets, stored).await;
                 });
             }
         });
-        Ok(Self { url, packets, task })
+        Ok(Self {
+            url,
+            packets,
+            stored,
+            task,
+        })
+    }
+    /// Waits until the rendezvous record of `topic` holds at least
+    /// `contacts` contacts.
+    pub async fn wait_for_contacts(&self, topic: &[u8; 32], contacts: usize) {
+        let mut stored = self.stored.subscribe();
+        while self.contacts(topic) < contacts {
+            if stored.changed().await.is_err() {
+                return;
+            }
+        }
     }
     /// Every key a packet was published under.
     pub fn keys(&self) -> Vec<EndpointId> {
@@ -72,7 +91,7 @@ impl LookupServer {
             .collect()
     }
 }
-async fn serve(stream: TcpStream, packets: Packets) -> Result<(), Failure> {
+async fn serve(stream: TcpStream, packets: Packets, stored: Stored) -> Result<(), Failure> {
     let mut stream = BufReader::new(stream);
     let mut line = String::new();
     stream.read_line(&mut line).await?;
@@ -111,6 +130,7 @@ async fn serve(stream: TcpStream, packets: Packets) -> Result<(), Failure> {
                     .is_none_or(|held| packet.more_recent_than(held))
                 {
                     packets.insert(key, packet);
+                    stored.send_modify(|count| *count += 1);
                 }
                 ("204 No Content", Vec::new())
             }

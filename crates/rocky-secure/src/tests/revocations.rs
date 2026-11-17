@@ -53,7 +53,6 @@ async fn a_learned_revocation_refuses_the_revoked_author_and_admits_every_other(
     let a = open(&f, &dir, "alice.db", &alice).await;
     let c = open(&f, &dir, "carol.db", &carol).await;
     let d = open(&f, &dir, "dave.db", &dave).await;
-    // Both write before the revocation; Dave receives neither yet.
     let early_alice = insert(&a, &f, 1, "alice early").await;
     let early_carol = insert(&c, &f, 2, "carol early").await;
 
@@ -69,15 +68,15 @@ async fn a_learned_revocation_refuses_the_revoked_author_and_admits_every_other(
         &[],
     );
     assert_eq!(d.learn_revocations(&revoked).await.unwrap().len(), 1);
-    // A frame Dave lacked from another author, signed before the
-    // revocation, is admitted; the statement's time plays no part.
     assert_eq!(
         d.receive(early_alice).await.unwrap(),
-        ReceiveStatus::Applied
+        ReceiveStatus::Applied,
+        "another author's frame signed before the revocation is admitted; the statement's time plays no part"
     );
-    // Every frame of the revoked author is refused, the earlier one too:
-    // its rows arrive with a checkpoint.
-    assert!(d.receive(early_carol).await.is_err());
+    assert!(
+        d.receive(early_carol).await.is_err(),
+        "every frame of the revoked author is refused, the earlier one too; its rows arrive with a checkpoint"
+    );
     let late_carol = insert(&c, &f, 3, "carol late").await;
     assert!(d.receive(late_carol).await.is_err());
     let late_alice = insert(&a, &f, 4, "alice late").await;
@@ -86,7 +85,6 @@ async fn a_learned_revocation_refuses_the_revoked_author_and_admits_every_other(
         names(&d, &f).await,
         [b"alice early".to_vec(), b"alice late".to_vec()]
     );
-    // The set survives a reopen of the file without being supplied again.
     drop(d);
     let d = open(&f, &dir, "dave.db", &dave).await;
     assert_eq!(
@@ -95,7 +93,8 @@ async fn a_learned_revocation_refuses_the_revoked_author_and_admits_every_other(
             .statements()
             .cloned()
             .collect::<Vec<_>>(),
-        revoked.statements().cloned().collect::<Vec<_>>()
+        revoked.statements().cloned().collect::<Vec<_>>(),
+        "the set survives a reopen without being supplied again"
     );
 }
 
@@ -132,14 +131,19 @@ async fn statements_travel_inside_the_handshake_and_both_sides_end_with_the_unio
         x.revocation_digest().await.unwrap(),
         y.revocation_digest().await.unwrap()
     );
-    // Each side sends the statement the other lacks; neither refuses.
     insert(&x, &f, 1, "after").await;
     let (left, right) = hello((&xavier, &x), (&yara, &y), &f).await;
-    let (left, right) = (left.unwrap(), right.unwrap());
+    let (left, right) = (
+        left.expect("neither side refuses a peer lacking a statement"),
+        right.expect("neither side refuses a peer lacking a statement"),
+    );
     let union = x.revocations().await;
-    assert_eq!(union.len(), 2);
+    assert_eq!(
+        union.len(),
+        2,
+        "each side sends the statement the other lacks"
+    );
     assert_eq!(y.revocations().await, union);
-    // Rows flow over the same link.
     let (mut client, mut server) = crate::network::link::testing::requests(right, left)
         .await
         .unwrap();
@@ -152,7 +156,11 @@ async fn statements_travel_inside_the_handshake_and_both_sides_end_with_the_unio
     );
     let () = served;
     pulled.unwrap();
-    assert_eq!(names(&y, &f).await, [b"after".to_vec()]);
+    assert_eq!(
+        names(&y, &f).await,
+        [b"after".to_vec()],
+        "rows flow over the link that exchanged revocations"
+    );
 }
 
 /// Carol read Alice's frame and names it as a head; Alice is revoked.
@@ -240,24 +248,30 @@ async fn ended_head_resolves(fork: bool) {
         }
     };
 
-    // Carol knows of no revocation yet: she shows nothing.
     assert_eq!(
         d.receive(write.clone()).await.unwrap(),
         ReceiveStatus::PendingDependencies
     );
-    assert!(ask(&dave, vec![head]).await.is_empty());
+    assert!(
+        ask(&dave, vec![head]).await.is_empty(),
+        "Carol, knowing no revocation yet, shows nothing"
+    );
     c.learn_revocations(&revoked).await.unwrap();
-    // Dave asks only once he knows of a revocation himself.
-    assert!(d.missing_heads(f.public).await.unwrap().is_empty());
+    assert!(
+        d.missing_heads(f.public).await.unwrap().is_empty(),
+        "Dave asks only once he knows of a revocation himself"
+    );
     d.learn_revocations(&revoked).await.unwrap();
     let missing = d.missing_heads(f.public).await.unwrap();
     assert_eq!(missing, [head]);
 
-    // Evidence for a head Dave does not wait on changes nothing.
     let other = ask(&dave, vec![unnamed.id().unwrap()]).await;
     assert_eq!(other.len(), 1);
     d.receive_revoked_heads(f.public, other).await.unwrap();
-    assert!(names(&d, &f).await.is_empty());
+    assert!(
+        names(&d, &f).await.is_empty(),
+        "evidence for a head Dave does not wait on changes nothing"
+    );
 
     let shown = ask(&dave, missing.clone()).await;
     assert_eq!(shown.len(), 1);
@@ -267,8 +281,6 @@ async fn ended_head_resolves(fork: bool) {
     assert_eq!(names(&d, &f).await, [b"carol".to_vec()]);
     assert!(d.missing_heads(f.public).await.unwrap().is_empty());
 
-    // Erin keeps nothing while her revocation set ends no chain, and asks
-    // nothing; once it does, the same evidence decides as for Dave.
     assert_eq!(
         e.receive(write).await.unwrap(),
         ReceiveStatus::PendingDependencies
@@ -276,8 +288,15 @@ async fn ended_head_resolves(fork: bool) {
     e.receive_revoked_heads(f.public, shown.clone())
         .await
         .unwrap();
-    assert!(names(&e, &f).await.is_empty());
+    assert!(
+        names(&e, &f).await.is_empty(),
+        "Erin keeps nothing while her revocation set ends no chain"
+    );
     e.learn_revocations(&revoked).await.unwrap();
     e.receive_revoked_heads(f.public, shown).await.unwrap();
-    assert_eq!(names(&e, &f).await, [b"carol".to_vec()]);
+    assert_eq!(
+        names(&e, &f).await,
+        [b"carol".to_vec()],
+        "once her set ends the chain, the same evidence decides as for Dave"
+    );
 }

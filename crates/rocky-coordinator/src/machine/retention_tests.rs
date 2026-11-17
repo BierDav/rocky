@@ -154,8 +154,6 @@ fn authority_time_is_committed_monotone_and_survives_snapshot_and_failover() {
     let restored: Metadata = decode(&encode(&metadata).unwrap()).unwrap();
     let mut metadata = restored;
     assert_eq!(metadata.time(), t + DAY + 10);
-    // A new leader whose clock is behind cannot rewind authority time, so
-    // a request signed before the retry window never applies.
     assert_eq!(
         mesh.apply_signed(
             &mut metadata,
@@ -164,7 +162,8 @@ fn authority_time_is_committed_monotone_and_survives_snapshot_and_failover() {
             t,
             t - 3600
         ),
-        Err(CoordinationError::Expired)
+        Err(CoordinationError::Expired),
+        "a new leader whose clock is behind cannot rewind authority time"
     );
     assert_eq!(metadata.time(), t + DAY + 10);
     assert_eq!(
@@ -220,12 +219,15 @@ fn closed_domains_never_take_entries_or_reopen_and_keep_a_marker() {
             .is_err()
         );
     }
-    // Long after closure the marker and its log head remain, marked closed.
     let closed = crate::coordinated::Head {
         closed: true,
         ..head
     };
-    assert_eq!(mesh.head(&mut metadata, scope, t + 8 * DAY), closed);
+    assert_eq!(
+        mesh.head(&mut metadata, scope, t + 8 * DAY),
+        closed,
+        "long after closure the marker and its log head remain, marked closed"
+    );
     assert_eq!(metadata.retention().domains, 1);
 }
 
@@ -254,7 +256,6 @@ fn tenant_domain_and_byte_quotas_backpressure_without_eviction() {
         ),
         Err(CoordinationError::Backpressure)
     );
-    // Closing a domain frees its slot; its identity is not reusable.
     mesh.apply(
         &mut metadata,
         &mesh.authority,
@@ -270,9 +271,8 @@ fn tenant_domain_and_byte_quotas_backpressure_without_eviction() {
         Operation::Control(mesh.control(mesh.scopes[2], 1)),
         t,
     )
-    .unwrap();
+    .expect("closing a domain frees its slot");
 
-    // A log that would grow past the tenant's bytes is refused, unchanged.
     let used = {
         let probe = mesh.open(Limits::default());
         Limits::default().tenant_bytes - probe.tenant_available(mesh.scopes[0]).unwrap()
@@ -285,7 +285,8 @@ fn tenant_domain_and_byte_quotas_backpressure_without_eviction() {
     let scope = mesh.scopes[0];
     assert_eq!(
         mesh.apply(&mut metadata, &mesh.executor, mesh.join(scope, 1), t),
-        Err(CoordinationError::Backpressure)
+        Err(CoordinationError::Backpressure),
+        "a log that would grow past the tenant's bytes is refused"
     );
     assert!(mesh.head(&mut metadata, scope, t).members.is_empty());
 }

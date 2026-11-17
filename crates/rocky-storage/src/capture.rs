@@ -329,8 +329,7 @@ impl Plan {
     ) -> Result<(), Error> {
         for table in &mut self.tables {
             let rows = connection.rows(
-                // Stored generated columns are in hook images.
-                "SELECT name FROM pragma_table_xinfo(?) WHERE hidden<>1 ORDER BY cid",
+                HOOK_IMAGE_COLUMNS,
                 vec![Value::Text(table.physical.clone())],
             )?;
             let names: Vec<_> = rows
@@ -534,11 +533,23 @@ struct Event {
 pub struct Touched {
     pub table: usize,
     pub key: Vec<SqlValue>,
-    /// The row at the transaction's start.
+    /// The row at the transaction's start, which the first event of its key
+    /// shows.
     pub before: Option<Vec<SqlValue>>,
     /// A surviving statement removed the row from this key.
     pub deleted: bool,
     pub assigned: Vec<bool>,
+}
+/// The columns of a table's hook images in order, stored generated
+/// columns included.
+const HOOK_IMAGE_COLUMNS: &str =
+    "SELECT name FROM pragma_table_xinfo(?) WHERE hidden<>1 ORDER BY cid";
+/// Whether `table` is a history table the runtime's triggers write, which
+/// is no session's change.
+fn is_history_table(table: &str) -> bool {
+    table
+        .get(..crate::sqlite::HISTORY_TABLES.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(crate::sqlite::HISTORY_TABLES))
 }
 /// Old and new row images of a session's transaction, in statement order.
 /// A savepoint rollback truncates them. A failure is latched until the
@@ -636,13 +647,7 @@ impl Sink {
             return false;
         };
         let target = plan.table(table).filter(|_| main);
-        // What the runtime's history triggers write is no session's change.
-        if main
-            && target.is_none()
-            && table
-                .get(..crate::sqlite::HISTORY_TABLES.len())
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(crate::sqlite::HISTORY_TABLES))
-        {
+        if main && target.is_none() && is_history_table(table) {
             return false;
         }
         if self.mode == Mode::Reconcile {
@@ -774,7 +779,6 @@ impl Sink {
                     .or_insert_with(|| Touched {
                         table: event.table,
                         key: table.key_values(&image),
-                        // The first event of a key shows its first state.
                         before: current.then_some(image),
                         deleted: false,
                         assigned: vec![false; table.columns.len()],
@@ -964,9 +968,10 @@ mod tests {
         conn.run_now("INSERT INTO child VALUES(10,1),(11,2)")
             .unwrap();
         conn.run_now("BEGIN").unwrap();
-        // A trigger's replace into a WITHOUT ROWID table is captured.
-        assert!(!run(&conn, &plan, "UPDATE plain SET b='uno' WHERE a=1"));
-        // A key change touches both keys and cascades to the child row.
+        assert!(
+            !run(&conn, &plan, "UPDATE plain SET b='uno' WHERE a=1"),
+            "a trigger's replace into a WITHOUT ROWID table is captured"
+        );
         assert!(!run(&conn, &plan, "UPDATE plain SET a=3 WHERE a=2"));
         assert_eq!(
             frozen(&conn),
@@ -994,9 +999,9 @@ mod tests {
                     false,
                     vec![false, true]
                 ),
-            ]
+            ],
+            "a key change touches both keys and cascades to the child row"
         );
-        // A savepoint rollback removes exactly its events.
         let mark = conn.capture().unwrap().lock().unwrap().mark();
         conn.run_now("SAVEPOINT s").unwrap();
         assert!(!run(&conn, &plan, "DELETE FROM plain WHERE a=1"));
@@ -1008,8 +1013,11 @@ mod tests {
         assert_eq!(frozen(&conn).len(), 6);
         conn.run_now("ROLLBACK TO s").unwrap();
         conn.capture().unwrap().lock().unwrap().truncate(mark);
-        assert_eq!(frozen(&conn).len(), 5);
-        // A failed statement's events stay as touches without evidence.
+        assert_eq!(
+            frozen(&conn).len(),
+            5,
+            "a savepoint rollback removes exactly its events"
+        );
         assert!(run(
             &conn,
             &plan,
@@ -1017,20 +1025,25 @@ mod tests {
         ));
         let rows = frozen(&conn);
         assert_eq!(rows.len(), 6);
-        assert!(rows.contains(&(0, vec![SqlValue::Integer(9)], false, false, vec![false; 3])));
-        // Replacing a key under another spelling is a delete and an insert.
+        assert!(
+            rows.contains(&(0, vec![SqlValue::Integer(9)], false, false, vec![false; 3])),
+            "a failed statement's events stay as touches without evidence"
+        );
         assert!(!run(
             &conn,
             &plan,
             "INSERT OR REPLACE INTO keyed VALUES('UNO',1,'again')"
         ));
-        assert!(frozen(&conn).contains(&(
-            1,
-            vec![text("uno"), SqlValue::Integer(1)],
-            false,
-            true,
-            vec![false; 3]
-        )));
+        assert!(
+            frozen(&conn).contains(&(
+                1,
+                vec![text("uno"), SqlValue::Integer(1)],
+                false,
+                true,
+                vec![false; 3]
+            )),
+            "replacing a key under another spelling is a delete and an insert"
+        );
         conn.run_now("ROLLBACK").unwrap();
     }
 
@@ -1078,26 +1091,33 @@ mod tests {
             &plan,
             "SELECT count(*),random(),datetime('now') FROM plain JOIN keyed ON keyed.b=plain.a"
         ));
-        // Counting a subquery or a common table expression names no stored table.
-        assert!(!run(
-            &conn,
-            &plan,
-            "SELECT count(*) FROM (SELECT a FROM plain) AS page"
-        ));
+        assert!(
+            !run(
+                &conn,
+                &plan,
+                "SELECT count(*) FROM (SELECT a FROM plain) AS page"
+            ),
+            "counting a subquery names no stored table"
+        );
         assert!(!run(
             &conn,
             &plan,
             "WITH n AS (SELECT a FROM plain) SELECT count(*) FROM n"
         ));
         assert!(!run(&conn, &plan, "SELECT count(*) FROM plain"));
-        // A local table is written without capture; an unclassified one latches.
         let capture = conn.capture().unwrap();
         assert_eq!(capture.lock().unwrap().local_tables(), vec![3]);
-        assert!(frozen(&conn).is_empty());
+        assert!(
+            frozen(&conn).is_empty(),
+            "a local table is written without capture"
+        );
         capture.lock().unwrap().begin_statement();
         conn.run_now("INSERT INTO secret VALUES(2)").unwrap();
         capture.lock().unwrap().end_statement(false, &[]);
-        assert!(capture.lock().unwrap().failure().is_some());
+        assert!(
+            capture.lock().unwrap().failure().is_some(),
+            "an unclassified table latches a failure"
+        );
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -1118,15 +1138,19 @@ mod tests {
         assert!(conn.capture().unwrap().lock().unwrap().failure().is_some());
         let capture = conn.capture().unwrap();
         capture.lock().unwrap().arm(plan.clone(), (16, 1 << 20));
-        // The engine keeps text a REAL column cannot convert.
         assert!(!run(&conn, &plan, "INSERT INTO plain VALUES(5,'e','abc')"));
-        assert!(capture.lock().unwrap().freeze().is_err());
-        // The projection may rewrite a row only to the same replicated values.
+        assert!(
+            capture.lock().unwrap().freeze().is_err(),
+            "the engine keeps text a REAL column cannot convert"
+        );
         capture.lock().unwrap().arm(plan.clone(), (16, 1 << 20));
         capture.lock().unwrap().reconcile(true);
         conn.run_now("UPDATE plain SET c=c WHERE a=1").unwrap();
         assert_eq!(capture.lock().unwrap().failure(), None);
         conn.run_now("UPDATE plain SET c=9.5 WHERE a=1").unwrap();
-        assert!(capture.lock().unwrap().failure().is_some());
+        assert!(
+            capture.lock().unwrap().failure().is_some(),
+            "the projection may rewrite a row only to the same replicated values"
+        );
     }
 }

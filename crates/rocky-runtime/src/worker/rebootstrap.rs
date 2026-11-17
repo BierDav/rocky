@@ -12,6 +12,8 @@ where
     A::State: Clone,
 {
     /// One page of the checkpoint copy's rows, while it stands at the record.
+    /// Pages continue after the last key, never by offset; an empty table is
+    /// skipped, so a page is empty only at the end.
     pub(super) async fn export(
         &self,
         after: Option<CheckpointCursor>,
@@ -58,7 +60,6 @@ where
             .find(|(index, _)| *index == cursor.table as usize)
         {
             let name = quoted(&table.shadow);
-            // Pages continue after the last key, never by offset.
             let (sql, params, hidden) = if table.without_rowid {
                 let key = primary_key(self.conn(), &table.shadow)?;
                 if !cursor.key.is_empty() && cursor.key.len() != key.len() {
@@ -133,7 +134,6 @@ where
                     ..cursor
                 }
             };
-            // An empty table is skipped, so a page is empty only at the end.
             if !page.rows.is_empty() {
                 break;
             }
@@ -243,8 +243,9 @@ where
             ));
         }
         if (page.start.table, page.start.position) != (import.table, import.position) {
-            // A repeated page is already staged; anything else is a gap.
-            return if (page.start.table, page.start.position) < (import.table, import.position) {
+            let already_staged =
+                (page.start.table, page.start.position) < (import.table, import.position);
+            return if already_staged {
                 Ok((self.retention.stored.clone(), None))
             } else {
                 Err(Error::Rejected("checkpoint page out of order".into()))

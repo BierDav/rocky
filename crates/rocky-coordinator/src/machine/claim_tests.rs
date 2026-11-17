@@ -162,17 +162,20 @@ fn a_holder_that_is_not_trusted_claims_gap_free_values_with_trusted_nodes() {
     assert_eq!(f.claim_by(&holder, "invoices", claim(1, T), T), Ok(1));
     assert_eq!(f.trusted_claim("invoices", claim(2, T), T), 2);
     assert_eq!(f.claim_by(&holder, "invoices", claim(3, T), T + 1), Ok(3));
-    // A retry answers the same value, from the holder or a trusted node.
-    assert_eq!(f.claim_by(&holder, "invoices", claim(1, T), T + 2), Ok(1));
+    assert_eq!(
+        f.claim_by(&holder, "invoices", claim(1, T), T + 2),
+        Ok(1),
+        "a retry answers the same value from the holder"
+    );
     assert_eq!(f.trusted_claim("invoices", claim(3, T), T + 2), 3);
     assert_eq!(
         f.read_by(&holder, "invoices", Some(claim(3, T)), T + 2),
         Ok(Lookup::Claimed(3))
     );
-    // An issue time outside the window is `Expired`, never a new value.
     assert_eq!(
         f.claim_by(&holder, "invoices", claim(4, T - CLAIM_WINDOW - 1), T + 2),
-        Err(CoordinationError::Expired)
+        Err(CoordinationError::Expired),
+        "an issue time outside the window is expired, never a new value"
     );
     assert_eq!(
         f.claim_by(&holder, "invoices", claim(1, T + 1), T + 2),
@@ -199,8 +202,6 @@ fn non_holders_and_other_counters_are_denied() {
         Ok(Lookup::Unclaimed)
     );
 
-    // A node presenting no chain, another node's chain, or a chain
-    // another publisher roots.
     let stranger = Holder {
         identity: PrivateKey::new(),
         node: PrivateKey::new(),
@@ -208,7 +209,8 @@ fn non_holders_and_other_counters_are_denied() {
     };
     assert_eq!(
         f.claim_by(&stranger, "invoices", claim(3, T), T),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a node presenting another node's chain claims nothing"
     );
     let foreign = {
         let publisher = PrivateKey::new();
@@ -246,13 +248,13 @@ fn non_holders_and_other_counters_are_denied() {
         f.state.apply_at(T, &unchained),
         Err(CoordinationError::Denied)
     );
-    // A right for another domain claims nothing here.
     let mut elsewhere = f.right(None);
     elsewhere.scope.domain = DomainId([8; 16]);
     let elsewhere = f.holder(elsewhere, 1);
     assert_eq!(
         f.claim_by(&elsewhere, "invoices", claim(6, T), T),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a right for another domain claims nothing here"
     );
     assert_eq!(f.trusted_claim("invoices", claim(7, T), T), 2);
 }
@@ -281,7 +283,6 @@ fn a_holder_neither_joins_logs_nor_acknowledges_nor_controls() {
             Err(CoordinationError::Denied)
         );
     }
-    // Its acknowledgment never counts toward a resolution.
     let pending = f.append(0, 2, 6);
     let acknowledgment = as_holder(
         &f,
@@ -299,9 +300,9 @@ fn a_holder_neither_joins_logs_nor_acknowledges_nor_controls() {
     );
     assert_eq!(
         f.state.apply_at(T + 2, &resolve),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a claim holder's acknowledgment never counts toward a resolution"
     );
-    // Nor does it close or reconfigure the domain.
     for operation in [
         Operation::Close { scope: f.scope },
         Operation::Configure {
@@ -312,7 +313,8 @@ fn a_holder_neither_joins_logs_nor_acknowledges_nor_controls() {
         let request = f.presenting(&holder, operation, T);
         assert_eq!(
             f.state.apply_at(T, &request),
-            Err(CoordinationError::Denied)
+            Err(CoordinationError::Denied),
+            "a claim holder neither closes nor reconfigures the domain"
         );
     }
 }
@@ -325,11 +327,12 @@ fn a_revoked_holder_is_refused_at_the_push_or_when_its_link_expires() {
     assert_eq!(f.claim_by(&pushed, "invoices", claim(1, T), T), Ok(1));
     assert_eq!(f.claim_by(&lapsing, "invoices", claim(2, T), T), Ok(2));
 
-    // Any node pushes the owner's statement; it holds from that commit on,
-    // for retries too.
     let stranger = PrivateKey::new();
     let outcome = f.push_revocation(pushed.identity.public_key(), &stranger, T + 1);
-    assert!(matches!(outcome, Outcome::Revoked(_)));
+    assert!(
+        matches!(outcome, Outcome::Revoked(_)),
+        "any node may push the owner's revocation"
+    );
     assert_eq!(
         f.claim_by(&pushed, "invoices", claim(3, T), T + 1),
         Err(CoordinationError::Denied)
@@ -342,10 +345,10 @@ fn a_revoked_holder_is_refused_at_the_push_or_when_its_link_expires() {
         f.read_by(&pushed, "invoices", None, T + 1),
         Err(CoordinationError::Denied)
     );
-    // Pushing it again changes nothing; a snapshot keeps it.
     assert_eq!(
         f.push_revocation(pushed.identity.public_key(), &stranger, T + 1),
-        outcome
+        outcome,
+        "pushing a revocation again changes nothing"
     );
     let image = crate::certified::encode(&f.state).unwrap();
     f.state = crate::certified::decode(&image).unwrap();
@@ -354,18 +357,16 @@ fn a_revoked_holder_is_refused_at_the_push_or_when_its_link_expires() {
         Err(CoordinationError::Denied)
     );
 
-    // Unpushed, a revocation still ends the right with its link: no issuer
-    // renews a revoked identity.
     assert_eq!(
         f.claim_by(&lapsing, "invoices", claim(4, T), T + CLAIM_LIFETIME - 1),
-        Ok(3)
+        Ok(3),
+        "an unpushed revocation still ends the right with its link"
     );
     assert_eq!(
         f.claim_by(&lapsing, "invoices", claim(5, T), T + CLAIM_LIFETIME),
         Err(CoordinationError::Denied)
     );
 
-    // A statement another publisher signed is refused.
     let forged = SignedRevocation::sign(
         Revocation {
             app: f.scope.app,
@@ -395,7 +396,8 @@ fn a_revoked_holder_is_refused_at_the_push_or_when_its_link_expires() {
     .unwrap();
     assert_eq!(
         f.state.apply_at(T + CLAIM_LIFETIME, &request),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a statement another publisher signed is refused"
     );
 }
 
@@ -436,11 +438,11 @@ fn a_delegate_claims_only_within_its_delegators_right() {
         )
         .is_err()
     );
-    // Revoking the delegator ends its delegate's right too.
     f.push_revocation(delegator.identity.public_key(), &PrivateKey::new(), T + 1);
     assert_eq!(
         f.claim_by(&delegate, "invoices", claim(3, T), T + 1),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "revoking the delegator ends its delegate's right too"
     );
 }
 
@@ -460,18 +462,18 @@ fn a_control_without_a_publisher_admits_only_trusted_nodes() {
         T,
     )
     .unwrap();
-    // The publisher is fixed for the domain: a revision cannot drop it.
     assert_eq!(
         f.state.apply_at(T, &request),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a revision cannot drop the domain's publisher"
     );
-    // A control that names none admits no claim right.
     let mut control = f.state.controls[0].control.clone();
     control.publisher = None;
     f.state.controls[0] = ControlCertificate::sign(control, &f.owner).unwrap();
     assert_eq!(
         f.claim_by(&holder, "invoices", claim(1, T), T),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a control that names no publisher admits no claim right"
     );
     assert_eq!(f.trusted_claim("invoices", claim(2, T), T), 1);
 }

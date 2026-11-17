@@ -6,14 +6,17 @@
 use super::*;
 use rocky_core::replay::{BaseMark, OutcomeRecord};
 
+/// The latest record of each publisher per transaction.
+const OUTCOMES_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_outcomes(txn BLOB NOT NULL,publisher BLOB NOT NULL,sequence INTEGER NOT NULL,record BLOB NOT NULL,PRIMARY KEY(txn,publisher)) WITHOUT ROWID";
+/// Members some record names: a seal covers a transaction of several
+/// members once each has one.
+const OUTCOME_MEMBERS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_outcome_members(txn BLOB NOT NULL,member INTEGER NOT NULL,PRIMARY KEY(txn,member)) WITHOUT ROWID";
+/// Refused records that disagreed with a stored one, with both engines.
+const OUTCOME_DIVERGENCE_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_outcome_divergence(txn BLOB NOT NULL,publisher BLOB NOT NULL,stored TEXT NOT NULL,refused TEXT NOT NULL,PRIMARY KEY(txn,publisher)) WITHOUT ROWID";
 pub(in crate::replica) const SCHEMA: &[&str] = &[
-    // The latest record of each publisher per transaction.
-    "CREATE TABLE IF NOT EXISTS secure_outcomes(txn BLOB NOT NULL,publisher BLOB NOT NULL,sequence INTEGER NOT NULL,record BLOB NOT NULL,PRIMARY KEY(txn,publisher)) WITHOUT ROWID",
-    // Members some record names: a seal covers a transaction of several
-    // members once each has one.
-    "CREATE TABLE IF NOT EXISTS secure_outcome_members(txn BLOB NOT NULL,member INTEGER NOT NULL,PRIMARY KEY(txn,member)) WITHOUT ROWID",
-    // Refused records that disagreed with a stored one, with both engines.
-    "CREATE TABLE IF NOT EXISTS secure_outcome_divergence(txn BLOB NOT NULL,publisher BLOB NOT NULL,stored TEXT NOT NULL,refused TEXT NOT NULL,PRIMARY KEY(txn,publisher)) WITHOUT ROWID",
+    OUTCOMES_TABLE,
+    OUTCOME_MEMBERS_TABLE,
+    OUTCOME_DIVERGENCE_TABLE,
 ];
 
 /// Two replicas replayed the same members of a transaction after the same
@@ -213,13 +216,11 @@ impl<A: RowApplication> Inner<A> {
         else {
             return Ok(());
         };
-        // Rows a clear left incomplete decide nothing others should drop
-        // by; the rebuild publishes what it decides.
-        if self.rederive_marked
+        let rederive_pending = self.rederive_marked
             && !rows(&self.conn, "SELECT 1 FROM secure_replayed_rederive LIMIT 1")
                 .await?
-                .is_empty()
-        {
+                .is_empty();
+        if rederive_pending {
             return Ok(());
         }
         let grants = self.local_grants(time)?;
@@ -236,9 +237,6 @@ impl<A: RowApplication> Inner<A> {
                         .iter()
                         .any(|right| grant.rights.contains(right))
             });
-            // Only a held scope's log takes frames from this node, and only
-            // after its own frames there that wait to apply again, as a
-            // checkpoint switch leaves them: a log's frames apply in order.
             if writes && self.holds(scope).await? && !self.own_pending(scope, node).await? {
                 logs.push((scope, id));
             }
@@ -247,8 +245,6 @@ impl<A: RowApplication> Inner<A> {
             return Ok(());
         }
         replayed.sort_by_key(|(member, _)| *member);
-        // A redo publishes again only when the outcome changed; a moved
-        // prefix alone would make records grow with every rewind.
         let unchanged =
             self.outcome_records(transaction)
                 .await?

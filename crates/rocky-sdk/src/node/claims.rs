@@ -43,6 +43,8 @@ impl PushRetry {
 }
 
 impl Node {
+    /// The grant is recorded before it is returned, so every issuer can renew
+    /// it.
     pub(super) async fn grant_claims(
         &self,
         identity: PublicKey,
@@ -59,7 +61,6 @@ impl Node {
             counters,
             delegations,
         )?;
-        // Record the grant before returning it so every issuer can renew it.
         if !changes.is_empty() {
             let replaced = self.registry().await?.claims.get(&identity).cloned();
             self.commit(changes).await?;
@@ -125,11 +126,13 @@ impl Node {
 }
 
 impl Node {
-    /// Pushes the revocations this node holds to its coordination service
-    /// until it acknowledges their digest: the claim rights they end are
-    /// refused from that commit on. Any node holding a statement pushes it,
-    /// at a revocation, a sync pass or a claim; a failed push is retried
-    /// with backoff and the acknowledgment persists across restarts.
+    /// Pushes the revocations this node holds to its coordination service until
+    /// it acknowledges their digest: the claim rights they end are refused from
+    /// that commit on. Any node holding a statement pushes it, at a revocation,
+    /// a sync pass or a claim; a failed push is retried with backoff and the
+    /// acknowledgment persists across restarts. One push runs at a time; a
+    /// concurrent caller leaves it to the first. Statements learned meanwhile
+    /// change the held digest and stay unpushed.
     pub(super) async fn push_revocations(&self) -> Result<(), Failure> {
         let Some(client) = self.coordinator() else {
             return Ok(());
@@ -140,8 +143,7 @@ impl Node {
             self.coordination.observe_push(true, time);
             return Ok(());
         };
-        // One push at a time; a concurrent caller leaves it to the first.
-        let Ok(_pushing) = self.revocations_pushing.try_lock() else {
+        let Ok(_one_push_at_a_time) = self.revocations_pushing.try_lock() else {
             return Ok(());
         };
         if !self
@@ -158,8 +160,6 @@ impl Node {
                     .push_retry
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner) = PushRetry::default();
-                // Statements learned meanwhile change the held digest and
-                // stay unpushed.
                 self.configure(|settings| {
                     settings.revocations_pushed = Some(digest);
                     Ok(())

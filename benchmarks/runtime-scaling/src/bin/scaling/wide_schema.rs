@@ -4,6 +4,9 @@ use rocky_core::*;
 use std::collections::BTreeMap;
 
 pub const MAX_TABLES: u16 = 2000;
+/// Terms per projection subquery: the pinned engine overflows its stack on a
+/// flat compound of roughly 1,000 terms.
+const COMPOUND_GROUP: usize = 32;
 
 /// Generated SQL, leaked once per probe run to satisfy the `'static` contract.
 pub struct Layout {
@@ -80,10 +83,8 @@ impl WideSchema {
             )));
             projection.push(stored);
         }
-        // The pinned engine overflows its stack on a flat compound of roughly
-        // 1,000 terms, so the terms are grouped into subqueries.
         let groups: Vec<_> = projection
-            .chunks(32)
+            .chunks(COMPOUND_GROUP)
             .map(|group| format!("SELECT * FROM ({})", group.join(" UNION ALL ")))
             .collect();
         layout.projection = leak(format!("{} ORDER BY 1,2,3", groups.join(" UNION ALL ")));
@@ -171,6 +172,8 @@ impl Application for WideSchema {
     fn admit(&self, op: &Envelope, policy: &Policy) -> Result<(), Invalid> {
         self.admit_read(op.scope, op.caller, policy)
     }
+    /// Deletion is permanent; field edits are last-writer-wins. The window
+    /// holds the row only if it is stored in the named table.
     fn apply_ready(
         &self,
         state: &mut Rows,
@@ -193,8 +196,6 @@ impl Application for WideSchema {
                     },
                 );
             }
-            // Deletion is permanent; field edits are last-writer-wins. The
-            // window holds the row only if it is stored in the named table.
             Action::SetA(_, a) => {
                 let row = state.0.get_mut(&op.entity).ok_or(Invalid)?;
                 if stamp > row.stamp {
@@ -325,6 +326,8 @@ impl StoredApplication for WideSchema {
             })
             .collect()
     }
+    /// The rows an edit or deletion reads; a created row is new, and an
+    /// invalid payload fails in the reducer.
     fn touched(&self, op: &Envelope) -> Vec<ProjectionStatement> {
         match decode(&op.payload) {
             Ok(action @ (Action::SetA(..) | Action::Delete(_))) => self
@@ -337,7 +340,6 @@ impl StoredApplication for WideSchema {
                 })
                 .into_iter()
                 .collect(),
-            // A created row is new; an invalid payload fails in the reducer.
             _ => Vec::new(),
         }
     }

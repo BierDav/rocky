@@ -301,12 +301,11 @@ mod tests {
                         ContactResponse::Contact { contact: None }
                     ));
                 }
-                // Bypass the client's counter to exercise the receiver's bound.
                 c.send_contact(Payload::Request(ContactRequest::Request {
                     node: NodeId([7; 16]),
                 }))
                 .await
-                .unwrap();
+                .expect("a raw send bypasses the client's counter to reach the receiver's bound");
             },
             s.serve_with_contacts(&server, &handler)
         );

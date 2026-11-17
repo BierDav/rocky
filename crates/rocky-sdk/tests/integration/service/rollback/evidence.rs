@@ -44,8 +44,8 @@ pub(super) fn guarded(directory: &Path, expected: &Endpoint) -> Result<Original,
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    // Prefix recovery may finish while the separate wanted-seal gate still waits.
-    if let Some((sequence, hash)) = guard {
+    let wanted_seal_gate_may_wait_after_prefix_recovery = guard;
+    if let Some((sequence, hash)) = wanted_seal_gate_may_wait_after_prefix_recovery {
         assert_eq!(sequence, expected.sequence);
         assert_eq!(hash, expected.hash);
     }

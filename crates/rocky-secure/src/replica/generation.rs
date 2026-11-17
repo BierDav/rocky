@@ -57,16 +57,20 @@ impl<A> Definition<A> {
         std::mem::swap(&mut self.tables, &mut inner.tables);
         std::mem::swap(&mut self.fields, &mut inner.fields);
         std::mem::swap(&mut self.domains, &mut inner.domains);
-        // Grants resolved under the other definition are stale.
-        *inner
-            .local
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        *inner
-            .local_selectors
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        forget_resolved_grants(inner);
     }
+}
+
+/// Grants resolved under the swapped-out definition are stale.
+fn forget_resolved_grants<A>(inner: &Inner<A>) {
+    *inner
+        .local
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *inner
+        .local_selectors
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
 /// Why a build whose engine differs from the followed tip's writes nothing.

@@ -50,7 +50,8 @@ impl<'a> RefreshGraphContext<'a> {
             .map(Arc::as_ref)
             .ok_or_else(|| denied("unknown tip graph"))
     }
-    // Include estimated B-tree overhead as well as owned frontier capacities.
+    /// Admits an entry of `bytes`, which include estimated B-tree overhead
+    /// as well as owned frontier capacities.
     fn retain(&mut self, bytes: usize) -> bool {
         if self.entries >= MAX_QUERIES || self.bytes.saturating_add(bytes) > MAX_BYTES {
             return false;

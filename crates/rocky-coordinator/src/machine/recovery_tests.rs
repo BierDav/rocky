@@ -85,10 +85,12 @@ fn the_owners_recovery_ends_the_exact_head_without_the_in_sync_set_and_retries_i
     assert_eq!(head.epoch, before.epoch + 1);
     assert!(head.members.is_empty());
     assert_eq!(head.terminal, Some(terminal(&seal)));
-    // The same seal from another submitter, or the owner, answers alike.
-    assert_eq!(f.run(1, recover(&seal), T + 4).unwrap(), admitted);
+    assert_eq!(
+        f.run(1, recover(&seal), T + 4).unwrap(),
+        admitted,
+        "the same seal from another submitter answers alike"
+    );
     assert_eq!(f.run_owner(recover(&seal), T + 4).unwrap(), admitted);
-    // Another recovery, an ordinary seal or a write never follows it.
     let other = SignedSeal::sign(
         SealStatement {
             recovery: Some(Recovery {
@@ -102,7 +104,8 @@ fn the_owners_recovery_ends_the_exact_head_without_the_in_sync_set_and_retries_i
     .unwrap();
     assert_eq!(
         f.run(0, recover(&other), T + 4),
-        Err(CoordinationError::Sealed)
+        Err(CoordinationError::Sealed),
+        "another recovery never follows a recovery"
     );
     let ordinary = Action::Seal {
         terminal: LogTerminal {
@@ -146,16 +149,18 @@ fn a_recovery_names_the_exact_head_and_a_prefix_that_chains_to_it() {
         let seal = SignedSeal::sign(statement, &f.owner).unwrap();
         assert_eq!(f.run(0, recover(&seal), T + 3), Err(error));
     }
-    // A pending entry is aborted: the recovery replaces the commit before it.
     let pending = f.append(0, 5, 4);
     let seal = SignedSeal::sign(statement(log, f.recovery(0)), &f.owner).unwrap();
-    assert!(matches!(
-        f.run(0, recover(&seal), T + 3),
-        Ok(Outcome::Coordinated(LogResult::Committed {
-            position: 4,
-            ..
-        }))
-    ));
+    assert!(
+        matches!(
+            f.run(0, recover(&seal), T + 3),
+            Ok(Outcome::Coordinated(LogResult::Committed {
+                position: 4,
+                ..
+            }))
+        ),
+        "a recovery aborts a pending entry"
+    );
     assert_eq!(f.state.log_head(log).unwrap().pending, None);
     assert!(f.resolve(&pending, &[0, 1], T + 4).is_err());
 }
@@ -204,18 +209,18 @@ fn a_prefix_before_the_window_is_endorsed_by_the_owner_alone() {
             owner.public_key(),
         )
     };
-    // Before the window the owner endorses the prefix; genesis is checked.
     let mut probe = log.clone();
     assert_eq!(
         recovered(&mut probe, point(0, [1; 32])),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "before the window the owner endorses the prefix, checked against genesis"
     );
     assert!(recovered(&mut probe, point(5, [1; 32])).is_ok());
-    // Inside the window the prefix must chain to the head.
     let mut probe = log.clone();
     assert_eq!(
         recovered(&mut probe, point(30, [1; 32])),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "inside the window the prefix must chain to the head"
     );
     assert!(recovered(&mut probe, point(30, runnings[30])).is_ok());
     assert_eq!(probe.head.hashes.len(), HASH_WINDOW);
@@ -249,35 +254,43 @@ fn only_a_node_of_the_in_sync_set_ends_a_log_with_an_ordinary_seal() {
         duration: 10,
         sequence,
     };
-    // An empty log has nothing to hold: anyone ends it, aborting a pending
-    // entry.
     let mut empty = log.clone();
     empty.apply(member, &join(&empty), T, true).unwrap();
     empty.apply(member, &append(&empty, 2), T, true).unwrap();
-    assert!(matches!(
-        empty.seal(outsider, terminal),
-        Ok(LogResult::Committed { position: 1, .. })
-    ));
+    assert!(
+        matches!(
+            empty.seal(outsider, terminal),
+            Ok(LogResult::Committed { position: 1, .. })
+        ),
+        "anyone ends an empty log, aborting a pending entry"
+    );
     assert_eq!(empty.head.pending, None);
     log.apply(member, &join(&log), T, true).unwrap();
     let Ok(LogResult::Assigned(pending)) = log.apply(member, &append(&log, 2), T, true) else {
         panic!("no slot")
     };
     log.resolve(&pending, &[member], T).unwrap();
-    // Once an entry committed, only a node holding it ends the log.
     let before = log.head.clone();
-    assert_eq!(log.seal(outsider, terminal), Err(CoordinationError::Denied));
+    assert_eq!(
+        log.seal(outsider, terminal),
+        Err(CoordinationError::Denied),
+        "once an entry committed, only a node holding it ends the log"
+    );
     assert_eq!(log.head, before);
-    // A member ends it while another entry is pending, which aborts.
     let Ok(LogResult::Assigned(_)) = log.apply(member, &append(&log, 3), T, true) else {
         panic!("no slot")
     };
     let ended = log.seal(member, terminal).unwrap();
-    assert!(matches!(ended, LogResult::Committed { position: 2, .. }));
+    assert!(
+        matches!(ended, LogResult::Committed { position: 2, .. }),
+        "a member ends the log while another entry is pending, which aborts"
+    );
     assert_eq!(log.head.pending, None);
-    // The set is empty now: the same terminal still answers, another is
-    // `Sealed`, from anyone.
-    assert_eq!(log.seal(outsider, terminal).unwrap(), ended);
+    assert_eq!(
+        log.seal(outsider, terminal).unwrap(),
+        ended,
+        "an empty set still answers the same terminal, from anyone"
+    );
     assert_eq!(
         log.seal(
             member,

@@ -206,7 +206,6 @@ async fn placement_extends_without_moving_existing_domains_and_opens_selected_fi
     for receipt in pending {
         receipt.committed().await.unwrap();
     }
-    // Query independent domains across the four file workers in bounded batches.
     for first in (0..256).step_by(8) {
         let mut reads = rocky_platform::task::JoinSet::new();
         for domain in first..first + 8 {
@@ -243,7 +242,6 @@ async fn placement_extends_without_moving_existing_domains_and_opens_selected_fi
     }
     assert!(runtime.domain(test_scope(256)).is_err());
     runtime.close().await.unwrap();
-    // The second process serves file 3 while file 0 is locked by another owner.
     let (_owner, _conn) = crate::database::DatabaseOwner::open(&path).await.unwrap();
     let runtime =
         Runtime::open_placed(&path, vec![installation(app, 1)], placement(256), options())
@@ -258,7 +256,8 @@ async fn placement_extends_without_moving_existing_domains_and_opens_selected_fi
             .unwrap()
             .rows
             .len(),
-        1
+        1,
+        "the second process serves file 3 while file 0 is locked by another owner"
     );
     assert!(runtime.domain(test_scope(0)).is_err());
     runtime.close().await.unwrap();
@@ -384,7 +383,7 @@ async fn bootstrap_child() {
     }
     panic!("bootstrap did not abort");
 }
-// Crashes a child process.
+/// Crashes a child process.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn interrupted_schema_resumes_committed_steps_and_never_opens_half_installed() {
@@ -474,7 +473,7 @@ async fn a_failed_ddl_step_rolls_back_and_a_different_resume_plan_is_refused() {
     ));
 }
 
-// Crashes a child process.
+/// Crashes a child process.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn placed_bootstrap_resumes_before_and_after_the_file_completion_marker() {
@@ -530,7 +529,7 @@ async fn placed_bootstrap_resumes_before_and_after_the_file_completion_marker() 
     }
 }
 
-// Crashes a child process.
+/// Crashes a child process.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn unscoped_wide_bootstrap_resumes_without_admitting_partial_identity() {

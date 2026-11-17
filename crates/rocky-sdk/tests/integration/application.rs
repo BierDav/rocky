@@ -86,7 +86,6 @@ async fn dropped_and_cancelled_transactions_release_the_writer() -> Result<(), F
     ready.await?;
     task.abort();
     assert!(task.await.expect_err("cancelled").is_cancelled());
-    // The next write deterministically waits for rollback, without a sleep.
     let mut tx = db.transaction().await?;
     let id = tx.next_id("notes", vec![]).await?;
     tx.execute(
@@ -100,7 +99,11 @@ async fn dropped_and_cancelled_transactions_release_the_writer() -> Result<(), F
         .await?
         .collect()
         .await?;
-    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows.len(),
+        1,
+        "the next write waits for the cancelled transaction's rollback"
+    );
     assert_eq!(rows[0].get::<String>("body")?, "kept");
     db.close().await
 }
@@ -115,8 +118,8 @@ async fn paged_reads_hold_a_snapshot_and_decode_aliases() -> Result<(), Failure>
         .create()
         .await?
         .database;
-    // Two transactions, each under the intent statement quota.
-    for batch in [1..=150_i64, 151..=300] {
+    let batches_under_intent_statement_quota = [1..=150_i64, 151..=300];
+    for batch in batches_under_intent_statement_quota {
         let mut tx = db.transaction().await?;
         for n in batch {
             let id = tx.next_id("cache", params![]).await?;
@@ -242,8 +245,8 @@ async fn a_created_database_follows_a_bookmark_and_seals_routinely() -> Result<(
     let status = session.tip_status().await?;
     assert_eq!(status.bookmark.as_deref(), Some(Configuration::BOOKMARK));
     let genesis = status.tip;
-    // Enough replayed transactions for the owner's routine seal.
-    for index in 0..128 {
+    let transactions_for_routine_seal = 128;
+    for index in 0..transactions_for_routine_seal {
         let mut tx = db.transaction().await?;
         let id = tx.next_id("notes", vec![]).await?;
         tx.execute(
@@ -362,7 +365,6 @@ async fn the_token_is_known_inside_the_transaction_and_its_outcome_survives_rest
     .await?;
     assert_eq!(tx.commit().await?, Some(token));
 
-    // A rolled-back transaction's token never gets an outcome.
     let mut tx = db.transaction().await?;
     let abandoned = tx.token();
     assert_ne!(abandoned, token);
@@ -388,7 +390,11 @@ async fn the_token_is_known_inside_the_transaction_and_its_outcome_survives_rest
         db.transaction_outcome(stored).await?,
         Some(TransactionOutcome::Applied { sealed: false })
     );
-    assert_eq!(db.transaction_outcome(abandoned).await?, None);
+    assert_eq!(
+        db.transaction_outcome(abandoned).await?,
+        None,
+        "a rolled-back transaction's token never gets an outcome"
+    );
     db.close().await
 }
 
@@ -412,14 +418,14 @@ async fn transactions_choose_durability_and_buffered_commits_can_be_flushed() ->
         assert_eq!(tx.commit().await?, Some(token));
         tokens.push(token);
     }
-    // Every commit that returned before the call, buffered ones included.
     db.flush().await?;
     db.close().await?;
     let db = configuration.open().await?.database;
     for token in tokens {
         assert_eq!(
             db.transaction_outcome(token).await?,
-            Some(TransactionOutcome::Applied { sealed: false })
+            Some(TransactionOutcome::Applied { sealed: false }),
+            "flush persists every commit returned before it, buffered ones included"
         );
     }
     assert!(db.flush().await.is_ok());

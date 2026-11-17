@@ -57,6 +57,12 @@ impl SetDigest {
     }
 }
 
+/// The integer the engine stores for an integral REAL; its row hook then
+/// reports that integer where a read reports the REAL.
+fn stored_integer(value: f64) -> Option<i64> {
+    (value.fract() == 0.0 && value.abs() < -(i64::MIN as f64)).then_some(value as i64)
+}
+
 /// The hash of one stored row: its logical table and every column in order.
 pub fn row_hash<'a>(table: &str, values: impl Iterator<Item = &'a Value>) -> Commitment {
     let mut bytes = (table.len() as u32).to_le_bytes().to_vec();
@@ -68,11 +74,9 @@ pub fn row_hash<'a>(table: &str, values: impl Iterator<Item = &'a Value>) -> Com
                 bytes.push(1);
                 bytes.extend(value.to_le_bytes());
             }
-            // The engine stores an integral REAL as an integer, and its row
-            // hook then reports the integer where a read reports the REAL.
-            Value::Real(value) if value.fract() == 0.0 && value.abs() < -(i64::MIN as f64) => {
+            Value::Real(value) if let Some(stored) = stored_integer(*value) => {
                 bytes.push(1);
-                bytes.extend((*value as i64).to_le_bytes());
+                bytes.extend(stored.to_le_bytes());
             }
             Value::Real(value) => {
                 bytes.push(2);
@@ -205,7 +209,6 @@ mod tests {
             "INSERT INTO keyed VALUES(x'aa',1,'k'),(x'aa',2,NULL)",
             "INSERT INTO loose VALUES(1,1),(1,1),(2.5,'x')",
             "INSERT INTO other VALUES(1)",
-            // An integral REAL is stored, and reported by the hook, as an integer.
             "INSERT INTO typed VALUES('a',2.0,2.0),('b',0.5,1),('c',1e300,NULL),('d',9e999,-1)",
             "INSERT INTO typed VALUES('A',-3.0,7) ON CONFLICT(a) DO UPDATE SET a=excluded.a,r=excluded.r",
             "UPDATE typed SET r=4 WHERE a='b'",
@@ -232,12 +235,14 @@ mod tests {
             }
             assert_eq!(tracked, expected, "{sql}");
         }
-        // A rolled back change is reported; the caller discards it.
         conn.execute("BEGIN", ()).await.unwrap();
         conn.execute("INSERT INTO plain VALUES(9,'gone',NULL)", ())
             .await
             .unwrap();
         conn.execute("ROLLBACK", ()).await.unwrap();
-        assert!(!conn.tracker().unwrap().lock().unwrap().peek(slot).is_zero());
+        assert!(
+            !conn.tracker().unwrap().lock().unwrap().peek(slot).is_zero(),
+            "a rolled back change is reported; the caller discards it"
+        );
     }
 }

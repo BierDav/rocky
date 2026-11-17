@@ -230,29 +230,25 @@ async fn graph_history(root: &Path) -> History {
         )
         .await,
     );
-    // Its nickname clashes with the first's ignoring case.
-    units.push(
-        unit(
-            &c,
-            &mut d[2],
-            &["INSERT INTO people(tenant,nickname,id) VALUES(1,'BETA',#id)"],
-        )
-        .await,
-    );
-    // A second active owner of twenty: its note rolls back with it.
-    units.push(
-        unit(
-            &c,
-            &mut d[3],
-            &[
-                "INSERT INTO notes(tenant,message,id) VALUES(1,'must roll back',#id)",
-                &format!(
-                    "INSERT INTO memberships(tenant,team,person,role,active,seats,id) VALUES(1,{twenty},{alpha},'owner',1,1,#id)"
-                ),
-            ],
-        )
-        .await,
-    );
+    let nickname_clashing_with_the_first_ignoring_case = unit(
+        &c,
+        &mut d[2],
+        &["INSERT INTO people(tenant,nickname,id) VALUES(1,'BETA',#id)"],
+    )
+    .await;
+    units.push(nickname_clashing_with_the_first_ignoring_case);
+    let second_active_owner_of_twenty_with_a_note_rolling_back = unit(
+        &c,
+        &mut d[3],
+        &[
+            "INSERT INTO notes(tenant,message,id) VALUES(1,'must roll back',#id)",
+            &format!(
+                "INSERT INTO memberships(tenant,team,person,role,active,seats,id) VALUES(1,{twenty},{alpha},'owner',1,1,#id)"
+            ),
+        ],
+    )
+    .await;
+    units.push(second_active_owner_of_twenty_with_a_note_rolling_back);
     units.push(
         unit(
             &c,
@@ -261,17 +257,15 @@ async fn graph_history(root: &Path) -> History {
         )
         .await,
     );
-    // Ten is gone where this replays.
-    units.push(
-        unit(
-            &c,
-            &mut d[1],
-            &[&format!(
-                "INSERT INTO memberships(tenant,team,person,role,active,seats,id) VALUES(1,{ten},{alpha},'member',1,3,#id)"
-            )],
-        )
-        .await,
-    );
+    let membership_of_ten_replayed_where_ten_is_gone = unit(
+        &c,
+        &mut d[1],
+        &[&format!(
+            "INSERT INTO memberships(tenant,team,person,role,active,seats,id) VALUES(1,{ten},{alpha},'member',1,3,#id)"
+        )],
+    )
+    .await;
+    units.push(membership_of_ten_replayed_where_ten_is_gone);
     History { c, setup, units }
 }
 
@@ -376,8 +370,11 @@ fn complex_checks_converge_in_all_120_orders() {
     let expected = canonical(&history.c, &history.frames());
     assert_eq!(expected.dropped(), 3, "{expected:?}");
     assert_eq!(expected.rows["lines"].len(), 1);
-    // quantity 100, price 10, discount 10: the generated net is computed.
-    assert_eq!(expected.rows["orders"][0][4], SqlValue::Integer(0));
+    assert_eq!(
+        expected.rows["orders"][0][4],
+        SqlValue::Integer(0),
+        "the generated net of quantity 100, price 10 and discount 10 is computed"
+    );
     deliver_all(&history, false, &expected);
 }
 

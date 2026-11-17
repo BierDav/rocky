@@ -77,7 +77,6 @@ fn claims_take_distinct_increasing_values_and_retries_repeat_them() {
     let mut fixture = Fixture::new(1, Limits::default());
     let retry_records = fixture.state.retry_records();
     let mut values = Vec::new();
-    // Interleaved claims from both trusted nodes, each retried by the other.
     for n in 0..20u8 {
         let value = fixture
             .claim(usize::from(n % 2), "invoices", claim(n, T), T)
@@ -85,24 +84,30 @@ fn claims_take_distinct_increasing_values_and_retries_repeat_them() {
         let retried = fixture
             .claim(usize::from(n % 2 == 0), "invoices", claim(n, T), T + 1)
             .unwrap();
-        assert_eq!(retried, value);
+        assert_eq!(
+            retried, value,
+            "a claim retried by the other trusted node answers the same value"
+        );
         values.push(value);
     }
     assert_eq!(values, (1..=20).collect::<Vec<_>>());
-    // Every earlier claim still answers its own value.
     for n in 0..20u8 {
         assert_eq!(
             fixture.claim(0, "invoices", claim(n, T), T + 2),
-            Ok(u64::from(n) + 1)
+            Ok(u64::from(n) + 1),
+            "every earlier claim still answers its own value"
         );
     }
-    // The same identity with another issue time is a different request.
     assert_eq!(
         fixture.claim(0, "invoices", claim(3, T + 1), T + 2),
-        Err(CoordinationError::RequestConflict)
+        Err(CoordinationError::RequestConflict),
+        "the same identity with another issue time is a different request"
     );
-    // Counters are independent; the same claim identity may name another.
-    assert_eq!(fixture.claim(1, "receipts", claim(3, T), T + 2), Ok(1));
+    assert_eq!(
+        fixture.claim(1, "receipts", claim(3, T), T + 2),
+        Ok(1),
+        "counters are independent; the same claim identity may name another"
+    );
     assert_eq!(
         fixture.reading("invoices", Some(claim(7, T)), T + 2),
         Reading {
@@ -124,8 +129,11 @@ fn claims_take_distinct_increasing_values_and_retries_repeat_them() {
             claim: None,
         }
     );
-    // Claims keep no machine retry record: their identities deduplicate.
-    assert_eq!(fixture.state.retry_records(), retry_records);
+    assert_eq!(
+        fixture.state.retry_records(),
+        retry_records,
+        "claims keep no machine retry record; their identities deduplicate"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -145,11 +153,11 @@ fn only_trusted_nodes_claim_and_only_while_the_domain_is_open() {
     let mut fixture = Fixture::new(1, Limits::default());
     let stranger = PrivateKey::new();
     let owner = fixture.owner.clone();
-    // Neither an unknown node nor the domain's control authority is a trusted node.
     for key in [&stranger, &owner] {
         assert_eq!(
             fixture.claim_as(key, "invoices", claim(1, T), T),
-            Err(CoordinationError::Denied)
+            Err(CoordinationError::Denied),
+            "neither an unknown node nor the domain's control authority is a trusted node"
         );
         let read = Operation::Counter {
             scope: fixture.scope,
@@ -161,7 +169,6 @@ fn only_trusted_nodes_claim_and_only_while_the_domain_is_open() {
             Err(CoordinationError::Denied)
         );
     }
-    // A request without a node certificate presents no trusted identity.
     let uncertified = Request::sign_at(
         fixture.state.genesis.id().unwrap(),
         [1; 32],
@@ -176,7 +183,8 @@ fn only_trusted_nodes_claim_and_only_while_the_domain_is_open() {
     .unwrap();
     assert_eq!(
         fixture.state.apply_at(T, &uncertified),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a request without a node certificate presents no trusted identity"
     );
     let mut unknown = fixture.scope;
     unknown.domain = DomainId([9; 16]);
@@ -200,10 +208,10 @@ fn only_trusted_nodes_claim_and_only_while_the_domain_is_open() {
         scope: fixture.scope,
     };
     fixture.operate(&owner, close, T).unwrap();
-    // A closed domain takes no claim, not even a retry; its counters stay readable.
     assert_eq!(
         fixture.claim(0, "invoices", claim(2, T), T),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Denied),
+        "a closed domain takes no claim, not even a retry"
     );
     assert_eq!(
         fixture.claim(0, "invoices", claim(1, T), T),
@@ -228,15 +236,18 @@ fn claims_outside_the_window_are_expired_never_given_a_second_value() {
     let end = T + CLAIM_WINDOW;
     assert_eq!(take(claim(1, T), end), Ok(1));
     assert_eq!(take(claim(1, T), end + 1), Err(CoordinationError::Expired));
-    // A new claim issued that long ago is refused too: it cannot be told apart.
-    assert_eq!(take(claim(2, T), end + 1), Err(CoordinationError::Expired));
+    assert_eq!(
+        take(claim(2, T), end + 1),
+        Err(CoordinationError::Expired),
+        "a new claim issued that long ago cannot be told apart from a retry"
+    );
     assert_eq!(take(claim(3, end), end + 1), Ok(2));
-    // An issue time ahead of authority time beyond the skew is refused.
     assert_eq!(
         take(claim(4, end + 2 + ISSUE_SKEW), end + 1),
         Err(CoordinationError::ClockSkew {
             coordinator_time: end + 1,
-        })
+        }),
+        "an issue time ahead of authority time beyond the skew is refused"
     );
     assert_eq!(take(claim(4, end + 1 + ISSUE_SKEW), end + 1), Ok(3));
     assert_eq!(
@@ -259,7 +270,6 @@ fn claims_outside_the_window_are_expired_never_given_a_second_value() {
 fn record_eviction_refuses_claims_it_can_no_longer_tell_apart() {
     let mut fixture = Fixture::new(1, Limits::default());
     let records = u64::try_from(CLAIM_RECORDS).unwrap();
-    // Each claim is issued one second after the previous one.
     let claim = |n: u64| Claim {
         id: rocky_core::commitment("counter-test", &n.to_be_bytes()),
         issued: T + n,
@@ -271,11 +281,10 @@ fn record_eviction_refuses_claims_it_can_no_longer_tell_apart() {
         );
     }
     let now = T + records;
-    // The first claim was evicted, so its retry and any claim issued no
-    // later than it are refused; every kept claim still answers.
     assert_eq!(
         fixture.claim(0, "invoices", claim(0), now),
-        Err(CoordinationError::Expired)
+        Err(CoordinationError::Expired),
+        "an evicted claim's retry, and any claim issued no later, is refused"
     );
     let mut early = claim(records + 1);
     early.issued = T;
@@ -292,7 +301,6 @@ fn record_eviction_refuses_claims_it_can_no_longer_tell_apart() {
         fixture.claim(0, "invoices", claim(records + 1), now),
         Ok(records + 2)
     );
-    // Eviction keeps the accounted bytes bounded.
     let bytes = fixture
         .state
         .state
@@ -300,7 +308,11 @@ fn record_eviction_refuses_claims_it_can_no_longer_tell_apart() {
         .unwrap()
         .counters
         .bytes();
-    assert_eq!(bytes, 128 + "invoices".len() + CLAIM_RECORDS * 64);
+    assert_eq!(
+        bytes,
+        128 + "invoices".len() + CLAIM_RECORDS * 64,
+        "eviction keeps the accounted bytes bounded"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -311,9 +323,11 @@ fn counter_name_count_and_byte_budgets_fail_closed() {
         Err(CoordinationError::Configuration)
     );
     assert!(Name::new(vec![b'n'; MAX_NAME]).is_ok());
-    // An oversized name in a decoded request is refused as well.
     let long = crate::certified::encode(&vec![b'n'; MAX_NAME + 1]).unwrap();
-    assert!(crate::certified::decode::<Name>(&long).is_err());
+    assert!(
+        crate::certified::decode::<Name>(&long).is_err(),
+        "an oversized name in a decoded request is refused as well"
+    );
 
     let mut fixture = Fixture::new(1, Limits::default());
     for n in 0..MAX_COUNTERS {
@@ -325,10 +339,12 @@ fn counter_name_count_and_byte_budgets_fail_closed() {
         fixture.claim(0, "one-too-many", claim(1, T), T),
         Err(CoordinationError::Backpressure)
     );
-    // Existing counters keep counting.
-    assert_eq!(fixture.claim(0, "series-0", claim(2, T), T), Ok(2));
+    assert_eq!(
+        fixture.claim(0, "series-0", claim(2, T), T),
+        Ok(2),
+        "existing counters keep counting"
+    );
 
-    // Claims count against the tenant's bytes; a refused one takes no value.
     let mut fixture = Fixture::new(1, Limits::default());
     fixture.claim(0, "invoices", claim(1, T), T).unwrap();
     let used = fixture
@@ -336,7 +352,11 @@ fn counter_name_count_and_byte_budgets_fail_closed() {
         .tenant_used(fixture.owner.public_key())
         .unwrap();
     fixture.state.state.limits.tenant_bytes = used + 64;
-    assert_eq!(fixture.claim(0, "invoices", claim(2, T), T), Ok(2));
+    assert_eq!(
+        fixture.claim(0, "invoices", claim(2, T), T),
+        Ok(2),
+        "claims count against the tenant's bytes"
+    );
     assert_eq!(
         fixture.claim(0, "invoices", claim(3, T), T),
         Err(CoordinationError::Backpressure)
@@ -353,8 +373,11 @@ fn counter_name_count_and_byte_budgets_fail_closed() {
         }
     );
     assert_eq!(fixture.reading("receipts", None, T).value, 0);
-    // Retries of kept claims need no budget.
-    assert_eq!(fixture.claim(1, "invoices", claim(1, T), T), Ok(1));
+    assert_eq!(
+        fixture.claim(1, "invoices", claim(1, T), T),
+        Ok(1),
+        "retries of kept claims need no budget"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]

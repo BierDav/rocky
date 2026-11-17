@@ -103,7 +103,6 @@ async fn actions_reopen_counters_outbox_and_rebuild() {
         disk(&dir, "SELECT count(*) FROM rocky_outbox").await,
         vec![vec![SqlValue::Integer(5)]]
     );
-    // Fresh on-disk projection rebuilt exclusively from retained operations.
     let rebuilt = crate::sqlite::Connection::open(&dir.path().join("rebuilt.db")).unwrap();
     let conn = rebuilt;
     for sql in TodoApp.schema() {
@@ -130,7 +129,8 @@ async fn actions_reopen_counters_outbox_and_rebuild() {
     }
     assert_eq!(
         rows(&conn, TodoApp.projection_query()).await.unwrap(),
-        TodoApp.projection_rows(&replay.state)
+        TodoApp.projection_rows(&replay.state),
+        "fresh on-disk projection rebuilt exclusively from retained operations"
     );
     let reopened = open(&dir).await;
     assert_eq!(reopened.query().await.unwrap(), snapshot);
@@ -250,7 +250,6 @@ async fn registration_race_slow_observer_and_close() {
     replica.close().await.unwrap();
     assert!(matches!(observer.next().await, Err(Error::Closed)));
     assert!(matches!(replica.query().await, Err(Error::Closed)));
-    // No observer retains the runtime/connection.
     drop(replica);
     let reopened = open(&dir).await;
     reopened.close().await.unwrap();
@@ -479,8 +478,10 @@ async fn dropping_last_runtime_drains_work_and_stops_observer() {
 async fn a_file_held_by_another_connection_is_retried_then_exhausted() {
     let dir = Scratch::new().await;
     let replica = open(&dir).await;
-    // Answered after the writer's opening flush.
-    replica.query().await.unwrap();
+    replica
+        .query()
+        .await
+        .expect("a query is answered after the writer's opening flush");
     let other = crate::sqlite::Connection::open(&dir.path().join("laptop.db")).unwrap();
     let todo = |title: &str| {
         mutation(

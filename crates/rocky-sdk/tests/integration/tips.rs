@@ -35,14 +35,22 @@ async fn a_trusted_node_only_raises_the_genesis_minimum_and_the_roots_governs()
     snap::ok(a.session.set_genesis_minimum(1)).await;
     snap::ok(a.session.set_genesis_minimum(3)).await;
     assert_eq!(minimum().await, 3);
-    // A trusted node cannot lower it, and says so.
     let lowered = snap::observe(a.session.set_genesis_minimum(2)).await;
-    assert!(message(lowered.unwrap_err()).contains("stays 3"));
-    // The root lowers it without revoking anyone, and then governs.
+    assert!(
+        message(lowered.unwrap_err()).contains("stays 3"),
+        "a trusted node cannot lower the genesis minimum and says so"
+    );
     snap::ok(a.session.set_root_genesis_minimum((a.root()).clone(), 2)).await;
-    assert_eq!(minimum().await, 2);
+    assert_eq!(
+        minimum().await,
+        2,
+        "the root lowers the minimum without revoking anyone"
+    );
     let raised = snap::observe(a.session.set_genesis_minimum(5)).await;
-    assert!(message(raised.unwrap_err()).contains("stays 2"));
+    assert!(
+        message(raised.unwrap_err()).contains("stays 2"),
+        "once the root set the minimum, a trusted node no longer changes it"
+    );
     assert_eq!(minimum().await, 2);
     Ok(())
 }
@@ -154,9 +162,8 @@ async fn compact_keeps_the_requested_seals_and_every_row_across_reopen() -> Resu
     let all = snap::ok(a.session.compact(0)).await;
     assert_eq!(all["compacted"], second);
     assert_eq!(all["uncompacted"], json!([]));
-    // The owner lists each compaction's checkpoint beside its seal.
     let inspected = snap::ok(a.session.inspect_tips()).await;
-    let listed = |seal: &Value| -> Vec<Value> {
+    let checkpoints_beside_seal = |seal: &Value| -> Vec<Value> {
         inspected["seals"]
             .as_array()
             .unwrap()
@@ -167,7 +174,7 @@ async fn compact_keeps_the_requested_seals_and_every_row_across_reopen() -> Resu
             .unwrap()
             .clone()
     };
-    let at_first = listed(&first);
+    let at_first = checkpoints_beside_seal(&first);
     assert_eq!(at_first.len(), 2);
     let mut rows: Vec<_> = at_first
         .iter()
@@ -176,7 +183,7 @@ async fn compact_keeps_the_requested_seals_and_every_row_across_reopen() -> Resu
     rows.sort_unstable();
     assert_eq!(rows, [0, 2]);
     assert_ne!(at_first[0]["scope"], at_first[1]["scope"]);
-    let at_second = listed(&second);
+    let at_second = checkpoints_beside_seal(&second);
     assert_eq!(at_second.len(), 1);
     assert_eq!(at_second[0]["rows"], 3);
     for record in at_first.iter().chain(&at_second) {
@@ -189,12 +196,14 @@ async fn compact_keeps_the_requested_seals_and_every_row_across_reopen() -> Resu
         let scope: rocky_core::ResourceScope = serde_json::from_value(record["scope"].clone())?;
         assert_eq!(scope.domain, a.database.scope());
     }
-    let empty = at_first.iter().find(|record| record["rows"] == 0).unwrap();
+    let empty_registry = at_first.iter().find(|record| record["rows"] == 0).unwrap();
     let changed = at_first.iter().find(|record| record["rows"] == 2).unwrap();
     assert_eq!(at_second[0]["scope"], changed["scope"]);
-    assert_ne!(at_second[0]["scope"], empty["scope"]);
+    assert_ne!(
+        at_second[0]["scope"], empty_registry["scope"],
+        "the unchanged empty registry keeps its signed base at the first seal"
+    );
     assert_ne!(at_second[0]["checkpoint"], changed["checkpoint"]);
-    // The unchanged empty registry keeps its signed base at the first seal.
     let items = ["bread/0", "eggs/1", "milk/0"];
     assert_eq!(a.items().await, items);
     a.close().await;
@@ -226,8 +235,7 @@ async fn requests_and_authority_are_checked() -> Result<(), Failure> {
     snap::ok(b.follow("main")).await;
     assert_eq!(snap::ok(b.session.tip_status()).await["tip"], sealed["tip"]);
 
-    // A writer neither seals nor moves bookmarks.
-    for (action, result) in [
+    let writer_attempts = [
         ("seal", snap::observe(b.session.seal(false)).await),
         (
             "create",
@@ -237,44 +245,51 @@ async fn requests_and_authority_are_checked() -> Result<(), Failure> {
             "delete",
             snap::observe(b.session.delete_bookmark("main")).await,
         ),
-    ] {
+    ];
+    for (action, result) in writer_attempts {
         let refused = message(result.unwrap_err());
         assert!(
             refused.contains("only a trusted identity or an issuer"),
-            "{action}: {refused}"
+            "a writer neither seals nor moves bookmarks; {action}: {refused}"
         );
     }
 
-    // An issuer seals and moves forward, but opens no tip and moves nothing back.
-    let c = Device::join(
+    let issuer = Device::join(
         &root.path().join("c"),
         &a.invite_as(json!({"kind": "issuer"})).await,
         Network::Owned(hub.connector("c")),
     )?;
-    introduce(&a, &c).await;
-    c.sync().await.expect("issuer sync");
-    snap::ok(c.follow("main")).await;
-    c.add(1, "issued").await;
-    let resealed = snap::ok(c.session.seal(false)).await;
-    assert_ne!(resealed["tip"], sealed["tip"]);
-    let issued = snap::ok(c.session.inspect_tips()).await;
+    introduce(&a, &issuer).await;
+    issuer.sync().await.expect("issuer sync");
+    snap::ok(issuer.follow("main")).await;
+    issuer.add(1, "issued").await;
+    let resealed = snap::ok(issuer.session.seal(false)).await;
+    assert_ne!(
+        resealed["tip"], sealed["tip"],
+        "an issuer seals and moves its bookmark forward"
+    );
+    let issued = snap::ok(issuer.session.inspect_tips()).await;
     let reseal = seal_of(&issued, sealed["tip"].as_str().ok_or("tip")?)["id"].clone();
     let opened = message(
         snap::observe(async {
-            let value = c.open_tip(&(snap::text(&(reseal))), 1).await?;
+            let value = issuer.open_tip(&(snap::text(&(reseal))), 1).await?;
             Ok(json!({"tip":value}))
         })
         .await
         .unwrap_err(),
     );
-    assert!(opened.contains("trusted"), "{opened}");
     assert!(
-        snap::observe(c.move_bookmark("main", &(snap::text(&(sealed["tip"])))))
+        opened.contains("trusted"),
+        "an issuer opens no tip: {opened}"
+    );
+    assert!(
+        snap::observe(issuer.move_bookmark("main", &(snap::text(&(sealed["tip"])))))
             .await
-            .is_err()
+            .is_err(),
+        "an issuer moves no bookmark back"
     );
     assert_eq!(
-        snap::ok(c.session.tip_status()).await["tip"],
+        snap::ok(issuer.session.tip_status()).await["tip"],
         resealed["tip"]
     );
     for result in [
@@ -331,15 +346,14 @@ async fn a_branch_writes_under_its_own_node_and_keeps_it_across_reopen() -> Resu
             .await
             .is_err()
     );
-    // Custody zero (the default) has no custody veto: the explicit drop
-    // discards the branch's unsent frames and stops keeping that tip.
     snap::ok(a.session.drop_tip(&(snap::text(&(dev))))).await;
     let nodes = snap::ok(a.session.inspect_tips()).await["nodes"].clone();
     assert!(
         !nodes[0]["kept_tips"]
             .as_array()
             .ok_or("kept")?
-            .contains(&dev)
+            .contains(&dev),
+        "with the default custody of zero, an explicit drop stops keeping the branch tip"
     );
     assert_eq!(a.titles().await, ["main again", "milk"]);
     Ok(())
@@ -351,8 +365,6 @@ async fn moving_main_back_closes_its_tip_and_withdraws_the_abandoned_writes() ->
     let root = tempfile::tempdir()?;
     let a = Device::create(root.path(), None)?;
     let genesis = main(&a).await["tip"].as_str().ok_or("tip")?.to_owned();
-    // `a` opens a branch on the seal after writing past it: it keeps the
-    // seals its bookmarks start from.
     snap::ok(
         a.session.set_kept_seals(
             serde_json::from_value::<rocky_sdk::KeptSeals>(json!({"bookmarked": true}))
@@ -379,9 +391,11 @@ async fn moving_main_back_closes_its_tip_and_withdraws_the_abandoned_writes() ->
         "close"
     );
     assert_eq!(a.titles().await, ["kept"]);
-    // Intents have no rows to re-author: the abandoned write goes with its
-    // line.
-    assert_eq!(snap::ok(a.session.held_changes()).await["count"], 0);
+    assert_eq!(
+        snap::ok(a.session.held_changes()).await["count"],
+        0,
+        "intents have no rows to re-author, so the abandoned write goes with its line"
+    );
     a.add(3, "rewritten").await;
     assert_eq!(a.titles().await, ["kept", "rewritten"]);
     Ok(())
@@ -403,7 +417,6 @@ async fn devices_on_main_never_receive_a_branch_frames() -> Result<(), Failure> 
     introduce(&a, &b).await;
     let genesis = main(&a).await["tip"].as_str().ok_or("tip")?.to_owned();
     a.add(1, "shared").await;
-    // Peers exchange frames only while they follow the same tip.
     b.sync().await.expect("graph sync");
     snap::ok(b.follow("main")).await;
     let sealed = snap::ok(a.session.seal(false)).await;
@@ -457,8 +470,10 @@ async fn bookmark_operations_work_through_a_native_offline_session() -> Result<(
     assert_eq!(seal.id, sealed.tip);
     let dev = session.open_tip(&seal.id, 1).await?;
     session.create_bookmark("dev", Some(&dev)).await?;
-    // Off an open tip this device does not follow, a sideways move is refused.
-    assert!(session.move_bookmark("dev", &sealed.tip).await.is_err());
+    assert!(
+        session.move_bookmark("dev", &sealed.tip).await.is_err(),
+        "a sideways move off an open tip this device does not follow is refused"
+    );
     session.create_bookmark("release", Some(&genesis)).await?;
     let release = session.move_bookmark("release", &sealed.tip).await?;
     assert_eq!(release.tip, sealed.tip);
@@ -669,8 +684,6 @@ mod coordinated {
         let sealed = snap::ok(a.session.seal(false)).await["tip"].clone();
         b.sync().await.map_err(|error| error.to_string())?;
         assert_eq!(snap::ok(b.session.compaction()).await["compacted"], sealed);
-        // The trusted acknowledgment creates finality; the next peer pass
-        // carries it to the owner and the member.
         a.sync().await.map_err(|error| error.to_string())?;
         c.sync().await.map_err(|error| error.to_string())?;
         for peer in [&a, &b, &c] {
@@ -709,10 +722,13 @@ mod coordinated {
         assert_eq!(hex(&terminal.digest), seal["id"]);
         assert_eq!(terminal.continuation, Some(tip(&sealed["tip"])));
 
-        // Writes continue on the continuation, whose own log is open.
         a.add(2, "eggs").await;
         assert_eq!(a.titles().await, ["eggs", "milk"]);
-        assert_eq!(log.head(log_of(&a, &sealed["tip"]))?.terminal, None);
+        assert_eq!(
+            log.head(log_of(&a, &sealed["tip"]))?.terminal,
+            None,
+            "writes continue on the continuation, whose own log is open"
+        );
         a.close().await;
         Ok(())
     }
@@ -728,7 +744,6 @@ mod coordinated {
             &root.path().join("a"),
             Some(Network::Owned(hub.connector("a"))),
         )?;
-        // A joiner seals only a tip it holds history of, not the one it imported.
         main(&a).await;
         let open = snap::ok(a.session.seal(false)).await["tip"].clone();
         let b = Device::join(
@@ -752,8 +767,6 @@ mod coordinated {
         b.sync().await.expect("graph sync");
         snap::ok(b.follow("main")).await;
 
-        // a's seal passed its checks and waits at the coordinator while b
-        // ends the log and hands a its seal.
         gated.armed.store(true, Ordering::SeqCst);
         let a = Arc::new(a);
         let mut sealing = tokio::spawn({
@@ -771,15 +784,21 @@ mod coordinated {
         let refused = sealing.await?.expect_err("a lost the race");
         assert_eq!(refused["code"], "sealed", "{refused}");
         assert_eq!(refused["retryable"], false);
-        // The log ended with b's seal, and a follows b's continuation.
         let terminal = log
             .head(log_of(&a, &open))?
             .terminal
             .ok_or("log not ended")?;
-        assert_eq!(terminal.continuation, Some(tip(&theirs["tip"])));
-        // a published nothing: the first seal and b's.
+        assert_eq!(
+            terminal.continuation,
+            Some(tip(&theirs["tip"])),
+            "the log ended with b's seal"
+        );
         let inspection = snap::ok(a.session.inspect_tips()).await;
-        assert_eq!(inspection["seals"].as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            inspection["seals"].as_array().map(Vec::len),
+            Some(2),
+            "the losing node published nothing: only the first seal and the winner's"
+        );
         assert_eq!(snap::ok(a.session.tip_status()).await["tip"], theirs["tip"]);
         b.close().await;
         a.close().await;
@@ -803,16 +822,12 @@ mod coordinated {
             .await
             .expect_err("unconfirmed");
         assert_eq!(held["code"], "coordinator_unavailable", "{held}");
-        // The next statement takes the place after the held seal and waits
-        // behind it, journaled.
         let later = snap::observe(a.session.create_bookmark("later", None))
             .await
-            .expect_err("waits for the seal");
+            .expect_err("the next statement chains after the held seal and waits behind it");
         assert_eq!(later["code"], "chain_pending", "{later}");
         assert_eq!(later["retryable"], true);
 
-        // The same seal again, once the coordinator answers, settles both
-        // in chain order.
         log.set_available(true);
         let sealed = snap::ok(a.session.seal(false)).await;
         assert!(
@@ -827,7 +842,11 @@ mod coordinated {
             .flatten()
             .filter_map(|bookmark| bookmark["name"].as_str())
             .collect();
-        assert_eq!(names, ["later", "main"], "{inspection}");
+        assert_eq!(
+            names,
+            ["later", "main"],
+            "retrying the seal settles both statements in chain order: {inspection}"
+        );
         assert_eq!(inspection["seals"].as_array().map(Vec::len), Some(1));
         assert_eq!(snap::ok(a.session.tip_status()).await["tip"], sealed["tip"]);
         let alerts = snap::ok(a.session.status()).await["alerts"].clone();
@@ -857,9 +876,7 @@ mod coordinated {
         a.add(1, "milk").await;
 
         log.set_available(false);
-        // The first waits on the coordinator; the others chain after it
-        // and wait behind it.
-        for (result, code) in [
+        let first_waits_and_later_ones_chain_behind_it = [
             (
                 snap::observe(a.session.seal(false)).await,
                 "coordinator_unavailable",
@@ -869,7 +886,8 @@ mod coordinated {
                 snap::observe(a.move_bookmark("main", &snap::text(&genesis))).await,
                 "chain_pending",
             ),
-        ] {
+        ];
+        for (result, code) in first_waits_and_later_ones_chain_behind_it {
             let refused = result.expect_err("unconfirmed");
             assert_eq!(refused["code"], code, "{refused}");
             assert_eq!(refused["retryable"], true);
@@ -883,20 +901,27 @@ mod coordinated {
         let status = snap::ok(a.session.tip_status()).await;
         assert_eq!(status["tip"], first["tip"]);
 
-        // Once the coordinator answers, the same call succeeds.
         log.set_available(true);
         assert_eq!(log.head(log_of(&a, &first["tip"]))?.terminal, None);
         let sealed = snap::ok(a.session.seal(false)).await;
-        assert_ne!(sealed["tip"], first["tip"]);
+        assert_ne!(
+            sealed["tip"], first["tip"],
+            "once the coordinator answers, the same seal succeeds"
+        );
         assert!(log.head(log_of(&a, &first["tip"]))?.terminal.is_some());
         assert_eq!(a.titles().await, ["milk"]);
-        // The close seal lost its log to the first; it and the move chained
-        // after it are dropped, never published.
         let inspection = snap::ok(a.session.inspect_tips()).await;
-        assert_eq!(inspection["seals"].as_array().map(Vec::len), Some(2));
+        let only_the_retried_seal_was_published =
+            "the close seal and the move chained after it lost the log and were dropped";
+        assert_eq!(
+            inspection["seals"].as_array().map(Vec::len),
+            Some(2),
+            "{only_the_retried_seal_was_published}"
+        );
         assert_eq!(
             inspection["bookmarks"][0]["moves"].as_array().map(Vec::len),
-            Some(3)
+            Some(3),
+            "{only_the_retried_seal_was_published}"
         );
         a.close().await;
         Ok(())
@@ -913,10 +938,10 @@ mod trusted {
         owner: Device,
         devices: Vec<Device>,
     }
-    /// The owner on `main` and `count` writers following it, every pair
-    /// introduced, then one row and a seal. The writers join before any
-    /// row: a device that imported a checkpoint neither seals nor switches
-    /// tips until phase 15 places checkpoints at seals.
+    /// The owner on `main` and `count` devices following it, every pair
+    /// introduced, then one row and a seal. Only the first device is an
+    /// issuer. Devices join before any row, because a device that imported a
+    /// checkpoint neither seals nor switches tips.
     async fn household(count: usize) -> Result<Household, Failure> {
         let root = tempfile::tempdir()?;
         let hub = Arc::new(Hub::default());
@@ -928,8 +953,8 @@ mod trusted {
         let mut devices = Vec::new();
         for index in 0..count {
             let name = format!("d{index}");
-            // Only an issuer identity is trusted: the first device.
-            let invitation = if index == 0 {
+            let is_first_device_and_the_only_issuer = index == 0;
+            let invitation = if is_first_device_and_the_only_issuer {
                 owner.invite_as(json!({"kind": "issuer"})).await
             } else {
                 owner.invite().await
@@ -1005,13 +1030,12 @@ mod trusted {
             .and_then(|seals| seals.iter().find(|seal| seal["id"] == main_tip))
             .ok_or("main's latest seal")?["id"]
             .clone();
-        // Without the grant an issuer opens no branch.
         let refused = snap::observe(async {
             let value = t.open_tip(&(snap::text(&(seal))), 1).await?;
             Ok(json!({"tip":value}))
         })
         .await
-        .expect_err("untrusted");
+        .expect_err("without the grant an issuer opens no branch");
         let refused = message(refused);
         assert!(
             refused.contains("a trusted identity opens tips"),
@@ -1044,13 +1068,16 @@ mod trusted {
             assert_eq!(device.titles().await, ["before", "m on main"]);
         }
 
-        // u returns to main, drops dev, and its writes there reach main.
         snap::ok(u.follow("main")).await;
         snap::ok(u.session.drop_tip(&(snap::text(&(dev))))).await;
         u.add(5, "u on main").await;
         settle(&[u, m, owner, t]).await;
         for device in [u, m, owner] {
-            assert_eq!(device.titles().await, ["before", "m on main", "u on main"]);
+            assert_eq!(
+                device.titles().await,
+                ["before", "m on main", "u on main"],
+                "a device back on main after dropping dev writes to main"
+            );
         }
         assert_eq!(t.titles().await, ["before", "t on dev", "u on dev"]);
         Ok(())
@@ -1112,7 +1139,6 @@ mod trusted {
             return Err("devices".into());
         };
         trust(owner, t).await;
-        // t opens a branch on this seal later: it keeps the seals it passes.
         snap::ok(
             t.session.set_kept_seals(
                 serde_json::from_value::<rocky_sdk::KeptSeals>(json!({"every": true}))
@@ -1127,7 +1153,6 @@ mod trusted {
             .and_then(|seals| seals.iter().find(|seal| seal["id"] == earlier))
             .ok_or("seal")?["id"]
             .clone();
-        // main moves on; m writes on the line t then abandons.
         t.add(2, "kept").await;
         snap::ok(t.session.seal(false)).await;
         settle(&[t, m, owner]).await;
@@ -1160,14 +1185,14 @@ mod trusted {
         let owner = &house.owner;
         let t = &house.devices[0];
         let granted = trust(owner, t).await;
-        // Only the root grants, and only an identity's own device installs.
         assert!(
             snap::observe(t.session.trust(
                 &(snap::text(&(identity(owner).await))),
                 std::sync::Arc::new(rocky_sdk::RootKey::generate())
             ))
             .await
-            .is_err()
+            .is_err(),
+            "only the root grants trust"
         );
         assert!(
             snap::observe(
@@ -1176,7 +1201,8 @@ mod trusted {
                     .install_trust(&(snap::text(&(granted["grant"]))))
             )
             .await
-            .is_err()
+            .is_err(),
+            "only the trusted identity's own device installs its grant"
         );
         snap::ok(
             owner.session.revoke_identity_with_root(
@@ -1207,13 +1233,12 @@ mod trusted {
             .and_then(|seals| seals.iter().find(|seal| seal["id"] == tip))
             .ok_or("seal")?["id"]
             .clone();
-        // The revoked trusted node learned it and opens nothing more.
         snap::observe(async {
             let value = t.open_tip(&(snap::text(&(seal))), 1).await?;
             Ok(json!({"tip":value}))
         })
         .await
-        .expect_err("trust revoked");
+        .expect_err("the revoked trusted node learned it and opens nothing more");
         let status = snap::ok(t.session.status()).await;
         assert!(
             status["authority"]["verified_revocation"].is_object(),
@@ -1223,10 +1248,8 @@ mod trusted {
     }
 }
 
-/// Races resolve by authority, then digest; revocation resolves again.
-/// Trusted identities race here: an issuer device that imported the
-/// registry from a checkpoint cannot rebuild another tip until phase 15; the issuer
-/// variants run in `rocky-secure`.
+/// Races between trusted identities resolve by authority, then digest;
+/// revocation resolves them again. The issuer variants run in `rocky-secure`.
 mod races {
     use super::*;
 
@@ -1376,12 +1399,12 @@ mod races {
         let house = household().await?;
         let (owner, member) = (&house.owner, &house.member);
         let tip = snap::ok(owner.session.tip_status()).await["tip"].clone();
-        // Two trusted identities seal main's tip at once; the lower digest wins.
         let continuations = [
             snap::ok(house.trusted[0].session.seal(false)).await["tip"].clone(),
             snap::ok(house.trusted[1].session.seal(false)).await["tip"].clone(),
         ];
-        let winner = usize::from(continuations[1].as_str() < continuations[0].as_str());
+        let lower_digest_wins = continuations[1].as_str() < continuations[0].as_str();
+        let winner = usize::from(lower_digest_wins);
         settle_on(&house.all(), &continuations[winner], &["before"]).await;
         let next = continuations[1 - winner].clone();
         for device in house.all() {
@@ -1399,10 +1422,7 @@ mod races {
         .await;
         assert_eq!(owner.titles().await, ["before", "on the winner"]);
 
-        // The root revoking the winner's trusted node with no cut leaves
-        // its seal and move out of resolution: every other device follows
-        // the other continuation, and the write on the revoked one goes
-        // with it.
+        let without_cut = false;
         snap::ok(
             owner.session.revoke_identity_with_root(
                 &(owner
@@ -1421,7 +1441,7 @@ mod races {
                     .to_hex()),
                 rocky_sdk::RevocationMode::Compromised,
                 Some((owner.root()).clone()),
-                false,
+                without_cut,
             ),
         )
         .await;
@@ -1431,10 +1451,10 @@ mod races {
             .into_iter()
             .filter(|device| !std::ptr::eq(*device, revoked))
             .collect();
-        // The rotation that follows may seal `next` once more.
         settle(&rest).await;
         let followed = snap::ok(owner.session.tip_status()).await["tip"].clone();
-        if followed != next {
+        let rotation_resealed_next = followed != next;
+        if rotation_resealed_next {
             let inspection = snap::ok(owner.session.inspect_tips()).await;
             assert_eq!(seal_by_id(&inspection, &followed)["tip"], next);
         }
@@ -1445,13 +1465,17 @@ mod races {
             let revoked = seal_by_id(&inspection, &continuations[winner]);
             assert_eq!(
                 (revoked["revoked"].clone(), revoked["canonical"].clone()),
-                (json!(true), json!(false))
+                (json!(true), json!(false)),
+                "a revocation without a cut takes the revoked seal out of resolution"
             );
             assert_eq!(seal_by_id(&inspection, &next)["canonical"], true);
             assert_eq!(seal_by_id(&inspection, &next)["tip"], tip);
         }
         let held = snap::ok(member.session.held_changes()).await;
-        assert_eq!(held["count"], 0, "{held}");
+        assert_eq!(
+            held["count"], 0,
+            "the write on the revoked continuation goes with it: {held}"
+        );
         Ok(())
     }
 
@@ -1476,9 +1500,6 @@ mod races {
         let titles = ["before", "sealed by the creator"];
         settle_on(&house.all(), &sealed, &titles).await;
 
-        // A surviving trusted node proposes the cut at the creator's head;
-        // the root signs it with the revocation. The member the creator
-        // enrolled ends with it.
         let creator = snap::ok(owner.session.info()).await["principal"].clone();
         let (t0, t1) = (&house.trusted[0], &house.trusted[1]);
         snap::ok(t0.session.revoke_identity_with_root(
@@ -1489,7 +1510,6 @@ mod races {
         ))
         .await;
         let rest = [t0, t1];
-        // The rotation that follows may seal once more.
         settle(&rest).await;
         let followed = snap::ok(t0.session.tip_status()).await["tip"].clone();
         settle_on(&rest, &followed, &titles).await;
@@ -1508,11 +1528,13 @@ mod races {
             .await
             .expect_err("the member ends with the creator");
         assert!(ended.to_string().contains("revoked"), "{ended}");
-        // Main keeps moving through the other trusted node.
         t0.add(3, "after").await;
         settle(&rest).await;
         let next = snap::ok(t1.session.seal(false)).await["tip"].clone();
-        assert_ne!(next, followed);
+        assert_ne!(
+            next, followed,
+            "main keeps moving through the other trusted node"
+        );
         settle_on(&rest, &next, &["after", "before", "sealed by the creator"]).await;
         for device in house.all() {
             device.close().await;
@@ -1526,14 +1548,10 @@ mod races {
         let house = household().await?;
         let (owner, member) = (&house.owner, &house.member);
         let (t0, t1) = (&house.trusted[0], &house.trusted[1]);
-        // The creator signs a bookmark that reaches t1 and the member, not t0.
-        for other in ["owner", "t1", "m"] {
-            house.hub.set_down("t0", other, true);
-        }
+        isolate_t0(&house.hub, true);
         snap::ok(owner.session.create_bookmark("late", None)).await;
         settle(&[owner, t1, member]).await;
         assert_eq!(bookmarks(t1).await, ["late", "main"]);
-        // t0 proposes the cut from the heads it holds, without that one.
         let creator = snap::ok(owner.session.info()).await["principal"].clone();
         snap::ok(t0.session.revoke_identity_with_root(
             &(snap::text(&(creator))),
@@ -1542,14 +1560,14 @@ mod races {
             true,
         ))
         .await;
-        for other in ["owner", "t1", "m"] {
-            house.hub.set_down("t0", other, false);
-        }
+        isolate_t0(&house.hub, false);
         settle(&[t0, t1]).await;
-        // t1, which held the statement, deletes it and says so; it never
-        // reaches t0.
         let past = alerts(t1, "tip_statements_past_cut").await;
-        assert_eq!(past.len(), 1, "{past:?}");
+        assert_eq!(
+            past.len(),
+            1,
+            "the device that held the statement past the cut deletes it and says so: {past:?}"
+        );
         assert_eq!(past[0]["kind"]["statements"], 1, "{past:?}");
         assert_eq!(past[0]["kind"]["signer"], creator, "{past:?}");
         for device in [t0, t1] {
@@ -1557,11 +1575,20 @@ mod races {
             assert_eq!(names.as_array().map(Vec::len), Some(1), "{names}");
             assert_eq!(bookmarks(device).await, ["main"]);
         }
-        assert!(alerts(t0, "tip_statements_past_cut").await.is_empty());
+        assert!(
+            alerts(t0, "tip_statements_past_cut").await.is_empty(),
+            "the statement past the cut never reaches the device that proposed the cut"
+        );
         for device in house.all() {
             device.close().await;
         }
         Ok(())
+    }
+    /// Cuts `t0` off from every other device, or reconnects it.
+    fn isolate_t0(hub: &Hub, down: bool) {
+        for other in ["owner", "t1", "m"] {
+            hub.set_down("t0", other, down);
+        }
     }
     async fn bookmarks(device: &Device) -> Vec<String> {
         snap::ok(device.session.inspect_tips()).await["bookmarks"]
@@ -1582,7 +1609,6 @@ async fn a_deferred_branch_switch_pulls_a_kept_seal_and_survives_reopen() -> Res
         &root.path().join("a"),
         Some(Network::Owned(hub.connector("a"))),
     )?;
-    // An issuer reads every scope the owner holds; it keeps the seals.
     let b = Device::join(
         &root.path().join("b"),
         &a.invite_as(json!({"kind": "issuer"})).await,
@@ -1618,11 +1644,11 @@ async fn a_deferred_branch_switch_pulls_a_kept_seal_and_survives_reopen() -> Res
         held(&snap::ok(b.session.inspect_tips()).await, &first),
         "kept"
     );
-    // The owner compacts past the first seal and no longer holds it.
     assert_eq!(snap::ok(a.session.compact(0)).await["compacted"], second);
     assert_eq!(
         held(&snap::ok(a.session.inspect_tips()).await, &first),
-        Value::Null
+        Value::Null,
+        "the owner compacted past the first seal and no longer holds it"
     );
     let open = json!({"seal": first, "minimum_in_sync": 1});
     let refused = message(
@@ -1640,7 +1666,6 @@ async fn a_deferred_branch_switch_pulls_a_kept_seal_and_survives_reopen() -> Res
     .await["grant"]
         .clone();
     snap::ok(b.session.install_trust(&(snap::text(&(grant))))).await;
-    // The issuer opens a branch on the old seal; the owner knows its graph but lacks its state.
     let branch = snap::ok(b.open_tip(&snap::text(&open["seal"]), 1)).await;
     snap::ok(
         b.session
@@ -1685,9 +1710,8 @@ async fn a_deferred_branch_switch_pulls_a_kept_seal_and_survives_reopen() -> Res
         held(&snap::ok(a.session.inspect_tips()).await, &first),
         "checkpoint"
     );
-    // The acquired state remains available for another owner-created branch.
-    snap::ok(a.open_tip(&snap::text(&open["seal"]), 1)).await;
-
+    let acquired_seal = snap::text(&open["seal"]);
+    snap::ok(a.open_tip(&acquired_seal, 1)).await;
     Ok(())
 }
 
@@ -1759,27 +1783,32 @@ async fn a_writer_compacts_a_close_with_only_registry_frames_after_the_last_item
     )?;
     main(&a).await;
     a.add(1, "milk").await;
-    // Enrollment writes the issuer registry after the last application frame.
-    let b = Device::join(
+    let writer = Device::join(
         &root.path().join("b"),
         &a.invite().await,
         Network::Owned(hub.connector("b")),
     )?;
-    introduce(&a, &b).await;
-    b.sync().await.expect("writer enrollment and rows");
-    assert_eq!(b.titles().await, ["milk"]);
+    introduce(&a, &writer).await;
+    writer
+        .sync()
+        .await
+        .expect("enrollment writes the issuer registry after the last application frame");
+    assert_eq!(writer.titles().await, ["milk"]);
     let before = snap::ok(a.session.tip_status()).await["tip"].clone();
     snap::ok(a.session.seal(true)).await;
     let inspected = snap::ok(a.session.inspect_tips()).await;
     let close = seal_of(&inspected, before.as_str().ok_or("tip")?);
     assert_eq!(close["action"], "close");
-    b.sync().await.expect("closed tip and registry placements");
-    let compacted = snap::ok(b.session.compact(0)).await;
+    writer
+        .sync()
+        .await
+        .expect("closed tip and registry placements");
+    let compacted = snap::ok(writer.session.compact(0)).await;
     assert_eq!(compacted["finalized"], close["id"], "{compacted}");
     assert_eq!(compacted["compacted"], close["id"], "{compacted}");
     assert_eq!(compacted["waiting"], Value::Null, "{compacted}");
-    assert_eq!(b.titles().await, ["milk"]);
-    b.close().await;
+    assert_eq!(writer.titles().await, ["milk"]);
+    writer.close().await;
     a.close().await;
     Ok(())
 }

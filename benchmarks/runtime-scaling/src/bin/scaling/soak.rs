@@ -72,6 +72,10 @@ fn histogram(label: &str, latency: &Mutex<Latency>) -> Result<(), Failure> {
     Ok(())
 }
 
+/// Runs the soak. Each interval prints and resets the service time of each
+/// observer delivery: the read of the subscribed range plus any wait for the
+/// change notification, which under continuous churn is small against the
+/// read, so it measures the observer-read cost.
 pub async fn run(config: Config) -> Result<(), Failure> {
     std::fs::create_dir_all(&config.directory)?;
     let path = config.directory.join("soak.db");
@@ -118,10 +122,6 @@ pub async fn run(config: Config) -> Result<(), Failure> {
     counters[0].creates.fetch_add(1, Relaxed);
     let point = Arc::new(Mutex::new(Latency::new()));
     let ranges = Arc::new(Mutex::new(Latency::new()));
-    // Per-interval service time of each observer delivery: the read of the
-    // subscribed range, plus any wait for the change notification. Under
-    // continuous churn the wait is small against the read, so the histogram is
-    // the observer-read cost; it is reset and printed every interval.
     let deliveries = Arc::new(Mutex::new(Latency::new()));
     let reader = tokio::spawn(reads(
         runtime.domain(scope(1))?,
@@ -185,11 +185,10 @@ pub async fn run(config: Config) -> Result<(), Failure> {
     let mut previous_observations = 0u64;
     loop {
         tokio::time::sleep(Duration::from_secs(config.interval)).await;
-        // Surface a failed task before spending hours waiting for its counter.
-        if writers.iter().any(tokio::task::JoinHandle::is_finished)
+        let a_task_ended_early = writers.iter().any(tokio::task::JoinHandle::is_finished)
             || reader.is_finished()
-            || observers.iter().any(tokio::task::JoinHandle::is_finished)
-        {
+            || observers.iter().any(tokio::task::JoinHandle::is_finished);
+        if a_task_ended_early {
             stop.store(true, Relaxed);
             shutdown.send(true)?;
             for task in writers {

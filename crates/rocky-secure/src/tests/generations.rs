@@ -709,8 +709,10 @@ pub(super) async fn identity_insert(
         };
         let id = session.next_id(name).await?;
         let tail = tail.trim().trim_end_matches(')');
-        // The allocated identity is a canonical BLOB; embed it without changing positional bindings.
-        let rewritten = format!("INSERT INTO {name}({columns},id) VALUES{tail},X'{id}')");
+        let id_as_blob_literal_keeping_positional_bindings = format!("X'{id}'");
+        let rewritten = format!(
+            "INSERT INTO {name}({columns},id) VALUES{tail},{id_as_blob_literal_keeping_positional_bindings})"
+        );
         session.run(&rewritten, std::mem::take(&mut values)).await
     }
     .await;
@@ -755,7 +757,7 @@ async fn frames(
     target: &EncryptedReplica<TypedRows>,
     scope: ResourceScope,
 ) -> Vec<EncryptedFrame> {
-    let (node, credentials, tip) = {
+    let (node, credentials, tip_the_hello_declares) = {
         let inner = target.inner.lock(crate::replica::Class::Background).await;
         (
             inner.config.node.public_key(),
@@ -763,8 +765,10 @@ async fn frames(
             inner.workspace.tip,
         )
     };
-    // As the target's session hello declares its followed tip.
-    source.admit_peer(node, &credentials, tip).await.unwrap();
+    source
+        .admit_peer(node, &credentials, tip_the_hello_declares)
+        .await
+        .unwrap();
     frames_as(source, node, &credentials, scope).await
 }
 /// Every frame a node presenting `credentials` may receive from `source`.
@@ -804,20 +808,21 @@ async fn an_interrupted_local_plan_finishes_when_the_replica_opens() {
         .await;
     assert!(matches!(failed, Err(Error::InjectedFailure)), "{failed:?}");
     assert_eq!(replica.projection_plan().await.unwrap().unwrap().tables, 1);
-    // The installed tables still answer.
     assert_eq!(
         select(&replica, "SELECT count(*) FROM items").await,
-        vec![vec![SqlValue::Integer(300)]]
+        vec![vec![SqlValue::Integer(300)]],
+        "the installed tables still answer"
     );
-    // Another plan waits for this one.
     let mut other = lineage.indexed();
     other.tables[0].indexes[1].name = "drafts_by_body".into();
     other.tables[0].indexes[1].create_sql = "CREATE INDEX drafts_by_body ON drafts(body)".into();
     let other = replica
         .install_tables(other, lineage.domain, lineage.readers(1))
         .await;
-    assert!(matches!(other, Err(Error::Incompatible(_))), "{other:?}");
-    // Writes before the switch keep their rows.
+    assert!(
+        matches!(other, Err(Error::Incompatible(_))),
+        "another plan waits for this one: {other:?}"
+    );
     let writer = session(&replica).await;
     writer
         .run("UPDATE items SET title='changed' WHERE key='0001'", vec![])
@@ -832,18 +837,22 @@ async fn an_interrupted_local_plan_finishes_when_the_replica_opens() {
         .unwrap();
     drop(writer);
     drop(replica);
-    // Reopening finishes the same plan before anything else runs.
     let replica = EncryptedReplica::open(&path, lineage.app(1), lineage.config(1, &node))
         .await
         .unwrap();
-    assert_eq!(replica.projection_plan().await.unwrap(), None);
+    assert_eq!(
+        replica.projection_plan().await.unwrap(),
+        None,
+        "reopening finishes the same plan before anything else runs"
+    );
     replica
         .install_tables(lineage.indexed(), lineage.domain, lineage.readers(1))
         .await
         .unwrap();
     assert_eq!(
         select(&replica, "SELECT count(*), max(key) FROM items").await,
-        vec![vec![SqlValue::Integer(300), text("9999")]]
+        vec![vec![SqlValue::Integer(300), text("9999")]],
+        "writes before the switch keep their rows"
     );
     assert_eq!(
         select(&replica, "SELECT title FROM items WHERE key='0001'").await,
@@ -896,15 +905,17 @@ async fn an_uninterrupted_local_plan_switches_while_reads_continue() {
         .unwrap()
     };
     assert!(format!("{plan:?}").contains("drafts_body"), "{plan:?}");
-    // A renamed field is another field: refused before a plan.
     let mut renamed = lineage.schema(1);
     renamed.tables[0].columns[1].sql_name = "name".into();
-    assert!(matches!(
-        replica
-            .install_tables(renamed, lineage.domain, lineage.readers(1))
-            .await,
-        Err(Error::Incompatible(_))
-    ));
+    assert!(
+        matches!(
+            replica
+                .install_tables(renamed, lineage.domain, lineage.readers(1))
+                .await,
+            Err(Error::Incompatible(_))
+        ),
+        "a renamed field is another field, refused before a plan"
+    );
     assert_eq!(replica.projection_plan().await.unwrap(), None);
 }
 
@@ -930,11 +941,11 @@ async fn a_backup_copy_opens_only_under_a_fresh_identity_and_keeps_its_history()
             .await
             .is_err()
     );
-    // Copying a file is not opening it: its identity is the old node's.
     assert!(
         EncryptedReplica::open(&copy, lineage.app(1), lineage.config(1, &new_key))
             .await
-            .is_err()
+            .is_err(),
+        "a copied file keeps the old node's identity, so opening it is refused"
     );
     let restored = restore(&new_key, old_key.public_key()).await.unwrap();
     restored
@@ -962,8 +973,9 @@ async fn a_backup_copy_opens_only_under_a_fresh_identity_and_keeps_its_history()
     );
     restored.audit(items).await.unwrap();
     drop(restored);
-    // Rebinding happened once; reopening is ordinary.
-    let reopened = restore(&new_key, old_key.public_key()).await.unwrap();
+    let reopened = restore(&new_key, old_key.public_key())
+        .await
+        .expect("rebinding happened once; reopening is ordinary");
     assert_eq!(
         reopened.predecessors().await.unwrap(),
         [old_key.public_key()]
@@ -981,10 +993,13 @@ async fn sync(
     scope: ResourceScope,
 ) {
     let credentials = lineage.credentials(generation, target_key);
-    // As the target's session hello declares its followed tip.
-    let tip = target.followed_tip().await;
+    let tip_the_hello_declares = target.followed_tip().await;
     source
-        .admit_peer(target_key.public_key(), &credentials, tip)
+        .admit_peer(
+            target_key.public_key(),
+            &credentials,
+            tip_the_hello_declares,
+        )
         .await
         .unwrap();
     let mut after = None;

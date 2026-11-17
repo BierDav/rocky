@@ -24,6 +24,8 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::common;
 
+/// How many identities, granted or invited, one registry holds.
+const REGISTRY_CAPACITY: usize = 256;
 /// The shared items collection and a partitioned one for partition grants.
 const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[
  {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
@@ -47,11 +49,12 @@ fn create(root: &Path, network: Network) -> Result<Device, Failure> {
 }
 fn join(directory: &Path, network: Network, invitation: &str) -> Result<Device, Failure> {
     let mut options = open(directory, Some(network));
-    // Fault tests retain an application signer across lost answers and process restarts.
     let mut seed = directory.to_string_lossy().as_bytes().to_vec();
     seed.extend_from_slice(invitation.as_bytes());
+    let signer_stable_across_lost_answers_and_restarts =
+        rocky_core::commitment("fixture.join-identity", &seed);
     options.identity = Some(Arc::new(rocky_sdk::IdentityKey::from_secret(
-        rocky_core::commitment("fixture.join-identity", &seed),
+        signer_stable_across_lost_answers_and_restarts,
     )));
     Device::new(Database::join(options, invitation)?)
 }
@@ -93,6 +96,20 @@ async fn settle(device: &Device) -> Value {
 async fn online(device: &Device, online: bool) {
     snap::ok(device.session.set_networking_enabled(online)).await;
 }
+/// Waits out each device's first sync, so no issuer relays a record that
+/// later steps expect to stay apart.
+async fn settle_first_syncs_before_anything_else_is_recorded(devices: &[&Device]) {
+    for device in devices {
+        settle(device).await;
+    }
+}
+/// Takes offline the issuers that tested concurrent enrollment, so none
+/// answers a renewal meant for another issuer while the first is offline.
+async fn keep_enrollment_issuers_from_renewals(issuers: &[&Device]) {
+    for issuer in issuers {
+        online(issuer, false).await;
+    }
+}
 async fn synced(device: &Device) -> Result<Value, Failure> {
     device
         .sync()
@@ -103,14 +120,13 @@ async fn synced(device: &Device) -> Result<Value, Failure> {
 fn chain_capability(directory: &Path) -> Result<String, Failure> {
     let chain: CredentialChain =
         serde_json::from_value(identity(directory)?["credentials"].clone())?;
-    // The device identity's own link, below the issuing trusted grant.
-    let link = chain
+    let device_identity_link = chain
         .0
         .iter()
         .rev()
         .find(|link| link.capability.kind == rocky_core::PrincipalKind::User)
         .ok_or("empty chain")?;
-    Ok(data_encoding::HEXLOWER.encode(&link.id()?))
+    Ok(data_encoding::HEXLOWER.encode(&device_identity_link.id()?))
 }
 /// Rows of the registry's typed table in a device's file.
 fn registry_rows(directory: &Path, entry: &str) -> Result<i64, Failure> {
@@ -192,6 +208,8 @@ async fn invitation_availability_survives_reopen_and_tracks_replacement_and_use(
     Ok(())
 }
 
+/// B stays out of reach until the member's first sync settled. The recorded
+/// partition capability can outlive the original enrollment.
 #[tokio::test]
 async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -> Result<(), Failure>
 {
@@ -205,7 +223,6 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
         &a.invite_as(issuer()).await,
     )?;
     settle(&b).await;
-    // B stays out of reach until the member's first sync settled.
     online(&b, false).await;
     let m = join(&root.join("m"), memory(&hub, "m"), &a.invite().await)?;
     settle(&m).await;
@@ -244,7 +261,6 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
     assert_eq!(at_a["kind"], "paired");
     assert_eq!(at_a["partitions"][0]["delegations"], 2);
     assert_eq!(at_a["label"], json!([7, 8, 9]));
-    // The recorded partition capability can outlive the original enrollment.
     let enrolled_expiry = snap::ok(m.session.info()).await["expires"]
         .as_str()
         .ok_or("enrollment expiry")?
@@ -254,7 +270,8 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
             .as_str()
             .ok_or("record expiry")?
             .parse::<u64>()?
-            >= enrolled_expiry
+            >= enrolled_expiry,
+        "the recorded partition capability can outlive the original enrollment"
     );
     online(&b, true).await;
     assert!(!identities(&b).await.contains_key(&m_identity));
@@ -262,8 +279,11 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
     synced(&b).await?;
     let listed = identities(&b).await;
     assert_eq!(listed[&m_identity], at_a);
-    // The enrolling issuer's own record arrived too.
-    assert_eq!(listed[&a.identity().await]["profile"], issuer());
+    assert_eq!(
+        listed[&a.identity().await]["profile"],
+        issuer(),
+        "the enrolling issuer's own record arrives with the member's"
+    );
     assert!(!listed.contains_key(&b.identity().await));
     for device in [&a, &b, &m] {
         device.close().await;
@@ -271,7 +291,8 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
     Ok(())
 }
 
-/// Acceptance 4 of the mesh scope, on the in-process hub.
+/// Acceptance 4 of the mesh scope, on the in-process hub. B is out of reach
+/// while the member joins: it never meets it and never receives its record.
 #[tokio::test]
 async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() -> Result<(), Failure>
 {
@@ -285,8 +306,6 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
         &a.invite_as(issuer()).await,
     )?;
     settle(&b).await;
-    // B is out of reach while the member joins: it never meets it and
-    // never receives its record.
     online(&b, false).await;
     let m = join(&root.join("m"), memory(&hub, "m"), &a.invite().await)?;
     settle(&m).await;
@@ -303,10 +322,10 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
     })
     .await;
     let after = snap::ok(m.session.info()).await;
-    // Renewed through B's chain, it expires no later than B does.
     assert_eq!(
         after["expires"],
-        snap::ok(b.session.info()).await["expires"]
+        snap::ok(b.session.info()).await["expires"],
+        "a renewal through B's chain expires no later than B does"
     );
     let record = identities(&b).await[&m_identity].clone();
     assert_eq!(record["kind"], "renewed");
@@ -340,6 +359,7 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
     Ok(())
 }
 
+/// Once the custody peer joined, the two issuers meet only through it.
 #[tokio::test]
 async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -366,7 +386,6 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
     let w = join(&root.join("w"), memory(&hub, "w"), &a.invite().await)?;
     synced(&r).await?;
     synced(&w).await?;
-    // The two issuers meet only through the custody peer from now on.
     let (a_node, b_node) = (a.node().await, b.node().await);
     snap::ok(a.session.remove_peer(&(snap::text(&(b_node))))).await;
     snap::ok(b.session.remove_peer(&(snap::text(&(a_node))))).await;
@@ -422,7 +441,6 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
                 .is_err()
         );
     }
-    // Neither do an issuer's application sessions open it.
     let query = rocky_sdk::ReadQuery {
         sql: "SELECT * FROM issuer_registry".to_owned(),
         values: vec![],
@@ -433,7 +451,8 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
     assert!(
         snap::observe(a.session.read((query).clone()))
             .await
-            .is_err()
+            .is_err(),
+        "an issuer's application session does not open the registry"
     );
     assert!(registry_rows(&root.join("b"), "identity")? >= 6);
     for device in [&a, &b, &c, &r, &w] {
@@ -442,6 +461,8 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
     Ok(())
 }
 
+/// Two issuers enroll an issuer each at once; then two issuers renew one device
+/// before either hears of the other.
 #[tokio::test]
 async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -453,7 +474,6 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
         memory(&hub, "b"),
         &a.invite_as(issuer()).await,
     )?;
-    // Two issuers enroll an issuer each at once.
     let started = |name: &str, invitation: String| {
         let (directory, network) = (root.join(name), memory(&hub, name));
         tokio::task::spawn_blocking(move || {
@@ -465,11 +485,7 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
         started("y", b.invite_as(issuer()).await)
     );
     let (x, y) = (x??, y??);
-    // Their first syncs end before anything else is recorded, so no issuer
-    // relays a record that the steps below expect to stay apart.
-    settle(&x).await;
-    settle(&y).await;
-    // Each issuer writes under its own node key.
+    settle_first_syncs_before_anything_else_is_recorded(&[&x, &y]).await;
     let mut writers = std::collections::BTreeSet::new();
     for device in [&a, &b, &x, &y] {
         writers.insert(
@@ -478,22 +494,25 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
                 .to_string(),
         );
     }
-    assert_eq!(writers.len(), 4, "{writers:?}");
+    assert_eq!(
+        writers.len(),
+        4,
+        "each issuer writes under its own node key: {writers:?}"
+    );
     synced(&a).await?;
     let (x_identity, y_identity) = (x.identity().await, y.identity().await);
     for issuer in [&a, &b] {
         let listed = identities(issuer).await;
-        assert!(listed.contains_key(&x_identity) && listed.contains_key(&y_identity));
+        assert!(
+            listed.contains_key(&x_identity) && listed.contains_key(&y_identity),
+            "both issuers list both concurrent enrollments"
+        );
     }
 
-    // Two issuers renew one device before either hears of the other.
     for issuer in [&a, &b] {
         snap::ok(issuer.session.set_automatic_sync(false)).await;
     }
-    // The extra issuers above tested concurrent enrollment; keep them from
-    // answering the renewal intended for b when a is offline.
-    online(&x, false).await;
-    online(&y, false).await;
+    keep_enrollment_issuers_from_renewals(&[&x, &y]).await;
     online(&b, false).await;
     let m = join(&root.join("m"), memory(&hub, "m"), &a.invite().await)?;
     settle(&m).await;
@@ -516,15 +535,13 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     synced(&a).await?;
     let (at_a, at_b) = (identities(&a).await, identities(&b).await);
     assert_eq!(at_a[&m_identity], at_b[&m_identity]);
-    // The record keeps the later renewal; a chain through the second
-    // issuer expires no later than that issuer's own.
     let expires =
         |value: &Value| -> Result<u64, Failure> { Ok(value.as_str().ok_or("expires")?.parse()?) };
     assert!(
         expires(&snap::ok(m.session.info()).await["expires"])?
-            <= expires(&at_a[&m_identity]["expires"])?
+            <= expires(&at_a[&m_identity]["expires"])?,
+        "the record keeps the later renewal; a chain through the second issuer expires no later"
     );
-    // One visible identity entry per identity in either file.
     for name in ["a", "b"] {
         let file = rusqlite::Connection::open_with_flags(
             root.join(name).join("rocky.sqlite"),
@@ -535,7 +552,10 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
             [&m_identity],
             |row| row.get(0),
         )?;
-        assert_eq!(entries, 1, "{name}");
+        assert_eq!(
+            entries, 1,
+            "one visible identity entry per identity in {name}"
+        );
     }
     for device in [&a, &b, &x, &y, &m] {
         device.close().await;
@@ -752,10 +772,11 @@ fn faulty(hub: &Arc<Hub>, name: &str, faults: &Arc<Faults>) -> Network {
     }))
 }
 
-/// Pairing, renewal and `grant` stopped after the registry commit: before
-/// the answer is written, and after it is written but before the requester
-/// stores it. A record exists without a usable chain, and the retry is the
-/// same device.
+/// Pairing, renewal and `grant` stopped after the registry commit: before the
+/// answer is written, and after it is written but before the requester stores
+/// it. A record exists without a usable chain, and the retry is the same
+/// device. A granted bundle lost after its record committed is issued again;
+/// short-lived chains make each renewal's capability a new one.
 #[tokio::test]
 async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -827,8 +848,6 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
         assert_eq!(identities(&a).await.len(), recorded.len(), "{name}");
         members.push((member, identity, requesting));
     }
-    // A granted bundle lost after its record committed is issued again.
-    // Short-lived chains make each renewal's capability a new one.
     let profile = json!({"kind": "writer", "scopes": ["items"]});
     let mut granted = Vec::new();
     for name in ["g", "h"] {
@@ -862,11 +881,11 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
         );
         granted.push((device, keys.identity.to_hex(), requesting));
     }
-    // Renewal stopped before its answer is written, then after.
     for (index, (device, identity, requesting)) in granted.iter().enumerate() {
         let directory = root.join(["g", "h"][index]);
         let held = chain_capability(&directory)?;
-        if index == 0 {
+        let stops_before_the_answer_is_written = index == 0;
+        if stops_before_the_answer_is_written {
             *issuing.answer.lock().unwrap() = Some(Protocol::Rpc);
         } else {
             *requesting.receipt.lock().unwrap() = Some(Protocol::Rpc);
@@ -911,7 +930,8 @@ fn random_device() -> Value {
 }
 
 /// A full registry refuses the 257th device and syncs to a new issuer; the
-/// enrollment guide records both times.
+/// enrollment guide records both times. A pending invitation and 253 granted
+/// devices make 256 identities with A and B.
 #[tokio::test]
 async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() -> Result<(), Failure>
 {
@@ -926,10 +946,10 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
     )?;
     settle(&b).await;
     let reader = json!({"kind": "reader", "scopes": ["items"]});
-    // A pending invitation, then 253 granted devices: 256 with A, B and it.
     let invitation = a.invite_as(reader.clone()).await;
     let filled = Instant::now();
-    for _ in 0..253 {
+    let a_b_and_the_pending_invitation = 3;
+    for _ in 0..REGISTRY_CAPACITY - a_b_and_the_pending_invitation {
         snap::ok(
             a.session.grant(
                 serde_json::from_value::<rocky_sdk::NodeKeys>(json!(random_device()))
@@ -948,7 +968,6 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
     let joined = join(&root.join("j"), memory(&hub, "j"), &invitation)?;
     assert_eq!(identities(&a).await.len(), 255);
 
-    // The 257th fails with the named error and writes nothing.
     let before = (
         std::fs::read(root.join("a/identity.json"))?,
         registry_rows(&root.join("a"), "%")?,
@@ -967,7 +986,7 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
     )
     .await
     .err()
-    .ok_or("granted a 257th device")?;
+    .ok_or("granted a device past the registry's capacity")?;
     assert_eq!(refused["code"], "registry_full", "{refused}");
     let refused = snap::observe(
         a.session.invite(
@@ -1073,7 +1092,6 @@ async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Resul
     let record = identities(&owner).await.remove(&identity).ok_or("record")?;
     assert_eq!(record["invitation"], invitation["id"]);
     assert_eq!(record["label"], json!(label));
-    // The next invitation cannot erase the association of the earlier enrollment.
     snap::ok(
         owner.session.invite(
             Some(
@@ -1091,7 +1109,10 @@ async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Resul
         .await
         .remove(&identity)
         .ok_or("reopened record")?;
-    assert_eq!(record["invitation"], invitation["id"]);
+    assert_eq!(
+        record["invitation"], invitation["id"],
+        "a later invitation does not erase the earlier enrollment's association"
+    );
     assert_eq!(record["label"], json!(label));
     reopened.database.close().await?;
     Ok(())

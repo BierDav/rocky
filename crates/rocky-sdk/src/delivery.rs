@@ -142,7 +142,8 @@ pub(crate) fn digest_key(digest: &Commitment) -> String {
 impl Settings {
     /// Saves an envelope for `recipient` with the sender's intent. One of
     /// this epoch already pending stays; a delivered one is replaced only
-    /// when `again`.
+    /// when `again`. When the outbox is full a delivered entry, which only
+    /// answers `status`, goes first.
     pub(crate) fn queue(
         &mut self,
         recipient: PublicKey,
@@ -167,14 +168,13 @@ impl Settings {
             None => {}
         }
         if self.deliveries.len() >= MAX_OUTBOX {
-            // Delivered entries only answer `status`; they go first.
-            let delivered = self
+            let evicted_delivered_digest = self
                 .deliveries
                 .iter()
                 .find(|(_, pending)| pending.delivery.is_none())
                 .map(|(digest, _)| digest.clone())
                 .ok_or("delivery outbox full: 16,384 envelopes are pending")?;
-            self.deliveries.remove(&delivered);
+            self.deliveries.remove(&evicted_delivered_digest);
         }
         self.deliveries.insert(
             digest_key(&delivery.digest()?),
@@ -236,8 +236,7 @@ impl Settings {
         if rotation.groups.is_empty() || candidates.is_empty() {
             return Ok(());
         }
-        // The issuer's node signs under its chain, which recipients verify.
-        let signer = PrivateKey::from_bytes(&vault.get("node")?);
+        let signer_under_issuer_chain = PrivateKey::from_bytes(&vault.get("node")?);
         let mut pending = Vec::new();
         for (address, generation) in &rotation.groups {
             let Some(record) = self.groups.get(address).cloned() else {
@@ -256,7 +255,7 @@ impl Settings {
                     continue;
                 }
                 let envelope = GroupSecretEnvelope::seal_recorded(
-                    &signer,
+                    &signer_under_issuer_chain,
                     rocky_credentials::GroupSecrets {
                         group: record.address,
                         epoch: epoch.generation,

@@ -91,7 +91,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 return Err(denied("another tip depends on retained frames"));
             }
         }
-        // Held originals and signed void headers can still need a predecessor.
         let mut evidence = Vec::new();
         for record in rows(&inner.conn, "SELECT frame FROM secure_held_frames").await? {
             let [SqlValue::Blob(bytes)] = record.as_slice() else {

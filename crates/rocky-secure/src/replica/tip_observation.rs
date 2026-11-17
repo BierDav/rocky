@@ -116,8 +116,6 @@ impl<A: RowApplication> Inner<A> {
         }
         let graph = self.scope_graph(scope)?;
         let mut marks = self.inherited_marks(&graph)?;
-        // A build on another engine than the tip's covers only what it
-        // replayed; what waits continues in the successor tip.
         let headers = self
             .domain_headers_from(scope, self.engine_matches())
             .await?;
@@ -132,14 +130,14 @@ impl<A: RowApplication> Inner<A> {
             };
             let resource: ResourceScope = decode(bytes)?;
             if resource.domain == scope && self.has_pruned_prefix(resource).await? {
-                // A base on the inherited path is already bounded by its seal's
-                // author frontier. Only uncovered pruning prevents a close.
-                if let Some(base) = self.base_seal(*id).await?
-                    && self
+                let pruning_bounded_by_inherited_base = match self.base_seal(*id).await? {
+                    Some(base) => self
                         .path_seals(scope)?
                         .iter()
-                        .any(|seal| seal.id().ok() == Some(base))
-                {
+                        .any(|seal| seal.id().ok() == Some(base)),
+                    None => false,
+                };
+                if pruning_bounded_by_inherited_base {
                     continue;
                 }
                 return Err(denied(

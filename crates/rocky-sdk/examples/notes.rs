@@ -1,3 +1,7 @@
+//! A notes database: `--create` makes it on the first run, which refuses
+//! to overwrite an installation; later runs open it. Creating follows the
+//! `main` bookmark, so this owner seals routinely during sync and replay
+//! drops become final.
 use rocky_sdk::{Affinity, Column, Configuration, Failure, Schema, Table, params};
 
 #[tokio::main]
@@ -13,9 +17,6 @@ async fn main() -> Result<(), Failure> {
                 ),
         )
         .build()?;
-    // Use `open()` on subsequent runs; create refuses to overwrite an installation.
-    // Creating follows the `main` bookmark, so this owner seals routinely
-    // during sync and replay drops become final.
     let directory = std::env::args()
         .skip(1)
         .find(|arg| arg != "--create")

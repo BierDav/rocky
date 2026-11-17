@@ -39,7 +39,6 @@ async fn a_revoked_fresh_restore_config_does_not_rebind_the_backup() {
         Err(error) => error,
     };
     assert!(error.to_string().contains("revoked"), "{error}");
-    // A different qualified fresh node can still adopt the untouched identity.
     let restored = EncryptedReplica::open_restored(
         &path,
         lineage.app(3),
@@ -47,7 +46,7 @@ async fn a_revoked_fresh_restore_config_does_not_rebind_the_backup() {
         keys[0].public_key(),
     )
     .await
-    .unwrap();
+    .expect("a different qualified fresh node can still adopt the untouched identity");
     assert_eq!(
         restored.predecessors().await.unwrap(),
         vec![keys[0].public_key()]
@@ -57,6 +56,17 @@ async fn a_revoked_fresh_restore_config_does_not_rebind_the_backup() {
         vec![vec![text("one"), text("before backup")]]
     );
     restored.audit(lineage.scope("items")).await.unwrap();
+}
+
+/// A value's logical size: eight bytes for numbers, the encoded length for
+/// blobs and text.
+fn logical_size(value: &SqlValue) -> usize {
+    match value {
+        SqlValue::Integer(_) | SqlValue::Real(_) => 8,
+        SqlValue::Blob(bytes) => bytes.len(),
+        SqlValue::Text(text) => text.len(),
+        SqlValue::Null => 0,
+    }
 }
 
 #[derive(Debug)]
@@ -86,7 +96,6 @@ pub(super) async fn accounting(
         "secure_identity_partitions",
     ];
     let mut logical_bytes = 0;
-    // Logical integer fields count eight bytes; blobs count their encoded length.
     for table in tables {
         let query = if table == "secure_admission_entries" {
             "SELECT bytes,signature,chain FROM secure_admission_entries".to_string()
@@ -95,12 +104,7 @@ pub(super) async fn accounting(
         };
         for row in records(replica, &query).await {
             for value in row {
-                logical_bytes += match value {
-                    SqlValue::Integer(_) | SqlValue::Real(_) => 8,
-                    SqlValue::Blob(bytes) => bytes.len(),
-                    SqlValue::Text(text) => text.len(),
-                    SqlValue::Null => 0,
-                };
+                logical_bytes += logical_size(&value);
             }
         }
     }

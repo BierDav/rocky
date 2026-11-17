@@ -232,10 +232,9 @@ impl TableEvents {
         };
         let tables = tables.unwrap_or(&self.tables);
         let mut dead = false;
-        // One offer per observer, however many of its tables changed.
-        let mut offers: HashMap<usize, (Arc<Slot>, Vec<String>)> = HashMap::new();
+        let mut offer_per_observer: HashMap<usize, (Arc<Slot>, Vec<String>)> = HashMap::new();
         let mut offer = |slot: &Weak<Slot>, label: &str| match slot.upgrade() {
-            Some(slot) => offers
+            Some(slot) => offer_per_observer
                 .entry(Arc::as_ptr(&slot) as usize)
                 .or_insert_with(|| (slot, Vec::new()))
                 .1
@@ -250,7 +249,7 @@ impl TableEvents {
                 offer(slot, table);
             }
         }
-        for (slot, labels) in offers.into_values() {
+        for (slot, labels) in offer_per_observer.into_values() {
             slot.offer(labels, self.scope, revision, causes);
         }
         if dead {
@@ -475,7 +474,6 @@ mod tests {
             [(scope(1), 3 * MAX_PENDING_OUTCOMES as u64)].into()
         );
         assert_eq!(change.causes, [Cause::Local, Cause::Sync].into());
-        // The next change names its outcomes again.
         events.publish_outcomes(
             1,
             &Outcomes {
@@ -484,7 +482,10 @@ mod tests {
             },
         );
         let change = observer.next().await.unwrap();
-        assert!(!change.reconcile);
+        assert!(
+            !change.reconcile,
+            "the next change names its outcomes again"
+        );
         assert_eq!(change.dropped, [[9; 32]].into());
     }
 }

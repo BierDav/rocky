@@ -90,8 +90,10 @@ async fn pull_once(
                     let mut session = incoming.recv().await.unwrap();
                     session.serve(&source).await.unwrap();
                     session.close().await.unwrap();
-                    // The client ends the link once its channel closed.
-                    driven.await.unwrap().unwrap();
+                    driven
+                        .await
+                        .unwrap()
+                        .expect("the client ends the link once its channel closed");
                 })
         })
     };
@@ -184,10 +186,8 @@ async fn catch_up_beside_a_writer(operations: usize) -> usize {
                 () = completed.notified() => break,
                 changed = frames.changed() => changed.unwrap(),
             }
-            // Receive pages hold at most 32 frames. Queue BEGIN directly
-            // after every second receipt, including while pending apply runs.
             incoming += 1;
-            if incoming % 2 != 0 {
+            if incoming % RECEIPTS_PER_QUEUED_WRITE != 0 {
                 continue;
             }
             insert(
@@ -203,14 +203,14 @@ async fn catch_up_beside_a_writer(operations: usize) -> usize {
         writes
     };
     let ((), writes) = tokio::join!(catch_up, writer);
-    // Every operation applied exactly once: one row per key, each ticked.
     let applied = select(&session, "SELECT count(*),sum(done) FROM items").await;
     assert_eq!(
         applied,
         vec![vec![
             SqlValue::Integer(rows as i64),
             SqlValue::Integer(rows as i64)
-        ]]
+        ]],
+        "every operation applied exactly once: one row per key, each ticked"
     );
     assert_eq!(
         rows_of(&reader, "SELECT sum(applied) FROM secure_scope_state").await,
@@ -219,10 +219,23 @@ async fn catch_up_beside_a_writer(operations: usize) -> usize {
     writes
 }
 
+/// Receive pages hold at most 32 frames; a write is queued directly after every
+/// second receipt, including while a pending apply runs.
+const RECEIPTS_PER_QUEUED_WRITE: usize = 2;
+
+/// Six receive pages of operations, enough to retain concurrent writes and
+/// cross-log dependencies.
+const SIX_RECEIVE_PAGES_OF_OPERATIONS: usize = 6 * 32;
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_writer_commits_during_a_catch_up() {
-    // Six receive pages retain concurrent writes and cross-log dependencies.
-    assert!(catch_up_beside_a_writer(192).await > 0);
+    assert!(catch_up_beside_a_writer(SIX_RECEIVE_PAGES_OF_OPERATIONS).await > 0);
+}
+
+/// Lets each later receipt or open commit at most `transactions` apply
+/// transactions before the injected fault; `None` lifts the limit.
+fn limit_apply_transactions(transactions: Option<usize>) {
+    crate::APPLY_BUDGET.with(|budget| budget.set(transactions));
 }
 
 /// A catch-up interrupted between two apply transactions, at any of them,
@@ -257,15 +270,13 @@ async fn interrupted_catch_up(retry_receipt: bool) {
         .await;
     assert_eq!(pull(&source, &editor, t.items).await.frames, rows);
     tick(&editor, &both, rows).await;
-    // Every operation in log order, the updater's ticks first.
-    let mut frames = crate::tests::stored_frames(
+    let mut updater_ticks_then_creations_in_log_order = crate::tests::stored_frames(
         &editor,
         "SELECT header,body FROM secure_operations ORDER BY author,sequence",
     )
     .await;
-    assert_eq!(frames.len(), 2 * rows);
-    // Without the first creation, every other operation waits.
-    let first = frames.remove(rows);
+    assert_eq!(updater_ticks_then_creations_in_log_order.len(), 2 * rows);
+    let first = updater_ticks_then_creations_in_log_order.remove(rows);
     assert_eq!(first.operation().unwrap().header.seq_num, 0);
 
     let reader_node = PrivateKey::new();
@@ -298,17 +309,25 @@ async fn interrupted_catch_up(retry_receipt: bool) {
         )
         .await
         .unwrap();
-    for status in reader.receive_all(frames).await {
-        assert_eq!(status.unwrap(), ReceiveStatus::PendingDependencies);
+    for status in reader
+        .receive_all(updater_ticks_then_creations_in_log_order)
+        .await
+    {
+        assert_eq!(
+            status.unwrap(),
+            ReceiveStatus::PendingDependencies,
+            "without the first creation every other operation waits"
+        );
     }
-    // Receipt commits custody, then the fault stops before application.
-    crate::APPLY_BUDGET.with(|budget| budget.set(Some(0)));
-    assert!(reader.receive(first.clone()).await.is_err());
+    limit_apply_transactions(Some(0));
+    assert!(
+        reader.receive(first.clone()).await.is_err(),
+        "receipt commits custody, then the injected fault stops before application"
+    );
     let mut current = retry_receipt.then_some(reader);
     let mut interruptions = 1;
     loop {
-        // Each reopen or retried receipt commits one more apply transaction.
-        crate::APPLY_BUDGET.with(|budget| budget.set(Some(1)));
+        limit_apply_transactions(Some(1));
         let resumed = if let Some(reader) = current.take() {
             match reader.receive(first.clone()).await {
                 Ok(ReceiveStatus::Duplicate) => Ok(reader),
@@ -325,7 +344,7 @@ async fn interrupted_catch_up(retry_receipt: bool) {
             Err(Error::InjectedFailure) => interruptions += 1,
             Err(error) => panic!("{error}"),
             Ok(reader) => {
-                crate::APPLY_BUDGET.with(|budget| budget.set(None));
+                limit_apply_transactions(None);
                 let rows = rows as i64;
                 assert_eq!(
                     rows_of(&reader, "SELECT count(*),sum(done) FROM items").await,
@@ -339,17 +358,19 @@ async fn interrupted_catch_up(retry_receipt: bool) {
                     .await,
                     vec![vec![SqlValue::Integer(0)]]
                 );
-                // Each application counts once in its scope.
                 assert_eq!(
                     rows_of(&reader, "SELECT sum(applied) FROM secure_scope_state").await,
-                    vec![vec![SqlValue::Integer(2 * rows)]]
+                    vec![vec![SqlValue::Integer(2 * rows)]],
+                    "each application counts once in its scope"
                 );
                 break;
             }
         }
     }
-    // Eight operations take separate application transactions.
-    assert!(interruptions >= 7, "{interruptions} interruptions");
+    assert!(
+        interruptions >= 7,
+        "the eight operations take separate application transactions: {interruptions} interruptions"
+    );
 }
 /// Regression: a SQL commit between every settle step restarted the pending
 /// pass, so a receive waiting for it never returned while writes continued.

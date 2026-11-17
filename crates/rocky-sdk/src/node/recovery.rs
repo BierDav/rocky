@@ -12,6 +12,12 @@ const TICK: Duration = Duration::from_secs(30);
 /// The least time between two runs a commit triggered.
 const SPACING: Duration = Duration::from_secs(1);
 
+/// Marks `watch` seen before a recovery pass: a change during the pass
+/// wakes the next one rather than being swallowed after it completes.
+fn seen_before_pass<T>(watch: &mut watch::Receiver<T>) {
+    watch.borrow_and_update();
+}
+
 impl Node {
     /// One local recovery pass, then the blockers left. Sealing for
     /// members publishes statements, so a due seal wakes the sync pass,
@@ -28,7 +34,10 @@ impl Node {
     /// In a sync pass, before the exchanges: a signer seals for members
     /// when writes of an earlier key epoch arrived past the last seal, and
     /// lists the bases it holds, so a scope only a listed checkpoint
-    /// restores finds a peer that serves it.
+    /// restores finds a peer that serves it. After a revocation members
+    /// restore rows only from a served base: a lost one is made again at the
+    /// newest finalized seal, one of an earlier epoch signed again, and one
+    /// that misses sealed writes of an earlier epoch moves to a later seal.
     /// Returns why a due member seal was not made.
     pub(super) async fn publish_for_members(&self) -> Option<String> {
         if !self.signs_for_members().await {
@@ -37,10 +46,6 @@ impl Node {
         let mut sealing = false;
         let scope = self.domain().scope;
         let published = async {
-            // After a revocation members restore rows only from a served
-            // base: a lost one is made again at the newest finalized seal,
-            // one of an earlier epoch signed again, and one that misses
-            // sealed writes of an earlier epoch moves to a later seal.
             match self.replica.earlier_epoch_writes(scope).await? {
                 EarlierEpochWrites::Unsealed => {
                     sealing = true;
@@ -72,7 +77,9 @@ impl Node {
     /// A trusted node seals the followed tip once it holds
     /// `ROUTINE_SEAL_TRANSACTIONS` unsealed replayed transactions, so a
     /// rewind never undoes more; finalizing the seal ends their rewinds.
-    /// The root is never needed. Returns why a due seal was not made.
+    /// The root is never needed, and a log another trusted node's seal
+    /// already ended is left for sync to bring. Returns why a due seal was
+    /// not made.
     pub(super) async fn seal_routinely(&self) -> Option<String> {
         self.settings.lock().await.trusted_links()?;
         let scope = self.domain().scope;
@@ -90,8 +97,6 @@ impl Node {
                 >= rocky_secure::ROUTINE_SEAL_TRANSACTIONS
             {
                 match self.seal_followed(scope, false).await {
-                    // Another trusted node's seal ended the tip's log; sync
-                    // brings it.
                     Err(error) if call_failure(&error).code == "sealed" => {}
                     sealed => sealed?,
                 }
@@ -159,22 +164,20 @@ impl Node {
         self.replica.followed_bookmark().await.is_some()
             && self.tip_signer(self.domain().scope).await.is_ok()
     }
-    /// Drives local recovery until the database closes.
+    /// Drives local recovery until the database closes. Sync passes,
+    /// explicit ones too, and tip changes wake it.
     pub(crate) async fn drive_recovery(self: Arc<Self>) {
         let mut context = self.replica.observe_recovery().await;
         let mut revisions = self.replica.observe_revision();
         let mut frames = self.replica.observe_frames().await;
-        // Sync passes, explicit ones too, and tip changes.
         let mut passes = self.topics.subscribe();
         let mut wakes = self.sync_events.subscribe();
         loop {
-            // Mark before the pass: changes during recovery must wake the
-            // next pass rather than being swallowed after it completes.
-            context.borrow_and_update();
-            revisions.borrow_and_update();
-            frames.borrow_and_update();
-            passes.borrow_and_update();
-            wakes.borrow_and_update();
+            seen_before_pass(&mut context);
+            seen_before_pass(&mut revisions);
+            seen_before_pass(&mut frames);
+            seen_before_pass(&mut passes);
+            seen_before_pass(&mut wakes);
             let blockers = match self.recover_locally().await {
                 Ok(blockers) => blockers,
                 Err(error) => {

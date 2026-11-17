@@ -232,18 +232,27 @@ async fn transitions_load_only_the_rows_they_touch() {
     for operation in &operations {
         b.receive(operation.encode().unwrap()).await.unwrap();
     }
-    // Create and edit of one row meet in passes of 32 operations.
     b.process_pending().await.unwrap();
-    assert_eq!(app.widest.load(Ordering::Relaxed), 1);
-    // One window per transition: 42 local and 42 incoming.
-    assert_eq!(app.windows.load(Ordering::Relaxed), 84);
+    assert_eq!(
+        app.widest.load(Ordering::Relaxed),
+        1,
+        "create and edit of one row meet in passes of 32 operations"
+    );
+    assert_eq!(
+        app.windows.load(Ordering::Relaxed),
+        84,
+        "one window per transition: 42 local and 42 incoming"
+    );
     assert_eq!((count(&a).await, count(&b).await), (41, 41));
     assert_eq!(b.query().await.unwrap().rows, a.query().await.unwrap().rows);
     source.close().await.unwrap();
     target.close().await.unwrap();
-    // Within the quota open audits by replay, which needs no window either.
     let source = open(NODE).await.unwrap();
-    assert_eq!(app.windows.load(Ordering::Relaxed), 84);
+    assert_eq!(
+        app.windows.load(Ordering::Relaxed),
+        84,
+        "within the quota open audits by replay, which needs no window either"
+    );
     let next = write(&source.domain(scope()).unwrap(), None, "after reopen").await;
     assert_eq!((next.id.sequence.get(), next.lamport.get()), (43, 43));
     source.close().await.unwrap();
@@ -279,8 +288,10 @@ async fn open_does_not_replay_and_a_domain_outgrows_the_former_quota() {
     edit("tampered").await;
     let runtime = open(&dir, NODE, options).await.unwrap();
     let replica = runtime.domain(scope()).unwrap();
-    // The row no longer matches the digest kept beside it.
-    assert!(matches!(replica.audit().await, Err(Error::Corrupt(_))));
+    assert!(
+        matches!(replica.audit().await, Err(Error::Corrupt(_))),
+        "the row no longer matches the digest kept beside it"
+    );
     runtime.close().await.unwrap();
     edit("note-0").await;
     let runtime = open(&dir, NODE, options).await.unwrap();
@@ -303,8 +314,10 @@ async fn open_does_not_replay_and_a_domain_outgrows_the_former_quota() {
         snapshot.pruned_prefix.0,
         [(NODE, AuthorSequence::new(total - window).unwrap())]
     );
-    // The retained window lies inside the held frontier.
-    assert_eq!(snapshot.held, snapshot.applied);
+    assert_eq!(
+        snapshot.held, snapshot.applied,
+        "the retained window lies inside the held frontier"
+    );
     assert!(snapshot.received.is_empty());
     assert_eq!(
         snapshot.applied.0,
@@ -427,15 +440,17 @@ async fn rowless_checkpoint_pages_cost_the_same_at_any_depth() {
         }
     }
     assert_eq!((rows, costs.len()), (1600, 3));
-    // The first page has no key to seek after; later ones all seek.
-    assert!(costs[2] < costs[1] + costs[1] / 10, "{costs:?}");
+    assert!(
+        costs[2] < costs[1] + costs[1] / 10,
+        "the first page has no key to seek after; later ones all seek: {costs:?}"
+    );
     source.close().await.unwrap();
 }
 
 /// A full query reads its rows beside the writer: the writer only decodes
 /// them, and the frontier read with them is the writer's own, also behind
 /// a pruned prefix.
-// A browser Worker runs the read pool on the writer's own thread.
+/// A browser Worker runs the read pool on the writer's own thread.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test]
 async fn queries_run_no_statement_on_the_writer() {

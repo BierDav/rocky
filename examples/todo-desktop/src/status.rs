@@ -8,6 +8,8 @@ use todo_app::Member;
 
 /// How often the status refreshes and an online device syncs.
 const REFRESH: Duration = Duration::from_secs(1);
+/// Status refreshes between sync passes. Peers on the in-process link are
+/// dialed only by a pass.
 const SYNC_EVERY: u32 = 3;
 
 #[component]
@@ -29,8 +31,8 @@ pub(crate) fn Sync(todos: Shared, members: Vec<Member>) -> Element {
                         let online = current.network.networking_enabled;
                         status.set(Some(current));
                         error.set(None);
-                        // Peers on the in-process link are only dialed by a pass.
-                        if online && tick.is_multiple_of(SYNC_EVERY) && !syncing() {
+                        let pass_due = online && tick.is_multiple_of(SYNC_EVERY) && !syncing();
+                        if pass_due {
                             let _ = session.sync_once().await;
                         }
                     }

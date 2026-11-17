@@ -176,11 +176,11 @@ fn selector_chain_checks_attenuation_and_concrete_scope_without_a_key() {
         .unwrap();
     assert!(grants[0].permits(scope, [8; 32], Right::Custody));
     assert!(!grants[0].permits(scope, [8; 32], Right::Read));
-    // The ordinary table-scope admission path cannot discard the selector.
     assert!(
         chain
             .verify(publisher.public_key(), node.public_key(), &policy(), NOW)
-            .is_err()
+            .is_err(),
+        "the ordinary table-scope admission path cannot discard the selector"
     );
 }
 
@@ -253,7 +253,6 @@ fn refuses_wider_partition_grant(wide: PartitionGrant) {
             )
             .is_err()
     );
-    // A malicious holder signs the expanded grant without using issuance APIs.
     let mut leaf = delegated.0[1].capability.clone();
     leaf.extension = Extension::new(Extended {
         partitions: vec![wide],
@@ -276,7 +275,8 @@ fn refuses_wider_partition_grant(wide: PartitionGrant) {
                 &policy(),
                 NOW
             )
-            .is_err()
+            .is_err(),
+        "an expanded grant signed without the issuance APIs is refused"
     );
 }
 
@@ -456,13 +456,15 @@ fn paired_grants_and_partition_nodes_never_expand_authority() {
         personal: None,
     })
     .unwrap();
-    // A node certificate holds no partitions of its own.
-    assert!(SignedCapability::sign(leaf, &holder).is_err());
-    // A later membership sequence names its predecessor.
+    assert!(
+        SignedCapability::sign(leaf, &holder).is_err(),
+        "a node certificate holds no partitions of its own"
+    );
     assert!(
         prefix
             .certify_member(&holder, node_signer.public_key(), 1, None)
-            .is_err()
+            .is_err(),
+        "a later membership sequence names its predecessor"
     );
     assert!(!a.rights.is_empty());
 }
@@ -612,8 +614,10 @@ fn partition_selectors_cannot_be_dropped() {
         .unwrap();
     let mut leaf = chain.0[1].capability.clone();
     leaf.extension = crate::Extension::new(crate::Extended::default()).unwrap();
-    // A certificate is no place for selectors: it names its node alone.
-    assert!(SignedCapability::sign(leaf, &user).is_err());
+    assert!(
+        SignedCapability::sign(leaf, &user).is_err(),
+        "a certificate names its node alone, no selectors"
+    );
     let t = tuple("x", "w");
     let scope = t.scope(domain(), [3; 32], &[4; 32]).unwrap();
     let mut parent = chain.0[0].capability.clone();

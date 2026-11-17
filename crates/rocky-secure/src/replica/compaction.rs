@@ -30,18 +30,31 @@ pub const ARRIVED_SEALS_PER_PASS: usize = 4;
 
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_seal_anchors(scope INTEGER PRIMARY KEY,frontier BLOB NOT NULL) WITHOUT ROWID",
-    // Seals of the followed path this replica finalized, oldest first. The
-    // last compacted one is its scopes' replay base.
-    "CREATE TABLE IF NOT EXISTS secure_finalized(domain BLOB NOT NULL,depth INTEGER NOT NULL,seal BLOB NOT NULL,compacted INTEGER NOT NULL,PRIMARY KEY(domain,depth)) WITHOUT ROWID",
-    // Per scope and uncompacted finalized seal: the last applied position
-    // it includes. Applied positions it excludes follow every included one.
-    "CREATE TABLE IF NOT EXISTS secure_seal_bounds(scope INTEGER NOT NULL,depth INTEGER NOT NULL,position INTEGER NOT NULL,PRIMARY KEY(scope,depth)) WITHOUT ROWID",
-    // What finalizing at that seal changed: a row without fields is dropped.
-    "CREATE TABLE IF NOT EXISTS secure_seal_drops(scope INTEGER NOT NULL,depth INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB,PRIMARY KEY(scope,depth,row)) WITHOUT ROWID",
-    // Domains whose compacted seal lost a race: their base must be rebuilt
-    // at the winner.
-    "CREATE TABLE IF NOT EXISTS secure_compaction_lost(domain BLOB PRIMARY KEY,seal BLOB NOT NULL) WITHOUT ROWID",
+    FINALIZED,
+    SEAL_BOUNDS,
+    SEAL_DROPS,
+    COMPACTION_LOST,
 ];
+/// Seals of the followed path this replica finalized, oldest first. The last
+/// compacted one is its scopes' replay base.
+const FINALIZED: &str = "CREATE TABLE IF NOT EXISTS secure_finalized(domain BLOB NOT NULL,depth INTEGER NOT NULL,seal BLOB NOT NULL,compacted INTEGER NOT NULL,PRIMARY KEY(domain,depth)) WITHOUT ROWID";
+/// Per scope and uncompacted finalized seal: the last applied position it
+/// includes. Applied positions it excludes follow every included one.
+const SEAL_BOUNDS: &str = "CREATE TABLE IF NOT EXISTS secure_seal_bounds(scope INTEGER NOT NULL,depth INTEGER NOT NULL,position INTEGER NOT NULL,PRIMARY KEY(scope,depth)) WITHOUT ROWID";
+/// What finalizing at a bound's seal changed: a row without fields is dropped.
+const SEAL_DROPS: &str = "CREATE TABLE IF NOT EXISTS secure_seal_drops(scope INTEGER NOT NULL,depth INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB,PRIMARY KEY(scope,depth,row)) WITHOUT ROWID";
+/// Domains whose compacted seal lost a race: their base must be rebuilt at
+/// the winner.
+const COMPACTION_LOST: &str = "CREATE TABLE IF NOT EXISTS secure_compaction_lost(domain BLOB PRIMARY KEY,seal BLOB NOT NULL) WITHOUT ROWID";
+
+impl checkpoint::CheckpointStatement {
+    /// Whether this is an empty partition's base off `seal`. Such a base
+    /// follows the seal even with unchanged rows: a newly granted reader may
+    /// never have held the other scopes' frames.
+    fn empty_partition_off(&self, seal: Commitment) -> bool {
+        self.partition.is_some() && self.frontier.is_empty() && self.seal != Some(seal)
+    }
+}
 
 /// One finalized seal of a domain's followed path.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -321,9 +334,6 @@ impl<A: RowApplication> Inner<A> {
         let mut held = BTreeMap::<WriterId, BTreeSet<u64>>::new();
         let mut last = BTreeMap::<(ResourceScope, WriterId), u64>::new();
         let ready: BTreeSet<ResourceScope> = scopes.iter().map(|(scope, _)| *scope).collect();
-        // A pending frame of a scope this replica does not hold, one whose
-        // key it lacks, still places its signed position in that scope; so
-        // does a peer's signed header of a scope it cannot hold.
         for record in rows(
             &self.conn,
             "SELECT header,status='pending',0 FROM secure_operations UNION ALL SELECT header,0,0 FROM secure_voids UNION ALL SELECT header,0,1 FROM secure_placements",
@@ -403,7 +413,6 @@ impl<A: RowApplication> Inner<A> {
         let mut open = Vec::new();
         for (scope, id) in scopes {
             if let Some(id) = id {
-                // Only an installed base stands in for live coverage.
                 let state = self.base_seal(*id).await?;
                 if let Some(base) = state
                     && self.path_index(domain, base)? >= at
@@ -639,8 +648,6 @@ pub(super) fn blocking_gaps(
         {
             continue;
         }
-        // A missing position below every open scope's last frame of the node
-        // is in another scope: each scope's log is contiguous.
         let threshold = scopes
             .iter()
             .map(|(scope, _)| last.get(&(*scope, mark.author)).copied().unwrap_or(0))
@@ -758,14 +765,11 @@ impl<A: RowApplication> Inner<A> {
             },
         };
         let changed: Vec<&SealChange> = changes.iter().filter(|change| change.changed).collect();
-        // Rows of replayed scopes follow their replay order, not records.
         let restored: Vec<&SealChange> = changed
             .iter()
             .copied()
             .filter(|change| !change.replayed)
             .collect();
-        // Application order stays causal: every operation the seal
-        // excludes, in order, after every one it includes.
         self.conn
             .execute("DELETE FROM secure_finalization_rows", ())
             .await?;
@@ -821,8 +825,6 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
         }
-        // A scope whose every applied operation the seal includes already
-        // holds the seal's state: rebuilding it would rewrite every row.
         let mut whole = BTreeSet::new();
         for change in &restored {
             let last = match collect_rows(
@@ -876,9 +878,6 @@ impl<A: RowApplication> Inner<A> {
             .filter(|(_, id, rows)| whole.contains(id) && rows.is_empty())
             .map(|(_, id, _)| *id)
             .collect();
-        // The live tables hold the seal's state now. Its stored rows take
-        // what finalizing changes, which no live table shows, so that they
-        // are what a replay through the seal leaves.
         if keep || incremental {
             for (scope, id, rows) in &drops {
                 let blob = encode(scope)?;
@@ -978,8 +977,6 @@ impl<A: RowApplication> Inner<A> {
                     .await?;
             }
         }
-        // Rebuilt with every operation, applying the seal's diff; a whole
-        // scope the seal drops nothing of is that state already.
         for change in restored
             .iter()
             .filter(|change| !unchanged.contains(&change.id))
@@ -1038,6 +1035,9 @@ impl<A: RowApplication> Inner<A> {
         crate::network::trace::outcome(&span, &result);
         result
     }
+    /// Finalizes ready seals of `domain`, at most `limit`. Rows a clear left
+    /// waiting are derived again first: a seal finalized over them would
+    /// decide members against incomplete rows and make those outcomes final.
     async fn finalize_ready_inner(
         &mut self,
         domain: Scope,
@@ -1047,15 +1047,11 @@ impl<A: RowApplication> Inner<A> {
         if self.schema_switching().await? {
             return Ok((0, Some("the schema switch is unfinished".into())));
         }
-        // A seal finalized over rows a clear left incomplete would decide
-        // members against them, and their outcomes would turn final.
         let (rederived, waits) = self.retry_rederive(domain).await?;
         if let Some(reason) = waits {
             return Ok((usize::from(rederived), Some(reason)));
         }
         count += usize::from(rederived);
-        // A pulled state a scope needs becomes its base before readiness is
-        // judged; until installed it covers nothing.
         if !rows(&self.conn, "SELECT 1 FROM secure_pulled LIMIT 1")
             .await?
             .is_empty()
@@ -1092,9 +1088,9 @@ impl<A: RowApplication> Inner<A> {
                     transaction!(self, |inner| inner
                         .finalize_seal(domain, &seal, &unverified, false)
                         .await)?;
-                    // Only a scope it verified is work done: one that never
-                    // verifies must not count on every pass.
-                    if self.unverified_scopes(domain).await?.len() < unverified.len() {
+                    let verified_a_scope =
+                        self.unverified_scopes(domain).await?.len() < unverified.len();
+                    if verified_a_scope {
                         count += 1;
                     }
                 }
@@ -1111,8 +1107,6 @@ impl<A: RowApplication> Inner<A> {
             {
                 return Ok((count, Some(reason)));
             }
-            // A finalization writes every replayed scope's rows at the seal;
-            // it starts on a cut WAL, as a publication step does.
             self.cut_wal().await;
             transaction!(self, |inner| {
                 let keep = inner
@@ -1288,7 +1282,6 @@ impl<A: RowApplication> Inner<A> {
             valid += 1;
         }
         let Some(first) = finalized.get(valid) else {
-            // The compacted seal is on the path again.
             self.conn
                 .execute(
                     "DELETE FROM secure_compaction_lost WHERE domain=?",
@@ -1323,10 +1316,8 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         let mut reopened = false;
-        // The open era falls back to the newest seal still finalized.
         let open = finalized[..valid].last().map_or(0, |known| known.depth);
         for (scope, id) in self.domain_scopes(domain).await? {
-            // Members the forgotten seals sealed reopen, with their undo.
             if self.replayed_scope(scope) {
                 reopened |= self.join_open_era(id, open).await?;
                 reopened |= !collect_rows(
@@ -1383,8 +1374,6 @@ impl<A: RowApplication> Inner<A> {
             .map(|(seal, _)| seal)
             .collect();
         let finalized = self.finalized(domain).await?;
-        // Replayed scopes released the rows of older seals they keep no
-        // mark for: a base cannot move there.
         let mut replayed = false;
         for (scope, _) in self.domain_scopes(domain).await? {
             replayed |= self.replayed_scope(scope);
@@ -1396,9 +1385,8 @@ impl<A: RowApplication> Inner<A> {
         let mut target = None;
         for known in finalized {
             if known.compacted {
-                // The replay base never passes a kept seal: this node can
-                // rebuild and serve every seal it keeps.
-                if kept.contains(&known.seal) {
+                let replay_base_stops_at_kept_seal = kept.contains(&known.seal);
+                if replay_base_stops_at_kept_seal {
                     break;
                 }
                 continue;
@@ -1458,7 +1446,6 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<bool, Error> {
         let base = previous.filter(|(_, signed)| signed.statement.seal.is_some());
         if let Some(history) = history {
-            // Lock gaps let writers touch the captured prefix after its scan.
             if history.through != through {
                 return Err(Error::Conflict);
             }
@@ -1473,28 +1460,19 @@ impl<A: RowApplication> Inner<A> {
         } else {
             self.seal_rows(id, target.seal).await?
         };
-        // A base nothing applied after stays, signed as it is, while it holds
-        // the seal's rows: a linked scope's delete action can change them
-        // without a member of this scope. Linked scopes' bases must hold rows
-        // at one seal, or a rebuild keeps a child its parent's base deleted.
-        // An empty partition's base follows the seal: a newly granted reader
-        // may never have held the other scopes' frames.
+        let seal_rows = || {
+            prepared.as_ref().map(Sets::rows_summary).or_else(|| {
+                taken
+                    .as_ref()
+                    .map(|rows| replay::base_sets(rows).rows_summary())
+            })
+        };
         if let Some((position, signed)) = base
             && *position == through
-            && prepared
-                .as_ref()
-                .map(Sets::rows_summary)
-                .or_else(|| {
-                    taken
-                        .as_ref()
-                        .map(|rows| replay::base_sets(rows).rows_summary())
-                })
-                .is_none_or(|summary| summary == signed.statement.rows)
+            && seal_rows().is_none_or(|summary| summary == signed.statement.rows)
             && signed.statement.key_epoch() == Some(self.scope_key(scope)?.0)
             && signed.statement.revocations == self.revocation_digest()?
-            && !(signed.statement.partition.is_some()
-                && signed.statement.frontier.is_empty()
-                && signed.statement.seal != Some(target.seal))
+            && !signed.statement.empty_partition_off(target.seal)
         {
             self.conn
                 .execute(
@@ -1503,15 +1481,12 @@ impl<A: RowApplication> Inner<A> {
                 )
                 .await?;
             if prepared.is_some() {
-                // Keep the newest equal snapshot readable even when the old
-                // signature stays. A later key/policy refresh still needs it.
                 self.publish_prepared_base(id, target).await?;
             } else {
                 self.queue_base_cleanup(id, target.depth).await?;
             }
             return Ok(false);
         }
-        // Rows the seal left undecided make no base; a later seal's does.
         if self.leaves_open(id, target.depth).await? {
             return Ok(false);
         }
@@ -1523,12 +1498,9 @@ impl<A: RowApplication> Inner<A> {
         let rows = match taken {
             Some(rows) => rows,
             None if prepared.is_some() => Vec::new(),
-            // Already the base: nothing was finalized since.
             None if base.is_some_and(|(_, signed)| signed.statement.seal == Some(target.seal)) => {
                 return Ok(false);
             }
-            // Finalized before its rows were readable: the live rows are the
-            // seal's while nothing applied after it.
             None if collect_rows(
                 self.conn
                     .query(
@@ -1580,11 +1552,7 @@ impl<A: RowApplication> Inner<A> {
             seal: Some(target.seal),
             partition: self.partitions.get(&scope).cloned(),
             identities,
-            // Replayed rows never move.
-            moves: checkpoint::SetSummary {
-                count: 0,
-                digest: [0; 32],
-            },
+            moves: checkpoint::REPLAYED_MOVES,
             tip,
             schema,
             revocations: self.revocation_digest()?,
@@ -1655,8 +1623,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         }
         if history.is_some() {
-            // Forward compaction absorbs a prefix already represented by L.
-            // Only newly based own floors can raise it; the live suffix stays.
             for mark in signed
                 .statement
                 .identities
@@ -1752,7 +1718,6 @@ impl<A: RowApplication> Inner<A> {
             .as_ref()
             .filter(|(_, signed)| signed.statement.seal.is_some());
         let mut cursor = base.map_or(0, |(position, _)| *position);
-        // A deferred scope has no applied state at intervening seals.
         let bound = self
             .seal_bounds(id)
             .await?
@@ -1772,7 +1737,6 @@ impl<A: RowApplication> Inner<A> {
         {
             return Ok(false);
         }
-        // Without a key only a scope with no frame history signs its base.
         if self.scope_key(scope).is_err() {
             return self
                 .compact_no_frames(scope, id, (target.depth, target.seal), seal, bound)
@@ -1791,8 +1755,6 @@ impl<A: RowApplication> Inner<A> {
                 )
                 .await;
         }
-        // Empty partitions need current coverage even with unchanged rows:
-        // a newly granted reader may never have held the other scopes' frames.
         let reusable = match base {
             Some((_, signed)) => {
                 signed.statement.key_epoch() == Some(self.scope_key(scope)?.0)
@@ -1800,11 +1762,8 @@ impl<A: RowApplication> Inner<A> {
             }
             None => false,
         };
-        let empty_partition = base.is_some_and(|(_, signed)| {
-            signed.statement.partition.is_some()
-                && signed.statement.frontier.is_empty()
-                && signed.statement.seal != Some(target.seal)
-        });
+        let empty_partition =
+            base.is_some_and(|(_, signed)| signed.statement.empty_partition_off(target.seal));
         if reusable && through == cursor && !empty_partition {
             let mut drops = self
                 .conn
@@ -1830,12 +1789,10 @@ impl<A: RowApplication> Inner<A> {
         self.conn
             .execute("DELETE FROM secure_checkpoint_overlay WHERE scope=?", [id])
             .await?;
-        // The base keeps its own tip's fields; readers filter it to theirs.
         let target_tip = seal.statement.tip;
         sets = self
             .prime_path_base(scope, id, Overlay::Build, target_tip, sets)
             .await?;
-        // Seeded from the signed base the overlay starts from, or nothing.
         let mut ledger = identity::IdentityLedger::based(
             base.map_or(&[][..], |(_, signed)| &signed.statement.identities),
         )?;
@@ -1859,7 +1816,6 @@ impl<A: RowApplication> Inner<A> {
             cursor = last;
         }
         let (frontier, operations) = self.covered_frontier(id, base, through).await?;
-        // The overlay becomes the base rows.
         for sql in [
             "DELETE FROM secure_checkpoint_base WHERE scope=?1 AND row IN (SELECT row FROM secure_checkpoint_overlay WHERE scope=?1)",
             "INSERT INTO secure_checkpoint_rows SELECT scope,row,fields FROM secure_checkpoint_overlay WHERE scope=?1 AND fields<>X''",
@@ -1867,8 +1823,6 @@ impl<A: RowApplication> Inner<A> {
         ] {
             self.conn.execute(sql, [id]).await?;
         }
-        // The base names the creations of the rows it stores, as an import
-        // rebuilds them; rows dropped at a seal take theirs along.
         sets.creations = 0;
         sets.creation_digest = checkpoint::Lt::new();
         let base_creations = self
@@ -1962,8 +1916,6 @@ impl<A: RowApplication> Inner<A> {
                 )
                 .await?;
         }
-        // Stubs witness creations of stored rows and pruned dependencies;
-        // past the seal only the creations of stored and base rows are needed.
         self.conn
             .execute(
                 "DELETE FROM secure_compaction_live_creations WHERE scope=?",
@@ -2083,6 +2035,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
         crate::network::trace::outcome(&span, &result);
         result
     }
+    /// Compacts `domain` to `target`. Every scope is prepared before any is
+    /// published, so linked bases are never exposed to a competing tip
+    /// between scope publications. Preparation runs in unlocked steps from a
+    /// fixed seal: it never blocks or refuses application writes, and
+    /// arrivals do not extend it.
     async fn compact_to<'a>(
         &'a self,
         mut inner: Guard<tokio::sync::MutexGuard<'a, Inner<A>>>,
@@ -2091,8 +2048,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<Guard<tokio::sync::MutexGuard<'a, Inner<A>>>, Error> {
         let authority = inner.authority;
         let at = inner.path_index(domain, target.seal)?;
-        // A scope granted after this seal was finalized may have no state
-        // yet. Account for it only after retained history proves its cut.
         for (scope, id) in inner.readiness_scopes(domain).await? {
             if id.is_none()
                 && inner
@@ -2108,7 +2063,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut scopes = Vec::new();
         let held = inner.domain_scopes(domain).await?;
         for &(scope, id) in &held {
-            // A base imported at a later seal stays.
             if let Some(base) = inner.base_seal(id).await?
                 && inner.path_index(domain, base)? > at
             {
@@ -2117,12 +2071,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             scopes.push((scope, id));
         }
         let mut history = BTreeMap::new();
-        // Prepare every scope before publishing any. Linked bases cannot be
-        // exposed to a competing tip between scope publications.
         for &(scope, id) in &scopes {
             loop {
-                // Preparation never blocks or refuses application writes. Its
-                // source is a fixed seal, so arrivals do not extend the work.
                 let more = inner.prepare_base_step(scope, target.seal).await?;
                 #[cfg(any(test, feature = "qualification"))]
                 inner.crash_at(|point| point == CrashPoint::BasePrepared)?;
@@ -2147,10 +2097,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     return Err(Error::Conflict);
                 }
                 if !more {
-                    // Re-finalizing a seal can replace its snapshot while
-                    // unlocked. A generation check prevents a mixed digest.
-                    if inner.seal_outcomes(id, target.seal).await?.is_some()
-                        && inner.prepared_base(id, target.seal).await?.is_none()
+                    if inner
+                        .snapshot_replaced_while_preparing(id, target.seal)
+                        .await?
                     {
                         continue;
                     }
@@ -2192,8 +2141,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             {
                 return Err(Error::Conflict);
             }
-            if inner.seal_outcomes(id, target.seal).await?.is_some()
-                && inner.prepared_base(id, target.seal).await?.is_none()
+            if inner
+                .snapshot_replaced_while_preparing(id, target.seal)
+                .await?
             {
                 return Err(Error::Conflict);
             }
@@ -2218,11 +2168,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.graph_for(domain)?;
         let (_, waiting) = inner.finalize_ready(domain).await?;
-        // A base taken while the rows wait to be derived again would sign
-        // them as they are.
         let rederiving = inner.rederive_marked && inner.retry_rederive(domain).await?.1.is_some();
-        // Without a newer seal, the base is signed again where it stands
-        // when a learned revocation or key epoch left it stale.
         let target = match inner.compaction_target(domain, keep).await? {
             Some(target) => Some(target),
             None => inner.compacted_target(domain).await?,
@@ -2326,6 +2272,19 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
+    /// Re-finalizing a seal can replace its snapshot while preparation runs
+    /// unlocked; a base prepared before that would publish a mixed digest.
+    async fn snapshot_replaced_while_preparing(
+        &self,
+        id: i64,
+        seal: Commitment,
+    ) -> Result<bool, Error> {
+        Ok(self.seal_outcomes(id, seal).await?.is_some()
+            && self.prepared_base(id, seal).await?.is_none())
+    }
+    /// Publishes the prepared bases. Replayed scopes' bases are linked: they
+    /// publish in one transaction, so they stay one state even across
+    /// process death. Other scopes keep the generic per-scope publication.
     async fn publish_compaction(
         &mut self,
         domain: Scope,
@@ -2335,8 +2294,6 @@ impl<A: RowApplication> Inner<A> {
         history: &BTreeMap<i64, history_transition::PreparedHistory>,
     ) -> Result<(), Error> {
         if scopes.iter().any(|(scope, _)| self.replayed_scope(*scope)) {
-            // Linked bases are one state even across process death. Selecting
-            // captured generations copies no partition rows in this transaction.
             self.cut_wal().await;
             transaction!(self, |inner| {
                 for &(scope, id) in scopes {
@@ -2354,7 +2311,6 @@ impl<A: RowApplication> Inner<A> {
                 self.verified_at.insert(id, self.commit);
             }
         } else {
-            // The generic row-frame contract retains its per-scope publication.
             for (index, &(scope, id)) in scopes.iter().enumerate() {
                 self.cut_wal().await;
                 transaction!(self, |inner| {
@@ -2400,7 +2356,6 @@ pub(super) fn tip_path_seals(
     if let Some(own) = graph.seal(tip).map_err(credential)? {
         seals.push(own.clone());
     }
-    // Each statement is hashed a fixed number of times, not once per step.
     let mut by_id = HashMap::new();
     let mut continued = HashMap::new();
     for seal in graph

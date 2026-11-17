@@ -49,27 +49,40 @@ async fn members_of_a_topic_find_each_other_over_mdns_and_others_do_not() -> Res
     let (at_a, at_b) = tokio::try_join!(found(&a, [12; 32]), found(&b, [11; 32]))?;
     assert!(at_a.local && at_b.local);
     assert_eq!(at_a.path, LOCAL_PATH);
-    // The found address is dialable as it is.
     let address: EndpointAddr = serde_json::from_str(&at_a.address)?;
     assert_eq!(address.id, b.endpoint().id());
-    assert!(address.ip_addrs().next().is_some());
-    // An endpoint of another topic hears of neither and is heard by neither.
+    assert!(
+        address.ip_addrs().next().is_some(),
+        "the found address is dialable as it is"
+    );
     let silence = Duration::from_secs(2);
     assert!(
         tokio::time::timeout(silence, discovery(&outsider)?.found())
             .await
-            .is_err()
+            .is_err(),
+        "an endpoint of another topic hears of no member"
     );
     while let Ok(heard) =
         tokio::time::timeout(Duration::from_millis(10), discovery(&a)?.found()).await
     {
-        assert_eq!(heard.ok_or("closed")?.node, [12; 32]);
+        assert_eq!(
+            heard.ok_or("closed")?.node,
+            [12; 32],
+            "members never hear of an endpoint of another topic"
+        );
     }
-    // The background stops the path; the foreground resumes it.
     discovery(&a)?.foreground(false);
-    assert_eq!(discovery(&a)?.paths()[0].1, PathState::Off);
+    assert_eq!(
+        discovery(&a)?.paths()[0].1,
+        PathState::Off,
+        "the background stops the local path"
+    );
     discovery(&a)?.foreground(true);
-    assert_eq!(discovery(&a)?.paths()[0].1, PathState::On);
+    assert_eq!(
+        discovery(&a)?.paths()[0].1,
+        PathState::On,
+        "the foreground resumes the local path"
+    );
     tokio::join!(a_port.close(), b_port.close(), c_port.close());
     assert!(discovery(&a)?.found().await.is_none());
     Ok(())
@@ -87,37 +100,31 @@ async fn members_of_a_topic_find_each_other_through_the_rendezvous_record() -> R
         b.discovery().ok_or("discovery")?,
     );
     assert_eq!(a_finder.paths()[1], (TOPIC_PATH.to_owned(), PathState::On));
-    // A answers its previous topic too; B knows only that one.
     a_finder.announce([14; 32], &[topic, previous]).await?;
-    tokio::time::timeout(WAIT, async {
-        while server.contacts(&previous) == 0 {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await?;
-    b_finder.announce([15; 32], &[previous]).await?;
+    tokio::time::timeout(WAIT, server.wait_for_contacts(&previous, 1)).await?;
+    let only_the_previous_topic = [previous];
+    b_finder
+        .announce([15; 32], &only_the_previous_topic)
+        .await?;
     let at_b = found(&b, [14; 32]).await?;
     assert!(!at_b.local);
     assert_eq!(at_b.path, TOPIC_PATH);
     let address: EndpointAddr = serde_json::from_str(&at_b.address)?;
     assert_eq!(address, a.endpoint().addr());
-    tokio::time::timeout(WAIT, async {
-        while server.contacts(&previous) < 2 {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await?;
+    tokio::time::timeout(WAIT, server.wait_for_contacts(&previous, 2)).await?;
     assert_eq!(server.contacts(&topic), 1);
-    // The service holds the two endpoints' own records and one record per
-    // topic, under keys only members derive, and no node key in the clear.
     assert!(
         server
             .keys()
-            .contains(&rocky_iroh::rendezvous_key(&topic).public())
+            .contains(&rocky_iroh::rendezvous_key(&topic).public()),
+        "each topic's record is stored under a key only members derive"
     );
     let stored = server.stored();
     for node in [[14u8; 32], [15; 32]] {
-        assert!(!stored.windows(32).any(|window| window == node));
+        assert!(
+            !stored.windows(32).any(|window| window == node),
+            "the lookup service holds no node key in the clear"
+        );
     }
     tokio::join!(a_port.close(), b_port.close());
     Ok(())
@@ -130,8 +137,10 @@ async fn an_attached_endpoint_keeps_its_lookup_services_and_discovers_only_when_
     let endpoint = options(Some(&server), false).bind([6; 32]).await?;
     let services = endpoint.address_lookup()?.len();
     assert!(services > 0);
-    // Without being asked, an attachment has no discovery.
-    assert!(Attachment::new(endpoint.clone()).discovery().is_none());
+    assert!(
+        Attachment::new(endpoint.clone()).discovery().is_none(),
+        "an attachment discovers only when asked"
+    );
     let attachment = Attachment::discovering(
         endpoint.clone(),
         Discover {
@@ -142,18 +151,19 @@ async fn an_attached_endpoint_keeps_its_lookup_services_and_discovers_only_when_
     let port = attachment.transport();
     let discovery = attachment.discovery().ok_or("discovery")?;
     discovery.announce([16; 32], &[[61; 32]]).await?;
-    tokio::time::timeout(WAIT, async {
-        while server.contacts(&[61; 32]) == 0 {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await?;
+    tokio::time::timeout(WAIT, server.wait_for_contacts(&[61; 32], 1)).await?;
     assert_eq!(endpoint.address_lookup()?.len(), services);
     discovery.announce([16; 32], &[]).await?;
     port.close().await;
-    // Closing Rocky's part leaves the endpoint and its services as they were.
-    assert!(!endpoint.is_closed());
-    assert_eq!(endpoint.address_lookup()?.len(), services);
+    assert!(
+        !endpoint.is_closed(),
+        "closing Rocky's part leaves the endpoint open"
+    );
+    assert_eq!(
+        endpoint.address_lookup()?.len(),
+        services,
+        "closing Rocky's part leaves the endpoint's lookup services"
+    );
     endpoint.close().await;
     Ok(())
 }

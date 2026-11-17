@@ -65,6 +65,8 @@ struct Migration {
     copied: bool,
 }
 
+/// Records the moves and carries out every pending migration. Updating a
+/// domain's assignment is the switch: from then on the target holds it.
 async fn run(path: &Path, moves: Vec<DomainPlacement>) -> Result<Vec<DomainPlacement>, Error> {
     let mut catalog_path = path.as_os_str().to_owned();
     catalog_path.push("-placement.sqlite");
@@ -131,7 +133,6 @@ async fn run(path: &Path, moves: Vec<DomainPlacement>) -> Result<Vec<DomainPlace
             )
             .await?;
             reached(2);
-            // The switch: from here the target holds the domain.
             write(&catalog, async |catalog| {
                 catalog
                     .execute(
@@ -227,7 +228,8 @@ async fn assignments(catalog: &ScopedConnection) -> Result<Assignments, Error> {
         .collect()
 }
 /// Validates the moves against the recorded assignments and records them. A domain that was never installed has no data and is
-/// reassigned at once.
+/// reassigned at once. Nothing is recorded while a runtime holds a file or
+/// a target is foreign.
 async fn plan(
     catalog: &ScopedConnection,
     path: &Path,
@@ -256,7 +258,6 @@ async fn plan(
             moving.push((key, file, item.file, ready));
         }
     }
-    // Nothing is recorded while a runtime holds a file or a target is foreign.
     for (_, source, target, ready) in &moving {
         if *ready {
             let marker = |slot: &usize| [id, &(*slot as u32).to_le_bytes()].concat();
@@ -295,6 +296,8 @@ async fn text(
     storage::collect_rows(conn.query(sql, [value]).await?).await
 }
 /// Tables of `schema` in the domain's namespace, each with its statement.
+/// Indexes travel with their table; any other installed object refuses the
+/// move.
 async fn tables(
     conn: &ScopedConnection,
     schema: &str,
@@ -322,7 +325,6 @@ async fn tables(
         }
         match (kind.as_str(), sql) {
             ("table", SqlValue::Text(sql)) => found.push((name.clone(), sql.clone())),
-            // Indexes travel with their table; nothing else is installed.
             ("index", _) => {}
             _ => {
                 return Err(Error::Incompatible(format!(
@@ -367,7 +369,8 @@ async fn open(
 }
 /// Copies the namespace's tables, rows and indexes into `target` in one
 /// transaction. A copy left by an interrupted attempt is replaced: the
-/// source is still the domain.
+/// source is still the domain. The source's lock is held while it is read,
+/// which keeps every writer out.
 async fn copy(
     source: &Path,
     source_binding: &[u8],
@@ -380,7 +383,6 @@ async fn copy(
             "assigned runtime file is missing".into(),
         ));
     }
-    // Holding the source's lock keeps every writer out while it is read.
     let (_source_owner, checked) = open(source, source_binding, false).await?;
     drop(checked);
     let (_target_owner, conn) = open(target, target_binding, true).await?;
@@ -450,8 +452,8 @@ async fn copy(
             )
             .await?
                 == vec![vec![SqlValue::Integer(0)]];
-            // An INTEGER PRIMARY KEY already is the row id.
-            let aliased = keys == [true]
+            let integer_primary_key_is_rowid = keys == [true];
+            let aliased = integer_primary_key_is_rowid
                 || names
                     .iter()
                     .any(|column| ["rowid", "oid", "_rowid_"].contains(&column.to_ascii_lowercase().as_str()));

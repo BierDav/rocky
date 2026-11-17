@@ -175,8 +175,8 @@ impl<A: RowApplication> Inner<A> {
             return Ok(None);
         }
         let listed = self.listed_at(graph, scope, path.iter().rev())?;
-        // A base at a seal of the path stands in for the frames it pruned.
-        if unknown && !missing && base.map_or(!pruned, |seal| path.contains(&seal)) {
+        let base_stands_in_for_pruned = base.map_or(!pruned, |seal| path.contains(&seal));
+        if unknown && !missing && base_stands_in_for_pruned {
             return Ok(None);
         }
         let replay = match pruned || missing {
@@ -213,8 +213,6 @@ impl<A: RowApplication> Inner<A> {
         if !reset {
             return Ok(());
         }
-        // Its own frames come back as after an eviction; it authors again
-        // once its log is whole.
         self.save_eviction_guard(scope).await?;
         let blob = encode(&scope)?;
         self.conn
@@ -223,8 +221,6 @@ impl<A: RowApplication> Inner<A> {
                 [id],
             )
             .await?;
-        // The frames replayed from the start fold the replay ledger again;
-        // permanent marks and admission evidence stay.
         for sql in [
             "DELETE FROM secure_row_records WHERE scope=?",
             "DELETE FROM secure_move_rows WHERE scope=?",
@@ -243,8 +239,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         if self.replayed_scope(scope) {
             self.clear_replayed(scope).await?;
-            // Retained seal images cover rows whose earlier keys this node
-            // never held. Restore that prefix while pending frames return.
             return self.replay_from_frames(now()?).await;
         }
         self.reproject(scope).await
@@ -310,8 +304,6 @@ impl<A: RowApplication> Inner<A> {
             if self.replayed_scope(scope) {
                 reordered |= self.join_open_era(id, 0).await?;
             }
-            // The finalized seals are forgotten: what a kept outcome took
-            // from them is provisional again.
             self.conn
                 .execute(
                     "UPDATE secure_kept_outcomes SET sealed=0,based=0 WHERE scope=?",
@@ -323,8 +315,6 @@ impl<A: RowApplication> Inner<A> {
                     .execute(format!("DELETE FROM {table} WHERE scope=?"), [id])
                     .await?;
             }
-            // Held frames the switch indexed before an imported base are
-            // indexed again after it.
             self.conn
                 .execute(
                     "DELETE FROM secure_applied WHERE scope=? AND hash IN(SELECT hash FROM secure_operations WHERE status='held')",
@@ -397,7 +387,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// sends again.
     pub async fn replay_at_seals(&self, scope: ResourceScope, reset: bool) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        // Only this scope is checked, not every scope of its domain.
         let mut need = None;
         if let Some(plan) = inner.rebootstrap_plan(scope.domain).await?
             && let Some((_, id)) = plan.scopes.iter().find(|(held, _)| *held == scope)
@@ -419,7 +408,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner = flush_guard(inner, &self.inner).await?;
         inner.publish_revision().await?;
         drop(inner);
-        // Replay retained frames even when the peer has nothing new to send.
         self.settle().await?;
         self.restored(scope).await?;
         self.finish_seal_rebootstrap(scope.domain).await?;

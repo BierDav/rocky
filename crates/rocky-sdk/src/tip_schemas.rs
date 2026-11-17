@@ -79,7 +79,6 @@ impl Record {
             return Err("a tip schema record cannot contain migrations".into());
         }
         let record: Self = serde_json::from_value(value)?;
-        // Parsing the portable schema performs all definition and profile checks.
         Schema::parse(&serde_json::to_string(&record.schema)?)?;
         if record.generation == 0 {
             return Err("invalid tip schema generation".into());
@@ -157,8 +156,7 @@ impl Bootstrap {
 impl Settings {
     pub(crate) fn verify_schema(&self) -> Result<(), Failure> {
         let root = self.manifest()?.verify(self.publisher)?;
-        // A personal genesis must still locate this database.
-        self.kind()?;
+        let _personal_genesis_still_locates_this_database = self.kind()?;
         let domain = self.domain()?;
         if root.app != domain.manifest().app || self.generation == 0 {
             return Err("invalid installed schema context".into());

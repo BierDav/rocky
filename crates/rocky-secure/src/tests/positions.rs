@@ -83,7 +83,6 @@ async fn position_ranges_merge_split_and_rollback_with_duplicate_custody() {
     inner.conn.execute("SAVEPOINT ranges", ()).await.unwrap();
     let mut header = frame.operation().unwrap().header;
     let start = header.extensions.author_sequence;
-    // Sparse arrival, bridging, splitting, and then reinserting the middle.
     for sequence in [start + 2, start + 1] {
         header.seq_num = sequence - start;
         header.extensions.author_sequence = sequence;
@@ -103,7 +102,8 @@ async fn position_ranges_merge_split_and_rollback_with_duplicate_custody() {
         vec![vec![
             SqlValue::Integer(start as i64),
             SqlValue::Integer((start + 2) as i64)
-        ]]
+        ]],
+        "a sparse arrival and the source bridging it merge into one range"
     );
     inner
         .conn
@@ -113,7 +113,11 @@ async fn position_ranges_merge_split_and_rollback_with_duplicate_custody() {
         )
         .await
         .unwrap();
-    assert_eq!(ranges().await.unwrap().len(), 2);
+    assert_eq!(
+        ranges().await.unwrap().len(),
+        2,
+        "removing the middle source splits the range"
+    );
     header.seq_num = 1;
     header.extensions.author_sequence = start + 1;
     header.sign(&node);
@@ -165,6 +169,21 @@ async fn position_ranges_merge_split_and_rollback_with_duplicate_custody() {
     inner.audit_positions_for_test().await.unwrap();
 }
 
+/// Held offsets from `base` as maximal inclusive `[start, end]` rows.
+fn maximal_inclusive_runs(held: &BTreeSet<u64>, base: u64) -> Vec<Vec<SqlValue>> {
+    let mut runs: Vec<Vec<SqlValue>> = Vec::new();
+    for offset in held {
+        let value = (base + offset) as i64;
+        match runs.last_mut() {
+            Some(last) if last[1] == SqlValue::Integer(value - 1) => {
+                last[1] = SqlValue::Integer(value)
+            }
+            _ => runs.push(vec![SqlValue::Integer(value), SqlValue::Integer(value)]),
+        }
+    }
+    runs
+}
+
 /// Sparse sequences each start a range; filling the gaps merges them and
 /// removals split them again, in both range indexes.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -193,20 +212,6 @@ async fn sparse_position_ranges_merge_and_split_like_their_sequences() {
     let start = header.extensions.author_sequence;
     let log = header.seq_num;
     let mut held = BTreeSet::from([0u64]);
-    // Held offsets from `start` as maximal inclusive runs.
-    let runs = |held: &BTreeSet<u64>, base: u64| {
-        let mut runs: Vec<Vec<SqlValue>> = Vec::new();
-        for offset in held {
-            let value = (base + offset) as i64;
-            match runs.last_mut() {
-                Some(last) if last[1] == SqlValue::Integer(value - 1) => {
-                    last[1] = SqlValue::Integer(value)
-                }
-                _ => runs.push(vec![SqlValue::Integer(value), SqlValue::Integer(value)]),
-            }
-        }
-        runs
-    };
     let check = |held: BTreeSet<u64>| {
         let inner = &inner;
         async move {
@@ -217,7 +222,7 @@ async fn sparse_position_ranges_merge_and_split_like_their_sequences() {
                 )
                 .await
                 .unwrap(),
-                runs(&held, start)
+                maximal_inclusive_runs(&held, start)
             );
             assert_eq!(
                 rows(
@@ -226,7 +231,7 @@ async fn sparse_position_ranges_merge_and_split_like_their_sequences() {
                 )
                 .await
                 .unwrap(),
-                runs(&held, log)
+                maximal_inclusive_runs(&held, log)
             );
         }
     };

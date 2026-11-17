@@ -71,7 +71,6 @@ async fn devices_never_online_together_converge_via_keyless_custody() -> Result<
     snap::ok(a.session.set_networking_enabled(true)).await;
     a.sync().await.expect("catch up");
     assert_eq!(a.titles().await, ["Eggs", "Milk"]);
-    // A keyless custodian cannot issue enrollment or renewal.
     assert!(
         snap::observe(relay.session.invite(
             Some(rocky_sdk::GrantProfile::Writer {
@@ -80,7 +79,8 @@ async fn devices_never_online_together_converge_via_keyless_custody() -> Result<
             None
         ))
         .await
-        .is_err()
+        .is_err(),
+        "a keyless custodian cannot issue enrollment"
     );
     assert!(
         snap::observe(async {
@@ -88,7 +88,8 @@ async fn devices_never_online_together_converge_via_keyless_custody() -> Result<
             b.session.info().await
         })
         .await
-        .is_err()
+        .is_err(),
+        "a keyless custodian cannot issue renewal"
     );
     a.close().await;
     b.close().await;
@@ -215,11 +216,11 @@ async fn container_resumes_from_configuration_and_drains_on_sigterm() -> Result<
         .status()?;
     assert!(status.success());
     assert!(process.wait()?.success());
-    // A clean exit must leave a custody file the native SDK can reopen.
     let reopened = Device::open(&root.path().join("relay"), None)?;
     assert_eq!(
         snap::ok(reopened.session.info()).await["profile"]["kind"],
-        "custody"
+        "custody",
+        "a clean exit leaves a custody file the native SDK can reopen"
     );
     reopened.close().await;
     Ok(())
@@ -281,11 +282,11 @@ async fn custody_forwards_pairing_and_renewal_to_an_explicit_issuer_with_creator
         .sync()
         .await
         .expect("proxy enrollment route must not be used for row sync");
-    // A routed contact updates only renewal routes; it preserves the issuer key.
     let contact = route_enrollment(&issuer_contact, &relay_contact)?;
     assert_eq!(
         device.add_peer(&contact).await.expect("renewal route")["node"],
-        issuer.node().await
+        issuer.node().await,
+        "a routed contact updates only renewal routes and keeps the issuer key"
     );
     assert!(
         snap::observe(relay.session.invite(
@@ -295,9 +296,9 @@ async fn custody_forwards_pairing_and_renewal_to_an_explicit_issuer_with_creator
             None
         ))
         .await
-        .is_err()
+        .is_err(),
+        "a forwarding custodian cannot issue enrollment"
     );
-    // The forwarding configuration survives a restart without acquiring any key.
     relay.close().await;
     let relay = Device::open(&root.path().join("relay"), net("relay"))?;
     snap::ok(async {
@@ -307,7 +308,11 @@ async fn custody_forwards_pairing_and_renewal_to_an_explicit_issuer_with_creator
     .await;
     let identity: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.path().join("relay/identity.json"))?)?;
-    assert_eq!(identity["keys"], json!({}));
+    assert_eq!(
+        identity["keys"],
+        json!({}),
+        "forwarding survives a restart without acquiring any key"
+    );
     assert_eq!(identity["authority"], json!(null));
     issuer.close().await;
     let error = snap::observe(async {

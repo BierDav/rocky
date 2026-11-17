@@ -191,17 +191,15 @@ impl SchemaDefinition {
             .iter()
             .map(|table| table.build())
             .collect::<Result<Vec<_>, _>>()?;
-        // References name the parent's identity, known once every table is built.
-        let identities: Vec<(String, Vec<String>)> = tables
+        let built_identities: Vec<(String, Vec<String>)> = tables
             .iter()
             .map(|table| (table.sql_name.clone(), table.identity_columns()))
             .collect();
         for (table, definition) in tables.iter_mut().zip(&self.tables) {
-            // Declaration order does not matter, as for tables and indexes.
-            let mut keys: Vec<_> = definition.foreign_keys.iter().collect();
-            keys.sort_by(|a, b| a.columns.cmp(&b.columns));
-            for key in keys {
-                let references = identities
+            let mut keys_in_column_order: Vec<_> = definition.foreign_keys.iter().collect();
+            keys_in_column_order.sort_by(|a, b| a.columns.cmp(&b.columns));
+            for key in keys_in_column_order {
+                let references = built_identities
                     .iter()
                     .find(|(name, _)| name.eq_ignore_ascii_case(&key.table))
                     .map(|(_, columns)| columns.clone())
@@ -317,7 +315,6 @@ impl TableDefinition {
             collation: Collation::Binary,
             class: ColumnClass::Replicated,
         });
-        // Table constraints follow every column.
         for check in &self.checks {
             if !crate::logical::single_expression(check) {
                 return invalid(format!("{name} check constraint"));
@@ -503,7 +500,6 @@ mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn unsupported_definition_and_descriptor_versions_are_refused() {
-        // Definitions and the descriptors they build use the current format.
         for format in [0, 1, 2, 3, 4, 5, 7] {
             let mut definition = SchemaDefinition::parse(DEFINITION.as_bytes()).unwrap();
             definition.format = format;
@@ -663,12 +659,10 @@ mod partition_tests {
                 "a partitioned child cannot reference an unpartitioned parent".into()
             )
         );
-        // A unique index of a partitioned table is checked within the
-        // partition it replays in.
-        let unique = items(
+        let unique_within_the_replayed_partition = items(
             r#","indexes":[{"name":"items_code","columns":[{"name":"list","descending":false},{"name":"code","descending":false}],"unique":true}]"#,
         );
-        SchemaDefinition::parse(unique.as_bytes())
+        SchemaDefinition::parse(unique_within_the_replayed_partition.as_bytes())
             .unwrap()
             .build()
             .unwrap()
@@ -801,7 +795,6 @@ mod replayed_tests {
             "FOREIGN KEY(\"org\",\"team\") REFERENCES \"teams\"(\"org\",\"id\") ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED)"
         ));
         assert!(members.foreign_keys[0].deferred);
-        // An immediate key is checked per statement.
         let mut immediate = definition(serde_json::Value::Null);
         table(&mut immediate, "members").foreign_keys[0].deferred = false;
         let immediate = immediate.build().unwrap();
@@ -810,12 +803,13 @@ mod replayed_tests {
                 .table("members")
                 .unwrap()
                 .create_sql
-                .ends_with("ON DELETE CASCADE)")
+                .ends_with("ON DELETE CASCADE)"),
+            "an immediate key is checked per statement"
         );
-        // What replays is what replicas agree on.
         assert_ne!(
             schema.replicated_fingerprint(),
-            immediate.replicated_fingerprint()
+            immediate.replicated_fingerprint(),
+            "key deferral replays, so replicas agree on it"
         );
         let mut capped = definition(serde_json::Value::Null);
         table(&mut capped, "teams").checks = vec!["cap BETWEEN 1 AND 20".into()];
@@ -829,7 +823,6 @@ mod replayed_tests {
             schema.replicated_fingerprint(),
             uncapped.replicated_fingerprint()
         );
-        // A descriptor's references must match its statement.
         let mut hidden = schema.clone();
         let members = hidden
             .tables
@@ -842,7 +835,8 @@ mod replayed_tests {
             Err(SchemaError::Incompatible {
                 table: "members".into(),
                 reason: Incompatibility::Reference("org".into()),
-            })
+            }),
+            "a descriptor's references must match its statement"
         );
     }
 
@@ -891,13 +885,12 @@ mod replayed_tests {
         }
         let refused = parsed(&|json| json["tables"][0]["class"] = "local_only".into());
         assert!(matches!(refused, Err(SchemaError::Invalid(_))));
-        // SQLite would turn an overflowing product into a REAL.
-        let promoting =
+        let promotes_overflow_to_real =
             parsed(&|json| json["tables"][0]["columns"][2]["derived"] = "cap * 2".into())
                 .unwrap()
                 .supported_on(Profile::Secure);
         assert_eq!(
-            promoting,
+            promotes_overflow_to_real,
             Err(SchemaError::Incompatible {
                 table: "items".into(),
                 reason: Incompatibility::Arithmetic('*'),
@@ -992,7 +985,6 @@ mod replayed_tests {
                 .build()
                 .is_err()
         );
-        // Another partition group cannot be checked where the partition is.
         let mut regrouped = assertion("SELECT * FROM teams JOIN members USING (org)");
         table(&mut regrouped, "teams").partition_group = Some("teams".into());
         table(&mut regrouped, "members").foreign_keys.clear();
@@ -1001,12 +993,15 @@ mod replayed_tests {
             Some((
                 "rule".into(),
                 other("tables must share one partition group").unwrap()
-            ))
+            )),
+            "another partition group cannot be checked where the partition is"
         );
-        // Names are identifiers and unique.
         let mut duplicate = definition(serde_json::Value::Null);
         duplicate.assertions.push(duplicate.assertions[0].clone());
-        assert!(duplicate.build().is_err());
+        assert!(
+            duplicate.build().is_err(),
+            "assertion names are identifiers and unique"
+        );
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -1026,13 +1021,13 @@ mod replayed_tests {
         schema.supported_on(Profile::Secure).unwrap();
         let teams = schema.table("teams").unwrap();
         assert_eq!(schema.restrictions_of(teams).count(), 1);
-        // Replicas must agree on restrictions: they are part of what replays.
         assert_ne!(
             schema.replicated_fingerprint(),
             definition(serde_json::Value::Null)
                 .build()
                 .unwrap()
-                .replicated_fingerprint()
+                .replicated_fingerprint(),
+            "restrictions replay, so replicas agree on them"
         );
         let rule = |when: &str| {
             invalid(serde_json::json!({
@@ -1040,7 +1035,6 @@ mod replayed_tests {
                 "refuse_update": true, "refuse_delete": true
             }))
         };
-        // Only the row's own columns and the rule functions.
         for when in [
             "absent = 1",
             "random() > 0",
@@ -1049,7 +1043,10 @@ mod replayed_tests {
             "teams.cap > 1",
             "cap > 1; DELETE FROM teams",
         ] {
-            assert!(rule(when).starts_with("restriction rule:"), "{when}");
+            assert!(
+                rule(when).starts_with("restriction rule:"),
+                "{when}: a rule reads only the row's own columns and the rule functions"
+            );
         }
         assert_eq!(
             invalid(serde_json::json!({
@@ -1063,7 +1060,6 @@ mod replayed_tests {
             })),
             "restriction rule refuses nothing"
         );
-        // A local column differs between devices; replay cannot judge it.
         let mut local = restricted(serde_json::json!({
             "name": "rule", "table": "notes", "when": "draft = 1",
             "refuse_update": true, "refuse_delete": true
@@ -1074,8 +1070,10 @@ mod replayed_tests {
         draft.affinity = Affinity::Integer;
         draft.local_only = true;
         notes.columns.push(draft);
-        assert!(matches!(local.build(), Err(SchemaError::Invalid(_))));
-        // A local table never replays.
+        assert!(
+            matches!(local.build(), Err(SchemaError::Invalid(_))),
+            "a local column differs between devices; replay cannot judge it"
+        );
         let mut unreplayed = restricted(serde_json::json!({
             "name": "rule", "table": "notes", "refuse_update": true, "refuse_delete": true
         }));
@@ -1087,12 +1085,14 @@ mod replayed_tests {
                 Incompatibility::Restriction("notes is not a replayed table".into())
             ))
         );
-        // Names are identifiers and unique.
         let mut duplicate = definition(serde_json::json!({ "restrictions": [
             {"name": "rule", "table": "teams", "refuse_update": true, "refuse_delete": true},
             {"name": "RULE", "table": "notes", "refuse_update": true, "refuse_delete": true}
         ]}));
-        assert!(duplicate.build().is_err());
+        assert!(
+            duplicate.build().is_err(),
+            "restriction names are identifiers and unique"
+        );
         duplicate.restrictions.pop();
         duplicate.build().unwrap();
     }

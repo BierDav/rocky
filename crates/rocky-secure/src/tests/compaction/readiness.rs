@@ -3,6 +3,17 @@ use super::super::generations::{identity_insert, session};
 use super::*;
 use crate::KeptSeals;
 
+/// Puts `keys` back in `replica`'s config without applying the payload they
+/// unlock: crypto state installed, its pending payload not yet applied.
+async fn install_keys_without_applying_pending(replica: &Replica, keys: Vec<crate::KeyMaterial>) {
+    replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .keys = keys;
+}
+
 async fn count_scope(replica: &Replica, scope: ResourceScope) -> i64 {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let rows = crate::storage::collect_rows(
@@ -393,12 +404,7 @@ async fn a_late_key_with_pending_payload_cannot_sign_an_empty_base() {
         b.receive(frame).await.unwrap();
     }
     assert_eq!(scalar(&b, "SELECT count(*) FROM secure_applied").await, 0);
-    // Stop between installing crypto state and applying its pending payload.
-    b.inner
-        .lock(crate::replica::Class::Background)
-        .await
-        .config
-        .keys = held_keys;
+    install_keys_without_applying_pending(&b, held_keys).await;
     let report = b.compact(lineage.domain, 0).await.unwrap();
     assert!(report.waiting.is_some());
     assert!(

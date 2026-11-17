@@ -35,6 +35,7 @@ impl NativeSession {
     /// Exchanges all selected member frontiers of each group partition together.
     /// Equal, fully applied frontiers need no row transfer
     /// this round. A refused member is skipped alone; the session goes on.
+    /// A frontier is metadata, so a peer outside a scope never sees it.
     pub async fn changed_scopes<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -47,9 +48,7 @@ impl NativeSession {
             .frontier_batches(scopes, MAX_FRONTIER_SCOPES)
             .await?
         {
-            // A scope this replica does not hold syncs nothing.
             let held = replica.held_of(&requested).await?;
-            // A frontier is metadata: a peer outside a scope never sees it.
             let batch = replica
                 .peer_holds(self.peer, &self.credentials, &held)
                 .await?;
@@ -120,14 +119,13 @@ impl NativeSession {
                     .await?;
                 for (local, state) in held {
                     self.request_custody(replica, local.scope).await?;
+                    let needs_rows = local != &state.frontier
+                        || local.logs.iter().any(|log| log.held != log.applied);
                     if state.importing {
                         importing.push(local.scope);
-                    } else if local != &state.frontier
-                        || local.logs.iter().any(|log| log.held != log.applied)
-                    {
+                    } else if needs_rows {
                         changed.push(local.scope);
                     } else {
-                        // Nothing to pull: a resubscribed scope is complete again.
                         replica.restored(local.scope).await?;
                     }
                 }
@@ -146,6 +144,8 @@ impl NativeSession {
             importing: order(&importing),
         })
     }
+    /// Answers a frontier request; even an entirely unproved batch verifies
+    /// the peer's current credentials.
     pub(super) async fn answer_frontiers<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -173,7 +173,6 @@ impl NativeSession {
             }
         }
         let replies = if allowed.is_empty() {
-            // Even an entirely unproved batch must verify current credentials.
             replica.admit_chain(self.peer, &self.credentials).await?;
             Vec::new()
         } else {

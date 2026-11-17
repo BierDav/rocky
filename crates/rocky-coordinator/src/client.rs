@@ -35,6 +35,13 @@ pub struct NetworkCoordinator {
 /// Sees how each call ended: `Ok` once the service answered it, or the
 /// refusal; `Unavailable` when no voter answered.
 pub use rocky_credentials::CoordinationObserver as Observer;
+/// A browser has no voter TCP. `connect`, its only constructor there,
+/// requires both a route and a public service, so a client lacking either is
+/// misconfigured.
+#[cfg(target_family = "wasm")]
+fn unrouted_browser_client() -> Result<Reply, CoordinationError> {
+    Err(CoordinationError::Configuration)
+}
 impl NetworkCoordinator {
     /// A client of the voters' TCP addresses, such as the membership
     /// authority's.
@@ -159,9 +166,8 @@ impl NetworkCoordinator {
                 }
                 #[cfg(not(target_family = "wasm"))]
                 _ => exchange(voter, genesis, &self.key, message()).await,
-                // `connect` is the only constructor here, and it requires both.
                 #[cfg(target_family = "wasm")]
-                _ => Err(CoordinationError::Configuration),
+                _ => unrouted_browser_client(),
             };
             let done = if let Ok(reply) = &reply {
                 *self

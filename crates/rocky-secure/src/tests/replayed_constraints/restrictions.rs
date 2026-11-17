@@ -38,7 +38,7 @@ fn ledger() -> Constrained {
 const UPDATE_POSTED: &str = "restriction posted_entries refuses this update of entries";
 const DELETE_POSTED: &str = "restriction posted_entries refuses this delete of entries";
 
-// Uses a native temporary directory across threads.
+/// Native only: it uses a temporary directory across threads.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn restrictions_refuse_local_updates_and_deletes_of_protected_rows() {
@@ -70,8 +70,6 @@ async fn restrictions_refuse_local_updates_and_deletes_of_protected_rows() {
         .await
         .unwrap();
     let (posted, draft) = (entries[0], entries[1]);
-    // Posting is a change of a row that did not match yet; the status
-    // column compares ignoring case, and so does the restriction.
     device
         .commit(
             &c,
@@ -80,20 +78,20 @@ async fn restrictions_refuse_local_updates_and_deletes_of_protected_rows() {
             )],
         )
         .await
-        .unwrap();
+        .expect("posting changes a row the restriction did not match yet");
     device.fresh().await;
     let refused = async |statements: &[&str]| {
         constraint_error(device.commit(&c, statements).await.unwrap_err())
     };
     assert_eq!(
         refused(&[&format!("UPDATE entries SET amount=6 WHERE id={posted}")]).await,
-        UPDATE_POSTED
+        UPDATE_POSTED,
+        "the restriction compares the status ignoring case, as its column does"
     );
     assert_eq!(
         refused(&[&format!("DELETE FROM entries WHERE id={posted}")]).await,
         DELETE_POSTED
     );
-    // Reopening and reposting within one transaction still changed it.
     assert_eq!(
         refused(&[
             &format!("UPDATE entries SET status='draft' WHERE id={posted}"),
@@ -101,23 +99,23 @@ async fn restrictions_refuse_local_updates_and_deletes_of_protected_rows() {
             &format!("UPDATE entries SET status='posted' WHERE id={posted}"),
         ])
         .await,
-        UPDATE_POSTED
+        UPDATE_POSTED,
+        "reopening and reposting within one transaction still changed the row"
     );
-    // A delete action reaches the posted child: the parent's delete fails.
     assert_eq!(
         refused(&[&format!("DELETE FROM batches WHERE id={may}")]).await,
-        DELETE_POSTED
+        DELETE_POSTED,
+        "a delete action reaching the posted child fails the parent's delete"
     );
-    // A row keeps its id; moving it is deleting it and inserting a copy.
     assert_eq!(
         refused(&[
             &format!("DELETE FROM entries WHERE id={posted}"),
             &format!("INSERT INTO entries(batch,status,amount,id) VALUES({june},'posted',5,#id)"),
         ])
         .await,
-        DELETE_POSTED
+        DELETE_POSTED,
+        "a row keeps its id, so moving it is deleting it and inserting a copy"
     );
-    // Append-only: no update or delete of any audit row.
     for statement in [
         format!("UPDATE audit SET note='edited' WHERE id={opened}"),
         format!("DELETE FROM audit WHERE id={opened}"),
@@ -126,14 +124,13 @@ async fn restrictions_refuse_local_updates_and_deletes_of_protected_rows() {
             refused(&[&statement])
                 .await
                 .starts_with("restriction audit_log refuses this "),
-            "{statement}"
+            "the audit table is append-only: {statement}"
         );
     }
     assert!(
         device.fresh().await.is_empty(),
         "a refusal publishes nothing"
     );
-    // Unprotected rows and changes that keep every value commit.
     device
         .commit(
             &c,
@@ -144,7 +141,7 @@ async fn restrictions_refuse_local_updates_and_deletes_of_protected_rows() {
             ],
         )
         .await
-        .unwrap();
+        .expect("unprotected rows and changes that keep every value commit");
     device
         .commit(&c, &[&format!("DELETE FROM batches WHERE id={june}")])
         .await
@@ -194,10 +191,9 @@ async fn posting_history(root: &Path) -> History {
         device.receive(&created).await;
     }
     setup.extend(created);
-    // What the others published so far belongs to the setup.
     for device in &mut d[1..] {
-        let published = device.fresh().await;
-        setup.extend(published);
+        let published_before_the_history = device.fresh().await;
+        setup.extend(published_before_the_history);
     }
     let (posted, draft) = (entries[0], entries[1]);
     let post = unit(
@@ -246,7 +242,7 @@ async fn posting_history(root: &Path) -> History {
     }
 }
 
-// Blocks on its own runtime, which a browser Worker cannot.
+/// Native only: it blocks on its own runtime, which a browser Worker cannot.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn edits_ordered_after_a_posting_drop_alike_in_every_order() {
@@ -269,8 +265,6 @@ fn edits_ordered_after_a_posting_drop_alike_in_every_order() {
     assert_eq!(expected.rows["entries"].len(), 2);
     deliver_all(&history, false, &expected);
 
-    // Every replica names the same restriction; a rebuild from frames
-    // restores the protected rows and keeps the drops.
     runtime().block_on(async {
         let c = &history.c;
         let mut violations = Vec::new();
@@ -297,10 +291,17 @@ fn edits_ordered_after_a_posting_drop_alike_in_every_order() {
                 .rebuild_projection(c.scope("entries"))
                 .await
                 .unwrap();
-            assert_eq!(receiver.state(c, &expected).await, expected);
+            assert_eq!(
+                receiver.state(c, &expected).await,
+                expected,
+                "a rebuild from frames restores the protected rows and keeps the drops"
+            );
             violations.push(named);
         }
-        assert_eq!(violations[0], violations[1]);
+        assert_eq!(
+            violations[0], violations[1],
+            "every replica names the same restriction"
+        );
         assert_eq!(
             violations[0],
             [

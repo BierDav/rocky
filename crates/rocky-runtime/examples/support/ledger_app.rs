@@ -61,6 +61,8 @@ impl Application for LedgerApp {
         state.events.insert(op.id, state.values[&op.entity].0);
         Ok(())
     }
+    /// Both the selected row and its resulting ownership must authorize all
+    /// fields.
     fn admit_candidate(
         &self,
         before: &State,
@@ -70,7 +72,6 @@ impl Application for LedgerApp {
         policy: &Self::Policy,
     ) -> Result<(), Denied> {
         self.admit(op, policy)?;
-        // Both the selected row and its resulting ownership must authorize all fields.
         if context.policy_version != 1
             || before
                 .values

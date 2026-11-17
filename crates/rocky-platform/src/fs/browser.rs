@@ -364,10 +364,15 @@ pub fn sync(path: impl AsRef<Path>) -> io::Result<bool> {
     if in_pool(&key)? {
         return pool()?.flush(&key).map(|()| true).map_err(unavailable);
     }
-    // Rows commit at `synchronous=FULL`, so they are durable already.
+    committed_row_exists(&key)
+}
+
+/// Whether the table holds a row for `key`; rows commit at
+/// `synchronous=FULL`, so one that exists is already durable.
+fn committed_row_exists(key: &str) -> io::Result<bool> {
     table(|table| {
         table
-            .query_row("SELECT 1 FROM files WHERE path=?", [&key], |_| Ok(()))
+            .query_row("SELECT 1 FROM files WHERE path=?", [key], |_| Ok(()))
             .optional()
     })
     .map(|row| row.is_some())

@@ -57,9 +57,9 @@ pub(crate) enum Recovery {
     Keyed,
 }
 
-// Archives are files a user moves elsewhere: natively streamed from disk; in
-// a browser, whole files in Rocky's storage (`rocky_platform::fs`).
 pub(crate) use archive::{Unsupported, inspect, open, place, write};
+/// Archives are files a user moves elsewhere: natively streamed from disk;
+/// in a browser, whole files in Rocky's storage (`rocky_platform::fs`).
 mod archive {
     use super::*;
     use crate::{Failure, enrollment::Settings};

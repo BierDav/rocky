@@ -49,10 +49,12 @@ fn canonical_definitions_are_bounded_and_publisher_bound() {
     let mut upgraded = manifest;
     upgraded.projection = 4;
     assert_ne!(upgraded.hash(), decoded.hash());
-    // One current format: the previous body, with its handler and methods, is refused.
     let mut previous = bytes.clone();
     previous[b"rocky.manifest.v".len()] = b'1';
-    assert!(ApplicationManifest::from_body(&previous).is_err());
+    assert!(
+        ApplicationManifest::from_body(&previous).is_err(),
+        "one current format: the previous body is refused"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]

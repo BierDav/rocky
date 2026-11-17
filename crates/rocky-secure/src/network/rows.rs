@@ -156,7 +156,10 @@ impl NativeSession {
     }
 
     /// Stops before receiving a page with advice when `take_state` is set.
-    /// The caller may import it or resume with advice disabled.
+    /// The caller may import it or resume with advice disabled. Each request
+    /// names only a committed frontier; one requested ahead lets the cursor
+    /// skip the page being applied, and a stale one only costs frames sent
+    /// again.
     pub async fn catch_up_with_state<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -168,9 +171,7 @@ impl NativeSession {
         self.acquire_required_migrations(replica).await?;
         let mut report = CatchUp::default();
         let mut after = None;
-        // The frontier last reported as held; only peer bookkeeping follows
-        // it, and a stale one only costs frames sent again.
-        let mut held = None;
+        let mut last_reported_held = None;
         let mut asked = false;
         loop {
             if !asked && self.low(quota) {
@@ -178,7 +179,7 @@ impl NativeSession {
                 return Ok(report);
             }
             if !asked {
-                let frontier = match held.take() {
+                let frontier = match last_reported_held.take() {
                     Some(frontier) => frontier,
                     None => replica.frontier(scope).await?,
                 };
@@ -220,8 +221,6 @@ impl NativeSession {
                 report.state = Some(state);
                 return Ok(report);
             }
-            // Only a committed frontier is acknowledged. The cursor skips the
-            // page being applied even though its frontier is not held yet.
             asked = page.next.is_some() && !self.low(quota);
             if asked {
                 self.send(RowMessage::Range {
@@ -236,7 +235,6 @@ impl NativeSession {
             let (frames, incomplete) = self.complete_frames(page.frames)?;
             report.incomplete += incomplete;
             self.keep_escrow(replica, &frames).await?;
-            // The page is received in shared transactions and one flush.
             let span = tracing::debug_span!(
                 "page_apply",
                 scope = rocky_core::scope_label(&scope),
@@ -264,15 +262,15 @@ impl NativeSession {
             span.record("outcome", "ok");
             let frontier = replica.frontier(scope).await?;
             report.lag = frontier.lag_behind(&page.frontier);
-            held = Some(frontier.clone());
+            last_reported_held = Some(frontier.clone());
             if !asked {
                 self.send(RowMessage::Held { frontier }).await?;
                 self.acknowledged("unexpected acknowledgment response")
                     .await?;
             }
-            // The sender's own frontier is its acknowledgment of what it holds.
+            let sender_holds = &page.frontier;
             replica
-                .acknowledge_frontier(self.peer, &self.credentials, &page.frontier)
+                .acknowledge_frontier(self.peer, &self.credentials, sender_holds)
                 .await?;
             after = page.next;
             if after.is_none() {
@@ -574,9 +572,8 @@ impl NativeSession {
                     }
                 }
                 receive_voids(replica, &voids, &[scope]).await?;
-                // An incomplete frame is not received; the frontier that
-                // answers the push shows the sender what is still missing.
-                let (frames, _) = self.complete_frames(frames)?;
+                let (frames, _missing_shown_by_answering_frontier) =
+                    self.complete_frames(frames)?;
                 for status in replica.receive_migration_all(frames.clone()).await {
                     status?;
                 }

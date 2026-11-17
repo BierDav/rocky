@@ -165,27 +165,29 @@ async fn a_reused_identity_beyond_the_seal_applies_once() {
     compacted_seal(&lineage, &a, &s, &keys[1]).await;
     let (author, covered) = own_mark(&a, scope).await;
 
-    // Beyond the seal y takes the next identity. The forger then drops y's
-    // tombstone at its own seal and rewinds its allocator: z is a second
-    // birth of y's identity.
     insert(&a, "y", "first").await;
     let y = last_operation(&a, scope).await;
     delete(&a, "y").await;
     compact_own(&lineage, &a).await;
     rewind_mark(&a, scope, covered).await;
     insert(&a, "z", "reused").await;
-    let z = last_operation(&a, scope).await;
+    let z_second_birth_of_ys_identity = last_operation(&a, scope).await;
     assert_eq!(own_mark(&a, scope).await, (author, covered + 1));
 
-    // J holds every frame, then imports the first seal's base: y beyond it
-    // reapplies and z's transaction drops.
     let j = open(&lineage, &dir, "j", &keys[2]).await;
     crate::tests::exchange_graphs(&a, &j, lineage.domain).await;
     sync(&lineage, &a, &j, &keys[2]).await;
     let (offered, report) = import_all(&lineage, &s, &j, &keys[2]).await;
     assert_eq!(marks(&offered), vec![(author, covered)]);
-    assert!(report.reapplied.contains(&y), "{report:?}");
-    assert_eq!(dropped(&j, z).await.as_deref(), Some("admission"));
+    assert!(
+        report.reapplied.contains(&y),
+        "y beyond the imported base reapplies: {report:?}"
+    );
+    assert_eq!(
+        dropped(&j, z_second_birth_of_ys_identity).await.as_deref(),
+        Some("admission"),
+        "a second birth of y's identity drops"
+    );
     assert_eq!(titles(&j).await, vec![vec![text("x"), text("covered")]]);
     assert_eq!(own_mark(&j, scope).await, (author, covered + 1));
 }
@@ -206,21 +208,25 @@ async fn a_retired_covered_birth_cannot_be_reused_after_an_import() {
     compacted_seal(&lineage, &a, &s, &keys[1]).await;
     let j = open(&lineage, &dir, "j", &keys[2]).await;
     let (offered, _) = import_all(&lineage, &s, &j, &keys[2]).await;
-    // The deleted row's birth is covered, so the mark reaches past it.
     let retired = kept + 1;
-    assert_eq!(marks(&offered), vec![(author, retired)]);
+    assert_eq!(
+        marks(&offered),
+        vec![(author, retired)],
+        "the deleted row's birth is covered, so the mark reaches past it"
+    );
     assert_eq!(offered.statement.rows.count, 1);
     assert_eq!(own_mark(&j, scope).await, (author, retired));
 
-    // The forger drops r's tombstone and signs a second birth of r's identity.
     compact_own(&lineage, &a).await;
     rewind_mark(&a, scope, kept).await;
     insert(&a, "r2", "reused").await;
-    let reused = last_operation(&a, scope).await;
+    let second_birth_of_rs_identity = last_operation(&a, scope).await;
     sync(&lineage, &a, &j, &keys[2]).await;
-    // The importer's covered mark refuses the reused identity, exactly as a
-    // device that applied the retired birth itself would.
-    assert_eq!(dropped(&j, reused).await.as_deref(), Some("admission"));
+    assert_eq!(
+        dropped(&j, second_birth_of_rs_identity).await.as_deref(),
+        Some("admission"),
+        "the importer's covered mark refuses the reused identity, as applying the retired birth would"
+    );
     assert_eq!(own_mark(&j, scope).await, (author, retired));
     assert_eq!(titles(&j).await, vec![vec![text("x"), text("kept")]]);
 }
@@ -287,7 +293,6 @@ async fn a_kept_checkpoint_signs_the_covered_marks_and_later_births_apply_on_top
     insert(&a, "x", "kept").await;
     let (author, covered) = own_mark(&a, scope).await;
     let sealed = seal(&lineage, &a).await.id().unwrap();
-    // Births after the seal raise the live mark, not the kept seal's.
     insert(&a, "y", "later").await;
     a.flush().await.unwrap();
     assert!(a.maintain().await);
@@ -297,11 +302,18 @@ async fn a_kept_checkpoint_signs_the_covered_marks_and_later_births_apply_on_top
     b.follow_bookmark(lineage.domain, "main").await.unwrap();
     import_kept(&lineage, &a, &b, &keys[1], lineage.scope("tags"), sealed).await;
     let (offered, report) = import_kept(&lineage, &a, &b, &keys[1], scope, sealed).await;
-    assert_eq!(marks(&offered), vec![(author, covered)]);
+    assert_eq!(
+        marks(&offered),
+        vec![(author, covered)],
+        "births after the seal raise the live mark, not the kept seal's"
+    );
     assert!(report.rejected.is_empty(), "{report:?}");
-    // The importer takes it as its base and applies y beyond it.
     sync(&lineage, &a, &b, &keys[1]).await;
-    assert_eq!(titles(&b).await, titles(&a).await);
+    assert_eq!(
+        titles(&b).await,
+        titles(&a).await,
+        "the importer takes the kept base and applies y beyond it"
+    );
     assert_eq!(titles(&b).await.len(), 2);
     assert_eq!(own_mark(&b, scope).await, (author, covered + 1));
 }
@@ -347,7 +359,6 @@ async fn births_of_one_frame_compare_with_the_marks_it_entered_with() {
     let s = open(&lineage, &dir, "s", &keys[1]).await;
     follow_main(&lineage, &a).await;
     insert(&a, "x", "first").await;
-    // Two births in descending sequence order in one frame both stand.
     let (higher, lower) = {
         let sql = session(&a).await;
         sql.run("BEGIN", vec![]).await.unwrap();
@@ -371,7 +382,6 @@ async fn births_of_one_frame_compare_with_the_marks_it_entered_with() {
     )
     .await
     .unwrap();
-    // A duplicate identity in one frame stays refused.
     let duplicate = transaction(
         &a,
         &[
@@ -386,13 +396,19 @@ async fn births_of_one_frame_compare_with_the_marks_it_entered_with() {
         ],
     )
     .await;
-    assert!(duplicate.is_err());
+    assert!(
+        duplicate.is_err(),
+        "a duplicate identity in one frame stays refused"
+    );
     sync(&lineage, &a, &s, &keys[1]).await;
     s.follow_bookmark(lineage.domain, "main").await.unwrap();
     let expected = identified(&a).await;
-    assert_eq!(expected.len(), 3);
+    assert_eq!(
+        expected.len(),
+        3,
+        "two births in descending sequence order in one frame both stand"
+    );
     assert_eq!(identified(&s).await, expected);
-    // Finalizing and compacting replays the frame through the ledger.
     seal(&lineage, &a).await;
     crate::tests::exchange_graphs(&a, &s, lineage.domain).await;
     assert!(
@@ -403,7 +419,11 @@ async fn births_of_one_frame_compare_with_the_marks_it_entered_with() {
             .is_some()
     );
     s.rebuild_projection(scope).await.unwrap();
-    assert_eq!(identified(&s).await, expected);
+    assert_eq!(
+        identified(&s).await,
+        expected,
+        "replaying the frame through the ledger at compaction keeps both births"
+    );
     s.audit(scope).await.unwrap();
 }
 
@@ -456,13 +476,11 @@ async fn a_kept_prefix_seed_counts_retired_births_and_is_unavailable_once_pruned
     let sealed = seal(&lineage, &a).await.id().unwrap();
     a.finalize_path(lineage.domain).await.unwrap();
     insert(&a, "w", "later").await;
-    // Through the kept bound: y's retired birth, not w's later one.
     assert_eq!(
         a.kept_prefix_marks(scope, sealed).await,
-        Some(vec![(author, retired)])
+        Some(vec![(author, retired)]),
+        "marks run through the kept bound: y's retired birth, not w's later one"
     );
-    // Once the prefix is pruned without a base at or before the bound,
-    // the seed is unavailable rather than empty.
     {
         let inner = a.inner.lock(crate::replica::Class::Background).await;
         inner
@@ -474,5 +492,9 @@ async fn a_kept_prefix_seed_counts_retired_births_and_is_unavailable_once_pruned
             .await
             .unwrap();
     }
-    assert_eq!(a.kept_prefix_marks(scope, sealed).await, None);
+    assert_eq!(
+        a.kept_prefix_marks(scope, sealed).await,
+        None,
+        "with the prefix pruned and no base at or before the bound, the seed is unavailable, not empty"
+    );
 }

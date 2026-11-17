@@ -62,8 +62,8 @@ impl Config {
         Ok(config)
     }
 }
-// Logarithmic buckets keep memory independent of the duration. The final
-// bucket has no finite upper bound; percentiles there report the exact max.
+/// Logarithmic buckets keep memory independent of the duration. The final
+/// bucket has no finite upper bound; percentiles there report the exact max.
 pub(super) struct Latency {
     buckets: [u64; 64],
     pub(super) count: u64,

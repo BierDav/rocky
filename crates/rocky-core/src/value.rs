@@ -153,6 +153,8 @@ fn skip_space(bytes: &[u8]) -> &[u8] {
         .unwrap_or(bytes.len());
     &bytes[start..]
 }
+/// SQLite's leading-integer parse, saturating. Digits accumulate negated
+/// because the negative range is one larger.
 fn leading_integer(bytes: &[u8]) -> i64 {
     let bytes = skip_space(bytes);
     let (negative, digits) = match bytes.first() {
@@ -160,19 +162,21 @@ fn leading_integer(bytes: &[u8]) -> i64 {
         Some(b'+') => (false, &bytes[1..]),
         _ => (false, bytes),
     };
-    let mut value: i64 = 0;
+    let mut negated_value: i64 = 0;
     for digit in digits.iter().take_while(|byte| byte.is_ascii_digit()) {
         let digit = i64::from(digit - b'0');
-        // Accumulate negatively: the negative range is one larger.
-        value = match value.checked_mul(10).and_then(|v| v.checked_sub(digit)) {
+        negated_value = match negated_value
+            .checked_mul(10)
+            .and_then(|v| v.checked_sub(digit))
+        {
             Some(value) => value,
             None => return if negative { i64::MIN } else { i64::MAX },
         };
     }
     if negative {
-        value
+        negated_value
     } else {
-        value.checked_neg().unwrap_or(i64::MAX)
+        negated_value.checked_neg().unwrap_or(i64::MAX)
     }
 }
 fn leading_real(bytes: &[u8]) -> f64 {

@@ -110,6 +110,8 @@ fn present(path: &Path) -> bool {
     rocky_platform::fs::len(path).is_ok_and(|len| len > 0)
 }
 
+/// Opens and installs the layout's files. File 0 is installed last: its
+/// record marks the set as installed.
 async fn prepare<A: StoredApplication>(
     path: &Path,
     requested: usize,
@@ -187,7 +189,6 @@ async fn prepare<A: StoredApplication>(
         if ABORT_BEFORE_MARKER.load(std::sync::atomic::Ordering::Relaxed) {
             std::process::abort();
         }
-        // File 0 last: its record marks the set as installed.
         bootstrap(
             &first,
             &layout(binding, requested, used, 0),

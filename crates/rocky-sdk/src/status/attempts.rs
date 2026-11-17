@@ -203,8 +203,8 @@ pub(crate) fn failure(error: &Failure, stage: &AttemptStage) -> AttemptFailure {
         kind = FailureKind::LocalAuthorization;
         code = Some("revoked".into());
     }
-    // A transport that erases its error type still failed during a dial, not admission.
-    if kind == FailureKind::Other && *stage == AttemptStage::Dial {
+    let erased_transport_failure = kind == FailureKind::Other && *stage == AttemptStage::Dial;
+    if erased_transport_failure {
         kind = FailureKind::Transport;
     }
     AttemptFailure {

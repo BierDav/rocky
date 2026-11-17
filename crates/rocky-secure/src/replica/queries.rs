@@ -181,7 +181,6 @@ impl<A: RowApplication> Inner<A> {
 }
 impl Drop for Queries {
     fn drop(&mut self) {
-        // The file closes with the replica: end its cursors first.
         self.cursors.close();
     }
 }
@@ -196,7 +195,6 @@ impl<A: RowApplication> Inner<A> {
                 .tables
                 .iter()
                 .map(|table| table.sql_name.clone());
-            // Observers of the same domain stay registered across a switch.
             self.workspace.queries.events = Some(match &self.workspace.queries.events {
                 Some(events) if events.scope() == typed.domain => events.follow(tables),
                 _ => TableEvents::new(typed.domain, tables),
@@ -295,15 +293,12 @@ impl<A: RowApplication> Inner<A> {
             else {
                 continue;
             };
-            // Each table the statement reads, its own scope's state only;
-            // a partitioned table's concrete partitions are checked apart.
             self.require_scope_readable(projected.scope).await?;
             if typed.partitioned(projected) {
                 continue;
             }
             let scope = projected.scope;
             if !status.scopes.contains(&scope) {
-                // Outside the session: the authorizer refuses it.
                 continue;
             }
             let keyed = self.config.keys.iter().any(|key| key.scope == scope);
@@ -314,8 +309,6 @@ impl<A: RowApplication> Inner<A> {
             } else if !self.holds(scope).await? {
                 Unavailable::NotHeld
             } else if self.restoring(scope).await?
-                // Frames another engine must replay leave this build reading
-                // what it replayed, as if they had not arrived yet.
                 || (self.engine_matches() && self.pending_now(scope).await?)
             {
                 Unavailable::Incomplete
@@ -482,8 +475,6 @@ impl<A: RowApplication> SecureSql<A> {
                 .iter()
                 .map(|table| table.physical.clone())
                 .collect();
-            // A bound session reads its seal; another names history as
-            // `table@seal` or `table@bookmark`.
             let views = match &self.seal {
                 Some(views) => Some(views.as_ref().clone()),
                 None => readiness.history.named_history::<A>(tables)?,
@@ -612,9 +603,6 @@ impl<A: RowApplication> SecureSql<A> {
                 .lock(crate::replica::Class::Background)
                 .await;
             inner.check_authority(Some(self.session.authority))?;
-            // SQLite defers the check; Rocky performs the declared action.
-            // References may share a column, such as a partition column, so
-            // each is named by its parent and its whole column set.
             let actions: BTreeMap<(String, BTreeSet<String>), String> = inner
                 .workspace
                 .typed
@@ -733,7 +721,6 @@ fn shaped(
     actions: &BTreeMap<(String, BTreeSet<String>), String>,
     listed: &BTreeSet<String>,
 ) -> Vec<Vec<SqlValue>> {
-    // Each foreign key spans the rows sharing its id: (id, seq, table, from, ...).
     let mut keys: BTreeMap<i64, (String, Vec<String>)> = BTreeMap::new();
     if pragma == Describe::ForeignKeyList {
         for row in &rows {
@@ -752,11 +739,10 @@ fn shaped(
     }
     let mut result = Vec::with_capacity(rows.len());
     for row in rows {
-        // A created index the catalog does not list is Rocky's own.
-        if pragma == Describe::IndexList
+        let rocky_own_index = pragma == Describe::IndexList
             && matches!((&row[1], &row[3]), (SqlValue::Text(index), SqlValue::Text(origin))
-                if origin == "c" && !listed.contains(&index.to_ascii_lowercase()))
-        {
+                if origin == "c" && !listed.contains(&index.to_ascii_lowercase()));
+        if rocky_own_index {
             continue;
         }
         let mut row = row;

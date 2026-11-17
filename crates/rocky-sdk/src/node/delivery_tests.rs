@@ -288,10 +288,9 @@ async fn join(
         name,
         hub,
     );
-    // The join's own first sync runs in the background: let it finish, so
-    // that no pass still in flight meets a later share.
     let mut status = snap::value(device.session.status()).await?;
-    while status["data"]["bootstrap_pending"] == true {
+    let first_sync_in_flight = |status: &Value| status["data"]["bootstrap_pending"] == true;
+    while first_sync_in_flight(&status) {
         status = snap::value(device.session.status_after(snap::text(&(status["token"])))).await?;
     }
     Ok(device)
@@ -328,6 +327,14 @@ async fn delivered(device: &Device, count: &str) -> Result<u64, Failure> {
         .filter_map(|event| event[count].as_u64())
         .sum())
 }
+/// Turns off background sync: a failed background attempt would put custody
+/// in backoff, which an explicit sync skips.
+async fn explicit_syncs_only(devices: &[&Device]) -> Result<(), Failure> {
+    for device in devices {
+        snap::value(device.session.set_automatic_sync(false)).await?;
+    }
+    Ok(())
+}
 fn contains(bytes: &[u8], pattern: &[u8]) -> bool {
     bytes.windows(pattern.len()).any(|window| window == pattern)
 }
@@ -342,7 +349,6 @@ async fn a_share_and_a_rotation_reach_an_offline_recipient_through_custody_alone
     mesh.hub.record("third");
     let node = b.node().await?;
     b.online(false).await?;
-    // Shared while B is offline; then a reader's revocation rotates the list.
     let removed_node = removed.node().await?;
     share(a, &[&node, &third.node().await?, &removed_node]).await?;
     snap::value(
@@ -358,7 +364,6 @@ async fn a_share_and_a_rotation_reach_an_offline_recipient_through_custody_alone
         4,
         "a share and a rotation each for B and the third member"
     );
-    // The mailbox stores recipients' node keys and nothing naming the list.
     let held = std::fs::read(custody.directory.join("mailbox.json"))?;
     let address = snap::value(
         a.session
@@ -377,22 +382,31 @@ async fn a_share_and_a_rotation_reach_an_offline_recipient_through_custody_alone
             "the mailbox names {named}"
         );
     }
-    // B meets only custody: both envelopes arrive and install.
     relay(b, a).await?;
-    assert_eq!(b.epochs().await?, [json!(1), json!(2)]);
+    assert_eq!(
+        b.epochs().await?,
+        [json!(1), json!(2)],
+        "B meets only custody, and both envelopes arrive and install"
+    );
     snap::value(third.session.sync_once()).await?;
-    // The sender learns of the delivery from custody, which then forgets it.
     relay(a, b).await?;
-    assert_eq!(a.state(&node).await?, "delivered");
-    assert_eq!(custody.mailbox()?.len(), 0);
+    assert_eq!(
+        a.state(&node).await?,
+        "delivered",
+        "the sender learns of the delivery from custody"
+    );
+    assert_eq!(custody.mailbox()?.len(), 0, "custody forgets a delivery");
     assert_eq!(
         b.state(&node).await?,
         Value::Null,
         "status is the sharer's alone"
     );
 
-    // Membership certificates are public; delivery progress is the sharer's alone.
-    assert_eq!(third.state(&node).await?, Value::Null);
+    assert_eq!(
+        third.state(&node).await?,
+        Value::Null,
+        "delivery progress is the sharer's alone"
+    );
     third.close().await?;
     removed.close().await?;
     mesh.close().await
@@ -420,7 +434,6 @@ async fn an_envelope_delivered_directly_and_through_two_mailboxes_installs_once(
     relay(a, b).await?;
     assert_eq!(custody.mailbox()?.len(), 1);
     assert_eq!(second.mailbox()?.len(), 1);
-    // B meets A and both mailboxes in one sync.
     introduce(a, b).await?;
     b.online(true).await?;
     snap::value(b.session.sync_once()).await?;
@@ -428,9 +441,12 @@ async fn an_envelope_delivered_directly_and_through_two_mailboxes_installs_once(
     assert_eq!(b.events("partition_key_installed").await?.len(), 1);
     assert_eq!(b.epochs().await?, [json!(1)]);
     assert_eq!(a.state(&node).await?, "delivered");
-    // Both mailboxes keep only B's receipt until A takes it.
     snap::value(a.session.sync_once()).await?;
-    assert_eq!(custody.mailbox()?.len() + second.mailbox()?.len(), 0);
+    assert_eq!(
+        custody.mailbox()?.len() + second.mailbox()?.len(),
+        0,
+        "both mailboxes keep B's receipt only until A takes it"
+    );
     second.close().await?;
     mesh.close().await
 }
@@ -470,19 +486,19 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
     };
     let other = mesh_member("other").await?;
     let removed = mesh_member("removed").await?;
-    // Only the issuer's explicit syncs deliver: a failed background attempt
-    // would put custody in backoff, which an explicit sync skips.
-    snap::value(a.session.set_automatic_sync(false)).await?;
+    explicit_syncs_only(&[&a]).await?;
     let node = b.node().await?;
     b.online(false).await?;
     share(&a, &[&node]).await?;
     relay(&a, &b).await?;
-    // Another member collects nothing of B's.
     snap::value(other.session.sync_once()).await?;
-    assert_eq!(delivered(&other, "received").await?, 0);
+    assert_eq!(
+        delivered(&other, "received").await?,
+        0,
+        "another member collects nothing of B's"
+    );
     assert_eq!(custody.mailbox()?.len(), 1);
 
-    // Fill custody's room for B: the rotation's envelope is refused by name.
     let recipient: rocky_secure::PublicKey = node.parse()?;
     let custody = custody
         .restart_with(|mailbox| {
@@ -500,7 +516,6 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
             .revoke_identity(&(snap::text(&(removed.identity().await?)))),
     )
     .await?;
-    // Every round refuses the rotation alike while custody is full.
     relay(&a, &b).await?;
     snap::value(a.session.sync_once()).await?;
     let mailbox = custody.node().await?;
@@ -559,7 +574,6 @@ fn a_mailbox_refuses_at_both_bounds_and_forgets_what_expired() -> Result<(), Fai
     let last = *recipients.last().ok_or("recipient")?;
     let full = deposit(&mut mailbox, last, 1)?.ok_or("stored past the bound")?;
     assert!(full.starts_with(MAILBOX_FULL), "{full}");
-    // Saved and reopened, then 30 days after the first arrived.
     mailbox.save()?;
     let mut mailbox = Mailbox::open(&root.path().join("mailbox.json"))?;
     assert_eq!(mailbox.len(), MAILBOX_DEPOSITS);
@@ -586,18 +600,24 @@ async fn a_recipient_revoked_after_the_deposit_gets_nothing_and_the_deposit_is_r
     share(&a, &[&node]).await?;
     relay(&a, &b).await?;
     assert_eq!(custody.mailbox()?.len(), 1);
-    // A restarted mailbox keeps the deposit.
     let custody = custody.restart_with(|_| Ok(())).await?;
-    assert_eq!(custody.mailbox()?.len(), 1);
+    assert_eq!(
+        custody.mailbox()?.len(),
+        1,
+        "a restarted mailbox keeps the deposit"
+    );
     snap::value(
         a.session
             .revoke_identity(&(snap::text(&(b.identity().await?)))),
     )
     .await?;
     assert_eq!(a.state(&node).await?, Value::Null, "the sender dropped it");
-    // Custody learns the statement from A and removes B's deposit.
     snap::value(a.session.sync_once()).await?;
-    assert_eq!(custody.mailbox()?.len(), 0);
+    assert_eq!(
+        custody.mailbox()?.len(),
+        0,
+        "custody learns the statement from A and removes B's deposit"
+    );
     let _ = relay(&b, &a).await;
     assert_eq!(b.epochs().await?, Vec::<Value>::new(), "B received nothing");
     for device in [a, custody, b] {
@@ -680,7 +700,6 @@ async fn sweep(direct: bool, at: At, stage: fault::Stage) -> Result<(), Failure>
     };
     let mut restarted = false;
     for _ in 0..4 {
-        // A, then B, syncs alone, unless both are online throughout.
         for (from, to) in [(0, 2), (2, 0)] {
             let (Some(sender), Some(receiver)) = (&devices[from], &devices[to]) else {
                 return Err("a device is missing".into());
@@ -814,19 +833,18 @@ async fn a_custody_grant_on_an_unrelated_scope_is_enough_to_hold_deliveries() ->
     .await?;
     introduce(&mesh.a, &mailbox).await?;
     introduce(&mesh.b, &mailbox).await?;
-    // Only the explicit syncs below exchange: a failed background attempt
-    // would put the mailbox in backoff, which an explicit sync skips.
-    for device in [&mesh.a, &mesh.b, &mailbox] {
-        snap::value(device.session.set_automatic_sync(false)).await?;
-    }
+    explicit_syncs_only(&[&mesh.a, &mesh.b, &mailbox]).await?;
     mesh.custody.online(false).await?;
     let recipient = mesh.b.node().await?;
     mesh.b.online(false).await?;
     share(&mesh.a, &[&recipient]).await?;
-    // The delivery round succeeds independently of row sync: this mailbox
-    // has no grant on the list, so the later row exchange may be refused.
-    let _ = snap::observe(mesh.a.session.sync_once()).await;
-    assert_eq!(mesh.a.state(&recipient).await?, "deposited");
+    let _row_exchange_may_be_refused_without_a_list_grant =
+        snap::observe(mesh.a.session.sync_once()).await;
+    assert_eq!(
+        mesh.a.state(&recipient).await?,
+        "deposited",
+        "the delivery round succeeds independently of row sync"
+    );
     assert_eq!(mailbox.mailbox()?.len(), 1);
     mesh.a.online(false).await?;
     mesh.b.online(true).await?;

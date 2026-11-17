@@ -213,8 +213,8 @@ impl NativeSession {
             }
             for Statement(bytes) in statements {
                 let signed = SignedRevocation::from_bytes(&bytes).map_err(credential)?;
-                // Only a statement this side named as lacking, once.
-                if !wanted.remove(&signed.id().map_err(credential)?) {
+                let named_as_lacking_and_unseen = wanted.remove(&signed.id().map_err(credential)?);
+                if !named_as_lacking_and_unseen {
                     return Err(denied("revocation statements outside the exchange"));
                 }
                 learned.push(signed);

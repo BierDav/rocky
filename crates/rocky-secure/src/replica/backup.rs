@@ -102,6 +102,9 @@ async fn rebind(
     let Some([SqlValue::Blob(stored)]) = stored.first().map(Vec::as_slice) else {
         return Err(denied("the restored file holds no replica"));
     };
+    /// The new node cannot restore its predecessor's private line signer; an
+    /// unbound genesis line selects the fresh node's own certificate.
+    const UNBIND_PREDECESSOR_LINE: &str = "DELETE FROM secure_line_nodes WHERE node=?";
     let (_, tip, bound): (String, TipId, PublicKey) = decode(stored)?;
     if bound == node {
         return Ok(());
@@ -121,9 +124,7 @@ async fn rebind(
                 [predecessor.as_bytes().to_vec()],
             )
             .await?;
-            // The new node cannot restore its predecessor's private line signer.
-            // An unbound genesis line selects the fresh node's own certificate.
-            conn.execute("DELETE FROM secure_line_nodes WHERE node=?", [predecessor.as_bytes().to_vec()]).await?;
+            conn.execute(UNBIND_PREDECESSOR_LINE, [predecessor.as_bytes().to_vec()]).await?;
             conn.execute(
                 "UPDATE secure_metadata SET identity=?,revision=revision+1 WHERE id=1",
                 [identity(tip, node)?],

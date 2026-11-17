@@ -14,6 +14,11 @@ type Replica = EncryptedReplica<Employees>;
 const SCOPES: u8 = 20;
 const QUOTA: usize = MAX_SECURE_FRAME / 2;
 const ROWS_PER_OPERATION: usize = 32;
+/// A full node keeps everything it was not told it may drop.
+const FULL_NODE_HARD_BYTES: usize = 4 << 30;
+/// The pause between writes: paced like an interactive client, not a bulk
+/// loader.
+const INTERACTIVE_PACE: Duration = Duration::from_millis(2);
 
 struct World {
     publisher: PrivateKey,
@@ -147,10 +152,9 @@ impl World {
             })
             .collect::<Result<Vec<_>, Failure>>()?;
         replica.keep_escrow(records).await?;
-        // A full node keeps everything it was not told it may drop.
         replica
             .set_retention_limits(RetentionLimits {
-                hard_bytes: 4 << 30,
+                hard_bytes: FULL_NODE_HARD_BYTES,
                 ..RetentionLimits::default()
             })
             .await?;
@@ -182,6 +186,7 @@ fn handle(node: &Node, label: &str, index: usize) -> Commitment {
 }
 /// A request session of `client` on a loopback link to `server`, and the
 /// task answering it until the client hangs up or the task is aborted.
+/// Ending the exchange drops both ends of the link.
 async fn connect(
     client: &Node,
     server: &Node,
@@ -231,7 +236,6 @@ async fn connect(
             loop {
                 match session.serve_once(&node.replica).await {
                     Ok(()) => {}
-                    // The peer hung up.
                     Err(rocky_runtime::Error::Io(_)) => return,
                     Err(error) => {
                         eprintln!("roles server: {error}");
@@ -240,7 +244,6 @@ async fn connect(
                 }
             }
         };
-        // Ending the exchange drops both ends of the link.
         tokio::select! {
             () = serve => {}
             _ = accepted.drive(served) => {}
@@ -376,12 +379,19 @@ async fn writes(
             .await?;
         times.push(start.elapsed());
         index += 1;
-        // Paced like an interactive client, not a bulk loader.
-        tokio::time::sleep(Duration::from_millis(2)).await;
+        tokio::time::sleep(INTERACTIVE_PACE).await;
     }
     Ok(times)
 }
 
+/// The phase 7 gate. Devices author in their own scope and push to the full
+/// node, then:
+/// 1. a partial replica holding 5% converges on its subset;
+/// 2. a replica `behind` operations back catches up while both sides write;
+/// 3. behind the pruned prefix, offline edits are applied or reported;
+/// 4. eviction needs custody, and evicted then resubscribed converges;
+/// 5. the full node dies mid-transfer and mid-checkpoint-serve;
+/// 6. a replacement full node starts from the existing one.
 pub async fn run(total: usize, behind: usize) -> Result<(), Failure> {
     let world = World::new()?;
     let dir = tempfile::tempdir()?;
@@ -407,7 +417,6 @@ pub async fn run(total: usize, behind: usize) -> Result<(), Failure> {
     let per_scope = total / SCOPES as usize;
     println!("roles rows={total} scopes={SCOPES} rows_per_scope={per_scope} behind={behind}");
 
-    // Devices author in their own scope and push to the full node.
     let start = Instant::now();
     let mut writers = Vec::new();
     for scope in 0..SCOPES {
@@ -443,7 +452,6 @@ pub async fn run(total: usize, behind: usize) -> Result<(), Failure> {
         resident_mib()
     );
 
-    // 1. A partial replica holding 5% converges on its subset.
     a.replica.subscribe(world.scopes[0]).await?;
     let start = Instant::now();
     let synced = sync(&a, &full, world.scopes[0]).await?;
@@ -474,7 +482,6 @@ pub async fn run(total: usize, behind: usize) -> Result<(), Failure> {
         "an unsubscribed scope is not complete",
     )?;
 
-    // 2. A replica `behind` operations back catches up while both sides write.
     b.replica.subscribe(world.scopes[1]).await?;
     b.replica.subscribe(world.scopes[2]).await?;
     sync(&b, &full, world.scopes[1]).await?;
@@ -519,7 +526,6 @@ pub async fn run(total: usize, behind: usize) -> Result<(), Failure> {
         "caught-up scope converges",
     )?;
 
-    // 3. Behind the pruned prefix: offline edits are applied or reported.
     a.replica.subscribe(world.scopes[1]).await?;
     for index in 0..10 {
         let current = rows(&b.replica, world.scopes[1]).await?[&World::row(1, index)].clone();
@@ -580,7 +586,6 @@ pub async fn run(total: usize, behind: usize) -> Result<(), Failure> {
         "rebootstrapped scope converges",
     )?;
 
-    // 4. Eviction needs custody; evicted and resubscribed converges.
     for index in 0..5 {
         a.replica
             .author_buffered(
@@ -617,7 +622,6 @@ pub async fn run(total: usize, behind: usize) -> Result<(), Failure> {
         "resubscribed scope converges",
     )?;
 
-    // 5. The full node dies mid-transfer and mid-checkpoint-serve.
     let c = open("c.db").await?;
     partial(&world, &c, &full).await?;
     c.replica.subscribe(world.scopes[1]).await?;
@@ -654,7 +658,6 @@ pub async fn run(total: usize, behind: usize) -> Result<(), Failure> {
         )
         .await?;
     c.replica.stage_checkpoint_page(page).await?;
-    // Every handle to the full node goes away, as in a process exit.
     let full_path = dir.path().join("full.db");
     drop(full);
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -675,7 +678,6 @@ pub async fn run(total: usize, behind: usize) -> Result<(), Failure> {
         start.elapsed().as_millis()
     );
 
-    // 6. A replacement full node starts from the existing one.
     let replacement = open("replacement.db").await?;
     let start = Instant::now();
     let (mut session, task) = connect(&replacement, &full).await?;

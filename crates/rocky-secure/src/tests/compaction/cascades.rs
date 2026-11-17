@@ -96,7 +96,7 @@ async fn a_parent_replayed_from_frames_keeps_the_rows_that_reference_it() {
     insert(&replica, "b", "second").await;
     let first = tag(&replica, "t", "a").await;
     let second = tag(&replica, "u", "b").await;
-    churn(&replica, 12, "c").await;
+    churn(&replica, RIVAL_CHURN, "c").await;
     let sealed = rivalled_seal(&lineage, &replica).await;
     replica.compact(lineage.domain, 0).await.unwrap();
     let before = tags(&replica).await;
@@ -107,11 +107,11 @@ async fn a_parent_replayed_from_frames_keeps_the_rows_that_reference_it() {
     replica.replay_at_seals(tag_scope, false).await.unwrap();
     replica.replay_at_seals(items, true).await.unwrap();
     assert_eq!(tags(&replica).await, before);
-    // The rival seal that won is not finalized here yet.
     for transaction in [first, second] {
         assert_eq!(
             replica.transaction_outcome(transaction).await.unwrap(),
-            Some(rocky_core::replay::TransactionOutcome::Applied { sealed: false })
+            Some(rocky_core::replay::TransactionOutcome::Applied { sealed: false }),
+            "the rival seal that won is not finalized here yet"
         );
     }
     replica.audit(items).await.unwrap();
@@ -139,31 +139,36 @@ async fn an_imported_parent_base_keeps_children_of_rows_applied_over_it() {
     let (items, tag_scope) = (lineage.scope("items"), lineage.scope("tags"));
     import_checkpoint(&lineage, &a, &b, &keys[1], items).await;
     import_checkpoint(&lineage, &a, &b, &keys[1], tag_scope).await;
-    // B's writes after the seal, which A does not hold.
     insert(&b, "l", "late").await;
     let late = tag(&b, "x", "l").await;
     tag(&b, "y", "p").await;
     let expected = tagged(&[("old", "p"), ("x", "l"), ("y", "p")]);
     assert_eq!(tags(&b).await, expected);
-    // A seals again without them; B imports A's `items` base there.
     insert(&a, "q", "owner").await;
     seal(&lineage, &a).await;
     a.compact(lineage.domain, 0).await.unwrap();
     crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
     import_checkpoint(&lineage, &a, &b, &keys[1], items).await;
-    assert_eq!(tags(&b).await, expected);
+    assert_eq!(
+        tags(&b).await,
+        expected,
+        "writes after the seal survive importing a base that lacks them"
+    );
     assert_eq!(
         b.transaction_outcome(late).await.unwrap(),
         Some(rocky_core::replay::TransactionOutcome::Applied { sealed: false })
     );
-    // Both hold every frame now and agree on rows and drops.
     for scope in [items, tag_scope] {
         sync_scope(&lineage, &b, &a, &keys[0], scope).await;
         sync_scope(&lineage, &a, &b, &keys[1], scope).await;
     }
     assert_eq!(tags(&a).await, expected);
     assert_eq!(titles(&a).await, titles(&b).await);
-    assert_eq!(drops(&a).await, drops(&b).await);
+    assert_eq!(
+        drops(&a).await,
+        drops(&b).await,
+        "holding every frame, both agree on rows and drops"
+    );
     b.audit(items).await.unwrap();
     b.audit(tag_scope).await.unwrap();
 }
@@ -203,8 +208,6 @@ async fn an_authored_outcome_survives_imports_and_restarts_after_compaction() {
     a.compact(lineage.domain, 0).await.unwrap();
     let a = reopen(&lineage, &dir, a, &keys[0]).await;
     assert_eq!(a.transaction_outcome(authored).await.unwrap(), applied);
-    // B takes A's base, writes, seals and compacts; A imports B's base,
-    // which covers the authored transaction.
     let items = lineage.scope("items");
     let b = open(&lineage, &dir, "b", &keys[1]).await;
     crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
@@ -309,13 +312,13 @@ async fn an_evicted_parent_leaves_what_a_replica_never_holding_it_replays() {
     partial(&d, &a, &[items, tag_scope]).await;
     d.unsubscribe(items).await.unwrap();
     d.evict(items).await.unwrap();
-    // A fresh partial replica that holds only `tags`.
-    let fresh = open(&lineage, &dir, "fresh", &keys[2]).await;
-    partial(&fresh, &a, &[tag_scope]).await;
-    sync_scope(&lineage, &a, &fresh, &keys[2], tag_scope).await;
+    let fresh_holding_only_tags = open(&lineage, &dir, "fresh", &keys[2]).await;
+    let fresh = &fresh_holding_only_tags;
+    partial(fresh, &a, &[tag_scope]).await;
+    sync_scope(&lineage, &a, fresh, &keys[2], tag_scope).await;
     fresh.follow_bookmark(lineage.domain, "main").await.unwrap();
     fresh.settle().await.unwrap();
-    assert_eq!(tag_rows(&d).await, tag_rows(&fresh).await);
+    assert_eq!(tag_rows(&d).await, tag_rows(fresh).await);
     assert_eq!(
         tag_rows(&d).await,
         vec![vec![text("v"), SqlValue::Integer(1), SqlValue::Integer(1)]]
@@ -457,11 +460,10 @@ async fn import_while_a_frame_waits(
             .await
             .is_empty()
     );
-    // Reads of `items` wait for `r1`. B's own tags redo after `l`, but
-    // the clear took `old`, a row of the `tags` base.
     assert_eq!(
         stored(&b, "SELECT key FROM tags ORDER BY key").await,
-        vec![vec![text("x")], vec![text("y")]]
+        vec![vec![text("x")], vec![text("y")]],
+        "B's own tags redo after `l`, but the clear took `old`, a row of the `tags` base"
     );
     let [key] = [keys[1].clone()];
     (a, b, key, late, expected)
@@ -725,24 +727,24 @@ async fn a_forged_drop_list_is_refused_on_import() {
     let mut altered = offered.clone();
     altered.statement.outcomes.listed.clear();
     let mut refused = vec![altered];
+    let out_of_stamp_order = |o: &mut SealedOutcomes| {
+        let mut first = o.listed[0].clone();
+        first.stamp.clock += 1;
+        first.transaction = [7; 32];
+        o.listed.insert(0, first);
+    };
+    let horizon_on_a_list_that_is_not_full =
+        |o: &mut SealedOutcomes| o.horizon = Some(o.listed[0].stamp.clone());
+    let violation_only_constraints_and_restrictions_name = |o: &mut SealedOutcomes| {
+        o.listed[0].outcome = SealedOutcome::Dropped {
+            reason: rocky_core::replay::DropReason::Admission,
+            violation: Some("x".into()),
+        }
+    };
     for edit in [
-        // Out of stamp order.
-        (|o: &mut SealedOutcomes| {
-            let mut first = o.listed[0].clone();
-            first.stamp.clock += 1;
-            first.transaction = [7; 32];
-            o.listed.insert(0, first);
-        }) as fn(&mut SealedOutcomes),
-        // A horizon on a list that is not full.
-        |o| o.horizon = Some(o.listed[0].stamp.clone()),
-        // A violation only constraints and restrictions name.
-        |o| {
-            o.listed[0].outcome = SealedOutcome::Dropped {
-                reason: rocky_core::replay::DropReason::Admission,
-                violation: Some("x".into()),
-            }
-        },
-        // Past the bound.
+        out_of_stamp_order as fn(&mut SealedOutcomes),
+        horizon_on_a_list_that_is_not_full,
+        violation_only_constraints_and_restrictions_name,
         |o| {
             let first = o.listed[0].clone();
             o.listed = (0..=crate::MAX_SEALED_OUTCOMES as u64)
@@ -762,17 +764,17 @@ async fn a_forged_drop_list_is_refused_on_import() {
         assert!(b.begin_rebootstrap(forged).await.is_err());
         assert!(b.rebootstrap_progress(tag_scope).await.unwrap().is_none());
     }
-    // B's own records, made final as a seal B finalized itself would:
-    // both tags applied there. A base stating the same imports; A's,
-    // which drops one, contradicts B's seal and is refused.
-    b.seal_replayed_for_test(tag_scope).await.unwrap();
+    b.seal_replayed_for_test(tag_scope)
+        .await
+        .expect("B's own records, made final as a seal B finalized itself would");
     b.cover_for_test(tag_scope, &SealedOutcomes::default())
         .await
-        .unwrap();
+        .expect("a base stating B's own outcomes imports");
     assert!(
         b.cover_for_test(tag_scope, &offered.statement.outcomes)
             .await
-            .is_err()
+            .is_err(),
+        "a base that drops a tag B applied contradicts B's seal"
     );
     assert_eq!(late, listed.transaction);
     let _ = kept;
@@ -787,7 +789,7 @@ async fn kept_outcomes_go_once_records_return_and_stay_bounded() {
     let replica = open(&lineage, &dir, "keep", &PrivateKey::new()).await;
     follow_main(&lineage, &replica).await;
     insert(&replica, "a", "first").await;
-    churn(&replica, 12, "c").await;
+    churn(&replica, RIVAL_CHURN, "c").await;
     let sealed = rivalled_seal(&lineage, &replica).await;
     replica.compact(lineage.domain, 0).await.unwrap();
     let (_, statements) = rival(&lineage, &sealed);
@@ -853,7 +855,7 @@ async fn an_outcome_survives_a_replay_from_frames_and_a_restart() {
     follow_main(&lineage, &replica).await;
     insert(&replica, "a", "first").await;
     let first = tag(&replica, "t", "a").await;
-    churn(&replica, 12, "c").await;
+    churn(&replica, RIVAL_CHURN, "c").await;
     let sealed = rivalled_seal(&lineage, &replica).await;
     replica.compact(lineage.domain, 0).await.unwrap();
     let (_, statements) = rival(&lineage, &sealed);
@@ -861,8 +863,9 @@ async fn an_outcome_survives_a_replay_from_frames_and_a_restart() {
     let (items, tag_scope) = (lineage.scope("items"), lineage.scope("tags"));
     replica.replay_at_seals(tag_scope, false).await.unwrap();
     replica.replay_at_seals(items, true).await.unwrap();
-    // Provisional: the rival seal that won is not finalized here yet.
-    let applied = Some(rocky_core::replay::TransactionOutcome::Applied { sealed: false });
+    let provisional_until_the_winning_rival_finalizes =
+        Some(rocky_core::replay::TransactionOutcome::Applied { sealed: false });
+    let applied = provisional_until_the_winning_rival_finalizes;
     assert_eq!(replica.transaction_outcome(first).await.unwrap(), applied);
     let replica = reopen(&lineage, &dir, replica, &key).await;
     assert_eq!(replica.transaction_outcome(first).await.unwrap(), applied);
@@ -879,8 +882,8 @@ async fn a_rebuild_that_cannot_hold_is_stuck_until_its_inputs_change() {
     follow_main(&lineage, &replica).await;
     insert(&replica, "p", "parent").await;
     tag(&replica, "old", "p").await;
-    // Rows a rebuild restores, which a stuck check does not touch.
-    for row in 0..64 {
+    let rows_a_rebuild_restores_and_a_stuck_check_skips = 0..64;
+    for row in rows_a_rebuild_restores_and_a_stuck_check_skips {
         identity_insert(
             &session(&replica).await,
             "INSERT INTO tags(key,label) VALUES(?,'filler')",
@@ -892,21 +895,8 @@ async fn a_rebuild_that_cannot_hold_is_stuck_until_its_inputs_change() {
     seal(&lineage, &replica).await;
     replica.compact(lineage.domain, 0).await.unwrap();
     let before = tags(&replica).await;
-    // A base of `items` without `p`, which `old` in the `tags` base
-    // references, and a mark as a clear of `items` leaves.
     let items = lineage.scope("items");
-    {
-        let inner = replica.inner.lock(crate::replica::Class::Background).await;
-        inner
-            .conn
-            .execute(
-                "DELETE FROM secure_replayed_base WHERE scope=(SELECT id FROM secure_scope_state WHERE scope=?)",
-                [encode(&items).unwrap()],
-            )
-            .await
-            .unwrap();
-    }
-    replica.mark_rederive_for_test(items).await.unwrap();
+    clear_the_parent_base_a_child_references(&replica, items).await;
     let attempt = async || {
         let start = crate::sqlite::statements();
         replica.rederive().await.unwrap();
@@ -922,14 +912,33 @@ async fn a_rebuild_that_cannot_hold_is_stuck_until_its_inputs_change() {
     assert_eq!(tags(&replica).await, before);
     let again = attempt().await;
     assert!(again * 4 < rebuilt, "{again} statements after {rebuilt}");
-    // A new frame changes the inputs: the rebuild runs again.
     insert(&replica, "q", "new").await;
-    assert!(attempt().await * 4 > rebuilt);
+    assert!(
+        attempt().await * 4 > rebuilt,
+        "a new frame changes the inputs, so the rebuild runs again"
+    );
     assert!(
         !stored(&replica, "SELECT 1 FROM secure_replayed_stuck")
             .await
             .is_empty()
     );
+}
+
+/// Drops the `items` base, though `old` in the `tags` base references its
+/// `p`, and marks `items` as a clear of it leaves it.
+async fn clear_the_parent_base_a_child_references(replica: &Replica, items: ResourceScope) {
+    {
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
+        inner
+            .conn
+            .execute(
+                "DELETE FROM secure_replayed_base WHERE scope=(SELECT id FROM secure_scope_state WHERE scope=?)",
+                [encode(&items).unwrap()],
+            )
+            .await
+            .unwrap();
+    }
+    replica.mark_rederive_for_test(items).await.unwrap();
 }
 
 /// A partitioned `tags` cannot reference the unpartitioned `items`, so no

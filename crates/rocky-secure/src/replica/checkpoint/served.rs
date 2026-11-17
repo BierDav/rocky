@@ -38,7 +38,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner = flushed(inner, &self.inner).await?;
         inner.authorize_seal_peer(peer, credentials, scope)?;
-        // A no-frames base needs no key: its original statement is served.
         if !inner.importing.contains(&scope)
             && !inner.importing(scope).await?
             && let Some(signed) = inner.no_frames_base(scope).await?
@@ -230,11 +229,7 @@ impl<A: RowApplication> Inner<A> {
             seal: Some(seal),
             partition: self.partitions.get(&scope).cloned(),
             identities,
-            // Replayed rows never move.
-            moves: SetSummary {
-                count: 0,
-                digest: [0; 32],
-            },
+            moves: REPLAYED_MOVES,
             tip,
             schema: self
                 .generation_of(self.manifest_of_tip(tip)?, false)?

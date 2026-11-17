@@ -76,8 +76,6 @@ async fn a_browser_node_syncs_and_claims_with_a_native_node_over_a_relay() -> Re
     session.sync_once().await?;
     assert_eq!(bodies(&db, "from %").await?, ["from native"]);
 
-    // The owner grants this node's identity a claim right for invoices once
-    // it asks; the node fetches the claim link from it when it claims.
     let principal = session.info().await?.principal;
     note(&db, &format!("member {principal}")).await?;
     let deadline = time::Instant::now() + time::Duration::from_secs(60);
@@ -96,24 +94,25 @@ async fn a_browser_node_syncs_and_claims_with_a_native_node_over_a_relay() -> Re
         time::sleep(time::Duration::from_millis(200)).await;
     }
 
-    // Gap-free invoice numbers: a retry with the same claim answers its
-    // value, and the next claim takes the next one.
     let invoices = counters::Name::new("invoices")?;
     let first = counters::Claim::fresh()?;
     let number = db.claim(invoices.clone(), first).await?;
     assert_eq!(number, 1);
-    assert_eq!(db.claim(invoices.clone(), first).await?, number);
+    assert_eq!(
+        db.claim(invoices.clone(), first).await?,
+        number,
+        "a retry with the same claim answers its value"
+    );
     assert_eq!(
         db.claim(invoices.clone(), counters::Claim::fresh()?)
             .await?,
         2
     );
-    // The right names only invoices; another counter is refused.
     let refused = db
         .claim(counters::Name::new("credits")?, counters::Claim::fresh()?)
         .await
         .err()
-        .ok_or("a claim outside the right succeeded")?;
+        .ok_or("a claim on a counter the right does not name succeeded")?;
     assert_eq!(
         refused.downcast_ref::<rocky_sdk::CoordinationError>(),
         Some(&rocky_sdk::CoordinationError::Denied)
@@ -130,12 +129,11 @@ async fn a_browser_node_syncs_and_claims_with_a_native_node_over_a_relay() -> Re
     session.sync_once().await?;
     db.close().await?;
 
-    // Reopened from OPFS, the node still holds both writes, its claim and
-    // its claim right.
     let db = configuration.open().await?.database;
     assert_eq!(
         bodies(&db, "from %").await?,
-        ["from browser", "from native"]
+        ["from browser", "from native"],
+        "reopened from OPFS, the node still holds both writes"
     );
     let reading = db.counter(invoices.clone(), Some(first)).await?;
     assert_eq!(

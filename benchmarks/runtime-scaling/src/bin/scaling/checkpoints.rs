@@ -81,8 +81,10 @@ pub async fn run(
         resident_mib()
     );
     let replica = runtime.domain(scope())?;
-    // The table of the row each creating operation made, by its sequence.
-    let placed: Vec<AtomicUsize> = (0..rows + WRITERS).map(|_| AtomicUsize::new(0)).collect();
+    let writers_in_flight_overshoot = WRITERS;
+    let table_by_sequence: Vec<AtomicUsize> = (0..rows + writers_in_flight_overshoot)
+        .map(|_| AtomicUsize::new(0))
+        .collect();
     let created = AtomicUsize::new(0);
     let create = async || -> Result<(), Error> {
         let index = created.fetch_add(1, Ordering::Relaxed);
@@ -94,7 +96,8 @@ pub async fn run(
             &format!("row-{index}"),
         );
         let operation = commit(&replica, None, payload).await?;
-        placed[operation.id.sequence.get() as usize - 1].store(table.into(), Ordering::Relaxed);
+        table_by_sequence[operation.id.sequence.get() as usize - 1]
+            .store(table.into(), Ordering::Relaxed);
         Ok(())
     };
     let empty = median(
@@ -104,7 +107,6 @@ pub async fn run(
     )
     .await?;
     let load_started = Instant::now();
-    // Writers in flight may pass `rows` by a few; `placed` has room for them.
     let results = futures(WRITERS, |_| async {
         while created.load(Ordering::Relaxed) < rows {
             create().await?;
@@ -129,7 +131,7 @@ pub async fn run(
             node: NODE,
             sequence: AuthorSequence::new(sequence as u64)?,
         };
-        let table = placed[sequence - 1].load(Ordering::Relaxed) as u16;
+        let table = table_by_sequence[sequence - 1].load(Ordering::Relaxed) as u16;
         commit(&replica, Some(id), WideSchema::set_a(table, index as i64))
             .await
             .map(|_| ())

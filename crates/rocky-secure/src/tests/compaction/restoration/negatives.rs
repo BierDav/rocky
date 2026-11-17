@@ -126,7 +126,6 @@ async fn a_wrong_endpoint_or_higher_log_without_its_bridge_still_waits() {
         )
         .await
         .unwrap();
-    // A raw higher-log claim is corruption, not a signed bridge through H.
     let ids = {
         let inner = f
             .replica
@@ -151,6 +150,7 @@ async fn a_wrong_endpoint_or_higher_log_without_its_bridge_still_waits() {
     };
     let id = *id;
     let clock = f.frames[2].operation_ref().unwrap().header.timestamp;
+    let unbridged_higher_sequence = 3;
     f.replica
         .inner
         .lock(crate::replica::Class::Background)
@@ -161,7 +161,7 @@ async fn a_wrong_endpoint_or_higher_log_without_its_bridge_still_waits() {
             bindings(vec![
                 SqlValue::Integer(id),
                 SqlValue::Blob(f.key.public_key().as_bytes().to_vec()),
-                SqlValue::Integer(3),
+                SqlValue::Integer(unbridged_higher_sequence),
                 SqlValue::Blob(wrong.as_bytes().to_vec()),
                 SqlValue::Integer(clock as i64 + 1),
             ]),
@@ -189,9 +189,9 @@ async fn restoration_never_admits_unknown_own_frames_without_or_above_its_exact_
     higher.timestamp += 1;
     higher.backlink = Some(f.frames[2].id().unwrap());
     higher.sign(&f.key);
-    // Seals verify the scope held again first, as any receive's pass does,
-    // so what follows compares only what the refused frames could change.
-    f.replica.finalize_arrived(f.lineage.domain).await.unwrap();
+    f.replica.finalize_arrived(f.lineage.domain).await.expect(
+        "seals verify the held scope first, so the snapshot isolates what refused frames change",
+    );
     let before = super::super::audit::snapshot(&f.replica).await;
     let error = f
         .replica
@@ -246,22 +246,9 @@ async fn restoration_never_admits_unknown_own_frames_without_or_above_its_exact_
     );
 }
 
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_complete_signed_header_placement_prefix_is_not_retained_payload() {
-    let f = HeldPrefix::new(3).await;
-    let scope = f.lineage.scope("items");
-    let saved = rows(
-        &f.replica
-            .inner
-            .lock(crate::replica::Class::Background)
-            .await
-            .conn,
-        "SELECT * FROM secure_placements",
-    )
-    .await
-    .unwrap();
-    // Privileged placement-store fixture: no claim that held readable scopes
-    // can use the off-custody placement protocol to bypass ordinary intake.
+/// Writes a placement for every fixture frame straight into the store, as
+/// the off-custody placement protocol would for a scope held elsewhere.
+async fn place_every_frame_directly(f: &HeldPrefix, scope: ResourceScope) {
     for frame in &f.frames {
         let operation = frame.operation_ref().unwrap();
         let header = &operation.header;
@@ -286,9 +273,27 @@ async fn a_complete_signed_header_placement_prefix_is_not_retained_payload() {
             .await
             .unwrap();
     }
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_complete_signed_header_placement_prefix_is_not_retained_payload() {
+    let f = HeldPrefix::new(3).await;
+    let scope = f.lineage.scope("items");
+    let saved = rows(
+        &f.replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
+        "SELECT * FROM secure_placements",
+    )
+    .await
+    .unwrap();
+    place_every_frame_directly(&f, scope).await;
     assert_eq!(
         scalar(&f.replica, "SELECT count(*) FROM secure_operations").await,
-        0
+        0,
+        "placements claimed for held readable scopes never bypass ordinary intake"
     );
     f.waits().await;
     f.replica

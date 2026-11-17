@@ -79,8 +79,10 @@ async fn withdrawing_a_private_stage_discards_cached_schema_paths_and_frontiers(
         .await
         .frontier_cache_stats()
         .0;
-    // The schema is private, including after its local switch.
-    assert!(replica.tip_statements(None, 32).await.is_err());
+    assert!(
+        replica.tip_statements(None, 32).await.is_err(),
+        "the schema stays private after its local switch"
+    );
     let peer = PrivateKey::new();
     let credentials = lineage.credentials(3, &peer);
     replica
@@ -316,6 +318,9 @@ async fn an_additive_switch_preserves_rows_observers_cursors_and_existing_sessio
     assert_eq!(reopened.followed_tip().await, target);
 }
 
+/// A transaction holds at most 256 intent statements.
+const ROWS_PER_TRANSACTION_UNDER_THE_INTENT_LIMIT: usize = 200;
+
 /// Storage changes an additive switch of `rows` stored rows makes, counted
 /// by SQLite over the switch alone, with the switch's observer events.
 async fn additive_switch_changes(rows: usize) -> (i64, usize) {
@@ -329,9 +334,8 @@ async fn additive_switch_changes(rows: usize) -> (i64, usize) {
         .unwrap();
     follow_main(&lineage, &replica).await;
     let writer = session(&replica).await;
-    // A transaction holds at most 256 intent statements.
     for row in 0..rows {
-        if row % 200 == 0 {
+        if row % ROWS_PER_TRANSACTION_UNDER_THE_INTENT_LIMIT == 0 {
             if row > 0 {
                 let handle = rocky_core::commitment("switch rows", &row.to_be_bytes());
                 writer.commit(handle).await.unwrap();
@@ -426,11 +430,12 @@ async fn additive_switch_changes(rows: usize) -> (i64, usize) {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_additive_switch_changes_the_same_storage_for_ten_or_a_thousand_rows() {
-    // Only metadata changes: SQLite counts no row inserted, updated or
-    // deleted by the switch, so the count does not grow with the rows.
     let (small, small_events) = additive_switch_changes(10).await;
     let (large, large_events) = additive_switch_changes(1000).await;
-    assert_eq!(small, large);
+    assert_eq!(
+        small, large,
+        "only metadata changes, so SQLite's change count does not grow with the rows"
+    );
     assert_eq!((small_events, large_events), (0, 0));
 }
 
@@ -490,8 +495,7 @@ async fn a_withdrawn_stage_leaves_the_live_chain_signed_meanwhile_accepted_elsew
         .await
         .unwrap();
 
-    // The stage branches off the live head.
-    let (link, _) = a.own_chain(lineage.domain, lane, lane).await.unwrap();
+    let (live_head, _) = a.own_chain(lineage.domain, lane, lane).await.unwrap();
     let mut statement = sign_seal(
         &lineage,
         source,
@@ -501,7 +505,7 @@ async fn a_withdrawn_stage_leaves_the_live_chain_signed_meanwhile_accepted_elsew
     statement.action = SealAction::Continue {
         schema: lineage.definition(3).hash(),
     };
-    let staged = link.branch(&statement).unwrap();
+    let staged = live_head.branch(&statement).unwrap();
     let seal = SignedSeal::endorse_linked(statement, signer(), &chain, Some(staged)).unwrap();
     let target = seal.successor().unwrap().unwrap();
     let movement = SignedBookmarkMove::endorse_linked(
@@ -533,9 +537,12 @@ async fn a_withdrawn_stage_leaves_the_live_chain_signed_meanwhile_accepted_elsew
     .await
     .unwrap();
 
-    // While it waits, the live chain signs on after its own head.
     let (meanwhile, _) = a.own_chain(lineage.domain, lane, lane).await.unwrap();
-    assert_eq!((meanwhile.sequence, meanwhile.stage), (1, None));
+    assert_eq!(
+        (meanwhile.sequence, meanwhile.stage),
+        (1, None),
+        "while the stage waits, the live chain signs on after its own head"
+    );
     a.publish_tip_statements(&[create("meanwhile", meanwhile)])
         .await
         .unwrap();

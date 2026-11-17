@@ -26,6 +26,8 @@ impl std::fmt::Display for PositionError {
 }
 impl std::error::Error for PositionError {}
 
+/// The digits of a stored key. A valid key ends with a non-zero digit: a
+/// trailing zero digit would leave no key directly below it.
 fn digits(key: &str) -> Result<Vec<u8>, PositionError> {
     let invalid = || PositionError::Invalid(key.to_owned());
     let digits = key
@@ -38,7 +40,6 @@ fn digits(key: &str) -> Result<Vec<u8>, PositionError> {
         })
         .collect::<Option<Vec<_>>>()
         .ok_or_else(invalid)?;
-    // A trailing zero digit would leave no key directly below it.
     match digits.last() {
         Some(0) | None => Err(invalid()),
         Some(_) => Ok(digits),
@@ -86,21 +87,21 @@ fn tag_digits(tag: &[u8]) -> Vec<u8> {
 
 /// Digits strictly between `low` and `high` that are not a prefix of
 /// `high`, so any suffix keeps them below `high`. Needs `low < high`.
+/// Ends within `low`'s length plus one, as past it the low digit is zero.
 fn middle(low: &[u8], high: Option<&[u8]>) -> Vec<u8> {
     let mut key = Vec::new();
     let mut high = high;
-    // Ends within `low`'s length plus one: past it the low digit is zero.
     loop {
         let index = key.len();
         let low_digit = low.get(index).copied().unwrap_or(0);
-        // Past a digit below `high`'s, anything above `low` fits.
         let high_digit = high.map_or(BASE, |high| high.get(index).copied().unwrap_or(0));
         if high_digit > low_digit + 1 {
             key.push(low_digit.midpoint(high_digit));
             return key;
         }
         key.push(low_digit);
-        if high_digit == low_digit + 1 {
+        let now_below_high = high_digit == low_digit + 1;
+        if now_below_high {
             high = None;
         }
     }
@@ -121,12 +122,14 @@ mod tests {
         let last = between(Some(&first), None, tag(2)).unwrap();
         let start = between(None, Some(&first), tag(3)).unwrap();
         let mut keys = vec![start.clone(), first.clone(), last.clone()];
-        // Repeatedly split the narrowest gaps on both sides.
         let mut low = first.clone();
         let mut high = last.clone();
         for sequence in 4..200 {
             let key = between(Some(&low), Some(&high), tag(sequence)).unwrap();
-            assert!(low < key && key < high, "{low} < {key} < {high}");
+            assert!(
+                low < key && key < high,
+                "splitting the narrowest gap on alternating sides: {low} < {key} < {high}"
+            );
             keys.push(key.clone());
             if sequence % 2 == 0 {
                 low = key;
@@ -155,14 +158,16 @@ mod tests {
         for key in [&left, &right] {
             assert!(low < *key && *key < high);
         }
-        // A later placement between the two concurrent ones still fits.
         let (a, b) = if left < right {
             (&left, &right)
         } else {
             (&right, &left)
         };
         let inner = between(Some(a), Some(b), tag(9)).unwrap();
-        assert!(*a < inner && inner < *b);
+        assert!(
+            *a < inner && inner < *b,
+            "a later placement between the two concurrent ones still fits"
+        );
     }
 
     #[test]

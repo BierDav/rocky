@@ -14,8 +14,17 @@ use std::{
     sync::Arc,
 };
 
-/// Wall time between two steps.
+/// Wall time between two steps, so a later user action stamps its writes later.
 const STEP_TIME: std::time::Duration = std::time::Duration::from_millis(1);
+/// Bounds a status watch; every wake is a changed token, so it never hangs.
+const MAX_STATUS_WAKES: usize = 1000;
+/// Only stops a hung alert watch: a paused clock reaches it once idle.
+const ALERT_WATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// Only stops a hung mesh watch: a paused clock reaches it once idle.
+const MESH_WATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
+/// Paused-clock time for the autonomous recovery driver's spacing and timer
+/// to run without a new frame or a restart.
+const RECOVERY_DRIVER_SETTLE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// How one seed ended.
 pub(super) struct Report {
@@ -128,9 +137,7 @@ pub(super) async fn run_steps(
     scenario: Scenario,
     steps: Vec<Action>,
 ) -> Result<Report, Failure> {
-    // Keys, nonces, lineages and the wall clock follow the seed on this
-    // thread, so one seed replays the same hashes and orders.
-    let _seeded = rocky_platform::entropy::simulation::seed(seed);
+    let _replays_seed_on_this_thread = rocky_platform::entropy::simulation::seed(seed);
     if scenario.wall == Wall::Frozen {
         rocky_platform::entropy::simulation::freeze();
     }
@@ -167,7 +174,6 @@ pub(super) async fn run_steps(
     simulation.setup().await?;
     for (index, action) in steps.into_iter().enumerate() {
         let started = std::time::Instant::now();
-        // A step is a later user action: its writes are stamped later.
         rocky_platform::entropy::simulation::pass(STEP_TIME);
         if std::env::var_os("ROCKY_SIM_TRACE").is_some() {
             eprintln!("    > {action}");
@@ -292,8 +298,7 @@ impl Simulation {
                 let watch = tokio::task::spawn_local(async move {
                     let mut status = session.status().await?;
                     let before = status.alerts.clone();
-                    // Every wake is a changed token: bounded, never a hang.
-                    for _ in 0..1000 {
+                    for _ in 0..MAX_STATUS_WAKES {
                         status = session.status_after(status.token).await?;
                         if status.alerts != before {
                             return Ok(status.alerts);
@@ -306,11 +311,9 @@ impl Simulation {
             }
             Action::Woken(node) => {
                 let watch = self.watches.remove(node).ok_or("no watch")?;
-                // Only stops a hang: a paused clock reaches it once idle.
-                let alerts =
-                    rocky_platform::time::timeout(std::time::Duration::from_secs(600), watch)
-                        .await
-                        .map_err(|_| "not woken")???;
+                let alerts = rocky_platform::time::timeout(ALERT_WATCH_TIMEOUT, watch)
+                    .await
+                    .map_err(|_| "not woken")???;
                 Ok(self.alerts(&alerts))
             }
             Action::Coordinated(node, behind) => {
@@ -381,8 +384,7 @@ impl Simulation {
                     .clone()
                     .ok_or("the device has no key")?;
                 let watch = tokio::task::spawn_local(async move {
-                    // The device's entry without its times.
-                    let entry = |mesh: &Option<Vec<crate::MeshDevice>>| {
+                    let entry_without_times = |mesh: &Option<Vec<crate::MeshDevice>>| {
                         mesh.iter()
                             .flatten()
                             .find(|entry| entry.node == device)
@@ -395,11 +397,10 @@ impl Simulation {
                             })
                     };
                     let mut status = session.status().await?;
-                    let before = entry(&status.mesh);
-                    // Every wake is a changed token: bounded, never a hang.
-                    for _ in 0..1000 {
+                    let before = entry_without_times(&status.mesh);
+                    for _ in 0..MAX_STATUS_WAKES {
                         status = session.status_after(status.token).await?;
-                        if entry(&status.mesh) != before {
+                        if entry_without_times(&status.mesh) != before {
                             return Ok(status.mesh);
                         }
                     }
@@ -410,11 +411,9 @@ impl Simulation {
             }
             Action::WokenMesh(node) => {
                 let watch = self.mesh_watches.remove(node).ok_or("no watch")?;
-                // Only stops a hang: a paused clock reaches it once idle.
-                let mesh =
-                    rocky_platform::time::timeout(std::time::Duration::from_secs(3600), watch)
-                        .await
-                        .map_err(|_| "not woken")???;
+                let mesh = rocky_platform::time::timeout(MESH_WATCH_TIMEOUT, watch)
+                    .await
+                    .map_err(|_| "not woken")???;
                 Ok(self.mesh(&mesh))
             }
             Action::Partial(node) => {
@@ -586,7 +585,6 @@ impl Simulation {
                 );
                 let member = self.running(*node)?;
                 if !self.partial[*node] {
-                    // The owner holds every list: eviction waits for it.
                     member
                         .session()?
                         .set_replica_role(crate::ReplicaRoleConfig {
@@ -900,7 +898,6 @@ impl Simulation {
             GroupBeforeCommit | GroupAfterCommit => {
                 member.write(&format!("w{index}"), index as u64).await
             }
-            // Replay points never fire on the simulation's row-frame tables.
             Custody | Import | Switch | Settle | Evict | Apply | Rewind | Redo | UndoDeletion => {
                 self.sync(node).await.map(drop)
             }
@@ -1067,8 +1064,8 @@ impl Simulation {
                 ));
             }
             drop(node);
-            // Both rows of a write commit together, so neither shows alone.
-            if self.fixture == Fixture::Relational {
+            let rows_of_a_write_commit_together = self.fixture == Fixture::Relational;
+            if rows_of_a_write_commit_together {
                 continue;
             }
             if let Ok(keys) = member.keys().await {
@@ -1130,14 +1127,10 @@ impl Simulation {
                 if let Some(running) = before
                     && tip != Some(running.replica.followed_tip().await)
                 {
-                    // The first exchange used another tip. Service the new
-                    // one before measuring recovery on the common path.
                     let _ = self.sync(*node).await;
                 }
             }
-            // Let the autonomous recovery driver's spacing and timer run
-            // on the paused clock, without a new frame or a restart.
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            tokio::time::sleep(RECOVERY_DRIVER_SETTLE).await;
             self.safety().await?;
             let mut stuck = self.convergence(&live).await;
             if stuck.count == 0 {
@@ -1224,7 +1217,6 @@ impl Simulation {
             }
         }
         if self.fixture == Fixture::Relational {
-            // Holdings differ: each list's rows agree among its holders.
             let mut lists: BTreeMap<String, Vec<(&String, &String)>> = BTreeMap::new();
             for (name, held) in &tables {
                 for rows in held {
@@ -1374,8 +1366,6 @@ impl Simulation {
             drop(running);
             for (txn, (position, sealed)) in positions {
                 let token = TransactionToken(txn);
-                // A replica holding some of a bundle's members sees a later
-                // earliest stamp: the least seen is the bundle's.
                 match self.positions.get_mut(&token) {
                     Some((known, true)) if sealed && known.0 != position.0 => {
                         return Err(format!(
@@ -1409,7 +1399,6 @@ impl Simulation {
                 continue;
             };
             for list in held {
-                // A list waiting for its history refuses reads.
                 if let Ok(found) = relational::violations(&database, &list).await
                     && !found.is_empty()
                 {
@@ -1532,8 +1521,6 @@ impl Simulation {
                         authored.step
                     ));
                 }
-                // Another author's transaction a base covers is in the rows
-                // only: a replica keeps outcomes only of its own members.
                 if outcome.is_none()
                     && authored.node != *node
                     && authored.lists.is_subset(&held)
@@ -1573,8 +1560,8 @@ impl Stuck {
     }
 }
 
-// All scopes share the global checks. A blocked scope must not hide an
-// invalid sibling, so retain individual checks when the batch is blocked.
+/// Audits every scope together, and each one alone when the batch is
+/// blocked, so a blocked scope never hides an invalid sibling.
 async fn audit_node(
     node: &crate::node::Node,
     allow_blocked: bool,

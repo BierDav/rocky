@@ -68,19 +68,24 @@ async fn refused(from: &dyn Transport, address: &str) -> bool {
 
 #[tokio::test]
 async fn rocky_and_an_application_protocol_share_an_application_endpoint() -> Result<(), Failure> {
-    // The application binds the endpoint and owns the router.
     let endpoint = local().bind([7; 32]).await?;
     let attachment = Attachment::new(endpoint.clone());
-    let router = attachment
+    let application_router = attachment
         .register(Router::builder(endpoint.clone()).accept(ECHO, Echo))
         .spawn();
     let served = attachment.transport();
     let other = local().start([8; 32]).await?;
     let dialing = other.transport();
-    // Until a service listens, Rocky's ALPNs are refused; the echo is not.
-    assert!(refused(&*dialing, &served.address().await?).await);
+    assert!(
+        refused(&*dialing, &served.address().await?).await,
+        "Rocky's ALPNs are refused until a service listens"
+    );
     assert_eq!(attachment.refused(), 1);
-    assert_eq!(echo(&other.endpoint(), endpoint.addr()).await?, b"hello");
+    assert_eq!(
+        echo(&other.endpoint(), endpoint.addr()).await?,
+        b"hello",
+        "the application's protocol answers while Rocky's are refused"
+    );
     served.listen(Some(TEST_SCOPE), true).expect("listen");
     dialing.listen(Some(TEST_SCOPE), true).expect("listen");
 
@@ -88,22 +93,29 @@ async fn rocky_and_an_application_protocol_share_an_application_endpoint() -> Re
     rocky(&*served, &*dialing).await?;
     assert_eq!(echo(&other.endpoint(), endpoint.addr()).await?, b"hello");
 
-    // Closing Rocky's side releases its streams and refuses its ALPNs.
     served.close().await;
     served.close().await;
-    assert!(served.accept().await.is_none());
+    assert!(
+        served.accept().await.is_none(),
+        "closing ends Rocky's streams"
+    );
     let address = served.address().await?;
-    // A stream on the connection made earlier fails; a fresh dial is refused.
-    for _ in 0..2 {
-        assert!(refused(&*dialing, &address).await);
-    }
+    let (on_earlier_connection, fresh_dial) = (
+        refused(&*dialing, &address).await,
+        refused(&*dialing, &address).await,
+    );
+    assert!(
+        on_earlier_connection && fresh_dial,
+        "a closed attachment refuses its ALPNs on old and new connections"
+    );
     assert!(attachment.refused() >= 1);
-    // The endpoint, the router and the application's protocol are untouched.
-    assert!(!endpoint.is_closed() && !router.is_shutdown());
+    assert!(
+        !endpoint.is_closed() && !application_router.is_shutdown(),
+        "closing Rocky's side leaves the application's endpoint and router"
+    );
     assert_eq!(echo(&other.endpoint(), endpoint.addr()).await?, b"hello");
 
-    // The final shutdown is the application's.
-    router.shutdown().await?;
+    application_router.shutdown().await?;
     assert!(endpoint.is_closed());
     dialing.close().await;
     Ok(())
@@ -114,8 +126,11 @@ async fn the_starter_shuts_down_everything_it_bound() -> Result<(), Failure> {
     let first = local().start([1; 32]).await?;
     let second = local().start([2; 32]).await?;
     assert_ne!(first.endpoint().id(), second.endpoint().id());
-    // The endpoint key follows the stable transport key.
-    assert_eq!(first.endpoint().id(), local().bind([1; 32]).await?.id());
+    assert_eq!(
+        first.endpoint().id(),
+        local().bind([1; 32]).await?.id(),
+        "the endpoint key follows the stable transport key"
+    );
     let (near, far) = (first.transport(), second.transport());
     far.listen(Some(TEST_SCOPE), true).expect("listen");
     rocky(&*near, &*far).await?;
@@ -163,10 +178,12 @@ async fn a_dial_rebinds_a_dead_starter_on_its_fixed_port() -> Result<(), Failure
     second.listen(Some(TEST_SCOPE), true).expect("listen");
     rocky(&first, &second).await?;
     first.endpoint().close().await;
-    // No foreground: the next dial heals it, on the same port.
     rocky(&first, &second).await?;
     rocky(&second, &first).await?;
-    assert!(first.address().await?.contains(&format!(":{port}")));
+    assert!(
+        first.address().await?.contains(&format!(":{port}")),
+        "the next dial heals the starter on its fixed port without a foreground"
+    );
     first.endpoint().close().await;
     first.foreground().await?;
     rocky(&second, &first).await?;
@@ -288,12 +305,19 @@ async fn a_link_has_four_request_streams_and_an_independent_control_stream() -> 
         send.write_u8(index as u8).await?;
         assert_eq!(receive.read_u8().await?, index as u8);
     }
-    // Ending a request lane leaves both control directions usable.
     outgoing[0].shutdown().await?;
     near.write_u8(7).await?;
-    assert_eq!(far.read_u8().await?, 7);
+    assert_eq!(
+        far.read_u8().await?,
+        7,
+        "ending a request lane leaves the control stream usable"
+    );
     far.write_u8(9).await?;
-    assert_eq!(near.read_u8().await?, 9);
+    assert_eq!(
+        near.read_u8().await?,
+        9,
+        "ending a request lane leaves the control stream usable"
+    );
     far.write_u8(11).await?;
     far.shutdown().await?;
     drop(incoming);
@@ -332,6 +356,9 @@ async fn closing_a_borrowed_attachment_ends_its_link_lanes_and_keeps_the_endpoin
     Ok(())
 }
 
+/// Only stops a hang should close wait for the pending accept's queue lock.
+const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[tokio::test]
 async fn closing_ends_a_pending_accept() -> Result<(), Failure> {
     let served = local().start([51; 32]).await?.transport();
@@ -343,8 +370,7 @@ async fn closing_ends_a_pending_accept() -> Result<(), Failure> {
         _ = &mut accept => return Err("nothing was dialed".into()),
         () = tokio::task::yield_now() => {}
     }
-    // The timeout only stops a hang: close used to wait for the accept's queue lock.
-    let (_, accepted) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    let (_, accepted) = tokio::time::timeout(HANG_GUARD, async {
         tokio::join!(served.close(), &mut accept)
     })
     .await

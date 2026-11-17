@@ -122,8 +122,10 @@ mod tests {
                 3 => legend.1.insert(0, Digest::new([4; 32])),
                 _ => legend.0.push(Digest::new([5; 32])),
             }
-            // A tuple wrapper matches Page's newtype representation.
-            assert!(decode::<Page>(&encode(&legend).unwrap()).is_err());
+            assert!(
+                decode::<Page>(&encode(&legend).unwrap()).is_err(),
+                "a defective legend must not decode, though its tuple wrapper matches Page's newtype representation"
+            );
         }
     }
 }

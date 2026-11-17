@@ -15,17 +15,14 @@ pub(super) const GROUP_BYTES: usize = 4 * 1024 * 1024;
 /// request, so it uses RECEIVE_REQUESTS instead of this admission-only bound.
 const STEP_REQUESTS: usize = 2;
 /// One-row incoming frames per transaction, including ready application.
-/// Pixel cold/warm p99 27.032/25.025 ms, including inspection and commit.
 /// Larger requests run alone.
 pub(crate) const RECEIVE_REQUESTS: usize = 4;
 /// Encoded input bytes per transaction; a larger atomic request runs alone.
-/// Sized in the receive-step sizing evidence.
 const STEP_BYTES: usize = 32 * 1024;
-/// One discovery, application or cleanup unit per acquisition. Pixel warm
-/// one-row application p99 8.466 ms; see the receive-step sizing evidence.
+/// One discovery, application or cleanup unit per acquisition.
 pub(super) const SETTLE_REQUESTS: usize = 1;
-/// Larger atomic frames/bundles are reported as oversized requests.
-/// One warm row costs 8.466 ms at p99 on Pixel; see the sizing evidence.
+/// Rows applied per acquisition; larger atomic frames and bundles are
+/// reported as oversized requests.
 pub(super) const APPLICATION_ROWS: u64 = 1;
 /// WAL size that triggers a passive checkpoint between groups, and the
 /// size a reset WAL is cut back to.
@@ -133,6 +130,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })
     }
     /// Enqueues `work` as contiguous requests and returns their results in order.
+    /// A reply is lost only when its leader was cancelled while waiting out a
+    /// busy file; the outcome is then unknown and retrying by handle is safe.
     pub(super) async fn submit(&self, work: Vec<(Work, usize)>, exposed: bool) -> Vec<Reply> {
         #[cfg(feature = "qualification")]
         let receive_limit = match crate::qualification_bound(
@@ -164,7 +163,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let (Some(last), Some(slot)) = (pending.last_mut(), results.last_mut()) else {
             return Vec::new();
         };
-        // Groups take queue prefixes, so the last reply arrives after the others.
         let guard = tokio::select! {
             biased;
             result = last => {
@@ -242,8 +240,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 {
                     settle_failure.get_or_insert(error);
                 }
-                // Yield outside the guard even when no mutex waiter has registered.
-                // A drained local write keeps the leader interactive.
                 rocky_platform::task::yield_now().await;
                 let class = class.min(class_of(cohort.iter().map(|request| &request.work)));
                 inner = self.inner.lock(class).await;
@@ -274,10 +270,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let mut inner = self.inner.lock(Class::Background).await;
             inner.checkpoint_if_due().await;
         }
-        // Another leader took these requests and answers them after its
-        // flush, outside the lock. A reply is lost only when its leader was
-        // cancelled while waiting out a busy file; the outcome is then
-        // unknown and retrying by handle is safe.
         let mut answered = Vec::with_capacity(pending.len());
         for (receiver, result) in pending.into_iter().zip(results) {
             answered.push(match result {
@@ -350,8 +342,6 @@ fn step<A: RowApplication>(
         {
             break;
         }
-        // Only known one-row frames share a receive step. An atomic bundle,
-        // larger frame or unopened payload keeps its own transaction.
         let indivisible = if let Work::Receive(frame) = &request.work {
             inner
                 .open_payload(frame)
@@ -416,9 +406,9 @@ impl Exposed {
             }
         }
     }
-    /// One flush covers every exposed result in the group.
+    /// One flush covers every exposed result in the group; a cancelled leader
+    /// still owes every queued caller its durable reply.
     async fn answer(self, flusher: Arc<Flusher>) {
-        // A cancelled leader still owes every queued caller its durable reply.
         let _ = rocky_platform::task::spawn_blocking(move || {
             let flushed = flusher.flush(self.commit);
             for (reply, done) in self.replies {
@@ -549,7 +539,6 @@ impl<A: RowApplication> Inner<A> {
             };
             match done {
                 Ok(done) if flush => exposed.push((reply, done)),
-                // A caller that went away still has its request committed.
                 done => {
                     let _ = reply.send(done.map(|done| (done, self.commit)));
                 }
@@ -623,8 +612,6 @@ impl<A: RowApplication> Inner<A> {
                 } => match self.lookup_bundle(*handle, *input).await {
                     Ok(Some(Ok(frames))) => Ok(Staged::Bundle(frames)),
                     Ok(Some(Err(hash))) => Ok(Staged::Handled(hash)),
-                    // The commit's linearization point: authority is checked
-                    // under the replica lock, inside the write transaction.
                     Ok(None) => match self.check_authority(*authority) {
                         Ok(()) => self
                             .author_bundle(*handle, *input, writes, dependencies, time)
@@ -645,7 +632,6 @@ impl<A: RowApplication> Inner<A> {
                     outcome.results.push(Err(error));
                 }
                 Ok(staged) => {
-                    // A retry must resume a pass interrupted after receipt committed.
                     unapplied |= matches!(
                         staged,
                         Staged::Stored(_) | Staged::Covered | Staged::Duplicate
@@ -693,8 +679,6 @@ impl<A: RowApplication> Inner<A> {
                 std::process::exit(77);
             }
         }
-        // Ready requests apply with admission so readers never see an artificial
-        // pending interval. Previously blocked work settles between groups.
         outcome.more = unapplied;
         #[cfg(any(test, feature = "qualification"))]
         self.crash_at(|point| point == super::CrashPoint::GroupBeforeCommit)?;
@@ -718,21 +702,16 @@ impl<A: RowApplication> Inner<A> {
         let operation = frame.operation_ref()?;
         let mut store = TransactionStore(self.conn.clone());
         let held = store.has_operation(operation.hash).await?;
-        // A held frame of a generation this replica does not admit, such as
-        // one refused as unknown, was verified as it arrived; any other is
-        // verified again.
-        if held
+        let verified_on_arrival = held
             && self
                 .manifest_of_tip(operation.header.extensions.tip)
                 .and_then(|manifest| self.admits(manifest))
-                .is_err()
-        {
+                .is_err();
+        if verified_on_arrival {
             return Ok(Staged::Duplicate);
         }
         self.verify_frame(frame, time)?;
         let operation = frame.operation_ref()?;
-        // Under the lock that installs no-frames bases, so neither order
-        // commits both a base and history it says the seal excludes.
         self.refuse_no_frames_contradiction(&operation.header)
             .await?;
         let extension = &operation.header.extensions;
@@ -753,22 +732,18 @@ impl<A: RowApplication> Inner<A> {
         if held {
             return Ok(Staged::Duplicate);
         }
-        // A late frame from before the pruned_prefix is part of the checkpoint: it
-        // is not stored and cannot be applied a second time.
         let scope = operation.header.extensions.scope;
         if self.frame_reach(frame)? != tips::FrameReach::Held
             && let Some(id) = self.find_scope_id(scope).await?
             && let Some(log) = self.log(id, operation.header.public_key).await?
             && operation.header.seq_num as i64 <= log.pruned_prefix
         {
-            // A pending frame may name it as a dependency.
             if self.has_pending(scope).await? {
                 self.put_stub(operation.hash, id, operation.header.timestamp, false)
                     .await?;
             }
             return Ok(Staged::Covered);
         }
-        // A void consumed this position: the frame forks its log.
         if self
             .voided_position(scope, operation.header.public_key, operation.header.seq_num)
             .await?
@@ -842,7 +817,6 @@ impl<A: RowApplication> Inner<A> {
             }
             return;
         }
-        // At the hard limit, cursors pinning the log end so it can reset.
         if !self.truncate_wal().await
             && size >= self.wal_limits.1
             && self.workspace.queries.cursors.preempt().await > 0

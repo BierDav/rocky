@@ -105,7 +105,6 @@ async fn bounded_pages_scope_filtering_and_pending_passes_do_not_starve() {
         }
     }
     assert!(found);
-    // A hash before the cursor arrives after a pass; custody is not application.
     let relay_key = PrivateKey::new();
     let relay = EncryptedReplica::open(
         dir.path().join("relay.db"),
@@ -126,7 +125,8 @@ async fn bounded_pages_scope_filtering_and_pending_passes_do_not_starve() {
     assert_eq!(relay.receive(last).await.unwrap(), ReceiveStatus::Custody);
     assert_eq!(
         relay.receive(first.clone()).await.unwrap(),
-        ReceiveStatus::Custody
+        ReceiveStatus::Custody,
+        "custody is not application"
     );
     assert!(
         relay
@@ -156,7 +156,8 @@ async fn bounded_pages_scope_filtering_and_pending_passes_do_not_starve() {
         restarted
             .frames
             .iter()
-            .any(|frame| frame.id().unwrap() == first.id().unwrap())
+            .any(|frame| frame.id().unwrap() == first.id().unwrap()),
+        "a hash arriving before the cursor is served by the next pass"
     );
     assert_eq!(
         relay.receipt_status(first.id().unwrap()).await.unwrap(),
@@ -258,6 +259,11 @@ fn wide_row(index: u16) -> [u8; 32] {
     row
 }
 
+/// Rows in each authored operation of the snapshot-limit corpus.
+const ROWS_PER_OPERATION: u16 = 32;
+/// Operations whose rows exceed what a snapshot may hold by one, plus spare.
+const OPERATIONS_PAST_A_SNAPSHOT: u16 = 33;
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn pages_bound_reads_and_rebuild_streams_past_the_snapshot_limit() {
     let f = Fixture::new();
@@ -270,13 +276,12 @@ async fn pages_bound_reads_and_rebuild_streams_past_the_snapshot_limit() {
     )
     .await
     .unwrap();
-    // 33 operations of 32 rows: one row more than a snapshot may hold, plus spare.
     let mut created = Vec::new();
-    for batch in 0..33u16 {
-        let changes = (0..32)
+    for batch in 0..OPERATIONS_PAST_A_SNAPSHOT {
+        let changes = (0..ROWS_PER_OPERATION)
             .map(|offset| RowChange {
                 scope: f.public,
-                row: wide_row(batch * 32 + offset),
+                row: wide_row(batch * ROWS_PER_OPERATION + offset),
                 before: None,
                 after: Some(f.app().name("first")),
             })
@@ -343,15 +348,24 @@ async fn pages_bound_reads_and_rebuild_streams_past_the_snapshot_limit() {
         }
     };
     let (before, pages) = read_all().await;
-    assert_eq!((before.len(), pages), (33 * 32 - 1, 11));
+    assert_eq!(
+        (before.len(), pages),
+        (
+            usize::from(OPERATIONS_PAST_A_SNAPSHOT * ROWS_PER_OPERATION) - 1,
+            11
+        )
+    );
     assert_eq!(before[&wide_row(5)], f.app().name("edited"));
     assert!(!before.contains_key(&wide_row(40)));
-    // A cursor is a row key inside the requested scope: it cannot leave it.
     let private = replica
         .snapshot_page(f.private, Some(wide_row(0)), 10)
         .await
         .unwrap();
-    assert_eq!(private.rows.len(), 1);
+    assert_eq!(
+        private.rows.len(),
+        1,
+        "a cursor is a row key inside the requested scope and cannot leave it"
+    );
     assert!(private.rows.contains_key(&[1; 32]));
     let last = replica
         .snapshot_page(f.public, Some([255; 32]), 10)
@@ -371,17 +385,19 @@ async fn pages_bound_reads_and_rebuild_streams_past_the_snapshot_limit() {
         Companion::Present(f.app().name("edited"))
     );
     drop(replica);
-    // Reopen audits the rebuilt projection against history.
-    let reopened = EncryptedReplica::open(
+    let reopened_after_auditing_the_rebuilt_projection = EncryptedReplica::open(
         dir.path().join("a.db"),
         f.app(),
         f.config(&node, f.full(), &[f.public]),
     )
     .await
     .unwrap();
-    // Without the key a readable scope yields no rows and is not complete.
+    let reopened = reopened_after_auditing_the_rebuilt_projection;
     let keyless = reopened.snapshot_page(f.private, None, 10).await.unwrap();
-    assert!(keyless.rows.is_empty() && !keyless.complete && keyless.next.is_none());
+    assert!(
+        keyless.rows.is_empty() && !keyless.complete && keyless.next.is_none(),
+        "without the key a readable scope yields no rows and is not complete"
+    );
     assert_eq!(
         reopened.companion(f.private, [1; 32]).await.unwrap(),
         Companion::Unavailable
@@ -426,7 +442,6 @@ async fn read_and_replay_queries_use_indexes() {
         assert!(plan.contains("SEARCH") && !plan.contains("SCAN"), "{plan}");
         assert!(!plan.contains("TEMP B-TREE"), "{plan}");
     }
-    // Only unsealed members are counted, never every replayed one.
     let plan = format!(
         "{:?}",
         rows(
@@ -436,7 +451,10 @@ async fn read_and_replay_queries_use_indexes() {
         .await
         .unwrap()
     );
-    assert!(plan.contains("secure_replayed_unsealed"), "{plan}");
+    assert!(
+        plan.contains("secure_replayed_unsealed"),
+        "only unsealed members are counted, never every replayed one: {plan}"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -771,11 +789,11 @@ async fn lthash_fixture_matches_phase_start() {
     inner.conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
     let digest = inner.fixed_row_digest(1_000).await.unwrap();
     inner.conn.execute("ROLLBACK", ()).await.unwrap();
-    // Rebuilding the same canonical corpus must remain deterministic.  The
-    // exact digest is an implementation detail; this test is not a benchmark
-    // or a large-corpus compatibility fixture.
     let repeated = inner.fixed_row_digest(1_000).await.unwrap();
-    assert_eq!(digest, repeated);
+    assert_eq!(
+        digest, repeated,
+        "rebuilding the same canonical corpus is deterministic"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

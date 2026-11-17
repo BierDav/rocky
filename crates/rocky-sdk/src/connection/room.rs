@@ -56,7 +56,8 @@ impl Housekeeping {
     }
 
     /// The answer to a housekeeping statement, or None for one the
-    /// session runs.
+    /// session runs. Room binds no parameter to any statement answered
+    /// here, so one with parameters is refused.
     pub(super) async fn answer(
         &mut self,
         sql: &str,
@@ -68,7 +69,6 @@ impl Housekeeping {
         }
         let words = words(sql);
         let words: Vec<&str> = words.iter().map(String::as_str).collect();
-        // Room binds no parameter to any statement answered here.
         let answered = match words.as_slice() {
             ["PRAGMA", rest @ ..] => self.pragma(rest, &context).await?,
             ["SELECT", ..] | ["INSERT", ..] | ["UPDATE", ..] => self.query(&words, &context)?,
@@ -81,6 +81,10 @@ impl Housekeeping {
         Ok(answered)
     }
 
+    /// Answers Room's pragmas. Rocky's file is always in WAL mode, so the
+    /// journal mode Room asks for is reported back as SQLite does when a
+    /// mode cannot change. Durability belongs to Rocky, which flushes
+    /// before data leaves, so a synchronous level is accepted as is.
     async fn pragma(
         &mut self,
         words: &[&str],
@@ -91,12 +95,9 @@ impl Housekeeping {
         let none = || Some(Pending::rows(Vec::new(), Vec::new()));
         let lower = |word: &str| word.to_ascii_lowercase();
         Ok(match words {
-            // Rocky's file is always in WAL mode; what Room asks for is
-            // reported back as SQLite does when a mode cannot change.
             [name, "=", _] if lower(name) == "journal_mode" => {
                 one("journal_mode", SqlValue::Text("wal".into()))
             }
-            // Durability belongs to Rocky: it flushes before data leaves.
             [name, "=", "NORMAL" | "FULL"] if lower(name) == "synchronous" => none(),
             [name] if lower(name) == "busy_timeout" => {
                 one("timeout", SqlValue::Integer(context.busy_timeout))
@@ -164,6 +165,8 @@ impl Housekeeping {
         })
     }
 
+    /// Answers Room's catalog queries. Rocky's typed tables carry no
+    /// trigger or view an ORM declared.
     fn query(&mut self, words: &[&str], context: &Context<'_>) -> Result<Option<Pending>, Failure> {
         let rows = |columns: &[&str], rows: Vec<Vec<SqlValue>>| {
             Some(Pending::rows(
@@ -275,7 +278,6 @@ impl Housekeeping {
                     })
                     .collect(),
             ),
-            // Rocky's typed tables carry no trigger or view an ORM declared.
             [
                 "SELECT",
                 "name",
@@ -366,6 +368,10 @@ impl Housekeeping {
         })
     }
 
+    /// Answers Room's schema statements. As in SQLite, an existing table is
+    /// left as it is; Room then validates it against the catalog's answers.
+    /// The entity must still carry Rocky's identity and leave its ids to
+    /// Rocky.
     fn schema(
         &mut self,
         words: &[&str],
@@ -433,9 +439,6 @@ impl Housekeeping {
                 self.log = None;
                 none()
             }
-            // As in SQLite, an existing table is left as it is; Room then
-            // validates it against the catalog's answers. The entity must
-            // still carry Rocky's identity and leave its ids to Rocky.
             [
                 "CREATE",
                 "TABLE",
@@ -653,7 +656,9 @@ mod tests {
                 "'android_metadata'"
             ]
         );
-        // A trigger body keeps its inner semicolon.
-        assert!(words("BEGIN UPDATE t SET a = 1; END").contains(&";".to_string()));
+        assert!(
+            words("BEGIN UPDATE t SET a = 1; END").contains(&";".to_string()),
+            "a trigger body keeps its inner semicolon"
+        );
     }
 }

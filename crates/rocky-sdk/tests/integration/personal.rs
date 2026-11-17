@@ -80,7 +80,6 @@ async fn owner_devices_link_independently_and_merge_without_forks() -> Result<()
     assert_eq!(scope.domain, namespace().domain(identity)?);
     assert_eq!(owner.identity().await, identity.to_hex());
 
-    // Each sibling still confirms both codes; no request flag skips them.
     let contact = owner.contact().await;
     let mut siblings = Vec::new();
     for name in ["laptop", "phone"] {
@@ -93,7 +92,6 @@ async fn owner_devices_link_independently_and_merge_without_forks() -> Result<()
         assert!(certificate.capability.extended()?.personal.is_some());
         siblings.push(Device::new(opened)?);
     }
-    // Both write before they ever meet each other.
     siblings[0].add(1, "from laptop").await;
     siblings[1].add(2, "from phone").await;
     owner.add(3, "from owner").await;
@@ -110,7 +108,8 @@ async fn owner_devices_link_independently_and_merge_without_forks() -> Result<()
     {
         assert_eq!(
             device.titles().await,
-            ["from laptop", "from owner", "from phone"]
+            ["from laptop", "from owner", "from phone"],
+            "siblings that wrote before meeting converge"
         );
         let known: rocky_credentials::RevocationSet =
             serde_json::from_value(saved(&directory.path().join(name))?["revocations"].clone())?;
@@ -156,16 +155,21 @@ async fn a_personal_database_admits_only_custody_principals() -> Result<(), Fail
         .await
         .expect_err("refused");
     assert_eq!(code(&error), "personal_owner_only");
-    // Partition grants and delegations name no one but the owner either.
-    let device = rocky_sdk::NodeKeys {
+    let another_identity = rocky_sdk::NodeKeys {
         identity: rocky_sdk::IdentityKey::generate().public_key(),
         node: rocky_sdk::IdentityKey::generate().public_key(),
     };
-    let Err(error) = session.grant_partitions(device, Vec::new(), 1).await else {
+    let Err(error) = session
+        .grant_partitions(another_identity, Vec::new(), 1)
+        .await
+    else {
         return Err("a personal database issued partitions to another identity".into());
     };
     assert_eq!(code(&error), "personal_owner_only");
-    let Err(error) = session.delegate_partitions(device, Vec::new(), 1).await else {
+    let Err(error) = session
+        .delegate_partitions(another_identity, Vec::new(), 1)
+        .await
+    else {
         return Err("a personal database issued partitions to another identity".into());
     };
     assert_eq!(code(&error), "personal_owner_only");
@@ -174,7 +178,6 @@ async fn a_personal_database_admits_only_custody_principals() -> Result<(), Fail
         .await?;
     owner.close().await;
 
-    // An explicit identity cannot replace the root-derived owner.
     let other = directory.path().join("other");
     let Err(error) = Configuration::new(&other, &Schema::parse(common::SCHEMA)?)?
         .identity(Arc::new(rocky_sdk::IdentityKey::generate()))
@@ -200,7 +203,6 @@ async fn recovering_a_personal_archive_keeps_its_owner() -> Result<(), Failure> 
     owner.close().await;
     std::fs::remove_dir_all(&path)?;
 
-    // Another identity never recovers it.
     let other = directory.path().join("other");
     let Err(error) = Configuration::new(&other, &Schema::parse(common::SCHEMA)?)?
         .identity(Arc::new(rocky_sdk::IdentityKey::generate()))
@@ -312,8 +314,7 @@ async fn a_passkey_restores_the_same_account_on_an_empty_device() -> Result<(), 
     let mut scopes = Vec::new();
     for (name, credential, purpose) in [
         ("first", 1, "account root"),
-        // Another empty device with the same passkey.
-        ("again", 1, "account root"),
+        ("same-passkey-on-another-empty-device", 1, "account root"),
         ("other-namespace", 1, "other root"),
         ("other-credential", 2, "account root"),
     ] {
@@ -341,8 +342,10 @@ async fn a_passkey_restores_the_same_account_on_an_empty_device() -> Result<(), 
     }
     assert_eq!(scopes[0].0, scopes[1].0);
     assert_eq!(scopes[0].1, scopes[1].1);
-    // Data keys are random, never derived from the passkey.
-    assert_ne!(scopes[0].2, scopes[1].2);
+    assert_ne!(
+        scopes[0].2, scopes[1].2,
+        "data keys are random, never derived from the passkey"
+    );
     for other in &scopes[2..] {
         assert_ne!(other.0.mesh, scopes[0].0.mesh);
         assert_ne!(other.0.domain, scopes[0].0.domain);
@@ -405,10 +408,10 @@ async fn only_device_keys_and_the_discovery_capability_are_stored() -> Result<()
             );
         }
     }
-    // Reopening needs no passkey: the node keys alone.
-    let reopened = Device::new(config(&path)?.secrets(store.clone()).open().await?)?;
-    assert_eq!(reopened.titles().await, ["kept"]);
-    reopened.close().await;
+    let reopened_without_passkey =
+        Device::new(config(&path)?.secrets(store.clone()).open().await?)?;
+    assert_eq!(reopened_without_passkey.titles().await, ["kept"]);
+    reopened_without_passkey.close().await;
     Ok(())
 }
 
@@ -425,7 +428,6 @@ async fn an_unsupported_prf_writes_and_sends_nothing() -> Result<(), Failure> {
     let input = namespace().prf_input()?;
     let other = PersonalNamespace::new("shopping.example", "other root")?;
     for prf in [
-        // Evaluated for another namespace, or no PRF output at all.
         passkey(1, &other),
         VerifiedPasskeyPrf::new(&input, [0; 32]),
         VerifiedPasskeyPrf::new(&input, *input.as_bytes()),
@@ -467,7 +469,6 @@ async fn another_account_never_touches_the_local_database() -> Result<(), Failur
     for (prf, namespace, expected) in [
         (passkey(2, &namespace()), namespace(), "wrong_local_account"),
         (passkey(1, &other), other.clone(), "wrong_local_account"),
-        // The same account: an explicit first create refuses it as well.
         (passkey(1, &namespace()), namespace(), "existing_state"),
     ] {
         let error = refusal(

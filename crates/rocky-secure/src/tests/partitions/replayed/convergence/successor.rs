@@ -142,9 +142,6 @@ async fn offline_peers_transactions_replay_after_the_seal_in_its_successor() {
         Some(outcome(None, false))
     );
 
-    // A reconnects and finalizes the seal: its own and B's transactions
-    // replay after the seal's members, and B's `k`, applied before, now
-    // drops behind the owner's.
     h.reconnect_a(&f).await;
     h.a.replica.finalize_path(f.domain).await.unwrap();
     let expected = h.expected(&f);
@@ -157,33 +154,42 @@ async fn offline_peers_transactions_replay_after_the_seal_in_its_successor() {
     );
     assert_eq!(
         expected.outcomes[&late_k],
-        outcome(Some(DropReason::Constraint), false)
+        outcome(Some(DropReason::Constraint), false),
+        "B's `k`, applied before, drops behind the owner's once A finalizes the seal"
     );
     assert_eq!(state(&f, &h.a.replica, &expected).await, expected);
-    // A reauthors nothing: what it relays are B's original frames.
-    assert_eq!(intents(&f, &h.a.fresh().await), 0);
+    assert_eq!(
+        intents(&f, &h.a.fresh().await),
+        0,
+        "A reauthors nothing: it relays B's original frames"
+    );
     assert!(h.a.replica.held_changes().await.unwrap().is_empty());
 
-    // The owner gets them from A, twice; B has not reconnected.
-    let offline = h.offline();
+    let offline_frames_relayed_by_a = h.offline();
     for _ in 0..2 {
-        h.owner.receive(&offline).await;
-        assert_eq!(state(&f, &h.owner.replica, &expected).await, expected);
+        h.owner.receive(&offline_frames_relayed_by_a).await;
+        assert_eq!(
+            state(&f, &h.owner.replica, &expected).await,
+            expected,
+            "the owner converges on frames relayed by A, received twice, before B reconnects"
+        );
     }
-    // A restart keeps it.
     let node = h.a.node.clone();
     drop(h.a);
     h.a = Author::at(&f, root.path(), 2, node).await;
-    assert_eq!(state(&f, &h.a.replica, &expected).await, expected);
+    assert_eq!(
+        state(&f, &h.a.replica, &expected).await,
+        expected,
+        "a restart keeps the finalized state"
+    );
 
-    // The owner's next seal covers them: B's drop becomes final. B, back at
-    // last, gets the same without authoring anything again.
     seal_main(&h.owner.replica, &f.publisher, f.domain).await;
     h.owner.replica.finalize_path(f.domain).await.unwrap();
-    let last = canonical_sealed(&f, &[&h.sealed, &offline], 2);
+    let last = canonical_sealed(&f, &[&h.sealed, &offline_frames_relayed_by_a], 2);
     assert_eq!(
         last.outcomes[&late_k],
-        outcome(Some(DropReason::Constraint), true)
+        outcome(Some(DropReason::Constraint), true),
+        "the owner's next seal covers B's drop and makes it final"
     );
     exchange_graphs(&h.owner.replica, &h.b.replica, f.domain).await;
     h.b.receive(&h.sealed).await;
@@ -192,7 +198,11 @@ async fn offline_peers_transactions_replay_after_the_seal_in_its_successor() {
         assert_eq!(state(&f, replica, &last).await, last);
         assert_eq!(replica.unsealed_replayed_transactions().await.unwrap(), 0);
     }
-    assert_eq!(intents(&f, &h.b.fresh().await), 0);
+    assert_eq!(
+        intents(&f, &h.b.fresh().await),
+        0,
+        "B, back at last, converges without authoring anything again"
+    );
 }
 
 /// Every order of the owner's and the offline transactions converges once
@@ -243,10 +253,12 @@ async fn finalization_crash(point: CrashPoint) {
     let mut h = offline_history(&f, root.path()).await;
     let unsealed = h.a.replica.unsealed_replayed_transactions().await.unwrap();
     h.a.replica.arm_crash(Some(point)).await;
-    // The receive that completes the seal's members finalizes it, after
-    // its group commits; that maintenance step fails at the point.
     h.reconnect_a(&f).await;
-    assert_eq!(h.a.replica.crashed().await, Some(point));
+    assert_eq!(
+        h.a.replica.crashed().await,
+        Some(point),
+        "the receive completing the seal's members finalizes it after its group commits, and that step crashes"
+    );
     let node = h.a.node.clone();
     drop(h.a);
 
@@ -259,8 +271,7 @@ async fn finalization_crash(point: CrashPoint) {
             .finalized
             .is_none()
     );
-    // Every received transaction is open, in stamp order.
-    let provisional = canonical(
+    let every_received_transaction_open_in_stamp_order = canonical(
         &f,
         &h.sealed
             .iter()
@@ -268,7 +279,15 @@ async fn finalization_crash(point: CrashPoint) {
             .chain(h.offline())
             .collect::<Vec<_>>(),
     );
-    assert_eq!(state(&f, &h.a.replica, &provisional).await, provisional);
+    assert_eq!(
+        state(
+            &f,
+            &h.a.replica,
+            &every_received_transaction_open_in_stamp_order
+        )
+        .await,
+        every_received_transaction_open_in_stamp_order
+    );
     assert_eq!(
         h.a.replica.unsealed_replayed_transactions().await.unwrap(),
         unsealed + 2
@@ -276,10 +295,10 @@ async fn finalization_crash(point: CrashPoint) {
     h.a.replica.finalize_path(f.domain).await.unwrap();
     let expected = h.expected(&f);
     assert_eq!(state(&f, &h.a.replica, &expected).await, expected);
-    // Only the transactions the seal left out keep undo records.
     assert_eq!(
         h.a.replica.unsealed_replayed_transactions().await.unwrap(),
-        3
+        3,
+        "only the transactions the seal left out keep undo records"
     );
 }
 

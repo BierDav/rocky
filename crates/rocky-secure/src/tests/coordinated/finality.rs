@@ -50,8 +50,6 @@ async fn a_seal_its_log_ended_becomes_final_and_beats_a_later_owner_seal() {
     }
     let committed = seal(&fixture.lineage, &alice.1, main.tip).await;
     let next = committed.successor().unwrap().unwrap();
-    // An owner seal of the same tip with a lower digest, which the log
-    // never committed.
     let rival = (1..)
         .map(|sequence| {
             let mut statement = committed.statement.clone();
@@ -67,11 +65,13 @@ async fn a_seal_its_log_ended_becomes_final_and_beats_a_later_owner_seal() {
         TipStatement::Seal(committed.clone()),
         bookmark(&fixture.lineage, "main", Some(main.tip), Some(next)),
     ];
-    // Tess ends `main`'s log with the seal.
     tess.1.publish_tip_statements(&statements).await.unwrap();
     let head = fixture.mesh.log.head(main).unwrap();
-    assert_eq!(head.terminal.unwrap().digest, committed.id().unwrap());
-    // A member learns the rival first: by digest it wins there.
+    assert_eq!(
+        head.terminal.unwrap().digest,
+        committed.id().unwrap(),
+        "publishing the seal ends `main`'s log"
+    );
     let key = PrivateKey::new();
     let carol = open(&fixture.lineage, &fixture.dir, "carol", &key).await;
     share(&tess.1, &carol).await;
@@ -80,12 +80,16 @@ async fn a_seal_its_log_ended_becomes_final_and_beats_a_later_owner_seal() {
         .await
         .unwrap();
     let graph = carol.tip_graph(fixture.lineage.domain).await.unwrap();
-    assert_eq!(graph.seal(main.tip).unwrap(), Some(&rival));
+    assert_eq!(
+        graph.seal(main.tip).unwrap(),
+        Some(&rival),
+        "a member learning the rival first lets it win by digest"
+    );
 
-    // One acknowledgment is below the genesis line's minimum of two.
     assert_eq!(
         tess.1.finalize_seals(fixture.lineage.domain).await.unwrap(),
-        0
+        0,
+        "one acknowledgment is below the genesis line's minimum of two"
     );
     share(&tess.1, &tom.1).await;
     assert_eq!(
@@ -96,44 +100,58 @@ async fn a_seal_its_log_ended_becomes_final_and_beats_a_later_owner_seal() {
         fixture.mesh.log.head(main).unwrap().acknowledgments.len(),
         2
     );
-    // A node outside the trusted identities acknowledges nothing.
     assert_eq!(
         alice
             .1
             .finalize_seals(fixture.lineage.domain)
             .await
             .unwrap(),
-        0
+        0,
+        "a node outside the trusted identities acknowledges nothing"
     );
     assert_eq!(
         fixture.mesh.log.head(main).unwrap().acknowledgments.len(),
         2
     );
 
-    // The record reaches the member without any coordinator call.
     assert_eq!(share(&tom.1, &carol).await, 1);
     let graph = carol.tip_graph(fixture.lineage.domain).await.unwrap();
-    assert!(graph.is_final(committed.id().unwrap()).unwrap());
+    assert!(
+        graph.is_final(committed.id().unwrap()).unwrap(),
+        "the record reaches the member without any coordinator call"
+    );
     assert_eq!(graph.seal(main.tip).unwrap(), Some(&committed));
     assert_eq!(graph.bookmark("main").unwrap(), Some(next));
-    // A trusted node that admits the rival afterwards keeps the final seal.
     tom.1
         .receive_tip_statements(&[TipStatement::Seal(rival)])
         .await
         .unwrap();
     let graph = tom.1.tip_graph(fixture.lineage.domain).await.unwrap();
-    assert_eq!(graph.seal(main.tip).unwrap(), Some(&committed));
-    // A node holding every frame through the final seal compacts there at
-    // once, whatever count of seals it leaves uncompacted.
+    assert_eq!(
+        graph.seal(main.tip).unwrap(),
+        Some(&committed),
+        "a trusted node admitting the rival afterwards keeps the final seal"
+    );
     share(&tom.1, &alice.1).await;
-    let report = alice.1.compact(fixture.lineage.domain, 5).await.unwrap();
+    let leaves_uncompacted = 5;
+    let report = alice
+        .1
+        .compact(fixture.lineage.domain, leaves_uncompacted)
+        .await
+        .unwrap();
     assert_eq!(report.waiting, None);
-    assert_eq!(report.compacted, Some(committed.id().unwrap()));
-    // Reopening verifies the stored record again.
+    assert_eq!(
+        report.compacted,
+        Some(committed.id().unwrap()),
+        "holding every frame through the final seal compacts there at once"
+    );
     drop(carol);
     let carol = open(&fixture.lineage, &fixture.dir, "carol", &key).await;
     let graph = carol.tip_graph(fixture.lineage.domain).await.unwrap();
-    assert!(graph.is_final(committed.id().unwrap()).unwrap());
+    assert!(
+        graph.is_final(committed.id().unwrap()).unwrap(),
+        "reopening verifies the stored record again"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -185,14 +203,12 @@ async fn a_held_cut_strips_a_revoked_nodes_acknowledgments_and_the_seal_stays_fi
         ])
         .await
         .unwrap();
-    // All three acknowledge; tina's record carries the three, tom's two.
     assert_eq!(
         tess.1.finalize_seals(fixture.lineage.domain).await.unwrap(),
         0
     );
     share(&tess.1, &tom.1).await;
     tom.1.finalize_seals(fixture.lineage.domain).await.unwrap();
-    // Tina has not seen tom's record yet, so she acknowledges too.
     share(&tess.1, &tina.1).await;
     tina.1.finalize_seals(fixture.lineage.domain).await.unwrap();
     let graph = tina.1.tip_graph(fixture.lineage.domain).await.unwrap();
@@ -200,11 +216,10 @@ async fn a_held_cut_strips_a_revoked_nodes_acknowledgments_and_the_seal_stays_fi
         graph
             .finalities
             .iter()
-            .any(|record| record.acknowledgments.len() == 3)
+            .any(|record| record.acknowledgments.len() == 3),
+        "a node that has not seen another's record acknowledges too, so all three count"
     );
 
-    // The root revokes tess, keeping none of its acknowledgments. Carol held the records before; dave learns the cut
-    // first.
     let carol = open(&fixture.lineage, &fixture.dir, "carol", &PrivateKey::new()).await;
     share(&tina.1, &carol).await;
     let identity = tess_identity.public_key();
@@ -247,13 +262,16 @@ async fn a_held_cut_strips_a_revoked_nodes_acknowledgments_and_the_seal_stays_fi
         assert!(graph.is_final(committed.id().unwrap()).unwrap());
         assert_eq!(graph.seal(main.tip).unwrap(), Some(&committed));
         assert!(!graph.finalities.is_empty());
-        assert!(graph.finalities.iter().all(|record| {
-            record.acknowledgments.len() == 2
-                && record
-                    .acknowledgments
-                    .iter()
-                    .all(|ack| ack.signer != tess_key.public_key())
-        }));
+        assert!(
+            graph.finalities.iter().all(|record| {
+                record.acknowledgments.len() == 2
+                    && record
+                        .acknowledgments
+                        .iter()
+                        .all(|ack| ack.signer != tess_key.public_key())
+            }),
+            "a revocation keeping none of a node's acknowledgments drops them, learned before or after the records"
+        );
         assert!(graph.past_cut.is_empty());
         assert_eq!(
             replica

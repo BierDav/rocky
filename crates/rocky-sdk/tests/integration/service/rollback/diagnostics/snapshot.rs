@@ -43,6 +43,32 @@ fn best_effort(conn: &Connection, output: &mut Value, name: &str, sql: &str) {
     };
 }
 
+/// The public parts of a device's settings. The settings object itself
+/// holds secrets and is never printed.
+struct PublicConfiguration {
+    node: String,
+    publisher: rocky_sdk::credentials::PublicKey,
+    schema: Value,
+}
+
+fn public_configuration(directory: &Path) -> Result<PublicConfiguration, Failure> {
+    let settings: Value = serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)?;
+    let chain: rocky_sdk::credentials::CredentialChain =
+        serde_json::from_value(settings["credentials"].clone())?;
+    let node = chain
+        .0
+        .last()
+        .ok_or("node certificate")?
+        .capability
+        .subject
+        .to_hex();
+    Ok(PublicConfiguration {
+        node,
+        publisher: serde_json::from_value(settings["publisher"].clone())?,
+        schema: settings["schema"].clone(),
+    })
+}
+
 pub(super) fn capture(
     directory: &Path,
     dependencies: &mut BTreeSet<Vec<u8>>,
@@ -51,22 +77,12 @@ pub(super) fn capture(
     let transaction = conn.transaction()?;
     let mut output = json!({"snapshot_started_unix_ms":now(),"read_only":true,
         "atomicity":"one file read transaction, later than refusal; other workers may progress"});
-    // Extract public configuration only; never print the settings object.
-    let settings: Value = serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)?;
-    let chain: rocky_sdk::credentials::CredentialChain =
-        serde_json::from_value(settings["credentials"].clone())?;
-    output["configured_node"] = json!(
-        chain
-            .0
-            .last()
-            .ok_or("node certificate")?
-            .capability
-            .subject
-            .to_hex()
-    );
-    let publisher: rocky_sdk::credentials::PublicKey =
-        serde_json::from_value(settings["publisher"].clone())?;
-    let mut definition = settings["schema"].clone();
+    let PublicConfiguration {
+        node,
+        publisher,
+        schema: mut definition,
+    } = public_configuration(directory)?;
+    output["configured_node"] = json!(node);
     let fields = definition.as_object_mut().ok_or("schema object")?;
     fields.remove("version");
     fields.remove("migrations");
@@ -192,7 +208,6 @@ pub(super) fn capture(
             .ok_or("import metadata")?
             .push(metadata);
     }
-    // Compare every dependency, never a maximum position/count proxy.
     output["dependency_records"] = json!([]);
     for hash in dependencies.iter() {
         let hash_hex = hex(hash);

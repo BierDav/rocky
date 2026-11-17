@@ -88,6 +88,11 @@ fn schema_of(directory: &Path) -> Result<(Vec<String>, Vec<String>), Failure> {
     Ok((names, columns))
 }
 
+/// A member still at the first generation writes a removed and a kept field in
+/// one frame and sends it. The signed schema opens explicitly and the sent
+/// frame keeps its authority; the member's application still declares the
+/// removed column, and its reads of it fail with an ordinary SQLite error. Each
+/// file then holds exactly the new schema.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
 -> Result<(), Failure> {
@@ -123,8 +128,6 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
     .await;
     b.sync().await.expect("sync");
     assert_eq!(b.titles().await, ["apples", "bread"]);
-    // The member, still at the first generation, writes a removed and a
-    // kept field in one frame and sends it.
     write(
         &b,
         "items",
@@ -138,17 +141,18 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
     let a = Device::new(common::confirmed(open(&a_dir, UNSHELVED, network("a")))?)?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     assert_eq!(a.titles().await, ["bread", "green apples"]);
-    // Explicitly open the signed schema; its sent frame keeps its authority.
     b.close().await;
     let b = Device::new(Database::open(open(&b_dir, UNSHELVED, network("b")))?)?;
     b.sync().await.expect("sync");
     b.sync().await.expect("sync");
     for device in [&a, &b] {
         assert_eq!(generation(device).await["current"]["schema"], 2);
-        assert_eq!(device.titles().await, ["bread", "green apples"]);
+        assert_eq!(
+            device.titles().await,
+            ["bread", "green apples"],
+            "a frame sent before the removal keeps its authority after the signed schema opens"
+        );
     }
-    // The member's application declares the removed column: its reads of
-    // it fail with an ordinary SQLite error.
     let failed = snap::observe(b.session.read(rocky_sdk::ReadQuery {
         sql: "SELECT category FROM items".to_owned(),
         values: vec![],
@@ -162,11 +166,10 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
         failed["message"]
             .as_str()
             .is_some_and(|message| message.contains("no such column")),
-        "{failed}"
+        "reading a removed column fails with an ordinary SQLite error: {failed}"
     );
     a.close().await;
     b.close().await;
-    // Each file holds exactly the new schema and no removed field.
     for directory in [&a_dir, &b_dir] {
         let (names, columns) = schema_of(directory)?;
         assert!(
@@ -185,6 +188,9 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
     Ok(())
 }
 
+/// Schemas A (note), B (no note) and C (note again) follow by `continue` seals.
+/// `c` is a second issuer, `d` writes the note offline at A after the removal
+/// was sealed, and `e` keeps the first rows with their notes.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> Result<(), Failure>
 {
@@ -203,7 +209,6 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> 
             invitation,
         )?)
     };
-    // c is a second issuer; d writes offline; e keeps the first rows.
     let c = join("c", &a.invite_as(json!({"kind": "issuer"})).await)?;
     let d = join("d", &a.invite().await)?;
     let e = join("e", &a.invite().await)?;
@@ -231,7 +236,6 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> 
     for member in [&c, &d, &e] {
         snap::ok(member.session.set_networking_enabled(false)).await;
     }
-    // A (note) -> B (no note) -> C (note again), each a `continue` seal.
     a.close().await;
     let removed = Device::new(common::confirmed(open(
         &directory("a"),
@@ -248,37 +252,46 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> 
     let notes = "SELECT title, note FROM items ORDER BY title";
     let empty = json!([[snap::cell(text("apples")), {"type": "null"}], [snap::cell(text("bread")), {"type": "null"}]]);
     assert_eq!(rows(&a, notes).await, empty);
-    // d, still at A, writes the note after the removal was sealed.
     d.set(3, &apples, "note", json!("late")).await;
 
-    // c follows `main` from A to C at once: B's schema is on the path.
     snap::ok(c.session.set_networking_enabled(true)).await;
     c.sync().await.expect("sync");
-    assert_eq!(generation(&c).await["current"]["schema"], 3);
+    assert_eq!(
+        generation(&c).await["current"]["schema"],
+        3,
+        "following main from A to C at once passes B's schema on the path"
+    );
 
     assert_eq!(rows(&c, notes).await, empty);
-    // d's late write crosses B: its note reaches no device, d's included.
     snap::ok(d.session.set_networking_enabled(true)).await;
     d.sync().await.expect("sync");
     assert_eq!(generation(&d).await["current"]["schema"], 3);
-    // The late write replays in C, where its field is off its path: it
-    // changes nothing, and nothing is held.
-    assert_eq!(generation(&d).await["held"], 0);
+    assert_eq!(
+        generation(&d).await["held"],
+        0,
+        "a late write replays in C, where its field is off its path, and nothing is held"
+    );
     for device in [&a, &c, &d] {
         device.sync().await.expect("sync");
-        assert_eq!(rows(device, notes).await, empty);
+        assert_eq!(
+            rows(device, notes).await,
+            empty,
+            "a late write crossing B's removal reaches no device, its writer's included"
+        );
     }
-    // A write at C carries the field again.
     a.set(4, &apples, "note", json!("current")).await;
     let expected = json!([[snap::cell(text("apples")), snap::cell(text("current"))], [snap::cell(text("bread")), {"type": "null"}]]);
-    // e held the first rows with their notes; following strips them.
     snap::ok(e.session.set_networking_enabled(true)).await;
     for device in [&c, &d, &e] {
         device.sync().await.expect("sync");
     }
     for device in [&a, &c, &d, &e] {
         assert_eq!(generation(device).await["current"]["schema"], 3);
-        assert_eq!(rows(device, notes).await, expected);
+        assert_eq!(
+            rows(device, notes).await,
+            expected,
+            "a write at C carries the field again, and following strips older notes"
+        );
     }
     for device in [&c, &d, &e, &a] {
         device.close().await;
@@ -286,6 +299,10 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() -> 
     Ok(())
 }
 
+/// Offline, the member edits a kept table and the table the next version
+/// removes in one transaction and never sends it. Replayed in the successor,
+/// the transaction no longer compiles and drops whole, as `Schema`; the
+/// member's later edits reach the issuer.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unsent_change_naming_a_removed_table_drops_whole_in_the_successor()
 -> Result<(), Failure> {
@@ -316,9 +333,6 @@ async fn an_unsent_change_naming_a_removed_table_drops_whole_in_the_successor()
     )
     .await;
     b.sync().await.expect("sync");
-    // Offline, the member edits a kept table and the table the next
-    // version removes in one transaction, and never sends it.
-
     snap::ok(b.session.execute("BEGIN", Vec::new())).await;
     snap::ok(b.session.execute(
         "UPDATE items SET title='green apples' WHERE title='apples'",
@@ -340,16 +354,17 @@ async fn an_unsent_change_naming_a_removed_table_drops_whole_in_the_successor()
     let b = Device::new(Database::open(open(&b_dir, UNSHELVED, network("b")))?)?;
     b.sync().await.expect("sync");
     b.sync().await.expect("sync");
-    // A late transaction replays in the successor; naming the removed
-    // table, it no longer compiles there and drops whole, as `Schema`.
     assert_eq!(generation(&b).await["current"]["schema"], 2);
     assert_eq!(generation(&b).await["held"], 0);
     a.sync().await.expect("sync");
     for device in [&a, &b] {
-        assert_eq!(device.titles().await, ["apples", "bread"]);
+        assert_eq!(
+            device.titles().await,
+            ["apples", "bread"],
+            "a late transaction naming a removed table drops whole in the successor"
+        );
     }
 
-    // The member's later edits reach the issuer.
     write(
         &b,
         "items",
@@ -361,7 +376,8 @@ async fn an_unsent_change_naming_a_removed_table_drops_whole_in_the_successor()
     let completed = "SELECT title, completed FROM items WHERE completed=1";
     assert_eq!(
         rows(&a, completed).await,
-        json!([[snap::cell(text("bread")), {"type": "integer", "value": "1"}]])
+        json!([[snap::cell(text("bread")), {"type": "integer", "value": "1"}]]),
+        "the member's later edits reach the issuer"
     );
     a.close().await;
     b.close().await;
@@ -410,6 +426,7 @@ fn files(path: &Path) -> Result<Vec<(std::path::PathBuf, String)>, Failure> {
     Ok(found)
 }
 
+/// The old schema still opens after a cancellation.
 #[tokio::test(flavor = "multi_thread")]
 async fn removing_open_changes_nothing_and_only_the_current_report_can_sign() -> Result<(), Failure>
 {
@@ -469,7 +486,6 @@ async fn removing_open_changes_nothing_and_only_the_current_report_can_sign() ->
     assert_ne!(stale.report.digest, required.report.digest);
     assert_eq!(std::fs::read(directory.join("identity.json"))?, identity);
     assert_eq!(std::fs::read(directory.join("rocky.sqlite"))?, database);
-    // Opening the old schema remains possible after cancellation.
     let a = Device::new(Database::open(open(directory, SHELVED, None))?)?;
     create(
         &a,
@@ -542,6 +558,7 @@ async fn a_member_cannot_confirm_an_unsigned_removal_and_waits_for_an_issuer() -
     Ok(())
 }
 
+/// A later conflicting create dropped and left no row to count.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_impact_report_counts_the_live_rows_of_all_local_partitions() -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
@@ -575,9 +592,11 @@ async fn an_impact_report_counts_the_live_rows_of_all_local_partitions() -> Resu
     assert_eq!(a.titles().await.len(), 1);
     peer.close().await;
     a.close().await;
-    // The later conflicting create dropped: it left no row to count.
     let report = confirmation(Database::open(open(&a_dir, UNSHELVED, None))).report;
-    assert_eq!(report.fields[0].rows, 1);
+    assert_eq!(
+        report.fields[0].rows, 1,
+        "the later conflicting create dropped and left no row to count"
+    );
 
     let b_dir = root.path().join("partitioned");
     let mut schema: Value = serde_json::from_str(NOTED)?;

@@ -85,6 +85,14 @@ impl Client {
 fn memory(hub: &Arc<Hub>, name: &'static str) -> Arc<Memory> {
     hub.connector(name)
 }
+fn dials(hub: &Hub) -> usize {
+    let [_, dials, _] = hub.counts();
+    dials
+}
+fn closed_transports(hub: &Hub) -> usize {
+    let [.., closes] = hub.counts();
+    closes
+}
 
 #[tokio::test]
 async fn status_observation_does_not_block_commits_or_shutdown() -> Result<(), Failure> {
@@ -125,7 +133,6 @@ async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result
     assert_eq!(domain["transport"], "");
     client.add(1, "Milk").await;
     assert_eq!(client.titles().await, ["Milk"]);
-    // The creator issues its own credentials; nothing else works offline.
     snap::ok(async {
         client.session.renew().await?;
         client.session.info().await
@@ -143,7 +150,10 @@ async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result
         .await,
     ] {
         let error = result.err().ok_or("needs a network")?;
-        assert_eq!(error["code"], "network_required", "{error}");
+        assert_eq!(
+            error["code"], "network_required",
+            "beyond renewing its own credentials, nothing works offline: {error}"
+        );
         assert_eq!(error["retryable"], json!(false));
     }
     database.close().await?;
@@ -155,7 +165,6 @@ async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result
     assert_eq!(client.titles().await, ["Eggs", "Milk"]);
     database.close().await?;
 
-    // Combinations that cannot work are refused before anything is stored.
     let error = Database::join(open(&root.path().join("b"), None), "rocky://join/x")
         .err()
         .ok_or("join needs a network")?;
@@ -163,7 +172,10 @@ async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result
         service(&error),
         Some(&ServiceError::NetworkRequired("join"))
     );
-    assert!(!root.path().join("b").exists());
+    assert!(
+        !root.path().join("b").exists(),
+        "a combination that cannot work is refused before anything is stored"
+    );
     assert!(Database::open(open(&root.path().join("b"), None)).is_err());
     assert!(Database::create(open(&directory, None), None).is_err());
     Ok(())
@@ -207,11 +219,13 @@ async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<()
     member.close().await?;
     creator.close().await?;
     let enrolled = hub.counts();
-    // Bootstrap and rows share a link; enrollment already supplies the node number.
-    assert_eq!(enrolled, [2, 3, 2]);
+    assert_eq!(
+        enrolled,
+        [2, 3, 2],
+        "starts, dials, closes: bootstrap and rows share a link and enrollment supplies the node number"
+    );
     assert!(!hub.listens("a"));
 
-    // Both devices open, write and reopen with no factory at all.
     for (directory, handle) in [("a", 1), ("b", 2)] {
         let directory = root.path().join(directory);
         for round in 0..2 {
@@ -220,8 +234,11 @@ async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<()
             } = Database::open(open(&directory, None))?;
             assert!(network.is_none());
             let client = Client::new(&database)?;
-            // No network is attached, and the domain is bound to none.
-            assert_eq!(snap::ok(client.session.domain()).await["transport"], "");
+            assert_eq!(
+                snap::ok(client.session.domain()).await["transport"],
+                "",
+                "a domain opened without a network is bound to none"
+            );
             client
                 .add(handle + 10 * round, &format!("{handle}.{round}"))
                 .await;
@@ -233,9 +250,12 @@ async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<()
             database.close().await?;
         }
     }
-    assert_eq!(hub.counts(), enrolled);
+    assert_eq!(
+        hub.counts(),
+        enrolled,
+        "both devices open, write and reopen without dialing"
+    );
 
-    // The same encrypted sync path, attached to databases opened locally.
     let Opened {
         database: creator, ..
     } = Database::open(open(&root.path().join("a"), None))?;
@@ -245,9 +265,10 @@ async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<()
     let serving = creator.attach(Network::Owned(memory(&hub, "a"))).await?;
     let syncing = member.attach(Network::Owned(memory(&hub, "b"))).await?;
     let (creator_client, member_client) = (Client::new(&creator)?, Client::new(&member)?);
-    assert!(support::reconciled(
-        &member_client.sync().await.map_err(|e| e.to_string())?
-    ));
+    assert!(
+        support::reconciled(&member_client.sync().await.map_err(|e| e.to_string())?),
+        "the same encrypted sync path serves databases opened locally"
+    );
     assert_eq!(member_client.titles().await, ["1.0", "1.1", "2.0", "2.1"]);
     assert_eq!(creator_client.titles().await, member_client.titles().await);
     syncing.close().await;
@@ -280,8 +301,10 @@ async fn sessions_share_a_database_and_close_independently() -> Result<(), Failu
         token
     };
     let (first_token, second_token) = (subscribe(&first).await, subscribe(&second).await);
-    // Tokens belong to their session.
-    assert_eq!(first_token, second_token);
+    assert_eq!(
+        first_token, second_token,
+        "subscription tokens belong to their session"
+    );
     let first = Arc::new(first);
     let waiting = {
         let first = first.clone();
@@ -293,21 +316,25 @@ async fn sessions_share_a_database_and_close_independently() -> Result<(), Failu
     tokio::task::yield_now().await;
     assert!(!waiting.is_finished());
 
-    // Closing one session ends its wait and nothing else.
     first.session.close().await;
     first.session.close().await;
     let ended = waiting.await?.err().ok_or("the wait ends")?;
-    assert_eq!(ended["code"], "closed", "{ended}");
+    assert_eq!(
+        ended["code"], "closed",
+        "closing a session ends its wait: {ended}"
+    );
     let error = first.session.domain().await.err().ok_or("closed session")?;
     assert_eq!(service(&error), Some(&ServiceError::Closed("session")));
 
     second.add(1, "Milk").await;
     let page = snap::ok(second.session.next(snap::integer(&(second_token)) as u64)).await;
-    assert_eq!(page["rows"][0][0]["value"], "Milk");
+    assert_eq!(
+        page["rows"][0][0]["value"], "Milk",
+        "closing one session leaves the others' subscriptions"
+    );
     let third = Client::new(&database)?;
     assert_eq!(third.titles().await, ["Milk"]);
 
-    // The owner closes the sessions that remain.
     database.close().await?;
     let error = second
         .session
@@ -315,7 +342,11 @@ async fn sessions_share_a_database_and_close_independently() -> Result<(), Failu
         .await
         .err()
         .ok_or("closed database")?;
-    assert_eq!(service(&error), Some(&ServiceError::Closed("database")));
+    assert_eq!(
+        service(&error),
+        Some(&ServiceError::Closed("database")),
+        "closing the database closes the sessions that remain"
+    );
     Ok(())
 }
 
@@ -324,7 +355,6 @@ async fn borrowed_networks_outlive_their_service_and_owned_ones_are_released() -
 {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    // The application starts and keeps these two.
     let listening = memory(&hub, "a").start(true, [0; 32]).await?;
     let dialing = memory(&hub, "b").start(false, [0; 32]).await?;
 
@@ -339,10 +369,10 @@ async fn borrowed_networks_outlive_their_service_and_owned_ones_are_released() -
         .err()
         .ok_or("one network at a time")?;
     assert_eq!(service(&error), Some(&ServiceError::NetworkAttached));
-    // The status names the attached network's kind.
     assert_eq!(
         snap::ok(creator_client.session.domain()).await["transport"],
-        "memory"
+        "memory",
+        "the status names the attached network's kind"
     );
     let invitation = snap::ok(creator_client.session.invite(
         Some(rocky_sdk::GrantProfile::Writer {
@@ -370,11 +400,14 @@ async fn borrowed_networks_outlive_their_service_and_owned_ones_are_released() -
     member_client.sync().await.map_err(|e| e.to_string())?;
     assert_eq!(member_client.titles().await, ["Milk"]);
 
-    // Closing the services leaves both databases and both transports open.
     syncing.close().await;
     syncing.close().await;
     serving.close().await;
-    assert_eq!(hub.counts()[2], 0);
+    assert_eq!(
+        closed_transports(&hub),
+        0,
+        "closing the services leaves both borrowed transports open"
+    );
     assert!(hub.listens("a"));
     assert_eq!(
         member_client.sync().await.err().ok_or("detached")?["code"],
@@ -383,24 +416,29 @@ async fn borrowed_networks_outlive_their_service_and_owned_ones_are_released() -
     member_client.add(2, "Eggs").await;
     creator_client.add(3, "Jam").await;
 
-    // The same transports serve again once attached again.
     let serving = creator.attach(Network::Attached(listening.clone())).await?;
     let syncing = member.attach(Network::Attached(dialing.clone())).await?;
     member_client.sync().await.map_err(|e| e.to_string())?;
-    assert_eq!(member_client.titles().await, ["Eggs", "Jam", "Milk"]);
+    assert_eq!(
+        member_client.titles().await,
+        ["Eggs", "Jam", "Milk"],
+        "the same transports serve again once attached again"
+    );
     assert_eq!(creator_client.titles().await, member_client.titles().await);
     drop((serving, syncing));
 
-    // Closing a database detaches its service; a borrowed transport stays.
     member.close().await?;
     creator.close().await?;
-    assert_eq!(hub.counts()[2], 0);
+    assert_eq!(
+        closed_transports(&hub),
+        0,
+        "closing a database detaches its service but leaves a borrowed transport"
+    );
     assert!(hub.listens("a"));
     listening.close().await;
     dialing.close().await;
-    assert_eq!(hub.counts()[2], 2);
+    assert_eq!(closed_transports(&hub), 2);
 
-    // A service that started its transport closes it, once.
     let Opened {
         database: creator,
         network,
@@ -412,11 +450,18 @@ async fn borrowed_networks_outlive_their_service_and_owned_ones_are_released() -
     let serving = network.ok_or("attached at open")?;
     assert!(hub.listens("a"));
     serving.close().await;
-    assert!(!hub.listens("a"));
-    assert_eq!(hub.counts()[2], 3);
+    assert!(
+        !hub.listens("a"),
+        "a service that started its transport closes it"
+    );
+    assert_eq!(closed_transports(&hub), 3);
     assert_eq!(Client::new(&creator)?.titles().await.len(), 3);
     creator.close().await?;
-    assert_eq!(hub.counts()[2], 3);
+    assert_eq!(
+        closed_transports(&hub),
+        3,
+        "a started transport is closed once"
+    );
     Ok(())
 }
 
@@ -457,29 +502,38 @@ async fn a_closing_service_cancels_work_that_outlasts_its_drain() -> Result<(), 
     let member_client = Arc::new(Client::new(&member)?);
     member_client.add(1, "Milk").await;
 
-    // A dial that never completes holds the sync until the service closes.
     hub.stalled.store(true, Ordering::SeqCst);
     let stuck = {
         let client = member_client.clone();
         tokio::spawn(async move { client.sync().await })
     };
-    while hub.counts()[1] < 2 {
+    while dials(&hub) < 2 {
         tokio::task::yield_now().await;
     }
     let started = std::time::Instant::now();
     syncing.close().await;
-    assert!(started.elapsed().as_secs() >= 4);
-    assert_eq!(stuck.await?.err().ok_or("cancelled")?["code"], "closed");
-    assert_eq!(hub.counts()[2], 1);
+    assert!(
+        started.elapsed().as_secs() >= 4,
+        "close waits out the drain bound before it cancels the stalled dial"
+    );
+    assert_eq!(
+        stuck.await?.err().ok_or("cancelled")?["code"],
+        "closed",
+        "a dial that never completes holds the sync until the service closes"
+    );
+    assert_eq!(closed_transports(&hub), 1);
 
-    // The database is intact and the interrupted sync is safe to repeat.
     member_client.add(2, "Eggs").await;
     hub.stalled.store(false, Ordering::SeqCst);
     member.attach(Network::Owned(memory(&hub, "b"))).await?;
     member_client.sync().await.map_err(|e| e.to_string())?;
-    assert_eq!(creator_client.titles().await, ["Eggs", "Milk"]);
+    assert_eq!(
+        creator_client.titles().await,
+        ["Eggs", "Milk"],
+        "the database stays intact and the interrupted sync is safe to repeat"
+    );
     member.close().await?;
     creator.close().await?;
-    assert_eq!(hub.counts()[2], 3);
+    assert_eq!(closed_transports(&hub), 3);
     Ok(())
 }

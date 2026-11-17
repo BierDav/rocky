@@ -139,11 +139,11 @@ fn a_trusted_grant_never_expires_and_only_the_root_signs_one() {
             .unwrap(),
         key.public_key()
     );
-    // No trusted identity grants trust, and nobody renews a trusted grant.
     assert!(
         rocky_credentials::testing::authority(&key, &grant)
             .issue_trusted(PrivateKey::new().public_key(), SCOPE, NOW)
-            .is_err()
+            .is_err(),
+        "no trusted identity grants trust"
     );
     assert!(
         Authority::owner(&root)
@@ -158,9 +158,11 @@ fn a_trusted_grant_never_expires_and_only_the_root_signs_one() {
             )
             .is_err()
     );
-    // A link below a trusted grant is bounded like any other.
     let (_, _, device) = member(&(key, grant));
-    assert!(device.expires() <= NOW + 30 * DAY);
+    assert!(
+        device.expires() <= NOW + 30 * DAY,
+        "a link below a trusted grant is bounded like any other"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -175,7 +177,6 @@ fn a_trusted_identity_cannot_revoke_another_and_the_root_can() {
         ..revocation(&a.0, &b.0)
     });
     assert!(by_a.is_err(), "issuers cannot target nodes");
-    // Identity targets verify, but another issuer cannot end protected trust.
     let by_a = set(rocky_credentials::testing::authority(&a.0, &a.1)
         .revoke(revocation(&a.0, &b.0))
         .unwrap());
@@ -188,7 +189,8 @@ fn a_trusted_identity_cannot_revoke_another_and_the_root_can() {
                 b_node.public_key(),
                 Some((&by_a, NOW))
             )
-            .is_ok()
+            .is_ok(),
+        "an identity target verifies, but another issuer cannot end protected trust"
     );
     let by_root = set(Authority::owner(&root)
         .revoke(revocation(&root, &b.0))
@@ -203,7 +205,6 @@ fn a_trusted_identity_cannot_revoke_another_and_the_root_can() {
             )
             .is_err()
     );
-    // A trusted identity still revokes what it did not get from the root.
     let (_, device, chain) = member(&b);
     let by_a = set(rocky_credentials::testing::authority(&a.0, &a.1)
         .revoke(Revocation {
@@ -215,7 +216,8 @@ fn a_trusted_identity_cannot_revoke_another_and_the_root_can() {
     assert!(
         chain
             .verify(root.public_key(), device.public_key(), &by_a, NOW)
-            .is_err()
+            .is_err(),
+        "a trusted identity still revokes what it did not get from the root"
     );
 }
 
@@ -234,7 +236,6 @@ fn revoking_a_trusted_identity_cascades_to_what_it_first_enrolled() {
             .map(|origin| origin.identity)
     };
     assert_eq!(origin(&enrolled), Some(hijacked.0.public_key()));
-    // The honest trusted node renews it: the origin stays.
     let renewed = rocky_credentials::testing::authority(&honest.0, &honest.1)
         .renew(
             &enrolled.0[1].capability,
@@ -249,11 +250,18 @@ fn revoking_a_trusted_identity_cascades_to_what_it_first_enrolled() {
     let mut chain = honest.1.clone();
     chain.0.push(renewed.clone());
     let renewed_chain = chain.certify(&user, node.public_key()).unwrap();
-    assert_eq!(origin(&renewed_chain), Some(hijacked.0.public_key()));
-    // An issuer the hijacked node enrolled hands its origin on.
+    assert_eq!(
+        origin(&renewed_chain),
+        Some(hijacked.0.public_key()),
+        "the honest trusted node's renewal keeps the origin"
+    );
     let below = issuer(&hijacked);
     let (_, below_node, below_member) = member(&below);
-    assert_eq!(origin(&below_member), Some(hijacked.0.public_key()));
+    assert_eq!(
+        origin(&below_member),
+        Some(hijacked.0.public_key()),
+        "an issuer the hijacked node enrolled hands its origin on"
+    );
     let (_, own_node, own) = member(&honest);
 
     let lost_statement = Authority::owner(&root)
@@ -270,7 +278,6 @@ fn revoking_a_trusted_identity_cascades_to_what_it_first_enrolled() {
             .verify(root.public_key(), node.public_key(), &lost, NOW)
             .is_ok()
     );
-    // A surviving issuer renews even the chain that still names the lost issuer.
     let after_loss = rocky_credentials::testing::authority(&honest.0, &honest.1)
         .renew(
             &enrolled.0[1].capability,
@@ -284,7 +291,8 @@ fn revoking_a_trusted_identity_cascades_to_what_it_first_enrolled() {
         .unwrap();
     assert_eq!(
         after_loss.capability.extended().unwrap().origin,
-        renewed.capability.extended().unwrap().origin
+        renewed.capability.extended().unwrap().origin,
+        "a surviving issuer renews even the chain that still names the lost issuer"
     );
 
     let revoked = set(Authority::owner(&root)
@@ -300,7 +308,6 @@ fn revoking_a_trusted_identity_cascades_to_what_it_first_enrolled() {
     assert!(verify(&renewed_chain, &node).is_err());
     assert!(verify(&below_member, &below_node).is_err());
     assert!(verify(&own, &own_node).is_ok());
-    // No trusted node renews it again; the device enrolls anew.
     assert!(
         rocky_credentials::testing::authority(&honest.0, &honest.1)
             .renew(
@@ -312,17 +319,18 @@ fn revoking_a_trusted_identity_cascades_to_what_it_first_enrolled() {
                     clock_skew: std::time::Duration::from_secs(0)
                 }
             )
-            .is_err()
+            .is_err(),
+        "no trusted node renews it again; the device enrolls anew"
     );
     assert!(revoked.revokes_origin(&hijacked.0.public_key()));
-    // A trusted identity's statement naming another cascades to nothing.
     let by_honest = set(rocky_credentials::testing::authority(&honest.0, &honest.1)
         .revoke(revocation(&honest.0, &hijacked.0))
         .unwrap());
     assert!(
         renewed_chain
             .verify(root.public_key(), node.public_key(), &by_honest, NOW)
-            .is_ok()
+            .is_ok(),
+        "a trusted identity's statement naming another cascades to nothing"
     );
 }
 
@@ -333,14 +341,11 @@ fn revoking_a_trusted_identity_cascades_to_what_it_first_enrolled() {
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_recovery_ends_every_earlier_trusted_grant_and_what_it_enrolled() {
     let root = RootKey::generate();
-    // Promoted after the backup the recovery used: no store it reaches
-    // names it.
     let unknown = trusted(&root);
     let (user, node, enrolled) = member(&unknown);
     let below = issuer(&unknown);
     let (_, below_node, below_member) = member(&below);
     let recovered = trusted_at(&root, NOW + 2 * DAY);
-    // A survivor that renewed the device before it learned the recovery.
     let renewed = rocky_credentials::testing::authority(&recovered.0, &recovered.1)
         .renew(
             &enrolled.0[1].capability,
@@ -370,7 +375,10 @@ fn a_recovery_ends_every_earlier_trusted_grant_and_what_it_enrolled() {
         (&below_member, &below_node),
         (&renewed_chain, &node),
     ] {
-        assert!(verify(chain, node).is_err());
+        assert!(
+            verify(chain, node).is_err(),
+            "a recovery ends grants no store it reaches names and renewals made before it was known"
+        );
         assert!(set.revoking(chain).unwrap().is_some());
     }
     let (recovered_node, recovered_chain) = node_of(&recovered);
@@ -384,8 +392,6 @@ fn a_recovery_ends_every_earlier_trusted_grant_and_what_it_enrolled() {
     }
     assert!(set.ends_trusted(&unknown.1.0[0].capability));
     assert!(!set.ends_trusted(&readded.1.0[0].capability));
-    // No survivor renews what the ended identity enrolled once it holds
-    // the statement.
     assert!(
         rocky_credentials::testing::authority(&recovered.0, &recovered.1)
             .renew(
@@ -397,7 +403,8 @@ fn a_recovery_ends_every_earlier_trusted_grant_and_what_it_enrolled() {
                     clock_skew: std::time::Duration::from_secs(0)
                 }
             )
-            .is_err()
+            .is_err(),
+        "no survivor renews what the ended identity enrolled once it holds the statement"
     );
 }
 
@@ -469,11 +476,14 @@ fn the_later_of_two_recoveries_ends_the_earlier() {
             .merge(other, root.public_key(), APP, NOW + DAY)
             .unwrap();
         assert!(ends(&merged, &first) && !ends(&merged, &second));
-        // Only the later's nodes stay valid.
         for (recovered, kept) in [(&first, false), (&second, true)] {
             let (node, chain) = node_of(recovered);
             let verified = chain.verify(root.public_key(), node.public_key(), &merged, NOW + DAY);
-            assert_eq!(verified.is_ok(), kept);
+            assert_eq!(
+                verified.is_ok(),
+                kept,
+                "only the later recovery's nodes stay valid"
+            );
         }
         assert_eq!(
             merged.recovery().map(|r| r.keep),
@@ -481,7 +491,6 @@ fn the_later_of_two_recoveries_ends_the_earlier() {
         );
         assert_eq!(merged.recoveries().len(), 2);
     }
-    // Granted in the same second, the larger key is the later.
     let tie = trusted_at(&root, NOW);
     let (low, high) = if tie.0.public_key() < first.0.public_key() {
         (&tie, &first)
@@ -489,8 +498,10 @@ fn the_later_of_two_recoveries_ends_the_earlier() {
         (&first, &tie)
     };
     let set = recovery(&root, high);
-    assert!(ends(&set, low) && !ends(&set, high));
-    // Only the root signs one.
+    assert!(
+        ends(&set, low) && !ends(&set, high),
+        "granted in the same second, the larger key is the later"
+    );
     let mut statement = Revocation {
         app: APP,
         issuer: first.0.public_key(),
@@ -510,11 +521,10 @@ fn the_later_of_two_recoveries_ends_the_earlier() {
     assert!(
         rocky_credentials::testing::authority(&first.0, &first.1)
             .revoke(statement.clone())
-            .is_err()
+            .is_err(),
+        "only the root signs a recovery"
     );
     statement.issuer = root.public_key();
-    // Its cut keeps chains of any identity it ends, never of the one it
-    // keeps.
     let cut = |identity: &PrivateKey| rocky_credentials::Cut {
         identity: identity.public_key(),
         lane: PrivateKey::new().public_key(),
@@ -527,7 +537,11 @@ fn the_later_of_two_recoveries_ends_the_earlier() {
     for (cut, valid) in [(cut(&second.0), true), (cut(&first.0), false)] {
         let mut cutting = statement.clone();
         cutting.cut = vec![cut];
-        assert_eq!(Authority::owner(&root).revoke(cutting).is_ok(), valid);
+        assert_eq!(
+            Authority::owner(&root).revoke(cutting).is_ok(),
+            valid,
+            "a cut keeps chains of an identity it ends, never of the one it keeps"
+        );
     }
 }
 
@@ -536,8 +550,6 @@ fn an_identity_key_never_signs_as_the_root() {
     let root = RootKey::generate();
     let restored = RootKey::from_phrase(&root.phrase()).unwrap();
     for identity in [root.identity(), IdentityKey::generate()] {
-        // Even derived from the root's secret, a trusted grant an identity
-        // key signs names no trusted identity under the root.
         let grant = Authority::owner(&identity)
             .issue_trusted(PrivateKey::new().public_key(), SCOPE, NOW)
             .unwrap();
@@ -545,16 +557,17 @@ fn an_identity_key_never_signs_as_the_root() {
         assert!(
             chain
                 .trusted_identity(root.public_key(), SCOPE, &RevocationSet::new(), NOW)
-                .is_err()
+                .is_err(),
+            "a trusted grant an identity key signs names no trusted identity under the root, even derived from the root's secret"
         );
     }
-    // The root's own grant does, so the refusal above is the signer's.
     let (key, chain) = trusted(&restored);
     assert_eq!(
         chain
             .trusted_identity(root.public_key(), SCOPE, &RevocationSet::new(), NOW)
             .unwrap(),
-        key.public_key()
+        key.public_key(),
+        "the root's own grant names its trusted identity, so the refusal above is the signer's"
     );
 }
 
@@ -569,11 +582,12 @@ fn an_identity_phrase_and_secret_restore_the_same_signer() {
             .issue_trusted(identity.public_key(), SCOPE, NOW)
             .unwrap(),
     ]);
-    let certify = |signer: &IdentityKey| {
-        // Ed25519 is deterministic: the same key signs the same bytes.
-        grant.clone().certify(signer, node).unwrap()
-    };
-    assert_eq!(certify(&by_phrase), certify(&identity));
+    let certify = |signer: &IdentityKey| grant.clone().certify(signer, node).unwrap();
+    assert_eq!(
+        certify(&by_phrase),
+        certify(&identity),
+        "Ed25519 is deterministic: the same key signs the same bytes"
+    );
     assert_eq!(certify(&by_secret), certify(&identity));
     assert_eq!(identity.phrase().split(' ').count(), 24);
 }

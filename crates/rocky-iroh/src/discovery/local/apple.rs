@@ -9,6 +9,10 @@ use iroh::EndpointAddr;
 use rocky_core::net::BoxFuture;
 use std::{net::SocketAddr, time::Duration};
 
+/// A and AAAA can arrive in separate callbacks; resolution waits this long
+/// after the first so both route families are kept.
+const SECOND_FAMILY_WAIT: Duration = Duration::from_millis(250);
+
 pub(super) struct Backend {
     registration: Registration,
     browser: Browse,
@@ -111,8 +115,7 @@ async fn resolve(event: BrowseResult, topics: &[[u8; 32]]) -> Option<Candidate> 
     if first.flags.contains(ResolvedHostFlags::ADD) {
         sockets.push(SocketAddr::from(first.address));
     }
-    // A and AAAA can arrive in separate callbacks; retain both route families.
-    let until = tokio::time::Instant::now() + Duration::from_millis(250);
+    let until = tokio::time::Instant::now() + SECOND_FAMILY_WAIT;
     while sockets.len() < 8 {
         match tokio::time::timeout_at(until, hosts.next()).await {
             Ok(Some(Ok(host))) if host.flags.contains(ResolvedHostFlags::ADD) => {

@@ -97,7 +97,8 @@ async fn replay() -> Result<(), Failure> {
 }
 
 /// How many seeds the e2e sweep runs, and where it starts; the shards
-/// split them.
+/// split them. Bounded by default; `ROCKY_SIM_FIRST` and `ROCKY_SIM_SEEDS`
+/// widen it when investigating a seed range.
 fn sweep_range() -> std::ops::Range<u64> {
     let read = |name: &str, default: u64| {
         std::env::var(name)
@@ -105,9 +106,6 @@ fn sweep_range() -> std::ops::Range<u64> {
             .and_then(|value| value.parse().ok())
             .unwrap_or(default)
     };
-    // The full sweep is for exploratory validation. Keep the correctness tier
-    // representative but bounded; larger sweeps remain opt-in through the
-    // environment when investigating a seed range.
     let first = read("ROCKY_SIM_FIRST", 10_000);
     first..first + read("ROCKY_SIM_SEEDS", 8)
 }
@@ -148,9 +146,6 @@ async fn shard(shard: u64) -> Result<(), Failure> {
 }
 macro_rules! shards {
     ($($name:ident = $shard:expr),* $(,)?) => {$(
-        // Once, in the workspace build: the build without iroh runs the
-        // same simulation.
-
         #[tokio::test(start_paused = true)]
         #[ignore = "the e2e sweep"]
         async fn $name() -> Result<(), Failure> {

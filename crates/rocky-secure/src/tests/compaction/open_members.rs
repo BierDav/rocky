@@ -110,10 +110,12 @@ async fn a_base_at_a_seal_that_left_a_member_open_converges_at_the_next_seal() {
     let p = open(&lineage, &dir, "p", &keys[1]).await;
     exchange_graphs(&a, &p, lineage.domain).await;
 
-    // A's items log: `base`, the bundle's member, then A's record of it.
     let item_frames = frames_of(&lineage, &a, &p, &keys[1], items).await;
     let tag_frames = frames_of(&lineage, &a, &p, &keys[1], tags).await;
-    assert!(item_frames.len() > 2, "A records the bundle's outcome");
+    assert!(
+        item_frames.len() > 2,
+        "A's items log holds `base`, the bundle's member, then A's record of it"
+    );
     let member_sequence = [&item_frames[1], &tag_frames[0]]
         .iter()
         .map(|frame| {
@@ -134,11 +136,11 @@ async fn a_base_at_a_seal_that_left_a_member_open_converges_at_the_next_seal() {
     publish_seal(&lineage, &a, sign_seal(&lineage, tip, frontier)).await;
     a.compact(lineage.domain, 0).await.unwrap();
 
-    // P holds `items` through the bundle's member, without A's record.
     exchange_graphs(&a, &p, lineage.domain).await;
     p.follow_bookmark(lineage.domain, "main").await.unwrap();
     partial(&p, &a, items).await;
-    for status in p.receive_all(item_frames[..2].to_vec()).await {
+    let through_the_member_without_as_record = item_frames[..2].to_vec();
+    for status in p.receive_all(through_the_member_without_as_record).await {
         status.unwrap();
     }
     p.finalize_arrived(lineage.domain).await.unwrap();
@@ -150,24 +152,23 @@ async fn a_base_at_a_seal_that_left_a_member_open_converges_at_the_next_seal() {
     partial(&q, &a, items).await;
     assert!(offer(&lineage, &p, &q, &keys[2], items).await.is_none());
 
-    // Q takes A's `items` base; F replays every frame.
     import_checkpoint(&lineage, &a, &q, &keys[2], items).await;
-    let f = open(&lineage, &dir, "f", &keys[3]).await;
-    exchange_graphs(&a, &f, lineage.domain).await;
+    let f_replaying_every_frame = open(&lineage, &dir, "f", &keys[3]).await;
+    let f = &f_replaying_every_frame;
+    exchange_graphs(&a, f, lineage.domain).await;
     f.follow_bookmark(lineage.domain, "main").await.unwrap();
     for scope in [items, tags] {
-        sync(&lineage, &a, &f, &keys[3], scope).await;
+        sync(&lineage, &a, f, &keys[3], scope).await;
     }
     f.finalize_arrived(lineage.domain).await.unwrap();
 
-    // The next seal covers A's record; everyone reaches it.
     insert(&a, "z", "later").await;
     seal(&lineage, &a).await;
     a.finalize_arrived(lineage.domain).await.unwrap();
     for (replica, key, scopes) in [
         (&p, &keys[1], &[items][..]),
         (&q, &keys[2], &[items][..]),
-        (&f, &keys[3], &[items, tags][..]),
+        (f, &keys[3], &[items, tags][..]),
     ] {
         exchange_graphs(&a, replica, lineage.domain).await;
         for scope in scopes {
@@ -175,7 +176,10 @@ async fn a_base_at_a_seal_that_left_a_member_open_converges_at_the_next_seal() {
         }
         replica.finalize_arrived(lineage.domain).await.unwrap();
     }
-    assert!(p.awaiting_outcomes().await.unwrap().is_empty());
+    assert!(
+        p.awaiting_outcomes().await.unwrap().is_empty(),
+        "the next seal covers A's record and everyone reaches it"
+    );
     p.compact(lineage.domain, 0).await.unwrap();
     let r_key = PrivateKey::new();
     let r = open(&lineage, &dir, "r", &r_key).await;
@@ -192,7 +196,7 @@ async fn a_base_at_a_seal_that_left_a_member_open_converges_at_the_next_seal() {
     let drops =
         "SELECT txn,dropped,sealed FROM secure_replayed WHERE dropped IS NOT NULL ORDER BY txn";
     let dropped = stored(&a, drops).await;
-    for (name, replica) in [("f", &f), ("p", &p), ("q", &q), ("r", &r)] {
+    for (name, replica) in [("f", f), ("p", &p), ("q", &q), ("r", &r)] {
         assert_eq!(titles(replica).await, expected, "{name}'s items");
         assert_eq!(stored(replica, drops).await, dropped, "{name}'s drops");
         replica.audit(items).await.unwrap();

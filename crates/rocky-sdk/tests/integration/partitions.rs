@@ -112,7 +112,6 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     .database;
     let reader_session = reader.session();
     snap::ok(session.share_partition(rocky_sdk::PartitionTarget::Table { table: "items".to_owned(), values: (values("A")).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([device.node])).expect("typed fixture"), None)).await;
-    // The reader receives the envelope by syncing with its sender.
     let contact = snap::ok(session.contact_info()).await;
     snap::ok(async {
         let value = reader_session

@@ -100,15 +100,18 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
         &|link, _| link.not_before -= 1,
         &|link, _| link.delegations = 2,
     ];
-    // The narrowing chain is admitted everywhere below.
-    let narrow = delegated(&f, &writer, &held, &|_, _| {});
+    let narrowing_admitted_everywhere = delegated(&f, &writer, &held, &|_, _| {});
     let config = |credentials| SecureConfig {
         credentials,
         ..f.config(&writer, held.clone(), &[f.public])
     };
-    let source = EncryptedReplica::open(dir.path().join("source.db"), f.app(), config(narrow))
-        .await
-        .unwrap();
+    let source = EncryptedReplica::open(
+        dir.path().join("source.db"),
+        f.app(),
+        config(narrowing_admitted_everywhere),
+    )
+    .await
+    .unwrap();
     let reader = PrivateKey::new();
     let target = EncryptedReplica::open(
         dir.path().join("target.db"),
@@ -140,7 +143,6 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
 
     for (index, widen) in widenings.into_iter().enumerate() {
         let chain = delegated(&f, &writer, &held, widen);
-        // Opening and renewing with it.
         let opened = EncryptedReplica::open(
             dir.path().join(format!("widened-{index}.db")),
             f.app(),
@@ -155,7 +157,6 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
                 .is_err_and(widened),
             "renew {index}"
         );
-        // A frame its node signed under it.
         let forged = author(
             &writer,
             crate::wire::FrameDraft {
@@ -182,7 +183,6 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
             target.receive(forged).await.is_err_and(widened),
             "frame {index}"
         );
-        // A sync page, an acknowledgment and a remote read for it.
         assert!(
             source
                 .acknowledge(writer.public_key(), &chain, frame_id, true)

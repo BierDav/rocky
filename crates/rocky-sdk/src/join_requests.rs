@@ -155,9 +155,11 @@ impl Requests {
             .iter()
             .position(|held| held.node == request.node)
         {
-            // The same node with another nonce is another join attempt.
-            let earlier = self.requests.remove(index);
-            notes.push(Note::Dropped(earlier, Dropped::Evicted));
+            let earlier_attempt_of_same_node = self.requests.remove(index);
+            notes.push(Note::Dropped(
+                earlier_attempt_of_same_node,
+                Dropped::Evicted,
+            ));
         }
         if self.pending().count() >= MAX_PENDING
             && let Some(index) = self
@@ -273,8 +275,6 @@ mod tests {
             .collect()
     }
 
-    // Mutation: evicting the newest instead of the oldest, or a bound of 33,
-    // fails the kept names and the reported eviction.
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn the_33rd_request_evicts_the_oldest_and_reports_it() {
         let issuer = PrivateKey::new().public_key();
@@ -283,20 +283,24 @@ mod tests {
             let notes = requests
                 .receive("a", &issuer, &request(nonce), u64::from(nonce))
                 .expect("received");
-            assert!(dropped(&notes).is_empty());
+            assert!(dropped(&notes).is_empty(), "32 requests fit the bound");
         }
         let notes = requests
             .receive("a", &issuer, &request(32), 32)
             .expect("received");
-        assert_eq!(dropped(&notes), [("device 0".into(), Dropped::Evicted)]);
+        assert_eq!(
+            dropped(&notes),
+            [("device 0".into(), Dropped::Evicted)],
+            "the 33rd request evicts the oldest and reports it"
+        );
         let names: Vec<_> = requests.pending().map(|held| held.name.clone()).collect();
         assert_eq!(
             names,
-            (1..=32).map(|n| format!("device {n}")).collect::<Vec<_>>()
+            (1..=32).map(|n| format!("device {n}")).collect::<Vec<_>>(),
+            "the newest 32 requests stay"
         );
     }
 
-    // Mutation: dropping the code comparison admits with any code.
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn admission_needs_the_code_both_devices_show() {
         let issuer = PrivateKey::from_bytes(&[42; 32]).public_key();
@@ -306,21 +310,24 @@ mod tests {
         let code = admission_code(&issuer, &asked.node, &asked.nonce);
         assert_eq!(code.len(), 6);
         assert!(code.bytes().all(|digit| digit.is_ascii_digit()));
-        // Fixed keys avoid random collisions in the 6-digit space.
         assert_ne!(
             code,
             admission_code(
                 &PrivateKey::from_bytes(&[43; 32]).public_key(),
                 &asked.node,
                 &asked.nonce,
-            )
+            ),
+            "another issuer shows another code; fixed keys rule out a chance collision in 6 digits"
         );
         let wrong = format!(
             "{:06}",
             (code.parse::<u32>().expect("digits") + 1) % 1_000_000
         );
         let profile = || (Profile::Issuer, None);
-        assert!(requests.admit(&asked.node, &wrong, profile()).is_err());
+        assert!(
+            requests.admit(&asked.node, &wrong, profile()).is_err(),
+            "a code other than the one both devices show does not admit"
+        );
         assert_eq!(requests.pending().count(), 1);
         requests
             .admit(&asked.node, &code, profile())
@@ -330,13 +337,16 @@ mod tests {
             requests.of(&asked).map(|held| &held.state),
             Some(State::Admitted { .. })
         ));
-        // Admitted once: neither admitted nor refused again.
-        assert!(requests.admit(&asked.node, &code, profile()).is_err());
-        assert!(requests.refuse(&asked.node).is_err());
+        assert!(
+            requests.admit(&asked.node, &code, profile()).is_err(),
+            "a request admitted once is not admitted again"
+        );
+        assert!(
+            requests.refuse(&asked.node).is_err(),
+            "a request admitted once is not refused"
+        );
     }
 
-    // Mutation: keeping requests across invitations lets a replaced
-    // invitation's request be admitted.
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn requests_end_with_their_invitation() {
         let issuer = PrivateKey::new().public_key();
@@ -347,7 +357,11 @@ mod tests {
         let notes = requests
             .receive("b", &issuer, &request(2), 1)
             .expect("received");
-        assert_eq!(dropped(&notes), [("device 1".into(), Dropped::Replaced)]);
+        assert_eq!(
+            dropped(&notes),
+            [("device 1".into(), Dropped::Replaced)],
+            "a replaced invitation's request ends with it and is never admitted"
+        );
         let notes = requests.end(Dropped::Expired);
         assert_eq!(dropped(&notes), [("device 2".into(), Dropped::Expired)]);
         assert_eq!(requests.pending().count(), 0);

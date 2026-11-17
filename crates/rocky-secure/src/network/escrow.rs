@@ -231,12 +231,18 @@ mod tests {
             records,
             metadata: None,
         };
-        // A repeated record is neither kept nor charged again.
         session
             .learn_escrow(carried(vec![carry(0), carry(0)]))
             .unwrap();
-        assert_eq!(session.escrow.reconstructed, bytes);
-        assert_eq!(session.escrow.received[&slot].len(), 1);
+        assert_eq!(
+            session.escrow.reconstructed, bytes,
+            "a repeated record is not charged again"
+        );
+        assert_eq!(
+            session.escrow.received[&slot].len(),
+            1,
+            "a repeated record is not kept again"
+        );
         let fit = (RECONSTRUCTED_BYTES / bytes) as u64;
         session
             .learn_escrow(carried((1..fit).map(carry).collect()))

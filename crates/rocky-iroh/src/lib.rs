@@ -88,6 +88,17 @@ const CLOSED: u32 = 1;
 const BUSY: u32 = 2;
 /// Binding a fixed port again waits this long for the dead socket to go.
 const REBIND: Duration = Duration::from_secs(3);
+/// Pause between attempts to bind a fixed port again.
+const REBIND_RETRY: Duration = Duration::from_millis(100);
+/// Streams one link connection carries; the first is the control stream.
+const LINK_LANES: u8 = 5;
+/// How long `address` waits for a home relay, which makes the address
+/// reachable beyond the LAN.
+const HOME_RELAY_WAIT: Duration = Duration::from_secs(5);
+/// Failed loopback dials otherwise drain for three seconds at QUIC's default
+/// initial RTT.
+#[cfg(feature = "qualification")]
+const LOOPBACK_INITIAL_RTT: Duration = Duration::from_millis(10);
 
 /// One bidirectional stream; it keeps its connection open.
 struct QuicStream {
@@ -99,11 +110,17 @@ struct QuicStream {
     /// An inbound stream's share of its connection.
     _slot: Option<Slot>,
 }
+impl QuicStream {
+    /// A read or write cancelled mid-exchange, which can hide a dead peer.
+    fn was_cancelled(&self) -> bool {
+        self.read_incomplete || self.write_incomplete
+    }
+}
 impl Drop for QuicStream {
+    /// After a cancelled exchange, fresh streams dial again while other
+    /// exchanges on this connection may still finish.
     fn drop(&mut self) {
-        // A cancelled exchange can hide a dead peer. Fresh streams must dial
-        // again, while other exchanges on this connection may still finish.
-        if (self.read_incomplete || self.write_incomplete)
+        if self.was_cancelled()
             && let Some(reusable) = &self.reusable
         {
             reusable.store(false, Ordering::SeqCst);
@@ -199,6 +216,8 @@ impl Drop for LinkConnection {
 }
 struct LinkLane {
     io: Join<RecvStream, SendStream>,
+    /// Keeps the dedicated connection alive until the peer has the final
+    /// bytes, including a resolution reply or signed Close.
     shutdown: Option<BoxFuture<'static, std::io::Result<()>>>,
     finished: bool,
     _owner: Arc<LinkConnection>,
@@ -233,8 +252,6 @@ impl AsyncWrite for LinkLane {
                 .finish()
                 .map_err(std::io::Error::other)?;
             let stopped = self.io.writer().stopped();
-            // Keep the dedicated connection alive until the peer has the
-            // final bytes, including a resolution reply or signed Close.
             self.shutdown = Some(Box::pin(async move {
                 match stopped.await.map_err(std::io::Error::other)? {
                     None => Ok(()),
@@ -280,7 +297,7 @@ async fn link_stream(
     }
     let mut lanes: Vec<Box<dyn SessionStream>> = Vec::new();
     let mut routed: Option<Arc<Route>> = None;
-    for lane in 0..5u8 {
+    for lane in 0..LINK_LANES {
         let (send, recv) = if dialing {
             connection.open_bi().await?
         } else {
@@ -362,6 +379,9 @@ struct CachedConnection {
     reusable: Arc<AtomicBool>,
 }
 impl CachedConnection {
+    /// Whether a new stream may use this connection: no exchange on it was
+    /// cancelled, it is open, and it was used within half of `IDLE`, so the
+    /// acceptor's idle close never races the new stream.
     fn reusable(&self) -> bool {
         self.reusable.load(Ordering::SeqCst)
             && self.connection.close_reason().is_none()
@@ -379,6 +399,8 @@ struct Shared {
     link_connections: std::sync::Mutex<Vec<std::sync::Weak<LinkConnection>>>,
     inbound: Semaphore,
     rpc: Arc<Semaphore>,
+    /// Link connections have a budget of their own, so duplicate link
+    /// handshakes still reach the service's tie-break or busy reply.
     inbound_links: Semaphore,
     closed: watch::Sender<bool>,
     refused: AtomicU64,
@@ -501,8 +523,29 @@ impl Attachment {
         let Some((options, secret)) = restart.as_ref() else {
             return Err("application-owned endpoint is dead; its owner must rebind it".into());
         };
-        // UDP sockets close with the last clone of their endpoint: the
-        // router and cached connections go first.
+        self.drop_endpoint_clones().await;
+        #[cfg(not(target_family = "wasm"))]
+        if options.bind.is_some() {
+            self.0.endpoint.send_replace(closed_stand_in(secret).await?);
+        }
+        let started = rocky_platform::time::Instant::now();
+        let replacement = loop {
+            match options.bind(*secret).await {
+                Ok(endpoint) => break endpoint,
+                Err(_) if started.elapsed() < REBIND => {
+                    rocky_platform::time::sleep(REBIND_RETRY).await;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let router = self.register(Router::builder(replacement.clone())).spawn();
+        self.0.endpoint.send_replace(replacement);
+        *self.0.router.lock().unwrap_or_else(PoisonError::into_inner) = Some(router);
+        Ok(())
+    }
+    /// UDP sockets close with the last clone of their endpoint, so the
+    /// router and cached connections let go of theirs.
+    async fn drop_endpoint_clones(&self) {
         let router = self
             .0
             .router
@@ -513,39 +556,26 @@ impl Attachment {
             let _ = router.shutdown().await;
         }
         self.0.connections.lock().await.clear();
-        // A browser binds no socket, so there is none to release.
-        #[cfg(not(target_family = "wasm"))]
-        if options.bind.is_some() {
-            // A closed loopback stand-in releases the watched clone.
-            let stand_in = Endpoint::builder(presets::Minimal)
-                .secret_key(SecretKey::from_bytes(secret))
-                .relay_mode(RelayMode::Disabled)
-                .clear_ip_transports()
-                .bind_addr("127.0.0.1:0")?
-                .bind()
-                .await?;
-            stand_in.close().await;
-            self.0.endpoint.send_replace(stand_in);
-        }
-        let started = rocky_platform::time::Instant::now();
-        let replacement = loop {
-            match options.bind(*secret).await {
-                Ok(endpoint) => break endpoint,
-                Err(_) if started.elapsed() < REBIND => {
-                    rocky_platform::time::sleep(Duration::from_millis(100)).await;
-                }
-                Err(error) => return Err(error),
-            }
-        };
-        let router = self.register(Router::builder(replacement.clone())).spawn();
-        self.0.endpoint.send_replace(replacement);
-        *self.0.router.lock().unwrap_or_else(PoisonError::into_inner) = Some(router);
-        Ok(())
     }
     fn refuse(&self, connection: &Connection, code: u32, reason: &[u8]) {
         self.0.refused.fetch_add(1, Ordering::Relaxed);
         connection.close(code.into(), reason);
     }
+}
+
+/// A closed loopback endpoint that replaces the watched dead endpoint, so
+/// its last clone and fixed port are released before the rebind.
+#[cfg(not(target_family = "wasm"))]
+async fn closed_stand_in(secret: &[u8; 32]) -> Result<Endpoint, Failure> {
+    let stand_in = Endpoint::builder(presets::Minimal)
+        .secret_key(SecretKey::from_bytes(secret))
+        .relay_mode(RelayMode::Disabled)
+        .clear_ip_transports()
+        .bind_addr("127.0.0.1:0")?
+        .bind()
+        .await?;
+    stand_in.close().await;
+    Ok(stand_in)
 }
 
 /// Serves Rocky's ALPNs on a router. It takes no other connection and
@@ -557,6 +587,8 @@ impl std::fmt::Debug for Handler {
     }
 }
 impl ProtocolHandler for Handler {
+    /// Serves one connection's streams. Duplicate link handshakes are
+    /// served too, so they reach the service's tie-break or busy reply.
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let attachment = Attachment(self.0.clone());
         let mut closed = self.0.closed.subscribe();
@@ -603,7 +635,6 @@ impl ProtocolHandler for Handler {
             }
             return Ok(());
         }
-        // Duplicate link handshakes must reach the service's tie-break/busy reply.
         let slots = Arc::new(Semaphore::new(STREAMS_PER_CONNECTION));
         let (active, mut activity) = watch::channel(0);
         let active = Arc::new(active);
@@ -677,6 +708,9 @@ impl ProtocolHandler for Handler {
 }
 
 impl Attachment {
+    /// Signals each change of this attachment's addresses. A closed
+    /// endpoint's watcher ends; the signal then follows the starter's
+    /// replacement.
     pub fn connectivity(&self) -> Option<watch::Receiver<()>> {
         let (events, receiver) = watch::channel(());
         let mut endpoints = self.0.endpoint.subscribe();
@@ -695,14 +729,14 @@ impl Attachment {
                         events.send_replace(());
                     }
                     changed = addresses.updated() => {
-                        if changed.is_err() {
-                            // A closed endpoint's watcher ends. Wait for the starter's replacement.
+                        let endpoint_closed = changed.is_err();
+                        if endpoint_closed {
                             tokio::select! {
                                 _ = events.closed() => break,
-                                changed = endpoints.changed() => { if changed.is_err() { break; } }
+                                replaced = endpoints.changed() => { if replaced.is_err() { break; } }
                             }
                             let endpoint = endpoints.borrow_and_update();
-                        addresses = endpoint.watch_addr().or(endpoint.home_relay_status());
+                            addresses = endpoint.watch_addr().or(endpoint.home_relay_status());
                         }
                         events.send_replace(());
                     }
@@ -753,6 +787,11 @@ impl Attachment {
 }
 
 impl Attachment {
+    /// Dials `address` for `protocol`. An endpoint the OS reclaimed heals
+    /// here. Link connections are never reused, and others only while
+    /// reusable, so a dial never races the acceptor closing an idle one. The
+    /// home runtime drives the dial; without one, or once it ended, the
+    /// caller's does.
     async fn connect_scoped(
         &self,
         address: &str,
@@ -767,14 +806,12 @@ impl Attachment {
                     if *self.0.closed.borrow() {
                         return Err("the iroh attachment is closed".into());
                     }
-                    // An endpoint the OS reclaimed heals on the next dial.
                     if self.endpoint().is_closed() {
                         self.revive().await?;
                     }
                     let address: EndpointAddr = serde_json::from_str(address)?;
                     let key = (address.id, protocol);
                     let cached = self.0.connections.lock().await.get(&key).cloned();
-                    // The acceptor closes a connection idle for `IDLE`; never race it.
                     if protocol != Protocol::Link
                         && let Some(cached) = cached
                         && cached.reusable()
@@ -805,12 +842,11 @@ impl Attachment {
                             .await
                         }
                     };
-                    let dialed = match &self.0.home {
+                    let dialed_at_home = match &self.0.home {
                         Some(home) => home.spawn(dial(address.clone())).await.ok(),
                         None => None,
                     };
-                    // Without a home runtime, or once it ended, the caller's drives the dial.
-                    let connection = match dialed {
+                    let connection = match dialed_at_home {
                         Some(dialed) => dialed,
                         None => dial(address).await,
                     }??;
@@ -978,13 +1014,13 @@ impl Transport for Port {
     fn kind(&self) -> &str {
         KIND
     }
+    /// Waits briefly for a home relay when relays are on: an address with
+    /// one is reachable beyond the LAN.
     fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
         Box::pin(async {
             if self.0.relays {
-                // An address with a home relay is reachable beyond the LAN.
                 let _ =
-                    rocky_platform::time::timeout(Duration::from_secs(5), self.endpoint().online())
-                        .await;
+                    rocky_platform::time::timeout(HOME_RELAY_WAIT, self.endpoint().online()).await;
             }
             Ok(serde_json::to_string(&self.endpoint().addr())?)
         })
@@ -1040,9 +1076,10 @@ impl Transport for Port {
     ) -> BoxFuture<'a, Result<Stream, Failure>> {
         Box::pin(self.dial_routes(addresses, Protocol::Link, scope, self.route.clone()))
     }
+    /// Returns once the route closes, so `close`, which marks the route
+    /// closed before taking the `incoming` lock, never waits on an accept.
     fn accept(&self) -> BoxFuture<'_, Option<rocky_core::net::Incoming>> {
         Box::pin(async {
-            // `close` takes this lock after marking the attachment closed.
             let mut closed = self.route.closed.subscribe();
             let mut incoming = tokio::select! {
                 biased;
@@ -1196,7 +1233,6 @@ impl Attachment {
     }
     pub fn foreground(&self) -> BoxFuture<'_, Result<(), Failure>> {
         Box::pin(async {
-            // No clone of a dead endpoint may outlive its rebind.
             if self.endpoint().is_closed() {
                 return self.revive().await;
             }
@@ -1326,6 +1362,11 @@ impl Options {
     fn relays(&self) -> bool {
         self.relay.as_deref() != Some("disabled")
     }
+    /// Whether the endpoint may multicast on the local network, as mDNS and
+    /// the portmapper's gateway discovery do.
+    fn allows_multicast(&self) -> bool {
+        self.local && !cfg!(target_os = "ios")
+    }
     /// Binds an endpoint with these options and `secret` as its key. The
     /// caller owns it: route it, then close it.
     pub async fn bind(&self, secret: [u8; 32]) -> Result<Endpoint, Failure> {
@@ -1343,15 +1384,13 @@ impl Options {
             bind.parse::<std::net::SocketAddr>()
                 .is_ok_and(|address| address.ip().is_loopback())
         }) {
-            // Failed loopback dials otherwise drain for three seconds at QUIC's initial RTT.
             builder = builder.transport_config(
                 iroh::endpoint::QuicTransportConfig::builder()
-                    .initial_rtt(Duration::from_millis(10))
+                    .initial_rtt(LOOPBACK_INITIAL_RTT)
                     .build(),
             );
         }
-        // Gateway discovery also uses multicast; a manual/local-disabled path must not probe it.
-        if !self.local || cfg!(target_os = "ios") {
+        if !self.allows_multicast() {
             builder = builder.portmapper_config(PortmapperConfig::Disabled);
         }
         match self.lookup.as_deref().unwrap_or("default") {
@@ -1360,7 +1399,6 @@ impl Options {
                 builder = builder
                     .address_lookup(PkarrPublisher::n0_dns())
                     .address_lookup(PkarrResolver::n0_dns());
-                // DNS needs sockets; a browser resolves through the pkarr relay.
                 #[cfg(not(target_family = "wasm"))]
                 {
                     builder = builder.address_lookup(DnsAddressLookup::n0_dns());
@@ -1422,7 +1460,6 @@ impl Connector for Options {
     }
 }
 
-// Needs tokio's paused clock.
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use super::*;
@@ -1440,6 +1477,21 @@ mod tests {
         far.write_u8(9).await?;
         assert_eq!(near.read_u8().await?, 9);
         Ok(())
+    }
+
+    /// Polls a read with no answer yet to Pending and drops it, as an
+    /// expired deadline does.
+    async fn cancel_pending_read(stream: &mut Stream) {
+        let read = stream.read_u8();
+        tokio::pin!(read);
+        std::future::poll_fn(|cx| {
+            assert!(
+                read.as_mut().poll(cx).is_pending(),
+                "the peer has not answered yet"
+            );
+            Poll::Ready(())
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1495,16 +1547,7 @@ mod tests {
                     .stable_id(),
                 cached.stable_id()
             );
-            // Hold the answer, poll the read to Pending, then cancel it as a deadline does.
-            {
-                let read = near.read_u8();
-                tokio::pin!(read);
-                std::future::poll_fn(|cx| {
-                    assert!(read.as_mut().poll(cx).is_pending());
-                    Poll::Ready(())
-                })
-                .await;
-            }
+            cancel_pending_read(&mut near).await;
             let reusable = client.0.connections.lock().await[&key].reusable.clone();
             drop(near);
             coordinate(&client, &server).await?;
@@ -1550,15 +1593,14 @@ mod tests {
             }
         };
         let start = rocky_platform::time::Instant::now();
-        let first = open().await;
+        let long_stream = open().await;
         let streams = async {
-            // A long stream keeps its connection; one opened while idle restarts the wait.
             rocky_platform::time::sleep(IDLE * 3).await;
-            drop(first);
+            drop(long_stream);
             rocky_platform::time::sleep(IDLE / 2).await;
-            let second = open().await;
+            let opened_while_idle = open().await;
             rocky_platform::time::sleep(IDLE / 2).await;
-            drop(second);
+            drop(opened_while_idle);
         };
         tokio::join!(idle(&mut activity, IDLE), streams);
         assert_eq!(start.elapsed(), IDLE * 5);

@@ -73,15 +73,16 @@ mod tests {
     fn the_owner_identity_is_derived_from_the_root_and_differs_from_it() {
         let root = RootKey::from_secret([7; 32]);
         let identity = root.identity();
-        // HKDF-SHA256 (RFC 5869), empty salt, info "rocky identity v1":
-        // the derivation and its label are part of the key format.
         let expected = "9c390ed6e479fa7ac5add3e9107652cd7cf143dac2b4466a3a1f7178be565a91";
         let hex: String = identity
             .secret()
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
-        assert_eq!(hex, expected);
+        assert_eq!(
+            hex, expected,
+            "HKDF-SHA256 with empty salt and info rocky identity v1 is part of the key format"
+        );
         let restored = RootKey::from_phrase(&root.phrase()).unwrap().identity();
         assert_eq!(restored.secret(), identity.secret());
         assert_ne!(identity.secret(), root.secret());

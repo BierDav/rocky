@@ -12,6 +12,11 @@ use rocky_secure::{SchemaStage, TipStatement};
 use std::collections::BTreeSet;
 
 impl Node {
+    /// Publishes the application schema at open. A continue published at once
+    /// is live and carries no migration rows; its ordinary terminal settles
+    /// while the original workspace still follows the source. A staged switch
+    /// branches, and the local graph holds its statements, so later signing
+    /// chains after them.
     pub(crate) async fn publish_schema_at_open(
         &self,
         confirmation: Option<&str>,
@@ -48,8 +53,8 @@ impl Node {
             self.declared.version,
             rocky_core::EngineIdentity::current(),
         )?;
-        // A continue published at once is live; a staged switch branches.
-        if !migrates && self.replica.domain_log().is_some() {
+        let continues_live = !migrates && self.replica.domain_log().is_some();
+        if continues_live {
             self.hold_chain(&mut signer, scope).await?;
         } else {
             self.hold_stage_chain(&mut signer, scope).await?;
@@ -94,8 +99,6 @@ impl Node {
             Some(target),
         )?);
         if !migrates && self.replica.domain_log().is_some() {
-            // A continue carries no migration rows. Its ordinary terminal
-            // settles while the original workspace still follows the source.
             match self.replica.publish_tip_statements(&statements).await {
                 Ok(_) => {}
                 Err(error)
@@ -160,7 +163,6 @@ impl Node {
                 parents: parents.into_iter().collect(),
             })
             .await?;
-        // The local graph holds the staged statements; later signing chains after them.
         drop(signer);
         self.replica
             .install_tip_schema(
@@ -179,7 +181,9 @@ impl Node {
     }
 
     /// Finish publication only after the closing base is signed and listed.
-    /// Persisted graph statements and bases are the retry journal.
+    /// Persisted graph statements and bases are the retry journal. A losing
+    /// publication first adopts the bookmark's winner: sealing its old
+    /// workspace would prevent the sync that fetches it.
     pub(super) async fn close_migrations(&self) -> Result<(), Failure> {
         let publications = self.replica.publications().await?;
         if publications.is_empty()
@@ -192,11 +196,11 @@ impl Node {
         let scope = self.domain().scope;
         let graph = self.replica.tip_graph(scope).await?;
         let followed = self.replica.followed_tip().await;
-        // A losing publication must first adopt the bookmark's winner.
-        // Sealing its old workspace would prevent the sync that fetches it.
-        if let Some((_, name)) = self.replica.followed_bookmark().await
-            && graph.bookmark(&name)? != Some(followed)
-        {
+        let must_first_adopt_bookmark_winner = match self.replica.followed_bookmark().await {
+            Some((_, name)) => graph.bookmark(&name)? != Some(followed),
+            None => false,
+        };
+        if must_first_adopt_bookmark_winner {
             return Ok(());
         }
         let mut pending = false;
@@ -260,6 +264,11 @@ impl Node {
         Ok(())
     }
 
+    /// Runs the program of replayed tables once over every granted scope but
+    /// the registry, so it may read and write every partition the issuer holds;
+    /// once committed, its bundles continue from their cursor and it never runs
+    /// again. A stage none of which left the device is withdrawn, and a later
+    /// application stages its own.
     async fn run_staged_migration(&self) -> Result<(), Failure> {
         let Some((stage, committed)) = self.replica.staged_schema().await? else {
             return Ok(());
@@ -268,8 +277,6 @@ impl Node {
             return self.endorse_migration(&stage).await;
         }
         self.ensure_tip_node().await?;
-        // The program of replayed tables ran and committed; its bundles
-        // continue from their cursor and it never runs again.
         if self.replica.publication_staged(stage.publication).await? {
             self.replica
                 .author_staged_publication(stage.publication)
@@ -277,8 +284,6 @@ impl Node {
             return self.endorse_migration(&stage).await;
         }
         let program = Schema::parse(std::str::from_utf8(&stage.program)?)?;
-        // Every granted scope but the registry: the migration may read and
-        // write every partition the issuer holds.
         let scopes = {
             let settings = self.settings.lock().await;
             let domain = self.domain();
@@ -318,8 +323,6 @@ impl Node {
                 if let Err(error) = ran {
                     sql.cancel().await;
                     drop(sql);
-                    // Nothing of the stage left the device: it is withdrawn,
-                    // and a later application stages its own.
                     self.withdraw_stage(&stage).await?;
                     return Err(format!(
                         "migration to version {} failed at statement {}: {error}",

@@ -289,12 +289,12 @@ enum Fault {
     Retransmit(usize),
 }
 
-/// Opens a receiver holding both partitions that writes nothing itself.
+/// Opens a receiver holding both partitions that writes nothing itself. Its
+/// keys are installed from the device's key store on every open.
 async fn receiver(f: &Fixture, path: &Path, node: &PrivateKey) -> EncryptedReplica<TypedRows> {
     let replica = f
         .open(path, node.clone(), f.grant(None, &[Right::Read]))
         .await;
-    // Keys come from the device's key store on every open.
     for (name, key) in KEYS {
         f.key(&replica, name, key).await;
     }
@@ -578,8 +578,10 @@ struct Group {
     frames: Vec<EncryptedFrame>,
 }
 
-/// Appends group `index` after the unreceived groups it depends on.
-fn closure(
+/// Appends group `index` after the unreceived groups it depends on. A partition
+/// with a causal gap or a partial bundle refuses reads and writes, so an author
+/// only ever receives whole groups with everything they follow.
+fn with_dependencies(
     index: usize,
     groups: &[Group],
     group_of: &BTreeMap<p2panda_core::Hash, usize>,
@@ -593,7 +595,7 @@ fn closure(
         let header = &frame.operation_ref().unwrap().header;
         for dependency in header.backlink.iter().chain(&header.previous) {
             if let Some(group) = group_of.get(dependency) {
-                closure(*group, groups, group_of, received, out);
+                with_dependencies(*group, groups, group_of, received, out);
             }
         }
     }
@@ -614,18 +616,20 @@ async fn seeded(seed: u64) {
     }
     let mut groups: Vec<Group> = Vec::new();
     let mut group_of = BTreeMap::new();
-    // Per author, the groups it holds: its own and those it received.
-    let mut received: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); authors.len()];
+    let mut groups_held_by_author: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); authors.len()];
     for transaction in 0..32u8 {
         let at = rng.gen_range(0..authors.len());
         let from: Vec<bool> = (0..authors.len()).map(|_| rng.gen_bool(0.5)).collect();
-        // A partition with a causal gap or a partial bundle refuses reads
-        // and writes, so an author receives whole groups with everything
-        // they follow.
         let mut incoming = Vec::new();
         for index in 0..groups.len() {
             if groups[index].author != at && from[groups[index].author] && rng.gen_bool(0.7) {
-                closure(index, &groups, &group_of, &mut received[at], &mut incoming);
+                with_dependencies(
+                    index,
+                    &groups,
+                    &group_of,
+                    &mut groups_held_by_author[at],
+                    &mut incoming,
+                );
             }
         }
         authors[at].receive(&incoming).await;
@@ -638,7 +642,7 @@ async fn seeded(seed: u64) {
             for frame in &frames {
                 group_of.insert(frame.operation_ref().unwrap().hash, groups.len());
             }
-            received[index].insert(groups.len());
+            groups_held_by_author[index].insert(groups.len());
             groups.push(Group {
                 author: index,
                 frames,
@@ -670,11 +674,11 @@ async fn seeded(seed: u64) {
     for (index, author) in authors.iter().enumerate() {
         let mut missing = Vec::new();
         for group in 0..groups.len() {
-            closure(
+            with_dependencies(
                 group,
                 &groups,
                 &group_of,
-                &mut received[index],
+                &mut groups_held_by_author[index],
                 &mut missing,
             );
         }

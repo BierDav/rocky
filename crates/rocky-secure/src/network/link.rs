@@ -318,14 +318,9 @@ impl Link {
         }
         scopes.sort();
         scopes.dedup();
-        // Exchange proofs in handshake order so bounded transports cannot deadlock.
-        if side == Side::Initiator {
-            session.offer_link_holdings(replica, &scopes).await?;
-            session.accept_link_holdings(replica).await?;
-        } else {
-            session.accept_link_holdings(replica).await?;
-            session.offer_link_holdings(replica, &scopes).await?;
-        }
+        session
+            .exchange_link_holdings(replica, &scopes, side)
+            .await?;
         let mut local_states = std::collections::BTreeMap::new();
         let states = if side == Side::Initiator {
             session
@@ -529,6 +524,22 @@ impl NativeSession {
                 }
                 _ => return Err(denied("link state response")),
             }
+        }
+    }
+    /// Exchanges holding proofs in handshake order, so bounded transports
+    /// cannot deadlock.
+    async fn exchange_link_holdings<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scopes: &[ResourceScope],
+        side: Side,
+    ) -> Result<(), Error> {
+        if side == Side::Initiator {
+            self.offer_link_holdings(replica, scopes).await?;
+            self.accept_link_holdings(replica).await
+        } else {
+            self.accept_link_holdings(replica).await?;
+            self.offer_link_holdings(replica, scopes).await
         }
     }
     async fn offer_link_holdings<A: RowApplication>(
@@ -802,17 +813,19 @@ mod tests {
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn only_current_link_name_and_handshake_label() {
-        // The cryptographic handshake accepts one current version.
-        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v29");
+        assert_eq!(
+            session_label(HANDSHAKE_VERSION),
+            "rocky.link.v29",
+            "the cryptographic handshake accepts one current version"
+        );
     }
 }
 
-// Every test here needs tokio's paused clock.
+/// Every test here needs tokio's paused clock.
 #[cfg(all(test, not(target_family = "wasm")))]
 mod integration_tests {
     use super::*;
 
-    // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn a_signed_link_frame_can_arrive_across_multiple_read_deadlines() {
@@ -857,7 +870,6 @@ mod integration_tests {
         );
         assert_eq!(reader.sequence, 1);
     }
-    // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn a_trickled_hello_cannot_hold_admission_past_its_limit() {
@@ -867,20 +879,20 @@ mod integration_tests {
         let replica = crate::tests::revocations::open(&f, &dir, "b.db", &node).await;
         let chain = f.credentials(&node, f.full());
         let (near, mut far) = tokio::io::duplex(IO_CHUNK * 2);
-        // Every chunk beats its own read deadline; the whole hello would take minutes.
-        let trickle = async {
+        let within_each_read_deadline = TIMEOUT * 9 / 10;
+        let trickle_taking_minutes = async {
             far.write_u32(MAX_SECURE_FRAME as u32).await.unwrap();
             loop {
-                rocky_platform::time::sleep(TIMEOUT * 9 / 10).await;
+                rocky_platform::time::sleep(within_each_read_deadline).await;
                 if far.write_all(&[0; IO_CHUNK]).await.is_err() {
                     break;
                 }
             }
         };
-        tokio::pin!(trickle);
+        tokio::pin!(trickle_taking_minutes);
         let admitted = tokio::select! {
             admitted = Link::open(near, &replica, node.clone(), chain, None) => admitted,
-            () = &mut trickle => unreachable!(),
+            () = &mut trickle_taking_minutes => unreachable!(),
         };
         let Err(error) = admitted else {
             panic!("a trickled hello was admitted");
@@ -890,7 +902,6 @@ mod integration_tests {
             "{error}"
         );
     }
-    // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn oversized_and_empty_headers_are_refused_before_body_read() {
@@ -937,9 +948,11 @@ pub(crate) mod testing {
         let address = listener.local_addr().unwrap();
         let (near, far) = tokio::join!(tokio::net::TcpStream::connect(address), listener.accept());
         let (near, far) = (near.unwrap(), far.unwrap().0);
-        // Request frames must not wait for Nagle's algorithm and delayed acknowledgments.
-        near.set_nodelay(true).unwrap();
-        far.set_nodelay(true).unwrap();
+        for end in [&near, &far] {
+            end.set_nodelay(true).expect(
+                "request frames must not wait for Nagle's algorithm and delayed acknowledgments",
+            );
+        }
         (near, far)
     }
     #[cfg(target_family = "wasm")]

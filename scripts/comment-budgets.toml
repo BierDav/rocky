@@ -3,19 +3,3 @@
 # scripts/lint --fix lowers a budget after cleanup and drops a package at zero;
 # never raise one. A package missing here may hold no plain comments.
 
-directory-app = 1
-inventory-app = 1
-rocky-coordinator = 123
-rocky-core = 63
-rocky-credentials = 333
-rocky-iroh = 52
-rocky-platform = 12
-rocky-runtime = 296
-rocky-sdk = 1502
-rocky-secure = 1994
-rocky-storage = 89
-rocky-voter = 90
-runtime-scaling = 83
-runtime-todo-app = 2
-todo-app = 30
-todo-desktop = 9

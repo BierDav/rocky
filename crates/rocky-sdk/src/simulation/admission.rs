@@ -41,8 +41,8 @@ async fn awaiting(device: &mut Member, hub: &Arc<Hub>, uri: &str) -> Result<Stri
         .clone())
 }
 
-// Mutations: skipping the code comparison in `admit`, or not ending
-// requests when their invitation expired, each fail an assertion below.
+/// Fails if `admit` skips the code comparison, or if a request outlives its
+/// expired invitation.
 #[tokio::test(start_paused = true)]
 async fn a_requested_join_waits_for_admission_with_the_code_both_devices_show()
 -> Result<(), Failure> {
@@ -57,10 +57,13 @@ async fn a_requested_join_waits_for_admission_with_the_code_both_devices_show()
             assert_eq!(invitation.profile, None);
             let uri = invitation.uri;
 
-            // Pending until admitted; a retry keeps its request and code.
             let mut device = Member::new(root.path(), "laptop", SCHEMA);
             let code = awaiting(&mut device, &hub, &uri).await?;
-            assert_eq!(awaiting(&mut device, &hub, &uri).await?, code);
+            assert_eq!(
+                awaiting(&mut device, &hub, &uri).await?,
+                code,
+                "a retry keeps its request and code"
+            );
             let listed = pending(&issuer).await?;
             assert_eq!(listed.len(), 1);
             assert_eq!(listed[0].name, "laptop");
@@ -77,7 +80,6 @@ async fn a_requested_join_waits_for_admission_with_the_code_both_devices_show()
                 1
             );
 
-            // A wrong code is refused and the request stays.
             let wrong = format!("{:06}", (code.parse::<u32>()? + 1) % 1_000_000);
             let admit = |code: &str| crate::Admit {
                 node: node.clone(),
@@ -85,14 +87,24 @@ async fn a_requested_join_waits_for_admission_with_the_code_both_devices_show()
                 profile: writer(),
                 label: None,
             };
-            assert!(issuer.session()?.admit(admit(&wrong)).await.is_err());
-            assert_eq!(pending(&issuer).await?.len(), 1);
+            assert!(
+                issuer.session()?.admit(admit(&wrong)).await.is_err(),
+                "a wrong code is refused"
+            );
+            assert_eq!(
+                pending(&issuer).await?.len(),
+                1,
+                "a refused code leaves the request"
+            );
             assert_eq!(awaiting(&mut device, &hub, &uri).await?, code);
 
-            // Pending and answered requests survive issuer restarts.
             issuer.close().await?;
             issuer.open(&hub).await?;
-            assert_eq!(pending(&issuer).await?, listed);
+            assert_eq!(
+                pending(&issuer).await?,
+                listed,
+                "pending requests survive issuer restarts"
+            );
             issuer.session()?.admit(admit(&code)).await?;
             assert!(pending(&issuer).await?.is_empty());
             issuer.close().await?;
@@ -110,7 +122,6 @@ async fn a_requested_join_waits_for_admission_with_the_code_both_devices_show()
                 1
             );
 
-            // A refused device learns it at its next join.
             let mut refused = Member::new(root.path(), "phone", SCHEMA);
             awaiting(&mut refused, &hub, &uri).await?;
             let node = pending(&issuer).await?[0].node.clone();
@@ -120,7 +131,10 @@ async fn a_requested_join_waits_for_admission_with_the_code_both_devices_show()
                 .await
                 .err()
                 .ok_or("joined refused")?;
-            assert!(error.downcast_ref::<JoinRefused>().is_some(), "{error}");
+            assert!(
+                error.downcast_ref::<JoinRefused>().is_some(),
+                "a refused device learns it at its next join: {error}"
+            );
             assert_eq!(
                 events(&issuer, |event| matches!(
                     event,
@@ -131,11 +145,13 @@ async fn a_requested_join_waits_for_admission_with_the_code_both_devices_show()
                 1
             );
 
-            // An expired invitation ends its request and reports it.
             let mut late = Member::new(root.path(), "tablet", SCHEMA);
             awaiting(&mut late, &hub, &uri).await?;
             rocky_platform::entropy::simulation::pass(Duration::from_secs(11 * 60));
-            assert!(pending(&issuer).await?.is_empty());
+            assert!(
+                pending(&issuer).await?.is_empty(),
+                "an expired invitation ends its request"
+            );
             let dropped = events(&issuer, |event| {
                 matches!(event, crate::ActivityKind::JoinRequestDropped { .. })
             })

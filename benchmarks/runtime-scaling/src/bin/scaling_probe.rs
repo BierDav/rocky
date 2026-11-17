@@ -1,5 +1,22 @@
 //! Scaling sweeps for the local runtime.
 //! Run a release build: `cargo run --release -p rocky-runtime-bench --bin scaling_probe -- all`.
+//!
+//! Sections outside `all`, which take minutes:
+//! - `wide [tables]`: resident memory is process-wide, so one table count per
+//!   process gives the clean figure.
+//! - `stored [rows] [tables] [directory]`: the phase 3 gate over 500,000 rows.
+//!   With a directory the file is kept, and a second run measures it from a
+//!   fresh process.
+//! - `checkpoints [operations] [rows] [tables] [directory]`: the phase 4 gate
+//!   over two million operations.
+//! - `gate [seconds] [files] [checkpoint_frames] [group] [directory]`: the
+//!   phase 5 gate; the qualifying run takes ten minutes.
+//! - `erp-open-loop`, `erp-bulk`, `erp-attrib`: fixed-rate, full-durability
+//!   local writes; `erp-overhead` and `erp-instrument-overhead` run matched
+//!   control/measured pairs to bound collection cost.
+//! - `erp-sync [rate] [seconds] [tables] [backlog] [directory]`: same-file
+//!   authoring while a preloaded peer backlog is applied to another domain.
+//! - `roles [rows] [behind]`: the phase 7 gate over native TCP.
 use inventory_app::{InventoryApp, Policy};
 use rocky_core::*;
 use rocky_runtime::{
@@ -598,8 +615,6 @@ async fn main() -> Result<(), Failure> {
         .await?;
     }
     if all || section == "wide" {
-        // `wide [tables]`: resident memory is process-wide, so one table count
-        // per process gives the clean figure.
         let tables = match std::env::args().nth(2) {
             Some(tables) => vec![tables.parse::<u16>()?.clamp(1, wide_schema::MAX_TABLES)],
             None => vec![20, 200, wide_schema::MAX_TABLES],
@@ -608,9 +623,6 @@ async fn main() -> Result<(), Failure> {
             wide::run(tables, &[500, 2000, 3500]).await?;
         }
     }
-    // `stored [rows] [tables] [directory]`: the phase 3 gate. Not part of
-    // `all`: loading 500,000 rows takes minutes. With a directory the file is
-    // kept, and a second run measures it from a fresh process.
     if section == "stored" {
         let rows = match std::env::args().nth(2) {
             Some(rows) => rows.parse()?,
@@ -622,8 +634,6 @@ async fn main() -> Result<(), Failure> {
         };
         stored::run(rows, tables, std::env::args().nth(4).map(Into::into)).await?;
     }
-    // `checkpoints [operations] [rows] [tables] [directory]`: the phase 4
-    // gate. Not part of `all`: two million operations take several minutes.
     if section == "checkpoints" {
         let number = |position: usize, default: usize| match std::env::args().nth(position) {
             Some(value) => value.parse(),
@@ -641,8 +651,6 @@ async fn main() -> Result<(), Failure> {
         )
         .await?;
     }
-    // `gate [seconds] [files] [checkpoint_frames] [group] [directory]`: the
-    // phase 5 gate. Not part of `all`: the qualifying run takes ten minutes.
     if section == "gate" {
         let argument = |position: usize| std::env::args().nth(position);
         gate::run(
@@ -664,8 +672,6 @@ async fn main() -> Result<(), Failure> {
         )
         .await?;
     }
-    // Fixed-rate, full-durability local writes. `erp-overhead` runs matched
-    // control/measured pairs to bound histogram collection cost.
     if section == "erp-open-loop" || section == "erp-overhead" || section == "erp-bulk" {
         let number = |position: usize, default: u64| match std::env::args().nth(position) {
             Some(value) => value.parse(),
@@ -717,8 +723,6 @@ async fn main() -> Result<(), Failure> {
             }
         }
     }
-    // Fixed-rate, full-durability local writes. `erp-overhead` runs matched
-    // control/measured pairs to bound histogram collection cost.
     if section == "erp-attrib" || section == "erp-instrument-overhead" {
         let number = |position: usize, default: u64| match std::env::args().nth(position) {
             Some(value) => value.parse(),
@@ -745,8 +749,6 @@ async fn main() -> Result<(), Failure> {
             }
         }
     }
-    // `erp-sync [rate] [seconds] [tables] [backlog] [directory]`: same-file
-    // authoring while a preloaded peer backlog is applied to another domain.
     if section == "erp-sync" {
         let number = |position: usize, default: u64| match std::env::args().nth(position) {
             Some(value) => value.parse(),
@@ -760,7 +762,6 @@ async fn main() -> Result<(), Failure> {
         attribution::erp_sync(rate, seconds, tables, backlog, directory).await?;
     }
     if section == "roles" {
-        // `roles [rows] [behind]`: the phase 7 gate over native TCP.
         let number = |position: usize, default: usize| match std::env::args().nth(position) {
             Some(value) => value.parse(),
             None => Ok(default),

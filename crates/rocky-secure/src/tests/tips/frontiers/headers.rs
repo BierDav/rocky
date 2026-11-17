@@ -228,6 +228,15 @@ async fn replace_header(replica: &Replica, bytes: &[u8]) {
         .unwrap();
 }
 
+/// Drops every memoized stored header, so excluded rows are read cold.
+async fn reset_to_a_cold_header_memo(replica: &Replica) {
+    replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .stored_header_memo_limits(1, 1);
+}
+
 fn rejected<T>(result: Result<T, Error>, expected: &str) {
     match result {
         Err(Error::Rejected(message)) => assert_eq!(message, expected),
@@ -270,9 +279,9 @@ async fn excluded_and_other_domain_headers_still_decode_after_warming() {
     let mut indefinite = vec![0x9f];
     indefinite.extend_from_slice(&original[1..]);
     indefinite.push(0xff);
-    // Prove this is decodable CBOR with the same fields, but not canonical.
     let _: p2panda_core::Header<crate::wire::Extensions> =
-        p2panda_core::cbor::decode_cbor(indefinite.as_slice()).unwrap();
+        p2panda_core::cbor::decode_cbor(indefinite.as_slice())
+            .expect("the non-canonical encoding still decodes to the same fields");
     for (bytes, message) in [
         (vec![0xff], "invalid secure frame"),
         (indefinite, "non-canonical secure frame"),
@@ -291,8 +300,6 @@ async fn excluded_and_other_domain_headers_still_decode_after_warming() {
                 .await,
             message,
         );
-        // Held lookup classifies by the transactional position index and
-        // never loads this live pending frame. Audit still checks its bytes.
         let held = target
             .held_frame_page(
                 peer.public_key(),
@@ -303,25 +310,28 @@ async fn excluded_and_other_domain_headers_still_decode_after_warming() {
             )
             .await
             .unwrap();
-        assert!(held.0.is_empty());
-        assert!(held.1.is_none());
-        assert!(target.audit(f.public).await.is_err());
+        assert!(
+            held.0.is_empty() && held.1.is_none(),
+            "held lookup classifies by the position index and never loads the live pending frame"
+        );
+        assert!(
+            target.audit(f.public).await.is_err(),
+            "audit still checks the stored header bytes"
+        );
         assert_eq!(state(&target).await, before);
     }
-    // A cold excluded row and a different requested domain also fail before filtering.
-    target
-        .inner
-        .lock(crate::replica::Class::Background)
-        .await
-        .stored_header_memo_limits(1, 1);
+    reset_to_a_cold_header_memo(&target).await;
     replace_header(&target, &[0xff]).await;
     rejected(
         scan(&target, f.public.domain, &[f.public], &[]).await,
         "invalid secure frame",
     );
-    let mut other = f.public.domain;
-    other.app.0[0] ^= 1;
-    rejected(scan(&target, other, &[], &[]).await, "invalid secure frame");
+    let mut other_domain = f.public.domain;
+    other_domain.app.0[0] ^= 1;
+    rejected(
+        scan(&target, other_domain, &[], &[]).await,
+        "invalid secure frame",
+    );
     assert_eq!(state(&target).await, before);
     replace_header(&target, original).await;
     assert_eq!(

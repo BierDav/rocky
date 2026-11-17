@@ -27,9 +27,7 @@ async fn relayed_frames_cannot_hide_nodes_past_the_membership_bound() {
             .unwrap(),
     ]);
     let mut previous = None;
-    let mut frames = Vec::new();
-    // Separate offline replicas each know only their own certificate. A carrier
-    // can relay their frames without volunteering their membership set.
+    let mut frames_from_separate_offline_nodes = Vec::new();
     for sequence in 0..=MAX_MEMBERSHIP_NODES {
         let node = PrivateKey::new();
         let chain = links
@@ -46,7 +44,7 @@ async fn relayed_frames_cannot_hide_nodes_past_the_membership_bound() {
         )
         .await
         .unwrap();
-        frames.push(
+        frames_from_separate_offline_nodes.push(
             source
                 .author(
                     [sequence as u8 + 1; 32],
@@ -62,12 +60,17 @@ async fn relayed_frames_cannot_hide_nodes_past_the_membership_bound() {
                 .unwrap(),
         );
     }
-    let results = receiver.receive_all(frames).await;
+    let results = receiver
+        .receive_all(frames_from_separate_offline_nodes)
+        .await;
     assert_eq!(
         results.iter().filter(|result| result.is_ok()).count(),
         MAX_MEMBERSHIP_NODES
     );
-    assert!(results[MAX_MEMBERSHIP_NODES].is_err());
+    assert!(
+        results[MAX_MEMBERSHIP_NODES].is_err(),
+        "each offline node knows only its own certificate, yet a carrier relaying their frames cannot exceed the membership bound"
+    );
     let known = receiver.revocations().await;
     assert_eq!(
         known

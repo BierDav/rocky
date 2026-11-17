@@ -168,7 +168,6 @@ pub(crate) async fn import_needed_bases<A: rocky_core::RowApplication>(
         offered.verify_signature().unwrap();
         let checkpoint = offered.id().unwrap();
         target.begin_rebootstrap(offered.clone()).await.unwrap();
-        // A no-frames checkpoint stages complete: it has no pages.
         let (_, mut after, complete) = target
             .rebootstrap_progress(need.scope)
             .await
@@ -907,7 +906,6 @@ fn signatures_attenuation_expiry_revocation_and_cross_app_replay() {
     let key = PrivateKey::new();
     let chain = fixture.credentials(&key, fixture.full());
     let time = now().unwrap();
-    // A chain names no generation: it verifies under the publisher alone.
     let verify = |chain: &CredentialChain, revocations: &RevocationSet| {
         chain.verify(
             fixture.publisher.public_key(),
@@ -923,14 +921,16 @@ fn signatures_attenuation_expiry_revocation_and_cross_app_replay() {
     let app = fixture.app().definition().app;
     let ended = revoking(&fixture.publisher, app, &[], &[chain.0[0].id().unwrap()]);
     assert!(verify(&chain, &ended).is_err());
-    // A statement naming someone else leaves the chain current.
     let other = revoking(
         &fixture.publisher,
         app,
         &[PrivateKey::new().public_key()],
         &[],
     );
-    assert!(verify(&chain, &other).is_ok());
+    assert!(
+        verify(&chain, &other).is_ok(),
+        "a statement naming someone else leaves the chain current"
+    );
     assert!(
         chain
             .verify(
@@ -1111,7 +1111,6 @@ async fn learned_revocation_lost_keys_and_wrong_generations() {
         .install_key(KeyMaterial::new(fixture.private, 1, [22; 32]))
         .await
         .unwrap();
-    // A sealed package carries no plaintext.
     let private = EncryptedPackage::seal(
         fixture.private,
         rocky_core::KeyEpoch::new(1, &[22; 32]),
@@ -1124,7 +1123,8 @@ async fn learned_revocation_lost_keys_and_wrong_generations() {
         !encode(&private)
             .unwrap()
             .windows(13)
-            .any(|bytes| bytes == b"SECRET SALARY")
+            .any(|bytes| bytes == b"SECRET SALARY"),
+        "a sealed package carries no plaintext"
     );
     let revoked = revoking(
         &fixture.publisher,
@@ -1133,8 +1133,6 @@ async fn learned_revocation_lost_keys_and_wrong_generations() {
         &[root_grant],
     );
     target.learn_revocations(&revoked).await.unwrap();
-    // The revoked author's new frames are refused; the target's own chain,
-    // which no statement names, stays current.
     let later = source
         .author(
             [2; 32],
@@ -1148,19 +1146,24 @@ async fn learned_revocation_lost_keys_and_wrong_generations() {
         )
         .await
         .unwrap();
-    assert!(target.receive(later).await.is_err());
-    assert!(target.snapshot(fixture.private).await.is_ok());
-    // Learning less removes nothing.
+    assert!(
+        target.receive(later).await.is_err(),
+        "the revoked author's new frames are refused"
+    );
+    assert!(
+        target.snapshot(fixture.private).await.is_ok(),
+        "the target's own chain, which no statement names, stays current"
+    );
     assert!(
         target
             .learn_revocations(&RevocationSet::new())
             .await
             .unwrap()
-            .is_empty()
+            .is_empty(),
+        "learning less removes nothing"
     );
     let expected = target.revocations().await;
     drop(target);
-    // Reopened with an empty supplied set, the file keeps what it learned.
     let mut config = fixture.config(&target_key, fixture.full(), &[]);
     config.credentials = target_credentials;
     assert_eq!(
@@ -1169,7 +1172,8 @@ async fn learned_revocation_lost_keys_and_wrong_generations() {
             .unwrap()
             .revocations()
             .await,
-        expected
+        expected,
+        "reopened with an empty supplied set, the file keeps what it learned"
     );
     assert!(
         EncryptedReplica::open(&target_path, fixture.app(), {
@@ -1361,7 +1365,13 @@ async fn concurrent_field_updates_converge_and_no_remote_operation_is_reauthored
     );
 }
 
-// Crashes a child process.
+/// Exit status of a crashed test child: it ends without dropping the
+/// connection or file owner.
+#[cfg(not(target_family = "wasm"))]
+const CRASH_EXIT_CODE: i32 = 77;
+
+/// Commits a row, then exits mid-process for
+/// [`committed_ciphertext_survives_process_exit`].
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 #[ignore = "invoked by committed_ciphertext_survives_process_exit"]
@@ -1389,11 +1399,9 @@ async fn crash_child() {
         )
         .await
         .unwrap();
-    // Exit without dropping the connection or file owner.
-    std::process::exit(77);
+    std::process::exit(CRASH_EXIT_CODE);
 }
 
-// Crashes a child process.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn committed_ciphertext_survives_process_exit() {
@@ -1404,7 +1412,7 @@ async fn committed_ciphertext_survives_process_exit() {
         .env("ROCKY_CRASH_TEST_PATH", &path)
         .status()
         .unwrap();
-    assert_eq!(status.code(), Some(77));
+    assert_eq!(status.code(), Some(CRASH_EXIT_CODE));
     let fixture = Fixture::with_publisher(PrivateKey::from_bytes(&[41; 32]));
     let node = PrivateKey::from_bytes(&[42; 32]);
     let replica = EncryptedReplica::open(
@@ -1588,10 +1596,10 @@ async fn signatures_wrong_scope_generation_and_mixed_batch_fail_without_revision
     operation.header.extensions.generation.generation = 2;
     operation.header.sign(&key);
     let wrong_generation = frame.with_header(operation.header.to_bytes());
-    // A key epoch this replica does not hold waits for its key; nothing applies.
     assert_eq!(
         target.receive(wrong_generation).await.unwrap(),
-        ReceiveStatus::MissingKey
+        ReceiveStatus::MissingKey,
+        "a key epoch this replica does not hold waits for its key; nothing applies"
     );
     operation.header.extensions.generation.generation = 1;
     operation.header.extensions.scope.domain.mesh = MeshId([99; 16]);
@@ -1651,7 +1659,6 @@ pub(crate) mod blockers;
 mod bundles;
 mod chains;
 mod compaction;
-// The coordinator's memory log is native-only, like the coordinator.
 #[cfg(not(target_family = "wasm"))]
 mod coordinated;
 mod delegation;

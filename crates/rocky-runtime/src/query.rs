@@ -81,7 +81,8 @@ impl ReadCursor {
             CursorKind::Offset
         }
     }
-    /// Text form for transports.
+    /// Text form for transports. A key never holds NULL (see
+    /// `read::Reads::snapshot`); `n` keeps the encoding total.
     pub fn encode(&self) -> String {
         let mut text = format!("{}:", self.offset);
         hex(&self.binding, &mut text);
@@ -98,7 +99,6 @@ impl ReadCursor {
                     text.push('b');
                     hex(value, &mut text);
                 }
-                // A key never holds NULL; see `read::Reads::snapshot`.
                 SqlValue::Null => text.push('n'),
             }
         }

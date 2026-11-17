@@ -195,8 +195,6 @@ impl PathFields {
 
 impl<A: RowApplication> Inner<A> {
     pub(super) fn frame_schema_ready(&self, frame: &EncryptedFrame) -> Result<bool, Error> {
-        // Replaying under another engine than the tip names could diverge;
-        // the frame waits, stored, until this build follows a tip of its own.
         if !self.engine_matches() {
             return Ok(false);
         }
@@ -440,12 +438,9 @@ impl<A: RowApplication> Inner<A> {
             mut required,
         } = requirements;
         let scopes = self.domain_scopes(domain).await?;
-        // Stored scopes hold the workspace tip's state until a switch filters it.
         if !scopes.is_empty() && path.contains(&self.workspace.tip) {
             retained.insert(self.workspace.tip);
         }
-        // Until an authenticated base covers every stored scope, replay starts
-        // at the implicit empty genesis base, including on a fresh enrollment.
         let mut genesis_base = scopes.is_empty();
         for (_, id) in scopes {
             if let Some(seal) = self.base_seal(id).await? {
@@ -453,7 +448,6 @@ impl<A: RowApplication> Inner<A> {
             } else {
                 genesis_base = true;
             }
-            // A base being imported is read through the path from its tip.
             if let Some(staging) = self.staging(id).await? {
                 retained.insert(staging.signed.statement.tip);
             }
@@ -488,8 +482,6 @@ impl<A: RowApplication> Inner<A> {
         let Some(mut requirements) = self.requirement_start()? else {
             return Ok(BTreeSet::new());
         };
-        // Headers only decide how much of the path is required: with every
-        // path schema installed none is missing, and none is read.
         if requirements.path.iter().any(|tip| {
             requirements
                 .graph
@@ -508,6 +500,19 @@ impl<A: RowApplication> Inner<A> {
             .filter(|manifest| !self.catalog.contains_key(manifest))
             .collect()
     }
+}
+
+/// Puts a failed switch's source definition and typed tables back. A staged
+/// switch keeps its source installed, as after a reopen, so that withdrawal
+/// always has it.
+async fn reinstall_switch_source<A: RowApplication>(
+    inner: &mut Inner<A>,
+    source: &mut generation::Definition<A>,
+    typed: Option<Arc<typed::Typed>>,
+) -> Result<(), Error> {
+    source.swap(inner);
+    inner.workspace.typed = typed;
+    inner.load_schemas().await
 }
 
 /// Requirement state accumulated over a domain's headers.
@@ -625,7 +630,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner.load_schemas().await
         })
         .await?;
-        // Frames that waited for this schema apply now.
         self.settle().await
     }
     pub async fn tip_schema(&self, manifest: Commitment) -> Result<Option<Vec<u8>>, Error> {
@@ -704,7 +708,6 @@ impl<A: RowApplication> Inner<A> {
             .followed
             .clone()
             .ok_or_else(|| denied("schema switching requires following a bookmark"))?;
-        // A staged intent the bookmark has left is withdrawn first.
         if withdraw.is_none() && inner.schema_switching().await? {
             transaction!(inner, |inner| inner.reconcile_staged_switch().await)?;
         }
@@ -720,7 +723,6 @@ impl<A: RowApplication> Inner<A> {
             ));
         }
         let graph = inner.graph_for(scope)?;
-        // The staged target resumes while the bookmark continues from it.
         let followed = match graph.bookmark(&name).map_err(credential)? {
             Some(followed) if followed == tip => true,
             Some(followed) if staged.is_some() => graph.continues(tip, followed).unwrap_or(false),
@@ -785,8 +787,6 @@ impl<A: RowApplication> Inner<A> {
         let mut security = config.security;
         let (current, mut history) = keys::split(std::mem::take(&mut security.keys));
         security.keys = current;
-        // Keys installed after open, as partition epochs, stay current for
-        // scopes the new configuration does not name.
         for key in &inner.config.keys {
             if manifest
                 .entities
@@ -844,8 +844,6 @@ impl<A: RowApplication> Inner<A> {
                 )
                 .await?;
             inner.store_schema(&inner.definition, &[]).await?;
-            // Readiness omits removed tables. Strip all stored scopes before
-            // projecting, even when the new schema retains none of them.
             inner.hold_removed(scope, tip).await?;
             let fields = inner.durable_switch_fields(scope, source, tip).await?;
             let stripped = inner.strip_rows(scope, source, &fields).await?;
@@ -863,7 +861,6 @@ impl<A: RowApplication> Inner<A> {
                 if expected.hash() != inner.manifest {
                     return Err(denied("projection differs from tip schema"));
                 }
-                // Stored rows the path filtered project again.
                 if !stripped
                     && inner
                         .switch_in_place(schema.clone(), *domain, readers)
@@ -884,9 +881,7 @@ impl<A: RowApplication> Inner<A> {
         let in_place = match staged {
             Ok(in_place) => in_place,
             Err(error) => {
-                definition.swap(inner);
-                inner.workspace.typed = old_typed;
-                inner.load_schemas().await?;
+                reinstall_switch_source(inner, &mut definition, old_typed).await?;
                 return Err(error);
             }
         };
@@ -901,17 +896,11 @@ impl<A: RowApplication> Inner<A> {
                 std::sync::atomic::Ordering::SeqCst,
             );
         }
-        // Once staged, the switch is durable: an interrupted plan resumes
-        // under the new definition at the next open or run.
         if !in_place {
             inner.load_schemas().await?;
             if let Err(error) = inner.finish_plan().await {
-                // The source stays installed while the switch is staged, as
-                // after a reopen, so that withdrawal always has it.
                 if inner.schema_switching().await? {
-                    definition.swap(inner);
-                    inner.workspace.typed = old_typed;
-                    inner.load_schemas().await?;
+                    reinstall_switch_source(inner, &mut definition, old_typed).await?;
                 }
                 return Err(error);
             }
@@ -973,8 +962,9 @@ impl<A: RowApplication> Inner<A> {
             .stored_definition(graph.schema_any(target).map_err(credential)?)
             .await?;
         let mut fields = PathFields::of(&target_definition);
-        // A source on a losing line continues to nothing: the target's own fields apply.
-        if source == target || graph.continues(source, target).unwrap_or(false) {
+        let source_continues_to_target =
+            source == target || graph.continues(source, target).unwrap_or(false);
+        if source_continues_to_target {
             let mut cursor = target;
             while cursor != source {
                 cursor = Self::tip_parent(graph, cursor)?
@@ -1104,8 +1094,6 @@ impl<A: RowApplication> Inner<A> {
                 stored.push(resource);
             }
         }
-        // Staging stripped only stored rows, never bases or history.
-        // Replayed scopes replay together once.
         let (replayed, stored): (Vec<_>, Vec<_>) = stored
             .into_iter()
             .partition(|resource| self.replayed_scope(*resource));
@@ -1115,8 +1103,6 @@ impl<A: RowApplication> Inner<A> {
         if !replayed.is_empty() {
             self.replay_from_frames(now()?).await?;
         }
-        // The pending row keeps whether the bookmark moved until the
-        // follow below replaces it.
         match self
             .graph_for(scope)?
             .bookmark(bookmark)
@@ -1157,7 +1143,6 @@ impl<A: RowApplication> Inner<A> {
         if !fields.strips(&before) {
             return Ok(false);
         }
-        // Every stored scope of the domain: a removed table's key may be gone.
         let mut stored = Vec::new();
         for record in rows(
             &self.conn,
@@ -1245,7 +1230,6 @@ impl<A: RowApplication> Inner<A> {
         {
             return Err(denied("schema switch target no longer resolves"));
         }
-        // Removed tables' scopes leave readiness only once the switch lands.
         for record in rows(&self.conn, "SELECT id,scope FROM secure_scope_state").await? {
             let [SqlValue::Integer(id), SqlValue::Blob(bytes)] = record.as_slice() else {
                 return Err(Error::Corrupt("scope state".into()));
@@ -1258,7 +1242,6 @@ impl<A: RowApplication> Inner<A> {
         self.invalidate_context();
         self.workspace.tip = source;
         self.switch_tip(scope, bookmark, target).await?;
-        // A bookmark that moved on from the target advances with it.
         if let Some(followed) = followed
             && followed != target
         {
@@ -1287,7 +1270,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await
             .switch_schema_now(tip, app, config, None)
             .await?;
-        // Frames that waited for this build's engine apply now.
         self.settle().await?;
         Ok(switched)
     }
@@ -1322,8 +1304,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 "a partially authored schema publication never withdraws",
             ));
         }
-        // A staged switch to the publication's target, interrupted under
-        // the source definition, is withdrawn with the stage.
         let staged = match inner.schema_switch_intent().await? {
             Some((scope, bookmark, source, target))
                 if scope == stage.scope && source == stage.source && target == stage.target =>

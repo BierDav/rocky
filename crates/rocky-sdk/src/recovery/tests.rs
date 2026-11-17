@@ -7,8 +7,8 @@ use rocky_platform::fs::Scratch;
 use serde_json::Value;
 use std::path::Path;
 
+/// Two collections, two keys: a stop after the first leaves one missing.
 fn schema() -> Result<Schema, Failure> {
-    // Two collections, two keys: a stop after the first leaves one missing.
     Schema::builder("recovery_faults", 1)
         .table(Table::replayed("notes").column(Column::new("body", Affinity::Text).required()))
         .table(Table::replayed("tasks").column(Column::new("body", Affinity::Text).required()))
@@ -109,7 +109,6 @@ async fn a_recovery_stopped_at_any_step_finishes_when_recovered_again_in_one_slo
         let stopped = stopped.ok_or("recovered past the stop")?.to_string();
         assert!(stopped.contains("injected stop"), "{stage:?}: {stopped}");
         let saved = slot(&directory)?;
-        // Nothing opens half-recovered.
         let refused = config.open().await.err();
         let refused = refused.ok_or("opened half-recovered")?.to_string();
         let expected = if saved.is_some() {
@@ -120,11 +119,10 @@ async fn a_recovery_stopped_at_any_step_finishes_when_recovered_again_in_one_slo
         assert!(refused.contains(expected), "{stage:?}: {refused}");
 
         let opened = config.recover(&archive, &key).await?;
-        // Named in full, also what an earlier attempt revoked.
         assert_eq!(
             serde_json::to_value(&opened.revoked)?,
             Value::Array(vec![lost.clone()]),
-            "{stage:?}"
+            "{stage:?}: named in full, also what an earlier attempt revoked"
         );
         assert_eq!(
             rows(&opened.database).await?,
@@ -136,20 +134,25 @@ async fn a_recovery_stopped_at_any_step_finishes_when_recovered_again_in_one_slo
         }
         write(&opened.database, "notes", "recovered").await?;
         opened.database.close().await?;
-        // Finished only once the root revoked what came before it.
         let settings = crate::enrollment::Settings::load(&directory.join("identity.json"))?;
         let kept = settings
             .revocations
             .recovery()
             .map(|recovery| recovery.keep);
-        assert_eq!(kept, Some(settings.identity), "{stage:?}");
-        // Finished: it opens, and is no longer recovered.
+        assert_eq!(
+            kept,
+            Some(settings.identity),
+            "{stage:?}: finished only once the root revoked what came before it"
+        );
         let reopened = config.open().await?;
         assert_eq!(rows(&reopened.database).await?.len(), 3, "{stage:?}");
         reopened.database.close().await?;
         let again = config.recover(&archive, &key).await.err();
         let again = again.ok_or("recovered twice")?.to_string();
-        assert!(again.contains("a domain exists"), "{stage:?}: {again}");
+        assert!(
+            again.contains("a domain exists"),
+            "{stage:?}: a finished recovery is no longer recovered: {again}"
+        );
     }
     Ok(())
 }
@@ -181,11 +184,14 @@ async fn a_backup_exported_as_bytes_recovers_the_domain() -> Result<(), Failure>
 
     let directory = root.path().join("recovered");
     let config = Configuration::new(&directory, &schema)?;
-    // Not an archive: refused, and nothing staged stays.
     let refused = config.recover_archive(&[0; 64], &key).await.err();
     let refused = refused.ok_or("recovered junk")?.to_string();
     assert!(refused.contains("not a Rocky backup"), "{refused}");
-    assert_eq!(files(&directory)?, Vec::<String>::new());
+    assert_eq!(
+        files(&directory)?,
+        Vec::<String>::new(),
+        "a refused non-archive leaves nothing staged"
+    );
     let opened = config.recover_archive(&archive, &key).await?;
     assert_eq!(
         serde_json::to_value(&opened.revoked)?,

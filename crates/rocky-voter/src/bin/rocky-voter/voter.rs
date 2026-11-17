@@ -140,15 +140,17 @@ async fn run(path: &Path, provision: bool) -> Result<(), Failure> {
     Ok(())
 }
 
+/// A voter is dialed at its address, so it announces under no topic.
+const ANNOUNCES_A_TOPIC: bool = false;
+
 async fn serve_clients(
     service: &std::sync::Arc<VoterService>,
     lane: ClientLane,
 ) -> Result<(), Failure> {
     let options = rocky_iroh::Options {
         relay: lane.relay,
-        // A voter is dialed at its address: it announces under no topic.
         lookup: (!lane.discovery).then(|| "disabled".into()),
-        topic: false,
+        topic: ANNOUNCES_A_TOPIC,
         local: false,
         bind: lane.bind,
     };
@@ -297,6 +299,15 @@ struct Admin {
 fn voters(list: &str) -> Result<std::collections::BTreeSet<u64>, Failure> {
     list.split(',').map(|id| Ok(id.trim().parse()?)).collect()
 }
+/// A stable ID of a membership plan, so retrying the same plan never
+/// applies it twice.
+fn membership_plan_id(revision: &str, expected: &str, target: &str) -> rocky_core::Commitment {
+    rocky_core::commitment(
+        "rocky.voter-cli.membership.v1",
+        format!("{revision}/{expected}/{target}").as_bytes(),
+    )
+}
+
 async fn admin(path: &Path, command: &[&str]) -> Result<(), Failure> {
     use rocky_coordinator::service::{NetworkCoordinator, Operation};
     let admin: Admin = serde_json::from_slice(&std::fs::read(path)?)?;
@@ -310,11 +321,7 @@ async fn admin(path: &Path, command: &[&str]) -> Result<(), Failure> {
         }
         ["snapshot", voter] => client.snapshot(voter.parse()?).await?,
         ["membership", revision, expected, target] => {
-            // A stable ID: retrying the same plan never applies it twice.
-            let id = rocky_core::commitment(
-                "rocky.voter-cli.membership.v1",
-                format!("{revision}/{expected}/{target}").as_bytes(),
-            );
+            let id = membership_plan_id(revision, expected, target);
             let outcome = client
                 .call(
                     id,

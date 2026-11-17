@@ -44,10 +44,10 @@ async fn a_late_write_of_a_removed_column_drops_as_schema_in_the_successor() {
     .await
     .unwrap();
     super::sync(&alice, &carol, &carol_key, &lineage, 3, items).await;
-    // Offline from the owner, carol writes the column the successor removes,
-    // then a column it keeps.
-    write(&carol, "UPDATE items SET note='late' WHERE key='0001'").await;
-    write(&carol, "UPDATE items SET title='kept' WHERE key='0001'").await;
+    let column_the_successor_removes = "UPDATE items SET note='late' WHERE key='0001'";
+    let column_it_keeps = "UPDATE items SET title='kept' WHERE key='0001'";
+    write(&carol, column_the_successor_removes).await;
+    write(&carol, column_it_keeps).await;
 
     let statements = lineage.publish(&alice, 4).await.unwrap();
     for (replica, key) in [(&alice, &alice_key), (&carol, &carol_key)] {

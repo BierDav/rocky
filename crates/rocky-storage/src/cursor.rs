@@ -203,14 +203,8 @@ impl CursorHost {
     /// Ends every cursor and waits until their connections are closed.
     /// Later opens are refused.
     pub fn close(&self) {
-        // Workers free themselves under this lock, so it is not held while
-        // they are joined; `closed` keeps later leases from adding one.
-        let workers = match self.workers.lock() {
-            Ok(mut workers) => {
-                self.closed.store(true, Ordering::SeqCst);
-                std::mem::take(&mut *workers)
-            }
-            Err(_) => return,
+        let Some(workers) = self.close_to_leases() else {
+            return;
         };
         let controls = match self.controls.lock() {
             Ok(mut controls) => std::mem::take(&mut *controls),
@@ -219,13 +213,20 @@ impl CursorHost {
         for control in controls.iter().filter_map(Weak::upgrade) {
             control.end(End::Closed);
             control.cancelled.store(true, Ordering::SeqCst);
-            // An idle worker notices within its poll interval.
             control.alive.wait_released(POLL);
         }
         for worker in workers {
             drop(worker.jobs);
             worker.task.release();
         }
+    }
+    /// Marks the host closed, so later leases add no worker, and takes its
+    /// workers. The lock is released before they are joined because workers
+    /// free themselves under it.
+    fn close_to_leases(&self) -> Option<Vec<Worker>> {
+        let mut workers = self.workers.lock().ok()?;
+        self.closed.store(true, Ordering::SeqCst);
+        Some(std::mem::take(&mut *workers))
     }
     /// Workers that keep a connection; connections are reused between leases.
     pub fn workers(&self) -> usize {
@@ -237,8 +238,9 @@ impl CursorHost {
         })
     }
     /// Ends every open cursor with `Aborted(Preempted)` and waits until
-    /// their read transactions end, so the write-ahead log can be reset.
-    /// Returns how many it ended.
+    /// their read transactions end, so the write-ahead log can be reset; a
+    /// control that is gone took its worker's turn with it. Returns how many
+    /// it ended.
     pub async fn preempt(&self) -> usize {
         let open: Vec<_> = match self.controls.lock() {
             Ok(controls) => controls
@@ -258,8 +260,7 @@ impl CursorHost {
             released.push(control.released.subscribe());
         }
         for mut released in released {
-            // An error means the control is gone, and with it the worker's turn.
-            let _ = released.wait_for(|released| *released).await;
+            let _released_or_gone = released.wait_for(|released| *released).await;
         }
         open.len()
     }
@@ -289,12 +290,13 @@ pub struct SnapshotCursor {
     count: Arc<AtomicUsize>,
 }
 impl Drop for SnapshotCursor {
+    /// Disconnects the request channel, which wakes the leased worker at
+    /// once, and waits until the worker releases.
     fn drop(&mut self) {
         self.requests = None;
         self.control.cancelled.store(true, Ordering::SeqCst);
         self.control.dropped.store(true, Ordering::SeqCst);
         self.count.fetch_sub(1, Ordering::SeqCst);
-        // The disconnected channel wakes the leased worker immediately.
         self.control.alive.wait_released(POLL);
     }
 }
@@ -419,7 +421,8 @@ struct Job {
 struct Worker {
     jobs: mpsc::Sender<Job>,
     busy: Arc<AtomicBool>,
-    /// The worker ended after its last cursor; it takes no more jobs.
+    /// The worker ended after its last cursor; it takes no more jobs, and
+    /// the pool drops it, detaching its task's handle.
     retired: Arc<AtomicBool>,
     task: task::Dedicated<()>,
     /// The cursor it serves or last served.
@@ -451,7 +454,6 @@ impl CursorHost {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::Closed);
         }
-        // A retired worker's task has ended or is ending; its handle detaches.
         workers.retain(|worker| !worker.retired.load(Ordering::SeqCst));
         let worker = match workers.iter_mut().find(|worker| worker.available()) {
             Some(worker) => worker,
@@ -501,7 +503,8 @@ impl CursorHost {
 }
 /// Frees a worker after its cursor, under the host's lock so workers ending
 /// together count each other. Returns whether it ends instead: when no job
-/// waits for it and enough other workers are free.
+/// waits for it and enough other workers are free. A lease queues a job
+/// only while it holds the lock, so no job can arrive unseen.
 fn free(
     pool: &Weak<Mutex<Vec<Worker>>>,
     busy: &AtomicBool,
@@ -510,7 +513,6 @@ fn free(
 ) -> bool {
     let workers = pool.upgrade();
     let workers = workers.as_deref().map(Mutex::lock);
-    // A lease queues a job only while it holds the lock.
     if !jobs.is_empty() {
         return false;
     }
@@ -529,6 +531,64 @@ fn free(
     retired.store(retire, Ordering::SeqCst);
     busy.store(false, Ordering::SeqCst);
     retire
+}
+/// Reads the revision, or anything at all, which starts the snapshot every
+/// later page shares.
+fn start_snapshot(
+    raw: &rusqlite::Connection,
+    revision: Option<&str>,
+) -> Result<Option<u64>, Error> {
+    match revision {
+        Some(sql) => Ok(Some(
+            raw.query_row(sql, [], |row| row.get::<_, i64>(0))
+                .map_err(engine)? as u64,
+        )),
+        None => {
+            raw.query_row("SELECT 1 FROM sqlite_schema LIMIT 1", [], |_| Ok(()))
+                .or_else(|error| match error {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(()),
+                    error => Err(error),
+                })
+                .map_err(engine)?;
+            Ok(None)
+        }
+    }
+}
+/// Allows reads of `readable` main tables and, when a prelude made views,
+/// of `temp`: the prelude's temporary views read only readable tables.
+fn snapshot_authorizer(
+    readable: Vec<String>,
+    prelude_views: bool,
+) -> impl FnMut(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization + Send + 'static
+{
+    use rusqlite::hooks::{AuthAction, Authorization};
+    move |context| match context.action {
+        AuthAction::Select | AuthAction::Function { .. } | AuthAction::Recursive => {
+            Authorization::Allow
+        }
+        AuthAction::Read { table_name, .. }
+            if context.database_name.is_none_or(|name| name == "main")
+                && readable
+                    .iter()
+                    .any(|table| table.eq_ignore_ascii_case(table_name)) =>
+        {
+            Authorization::Allow
+        }
+        AuthAction::Read { .. } if prelude_views && context.database_name == Some("temp") => {
+            Authorization::Allow
+        }
+        _ => Authorization::Deny,
+    }
+}
+/// Fails the next request with `error`, if one arrives within `idle`.
+async fn report_on_next_request(
+    requests: &mut mpsc::UnboundedReceiver<Request>,
+    idle: Duration,
+    error: Error,
+) {
+    if let Ok(Some(request)) = time::timeout(idle, requests.recv()).await {
+        request.fail(error);
+    }
 }
 #[expect(
     clippy::await_holding_lock,
@@ -593,7 +653,6 @@ async fn run(
     opened: oneshot::Sender<Result<Opened, Error>>,
     control: &Control,
 ) -> End {
-    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     let started = Instant::now();
     let expires = started + plan.limits.lifetime;
     let cancelled = control.cancelled.clone();
@@ -603,22 +662,7 @@ async fn run(
         }
         raw.pragma_update(None, "query_only", 1).map_err(engine)?;
         raw.execute_batch("BEGIN").map_err(engine)?;
-        // Reading anything starts the snapshot every later page shares.
-        let revision = match &plan.revision {
-            Some(sql) => Some(
-                raw.query_row(sql, [], |row| row.get::<_, i64>(0))
-                    .map_err(engine)? as u64,
-            ),
-            None => {
-                raw.query_row("SELECT 1 FROM sqlite_schema LIMIT 1", [], |_| Ok(()))
-                    .or_else(|error| match error {
-                        rusqlite::Error::QueryReturnedNoRows => Ok(()),
-                        error => Err(error),
-                    })
-                    .map_err(engine)?;
-                None
-            }
-        };
+        let revision = start_snapshot(raw, plan.revision.as_deref())?;
         if let Some((sql, expected)) = &plan.epoch {
             let epoch: i64 = raw.query_row(sql, [], |row| row.get(0)).map_err(engine)?;
             if u64::try_from(epoch).ok() != Some(*expected) {
@@ -641,26 +685,10 @@ async fn run(
                 }));
             }
         }
-        let readable = plan.readable.clone();
-        let viewed = !plan.prelude.is_empty();
-        raw.authorizer(Some(move |context: AuthContext<'_>| match context.action {
-            AuthAction::Select | AuthAction::Function { .. } | AuthAction::Recursive => {
-                Authorization::Allow
-            }
-            AuthAction::Read { table_name, .. }
-                if context.database_name.is_none_or(|name| name == "main")
-                    && readable
-                        .iter()
-                        .any(|table| table.eq_ignore_ascii_case(table_name)) =>
-            {
-                Authorization::Allow
-            }
-            // The prelude's temporary views read only readable tables.
-            AuthAction::Read { .. } if viewed && context.database_name == Some("temp") => {
-                Authorization::Allow
-            }
-            _ => Authorization::Deny,
-        }))
+        raw.authorizer(Some(snapshot_authorizer(
+            plan.readable.clone(),
+            !plan.prelude.is_empty(),
+        )))
         .map_err(engine)?;
         let interrupt = cancelled.clone();
         raw.progress_handler(
@@ -700,11 +728,7 @@ async fn run(
         let mut rows = match statement.query(rusqlite::params_from_iter(params.iter())) {
             Ok(rows) => rows,
             Err(error) => {
-                // Reported on the next request.
-                let error = engine(error);
-                if let Ok(Some(request)) = time::timeout(plan.limits.idle, requests.recv()).await {
-                    request.fail(error);
-                }
+                report_on_next_request(requests, plan.limits.idle, engine(error)).await;
                 break 'exec End::Failed;
             }
         };
@@ -897,7 +921,6 @@ fn page(
         page.rows.push(row);
     }
     page.done = position.exhausted && position.carry.is_none();
-    // Revocation discards what was stepped but not yet delivered.
     (plan.guard)().inspect_err(|_| control.end(End::Failed))?;
     Ok(page)
 }
@@ -1015,16 +1038,14 @@ mod tests {
         }
         assert_eq!(host.workers(), 5);
         drop(cursors);
-        // Waits until every worker is past its cursor rather than sleeping:
-        // the last reference to a control goes when its worker's turn ends.
-        let serving = || {
+        let a_worker_still_holds_its_control = || {
             host.controls
                 .lock()
                 .unwrap()
                 .iter()
                 .any(|control| control.strong_count() > 0)
         };
-        while serving() {
+        while a_worker_still_holds_its_control() {
             task::yield_now().await;
         }
         assert_eq!(host.workers(), MAX_IDLE_WORKERS);
@@ -1090,7 +1111,6 @@ mod tests {
         );
         let first = cursor.next().await.unwrap();
         assert_eq!(first.rows.len(), 2);
-        // Commits after the cursor opened are not part of its snapshot.
         file.writer
             .run_now("DELETE FROM items WHERE id >= 2")
             .unwrap();
@@ -1106,7 +1126,11 @@ mod tests {
             }
         }
         let ids: Vec<_> = seen.iter().map(|row| row[0].clone()).collect();
-        assert_eq!(ids, (0..5).map(SqlValue::Integer).collect::<Vec<_>>());
+        assert_eq!(
+            ids,
+            (0..5).map(SqlValue::Integer).collect::<Vec<_>>(),
+            "commits after the cursor opened are not part of its snapshot"
+        );
         assert!(cursor.next().await.unwrap().done);
         cursor.reset().await.unwrap();
         assert_eq!(
@@ -1116,7 +1140,6 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 1);
         drop(cursor);
         assert_eq!(count.load(Ordering::SeqCst), 0);
-        // A new cursor sees the new snapshot.
         let mut cursor = SnapshotCursor::open(
             &host,
             count,
@@ -1125,7 +1148,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(cursor.revision(), Some(3));
-        assert_eq!(cursor.next().await.unwrap().rows.len(), 3);
+        assert_eq!(
+            cursor.next().await.unwrap().rows.len(),
+            3,
+            "a new cursor sees the new snapshot"
+        );
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -1142,7 +1169,6 @@ mod tests {
         .unwrap();
         assert_eq!(cursor.next().await.unwrap().rows.len(), 1);
         file.writer.run_now("DELETE FROM items").unwrap();
-        // Another statement, between pages, still reads the opened snapshot.
         let counted = cursor
             .run(
                 "SELECT count(*) AS n FROM items WHERE id >= ?".into(),
@@ -1152,12 +1178,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(counted.columns[0].name, "n");
-        assert_eq!(counted.rows, vec![vec![SqlValue::Integer(2)]]);
+        assert_eq!(
+            counted.rows,
+            vec![vec![SqlValue::Integer(2)]],
+            "another statement between pages still reads the opened snapshot"
+        );
         assert_eq!(
             cursor.next().await.unwrap().rows,
             vec![vec![SqlValue::Integer(1)]]
         );
-        // Writes, other tables and oversized results are refused; the cursor stays usable.
         for sql in ["DELETE FROM items", "SELECT * FROM secret"] {
             assert!(
                 cursor.run(sql.into(), Vec::new(), 1024).await.is_err(),
@@ -1172,7 +1201,8 @@ mod tests {
         ));
         assert_eq!(
             cursor.next().await.unwrap().rows,
-            vec![vec![SqlValue::Integer(2)]]
+            vec![vec![SqlValue::Integer(2)]],
+            "refused writes, other tables and oversized results leave the cursor usable"
         );
     }
 
@@ -1192,7 +1222,6 @@ mod tests {
             assert!(opened.is_err(), "{sql}");
         }
         assert_eq!(count.load(Ordering::SeqCst), 0);
-        // A row that does not fit a page opens the next one.
         let limits = CursorLimits {
             page_rows: 10,
             page_bytes: 4,
@@ -1214,7 +1243,10 @@ mod tests {
             }
         }
         assert_eq!(pages.iter().sum::<usize>(), 3);
-        assert!(pages.len() > 1);
+        assert!(
+            pages.len() > 1,
+            "a row that does not fit a page opens the next one"
+        );
         let limits = CursorLimits {
             page_rows: 10,
             page_bytes: 1,
@@ -1248,7 +1280,6 @@ mod tests {
         .await
         .unwrap();
         cursor.next().await.unwrap();
-        // Waits for the thread to end the transaction rather than sleeping blindly.
         while host.open_cursors() > 0 {
             task::yield_now().await;
         }
@@ -1256,7 +1287,6 @@ mod tests {
             cursor.next().await,
             Err(Error::Sql(SqlError::Aborted(AbortReason::Timeout)))
         ));
-        // The guard discards a stepped page once authority is gone.
         let revoked = Arc::new(AtomicBool::new(false));
         let flag = revoked.clone();
         let guard: Guard = Arc::new(move || {
@@ -1278,12 +1308,14 @@ mod tests {
         .unwrap();
         cursor.next().await.unwrap();
         revoked.store(true, Ordering::SeqCst);
-        assert!(matches!(
-            cursor.next().await,
-            Err(Error::Sql(SqlError::Unavailable { .. }))
-        ));
+        assert!(
+            matches!(
+                cursor.next().await,
+                Err(Error::Sql(SqlError::Unavailable { .. }))
+            ),
+            "the guard discards a stepped page once authority is gone"
+        );
         assert!(cursor.next().await.is_err());
-        // Cancelling ends the cursor.
         let mut cursor = SnapshotCursor::open(
             &host,
             count.clone(),
@@ -1292,8 +1324,7 @@ mod tests {
         .await
         .unwrap();
         cursor.cancel();
-        assert!(cursor.next().await.is_err());
-        // Closing the host ends open cursors and refuses new ones.
+        assert!(cursor.next().await.is_err(), "cancelling ends the cursor");
         let mut cursor = SnapshotCursor::open(
             &host,
             count.clone(),
@@ -1302,21 +1333,23 @@ mod tests {
         .await
         .unwrap();
         host.close();
-        assert!(cursor.next().await.is_err());
-        assert!(matches!(
-            SnapshotCursor::open(
-                &host,
-                count.clone(),
-                plan(&file, "SELECT id FROM items", small(1), open())
-            )
-            .await,
-            Err(Error::Closed)
-        ));
-        // The WAL can be reset once no cursor pins it.
+        assert!(cursor.next().await.is_err(), "closing ends open cursors");
+        assert!(
+            matches!(
+                SnapshotCursor::open(
+                    &host,
+                    count.clone(),
+                    plan(&file, "SELECT id FROM items", small(1), open())
+                )
+                .await,
+                Err(Error::Closed)
+            ),
+            "closing refuses new cursors"
+        );
         drop(cursor);
         file.writer
             .run_now("PRAGMA wal_checkpoint(TRUNCATE)")
-            .unwrap();
+            .expect("the WAL resets once no cursor pins it");
     }
 
     /// A writer that must reset the log ends the cursors pinning it: they
@@ -1325,11 +1358,11 @@ mod tests {
     async fn preempting_ends_the_cursors_that_pin_the_log() {
         let file = file(3).await;
         file.writer.set_busy_timeout(Duration::ZERO).unwrap();
-        // `(busy, log frames, checkpointed frames)` of a resetting checkpoint.
-        let reset = || match file.writer.rows("PRAGMA wal_checkpoint(TRUNCATE)", ()) {
-            Ok(rows) => rows[0].clone(),
-            Err(error) => panic!("{error}"),
-        };
+        let busy_log_and_checkpointed_frames_of_reset =
+            || match file.writer.rows("PRAGMA wal_checkpoint(TRUNCATE)", ()) {
+                Ok(rows) => rows[0].clone(),
+                Err(error) => panic!("{error}"),
+            };
         let host = CursorHost::new();
         let count = Arc::new(AtomicUsize::new(0));
         let mut idle = SnapshotCursor::open(
@@ -1351,13 +1384,13 @@ mod tests {
             .run_now("INSERT INTO items VALUES(10,'later')")
             .unwrap();
         assert_eq!(
-            reset()[0],
+            busy_log_and_checkpointed_frames_of_reset()[0],
             Value::Integer(1),
             "the open snapshots pin the log"
         );
         assert_eq!(host.preempt().await, 2);
         assert_eq!(
-            reset(),
+            busy_log_and_checkpointed_frames_of_reset(),
             vec![Value::Integer(0), Value::Integer(0), Value::Integer(0)]
         );
         assert_eq!(host.open_cursors(), 0);
@@ -1369,7 +1402,6 @@ mod tests {
         }
         assert_eq!(host.preempt().await, 0);
         drop((idle, unread));
-        // Later cursors read the new snapshot.
         let mut cursor = SnapshotCursor::open(
             &host,
             count,
@@ -1377,7 +1409,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(cursor.revision(), Some(4));
+        assert_eq!(
+            cursor.revision(),
+            Some(4),
+            "later cursors read the new snapshot"
+        );
         assert_eq!(cursor.next().await.unwrap().rows.len(), 4);
     }
 

@@ -24,8 +24,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let (graph, tips, publisher, revocations, node, chain) = {
             let inner = self.inner.lock(crate::replica::Class::Background).await;
             let graph = inner.scope_graph(scope)?;
-            // The followed tip and the nearest ones its line came through:
-            // a coordinator keeps that many ended logs.
             let mut tips = vec![inner.workspace.tip];
             while tips.len() <= FINALIZED_TIPS {
                 match Inner::<A>::tip_parent(&graph, tips[tips.len() - 1])? {
@@ -46,8 +44,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         let time = now()?;
         let current = Some((&revocations, time));
-        // Only the node the coordinator knows, certified by a trusted
-        // identity, acknowledges; any trusted node publishes.
         let acknowledges = coordinator.node() == *node.public_key().as_bytes()
             && chain
                 .trusted_node(publisher, scope, node.public_key(), current)

@@ -264,7 +264,6 @@ impl<A: RowApplication> Inner<A> {
                 limit: MAX_BUNDLE_FRAMES,
             });
         }
-        // The application sees the exact transaction once, across scopes.
         if !writes.is_empty() {
             self.app
                 .validate_changes(&apply::exact(&writes))
@@ -279,7 +278,6 @@ impl<A: RowApplication> Inner<A> {
         let transaction = transaction_id(node, &handle);
         let mut plan = Vec::with_capacity(frames.len());
         let mut next = BTreeMap::new();
-        // An intent scope has one member, which continues this tip.
         let mut tips = BTreeMap::new();
         for (scope, _) in &frames {
             let scope = *scope;
@@ -320,8 +318,6 @@ impl<A: RowApplication> Inner<A> {
         let mut authored = Vec::with_capacity(count);
         let mut replayed = Vec::new();
         for (index, ((_, frame), opening)) in frames.into_iter().zip(&plan).enumerate() {
-            // External dependencies go to the first frame of their scope; the
-            // later frames of a scope follow it in the author's log.
             let dependencies = routed.remove(&opening.scope).unwrap_or_default();
             let membership = Membership {
                 transaction,
@@ -354,7 +350,6 @@ impl<A: RowApplication> Inner<A> {
                             },
                         )
                         .await?;
-                    // The author's execution is the transaction's local replay.
                     self.record_replayed(&frame, recorded, None, &undo, None)
                         .await?;
                     replayed.push(authored.len());
@@ -402,10 +397,8 @@ impl<A: RowApplication> Inner<A> {
                 )
                 .await?;
         }
-        // The author holds every member: its record lets replicas holding
-        // only some of them follow, and lets a seal cover the transaction.
-        // A publication's records follow its migration's initial run.
-        if count > 1 && !replayed.is_empty() && !self.publishing {
+        let partial_holders_need_outcome = count > 1 && !replayed.is_empty() && !self.publishing;
+        if partial_holders_need_outcome {
             let held: Vec<_> = replayed
                 .iter()
                 .map(|index| (&authored[*index], *index as u16))
@@ -474,8 +467,6 @@ impl<A: RowApplication> Inner<A> {
         )
         .await?;
         if records.is_empty() {
-            // A handle restored from a recovery package: find the members
-            // through the first frame's sealed entries.
             return self.members_of(&first).await.map(Some);
         }
         let mut frames = Vec::with_capacity(records.len());
@@ -591,7 +582,6 @@ impl<A: RowApplication> Inner<A> {
                 .reject_members(&hashes, "a bundle member was rejected")
                 .await;
         }
-        // An applied member still retained must be of this same transaction.
         for (index, frame) in &settled {
             if !self.member_opens(frame)? {
                 return Ok(Outcome::Waiting(WaitReason::OpeningKey));
@@ -648,7 +638,6 @@ impl<A: RowApplication> Inner<A> {
                     .await?;
                 self.note_settled(frame.id()?);
             }
-            // The candidate of every held partition together.
             self.app
                 .validate_changes(&actual)
                 .map_err(|message| denied(&message))
@@ -887,8 +876,6 @@ impl<A: RowApplication> Inner<A> {
                 _ => Member::Pending(frame),
             });
         }
-        // Logs apply in order: a sequence at or behind the tip was applied
-        // and has since been pruned or covered by a checkpoint.
         if let Some(id) = self.find_scope_id(opening.scope).await?
             && let Some(log) = self.log(id, author).await?
             && opening.sequence as i64 <= log.sequence.max(log.pruned_prefix)

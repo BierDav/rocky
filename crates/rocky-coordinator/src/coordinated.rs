@@ -194,8 +194,8 @@ impl Log {
             0
         }
     }
+    /// Conservative admission size, including encoded retry outcomes.
     pub fn bytes(&self) -> usize {
-        // Conservative admission accounting including encoded retry outcomes.
         let acknowledgments: usize = self
             .head
             .acknowledgments
@@ -473,12 +473,10 @@ impl Log {
                 if !tenant_admits || self.head.members.len() < self.head.minimum {
                     return Err(CoordinationError::Backpressure);
                 }
-                // An obsolete slot is a definite refusal: this append was
-                // never assigned. Retries of assigned appends returned above.
-                if *expected != self.head.head
+                let unassigned_slot = *expected != self.head.head
                     || self.head.pending.is_some()
-                    || *epoch != self.head.epoch
-                {
+                    || *epoch != self.head.epoch;
+                if unassigned_slot {
                     return Err(CoordinationError::Configuration);
                 }
                 if *duration == 0 || *duration > ACKNOWLEDGMENT_DEADLINE {
@@ -649,7 +647,6 @@ impl Logs {
             return Ok(log.clone());
         }
         match action {
-            // An unopened tip's seal ends it at once.
             Action::Seal { .. } | Action::Recover { .. } => return Ok(self.fresh(tip)),
             Action::Configure { .. } | Action::Join { .. } => {}
             Action::Append { .. } => return Err(CoordinationError::Denied),

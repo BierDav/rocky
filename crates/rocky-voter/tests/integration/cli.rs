@@ -4,9 +4,7 @@ use std::process::Command;
 #[test]
 fn bare_relative_key_is_private_and_never_replaced() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    // nextest remaps the executable when running an archive built elsewhere.
-    let voter = std::env::var_os("CARGO_BIN_EXE_rocky-voter")
-        .unwrap_or_else(|| env!("CARGO_BIN_EXE_rocky-voter").into());
+    let voter = crate::support::public::voter();
     let generate = || {
         Command::new(&voter)
             .current_dir(directory.path())

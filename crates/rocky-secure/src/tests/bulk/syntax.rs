@@ -159,9 +159,11 @@ async fn stored_reconstruction_reuses_only_owned_syntax_and_reopens_cold() {
         .await
         .unwrap();
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
-    // Opening replays no row records, so the first reconstruction on the
-    // new Inner parses cold and the next one reuses it.
-    assert_eq!(inner.migration_syntax_stats(), (0, 0, 0, 0));
+    assert_eq!(
+        inner.migration_syntax_stats(),
+        (0, 0, 0, 0),
+        "opening replays no row records, so nothing is parsed yet"
+    );
     same_frame(&reconstruct(&inner, &frame).await.unwrap(), &frame);
     assert_eq!(
         inner.migration_syntax_stats(),
@@ -169,7 +171,11 @@ async fn stored_reconstruction_reuses_only_owned_syntax_and_reopens_cold() {
     );
     same_frame(&reconstruct(&inner, &frame).await.unwrap(), &frame);
     assert_eq!(inner.migration_syntax_stats().0, 1);
-    assert_eq!(inner.migration_syntax_stats().1, 1);
+    assert_eq!(
+        inner.migration_syntax_stats().1,
+        1,
+        "the next reconstruction reuses the first, cold parse"
+    );
     drop(inner);
     assert_eq!(replica.migration_storage().await.unwrap(), storage);
     replica.audit(l.scope("items")).await.unwrap();
@@ -212,8 +218,8 @@ async fn warm_reconstruction_preserves_sql_shapes_and_first_errors() {
         inner.migration_syntax_capacity(0);
         let cold = reconstruct(&inner, &frame).await.unwrap_err();
         assert_eq!(format!("{cold:?}"), expected);
-        // Repeat unchanged SQL: no shape/NULL/conflict result is memoized.
-        same_error(reconstruct(&inner, &frame).await.unwrap_err(), cold);
+        let repeated_unchanged_sql_is_not_memoized = reconstruct(&inner, &frame).await.unwrap_err();
+        same_error(repeated_unchanged_sql_is_not_memoized, cold);
         restore(&inner).await;
     }
     assert_eq!(snapshot(&inner).await, before);
@@ -248,16 +254,17 @@ async fn warm_reconstruction_keeps_parser_validation_and_uncached_errors() {
         reconstruct(&inner, &frame).await.unwrap();
         save(&inner).await;
         signed_bytes(&inner, bytes.clone()).await;
-        // Malformed descriptor wins over bad proof, even after a successful warm parse.
         inner
             .conn
             .execute("UPDATE secure_migration_frames SET proof=X'FF'", ())
             .await
             .unwrap();
         for _ in 0..2 {
+            let malformed_descriptor_wins_over_bad_proof =
+                crate::credential(SignedMigrationPublication::from_bytes(&bytes).unwrap_err());
             same_error(
                 reconstruct(&inner, &frame).await.unwrap_err(),
-                crate::credential(SignedMigrationPublication::from_bytes(&bytes).unwrap_err()),
+                malformed_descriptor_wins_over_bad_proof,
             );
         }
         assert_eq!(inner.migration_syntax_stats().0, 3);

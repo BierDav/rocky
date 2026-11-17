@@ -48,6 +48,8 @@ pub enum Packet {
         bytes: Vec<u8>,
         last: bool,
     },
+    /// Ends a channel's generation, possibly mid-message when its sender
+    /// was cancelled: only that channel fails.
     End {
         generation: u64,
     },
@@ -354,11 +356,10 @@ impl Channels {
                         return Err(denied("data after link channel end"));
                     };
                     let message = std::mem::take(&mut slot.bytes);
-                    let permit = u32::try_from(message.len())
+                    let within_byte_budget = u32::try_from(message.len())
                         .ok()
                         .and_then(|bytes| slot.queued.clone().try_acquire_many_owned(bytes).ok());
-                    // Over the byte budget (no permit) is refused like a full queue.
-                    match permit.map(|permit| receive.try_send((message, permit))) {
+                    match within_byte_budget.map(|permit| receive.try_send((message, permit))) {
                         Some(Ok(())) => {
                             #[cfg(any(test, feature = "qualification"))]
                             {
@@ -392,7 +393,6 @@ impl Channels {
                 self.handle.events.send_replace(());
             }
             Packet::End { .. } => {
-                // A cancelled sender may end mid-message: only its channel fails.
                 slot.bytes.clear();
                 slot.ended = true;
                 slot.receive.take();
@@ -407,6 +407,8 @@ impl Channels {
 pub struct Reconcile {
     handle: Handle,
     generation: u64,
+    /// Set once the finish is queued; the lease itself lasts until the
+    /// writer sends that finish.
     closed: bool,
 }
 impl Reconcile {
@@ -478,7 +480,6 @@ impl Drop for Reconcile {
             if self.handle.queue(finish) {
                 self.mark_closed();
             } else {
-                // The lease lasts until the writer sends its finish.
                 self.closed = true;
             }
         }
@@ -493,9 +494,9 @@ impl Handle {
             .traffic
             .clone()
     }
-    /// Queues `frame` without waiting; a full queue defers it to the writer.
+    /// Queues `frame` without waiting; a full queue defers it to the writer,
+    /// which checks for deferrals under the same lock, so none is stranded.
     fn queue(&self, frame: Frame) -> bool {
-        // The writer checks for deferrals under this lock, so none is stranded.
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let Err(mpsc::error::TrySendError::Full(frame)) = self.send.try_send(frame) else {
             return true;
@@ -966,9 +967,8 @@ impl Io {
             tokio::select! {
                 biased;
                 queued = self.receive.recv() => {
-                    // Dropping the permit returns the message's bytes to the budget.
                     return queued
-                        .map(|(bytes, _)| bytes)
+                        .map(|(bytes, _dropped_permit_returns_bytes_to_budget)| bytes)
                         .ok_or_else(|| Error::Io(super::closed_by_peer()));
                 }
                 _ = async {
@@ -983,8 +983,10 @@ impl Io {
                 changed = events.changed() => {
                     changed.map_err(|_| Error::Io(super::closed_by_peer()))?;
                     let (total, working, _) = received();
-                    // A full fragment earns another deadline; trickles and other channels do not.
-                    if working > progress || (total > covered && (deadline.is_none() || total.saturating_sub(covered) >= FRAGMENT)) {
+                    let earns_another_deadline = working > progress
+                        || (total > covered
+                            && (deadline.is_none() || total.saturating_sub(covered) >= FRAGMENT));
+                    if earns_another_deadline {
                         progress = working;
                         covered = total;
                         deadline = Some(rocky_platform::time::Instant::now() + TIMEOUT);
@@ -1262,7 +1264,8 @@ pub(crate) mod tests {
         );
     }
 
-    // Working traffic and full fragments cannot extend the absolute publication lifetime.
+    /// Working traffic and full fragments cannot extend the absolute
+    /// publication lifetime.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn publication_lifetime_starts_at_open_before_handler_dispatch() {
@@ -1342,8 +1345,10 @@ pub(crate) mod tests {
             .accept(frame(2, Packet::End { generation: 0 }))
             .unwrap();
         assert!(channels.handle.state.lock().unwrap().slots[&(true, 2)].deferred);
-        // It never overtakes frames queued before it.
-        assert!(channels.handle.take_deferred(&channels.outgoing).is_empty());
+        assert!(
+            channels.handle.take_deferred(&channels.outgoing).is_empty(),
+            "a deferred End never overtakes frames queued before it"
+        );
         let written = drain(&mut channels);
         assert_eq!(written.len(), QUEUE + 1);
         assert_eq!(ends(&written[QUEUE..]), [(true, 2, 0)]);
@@ -1353,7 +1358,6 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
 
-        // An opener's publication slot frees once its End is written and the peer's arrives.
         let publication = channels.handle.open_publication(8).await.unwrap();
         drain(&mut channels);
         fill(&channels);
@@ -1369,7 +1373,10 @@ pub(crate) mod tests {
             .unwrap();
         assert!(channels.handle.open_publication(8).await.is_err());
         assert_eq!(ends(&drain(&mut channels)), [(false, 2, 0)]);
-        assert!(channels.handle.open_publication(8).await.is_ok());
+        assert!(
+            channels.handle.open_publication(8).await.is_ok(),
+            "an opener's publication slot frees once its End is written and the peer's arrives"
+        );
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -1465,7 +1472,6 @@ pub(crate) mod tests {
             message: Message::Channel(packet),
         }
     }
-    // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn a_timed_out_generation_discards_late_fragments_then_reuses_its_slot() {
@@ -1574,7 +1580,6 @@ pub(crate) mod tests {
         assert!(channels.handle.state.lock().unwrap().slots.is_empty());
     }
 
-    // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn working_renews_only_its_channel_and_the_request_still_has_a_lifetime_limit() {
@@ -1608,7 +1613,6 @@ pub(crate) mod tests {
         assert!(channels.handle.state.lock().unwrap().slots[&(true, 2)].closed);
     }
 
-    // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn a_slow_response_sends_working_every_four_seconds() {
@@ -1708,7 +1712,6 @@ pub(crate) mod tests {
                 .is_err()
         );
     }
-    // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn a_requester_can_apply_an_answer_before_asking_again() {
@@ -1737,7 +1740,6 @@ pub(crate) mod tests {
         assert_eq!(received.unwrap(), vec![7]);
     }
 
-    // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn a_queued_partial_request_is_already_started() {
@@ -1770,7 +1772,6 @@ pub(crate) mod tests {
         assert_eq!(start.elapsed(), TIMEOUT);
     }
 
-    // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn a_started_request_cannot_stall_after_idle() {
@@ -1806,7 +1807,6 @@ pub(crate) mod tests {
         assert_eq!(start.elapsed(), TIMEOUT * 3);
     }
 
-    // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn progressing_reassembly_outlives_one_read_deadline() {
@@ -1838,7 +1838,6 @@ pub(crate) mod tests {
         assert_eq!(received.unwrap(), expected);
     }
 
-    // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn reassembly_still_times_out_after_progress_stops() {
@@ -1877,7 +1876,6 @@ pub(crate) mod tests {
         tokio::join!(read, deliver);
     }
 
-    // Needs tokio's paused clock.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn trickles_and_other_channels_do_not_extend_a_read_deadline() {
@@ -1954,7 +1952,6 @@ pub(crate) mod tests {
             large(&channels).unwrap();
         }
         assert_eq!(channels.handle.traffic().peak_queued_bytes, QUEUE_BYTES);
-        // Another channel's small messages still flow up to the count bound.
         let mut other = channels
             .accept(frame(3, Packet::Open { generation: 1 }))
             .unwrap()
@@ -1974,13 +1971,16 @@ pub(crate) mod tests {
         let SessionIo::Channel(io) = &mut other.stream else {
             panic!("request channel");
         };
-        assert_eq!(io.receive().await.unwrap(), [2]);
-        // Reading returns a message's bytes to the budget.
+        assert_eq!(
+            io.receive().await.unwrap(),
+            [2],
+            "another channel's small messages still flow up to the count bound"
+        );
         let SessionIo::Channel(io) = &mut slow.stream else {
             panic!("request channel");
         };
         assert_eq!(io.receive().await.unwrap().len(), MAX_SECURE_FRAME);
-        large(&channels).unwrap();
+        large(&channels).expect("reading returns a message's bytes to the budget");
         let Err(Error::Rejected(reason)) = large(&channels) else {
             panic!("an over-budget message must be refused");
         };

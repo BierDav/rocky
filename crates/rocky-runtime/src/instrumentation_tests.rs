@@ -14,8 +14,6 @@ fn instrumented() -> RuntimeOptions {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn subphases_are_zero_by_default_and_recorded_when_instrumented() {
-    // Default options leave instrumentation off: the subphase counters stay
-    // zero even though steps ran.
     let dir = rocky_platform::fs::Scratch::new().await;
     let runtime = open_node(&dir.path().join("off.db"), NODE, RuntimeOptions::default()).await;
     let replica = runtime.domain(scope(1)).unwrap();
@@ -23,7 +21,10 @@ async fn subphases_are_zero_by_default_and_recorded_when_instrumented() {
         note(&replica, index, "off").committed().await.unwrap();
     }
     let stats = replica.writer_stats();
-    assert_eq!(stats.admission_micros, 0);
+    assert_eq!(
+        stats.admission_micros, 0,
+        "default options leave instrumentation off: the subphase counters stay zero even though steps ran"
+    );
     assert_eq!(stats.reduction_micros, 0);
     assert_eq!(stats.encoding_micros, 0);
     assert_eq!(stats.sql_micros, 0);
@@ -36,10 +37,11 @@ async fn subphases_are_zero_by_default_and_recorded_when_instrumented() {
         note(&replica, index, "on").committed().await.unwrap();
     }
     let stats = replica.writer_stats();
-    // A browser coarsens its clock to tens of microseconds, so there a short
-    // subphase can measure zero; together they still record time.
-    #[cfg(not(target_family = "wasm"))]
-    {
+    /// Whether each subphase measures time on its own. A browser coarsens its
+    /// clock to tens of microseconds, so there a short one can measure zero;
+    /// together they still record time.
+    const EACH_SUBPHASE_MEASURABLE: bool = !cfg!(target_family = "wasm");
+    if EACH_SUBPHASE_MEASURABLE {
         assert!(stats.admission_micros > 0, "{stats:?}");
         assert!(stats.reduction_micros > 0, "{stats:?}");
         assert!(stats.encoding_micros > 0, "{stats:?}");
@@ -50,11 +52,10 @@ async fn subphases_are_zero_by_default_and_recorded_when_instrumented() {
             > 0,
         "{stats:?}"
     );
-    // The subphases stay within the total step time (not counting commit).
     assert!(
         stats.admission_micros + stats.reduction_micros + stats.encoding_micros + stats.sql_micros
             <= stats.step_micros,
-        "{stats:?}"
+        "the subphases stay within the total step time (not counting commit): {stats:?}"
     );
     runtime.close().await.unwrap();
 }
@@ -64,8 +65,9 @@ async fn checkpoint_intervals_are_recorded_in_monotonic_order_when_instrumented(
     let dir = rocky_platform::fs::Scratch::new().await;
     let runtime = open_node(&dir.path().join("ckpt.db"), NODE, instrumented()).await;
     let replica = runtime.domain(scope(1)).unwrap();
-    // A tiny threshold so a short write burst crosses it several times.
-    crate::tests::fault(&replica, Fault::CheckpointFrames(10)).await;
+    /// Small enough that a short write burst crosses it several times.
+    const FRAMES: i64 = 10;
+    crate::tests::fault(&replica, Fault::CheckpointFrames(FRAMES)).await;
     for index in 0..400u16 {
         replica
             .mutate(Mutation {
@@ -83,20 +85,18 @@ async fn checkpoint_intervals_are_recorded_in_monotonic_order_when_instrumented(
         assert!(window[0].start <= window[1].start, "{window:?}");
         assert!(window[0].start <= window[0].end, "{window:?}");
     }
-    // Truncating resets are the second kind; both kinds carry a copy/flush time.
     assert!(
         intervals
             .iter()
             .all(|interval| interval.kind == CheckpointKind::Passive
-                || interval.kind == CheckpointKind::Truncate)
+                || interval.kind == CheckpointKind::Truncate),
+        "truncating resets are the second kind; both kinds carry a copy/flush time"
     );
-    // A passive checkpoint measured its page copy; the flush can be zero only
-    // if the copy failed, which would have been surfaced as an error.
     assert!(
         intervals
             .iter()
             .all(|interval| interval.copy_micros > 0 || interval.kind == CheckpointKind::Truncate),
-        "{intervals:?}"
+        "a passive checkpoint measured its page copy; the flush can be zero only if the copy failed, which would have been surfaced as an error: {intervals:?}"
     );
     assert_eq!(dropped, 0);
     runtime.close().await.unwrap();
@@ -104,8 +104,6 @@ async fn checkpoint_intervals_are_recorded_in_monotonic_order_when_instrumented(
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn writer_steps_are_attributed_by_kind_only_when_instrumented() {
-    // Default options leave the attribution counters at zero even though
-    // local mutations ran.
     let dir = rocky_platform::fs::Scratch::new().await;
     let runtime = open_node(
         &dir.path().join("kind-off.db"),
@@ -118,7 +116,10 @@ async fn writer_steps_are_attributed_by_kind_only_when_instrumented() {
         note(&replica, index, "off").committed().await.unwrap();
     }
     let stats = replica.writer_stats();
-    assert_eq!(stats.authoring_steps, 0);
+    assert_eq!(
+        stats.authoring_steps, 0,
+        "default options leave the attribution counters at zero even though local mutations ran"
+    );
     assert_eq!(stats.authoring_step_micros, 0);
     runtime.close().await.unwrap();
 
@@ -130,10 +131,9 @@ async fn writer_steps_are_attributed_by_kind_only_when_instrumented() {
     let stats = replica.writer_stats();
     assert!(stats.authoring_steps > 0, "{stats:?}");
     assert!(stats.authoring_step_micros > 0, "{stats:?}");
-    // Attributed authoring time is part of the group's total step time.
     assert!(
         stats.authoring_step_micros <= stats.step_micros,
-        "{stats:?}"
+        "attributed authoring time is part of the group's total step time: {stats:?}"
     );
     runtime.close().await.unwrap();
 }
@@ -154,6 +154,9 @@ fn the_checkpoint_log_is_bounded_and_counts_dropped_intervals() {
     let (intervals, dropped) = metrics.checkpoint_intervals();
     assert_eq!(intervals.len(), crate::writer::MAX_CHECKPOINT_INTERVALS);
     assert_eq!(dropped, 7);
-    // The oldest intervals were dropped, so the log starts at the 8th record.
-    assert_eq!(intervals[0].kind, CheckpointKind::Passive);
+    assert_eq!(
+        intervals[0].kind,
+        CheckpointKind::Passive,
+        "the oldest intervals were dropped, so the log starts at the 8th record"
+    );
 }

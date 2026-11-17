@@ -3,6 +3,12 @@
 //! its own scope.
 use super::*;
 
+/// Coverage the graph cannot decide, such as of a frame of a tip it no
+/// longer resolves, cannot be ruled out and counts as covered.
+fn possibly_covers(coverage: Result<bool, Error>) -> bool {
+    coverage.unwrap_or(true)
+}
+
 impl<A: RowApplication> Inner<A> {
     /// Whether this replica holds authenticated history of `scope` that the
     /// state at `seal` includes: a retained frame, void or placement header
@@ -32,16 +38,14 @@ impl<A: RowApplication> Inner<A> {
             let Some(author) = extensions.author(&header.public_key) else {
                 return Ok(true);
             };
-            // A frame of a tip the graph no longer resolves cannot be ruled out.
-            match Self::covers_exact(
+            if possibly_covers(Self::covers_exact(
                 graph,
                 extensions.tip,
                 author,
                 extensions.author_sequence,
                 seal,
-            ) {
-                Ok(false) => {}
-                Ok(true) | Err(_) => return Ok(true),
+            )) {
+                return Ok(true);
             }
         }
         for record in collect_rows(self.conn.query(
@@ -55,9 +59,8 @@ impl<A: RowApplication> Inner<A> {
                 return Err(Error::Corrupt("scope admission receipt".into()));
             };
             let Some(author) = receipt.author else { return Ok(true); };
-            match Self::covers_exact(graph, receipt.tip, author, receipt.author_sequence, seal) {
-                Ok(false) => {},
-                Ok(true) | Err(_) => return Ok(true),
+            if possibly_covers(Self::covers_exact(graph, receipt.tip, author, receipt.author_sequence, seal)) {
+                return Ok(true);
             }
         }
         Ok(false)
@@ -166,8 +169,8 @@ impl<A: RowApplication> Inner<A> {
             outcomes: SealedOutcomes::default(),
         };
         let signed = self.sign_checkpoint(statement)?;
-        // Only a signer with checkpoint authority states another node's base.
-        if signed.verify_authority(self, now()?).is_err() {
+        let states_others_bases = signed.verify_authority(self, now()?).is_ok();
+        if !states_others_bases {
             return Ok(false);
         }
         self.clear_seal_anchor(id).await?;
@@ -259,7 +262,8 @@ impl<A: RowApplication> Inner<A> {
     /// A frame, void or placement header that a verified no-frames base of
     /// its scope says the state at its seal does not include is refused:
     /// never stored, pruned or applied. Callers run it in the storing
-    /// transaction.
+    /// transaction, under the lock that installs no-frames bases, so neither
+    /// order commits both a base and history it says the seal excludes.
     pub(in crate::replica) async fn refuse_no_frames_contradiction(
         &self,
         header: &p2panda_core::Header<Extensions>,
@@ -320,10 +324,8 @@ impl<A: RowApplication> Inner<A> {
             return Ok(());
         }
         let covered = match (extensions.author(&header.public_key), signed.statement.seal) {
-            // Coverage that cannot be decided drops the candidate too.
-            (Some(author), Some(sealed)) => self
-                .graph_for(extensions.scope.domain)
-                .and_then(|graph| {
+            (Some(author), Some(sealed)) => {
+                possibly_covers(self.graph_for(extensions.scope.domain).and_then(|graph| {
                     let seal = graph.seal_by_id(sealed).map_err(credential)?;
                     Self::covers_exact(
                         graph,
@@ -332,8 +334,8 @@ impl<A: RowApplication> Inner<A> {
                         extensions.author_sequence,
                         seal,
                     )
-                })
-                .unwrap_or(true),
+                }))
+            }
             _ => true,
         };
         if covered {

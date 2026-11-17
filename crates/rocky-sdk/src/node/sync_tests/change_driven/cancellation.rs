@@ -31,7 +31,6 @@ pub(super) async fn run(exhaustive: bool) -> Result<(), Failure> {
                 )
                 .await?;
                 targets(&a, std::slice::from_ref(&b)).await?;
-                // Establish enrollment metadata before the bidirectional row session.
                 a.sync(&*transport(&a).await?).await?;
                 add(&a, 1).await?;
                 add(&b, 2).await?;
@@ -82,7 +81,6 @@ pub(super) async fn run(exhaustive: bool) -> Result<(), Failure> {
             if exhaustive {
                 let workers = std::thread::available_parallelism()?.get().min(8);
                 eprintln!("exercising {count} session byte offsets on {workers} workers");
-                // Each worker owns its paused clock and local tasks; byte cuts are independent.
                 std::thread::scope(|scope| -> Result<(), Failure> {
                     let workers: Vec<_> = offsets
                         .chunks(count.div_ceil(workers))
@@ -217,7 +215,6 @@ async fn trial(fixture: &Fixture, offset: usize) -> Result<(), Failure> {
     }
     progress.phase.set("stopping worker");
     let service = a.current().ok_or("service")?;
-    // A cut may already have started a drain before the stop request.
     let mut closing = 0;
     {
         let stop = start(&a, false);

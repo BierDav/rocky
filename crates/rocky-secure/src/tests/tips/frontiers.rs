@@ -60,12 +60,12 @@ async fn switching_back_and_sideways_invalidates_warmed_inherited_frontiers() {
         .unwrap();
     insert(&f, &replica, 2, "dev").await;
     checked(&replica, f.public, 2).await;
-    // A failed follow must not damage the warmed state.
     assert!(
         replica
             .follow_bookmark(f.public.domain, "missing")
             .await
-            .is_err()
+            .is_err(),
+        "the failed follow is checked below to leave the warmed state intact"
     );
     checked(&replica, f.public, 2).await;
     replica
@@ -134,7 +134,6 @@ async fn equal_size_revocation_replacements_and_graph_reload_invalidate_without_
         )
         .await
         .unwrap();
-    // The workspace stays at the same source; the winner changes in memory.
     let mut inner = replica.inner.lock(crate::replica::Class::Background).await;
     let original = inner.frontier(f.public).await.unwrap();
     inner.checked_seal_path(f.public.domain).unwrap();
@@ -149,9 +148,17 @@ async fn equal_size_revocation_replacements_and_graph_reload_invalidate_without_
         assert_eq!(inner.frontier_cache_stats().1, 0);
         let graph = &inner.graphs[&f.public.domain];
         assert_eq!(graph.revoked.len(), 1);
-        assert_eq!(graph.seal(source).unwrap(), Some(&seals[1 - index]));
+        assert_eq!(
+            graph.seal(source).unwrap(),
+            Some(&seals[1 - index]),
+            "the winner changes in memory"
+        );
         inner.checked_seal_path(f.public.domain).unwrap();
-        assert_eq!(inner.frontier(f.public).await.unwrap(), original);
+        assert_eq!(
+            inner.frontier(f.public).await.unwrap(),
+            original,
+            "the workspace stays at the same source"
+        );
         assert_eq!(
             inner.compute_tip_frontier(f.public).await.unwrap(),
             original
@@ -159,7 +166,8 @@ async fn equal_size_revocation_replacements_and_graph_reload_invalidate_without_
     }
     assert_eq!(
         rows(&inner.conn, "SELECT total_changes()").await.unwrap()[0][0],
-        rocky_core::SqlValue::Integer(writes)
+        rocky_core::SqlValue::Integer(writes),
+        "a revocation refresh changes the winner without writing"
     );
     drop(inner);
     main(&f, &replica).await;
@@ -450,13 +458,13 @@ async fn offering_pages_and_recording_acknowledgments_compute_once_without_heade
         .frontier_cache_stats();
     assert_eq!(warmed.2 - before.2, 1);
     assert_eq!(warmed.3 - before.3, 0);
-    // A hit never bypasses authorization or the current peer tip.
     let denied = f.credentials(&peer, vec![]);
     assert!(
         replica
             .range_page(peer.public_key(), &denied, &request, None, MAX_SECURE_FRAME)
             .await
-            .is_err()
+            .is_err(),
+        "a frontier cache hit never bypasses authorization"
     );
     replica
         .admit_peer(peer.public_key(), &credentials, TipId([91; 32]))
@@ -472,7 +480,8 @@ async fn offering_pages_and_recording_acknowledgments_compute_once_without_heade
                 MAX_SECURE_FRAME
             )
             .await
-            .is_err()
+            .is_err(),
+        "a frontier cache hit never bypasses the current peer tip"
     );
     insert(&f, &replica, 67, "new history").await;
     let fresh = replica.frontier(f.public).await.unwrap();

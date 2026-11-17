@@ -165,11 +165,10 @@ mod tests {
     fn every_allowed_function_exists_in_this_sqlite_build() {
         let connection = connection();
         for function in rocky_core::DETERMINISTIC_FUNCTIONS {
-            // Arity and window misuse fail too; only a missing function matters.
             if let Err(error) = connection.prepare(&format!("SELECT {function}()")) {
                 assert!(
                     !error.to_string().contains("no such function"),
-                    "{function}: {error}"
+                    "{function}: {error}; arity and window misuse may fail, a missing function may not"
                 );
             }
         }
@@ -180,7 +179,6 @@ mod tests {
         let connection = connection();
         let max = i64::MAX;
         let min = i64::MIN;
-        // Results SQLite's operators compute exactly stay identical.
         for (left, right) in [
             ("7", "2"),
             ("-7", "2"),
@@ -206,10 +204,12 @@ mod tests {
                 let native = evaluate(&connection, &format!("{left} {operator} {right}")).unwrap();
                 let checked =
                     evaluate(&connection, &format!("{function}({left}, {right})")).unwrap();
-                assert_eq!(checked, native, "{left} {operator} {right}");
+                assert_eq!(
+                    checked, native,
+                    "{left} {operator} {right}: exact results stay identical"
+                );
             }
         }
-        // Where SQLite would have promoted to REAL, the checked call fails.
         for sql in [
             format!("checked_add({max}, 1)"),
             format!("checked_sub(({min}), 1)"),
@@ -217,7 +217,10 @@ mod tests {
             format!("checked_div(({min}), -1)"),
         ] {
             let error = evaluate(&connection, &sql).unwrap_err();
-            assert!(error.to_string().contains(OVERFLOW), "{sql}: {error}");
+            assert!(
+                error.to_string().contains(OVERFLOW),
+                "{sql}: where SQLite would promote to REAL the checked call fails, got {error}"
+            );
         }
         assert_eq!(
             evaluate(&connection, &format!("({min}) - 1")).unwrap(),

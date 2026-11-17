@@ -90,6 +90,22 @@ async fn keys(device: &Device) -> Vec<String> {
         .collect()
 }
 
+/// Reopens the owner at [`POSITIONED`]; reopening offline stages the close,
+/// opening and move and migrates.
+fn reopen_owner_positioned(
+    directory: &std::path::Path,
+    log: &MemoryLog,
+    node: rocky_sdk::credentials::PublicKey,
+    network: Option<Network>,
+) -> Result<Device, Failure> {
+    Ok(Device::new(Database::open(Open {
+        schema: POSITIONED,
+        coordination: Some(Arc::new(log.client(node))),
+        ..open(directory, network)
+    })?)?
+    .with_identity(common::external_identity(directory)))
+}
+
 const POSITIONED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],"migrations":[{"version":2,"statements":["UPDATE items SET position = title"]}]}"#;
 
 /// The owner closes, opens and migrates
@@ -145,35 +161,21 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
     a.sync().await.expect("the first invoice");
     let source = tip_log(&a).await;
     a.close().await;
-    // While the owner is away, the trusted node writes a second invoice.
     invoice(&c, 2).await;
 
-    // Offline, the owner stages its close, opening and move and migrates.
-    let a = Device::new(Database::open(Open {
-        schema: POSITIONED,
-        coordination: Some(Arc::new(log.client(a_node))),
-        ..open(&a_dir, None)
-    })?)?
-    .with_identity(common::external_identity(&a_dir));
+    let a = reopen_owner_positioned(&a_dir, &log, a_node, None)?;
     let status = snap::ok(a.session.generation()).await;
     assert_eq!(status["current"]["schema"], 2, "{status}");
-    // Nothing of the stage left the device: the source log is open.
-    assert!(log.head(source)?.terminal.is_none());
+    assert!(
+        log.head(source)?.terminal.is_none(),
+        "nothing of the offline stage leaves the device: the source log stays open"
+    );
     a.close().await;
 
-    // The candidate already fixed its parent. Source writes still commit
-    // while its successor remains private.
     invoice(&c, 3).await;
     c.add(4, "ordinary meanwhile").await;
 
-    // Reconnected, it relays the exact close; the trusted node ends the
-    // log with it and acknowledges, and the owner releases.
-    let a = Device::new(Database::open(Open {
-        schema: POSITIONED,
-        coordination: Some(Arc::new(log.client(a_node))),
-        ..open(&a_dir, network("a"))
-    })?)?
-    .with_identity(common::external_identity(&a_dir));
+    let a = reopen_owner_positioned(&a_dir, &log, a_node, network("a"))?;
     introduce(&a, &c).await;
     for _ in 0..4 {
         let _ = a.sync().await;
@@ -190,13 +192,14 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
         .clone();
     assert_eq!(
         data_encoding::HEXLOWER.encode(&head.terminal.expect("ended").digest),
-        close["id"]
+        close["id"],
+        "the trusted node ends the source log with exactly the relayed close"
     );
-    // The trusted node follows `main` to the migration's tip. Its writes
-    // past the close are late: they replay there in stamp order, so the
-    // replayed migration fills invoice 2 and later rows keep the default.
     let status = snap::ok(c.session.generation()).await;
-    assert_eq!(status["current"]["schema"], 2, "{status}");
+    assert_eq!(
+        status["current"]["schema"], 2,
+        "the trusted node follows `main` to the migration's tip: {status}"
+    );
     assert_eq!(status["held"], 0, "{status}");
     let text = |value: &str| json!({"type": "text", "value": value});
     for device in [&a, &c] {
@@ -216,7 +219,9 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
                 [text("invoice 2"), text("invoice 2")],
                 [text("invoice 3"), text("")],
                 [text("ordinary meanwhile"), text("")]
-            ])
+            ]),
+            "writes past the close replay in stamp order: the migration fills \
+             invoice 2 and later rows keep the default"
         );
     }
     invoice(&c, 5).await;

@@ -54,8 +54,6 @@ async fn expiry_alone_wakes_a_status_wait_and_observation_does_not_start_sync()
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let creator = enrolled(&root.path().join("c"), &hub, "c", None).await?;
-            // The creating device's trusted grant never expires; an
-            // enrolled device's credential does.
             let writer = Profile::Writer {
                 scopes: ["items".into()].into(),
             };

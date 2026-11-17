@@ -250,8 +250,7 @@ mod tests {
         }
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn old_integer_identities_are_refused() {
-        // The former packed `i64` and its decimal text are not identities.
+    fn packed_integer_and_decimal_text_are_not_identities() {
         assert!(RowIdentity::from_sql(&SqlValue::Integer(0x1_0000_0001)).is_err());
         assert!(RowIdentity::from_sql(&SqlValue::Text("4294967297".into())).is_err());
         assert!("4294967297".parse::<RowIdentity>().is_err());
@@ -274,7 +273,6 @@ mod tests {
             RowIdentity::new(writer(1), MAX_ROW_SEQUENCE + 1),
             Err(RowIdentityError::Sequence)
         );
-        // Byte order is identity order: writer first, then sequence.
         let mut ids = [
             RowIdentity::new(writer(2), 1).unwrap(),
             RowIdentity::new(writer(1), 256).unwrap(),
@@ -283,6 +281,10 @@ mod tests {
         let mut bytes = ids.map(RowIdentity::to_bytes);
         ids.sort();
         bytes.sort();
-        assert_eq!(ids.map(RowIdentity::to_bytes), bytes);
+        assert_eq!(
+            ids.map(RowIdentity::to_bytes),
+            bytes,
+            "byte order is identity order: writer first, then sequence"
+        );
     }
 }

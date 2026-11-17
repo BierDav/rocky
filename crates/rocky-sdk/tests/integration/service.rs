@@ -31,8 +31,7 @@ async fn a_registered_service_domain_commits_ordinary_rows_and_closes() -> Resul
     let opened = &peer.opened;
     let session = &peer.session;
     let identity = snap::value(session.info()).await?;
-    // Controls trust identities; the node presents its certificate.
-    let trusted = identity["principal"].clone();
+    let trusted_identity = identity["principal"].clone();
     let tenant = PrivateKey::new();
     let register = || {
         peer.publish_coordination(
@@ -41,7 +40,7 @@ async fn a_registered_service_domain_commits_ordinary_rows_and_closes() -> Resul
                     &(tenant.to_hex()),
                 )),
                 trusted: serde_json::from_value::<Vec<rocky_sdk::credentials::PublicKey>>(json!([
-                    trusted
+                    trusted_identity
                 ]))
                 .expect("typed fixture"),
                 lifetime: 3600,
@@ -78,15 +77,16 @@ async fn a_registered_service_domain_commits_ordinary_rows_and_closes() -> Resul
     .await?;
     let committed = snap::value(session.commit([2u8; 32])).await?;
     assert!(!committed["committed"].is_null());
-    // A claim is a coordinator decision outside any transaction: the
-    // application keeps the claim, uses the value in an ordinary write and
-    // retries with the same claim.
     let database = &opened.database;
     let invoices = counters::Name::new("company-1/invoices")?;
     let pending = counters::Claim::fresh()?;
     let number = database.claim(invoices.clone(), pending).await?;
     assert_eq!(number, 1);
-    assert_eq!(database.claim(invoices.clone(), pending).await?, number);
+    assert_eq!(
+        database.claim(invoices.clone(), pending).await?,
+        number,
+        "a claim decided outside any transaction answers the same on retry"
+    );
     let next = counters::Claim::fresh()?;
     assert_eq!(database.claim(invoices.clone(), next).await?, 2);
     let reading = database.counter(invoices.clone(), Some(pending)).await?;
@@ -117,14 +117,14 @@ async fn a_registered_service_domain_commits_ordinary_rows_and_closes() -> Resul
         [3u8; 32],
     ))
     .await?;
-    // A closed domain takes no claim.
     let refused = database
         .claim(invoices, counters::Claim::fresh()?)
         .await
         .unwrap_err();
     assert_eq!(
         refused.downcast_ref::<CoordinationError>(),
-        Some(&CoordinationError::Denied)
+        Some(&CoordinationError::Denied),
+        "a closed domain takes no claim"
     );
     peer.close().await?;
     Ok(())

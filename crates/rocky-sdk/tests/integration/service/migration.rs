@@ -41,7 +41,6 @@ async fn real_voters_release_a_private_migration_without_reopening_the_publisher
     assert!(staged.statements.iter().any(|statement| matches!(statement, rocky_secure::TipStatement::Seal(sealed) if sealed.id().is_ok_and(|id| data_encoding::HEXLOWER.encode(&id) == close["id"]))));
     let staged_bytes = rocky_sdk::credentials::encode(&staged)?;
     assert_ne!(close["final"], true);
-    // This write is genuinely after A signed the close, on T's source tip.
     t.write("after close", 43).await?;
     t.close().await?;
     a.session.set_networking_enabled(true).await?;
@@ -75,8 +74,10 @@ async fn real_voters_release_a_private_migration_without_reopening_the_publisher
             && seal(&a_graph, &close["id"])["final"] == true
             && seal(&t_graph, &close["id"])["final"] == true
         {
-            // T's writes past the close replay in the successor.
-            assert_eq!(generation["held"], 0, "{generation}");
+            assert_eq!(
+                generation["held"], 0,
+                "writes past the close replay in the successor: {generation}"
+            );
             break;
         }
         assert!(
@@ -112,12 +113,14 @@ async fn real_voters_release_a_private_migration_without_reopening_the_publisher
                 cursor: None,
             }))
             .await?;
-            // The replayed migration fills the row written before it; the
-            // later one keeps the default.
             let text = |value: &str| json!({"type":"text","value":value});
+            let written_after_the_migration_keeps_the_default = text("");
             complete &= rows["rows"]
                 == json!([
-                    [text("after close"), text("")],
+                    [
+                        text("after close"),
+                        written_after_the_migration_keeps_the_default
+                    ],
                     [
                         text("before close but unknown"),
                         text("before close but unknown")

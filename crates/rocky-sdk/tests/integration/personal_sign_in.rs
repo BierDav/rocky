@@ -119,6 +119,11 @@ async fn announced(hub: &Hub, name: &str) {
     .await
     .expect("announced under the bootstrap topic");
 }
+/// Loses the only owner device, leaving only keyless sources.
+async fn lose_every_owner_device(owner: Device, path: &Path) -> std::io::Result<()> {
+    owner.close().await;
+    std::fs::remove_dir_all(path)
+}
 fn refusal<T>(result: Result<T, PersonalSignInError>) -> PersonalSignInError {
     match result {
         Ok(_) => panic!("the sign-in succeeded"),
@@ -138,8 +143,11 @@ async fn a_passkey_alone_signs_in_through_discovery_and_touches_no_sibling() -> 
 
     let path = directory.path().join("phone");
     let personal = sign_in(&path, owned(&hub, "phone"), prf(), namespace()).await?;
-    // Another owner device answered: its durable store anchors the view.
-    assert_eq!(personal.freshness, Freshness::LocallyAnchored);
+    assert_eq!(
+        personal.freshness,
+        Freshness::LocallyAnchored,
+        "another owner device answered, so its durable store anchors the view"
+    );
     assert!(personal.restored.complete(), "{:?}", personal.restored);
     assert!(personal.restored.readers.contains_key("items"));
     assert!(personal.opened.root.is_none());
@@ -148,17 +156,23 @@ async fn a_passkey_alone_signs_in_through_discovery_and_touches_no_sibling() -> 
     assert_eq!(phone.identity().await, identity_key().to_hex());
     phone.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(phone.titles().await, ["from owner"]);
-    // The phone writes as itself; the owner reads it.
     phone.add(2, "from phone").await;
     phone.sync().await.map_err(|error| error.to_string())?;
     owner.sync().await.map_err(|error| error.to_string())?;
-    assert_eq!(owner.titles().await, ["from owner", "from phone"]);
+    assert_eq!(
+        owner.titles().await,
+        ["from owner", "from phone"],
+        "the phone writes as itself and the owner reads it"
+    );
 
-    // An independent owner certificate, published to and kept by the owner.
     let chain: rocky_credentials::CredentialChain =
         serde_json::from_value(saved(&path)?["credentials"].clone())?;
     let certificate = chain.certificate().ok_or("certificate")?;
-    assert_eq!(certificate.issuer, identity_key());
+    assert_eq!(
+        certificate.issuer,
+        identity_key(),
+        "the phone holds an independent owner certificate"
+    );
     assert!(certificate.capability.extended()?.personal.is_some());
     assert_eq!(certificate.membership()?, None);
     for device in [&owner_path, &path] {
@@ -194,7 +208,6 @@ async fn concurrent_sign_ins_against_one_snapshot_both_stay_valid() -> Result<()
         sign_in(&phone_path, owned(&hub, "phone"), prf(), namespace()),
     );
     let (laptop, phone) = (Device::new(laptop?.opened)?, Device::new(phone?.opened)?);
-    // Both write before they ever meet each other, then merge both ways.
     laptop.add(2, "from laptop").await;
     phone.add(3, "from phone").await;
     common::introduce(&laptop, &phone).await;
@@ -210,7 +223,8 @@ async fn concurrent_sign_ins_against_one_snapshot_both_stay_valid() -> Result<()
     ] {
         assert_eq!(
             device.titles().await,
-            ["from laptop", "from owner", "from phone"]
+            ["from laptop", "from owner", "from phone"],
+            "devices that wrote before meeting merge both ways"
         );
         untouched(path, &keys)?;
         assert_eq!(known(path)?.personal_devices(identity_key())?.len(), 3);
@@ -243,11 +257,8 @@ async fn a_custodian_alone_restores_an_unwitnessed_view() -> Result<(), Failure>
     common::introduce(&owner, &custodian).await;
     owner.add(1, "kept by custody").await;
     owner.sync().await.map_err(|error| error.to_string())?;
-    // The custodian announces where a passkey-only device looks.
     announced(&hub, "custodian").await;
-    // Every owner device is lost; only the keyless custodian remains.
-    owner.close().await;
-    std::fs::remove_dir_all(&owner_path)?;
+    lose_every_owner_device(owner, &owner_path).await?;
 
     let path = directory.path().join("phone");
     let personal = sign_in(&path, owned(&hub, "phone"), prf(), namespace()).await?;
@@ -263,19 +274,25 @@ async fn a_custodian_alone_restores_an_unwitnessed_view() -> Result<(), Failure>
         "{:?}",
         personal.restored
     );
-    // The custodian served the naming root's vouched record, which only
-    // the passkey's root opens: everything the owner held is restored.
-    assert!(personal.restored.naming);
+    assert!(
+        personal.restored.naming,
+        "the custodian served the naming record only the passkey's root opens"
+    );
     assert!(personal.restored.complete(), "{:?}", personal.restored);
     let phone = Device::new(personal.opened)?;
     assert_eq!(phone.session.freshness().await?, Freshness::Unwitnessed);
     phone.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(phone.titles().await, ["kept by custody"]);
-    // Syncing with a custodian witnesses nothing.
-    assert_eq!(phone.session.freshness().await?, Freshness::Unwitnessed);
-    // The custodian keeps and relays the new device's certificate.
+    assert_eq!(
+        phone.session.freshness().await?,
+        Freshness::Unwitnessed,
+        "syncing with a custodian witnesses nothing"
+    );
     let devices = known(&directory.path().join("custodian"))?.personal_devices(identity_key())?;
-    assert!(devices.contains(&phone.session.info().await?.node));
+    assert!(
+        devices.contains(&phone.session.info().await?.node),
+        "the custodian keeps and relays the new device's certificate"
+    );
     phone.close().await;
     custodian.close().await;
     Ok(())
@@ -505,7 +522,6 @@ async fn a_custodian_without_the_naming_record_reports_it_and_nothing_replaces_i
     let hub = hub();
     let (owner_path, custodian) = custody(directory.path(), &hub).await?;
     custodian.close().await;
-    // The custodian lost its record: it serves only key epochs.
     let custodian_path = directory.path().join("custodian");
     let mut held = saved(&custodian_path)?;
     assert!(
@@ -535,8 +551,10 @@ async fn a_custodian_without_the_naming_record_reports_it_and_nothing_replaces_i
     let personal = sign_in(&path, owned(&hub, "phone"), prf(), namespace()).await?;
     assert!(personal.restored.readers.contains_key("items"));
     assert!(personal.restored.missing.is_empty() && personal.restored.unkeyed.is_empty());
-    // Naming future partitions is a separate gap, never a fresh root.
-    assert!(!personal.restored.naming);
+    assert!(
+        !personal.restored.naming,
+        "a custodian without the naming record leaves naming as a gap, never a fresh root"
+    );
     assert!(!personal.restored.complete());
     let phone = Device::new(personal.opened)?;
     phone.sync().await.map_err(|error| error.to_string())?;
@@ -558,7 +576,6 @@ async fn an_unwitnessed_device_stays_so_until_an_owner_device_reconciles() -> Re
     let phone = Device::new(personal.opened)?;
     assert_eq!(phone.session.freshness().await?, Freshness::Unwitnessed);
     phone.close().await;
-    // Reopening keeps what the sign-in reported.
     let reopen = |name: &'static str, path: PathBuf| {
         let hub = hub.clone();
         async move {
@@ -571,21 +588,26 @@ async fn an_unwitnessed_device_stays_so_until_an_owner_device_reconciles() -> Re
         }
     };
     let phone = reopen("phone", path.clone()).await?;
-    assert_eq!(phone.session.freshness().await?, Freshness::Unwitnessed);
-    // The owner device returns; its reconciliation witnesses the phone.
-    let owner = reopen("owner", owner_path).await?;
-    common::introduce(&owner, &phone).await;
-    // With the custodian gone, the phone's pass reconciles with the owner
-    // device, reachable again.
+    assert_eq!(
+        phone.session.freshness().await?,
+        Freshness::Unwitnessed,
+        "reopening keeps the freshness the sign-in reported"
+    );
+    let returning_owner = reopen("owner", owner_path).await?;
+    common::introduce(&returning_owner, &phone).await;
     custodian.close().await;
     phone.session.set_networking_enabled(true).await?;
     phone.sync().await.map_err(|error| error.to_string())?;
-    assert_eq!(phone.session.freshness().await?, Freshness::LocallyAnchored);
+    assert_eq!(
+        phone.session.freshness().await?,
+        Freshness::LocallyAnchored,
+        "reconciling with a returning owner device witnesses the phone"
+    );
     phone.close().await;
     let phone = reopen("phone", path).await?;
     assert_eq!(phone.session.freshness().await?, Freshness::LocallyAnchored);
     phone.close().await;
-    owner.close().await;
+    returning_owner.close().await;
     Ok(())
 }
 
@@ -593,8 +615,8 @@ async fn an_unwitnessed_device_stays_so_until_an_owner_device_reconciles() -> Re
 async fn an_unreachable_source_creates_nothing() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("phone");
-    // No network, or a network without discovery: no source.
-    let error = refusal(sign_in(&path, None, prf(), namespace()).await);
+    let without_network = None;
+    let error = refusal(sign_in(&path, without_network, prf(), namespace()).await);
     assert!(
         matches!(error, PersonalSignInError::SourceUnavailable),
         "{error}"
@@ -607,7 +629,6 @@ async fn an_unreachable_source_creates_nothing() -> Result<(), Failure> {
     );
     assert_eq!(error.code(), "source_unavailable");
     assert!(!path.exists(), "an unavailable source left files");
-    // An existing empty directory stays empty.
     std::fs::create_dir_all(&path)?;
     let error = refusal(sign_in(&path, owned(&silent, "phone"), prf(), namespace()).await);
     assert!(
@@ -652,11 +673,11 @@ async fn a_wrong_passkey_or_namespace_finds_nothing_and_touches_nothing() -> Res
         devices
     );
     owner.close().await;
-    // Only the owner's own writes changed its store since.
     let after = files(&owner_path)?;
     assert_eq!(
         before.get(&owner_path.join("identity.json")),
-        after.get(&owner_path.join("identity.json"))
+        after.get(&owner_path.join("identity.json")),
+        "only the owner's own writes changed its store"
     );
     Ok(())
 }
@@ -714,9 +735,17 @@ impl Transport for LosingTransport {
         self.inner.close()
     }
 }
+/// The publication request, after the hello and one bootstrap page: the
+/// owner keeps the certificate and its reply is lost.
+const LOST_PUBLICATION_REPLY: usize = 3;
 struct Losing {
     inner: Arc<dyn Connector>,
     drop: usize,
+}
+/// Writes `intent` back as a crash between saving the identity and ending
+/// the intent leaves it.
+fn leave_intent_as_after_a_crash(path: &Path, intent: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path.join("personal.intent"), intent)
 }
 impl Connector for Losing {
     fn start(&self, accepts: bool, secret: [u8; 32]) -> BoxFuture<'_, Result<Connected, Failure>> {
@@ -743,11 +772,9 @@ async fn an_interrupted_sign_in_resumes_under_the_same_node() -> Result<(), Fail
     let owner = create(&owner_path, &hub, "owner").await?;
     owner.add(1, "from owner").await;
     let path = directory.path().join("phone");
-    // Hello, one bootstrap page, then the publication: the owner keeps the
-    // certificate, and its reply is lost.
     let losing = Network::Owned(Arc::new(Losing {
         inner: hub.connector("phone"),
-        drop: 3,
+        drop: LOST_PUBLICATION_REPLY,
     }));
     let error = refusal(sign_in(&path, Some(losing), prf(), namespace()).await);
     assert!(matches!(error, PersonalSignInError::Failed(_)), "{error}");
@@ -759,8 +786,10 @@ async fn an_interrupted_sign_in_resumes_under_the_same_node() -> Result<(), Fail
     let personal = sign_in(&path, owned(&hub, "phone"), prf(), namespace()).await?;
     let phone = Device::new(personal.opened)?;
     let node = phone.session.info().await?.node;
-    // One node and one certificate: the retry published the same one.
-    assert!(published.contains(&node));
+    assert!(
+        published.contains(&node),
+        "the retry published the same node and certificate"
+    );
     let held = known(&owner_path)?;
     assert_eq!(held.personal_devices(identity_key())?, published);
     assert_eq!(
@@ -787,7 +816,7 @@ async fn a_revoked_node_never_signs_in_again_under_that_node() -> Result<(), Fai
     let path = directory.path().join("phone");
     let losing = Network::Owned(Arc::new(Losing {
         inner: hub.connector("phone"),
-        drop: 3,
+        drop: LOST_PUBLICATION_REPLY,
     }));
     refusal(sign_in(&path, Some(losing), prf(), namespace()).await);
     let owner_node = owner.node().await;
@@ -796,7 +825,6 @@ async fn a_revoked_node_never_signs_in_again_under_that_node() -> Result<(), Fai
         .into_iter()
         .find(|node| node.to_hex() != owner_node)
         .ok_or("the published node")?;
-    // The owner unlinks that node before its install finished.
     let identity: Arc<dyn rocky_sdk::IdentityProvider> = Arc::new(account().identity());
     owner
         .session
@@ -809,10 +837,13 @@ async fn a_revoked_node_never_signs_in_again_under_that_node() -> Result<(), Fai
     );
     assert_eq!(error.code(), "device_revoked");
     assert!(!path.join("personal.intent").exists());
-    // The passkey holder signs in again as a fresh node.
     let personal = sign_in(&path, owned(&hub, "phone"), prf(), namespace()).await?;
     let phone = Device::new(personal.opened)?;
-    assert_ne!(phone.session.info().await?.node, node);
+    assert_ne!(
+        phone.session.info().await?.node,
+        node,
+        "after an unlink the passkey holder signs in again as a fresh node"
+    );
     phone.close().await;
     owner.close().await;
     Ok(())
@@ -832,7 +863,6 @@ async fn a_backup_restores_offline_and_its_device_keeps_working() -> Result<(), 
 
     let backup = VerifiedBackup::open(&archive)?;
     assert_eq!(backup.devices()?.len(), 1);
-    // Another account's passkey finds no source in it.
     let stranger = directory.path().join("stranger");
     let error = refusal(
         config(&stranger)?
@@ -845,7 +875,7 @@ async fn a_backup_restores_offline_and_its_device_keeps_working() -> Result<(), 
     );
     assert!(
         matches!(error, PersonalSignInError::SourceUnavailable),
-        "{error}"
+        "another account's passkey finds no source in the backup: {error}"
     );
     assert!(!stranger.exists());
 
@@ -871,8 +901,7 @@ async fn a_backup_restores_offline_and_its_device_keeps_working() -> Result<(), 
     let reopened = Device::new(config(&path)?.open().await?)?;
     assert_eq!(reopened.session.freshness().await?, Freshness::Unwitnessed);
     reopened.close().await;
-    // The archived device returns and still works beside the new one.
-    let owner = Device::new(
+    let archived_owner = Device::new(
         config(&owner_path)?
             .network(Network::Owned(hub.connector("owner")))
             .open()
@@ -884,22 +913,32 @@ async fn a_backup_restores_offline_and_its_device_keeps_working() -> Result<(), 
             .open()
             .await?,
     )?;
-    // Reopened, the restore is still unwitnessed.
-    assert_eq!(phone.session.freshness().await?, Freshness::Unwitnessed);
-    common::introduce(&owner, &phone).await;
-    for device in [&phone, &owner] {
+    assert_eq!(
+        phone.session.freshness().await?,
+        Freshness::Unwitnessed,
+        "a reopened restore is still unwitnessed"
+    );
+    common::introduce(&archived_owner, &phone).await;
+    for device in [&phone, &archived_owner] {
         device.sync().await.map_err(|error| error.to_string())?;
     }
-    assert_eq!(owner.titles().await, ["backed up", "restored"]);
-    // The archived owner device reconciled with it: now anchored.
-    assert_eq!(phone.session.freshness().await?, Freshness::LocallyAnchored);
+    assert_eq!(
+        archived_owner.titles().await,
+        ["backed up", "restored"],
+        "the archived device returns and works beside the new one"
+    );
+    assert_eq!(
+        phone.session.freshness().await?,
+        Freshness::LocallyAnchored,
+        "reconciling with the archived owner device anchors the restore"
+    );
     untouched(&owner_path, &keys)?;
     assert!(
         known(&owner_path)?
             .personal_devices(identity_key())?
             .contains(&node)
     );
-    owner.close().await;
+    archived_owner.close().await;
     phone.close().await;
     Ok(())
 }
@@ -909,8 +948,6 @@ const OTHER: &str = r#"{"application":"shopping","version":2,"format":6,"tables"
 
 #[tokio::test(flavor = "multi_thread")]
 async fn independent_creates_are_a_conflict_and_both_stay() -> Result<(), Failure> {
-    // Two explicit first creates of one account and place, of the same
-    // schema and of another version: each pins its own genesis.
     for second_schema in [common::SCHEMA, OTHER] {
         let directory = tempfile::tempdir()?;
         let hub = hub();
@@ -928,7 +965,8 @@ async fn independent_creates_are_a_conflict_and_both_stay() -> Result<(), Failur
         assert_eq!(first.scope(), second.scope());
         assert_ne!(
             saved(&first_path)?["genesis"],
-            saved(&second_path)?["genesis"]
+            saved(&second_path)?["genesis"],
+            "each explicit first create pins its own genesis"
         );
         announced(&hub, "first").await;
         announced(&hub, "second").await;
@@ -950,9 +988,11 @@ async fn independent_creates_are_a_conflict_and_both_stay() -> Result<(), Failur
         assert!(!path.exists());
         first.close().await;
         second.close().await;
-        // Neither store was chosen, changed or ended: discovery hints aside,
-        // each keeps its genesis, keys and authority.
-        assert_eq!(pinned(&first_path)?, before.0);
+        assert_eq!(
+            pinned(&first_path)?,
+            before.0,
+            "neither independent create was chosen, changed or ended"
+        );
         assert_eq!(pinned(&second_path)?, before.1);
         let first = Device::new(config(&first_path)?.open().await?)?;
         assert_eq!(first.titles().await, ["first"]);
@@ -1086,8 +1126,6 @@ async fn a_sources_unverified_refusal_never_ends_the_install() -> Result<(), Fai
     let owner_path = directory.path().join("owner");
     let owner = create(&owner_path, &hub, "owner").await?;
     owner.add(1, "from owner").await;
-    // A claimed revocation ends only that source's attempt: the install,
-    // its node and keys stay for the retry.
     let path = directory.path().join("phone");
     let claimed = forging(
         &hub,
@@ -1099,18 +1137,22 @@ async fn a_sources_unverified_refusal_never_ends_the_install() -> Result<(), Fai
     let error = refusal(sign_in(&path, claimed, prf(), namespace()).await);
     assert!(
         !matches!(error, PersonalSignInError::RevokedNode { .. }),
-        "{error}"
+        "a claimed revocation ends only that source's attempt: {error}"
     );
-    assert!(path.join("personal.intent").exists());
-    // A claimed device limit is reported, and the published certificate's
-    // install stays too.
+    assert!(
+        path.join("personal.intent").exists(),
+        "the install, its node and keys stay for the retry"
+    );
     let full = forging(&hub, "phone", Forged::Publish, "device_limit", usize::MAX);
     let error = refusal(sign_in(&path, full, prf(), namespace()).await);
     assert!(
         matches!(error, PersonalSignInError::Capacity { .. }),
-        "{error}"
+        "a claimed device limit is reported: {error}"
     );
-    assert!(path.join("personal.intent").exists());
+    assert!(
+        path.join("personal.intent").exists(),
+        "the published certificate's install stays after a claimed device limit"
+    );
     let phone = Device::new(
         sign_in(&path, owned(&hub, "phone"), prf(), namespace())
             .await?
@@ -1123,7 +1165,6 @@ async fn a_sources_unverified_refusal_never_ends_the_install() -> Result<(), Fai
     );
     phone.close().await;
 
-    // With another source reachable, one lying source does not stop it.
     let laptop_path = directory.path().join("laptop");
     let once = forging(&hub, "laptop", Forged::Bootstrap, "device_revoked", 1);
     let phone = Device::new(
@@ -1138,7 +1179,11 @@ async fn a_sources_unverified_refusal_never_ends_the_install() -> Result<(), Fai
             .await?
             .opened,
     )?;
-    assert_ne!(laptop.session.info().await?.node, node);
+    assert_ne!(
+        laptop.session.info().await?.node,
+        node,
+        "with another source reachable, one lying source does not stop the sign-in"
+    );
     laptop.close().await;
     phone.close().await;
     owner.close().await;
@@ -1154,7 +1199,7 @@ async fn a_sign_in_never_takes_back_an_installed_database() -> Result<(), Failur
     let path = directory.path().join("phone");
     let losing = Network::Owned(Arc::new(Losing {
         inner: hub.connector("phone"),
-        drop: 3,
+        drop: LOST_PUBLICATION_REPLY,
     }));
     refusal(sign_in(&path, Some(losing), prf(), namespace()).await);
     let intent = std::fs::read(path.join("personal.intent"))?;
@@ -1165,28 +1210,31 @@ async fn a_sign_in_never_takes_back_an_installed_database() -> Result<(), Failur
     )?;
     phone.add(2, "unsynced").await;
     phone.close().await;
-    // A crash between saving the identity and ending the intent left it:
-    // signing in again hands out that database as it is.
-    std::fs::write(path.join("personal.intent"), &intent)?;
+    leave_intent_as_after_a_crash(&path, &intent)?;
     let resumed = sign_in(&path, owned(&hub, "phone"), prf(), namespace()).await?;
     assert_eq!(resumed.freshness, Freshness::LocallyAnchored);
     assert!(resumed.restored.complete(), "{:?}", resumed.restored);
     let phone = Device::new(resumed.opened)?;
-    assert_eq!(phone.titles().await, ["unsynced"]);
+    assert_eq!(
+        phone.titles().await,
+        ["unsynced"],
+        "signing in over a leftover intent hands out the database as it is"
+    );
     phone.close().await;
     assert!(!path.join("personal.intent").exists());
-    // Opening ends a leftover intent too, and the local write stays.
-    std::fs::write(path.join("personal.intent"), &intent)?;
+    leave_intent_as_after_a_crash(&path, &intent)?;
     let phone = Device::new(config(&path)?.open().await?)?;
     assert_eq!(phone.titles().await, ["unsynced"]);
     phone.close().await;
-    assert!(!path.join("personal.intent").exists());
-    // Without an intent, an installed database is never signed in again.
+    assert!(
+        !path.join("personal.intent").exists(),
+        "opening ends a leftover intent and keeps the local write"
+    );
     let before = files(&path)?;
     let error = refusal(sign_in(&path, owned(&hub, "phone"), prf(), namespace()).await);
     assert!(
         matches!(error, PersonalSignInError::ExistingState),
-        "{error}"
+        "without an intent, an installed database is never signed in again: {error}"
     );
     assert_eq!(files(&path)?, before);
     owner.close().await;
@@ -1264,16 +1312,15 @@ async fn each_personal_request_path_refuses_what_its_trust_forbids() -> Result<(
         PeerRequest::Identity(IdentityEnrollment::Personal(Box::new(authorization)))
     };
     let identity = account.identity();
-    // A nonce the responder never issued.
+    let unissued_nonce = [9; 32];
     let refused = ask(
         &probe,
         "owner",
         scope,
-        &fetch(bootstrap([9; 32], offered.responder, &identity)),
+        &fetch(bootstrap(unissued_nonce, offered.responder, &identity)),
     )
     .await;
     assert!(refused.is_err());
-    // Another identity than the pinned owner cannot authorize.
     let stranger = rocky_sdk::IdentityKey::generate();
     let refused = ask(
         &probe,
@@ -1286,25 +1333,25 @@ async fn each_personal_request_path_refuses_what_its_trust_forbids() -> Result<(
         refused.err().map(|error| error.code),
         Some("wrong_owner".to_owned())
     );
-    // An authorization for another responder.
-    let elsewhere = rocky_credentials::PrivateKey::new().public_key();
+    let other_responder = rocky_credentials::PrivateKey::new().public_key();
     let refused = ask(
         &probe,
         "owner",
         scope,
-        &fetch(bootstrap(offered.nonce(), elsewhere, &identity)),
+        &fetch(bootstrap(offered.nonce(), other_responder, &identity)),
     )
     .await;
     assert!(refused.is_err());
-    // The genuine one answers once; its replay is refused.
     let genuine = bootstrap(offered.nonce(), offered.responder, &identity);
     assert!(matches!(
         ask(&probe, "owner", scope, &fetch(genuine.clone())).await,
         Ok(PeerReply::Identity(_))
     ));
-    assert!(ask(&probe, "owner", scope, &fetch(genuine)).await.is_err());
+    assert!(
+        ask(&probe, "owner", scope, &fetch(genuine)).await.is_err(),
+        "a genuine bootstrap answers once and its replay is refused"
+    );
 
-    // A publication must name its node's own certificate.
     let (hello, offered) = challenge(&probe, "owner", scope).await;
     offered.verify(&hello, database, (identity_key(), &namespace()))?;
     let grant = rocky_credentials::Authority::owner(account.root()).issue_trusted(
@@ -1333,16 +1380,20 @@ async fn each_personal_request_path_refuses_what_its_trust_forbids() -> Result<(
             authorization,
             certificate: certificate.clone(),
         })));
-    assert!(ask(&probe, "owner", scope, &publish).await.is_err());
-    // Nor is the shared link path a bypass: only this identity's node links.
+    assert!(
+        ask(&probe, "owner", scope, &publish).await.is_err(),
+        "a publication must name its node's own certificate"
+    );
     let shared = PeerRequest::LinkEnroll(LinkEnrollment::Shared(Box::new(certificate)));
-    assert!(ask(&probe, "owner", scope, &shared).await.is_err());
-    // A device that only bootstrapped published nothing: the owner device
-    // knows itself alone.
+    assert!(
+        ask(&probe, "owner", scope, &shared).await.is_err(),
+        "the shared link path is no bypass: only this identity's node links"
+    );
     let devices = known(&directory.path().join("owner"))?.personal_devices(identity_key())?;
     assert_eq!(
         devices.iter().map(|node| node.to_hex()).collect::<Vec<_>>(),
-        [owner.node().await]
+        [owner.node().await],
+        "a device that only bootstrapped published nothing"
     );
     probe.transport.close().await;
     owner.close().await;
@@ -1477,7 +1528,6 @@ async fn personal_notices_are_local_durable_and_deduplicated_after_custody_deliv
     common::introduce(&owner, &custodian).await;
     owner.sync().await.map_err(|e| e.to_string())?;
     owner.close().await;
-    // No owner device is serving; the new device publishes to custody.
     let phone = Device::new(
         config(&directory.path().join("phone"))?
             .network(Network::Owned(hub.connector("phone")))
@@ -1608,7 +1658,6 @@ async fn a_passkey_revoke_is_precise_idempotent_durable_and_delivered_to_the_end
     let repeated = owner.session.revoke_personal_device(target, prf()).await?;
     assert_eq!(repeated, receipt);
     assert_eq!(saved(&owner_path)?["keys"], after);
-    // A sibling remains a writer and trusted sealer.
     laptop
         .sync()
         .await
@@ -1728,7 +1777,6 @@ async fn a_personal_owner_reset_uses_passkey_authority_and_refuses_other_full_re
         .sign_out_personal_devices(prf(), Default::default())
         .await?;
     assert_eq!(next.follows, [receipt.reset].into());
-    // The passkey still authorizes a fresh node after the reset.
     let fresh = Device::new(
         sign_in(
             &directory.path().join("fresh"),

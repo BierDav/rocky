@@ -122,6 +122,9 @@ impl Deliveries for Port {
     }
 }
 
+/// Bytes per large delivery: three pages travel each way.
+const LARGE_DELIVERY: usize = 40 * 1024;
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_round_hands_over_deposits_and_collects_in_pages_with_receipts() {
     let fixture = Fixture::new();
@@ -136,9 +139,8 @@ async fn a_round_hands_over_deposits_and_collects_in_pages_with_receipts() {
     let sender = EncryptedReplica::open(dir.path().join("b.db"), fixture.app(), bc)
         .await
         .unwrap();
-    // 40 KiB each: three pages travel each way.
     let large = |to: &PrivateKey, tag: u8| {
-        SealedDelivery::seal(to.public_key(), &vec![tag; 40 * 1024]).unwrap()
+        SealedDelivery::seal(to.public_key(), &vec![tag; LARGE_DELIVERY]).unwrap()
     };
     let relayed = DeliveryReceipt::sign(&c, [7; 32]).unwrap();
     let mailbox_port = Arc::new(Port {
@@ -179,17 +181,28 @@ async fn a_round_hands_over_deposits_and_collects_in_pages_with_receipts() {
         ),
         (5, 3, 1, 5, 1)
     );
-    // Each side installed what was addressed to it, and acknowledged it.
     assert_eq!(mailbox_port.received.lock().unwrap().len(), 5);
-    assert_eq!(sender_port.received.lock().unwrap().len(), 5);
-    assert_eq!(sender_port.acknowledged.lock().unwrap().len(), 5 + 1);
+    assert_eq!(
+        sender_port.received.lock().unwrap().len(),
+        5,
+        "each side installs what was addressed to it"
+    );
+    assert_eq!(
+        sender_port.acknowledged.lock().unwrap().len(),
+        5 + 1,
+        "each side acknowledges what it installed"
+    );
     assert!(mailbox_port.held.lock().unwrap().is_empty());
-    // The mailbox holds three deposits and forgot the receipt it relayed.
-    assert_eq!(mailbox_port.mailbox.lock().unwrap().len(), 3);
+    assert_eq!(
+        mailbox_port.mailbox.lock().unwrap().len(),
+        3,
+        "the mailbox holds three deposits"
+    );
     assert_eq!(sender_port.stored.lock().unwrap().len(), 3);
     assert_eq!(
         *mailbox_port.forgotten.lock().unwrap(),
-        vec![relayed.digest()]
+        vec![relayed.digest()],
+        "the mailbox forgets the receipt it relayed"
     );
 }
 

@@ -665,7 +665,8 @@ impl<A: RowApplication> Inner<A> {
     pub(super) async fn follow_moves(&mut self, time: u64) -> Result<bool, Error> {
         let mut pass = std::mem::take(&mut self.follow_pass);
         let epoch = self.context_epoch.load(Ordering::Relaxed);
-        if pass.commit != self.commit || pass.epoch != epoch {
+        let context_changed = pass.epoch != epoch;
+        if pass.commit != self.commit || context_changed {
             if let Some(row) = &mut pass.row
                 && (row.sources.pop_front().is_some()
                     || row.visited.pop_first().is_some()
@@ -674,10 +675,8 @@ impl<A: RowApplication> Inner<A> {
                 self.follow_pass = pass;
                 return Ok(true);
             }
-            // The current row restarts at its own key; unrelated commits
-            // keep the cursor so the pass still completes under writes.
             pass.row = None;
-            if pass.epoch != epoch {
+            if context_changed {
                 pass.after = None;
                 pass.moved = None;
             }

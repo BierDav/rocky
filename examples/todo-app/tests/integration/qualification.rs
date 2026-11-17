@@ -1,5 +1,4 @@
-//! features_13 phase 9 convergence scenarios on the todo app, over an
-//! in-process link: devices at one seal hold the same rows and the same
+//! Convergence scenarios on the todo app, over an in-process link: devices at one seal hold the same rows and the same
 //! drop map, offline edits continue in the successor tip, buffered
 //! commits survive a process kill, and the open tip may grow while no
 //! owner is online. Printed timings are diagnostic only.
@@ -75,7 +74,7 @@ fn token(token: Option<TransactionToken>) -> Result<TransactionToken, Failure> {
     Ok(token.ok_or("a replayed write publishes a transaction")?)
 }
 
-/// Slice 3: three devices edit one list at once: two moves into one gap,
+/// Three devices edit one list at once: two moves into one gap,
 /// three raises of one priority and two adds of one title.
 #[tokio::test(flavor = "multi_thread")]
 async fn three_devices_editing_one_list_converge_at_the_next_seal() -> Result<(), Failure> {
@@ -96,7 +95,6 @@ async fn three_devices_editing_one_list_converge_at_the_next_seal() -> Result<()
     let laptop_events = laptop.database().observe_tables(None).await?;
     let phone_events = phone.database().observe_tables(None).await?;
 
-    // Each device's edits run at the same time as the others'.
     let (on_laptop, on_phone, on_tablet) = tokio::join!(
         async {
             let moved = token(laptop.move_to(list, ids[2], 1).await?)?;
@@ -128,19 +126,22 @@ async fn three_devices_editing_one_list_converge_at_the_next_seal() -> Result<()
     seal(&world).await?;
     let (todos, outcomes) = converged(&devices, &tokens).await?;
 
-    // Both moves into the gap after "Post" keep their place, in tag order.
     let order: Vec<_> = todos.iter().map(|todo| todo.title.as_str()).collect();
     assert_eq!(order[0], "Post");
     let mut gap = order[1..3].to_vec();
     gap.sort_unstable();
-    assert_eq!(gap, ["Bakery", "Florist"]);
+    assert_eq!(
+        gap,
+        ["Bakery", "Florist"],
+        "both moves into the gap after \"Post\" keep their place"
+    );
     assert_eq!(&order[3..], ["Bank and cash", "Pharmacy"]);
-    assert_eq!(todos[0].priority, 3);
-    // Only one of the two "Pharmacy" adds stands; the seal made it final.
+    assert_eq!(todos[0].priority, 3, "all three raises count");
     let drops: Vec<_> = outcomes.iter().map(dropped).collect();
     assert_eq!(
         drops.iter().flatten().collect::<Vec<_>>(),
-        [&(DropReason::Constraint, true)]
+        [&(DropReason::Constraint, true)],
+        "only one \"Pharmacy\" add stands, and the seal made its drop final"
     );
     let lost = if drops[2].is_some() {
         on_laptop[2]
@@ -148,16 +149,13 @@ async fn three_devices_editing_one_list_converge_at_the_next_seal() -> Result<()
         on_phone[2]
     };
     assert!(drops[2].is_some() != drops[5].is_some());
-    // The device whose add was dropped is told so.
-    let author = if lost == on_laptop[2] {
+    let author_of_dropped_add = if lost == on_laptop[2] {
         &laptop_events
     } else {
         &phone_events
     };
-    notified(author, lost).await?;
+    notified(author_of_dropped_add, lost).await?;
 
-    // Compacting at the seal hands bases to the members and to a device
-    // joining later; every device still holds the same rows.
     laptop.database().session().compact(0).await?;
     world.sync().await?;
     let watch = world.join("watch", Role::Full).await?;
@@ -166,12 +164,16 @@ async fn three_devices_editing_one_list_converge_at_the_next_seal() -> Result<()
     world.sync().await?;
     let rows = laptop.all_todos().await?;
     for device in [&phone, &tablet, &watch] {
-        assert_eq!(device.all_todos().await?, rows);
+        assert_eq!(
+            device.all_todos().await?,
+            rows,
+            "compacting at the seal hands bases to members and later joiners alike"
+        );
     }
     world.close().await
 }
 
-/// Slice 4: a device edits offline across a routine seal of another,
+/// A device edits offline across a routine seal of another,
 /// then reconnects; its late transactions replay in the successor tip.
 #[tokio::test(flavor = "multi_thread")]
 async fn offline_edits_across_a_routine_seal_replay_in_the_successor_tip() -> Result<(), Failure> {
@@ -194,9 +196,9 @@ async fn offline_edits_across_a_routine_seal_replay_in_the_successor_tip() -> Re
         token(phone.raise_priority(list, post).await?)?,
         token(phone.add(list, "Bread").await?.token)?,
     ];
-    // Enough writes for a routine seal while the phone is away.
     let mut tokens = Vec::new();
-    for index in 0..rocky_secure_routine() {
+    let enough_for_a_routine_seal = rocky_secure_routine();
+    for index in 0..enough_for_a_routine_seal {
         tokens.push(token(
             laptop.add(list, &format!("Item {index}")).await?.token,
         )?);
@@ -225,30 +227,36 @@ async fn offline_edits_across_a_routine_seal_replay_in_the_successor_tip() -> Re
     tokens.extend(late);
     let devices = [&laptop, &phone];
     let (todos, outcomes) = converged(&devices, &tokens).await?;
-    // The phone's offline "Milk" and raise stand in the successor tip; its
-    // "Bread" came later than the laptop's sealed one, so it alone drops.
-    assert!(todos.iter().any(|todo| todo.title == "Milk"));
+    assert!(
+        todos.iter().any(|todo| todo.title == "Milk"),
+        "the phone's offline add stands in the successor tip"
+    );
     assert_eq!(
         todos
             .iter()
             .find(|todo| todo.id == post)
             .map(|t| t.priority),
-        Some(1)
+        Some(1),
+        "the phone's offline raise stands in the successor tip"
     );
     let drops: Vec<_> = tokens
         .iter()
         .zip(outcomes.iter().map(dropped))
         .filter_map(|(token, drop)| drop.map(|drop| (*token, drop)))
         .collect();
-    assert_eq!(drops, [(late[2], (DropReason::Constraint, false))]);
+    assert_eq!(
+        drops,
+        [(late[2], (DropReason::Constraint, false))],
+        "the phone's \"Bread\" came after the laptop's sealed one, so it alone drops"
+    );
     seal(&world).await?;
     let (_, outcomes) = converged(&devices, &late).await?;
     assert_eq!(dropped(&outcomes[2]), Some((DropReason::Constraint, true)));
-    eprintln!("slice 4: drops {drops:?}");
+    eprintln!("offline across a routine seal: drops {drops:?}");
     world.close().await
 }
 
-/// Slice 6: with the only owner offline, two members grow the open tip to
+/// With the only owner offline, two members grow the open tip to
 /// four routine seals' worth of interleaved transactions; once the owner
 /// returns and seals, all three converge.
 #[tokio::test(flavor = "multi_thread")]
@@ -268,14 +276,12 @@ async fn the_open_tip_grows_while_no_owner_is_online_and_converges() -> Result<(
         .await?;
 
     let target = 4 * rocky_secure_routine();
-    let rounds = target / 32;
+    let rounds = target / (2 * WRITES_APART_PER_ROUND);
     let mut tokens = Vec::new();
     let mut syncs = Vec::new();
     for round in 0..rounds {
-        // Each round, both members write 16 transactions apart, then sync:
-        // half of each side's arrivals order before the other's writes.
         for (name, device) in [("phone", &phone), ("tablet", &tablet)] {
-            for index in 0..16 {
+            for index in 0..WRITES_APART_PER_ROUND {
                 tokens.push(if index % 4 == 0 {
                     token(device.raise_priority(list, shared).await?)?
                 } else {
@@ -295,7 +301,7 @@ async fn the_open_tip_grows_while_no_owner_is_online_and_converges() -> Result<(
     assert!(tokens.len() >= target);
     syncs.sort_unstable();
     eprintln!(
-        "slice 6: {} transactions, {} member sync rounds, median {:?}, max {:?}",
+        "open tip without an owner: {} transactions, {} member sync rounds, median {:?}, max {:?}",
         tokens.len(),
         syncs.len(),
         syncs[syncs.len() / 2],
@@ -326,9 +332,13 @@ async fn the_open_tip_grows_while_no_owner_is_online_and_converges() -> Result<(
             .map(|t| t.priority),
         Some(i64::try_from(tokens.len() / 4)?)
     );
-    eprintln!("slice 6: owner catch-up {catch_up:?}");
+    eprintln!("open tip without an owner: owner catch-up {catch_up:?}");
     world.close().await
 }
+
+/// Transactions each member writes apart per round before they sync, so
+/// half of each side's arrivals order before the other's writes.
+const WRITES_APART_PER_ROUND: usize = 16;
 
 /// Unsealed replayed transactions at which an owner seals routinely.
 fn rocky_secure_routine() -> usize {
@@ -337,8 +347,8 @@ fn rocky_secure_routine() -> usize {
 
 const CHILD: &str = "TODO_QUALIFICATION_CHILD";
 
-/// Slice 5, child side: writes into the installation `CHILD` names and is
-/// killed by the parent.
+/// The child side of `a_killed_app_reopens_offline_with_whole_transactions`:
+/// writes into the installation `CHILD` names and is killed by the parent.
 #[tokio::test(flavor = "multi_thread")]
 async fn qualification_child() -> Result<(), Failure> {
     let Ok(spec) = std::env::var(CHILD) else {
@@ -353,8 +363,7 @@ async fn qualification_child() -> Result<(), Failure> {
             let id = todos.add(list, "Buffered").await?.id;
             writeln!(out, "{REPORT}{id}")?;
             out.flush()?;
-            // Ended at once, as a killed app is: nothing closes or flushes.
-            std::process::abort();
+            end_as_a_killed_app_does();
         }
         _ => {
             for pair in 0.. {
@@ -376,6 +385,11 @@ async fn qualification_child() -> Result<(), Failure> {
             Ok(())
         }
     }
+}
+
+/// Ends at once: nothing closes or flushes.
+fn end_as_a_killed_app_does() -> ! {
+    std::process::abort()
 }
 
 fn child(mode: &str, directory: &Path) -> Result<std::process::Child, Failure> {
@@ -402,7 +416,7 @@ fn reports(child: &mut std::process::Child) -> Result<impl Iterator<Item = Strin
 }
 const REPORT: &str = "qualification: ";
 
-/// Slice 5: a write whose buffered commit returned survives a kill; one
+/// A write whose buffered commit returned survives a kill; one
 /// killed before `commit()` returns is absent or complete.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_killed_app_reopens_offline_with_whole_transactions() -> Result<(), Failure> {
@@ -421,11 +435,12 @@ async fn a_killed_app_reopens_offline_with_whole_transactions() -> Result<(), Fa
     killed.wait()?;
     let todos = Todos::new(config.open().await?.database);
     let list = todos.lists().await?[0].id;
-    assert!(todos.todos(list).await?.iter().any(|todo| todo.id == id));
+    assert!(
+        todos.todos(list).await?.iter().any(|todo| todo.id == id),
+        "a write whose buffered commit returned survives a kill"
+    );
     todos.database().close().await?;
 
-    // Killed while committing: every pair is whole or absent, and each
-    // pair the child reported committed is present.
     let mut writer = child("pairs", &directory)?;
     let committed = reports(&mut writer)?.take(40).count();
     assert_eq!(committed, 40, "the child stopped");
@@ -440,7 +455,13 @@ async fn a_killed_app_reopens_offline_with_whole_transactions() -> Result<(), Fa
             *sides.entry(pair.to_owned()).or_default() += 1;
         }
     }
-    assert!(sides.values().all(|count| *count == 2), "{sides:?}");
-    assert!(sides.len() >= committed);
+    assert!(
+        sides.values().all(|count| *count == 2),
+        "a pair killed while committing is whole or absent: {sides:?}"
+    );
+    assert!(
+        sides.len() >= committed,
+        "each pair the child reported committed is present"
+    );
     todos.database().close().await
 }

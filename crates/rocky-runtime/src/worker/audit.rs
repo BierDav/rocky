@@ -13,7 +13,10 @@ where
     /// ledger must agree. It reads retained records in pages. Rows are
     /// compared with their digests off the writer thread, and the projection
     /// is recomputed by the checkpoint that follows; see `Replica::audit`.
-    /// Returns the number of retained operations.
+    /// Applied history has no gap, since pruning removes a prefix. Clocks and
+    /// revisions are checked exactly only without an imported checkpoint or
+    /// pruned history, which carry ones this file no longer shows. Returns the
+    /// number of retained operations.
     pub(super) async fn audit(&self) -> Result<usize, Error> {
         let corrupt = |what: &str| Error::Corrupt(what.into());
         let metadata = rows(
@@ -75,7 +78,6 @@ where
                         || !["local", "remote"].contains(&origin.as_str())
                         || (origin == "local") != (node == local)
                         || (status == "applied") != (after <= applied)
-                        // Applied history has no gap; pruning removes a prefix.
                         || match previous {
                             Some(previous) => after <= applied && after != previous + 1,
                             None => after <= applied && after > pruned_prefix + 1,
@@ -124,8 +126,6 @@ where
                 return Err(corrupt("counters differ from canonical history"));
             }
         }
-        // An imported checkpoint and pruned history carry clocks and
-        // revisions this file no longer shows.
         let exact = !pruned
             && self
                 .retention
@@ -225,8 +225,8 @@ where
                 let id = incoming::operation_id(&row.get::<Vec<u8>>(2)?, row.get(3)?)
                     .map_err(|_| corrupt())?;
                 let sequence = id.sequence.get();
-                // Sequences are unique: the page order would repeat one.
-                if handle.len() != 32 || id.node != local || sequence as i64 == after {
+                let repeats_previous = sequence as i64 == after;
+                if handle.len() != 32 || id.node != local || repeats_previous {
                     return Err(corrupt());
                 }
                 after = sequence as i64;
@@ -263,7 +263,8 @@ where
         Ok(())
     }
     /// The outbox holds exactly the local operations after the pruned prefix that
-    /// some delivery target has not acknowledged.
+    /// some delivery target has not acknowledged. The last page also covers
+    /// anything after the newest operation.
     async fn audit_outbox(&self) -> Result<(), Error> {
         let local = self.identity.node;
         let pruned_prefix = self.retention.pruned_prefix(local);
@@ -304,7 +305,6 @@ where
                     expected.push(vec![SqlValue::Integer(after)]);
                 }
             }
-            // The last page also covers anything after the newest operation.
             let stored = storage::collect_rows(
                 self.conn()
                     .query(

@@ -124,10 +124,13 @@ async fn grouped_mutations_keep_order_identity_and_survive_reopen() {
     ));
     assert_eq!(replica.query().await.unwrap().revision.get(), 7);
     runtime.close().await.unwrap();
-    // Reopen replays history and compares it with counters and projection.
     let runtime = open(&dir, grouped()).await;
     let snapshot = runtime.domain(scope(1)).unwrap().query().await.unwrap();
-    assert_eq!((snapshot.rows.len(), snapshot.revision.get()), (7, 7));
+    assert_eq!(
+        (snapshot.rows.len(), snapshot.revision.get()),
+        (7, 7),
+        "reopen replays history and compares it with counters and projection"
+    );
     runtime.close().await.unwrap();
 }
 
@@ -137,7 +140,6 @@ async fn a_busy_step_reruns_only_its_savepoint() {
     let runtime = open(&dir, grouped()).await;
     let replica = runtime.domain(scope(1)).unwrap();
     let (first, resume) = pause(&replica).await;
-    // Queued behind the paused mutation: the fault hits the following group.
     let (reply, injected) = oneshot::channel();
     enqueue(
         &replica.inner.commands,
@@ -154,7 +156,11 @@ async fn a_busy_step_reruns_only_its_savepoint() {
         let operation = receipt.committed().await.unwrap();
         assert_eq!(operation.id.sequence.get(), index as u64 + 2);
     }
-    assert_eq!(replica.query().await.unwrap().revision.get(), 5);
+    assert_eq!(
+        replica.query().await.unwrap().revision.get(),
+        5,
+        "queued behind the paused mutation: the fault hits the following group"
+    );
     runtime.close().await.unwrap();
     let runtime = open(&dir, grouped()).await;
     let snapshot = runtime.domain(scope(1)).unwrap().query().await.unwrap();
@@ -186,9 +192,12 @@ async fn reads_follow_commits_and_page_instead_of_refusing() {
     };
     let both = notes(2).await.unwrap();
     assert_eq!((both.rows.len(), both.next), (2, None));
-    // More rows than `max_rows` end the page with a cursor, not an error.
     let first = notes(1).await.unwrap();
-    assert_eq!(first.rows, vec![vec![SqlValue::Text("one".into())]]);
+    assert_eq!(
+        first.rows,
+        vec![vec![SqlValue::Text("one".into())]],
+        "more rows than `max_rows` end the page with a cursor, not an error"
+    );
     let second = replica
         .read(
             BoundQuery {
@@ -204,7 +213,7 @@ async fn reads_follow_commits_and_page_instead_of_refusing() {
     runtime.close().await.unwrap();
 }
 
-// Needs threads, which a browser Worker lacks.
+/// Needs threads, which a browser Worker lacks.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_domains_share_the_file_writer_and_reopen() {
@@ -246,10 +255,13 @@ async fn reads_follow_incoming_application_and_reopen() {
     let replica = runtime.domain(scope(1)).unwrap();
     note(&replica, 1, "local").committed().await.unwrap();
     assert_eq!(count(&replica, 1).await.rows, [[SqlValue::Integer(1)]]);
-    // Durable receipt changes completeness but not the applied rows.
     replica.receive(remote.encode().unwrap()).await.unwrap();
     let received = count(&replica, 1).await;
-    assert_eq!(received.rows, [[SqlValue::Integer(1)]]);
+    assert_eq!(
+        received.rows,
+        [[SqlValue::Integer(1)]],
+        "durable receipt changes completeness but not the applied rows"
+    );
     assert_eq!(
         received.completeness,
         Completeness::Local {

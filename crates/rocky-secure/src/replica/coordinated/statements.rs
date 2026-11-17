@@ -8,12 +8,13 @@ use rocky_core::{CoordinationError, LogHead, LogTerminal};
 use rocky_credentials::SignedSeal;
 
 pub(in crate::replica) const SCHEMA: &[&str] = &[
-    // Statement batches whose seals wait for their tip's terminal entry:
-    // this node's own publication, flushed before the coordinator sees it,
-    // and received seals it could not confirm yet. Never part of the graph.
     "CREATE TABLE IF NOT EXISTS secure_terminal_credentials(node BLOB PRIMARY KEY,credentials BLOB NOT NULL) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_pending_tips(batch BLOB PRIMARY KEY,own INTEGER NOT NULL,statements BLOB NOT NULL) WITHOUT ROWID",
+    PENDING_TIPS,
 ];
+/// Statement batches whose seals wait for their tip's terminal entry: this
+/// node's own publication, flushed before the coordinator sees it, and
+/// received seals it could not confirm yet. Never part of the graph.
+const PENDING_TIPS: &str = "CREATE TABLE IF NOT EXISTS secure_pending_tips(batch BLOB PRIMARY KEY,own INTEGER NOT NULL,statements BLOB NOT NULL) WITHOUT ROWID";
 /// Received batches a node keeps waiting at once; more wait for a resend.
 const MAX_PENDING_RECEIVED: usize = 32;
 
@@ -68,7 +69,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if !fresh.iter().any(|s| matches!(s, TipStatement::Seal(_))) {
             return Ok(all());
         }
-        // Nothing ends a log for a statement admission would refuse.
         self.check_statements(&fresh).await?;
         let (mut deferred, mut dropped) = (BTreeSet::new(), BTreeSet::new());
         let mut proofs = Vec::new();
@@ -105,7 +105,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     deferred.insert(statement.id()?);
                     continue;
                 }
-                // Verified finality is sufficient even after coordinator retention.
                 if graph
                     .is_final(seal.id().map_err(credential)?)
                     .map_err(credential)?
@@ -293,24 +292,19 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
             return Ok(Ending::Ended);
         }
-        // A recovery that never committed abandons nothing.
         if seal.statement.recovery.is_some() {
             return Ok(Ending::Refused(
                 "sealed",
                 "another terminal entry ended the tip's log; the recovery never committed".into(),
             ));
         }
-        // Only the terminal entry's seal becomes final and wins once its
-        // statement arrives: this node never follows, or writes past, an own
-        // seal that is not it.
-        Ok(
-            match ended.digest != terminal.digest
-                && (own || self.holds_statement(ended.digest).await?)
-            {
-                true => Ending::Lost,
-                false => Ending::Ended,
-            },
-        )
+        let another_terminal_seal_wins =
+            ended.digest != terminal.digest && (own || self.holds_statement(ended.digest).await?);
+        Ok(if another_terminal_seal_wins {
+            Ending::Lost
+        } else {
+            Ending::Ended
+        })
     }
     /// Journals a batch, flushed, before its seals reach the coordinator.
     /// Received batches beyond the bound are not kept; a peer resends them.
@@ -365,7 +359,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// batches after a restart or a lost reply, with the same bytes, and
     /// received ones. Returns the statements admitted.
     pub async fn settle_tip_statements(&self) -> Result<usize, Error> {
-        // A batch chained after another settles in a later round.
         let mut admitted = 0;
         loop {
             let round = self.settle_round().await?;
@@ -375,6 +368,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             admitted += round;
         }
     }
+    /// Admits each journaled batch once. A revoked or permanently invalid
+    /// candidate, or a statement the graph refuses, never blocks later
+    /// batches: an own batch keeps its exact submission bytes even if another
+    /// statement was revoked after external commitment, while a received one
+    /// leaves the quota and its peer resends it.
     async fn settle_round(&self) -> Result<usize, Error> {
         let (pending, own) = {
             let inner = self.inner.lock(crate::replica::Class::Background).await;
@@ -394,10 +392,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await
             {
                 Ok(coordinated) => coordinated,
-                // A revoked or permanently invalid candidate cannot block later
-                // batches. An own batch keeps its exact submission bytes even if
-                // another statement was revoked after external commitment; a
-                // received one leaves the quota, and its peer resends it.
                 Err(Error::Rejected(_)) => {
                     self.forget_refused(batch, own).await?;
                     continue;
@@ -409,15 +403,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await
             {
                 Ok(count) => count,
-                // A statement the graph refuses does not block later batches.
                 Err(Error::Rejected(_)) => {
                     self.forget_refused(batch, own).await?;
                     continue;
                 }
                 Err(error) => return Err(error),
             };
-            // An own statement dropped as lost takes the own statements
-            // chained after it: none of them is ever published.
             if own {
                 let mut dropped = BTreeSet::new();
                 for statement in &statements {

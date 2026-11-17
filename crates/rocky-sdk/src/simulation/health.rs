@@ -60,10 +60,8 @@ async fn a_coordinator_clock_skew_is_an_alert_until_a_call_is_accepted() -> Resu
 #[tokio::test(start_paused = true)]
 async fn a_trusted_node_sees_a_partial_devices_alert_and_blocker_clear() -> Result<(), Failure> {
     let hour = Duration::from_secs(3600);
-    // Severing the pair ends its link: the next sync makes a new one.
     let relink = [Sever(1, 2), Heal(1, 2)];
     let mut steps = vec![Invite(0, 2), Partial(1), Sync(0), Sync(1), Sync(2), Mesh(0)];
-    // c's clock runs an hour ahead and only b hears from it.
     steps.extend([Sever(0, 2), Clock(2, hour)]);
     steps.extend(relink.clone());
     steps.extend([
@@ -78,7 +76,6 @@ async fn a_trusted_node_sees_a_partial_devices_alert_and_blocker_clear() -> Resu
         Clock(2, Duration::ZERO),
         Advance(hour),
         Ahead(1),
-        // b's last link to a closed an hour ago.
         Mesh(0),
         WatchMesh(0, 1),
     ]);
@@ -97,11 +94,10 @@ async fn a_trusted_node_sees_a_partial_devices_alert_and_blocker_clear() -> Resu
         ]
     );
     let cleared = r#"mesh ["b: alerts []", "c: alerts [], silent"]"#;
-    // A report may clear the alert in the wake that first removes silence.
     let heard = r#"mesh ["b: alerts [\"c ahead 60 min\"], clock_ahead 1", "c: alerts [], silent"]"#;
     assert!(
         observed[5] == heard || observed[5] == cleared,
-        "{observed:?}"
+        "a report may clear the alert in the wake that first removes silence: {observed:?}"
     );
     assert_eq!(observed[6], cleared);
     Ok(())

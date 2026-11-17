@@ -64,9 +64,10 @@ enum Running<T> {
     Local(JoinHandle<T>),
 }
 impl<T: Send + 'static> Dedicated<T> {
+    /// Joins a thread from a blocking task, never in place, because the
+    /// thread may still need this executor.
     pub async fn join(self) -> Result<T, Ended> {
         match self.0 {
-            // Never in place: the thread may still need this executor.
             Running::Thread(thread) => tokio::task::spawn_blocking(move || thread.join())
                 .await
                 .map_err(|_| Ended)?
@@ -113,9 +114,9 @@ impl Held {
         self.released.notify_all();
     }
     /// Waits until the worker releases, rechecking every `poll` in case it
-    /// missed a signal such as a disconnected channel.
+    /// missed a signal such as a disconnected channel. Under simulation it
+    /// returns at once: a local worker cannot run while this thread waits.
     pub fn wait_released(&self, poll: std::time::Duration) {
-        // A local worker cannot run while this thread waits for it.
         #[cfg(feature = "simulation")]
         if crate::entropy::simulation::installed() {
             return;

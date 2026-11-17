@@ -45,8 +45,7 @@ async fn header_scans_page_their_reads_and_restart_on_a_changed_source() {
             .iter()
             .all(|count| *count <= crate::replica::headers::HEADER_ROWS as u64)
     );
-    // Rows one uninterrupted frontier scan reads.
-    let total: u64 = {
+    let uninterrupted_scan_rows: u64 = {
         let measurements = alice.lock_measurements();
         measurements.start();
         alice.seal_frontier(lineage.domain, false).await.unwrap();
@@ -78,8 +77,11 @@ async fn header_scans_page_their_reads_and_restart_on_a_changed_source() {
         let measurements = alice.lock_measurements();
         measurements.start();
         let (result, ()) = tokio::join!(scan, change);
-        // A changed source restarts the scan instead of acting on it.
-        assert_eq!(result.unwrap(), unpaged, "{sql}");
+        assert_eq!(
+            result.unwrap(),
+            unpaged,
+            "{sql}: a changed source restarts the scan instead of acting on it"
+        );
         let pages: u64 = measurements
             .stop()
             .holders
@@ -87,6 +89,10 @@ async fn header_scans_page_their_reads_and_restart_on_a_changed_source() {
             .flat_map(|holder| holder.units.get("domain_header").into_iter().flatten())
             .map(|(count, _)| *count)
             .sum();
-        assert_eq!(pages > total, invalidates, "{sql}: {pages} of {total}");
+        assert_eq!(
+            pages > uninterrupted_scan_rows,
+            invalidates,
+            "{sql}: {pages} of {uninterrupted_scan_rows}"
+        );
     }
 }

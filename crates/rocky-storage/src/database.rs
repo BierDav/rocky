@@ -38,11 +38,7 @@ impl DatabaseOwner {
         check_file_format(path).await?;
         let connection = owner.connect()?;
         if !has_data(path) {
-            // Only an empty file takes `auto_vacuum`; maintenance reclaims
-            // free pages in bounded steps.
-            connection
-                .execute("PRAGMA auto_vacuum=INCREMENTAL", ())
-                .await?;
+            connection.execute(INCREMENTAL_AUTO_VACUUM, ()).await?;
             connection
                 .execute(format!("PRAGMA application_id={FILE_FORMAT}"), ())
                 .await?;
@@ -50,6 +46,10 @@ impl DatabaseOwner {
         Ok((owner, connection))
     }
 }
+
+/// Lets maintenance reclaim free pages in bounded steps; only an empty file
+/// takes `auto_vacuum`.
+const INCREMENTAL_AUTO_VACUUM: &str = "PRAGMA auto_vacuum=INCREMENTAL";
 
 fn has_data(path: &Path) -> bool {
     fs::len(path).is_ok_and(|len| len > 0)
@@ -101,7 +101,7 @@ pub async fn check_file_format(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-// These inspect the native file layout: the bytes and the lock beside them.
+/// These inspect the native file layout: the bytes and the lock beside them.
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use super::*;

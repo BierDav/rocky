@@ -98,11 +98,11 @@ async fn a_migration_reads_its_frozen_parent_after_changing_the_live_rows() -> R
     a.add(1, "apples").await;
     a.close().await;
     let mut declared: Value = serde_json::from_str(&schema(2, true))?;
+    let parent_read_the_author_evaluates_once_for_replicas =
+        "UPDATE items SET note=(SELECT max(p.title) FROM parent.items p)";
     declared["migrations"][0]["statements"] = json!([
         "UPDATE items SET title=title || '-live'",
-        // Replicas replay the program without the parent: a read of it must
-        // not refer to the outer statement, so the author evaluates it once.
-        "UPDATE items SET note=(SELECT max(p.title) FROM parent.items p)"
+        parent_read_the_author_evaluates_once_for_replicas
     ]);
     let declared = declared.to_string();
     let a = Device::new(Database::open(open(root.path(), &declared))?)?

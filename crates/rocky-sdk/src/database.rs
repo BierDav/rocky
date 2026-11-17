@@ -56,8 +56,9 @@ pub struct Opened {
     pub revoked: Vec<rocky_credentials::PublicKey>,
 }
 
-// The blocking constructors make the other installs; a browser has create,
-// join, restore, recover and open (`Configuration`).
+/// How a database is installed or opened. The blocking constructors make
+/// every variant; a browser makes create, join, restore, recover and open
+/// through `Configuration`.
 #[cfg_attr(
     target_family = "wasm",
     expect(dead_code, reason = "blocking installation variants are native only")
@@ -99,13 +100,50 @@ pub(crate) enum Install {
     /// root grants, with the keys the root opens from its escrow.
     Recover {
         archive: PathBuf,
-        /// Taken once, when the installation is written.
+        /// Copied when the installation is written and taken once the
+        /// lost trusted identities are revoked.
         root: std::sync::Mutex<Option<Box<crate::RootKey>>>,
         /// The archived identity record, once the archive is opened.
         archived: std::sync::Mutex<Option<Box<Settings>>>,
     },
 }
 impl Install {
+    /// A restore interrupted after it enrolled continues, as does a
+    /// recovery interrupted after it saved its identity.
+    fn resumes_interrupted(&self, directory: &Path) -> Result<bool, Failure> {
+        Ok(match self {
+            Self::Restore { .. } => {
+                rocky_platform::fs::exists(directory.join(crate::backup::MARKER))
+            }
+            Self::Recover { .. } => crate::recovery::unfinished(directory)?.is_some(),
+            _ => false,
+        })
+    }
+    /// A join or another node of an identity bootstraps from a checkpoint.
+    fn bootstraps_from_checkpoint(&self) -> bool {
+        matches!(self, Self::Join { .. } | Self::Identity { .. })
+    }
+    /// A create, sign-in or supplied install takes back what it wrote when
+    /// it fails before it is handed out; see `unwind`.
+    fn unwinds_on_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::Create { .. } | Self::SignIn(_) | Self::Supplied(_)
+        )
+    }
+    /// A personal install's intent ends once it is handed out; until then a
+    /// retry resumes it. An open ends one an interrupted install left beside
+    /// its saved identity, so no later sign-in takes that store back.
+    fn ends_personal_intent(&self) -> bool {
+        matches!(
+            self,
+            Self::Create {
+                personal: Some(_),
+                ..
+            } | Self::SignIn(_)
+                | Self::Installed
+        )
+    }
     /// A shared create that fails takes its secrets back. A personal
     /// create keeps its device keys and pinned epochs for the retry its
     /// install intent resumes.
@@ -226,6 +264,9 @@ impl Hello {
     }
 }
 
+/// Calls a database serves at once; one more is refused.
+const ACTIVE_CALL_QUOTA: usize = 128;
+
 struct Shared {
     input: mpsc::Sender<Command>,
     cleanup: mpsc::UnboundedSender<Command>,
@@ -270,6 +311,9 @@ enum Worker {
 /// waits for the release, so a test sees whether a closer still yields.
 #[cfg(all(test, not(target_family = "wasm")))]
 type HeldEnd = (oneshot::Sender<()>, std::sync::mpsc::Receiver<()>);
+/// Bounds a test's hang only: a closer blocking its executor never releases.
+#[cfg(all(test, not(target_family = "wasm")))]
+const HELD_END_HANG_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(all(test, not(target_family = "wasm")))]
 thread_local! {
     /// Taken by the next database thread this thread starts.
@@ -289,53 +333,42 @@ impl Worker {
                 #[cfg(test)]
                 if let Some((reached, release)) = held {
                     let _ = reached.send(());
-                    // Bounds a hang only: a closer blocking its executor never releases.
-                    let _ = release.recv_timeout(std::time::Duration::from_secs(30));
+                    let _ = release.recv_timeout(HELD_END_HANG_BOUND);
                 }
                 let _ = end.send(());
             })?;
         Ok(Self::Thread { thread, ended })
     }
     /// Waits for the worker to end without blocking the caller's executor.
+    /// A thread that signalled its end has only its exit left, so it is
+    /// detached rather than joined.
     async fn join(self) -> Result<(), Failure> {
         match self {
             #[cfg(not(target_family = "wasm"))]
-            Self::Thread { thread, ended } => {
+            Self::Thread { ended, .. } => {
                 ended.await.map_err(|_| "database thread failed")?;
-                // Only the thread's exit remains; it is detached, not joined.
-                drop(thread);
             }
             #[cfg(any(test, target_family = "wasm"))]
             Self::Task(task) => task.await.map_err(|_| "database task failed")?,
         }
         Ok(())
     }
-    /// Waits for the worker's end from a synchronous opener.
+    /// Waits for the worker's end from a synchronous opener. A task needs
+    /// no wait: it ends with the error it sent.
     #[cfg(not(target_family = "wasm"))]
     fn release(self) {
         match self {
             Self::Thread { thread, .. } => drop(thread.join()),
-            // A task ends with the error it sent.
             #[cfg(test)]
             Self::Task(_) => {}
         }
     }
 }
+/// Blocking installs and opens, native only: each blocks the caller until
+/// the database is open, which a browser cannot; `Configuration` opens
+/// without blocking.
+#[cfg(not(target_family = "wasm"))]
 impl Database {
-    /// Replica-local measurement support for release qualification probes.
-    #[cfg(feature = "qualification")]
-    pub async fn lock_measurements(&self) -> Result<rocky_secure::LockMeasurements, Failure> {
-        Ok(self.shared.request(Command::LockMeasurements).await?)
-    }
-    #[cfg(feature = "qualification")]
-    pub async fn reactor_measurements(&self) -> Result<crate::ReactorMeasurements, Failure> {
-        self.shared
-            .request(Command::ReactorMeasurements)
-            .await?
-            .ok_or_else(|| "reactor measurement context missing".into())
-    }
-    // Blocks the caller until the database is open, which a browser cannot.
-    #[cfg(not(target_family = "wasm"))]
     /// Creates a domain in an empty directory under a fresh root key, which
     /// `Opened::root` hands back once; see `create_with_root`. Credentials
     /// last `credential_ttl` seconds, 30 days by default.
@@ -349,8 +382,6 @@ impl Database {
         opened.root = Some(created);
         Ok(opened)
     }
-    // Blocks the caller until the database is open, which a browser cannot.
-    #[cfg(not(target_family = "wasm"))]
     /// Creates a domain in an empty directory whose root `root` signs it:
     /// the genesis and a trusted grant to this device's own identity, which
     /// it runs on from then on. The root is dropped when the domain is
@@ -365,42 +396,12 @@ impl Database {
             Self::create_install(credential_ttl, root, None, None)?,
         )
     }
-    fn create_install(
-        credential_ttl: Option<u64>,
-        root: Arc<dyn crate::IdentityProvider>,
-        bookmark: Option<&'static str>,
-        personal: Option<Box<crate::personal::Create>>,
-    ) -> Result<Install, Failure> {
-        let ttl = credential_ttl.unwrap_or(DEFAULT_TTL);
-        if !(60..=366 * 24 * 60 * 60).contains(&ttl) {
-            return Err("credential lifetime must be between a minute and a year".into());
-        }
-        Ok(Install::Create {
-            ttl,
-            root: std::sync::Mutex::new(Some(root)),
-            bookmark,
-            personal,
-        })
-    }
-    // Blocks the caller until the database is open, which a browser cannot.
-    #[cfg(not(target_family = "wasm"))]
     /// Enrolls this device with the issuer an invitation names, as the
     /// grant profile it names, over `open.network`, which stays attached.
     pub fn join(open: Open<'_>, invitation: &str) -> Result<Opened, Failure> {
         let install = Self::join_install(&open, invitation, "")?;
         Self::start(open, install)
     }
-    fn join_install(open: &Open<'_>, invitation: &str, name: &str) -> Result<Install, Failure> {
-        if open.network.is_none() {
-            return Err(ServiceError::NetworkRequired("join").into());
-        }
-        Ok(Install::Join {
-            invitation: invitation.into(),
-            name: name.into(),
-        })
-    }
-    // Blocks the caller until the database is open, which a browser cannot.
-    #[cfg(not(target_family = "wasm"))]
     /// Installs another node of the identity `open.identity` supplies: a
     /// node of that identity, which `contact` names, hands it what the
     /// identity holds over `open.network`, and its provider certifies this
@@ -420,6 +421,108 @@ impl Database {
             },
         )
     }
+    /// Installs credentials and reader keys supplied for the device that
+    /// `device` prepared. They are verified like any others; no issuer is
+    /// contacted and no network is needed.
+    pub fn install(open: Open<'_>, supplied: Supplied) -> Result<Opened, Failure> {
+        Self::start(open, Install::Supplied(Box::new(supplied)))
+    }
+    /// Opens the domain installed in the directory. A member whose
+    /// credentials expired renews them over `open.network` first.
+    pub fn open(open: Open<'_>) -> Result<Opened, Failure> {
+        Self::start(open, Install::Installed)
+    }
+    /// Opens after the application confirms the exact removal impact report.
+    pub fn open_confirmed(open: Open<'_>, digest: &str) -> Result<Opened, Failure> {
+        Self::start_confirmed(open, Install::Installed, Some(digest.into()))
+    }
+    /// Restores a backup archive into an empty directory under a fresh
+    /// signing identity, which `invitation` enrolls over `open.network`.
+    /// The archive's operations, handles, tickets, results and effects keep
+    /// their original identities; nothing is sent again as new work. An
+    /// interrupted restore continues when called again.
+    /// `Configuration::restore` does the same without blocking.
+    pub fn restore(open: Open<'_>, archive: &Path, invitation: &str) -> Result<Opened, Failure> {
+        let install = Self::restore_install(&open, archive, invitation)?;
+        Self::start(open, install)
+    }
+    /// The root recovers a domain from a backup archive of one of its
+    /// trusted nodes with every trusted node and device lost: into an empty
+    /// directory, under a fresh trusted identity the root grants, with every
+    /// key the archived node held opened from its root escrow. A key the
+    /// escrow lacks fails the recovery and is named. The root revokes the
+    /// lost trusted identities (`Opened::revoked`), then is dropped. See
+    /// `Configuration::recover`.
+    pub fn recover(
+        open: Open<'_>,
+        archive: &Path,
+        root: &crate::RootKey,
+    ) -> Result<Opened, Failure> {
+        Self::start(open, Self::recover_install(archive, root))
+    }
+    fn start(open: Open<'_>, install: Install) -> Result<Opened, Failure> {
+        Self::start_confirmed(open, install, None)
+    }
+    fn start_confirmed(
+        open: Open<'_>,
+        install: Install,
+        confirmation: Option<String>,
+    ) -> Result<Opened, Failure> {
+        let (setup, network) = Self::setup(open, install, confirmation)?;
+        let (input, receiver) = mpsc::channel(32);
+        let (cleanup, cleanups) = mpsc::unbounded_channel();
+        let (hello, greeting) = std::sync::mpsc::sync_channel::<Greeting>(1);
+        let hello = Hello::Thread(hello);
+        let worker =
+            Worker::thread(move || serve_on_thread(setup, network, receiver, cleanups, &hello))?;
+        match greeting.recv().map_err(|_| "database failed to start")? {
+            Ok(ready) => Ok(Self::opened(ready, input, cleanup, worker)),
+            Err(error) => {
+                worker.release();
+                Err(error)
+            }
+        }
+    }
+}
+impl Database {
+    /// Replica-local measurement support for release qualification probes.
+    #[cfg(feature = "qualification")]
+    pub async fn lock_measurements(&self) -> Result<rocky_secure::LockMeasurements, Failure> {
+        Ok(self.shared.request(Command::LockMeasurements).await?)
+    }
+    #[cfg(feature = "qualification")]
+    pub async fn reactor_measurements(&self) -> Result<crate::ReactorMeasurements, Failure> {
+        self.shared
+            .request(Command::ReactorMeasurements)
+            .await?
+            .ok_or_else(|| "reactor measurement context missing".into())
+    }
+    fn create_install(
+        credential_ttl: Option<u64>,
+        root: Arc<dyn crate::IdentityProvider>,
+        bookmark: Option<&'static str>,
+        personal: Option<Box<crate::personal::Create>>,
+    ) -> Result<Install, Failure> {
+        let ttl = credential_ttl.unwrap_or(DEFAULT_TTL);
+        if !(60..=366 * 24 * 60 * 60).contains(&ttl) {
+            return Err("credential lifetime must be between a minute and a year".into());
+        }
+        Ok(Install::Create {
+            ttl,
+            root: std::sync::Mutex::new(Some(root)),
+            bookmark,
+            personal,
+        })
+    }
+    fn join_install(open: &Open<'_>, invitation: &str, name: &str) -> Result<Install, Failure> {
+        if open.network.is_none() {
+            return Err(ServiceError::NetworkRequired("join").into());
+        }
+        Ok(Install::Join {
+            invitation: invitation.into(),
+            name: name.into(),
+        })
+    }
     /// Prepares public node keys for external enrollment under an explicit identity.
     /// Keep the provider outside Rocky and supply it again when installing the answer.
     pub fn node_keys_of(
@@ -435,39 +538,6 @@ impl Database {
         let secrets =
             secrets.unwrap_or_else(|| Arc::new(FileSecretStore::new(directory.join("secrets"))));
         Settings::prepare_install(&path, &secrets, identity)
-    }
-    // Blocks the caller until the database is open, which a browser cannot.
-    #[cfg(not(target_family = "wasm"))]
-    /// Installs credentials and reader keys supplied for the device that
-    /// `device` prepared. They are verified like any others; no issuer is
-    /// contacted and no network is needed.
-    pub fn install(open: Open<'_>, supplied: Supplied) -> Result<Opened, Failure> {
-        Self::start(open, Install::Supplied(Box::new(supplied)))
-    }
-    // Blocks the caller until the database is open, which a browser cannot.
-    #[cfg(not(target_family = "wasm"))]
-    /// Opens the domain installed in the directory. A member whose
-    /// credentials expired renews them over `open.network` first.
-    pub fn open(open: Open<'_>) -> Result<Opened, Failure> {
-        Self::start(open, Install::Installed)
-    }
-    // Blocks the caller until the database is open, which a browser cannot.
-    #[cfg(not(target_family = "wasm"))]
-    /// Opens after the application confirms the exact removal impact report.
-    pub fn open_confirmed(open: Open<'_>, digest: &str) -> Result<Opened, Failure> {
-        Self::start_confirmed(open, Install::Installed, Some(digest.into()))
-    }
-    // Blocks the caller until the database is open, which a browser cannot.
-    #[cfg(not(target_family = "wasm"))]
-    /// Restores a backup archive into an empty directory under a fresh
-    /// signing identity, which `invitation` enrolls over `open.network`.
-    /// The archive's operations, handles, tickets, results and effects keep
-    /// their original identities; nothing is sent again as new work. An
-    /// interrupted restore continues when called again.
-    /// `Configuration::restore` does the same without blocking.
-    pub fn restore(open: Open<'_>, archive: &Path, invitation: &str) -> Result<Opened, Failure> {
-        let install = Self::restore_install(&open, archive, invitation)?;
-        Self::start(open, install)
     }
     pub(crate) async fn launch_restore(
         open: Open<'_>,
@@ -489,22 +559,6 @@ impl Database {
             archive: archive.to_path_buf(),
             invitation: invitation.into(),
         })
-    }
-    // Blocks the caller until the database is open, which a browser cannot.
-    #[cfg(not(target_family = "wasm"))]
-    /// The root recovers a domain from a backup archive of one of its
-    /// trusted nodes with every trusted node and device lost: into an empty
-    /// directory, under a fresh trusted identity the root grants, with every
-    /// key the archived node held opened from its root escrow. A key the
-    /// escrow lacks fails the recovery and is named. The root revokes the
-    /// lost trusted identities (`Opened::revoked`), then is dropped. See
-    /// `Configuration::recover`.
-    pub fn recover(
-        open: Open<'_>,
-        archive: &Path,
-        root: &crate::RootKey,
-    ) -> Result<Opened, Failure> {
-        Self::start(open, Self::recover_install(archive, root))
     }
     pub(crate) async fn launch_recover(
         open: Open<'_>,
@@ -535,33 +589,6 @@ impl Database {
     pub async fn export_backup(&self) -> Result<Vec<u8>, Failure> {
         self.shared.request(Command::Export).await?
     }
-    // Blocks the caller until the database is open, which a browser cannot.
-    #[cfg(not(target_family = "wasm"))]
-    fn start(open: Open<'_>, install: Install) -> Result<Opened, Failure> {
-        Self::start_confirmed(open, install, None)
-    }
-    // Blocks the caller until the database is open, which a browser cannot.
-    #[cfg(not(target_family = "wasm"))]
-    fn start_confirmed(
-        open: Open<'_>,
-        install: Install,
-        confirmation: Option<String>,
-    ) -> Result<Opened, Failure> {
-        let (setup, network) = Self::setup(open, install, confirmation)?;
-        let (input, receiver) = mpsc::channel(32);
-        let (cleanup, cleanups) = mpsc::unbounded_channel();
-        let (hello, greeting) = std::sync::mpsc::sync_channel::<Greeting>(1);
-        let hello = Hello::Thread(hello);
-        let worker =
-            Worker::thread(move || serve_on_thread(setup, network, receiver, cleanups, &hello))?;
-        match greeting.recv().map_err(|_| "database failed to start")? {
-            Ok(ready) => Ok(Self::opened(ready, input, cleanup, worker)),
-            Err(error) => {
-                worker.release();
-                Err(error)
-            }
-        }
-    }
     /// Opens without blocking the caller: natively the database gets its
     /// own thread, as `start` gives it; in a browser it is a task on the
     /// Worker's event loop.
@@ -580,7 +607,6 @@ impl Database {
             Worker::thread(move || serve_on_thread(setup, network, receiver, cleanups, &hello))?;
         #[cfg(target_family = "wasm")]
         let worker = {
-            // Everything after this is synchronous storage.
             rocky_platform::fs::prepare(&setup.directory.join("rocky.sqlite")).await?;
             Worker::Task(crate::reactor::spawn_local("database", async move {
                 if let Err(error) = run(setup, network, receiver, cleanups, &hello).await {
@@ -692,7 +718,7 @@ impl Database {
         let shared = Arc::new(Shared {
             input,
             cleanup,
-            budget: Semaphore::new(128),
+            budget: Semaphore::new(ACTIVE_CALL_QUOTA),
             closed: AtomicBool::new(false),
             sessions: AtomicU64::new(1),
         });
@@ -889,7 +915,6 @@ impl Database {
         let greeting = greeting
             .await
             .unwrap_or_else(|_| Err("database failed to start".into()));
-        // The task ends with the error it sent.
         let opened = Self::opened(greeting?, input, cleanup, Worker::Task(task));
         let node = exposed
             .try_recv()
@@ -1451,15 +1476,7 @@ async fn identity(
         ..
     } = setup;
     let exists = rocky_platform::fs::exists(path);
-    // A restore interrupted after it enrolled continues, as does a recovery
-    // interrupted after it saved its identity.
-    let resuming = match install {
-        Install::Restore { .. } => {
-            rocky_platform::fs::exists(directory.join(crate::backup::MARKER))
-        }
-        Install::Recover { .. } => crate::recovery::unfinished(directory)?.is_some(),
-        _ => false,
-    };
+    let resuming = install.resumes_interrupted(directory)?;
     if exists && !matches!(install, Install::Installed) && !resuming {
         return Err("a domain exists in this directory: open it instead".into());
     }
@@ -1507,7 +1524,6 @@ async fn identity(
                         &*root,
                         (&personal.namespace, discovery),
                     )?;
-                    // What an interrupted attempt wrote besides its intent goes.
                     if installing.resumed() {
                         remove_installation(directory)?;
                     }
@@ -1625,7 +1641,6 @@ async fn identity(
             root,
             archived,
         } => {
-            // The root stays for `run_inner` to revoke the lost identities.
             let root = root
                 .lock()
                 .map_err(|_| "root poisoned")?
@@ -1685,13 +1700,30 @@ pub(crate) async fn attach(
     replica
         .install_readable_tables(domain.logical().clone(), domain.scope, domain.readers())
         .await?;
-    // A settings file restored on its own may have lost groups the
-    // replica holds; the vault still keeps their secrets.
     if settings.recover_groups(vault, domain, &replica.retained_partitions().await?)? {
         settings.save(path)?;
     }
-    // Every readable member's key derives from its group secret,
-    // including a table that joined the group in a later generation.
+    install_group_keys(replica, settings, vault, domain).await?;
+    if replica.role().await?.role == rocky_secure::ReplicaRole::Partial {
+        hold_late_group_members(replica, settings, domain).await?;
+    }
+    replica
+        .register_credential_signer(rocky_credentials::PrivateKey::from_bytes(
+            &vault.get("node")?,
+        ))
+        .await?;
+    crate::escrow::keep(replica, settings, vault, domain).await
+}
+
+/// Registers the granted members of every group partition and installs
+/// each readable member's keys, which derive from its group secret, also
+/// for a table that joined the group in a later generation.
+async fn install_group_keys(
+    replica: &EncryptedReplica<rocky_core::TypedRows>,
+    settings: &Settings,
+    vault: &crate::secrets::Vault,
+    domain: &crate::domain::Domain,
+) -> Result<(), Failure> {
     let granted = settings.granted(domain);
     for partition in settings.partitions(domain)? {
         for member in &partition.members {
@@ -1700,9 +1732,9 @@ pub(crate) async fn attach(
                     .register_partition(member.scope, member.tuple.clone(), partition.record.name)
                     .await?;
             }
-            // Newest first: earlier epochs then join its history.
             if settings.reads_partition(domain, member) {
-                for epoch in partition.record.epochs.iter().rev() {
+                let newest_first = partition.record.epochs.iter().rev();
+                for epoch in newest_first {
                     replica
                         .install_key_epoch(partition.key(vault, member, *epoch)?)
                         .await?;
@@ -1710,32 +1742,31 @@ pub(crate) async fn attach(
             }
         }
     }
-    // On a partial replica, a table that joined a group in a later
-    // generation is held wherever its group partition is.
-    if replica.role().await?.role == rocky_secure::ReplicaRole::Partial {
-        for partition in settings.partitions(domain)? {
-            let mut held = false;
-            let mut unrecorded = Vec::new();
-            for member in &partition.members {
-                match replica.subscription(member.scope).await? {
-                    Some(rocky_secure::Holding::Held) => held = true,
-                    None if settings.reads_partition(domain, member) => {
-                        unrecorded.push(member.scope)
-                    }
-                    _ => {}
-                }
-            }
-            for scope in unrecorded.into_iter().filter(|_| held) {
-                replica.subscribe(scope).await?;
+    Ok(())
+}
+
+/// On a partial replica, holds a table that joined a group in a later
+/// generation wherever its group partition is held.
+async fn hold_late_group_members(
+    replica: &EncryptedReplica<rocky_core::TypedRows>,
+    settings: &Settings,
+    domain: &crate::domain::Domain,
+) -> Result<(), Failure> {
+    for partition in settings.partitions(domain)? {
+        let mut held = false;
+        let mut unrecorded = Vec::new();
+        for member in &partition.members {
+            match replica.subscription(member.scope).await? {
+                Some(rocky_secure::Holding::Held) => held = true,
+                None if settings.reads_partition(domain, member) => unrecorded.push(member.scope),
+                _ => {}
             }
         }
+        for scope in unrecorded.into_iter().filter(|_| held) {
+            replica.subscribe(scope).await?;
+        }
     }
-    replica
-        .register_credential_signer(rocky_credentials::PrivateKey::from_bytes(
-            &vault.get("node")?,
-        ))
-        .await?;
-    crate::escrow::keep(replica, settings, vault, domain).await
+    Ok(())
 }
 
 /// Gives every granted scope without one the default retention policy.
@@ -1874,8 +1905,9 @@ async fn restore(
         let link = network.start(settings.issuer(), key).await?;
         (settings, link)
     } else {
-        // Restores admit a fresh single-use identity.
-        let joining = Settings::prepare_join(path, (invitation, ""), secrets, None)?;
+        let fresh_single_use_identity = None;
+        let joining =
+            Settings::prepare_join(path, (invitation, ""), secrets, fresh_single_use_identity)?;
         let key = Settings::transport_key(&joining.vault)?;
         let (transport, owned) = network.start(false, key).await?;
         match joining.enroll(path, schema, &*transport).await {
@@ -1913,6 +1945,149 @@ async fn restore(
         return Err(error);
     }
     Ok((settings, Some(link)))
+}
+
+/// Records the durable intent to bootstrap from a checkpoint, as before
+/// enrollment can persist the identity or when rows of a newly revoked
+/// author arrive by checkpoint only.
+fn record_checkpoint_bootstrap(directory: &Path) -> Result<(), Failure> {
+    rocky_credentials::write_private(&directory.join("bootstrap.json"), b"true")
+}
+
+/// Envelopes shared after enrollment wait at the inviter: the bootstrap
+/// intent stays until one exchange with it.
+fn record_inviter_bootstrap(
+    directory: &Path,
+    inviter: &rocky_credentials::PublicKey,
+) -> Result<(), Failure> {
+    rocky_credentials::write_private(
+        &directory.join("bootstrap.json"),
+        &serde_json::to_vec(&serde_json::json!({"intent": true, "inviter": inviter.to_hex()}))?,
+    )
+}
+
+/// Confirms a removal the installed schema implies before the network
+/// starts or anything changes.
+async fn confirm_removals(setup: &Setup, directory: &Path, path: &Path) -> Result<(), Failure> {
+    let settings = Settings::load(path)?;
+    let has_tip_schema = rocky_secure::installed_tip_schema(
+        &directory.join("rocky.sqlite"),
+        settings.domain()?.scope,
+        settings.publisher,
+        None,
+    )
+    .await?
+    .is_some();
+    if has_tip_schema {
+        crate::rollout::confirm(
+            &settings,
+            path,
+            &setup.schema,
+            setup.confirmation.as_deref(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Adopts a pending schema the replica already committed. The commit may
+/// also have advanced the bookmark past the pending tip on the same schema.
+async fn adopt_committed_pending_schema(
+    settings: &mut Settings,
+    vault: &crate::secrets::Vault,
+    directory: &Path,
+    path: &Path,
+) -> Result<(), Failure> {
+    let Some(pending) = settings.pending.clone() else {
+        return Ok(());
+    };
+    let Some(installed) = rocky_secure::installed_tip_schema(
+        &directory.join("rocky.sqlite"),
+        settings.domain()?.scope,
+        settings.publisher,
+        Some(pending.tip),
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let committed = installed.tip == pending.tip
+        || (installed.continues && installed.manifest == pending.manifest);
+    if !committed {
+        return Ok(());
+    }
+    let manifest = installed.manifest;
+    if manifest != pending.manifest {
+        return Err("pending schema differs from committed workspace".into());
+    }
+    let record = crate::tip_schemas::Record::parse(&installed.record)?;
+    let domain = record.domain(settings, manifest)?;
+    settings.schema = record.schema;
+    settings.generation = record.generation;
+    settings.engine = record.engine;
+    settings.prepare_schema(vault, &domain)?;
+    settings.pending = None;
+    settings.save(path)?;
+    Ok(())
+}
+
+/// The marker of a restore whose open steps are unfinished. A restored
+/// file is rebound to this device's identity first; the marker goes once
+/// the file holds its tables and keys, a recovery's once the root revoked
+/// the lost identities too, and until then each open repeats these steps.
+/// A recovery whose store took its keys opens as installed.
+fn unfinished_restore(marker: &Path) -> Result<Option<crate::backup::Marker>, Failure> {
+    if !rocky_platform::fs::exists(marker) {
+        return Ok(None);
+    }
+    let saved: crate::backup::Marker = serde_json::from_slice(&rocky_platform::fs::read(marker)?)?;
+    Ok((saved.recovery != Some(crate::backup::Recovery::Keyed)).then_some(saved))
+}
+
+/// Drains the work of migration commits, which precede the revision
+/// subscription, before enrollment or the first reconciliation can
+/// trigger it instead.
+async fn drain_migration_work(
+    replica: &EncryptedReplica<rocky_core::TypedRows>,
+    scope: rocky_core::Scope,
+) -> Result<(), Failure> {
+    replica.flush().await?;
+    replica.maintain().await;
+    replica.finalize_path(scope).await?;
+    Ok(())
+}
+
+/// Recovery is for lost trusted nodes: the root revokes them before anyone
+/// writes, and is dropped. The marker stays until the revocations are
+/// applied, so until then the directory opens only by recovering again.
+async fn revoke_lost_trusted(
+    node: &Node,
+    root: &std::sync::Mutex<Option<Box<crate::RootKey>>>,
+    archived: &std::sync::Mutex<Option<Box<Settings>>>,
+    directory: &Path,
+) -> Result<Vec<rocky_credentials::PublicKey>, Failure> {
+    let archived = archived
+        .lock()
+        .map_err(|_| "archive poisoned")?
+        .take()
+        .ok_or("the recovered archive was not opened")?;
+    let root: Arc<crate::RootKey> = root
+        .lock()
+        .map_err(|_| "root poisoned")?
+        .take()
+        .ok_or(crate::enrollment::PublisherRequired("recovering a domain"))?
+        .into();
+    let unfinished = |error: Failure| -> Failure {
+        format!("recovered, but {error}; recover again with its backup and the root").into()
+    };
+    crate::recovery::fault::check(directory, crate::recovery::fault::Stage::Revoking)
+        .map_err(unfinished)?;
+    let revoked = node
+        .revoke_lost(root, &archived)
+        .await
+        .map_err(unfinished)?;
+    rocky_platform::fs::remove_file(directory.join(crate::backup::MARKER))?;
+    Ok(revoked)
 }
 
 /// Serves a database on the calling thread: its tasks stay on it, and
@@ -1984,68 +2159,33 @@ async fn run_inner(
         .map_err(|_| "data directory is already in use")?;
     rocky_secure::check_replica_format(&directory.join("rocky.sqlite")).await?;
     let path = directory.join("identity.json");
-    // Record checkpoint-first intent before enrollment can persist the identity.
-    if matches!(
-        setup.install,
-        Install::Join { .. } | Install::Identity { .. }
-    ) && !rocky_platform::fs::exists(&path)
-    {
-        rocky_credentials::write_private(&directory.join("bootstrap.json"), b"true")?;
+    if setup.install.bootstraps_from_checkpoint() && !rocky_platform::fs::exists(&path) {
+        record_checkpoint_bootstrap(&directory)?;
     }
     if !matches!(setup.install, Install::Recover { .. }) {
         crate::recovery::refuse_unfinished(&directory)?;
     }
-    // A removal is confirmed before the network starts or anything changes.
     if matches!(setup.install, Install::Installed) {
-        let settings = Settings::load(&path)?;
-        if rocky_secure::installed_tip_schema(
-            &directory.join("rocky.sqlite"),
-            settings.domain()?.scope,
-            settings.publisher,
-            None,
-        )
-        .await?
-        .is_some()
-        {
-            crate::rollout::confirm(
-                &settings,
-                &path,
-                &setup.schema,
-                setup.confirmation.as_deref(),
-            )
-            .await?;
-        }
+        confirm_removals(&setup, &directory, &path).await?;
     }
-    // A create, sign-in or supplied install that fails before it is handed
-    // out takes back what it wrote; see `unwind`. A personal install keeps
-    // its intent and keys for the retry.
-    let fresh = matches!(
-        setup.install,
-        Install::Create { .. } | Install::SignIn(_) | Install::Supplied(_)
-    ) && !rocky_platform::fs::exists(&path);
+    let fresh = setup.install.unwinds_on_failure() && !rocky_platform::fs::exists(&path);
     let (mut settings, link) = match identity(&path, &setup, network).await {
         Ok(installed) => installed,
         Err(error) if fresh => return Err(unwind(&directory, None, error)),
         Err(error) => return Err(error),
     };
-    // Envelopes shared after enrollment wait at the inviter: the intent
-    // stays until one exchange with it.
     if let (Install::Join { .. }, Some(inviter)) = (&setup.install, settings.issuers.first()) {
-        rocky_credentials::write_private(
-            &directory.join("bootstrap.json"),
-            &serde_json::to_vec(&serde_json::json!({"intent": true, "inviter": inviter.to_hex()}))?,
-        )?;
+        record_inviter_bootstrap(&directory, inviter)?;
     }
     let startup_identity = setup.identity.take();
     let vault = settings.vault(&setup.secrets);
     let opened = async {
-        // A revocation interrupted after its intent was saved completes
-        // here; the replica adopts its revocations and keys as it opens.
-        if settings.rotate(&vault)?.is_some() {
+        let completed_interrupted_revocation = settings.rotate(&vault)?.is_some();
+        if completed_interrupted_revocation {
             settings.save(&path)?;
         }
-        // Expired credentials cannot open the replica: renew them first.
-        if settings.expires() <= now()? {
+        let credentials_expired = settings.expires() <= now()?;
+        if credentials_expired {
             let transport = link.as_ref().map(|(transport, _)| &**transport);
             if transport.is_none() && !settings.issuer() {
                 return Err(ServiceError::CredentialsExpired.into());
@@ -2054,9 +2194,9 @@ async fn run_inner(
                 .request_renewal(&vault, transport, false, None)
                 .await?;
             if rocky_platform::fs::exists(&path) {
-                // Rows of a newly revoked author arrive by checkpoint.
-                if settings.lacks(&renewed.revocations)? {
-                    rocky_credentials::write_private(&directory.join("bootstrap.json"), b"true")?;
+                let revokes_new_authors = settings.lacks(&renewed.revocations)?;
+                if revokes_new_authors {
+                    record_checkpoint_bootstrap(&directory)?;
                 }
                 settings.adopt(&path, &vault, &renewed)?;
             } else {
@@ -2064,54 +2204,16 @@ async fn run_inner(
                 settings.credentials = renewed.chain;
             }
         }
-        // The commit may also have advanced the bookmark past the pending
-        // tip on the same schema.
-        if let Some(pending) = settings.pending.clone()
-            && let Some(installed) = rocky_secure::installed_tip_schema(
-                &directory.join("rocky.sqlite"),
-                settings.domain()?.scope,
-                settings.publisher,
-                Some(pending.tip),
-            )
-            .await?
-            && (installed.tip == pending.tip
-                || (installed.continues && installed.manifest == pending.manifest))
-        {
-            let manifest = installed.manifest;
-            if manifest != pending.manifest {
-                return Err("pending schema differs from committed workspace".into());
-            }
-            let record = crate::tip_schemas::Record::parse(&installed.record)?;
-            let domain = record.domain(&settings, manifest)?;
-            settings.schema = record.schema;
-            settings.generation = record.generation;
-            settings.engine = record.engine;
-            settings.prepare_schema(&vault, &domain)?;
-            settings.pending = None;
-            settings.save(&path)?;
-        }
+        adopt_committed_pending_schema(&mut settings, &vault, &directory, &path).await?;
         let domain = settings.domain()?;
-        // A restored file is rebound to this device's identity first. The
-        // marker goes once the file holds its tables and keys, a recovery's
-        // once the root revoked the lost identities too; until then each
-        // open repeats these steps. A recovery whose store took its keys
-        // opens it as installed.
         let marker = directory.join(crate::backup::MARKER);
-        let restored = if rocky_platform::fs::exists(&marker) {
-            Some(serde_json::from_slice::<crate::backup::Marker>(
-                &rocky_platform::fs::read(&marker)?,
-            )?)
-        } else {
-            None
-        }
-        .filter(|saved| saved.recovery != Some(crate::backup::Recovery::Keyed));
-        let mut deferred = Vec::new();
+        let restored = unfinished_restore(&marker)?;
+        let mut keys_awaiting_tables = Vec::new();
         let replica = if let Some(restored) = &restored {
             let mut config = settings.config(&vault, &domain)?;
-            // A recovered store may never have read its frames: its keys
-            // apply them once `attach` installed the tables.
-            if restored.recovery.is_some() {
-                deferred = std::mem::take(&mut config.keys);
+            let store_may_lack_frames = restored.recovery.is_some();
+            if store_may_lack_frames {
+                keys_awaiting_tables = std::mem::take(&mut config.keys);
             }
             let replica = EncryptedReplica::open_restored(
                 directory.join("rocky.sqlite"),
@@ -2146,9 +2248,9 @@ async fn run_inner(
         };
         attach(&replica, &mut settings, &vault, &domain, &path).await?;
         crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Attached)?;
-        // Newest first: earlier epochs then join its history.
-        deferred.sort_by_key(|key| std::cmp::Reverse(key.generation));
-        for key in deferred {
+        let mut newest_first = keys_awaiting_tables;
+        newest_first.sort_by_key(|key| std::cmp::Reverse(key.generation));
+        for key in newest_first {
             replica.install_key_epoch(key).await?;
             crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Keyed)?;
         }
@@ -2238,11 +2340,7 @@ async fn run_inner(
         {
             node.follow_new_bookmark(name).await?;
         }
-        // Migration commits precede the revision subscription. Drain their work
-        // before enrollment or the first reconciliation can trigger it instead.
-        replica.flush().await?;
-        replica.maintain().await;
-        replica.finalize_path(node.domain().scope).await?;
+        drain_migration_work(&replica, node.domain().scope).await?;
         crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Started)?;
         if matches!(setup.install, Install::SignIn(_)) {
             crate::personal::fault::check(&directory, crate::personal::fault::Stage::Saved)?;
@@ -2267,58 +2365,21 @@ async fn run_inner(
         Some((transport, owned)) => Some(node.link(transport, owned).await?),
         None => None,
     };
-    // Recovery is for lost trusted nodes: the root revokes them before
-    // anyone writes, and is dropped.
     let revoked = match &setup.install {
         Install::Recover { root, archived, .. } => {
-            let archived = archived
-                .lock()
-                .map_err(|_| "archive poisoned")?
-                .take()
-                .ok_or("the recovered archive was not opened")?;
-            let root: Arc<crate::RootKey> = root
-                .lock()
-                .map_err(|_| "root poisoned")?
-                .take()
-                .ok_or(crate::enrollment::PublisherRequired("recovering a domain"))?
-                .into();
-            // The marker stays until the revocations are applied: until
-            // then the directory opens only by recovering again.
-            let unfinished = |error: Failure| -> Failure {
-                format!("recovered, but {error}; recover again with its backup and the root").into()
-            };
-            crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Revoking)
-                .map_err(unfinished)?;
-            let revoked = node
-                .revoke_lost(root, &archived)
-                .await
-                .map_err(unfinished)?;
-            rocky_platform::fs::remove_file(directory.join(crate::backup::MARKER))?;
-            revoked
+            revoke_lost_trusted(&node, root, archived, &directory).await?
         }
         _ => Vec::new(),
     };
-    // A personal install's intent ends once it is handed out; until then
-    // a retry resumes it. An open ends one an interrupted install left
-    // beside its saved identity, so no later sign-in takes that store back.
-    let personal = matches!(
-        setup.install,
-        Install::Create {
-            personal: Some(_),
-            ..
-        } | Install::SignIn(_)
-            | Install::Installed
-    );
+    let personal = setup.install.ends_personal_intent();
     if hello.send(Ok((scope, network, revoked))).is_err() {
         let abandoned: Failure = "database opener abandoned".into();
-        // Nobody received the created domain's root: the domain goes too.
-        return Err(
-            if fresh && matches!(setup.install, Install::Create { .. }) {
-                discard(node, replica, &directory, &setup.install, abandoned).await
-            } else {
-                abandoned
-            },
-        );
+        let created_root_undelivered = fresh && matches!(setup.install, Install::Create { .. });
+        return Err(if created_root_undelivered {
+            discard(node, replica, &directory, &setup.install, abandoned).await
+        } else {
+            abandoned
+        });
     }
     if personal && let Err(error) = crate::personal::finish(&directory) {
         tracing::warn!(%error, "the finished personal install intent could not be removed");
@@ -2326,11 +2387,12 @@ async fn run_inner(
     if rocky_platform::fs::exists(directory.join("bootstrap.json")) && network.is_some() {
         let joining = node.clone();
         crate::reactor::spawn_local("bootstrap", async move {
-            // Failure leaves the durable bootstrap intent for the next sync/open.
-            let _ = joining.initial_sync().await;
+            if let Err(error) = joining.initial_sync().await {
+                tracing::debug!(%error, "initial sync failed; its bootstrap intent stays for the next sync or open");
+            }
         });
     }
-    let budget = Arc::new(Semaphore::new(128));
+    let budget = Arc::new(Semaphore::new(ACTIVE_CALL_QUOTA));
     let connections = Arc::new(connection::Registry::default());
     let mut tasks = rocky_platform::task::JoinSet::new();
     let mut shutdown = None;
@@ -2420,8 +2482,9 @@ async fn run_inner(
                     if let Ok(connection) = &result {
                         timing.finish(connection.id);
                     }
-                    // The reply owns the handle, so dropping an unread reply also disconnects.
-                    let _ = reply.send(result);
+                    if let Err(Ok(unread_connection)) = reply.send(result) {
+                        drop(unread_connection);
+                    }
                 });
             }
             Command::Sql {
@@ -2532,22 +2595,12 @@ async fn run_inner(
     }
     recovering.abort();
     let _ = recovering.await;
-    node.end_sessions(None);
-    // Open transactions roll back and cursors end before the file closes.
-    connections.close(None);
-    // Calls that use the network end within its drain bound; an attach
-    // still pending is detached by the second pass.
-    node.detach(None).await;
-    while tasks.join_next().await.is_some() {}
-    node.detach(None).await;
+    end_users_of_file(&node, &connections, &mut tasks).await;
     let purge = node.lifecycle.lock().await.purge_on_close();
     drop(node);
     settling.abort();
     let _ = settling.await;
-    // Dropping the last handle closes the file.
-    let mut result = replica.flush().await.map(drop).map_err(|e| e.to_string());
-    replica.optimize().await;
-    drop(replica);
+    let mut result = close_file(replica).await;
     if purge && result.is_ok() {
         result = purge_directory(&directory).map_err(|e| e.to_string());
     }
@@ -2556,11 +2609,36 @@ async fn run_inner(
     }
     Ok(())
 }
+/// Ends everything that uses the file before it closes: sessions end, open
+/// transactions roll back and cursors end, and calls that use the network
+/// end within its drain bound. An attach still pending once the tasks are
+/// joined is detached by the second pass.
+async fn end_users_of_file(
+    node: &Node,
+    connections: &connection::Registry,
+    tasks: &mut rocky_platform::task::JoinSet<()>,
+) {
+    node.end_sessions(None);
+    connections.close(None);
+    node.detach(None).await;
+    while tasks.join_next().await.is_some() {}
+    node.detach(None).await;
+}
+/// Flushes and optimizes the replica, then drops this last handle, which
+/// closes the file.
+async fn close_file(replica: EncryptedReplica<rocky_core::TypedRows>) -> Result<(), String> {
+    let flushed = replica.flush().await.map(drop).map_err(|e| e.to_string());
+    replica.optimize().await;
+    drop(replica);
+    flushed
+}
 /// Flushes buffered SQL commits and runs their queued maintenance after
 /// they answer. The flush runs on a blocking thread and covers every
 /// commit that arrived during the previous flush. A flush failure surfaces
 /// at the next call that exposes data, which flushes itself. Failed background
-/// flushes retain maintenance and retry with backoff.
+/// flushes retain maintenance and retry with backoff. Maintenance left over
+/// retries soon: a concurrent commit leaves its revision pending too, and
+/// the timer also covers work present before this driver's subscription.
 async fn settle_commits(replica: EncryptedReplica<rocky_core::TypedRows>) {
     let mut revisions = replica.observe_revision();
     revisions.mark_changed();
@@ -2578,8 +2656,6 @@ async fn settle_commits(replica: EncryptedReplica<rocky_core::TypedRows>) {
         }
         match replica.flush().await {
             Ok(_) if replica.maintain().await => retry.reset(),
-            // A concurrent commit leaves its revision pending too. The timer
-            // also covers work present before this driver's subscription.
             Ok(_) => retry.soon(),
             Err(error) => {
                 tracing::warn!(%error, "background flush failed; maintenance remains queued");
@@ -2625,8 +2701,8 @@ fn unwind(
     created: Option<(&crate::secrets::Vault, Vec<String>)>,
     error: Failure,
 ) -> Failure {
-    // A crash takes back nothing: the next attempt finds what it wrote.
-    if crate::personal::fault::crashed(&error) {
+    let next_attempt_finds_what_it_wrote = crate::personal::fault::crashed(&error);
+    if next_attempt_finds_what_it_wrote {
         return error;
     }
     if let Some((vault, roles)) = created {
@@ -2692,7 +2768,6 @@ mod tests {
             reaching
                 .await
                 .map_err(|_| -> Failure { "the database thread never ended".into() })?;
-            // Runs only while the close yields this thread.
             release
                 .send(())
                 .map_err(|_| -> Failure { "the close blocked its executor".into() })
@@ -2704,7 +2779,6 @@ mod tests {
     }
 
     #[cfg(feature = "qualification")]
-    // Needs threads, which a browser Worker lacks.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn blocking_reactor_task_and_queued_sql_call_are_attributed() -> Result<(), Failure> {
@@ -2762,8 +2836,8 @@ mod tests {
                 reply,
             })
             .await?;
-        // Deliberately block the reactor, while a real connection call is queued.
-        while queued.elapsed() < std::time::Duration::from_millis(2) {
+        let deliberate_reactor_block = std::time::Duration::from_millis(2);
+        while queued.elapsed() < deliberate_reactor_block {
             std::hint::spin_loop();
         }
         resume.send(())?;
@@ -2813,7 +2887,6 @@ mod tests {
         Ok(())
     }
 
-    // Needs a native file system.
     #[cfg(not(target_family = "wasm"))]
     #[test]
     fn purge_leaves_no_installation_state_for_a_later_join() -> Result<(), Failure> {
@@ -2831,8 +2904,11 @@ mod tests {
         }
         std::fs::create_dir(directory.path().join("secrets"))?;
         purge_directory(directory.path())?;
-        // A stale revocation notice fails every status of the next installation here.
-        assert_eq!(std::fs::read_dir(directory.path())?.count(), 0);
+        assert_eq!(
+            std::fs::read_dir(directory.path())?.count(),
+            0,
+            "a stale revocation notice left here fails every status of the next installation"
+        );
         Ok(())
     }
 
@@ -2879,7 +2955,6 @@ mod tests {
 
     /// A supplied install that fails keeps the prepared device keys, so the
     /// same credentials install on a retry.
-    // `Database::install` blocks its caller.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_supplied_install_failing_before_it_is_handed_out_installs_on_a_retry()
@@ -2926,7 +3001,6 @@ mod tests {
         issuer.close().await
     }
 
-    // Needs threads, which a browser Worker lacks.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn old_database_is_refused_before_enrollment_or_database_writes() -> Result<(), Failure> {
@@ -2986,7 +3060,6 @@ mod tests {
         Ok(())
     }
 
-    // Needs threads, which a browser Worker lacks.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn populated_consumer_continues_its_writer_sequence_after_reopen() -> Result<(), Failure>
@@ -3058,7 +3131,6 @@ mod tests {
         Ok(())
     }
 
-    // Needs threads, which a browser Worker lacks.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn saturated_waits_cannot_block_session_shutdown() -> Result<(), Failure> {
@@ -3078,8 +3150,8 @@ mod tests {
         let session = database.session();
         let status = session.status().await?;
         let mut replies = Vec::new();
-        // Queue every wait before End, without sleeps or scheduler assumptions.
-        for _ in 0..129 {
+        let saturating_waits_queued_before_end = ACTIVE_CALL_QUOTA + 1;
+        for _ in 0..saturating_waits_queued_before_end {
             let (reply, receiver) = oneshot::channel();
             database
                 .shared

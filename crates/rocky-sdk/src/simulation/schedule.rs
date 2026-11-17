@@ -300,7 +300,6 @@ pub(super) fn plan(seed: u64, scenario: Scenario) -> Vec<Action> {
     let mut draws = Draws::new(seed);
     let total: u64 = WEIGHTS.iter().map(|(_, weight)| weight).sum();
     let mut steps = Vec::with_capacity(scenario.steps);
-    // Planned members; the schedule never depends on what happened.
     let mut members = 2;
     let mut revoked = false;
     let mut branches: Vec<String> = Vec::new();
@@ -308,8 +307,7 @@ pub(super) fn plan(seed: u64, scenario: Scenario) -> Vec<Action> {
     while steps.len() < scenario.steps {
         let index = steps.len();
         let node = |draws: &mut Draws| draws.below(members as u64) as usize;
-        // Only the owner signs tip statements; others are mostly refused.
-        let signer = |draws: &mut Draws| match draws.chance(700) {
+        let signer = |draws: &mut Draws| match draws.chance(OWNER_SIGNS_PER_MILLE) {
             true => 0,
             false => draws.below(members as u64) as usize,
         };
@@ -394,9 +392,6 @@ pub(super) fn plan(seed: u64, scenario: Scenario) -> Vec<Action> {
             }
             Kind::Invite | Kind::Revoke => continue,
         };
-        // The device testing's paths: a member joining after a seal, a
-        // restart during its bootstrap, a seal while another node follows
-        // a branch.
         let follow = match &action {
             Action::Seal(_) if members < scenario.nodes && draws.chance(400) => {
                 members += 1;
@@ -571,9 +566,6 @@ fn relational(seed: u64, scenario: Scenario) -> Vec<Action> {
             Lifecycle::Offline => Action::Offline(node(&mut draws)),
             Lifecycle::Online => Action::Online(node(&mut draws)),
         };
-        // The lifecycle paths: a member joining after a compacted seal
-        // imports a checkpoint, a crash during that import, a share to a
-        // new member, and a compaction right after a seal.
         let follow = match &action {
             Action::Seal(0) if draws.chance(500) => Some(Action::Compact(0)),
             Action::Compact(_) if members < scenario.nodes && draws.chance(400) => {
@@ -596,6 +588,13 @@ fn relational(seed: u64, scenario: Scenario) -> Vec<Action> {
     steps
 }
 
+/// Chance per mille that the owner signs a tip statement; other signers
+/// are mostly refused.
+const OWNER_SIGNS_PER_MILLE: u16 = 700;
+/// Board caps span `3..=13`; 13 breaks the schema's `cap BETWEEN 1 AND 12`
+/// check where it is written.
+const MIN_BOARD_CAP: u8 = 3;
+const BOARD_CAP_SPREAD: u64 = 11;
 fn change(draws: &mut Draws, lists: &[String]) -> Change {
     let list = |draws: &mut Draws| lists[draws.below(lists.len() as u64) as usize].clone();
     let small = |draws: &mut Draws, below: u64| draws.below(below) as u8;
@@ -603,8 +602,7 @@ fn change(draws: &mut Draws, lists: &[String]) -> Change {
         0..=3 => Change::Board {
             list: list(draws),
             code: small(draws, 4),
-            // 13 breaks the check where it is written.
-            cap: 3 + small(draws, 11),
+            cap: MIN_BOARD_CAP + small(draws, BOARD_CAP_SPREAD),
         },
         4..=8 => Change::Card {
             list: list(draws),

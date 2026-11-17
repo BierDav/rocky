@@ -7,9 +7,9 @@ use crate::logical::{Token, keyword, tokenize};
 /// SQLite functions whose result depends only on their arguments and the
 /// engine build. Part of the engine identity a tip records. Functions that
 /// turn INTEGER values into REAL ones (`avg`, `total`, `round`, `mod`) are
-/// left out, so exact columns never pass through binary floating point.
+/// left out, so exact columns never pass through binary floating point;
+/// Rocky registers the `checked_*` arithmetic, which fails on `i64` overflow.
 pub const DETERMINISTIC_FUNCTIONS: &[&str] = &[
-    // Scalar.
     "abs",
     "char",
     "coalesce",
@@ -45,17 +45,14 @@ pub const DETERMINISTIC_FUNCTIONS: &[&str] = &[
     "unlikely",
     "upper",
     "zeroblob",
-    // Arithmetic that fails on `i64` overflow; Rocky registers these.
     "checked_add",
     "checked_div",
     "checked_mul",
     "checked_sub",
-    // Aggregate.
     "count",
     "group_concat",
     "string_agg",
     "sum",
-    // Window.
     "cume_dist",
     "dense_rank",
     "first_value",
@@ -67,7 +64,6 @@ pub const DETERMINISTIC_FUNCTIONS: &[&str] = &[
     "percent_rank",
     "rank",
     "row_number",
-    // JSON.
     "json",
     "json_array",
     "json_array_length",
@@ -152,10 +148,9 @@ fn refused_call(tokens: &[Token]) -> Option<String> {
             _ => continue,
         };
         let called = tokens.get(index + 1) == Some(&Token::Symbol('('));
-        // `CAST(x AS DECIMAL(10,2))` names a type, not a function.
-        let typed = index > 0 && keyword(&tokens[index - 1], "AS");
+        let names_cast_type = index > 0 && keyword(&tokens[index - 1], "AS");
         let word = matches!(token, Token::Word(_));
-        if !called || typed || (word && KEYWORDS.contains(&name.as_str())) {
+        if !called || names_cast_type || (word && KEYWORDS.contains(&name.as_str())) {
             continue;
         }
         if !DETERMINISTIC_FUNCTIONS.contains(&name.as_str()) {
@@ -188,7 +183,6 @@ fn body(tokens: &[Token], open: usize) -> &[Token] {
 /// evaluates them on every replica.
 fn expressions(tokens: &[Token]) -> Vec<&[Token]> {
     if tokens.iter().any(|token| keyword(token, "INDEX")) {
-        // Everything after the indexed table's name.
         return tokens
             .iter()
             .position(|token| *token == Token::Symbol('('))
@@ -270,7 +264,8 @@ pub(crate) enum AssertionShape {
     Refused(String),
 }
 
-/// The tables an assertion's `SELECT` reads. Refuses `WITH`, qualified
+/// The tables an assertion's `SELECT` reads, including those named by the
+/// `FROM` lists of subqueries and nested joins. Refuses `WITH`, qualified
 /// names and table-valued functions rather than guessing at them.
 pub(crate) fn assertion_tables(select_sql: &str) -> AssertionShape {
     let refused = |reason: &str| AssertionShape::Refused(reason.into());
@@ -280,43 +275,45 @@ pub(crate) fn assertion_tables(select_sql: &str) -> AssertionShape {
     if !tokens.first().is_some_and(|token| keyword(token, "SELECT")) {
         return refused("must be one SELECT");
     }
-    // Depths whose FROM list is open; whether a table source comes next.
-    let (mut depth, mut lists, mut expect) = (0usize, Vec::<usize>::new(), false);
+    let mut depth = 0usize;
+    let mut open_from_depths = Vec::<usize>::new();
+    let mut table_source_next = false;
     let mut tables = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
         let next = tokens.get(index + 1);
         match token {
-            // A subquery or nested join: its own FROM lists name its tables.
             Token::Symbol('(') => {
-                expect = false;
+                table_source_next = false;
                 depth += 1;
             }
             Token::Symbol(')') => {
-                lists.retain(|open| *open < depth);
+                open_from_depths.retain(|open| *open < depth);
                 let Some(outer) = depth.checked_sub(1) else {
                     return refused("unbalanced parentheses");
                 };
                 depth = outer;
             }
             Token::Symbol(';') => return refused("must be one SELECT"),
-            Token::Symbol(',') if lists.last() == Some(&depth) => expect = true,
-            Token::Word(word) if !expect || keyword(token, "WITH") => {
+            Token::Symbol(',') if open_from_depths.last() == Some(&depth) => {
+                table_source_next = true
+            }
+            Token::Word(word) if !table_source_next || keyword(token, "WITH") => {
                 let word = word.to_ascii_lowercase();
                 match word.as_str() {
                     "with" => return refused("WITH is not supported"),
                     "from" => {
-                        if lists.last() != Some(&depth) {
-                            lists.push(depth);
+                        if open_from_depths.last() != Some(&depth) {
+                            open_from_depths.push(depth);
                         }
-                        expect = true;
+                        table_source_next = true;
                     }
-                    "join" => expect = true,
+                    "join" => table_source_next = true,
                     "where" | "group" | "having" | "order" | "limit" | "window" | "union"
-                    | "except" | "intersect" => lists.retain(|open| *open < depth),
+                    | "except" | "intersect" => open_from_depths.retain(|open| *open < depth),
                     _ => {}
                 }
             }
-            Token::Word(name) | Token::Quoted(name) if expect => {
+            Token::Word(name) | Token::Quoted(name) if table_source_next => {
                 if next == Some(&Token::Symbol('.')) {
                     return refused("qualified table names are not supported");
                 }
@@ -324,13 +321,13 @@ pub(crate) fn assertion_tables(select_sql: &str) -> AssertionShape {
                     return refused("table-valued functions are not supported");
                 }
                 tables.push(name.to_ascii_lowercase());
-                expect = false;
+                table_source_next = false;
             }
-            _ if expect => return refused("unsupported table source"),
+            _ if table_source_next => return refused("unsupported table source"),
             _ => {}
         }
     }
-    if depth != 0 || expect {
+    if depth != 0 || table_source_next {
         return refused("unbalanced parentheses");
     }
     if let Some(function) = refused_call(&tokens) {

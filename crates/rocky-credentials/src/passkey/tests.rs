@@ -19,9 +19,12 @@ fn derived(credential: u8, namespace: &PersonalNamespace) -> PersonalAccount {
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_fixed_prf_restores_the_same_distinct_root_identity_and_locator() {
     let account = derived(1, &namespace("account root"));
-    // An empty device evaluating the same credential derives it all again.
     let again = derived(1, &namespace("account root"));
-    assert_eq!(account.root().secret(), again.root().secret());
+    assert_eq!(
+        account.root().secret(),
+        again.root().secret(),
+        "an empty device evaluating the same credential derives it all again"
+    );
     assert_eq!(account.identity().secret(), again.identity().secret());
     assert_eq!(account.locator(), again.locator());
     assert_eq!(account.discovery().topic(), again.discovery().topic());
@@ -36,13 +39,15 @@ fn a_fixed_prf_restores_the_same_distinct_root_identity_and_locator() {
         locator.scope("notes").app,
         ApplicationManifest::app_id(*locator.publisher.as_bytes(), "notes")
     );
-    // Three distinct secrets: root, identity and the discovery capability.
     let secrets = [
         account.root().secret(),
         account.identity().secret(),
         *account.discovery().topic(),
     ];
-    assert!(secrets[0] != secrets[1] && secrets[1] != secrets[2] && secrets[0] != secrets[2]);
+    assert!(
+        secrets[0] != secrets[1] && secrets[1] != secrets[2] && secrets[0] != secrets[2],
+        "root, identity and discovery capability are three distinct secrets"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -50,16 +55,19 @@ fn the_root_and_identity_keep_the_existing_derivation_vectors() {
     let ns = namespace("account root");
     let input = ns.prf_input().unwrap();
     let account = PersonalAccount::derive(VerifiedPasskeyPrf::new(&input, [7; 32]), &ns).unwrap();
-    // `RootKey::from_secret(prf)` and HKDF-SHA256 "rocky identity v1".
-    assert_eq!(account.root().secret(), [7; 32]);
+    assert_eq!(
+        account.root().secret(),
+        [7; 32],
+        "the root is the PRF output itself"
+    );
     assert_eq!(
         hex(&account.identity().secret()),
         "9c390ed6e479fa7ac5add3e9107652cd7cf143dac2b4466a3a1f7178be565a91"
     );
-    // The evaluation input and the topic label are part of the format.
     assert_eq!(
         hex(input.as_bytes()),
-        hex(&rocky_core::commitment(PRF_INPUT, &ns.canonical().unwrap()))
+        hex(&rocky_core::commitment(PRF_INPUT, &ns.canonical().unwrap())),
+        "the evaluation input is part of the format"
     );
     let topic = crate::group::hkdf(
         &[],
@@ -100,8 +108,6 @@ fn other_namespaces_and_credentials_name_other_accounts() {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn the_topic_follows_the_identity_secret_not_the_public_identity() {
-    // One owner public key, two namespaces: a topic computed from the
-    // public identity alone would need only the key and the namespace.
     let ns = namespace("account root");
     let account = derived(1, &ns);
     let public = account.identity().public_key();
@@ -111,31 +117,34 @@ fn the_topic_follows_the_identity_secret_not_the_public_identity() {
             &rocky_core::commitment(label, public.as_bytes())
         );
     }
-    // The same identity secret under another namespace finds another topic.
     let identity = account.identity().secret();
     let elsewhere = crate::group::hkdf(
         &[],
         &identity,
         &[DISCOVERY, &namespace("other root").canonical().unwrap()].concat(),
     );
-    assert_ne!(account.discovery().topic(), &elsewhere);
+    assert_ne!(
+        account.discovery().topic(),
+        &elsewhere,
+        "the same identity secret under another namespace finds another topic"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn an_unusable_prf_is_refused() {
     let ns = namespace("account root");
     let input = ns.prf_input().unwrap();
-    // Evaluated for another namespace's input.
     assert_eq!(
         PersonalAccount::derive(evaluate(1, &namespace("other root")), &ns).unwrap_err(),
-        PrfUnsupported
+        PrfUnsupported,
+        "an evaluation for another namespace's input is unsupported"
     );
-    // No PRF result: zeros, or the input echoed back.
     for output in [[0; 32], *input.as_bytes()] {
         let prf = VerifiedPasskeyPrf::new(&input, output);
         assert_eq!(
             PersonalAccount::derive(prf, &ns).unwrap_err(),
-            PrfUnsupported
+            PrfUnsupported,
+            "zeros or the echoed input are no PRF result"
         );
     }
 }

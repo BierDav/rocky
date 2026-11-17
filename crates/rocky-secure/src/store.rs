@@ -35,19 +35,10 @@ impl LocalOperationStore<ResourceScope, Extensions> for TransactionStore {
         if self.has_operation(hash).await? {
             return Ok(false);
         }
-        // An operation is never stored without the chain it names.
         let chain = header.extensions.chain.to_vec();
-        let mut kept = self
-            .0
-            .query(
-                "SELECT 1 FROM secure_chains WHERE digest=?",
-                [chain.clone()],
-            )
-            .await?;
-        if kept.next().await?.is_none() {
+        if !self.keeps_chain(chain.clone()).await? {
             return Err(denied(crate::wire::INCOMPLETE_FRAME));
         }
-        drop(kept);
         let fork = self
             .0
             .query(
@@ -105,13 +96,27 @@ impl LocalOperationStore<ResourceScope, Extensions> for TransactionStore {
     }
 }
 
+impl TransactionStore {
+    /// Whether the chain with `digest` is kept; an operation is never stored
+    /// without the chain it names.
+    async fn keeps_chain(&self, digest: Vec<u8>) -> Result<bool, Error> {
+        let mut kept = self
+            .0
+            .query("SELECT 1 FROM secure_chains WHERE digest=?", [digest])
+            .await?;
+        Ok(kept.next().await?.is_some())
+    }
+}
+
+/// Pending log heads, a covering index for `apply_pending`.
+const PENDING_OPERATIONS_INDEX: &str = "CREATE INDEX secure_operations_pending ON secure_operations(scope,author,sequence,hash) WHERE status='pending'";
+
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE secure_read_epoch(id INTEGER PRIMARY KEY CHECK(id=1),epoch INTEGER NOT NULL)",
     "INSERT INTO secure_read_epoch VALUES(1,0)",
     "CREATE TABLE secure_metadata(id INTEGER PRIMARY KEY CHECK(id=1),identity BLOB NOT NULL,revocations BLOB NOT NULL,revision INTEGER NOT NULL)",
     "CREATE TABLE secure_operations(hash BLOB PRIMARY KEY,author BLOB NOT NULL,scope BLOB NOT NULL,sequence INTEGER NOT NULL,header BLOB NOT NULL,body BLOB NOT NULL,status TEXT NOT NULL,chain BLOB NOT NULL,UNIQUE(author,scope,sequence))",
-    // Pending log heads, covering for `apply_pending`.
-    "CREATE INDEX secure_operations_pending ON secure_operations(scope,author,sequence,hash) WHERE status='pending'",
+    PENDING_OPERATIONS_INDEX,
     "CREATE TABLE secure_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,live INTEGER GENERATED ALWAYS AS (substr(fields,1,1)=X'01') VIRTUAL,shape BLOB GENERATED ALWAYS AS (substr(fields,2,CASE hex(substr(fields,2,1)) WHEN '18' THEN 2 WHEN '19' THEN 3 WHEN '1A' THEN 5 WHEN '1B' THEN 9 ELSE 1 END)) VIRTUAL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
     "CREATE INDEX secure_rows_dead ON secure_rows(scope,row) WHERE live=0",
     "CREATE TABLE secure_outbox(hash BLOB PRIMARY KEY)",

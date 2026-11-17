@@ -91,7 +91,6 @@ async fn held_partition_proofs_cross_tips_without_admitting_current_rows() {
             inner.config.credentials.clone(),
         )
     };
-    // A link's reported tip may differ while its metadata is being reconciled.
     server
         .admit_peer(node, &credentials, rocky_core::TipId([71; 32]))
         .await
@@ -107,7 +106,10 @@ async fn held_partition_proofs_cross_tips_without_admitting_current_rows() {
         .admit_peer(node, &credentials, rocky_core::TipId([71; 32]))
         .await
         .unwrap();
-    assert!(!c.follows_same_tip(&client).await);
+    assert!(
+        !c.follows_same_tip(&client).await,
+        "a link's reported tip may differ while its metadata is being reconciled"
+    );
     let ((), served) = tokio::join!(
         async {
             assert!(!c.sync_held_changes(&client, scope, 8192).await.unwrap());
@@ -182,6 +184,12 @@ fn requests(scope: ResourceScope) -> Vec<Message> {
     ]
 }
 
+/// Before a reader server the member even knows the tuple, yet lacks the
+/// reader key. Keyless custody accepts the tuple as proof, which a link
+/// offers at open, so before custody the member must not know it.
+fn member_knows_the_tuple(custody: bool) -> bool {
+    !custody
+}
 async fn transcript_case(custody: bool) {
     let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new(1);
@@ -207,10 +215,7 @@ async fn transcript_case(custody: bool) {
     }
     server.subscribe(scope).await.unwrap();
     server.subscribe(f.scope("products", 0)).await.unwrap();
-    // A reader server: the member even knows the tuple, yet lacks the reader
-    // key. Keyless custody accepts the tuple as proof, which a link offers at
-    // open, so there the member must not know it.
-    if !custody {
+    if member_knows_the_tuple(custody) {
         member
             .register_partition(scope, f.tuple("customers", 1), crate::tests::PARTITION_NAME)
             .await
@@ -285,15 +290,14 @@ async fn proofs_are_session_bound_bounded_and_remembered() {
     let member = open(&f, root.path(), "member.db", &[Right::Read]).await;
     let scope = f.scope("customers", 1);
     f.keys(&server, 1, &["customers"]).await;
-    // Opened before the member holds the partition, so its open proves nothing.
-    let second = pair(&member, &server).await;
+    let opened_before_member_holds_partition = pair(&member, &server).await;
     f.keys(&member, 1, &["customers"]).await;
     server.subscribe(scope).await.unwrap();
     f.keys(&server, 2, &["customers"]).await;
     server.subscribe(f.scope("customers", 2)).await.unwrap();
     let (mut c, mut s) = pair(&member, &server).await;
     let captured = member.holding_proofs(c.binding, &[scope]).await.unwrap();
-    let (mut c2, mut s2) = second;
+    let (mut c2, mut s2) = opened_before_member_holds_partition;
     let query = |proofs| FrontierMessage::FrontiersQuery {
         frontiers: vec![ScopeFrontier {
             scope,
@@ -308,7 +312,6 @@ async fn proofs_are_session_bound_bounded_and_remembered() {
         panic!("frontiers")
     };
     assert!(matches!(states.as_slice(), [FrontierReply::Held(_)]));
-    // A later raw scoped request needs no proof or extra message.
     let before = s.sent;
     c.send(RowMessage::FrontierQuery { scope }).await.unwrap();
     s.serve_once(&server).await.unwrap();
@@ -316,7 +319,11 @@ async fn proofs_are_session_bound_bounded_and_remembered() {
         c.reply::<RowMessage>().await.unwrap(),
         RowMessage::Frontier { .. }
     ));
-    assert_eq!(s.sent - before, 1);
+    assert_eq!(
+        s.sent - before,
+        1,
+        "a later raw scoped request needs no proof or extra message"
+    );
     c.send(RowMessage::ScopesQuery { after: None })
         .await
         .unwrap();
@@ -366,8 +373,8 @@ async fn retained_siblings_and_previous_generations_prove_but_fresh_peers_refuse
         .install_key_epoch(KeyMaterial::new(scope, 2, newest))
         .await
         .unwrap();
-    // Only the previous generation, then only the losing sibling.
-    for (generation, key) in [(1, [10; 32]), (2, sibling_keys[0])] {
+    let previous_generation_then_losing_sibling = [(1, [10; 32]), (2, sibling_keys[0])];
+    for (generation, key) in previous_generation_then_losing_sibling {
         member
             .install_key_epoch(KeyMaterial::new(scope, generation, key))
             .await
@@ -441,7 +448,6 @@ async fn custody_tuple_offers_relay_only_with_both_grants() {
     let (served, ()) = tokio::join!(serve, ask);
     served.unwrap();
     assert!(custody.key_epochs(scope).await.is_empty());
-    // Custody asks the reader with its tuple and grant, without any reader key.
     let (mut c, mut s) = pair(&custody, &writer).await;
     let serve = s.serve_to_end(&writer);
     let ask = async {
@@ -450,7 +456,8 @@ async fn custody_tuple_offers_relay_only_with_both_grants() {
                 .await
                 .unwrap()
                 .refused
-                .is_empty()
+                .is_empty(),
+            "custody asks the reader with its tuple and grant, without any reader key"
         );
         c.close().await.unwrap();
     };
@@ -526,7 +533,6 @@ async fn frontier_acknowledgments_require_proved_custody() {
     let frontier = member.frontier(scope).await.unwrap();
     let refused = refusal(&member, &writer, RowMessage::Held { frontier }.into()).await;
     assert_eq!(refused.1, 1);
-    // A reader that proves the partition receives and acknowledges its frontier.
     f.keys(&member, 1, &["customers"]).await;
     let (mut c, mut s) = pair(&member, &writer).await;
     let (served, ()) = tokio::join!(s.serve_to_end(&writer), async {
@@ -539,18 +545,19 @@ async fn frontier_acknowledgments_require_proved_custody() {
     served.unwrap();
     assert_eq!(
         member.frontier(scope).await.unwrap(),
-        writer.frontier(scope).await.unwrap()
+        writer.frontier(scope).await.unwrap(),
+        "a reader that proves the partition receives and acknowledges its frontier"
     );
 }
 
 /// A no-frames base of a concrete partition moves to a custodian that
 /// proves its tuple, while an unproved reader's offers of it get the
-/// common refusal; a partitioned table's own scope signs none.
+/// common refusal; a partitioned table's own scope signs none. The server
+/// reads the partition without its key and holds no history.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_no_frames_partition_base_moves_by_its_tuple_and_stays_hidden() {
     let root = rocky_platform::fs::Scratch::new().await;
     let f = Fixture::new(1);
-    // The server reads the partition without its key and holds no history.
     let server = open(&f, root.path(), "server.db", &[Right::Read, Right::Insert]).await;
     let scope = f.scope("customers", 1);
     server
@@ -582,7 +589,6 @@ async fn a_no_frames_partition_base_moves_by_its_tuple_and_stays_hidden() {
     .map(|signed| signed.statement.scope)
     .collect();
     assert_eq!(no_frames, vec![scope]);
-    // A custodian that proves the tuple imports it, by either offer.
     let custodian = open(&f, root.path(), "custodian.db", &[Right::Custody]).await;
     custodian
         .register_partition(scope, f.tuple("customers", 1), crate::tests::PARTITION_NAME)
@@ -619,10 +625,10 @@ async fn a_no_frames_partition_base_moves_by_its_tuple_and_stays_hidden() {
     custodian.finish_rebootstrap(scope).await.unwrap();
     assert_eq!(
         custodian.checkpoint(scope).await.unwrap().id().unwrap(),
-        base.id().unwrap()
+        base.id().unwrap(),
+        "a custodian that proves the tuple imports it, by either offer"
     );
     assert!(custodian.key_epochs(scope).await.is_empty());
-    // A reader that guesses the tuple learns nothing a missing scope hides.
     let member = open(&f, root.path(), "member.db", &[Right::Read]).await;
     let unknown = ResourceScope {
         encryption: [203; 32],
@@ -648,7 +654,10 @@ async fn a_no_frames_partition_base_moves_by_its_tuple_and_stays_hidden() {
     ] {
         let known = refusal(&member, &server, known).await;
         let missing = refusal(&member, &server, missing).await;
-        assert_eq!(known, missing);
+        assert_eq!(
+            known, missing,
+            "a reader that guesses the tuple learns nothing a missing scope hides"
+        );
         assert!(known.0.contains("request not permitted"));
         assert_eq!(known.1, 1);
     }

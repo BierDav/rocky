@@ -53,13 +53,11 @@ async fn placement_fallback_finds_conflicts_after_equal_matches_and_checks_its_s
     other.extensions.author_sequence = first.extensions.author_sequence;
     other.sign(&inner.config.node);
     headers.clear();
-    // A narrow actual-place harness: these retained headers are signed and
-    // scope-bound. Public request/custody/visibility gates have separate controls.
     for header in [&first, &other] {
-        crate::wire::verified_header(&header.to_bytes()).unwrap();
+        crate::wire::verified_header(&header.to_bytes()).expect("retained headers are signed");
         inner
             .verify_header_authority(header, &inner.config.credentials, now().unwrap())
-            .unwrap();
+            .expect("retained headers are scope-bound");
     }
     assert_ne!(first.hash(), other.hash());
     assert!(!inner.place_verified_for_test(&first).await.unwrap());
@@ -214,7 +212,6 @@ async fn placement_fallback_finds_conflicts_after_equal_matches_and_checks_its_s
             .unwrap()
             .is_empty()
     );
-    // The existing exact-placement fast path deliberately keeps precedence.
     inner
         .conn
         .execute(
@@ -230,7 +227,10 @@ async fn placement_fallback_finds_conflicts_after_equal_matches_and_checks_its_s
         )
         .await
         .unwrap();
-    assert!(!inner.place_verified_for_test(&first).await.unwrap());
+    assert!(
+        !inner.place_verified_for_test(&first).await.unwrap(),
+        "the existing exact-placement fast path keeps precedence over retained conflicts"
+    );
     inner
         .conn
         .execute("ROLLBACK TO retained_conflicts", ())

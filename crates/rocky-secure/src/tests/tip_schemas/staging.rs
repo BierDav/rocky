@@ -97,8 +97,7 @@ async fn a_source_write_between_preflight_and_admission_refuses_the_stage_atomic
         ready = ready => ready.unwrap(),
         result = &mut staging => panic!("stage completed before preflight pause: {result:?}"),
     }
-    // Another task commits through ordinary SQL while staging is outside its guard.
-    let write = super::super::generations::identity_insert(
+    let write_while_staging_is_outside_its_guard = super::super::generations::identity_insert(
         &session(&a).await,
         "INSERT INTO items(key,title,note) VALUES('late','beyond the signed close','original non-NULL source note')",
         vec![],
@@ -108,8 +107,8 @@ async fn a_source_write_between_preflight_and_admission_refuses_the_stage_atomic
     .committed
     .unwrap()
     .frames;
-    assert_eq!(write.len(), 1);
-    let original = write[0].clone();
+    assert_eq!(write_while_staging_is_outside_its_guard.len(), 1);
+    let original = write_while_staging_is_outside_its_guard[0].clone();
     let applied = applied_binding(&a, &original).await;
     assert_eq!(applied.len(), 1);
     assert_ne!(

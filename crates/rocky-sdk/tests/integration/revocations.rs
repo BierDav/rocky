@@ -140,31 +140,29 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
     let empty = revocations(&a).await;
     assert_eq!(empty.statements, 0);
 
-    // Partitioned: neither issuer syncs while both revoke.
     let by_a = a.session().revoke_identity(&x.identity().await).await?;
     let by_b = b.session().revoke_identity(&y.identity().await).await?;
     assert_ne!(by_a.statement, by_b.statement);
     assert_eq!(by_a.revocations.statements, 1);
     assert_eq!(by_b.revocations.statements, 1);
     assert_ne!(by_a.revocations.digest, by_b.revocations.digest);
-    // Each rotated only the collection its device read: the scopes are
-    // disjoint, so the two key epochs never meet in one scope.
     assert_eq!(
         identity(root, "a")?["keys"],
-        json!({"issuer_registry": [1], "items": [1, 2], "notes": [1]})
+        json!({"issuer_registry": [1], "items": [1, 2], "notes": [1]}),
+        "each issuer rotates only the collection its revoked device read"
     );
     assert_eq!(
         identity(root, "b")?["keys"],
         json!({"issuer_registry": [1], "items": [1], "notes": [1, 2]})
     );
 
-    // They meet. The handshake gives each the other's statement; each
-    // then renews once for the other's rotated key, the first while it
-    // syncs, the second on its next sync. The first's checkpoint import
-    // fails until the second holds its key too.
     let (first, second) = if a_first { (&a, &b) } else { (&b, &a) };
-    let _ = first.sync().await;
-    assert_eq!(revocations(first).await.statements, 2);
+    let _checkpoint_import_fails_until_both_hold_the_keys = first.sync().await;
+    assert_eq!(
+        revocations(first).await.statements,
+        2,
+        "the handshake gives each issuer the other's statement"
+    );
     assert_eq!(revocations(second).await.statements, 2);
     second.sync().await.map_err(|error| error.to_string())?;
     first.sync().await.map_err(|error| error.to_string())?;
@@ -179,12 +177,17 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
         );
     }
 
-    // A member learns both from its issuer's handshake and renews once for
-    // the keys. Its peer learns both from the member's handshake, before
-    // it ever met an issuer again, and renews on its next sync.
     m.sync().await.map_err(|error| error.to_string())?;
-    assert_eq!(revocations(&m).await, both);
-    assert_eq!(revocations(&n).await, both);
+    assert_eq!(
+        revocations(&m).await,
+        both,
+        "a member learns both statements from its issuer's handshake"
+    );
+    assert_eq!(
+        revocations(&n).await,
+        both,
+        "a member's peer learns both statements from the member before meeting an issuer"
+    );
     n.sync().await.map_err(|error| error.to_string())?;
     m.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(
@@ -205,7 +208,6 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
         );
         assert!(!device.session().status().await?.data.bootstrap_pending);
     }
-    // Rows flow under both new epochs, through either issuer's members.
     create_row(&m, 3, "items", INSERT_ITEM, "after").await;
     create_row(&n, 4, "notes", INSERT_NOTE, "after").await;
     for device in [&m, &n, &m] {
@@ -217,9 +219,9 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
     );
     assert_eq!(
         texts(&m, "SELECT text FROM notes ORDER BY text").await,
-        ["after", "before"]
+        ["after", "before"],
+        "rows flow under both new epochs through either issuer's members"
     );
-    // Each revoked device is told why by its own issuer and reads no more.
     for device in [&x, &y] {
         assert!(common::exchange_failed(&device.sync().await));
         assert!(
@@ -229,7 +231,8 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
                 .await?
                 .authority
                 .verified_revocation
-                .is_some()
+                .is_some(),
+            "each revoked device is told why by its own issuer"
         );
     }
     assert_eq!(

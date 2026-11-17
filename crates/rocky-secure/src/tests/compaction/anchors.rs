@@ -45,7 +45,7 @@ async fn coverage_after_import(missing: bool, restoration: bool) {
     let first = seal(&lineage, &a).await;
     insert(&a, "second", "second").await;
     let second = seal(&lineage, &a).await;
-    churn(&a, 12, "c").await;
+    churn(&a, RIVAL_CHURN, "c").await;
     let losing = rivalled_seal(&lineage, &a).await;
     sync(&lineage, &a, &b, &keys[1]).await;
     a.acknowledge_frontier(
@@ -105,7 +105,6 @@ async fn coverage_after_import(missing: bool, restoration: bool) {
             .all(|need| need.scope != tags)
     );
     if restoration {
-        // A switch that fails leaves the old base and no obligation.
         let credentials = lineage.credentials(3, &keys[0]);
         b.admit_peer(keys[0].public_key(), &credentials, a.followed_tip().await)
             .await
@@ -142,13 +141,19 @@ async fn coverage_after_import(missing: bool, restoration: bool) {
             a.finish_rebootstrap(items).await,
             Err(Error::InjectedFailure)
         ));
-        assert_eq!(guards(&a).await, 0);
+        assert_eq!(
+            guards(&a).await,
+            0,
+            "a switch that fails leaves the old base and no obligation"
+        );
     }
     import_checkpoint(&lineage, &b, &a, &keys[0], items).await;
     if restoration {
-        // The new base and the obligation for A's uncovered own frames
-        // committed together.
-        assert_eq!(guards(&a).await, 1);
+        assert_eq!(
+            guards(&a).await,
+            1,
+            "the new base and the obligation for uncovered own frames commit together"
+        );
     }
     assert!(a.finish_seal_rebootstrap(lineage.domain).await.unwrap());
     assert!(
@@ -226,10 +231,8 @@ async fn coverage_after_import(missing: bool, restoration: bool) {
             scalar(&a, "SELECT count(*) FROM secure_seal_anchors").await,
             0
         );
-        // A later items frame supplies this author's placement beyond the old anchor.
         insert(&b, "after", "after the new seal").await;
         if restoration {
-            // Authoring waits for A's own frames, also across a reopen.
             assert!(
                 identity_insert(
                     &session(&a).await,
@@ -237,14 +240,19 @@ async fn coverage_after_import(missing: bool, restoration: bool) {
                     vec![text("early"), text("too early")],
                 )
                 .await
-                .is_err()
+                .is_err(),
+                "authoring waits for the replica's own frames"
             );
             drop(a);
             a = lineage
                 .reopen(&dir.path().join("a.db"), &keys[0], 3, 3)
                 .await
                 .unwrap();
-            assert_eq!(guards(&a).await, 1);
+            assert_eq!(
+                guards(&a).await,
+                1,
+                "authoring keeps waiting for own frames across a reopen"
+            );
         }
         sync(&lineage, &b, &a, &keys[0]).await;
         if restoration {
@@ -316,7 +324,7 @@ async fn bounds_without_a_base_gain_coverage_before_the_settle_wipe() {
     .await
     .unwrap();
     insert(&a, "x", "x").await;
-    churn(&a, 12, "c").await;
+    churn(&a, RIVAL_CHURN, "c").await;
     let losing = rivalled_seal(&lineage, &a).await;
     seal(&lineage, &a).await;
     a.finalize_path(lineage.domain).await.unwrap();
@@ -401,18 +409,18 @@ async fn restoration_endpoints_merge_as_pairs() {
             .unwrap(),
         Some((5, Some(one)))
     );
-    // A lower endpoint never replaces a higher one or its hash.
     assert_eq!(
         a.merge_restoration_for_test(items, (3, Some(two)))
             .await
             .unwrap(),
-        Some((5, Some(one)))
+        Some((5, Some(one))),
+        "a lower endpoint never replaces a higher one or its hash"
     );
-    // Two hashes at one sequence are corruption.
     assert!(
         a.merge_restoration_for_test(items, (5, Some(two)))
             .await
-            .is_err()
+            .is_err(),
+        "two hashes at one sequence are corruption"
     );
     assert_eq!(
         a.merge_restoration_for_test(items, (7, Some(two)))
@@ -435,7 +443,6 @@ async fn superseded_frames_stay_placed_for_scopes_their_writer_never_wrote() {
     sync(&lineage, &a, &b, &keys[1]).await;
     b.follow_bookmark(lineage.domain, "main").await.unwrap();
     let (items, tags) = (lineage.scope("items"), lineage.scope("tags"));
-    // a writes only items; tags hold b's frames alone.
     insert(&a, "first", "first").await;
     insert(&a, "second", "second").await;
     identity_insert(

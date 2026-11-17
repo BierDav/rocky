@@ -126,12 +126,11 @@ async fn signing_out_everywhere_else_ends_other_devices_and_discards_what_it_nev
     )?)?;
     common::introduce(&owner, &laptop).await;
     laptop.sync().await.map_err(|error| error.to_string())?;
-    // The owner holds what the laptop synced; the fence keeps it.
     write_note(&laptop, "seen").await;
     laptop.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(notes(&owner).await, ["before", "seen"]);
-    // Written while the owner was away: the reset discards it everywhere.
-    write_note(&laptop, "hidden").await;
+    let written_while_the_owner_was_away = "hidden";
+    write_note(&laptop, written_while_the_owner_was_away).await;
     let laptop_node = rocky_credentials::PeerId::of(laptop.session.info().await?.node);
     assert_eq!(owner.session.freshness().await?, Freshness::LocallyAnchored);
     assert_eq!(RestoreChoice::ALL[0], RestoreChoice::DEFAULT);
@@ -154,18 +153,24 @@ async fn signing_out_everywhere_else_ends_other_devices_and_discards_what_it_nev
             reset: receipt.reset
         }
     );
-    // The laptop learns it was signed out by the reset, and its writes stay out.
     learn_ended(&laptop).await;
-    assert_eq!(revocation_reason(&laptop).await["type"], "reset");
+    assert_eq!(
+        revocation_reason(&laptop).await["type"],
+        "reset",
+        "the laptop learns it was signed out by the reset"
+    );
     assert!(recorded_reset(&laptop, receipt.reset).await?);
     assert_eq!(
         laptop.session.freshness().await?,
         Freshness::LocallyAnchored
     );
     let _ = owner.sync().await;
-    assert_eq!(notes(&owner).await, ["before", "seen"]);
+    assert_eq!(
+        notes(&owner).await,
+        ["before", "seen"],
+        "the fence keeps what the owner held and discards what was written while it was away"
+    );
     refuses_as_signed_out(&laptop, &owner, receipt.reset).await?;
-    // An ended custodian is refused, recording nothing.
     let error = owner
         .session
         .sign_out_everywhere_else(
@@ -182,12 +187,15 @@ async fn signing_out_everywhere_else_ends_other_devices_and_discards_what_it_nev
         CallFailure::from_failure(&error).code(),
         "custodian_signed_out"
     );
-    // A second reset follows the first.
     let again = owner
         .session
         .sign_out_everywhere_else(owner.root(), ResetKeep::default())
         .await?;
-    assert_eq!(again.follows, [receipt.reset].into());
+    assert_eq!(
+        again.follows,
+        [receipt.reset].into(),
+        "a second reset follows the first"
+    );
     write_note(&owner, "after").await;
     assert_eq!(notes(&owner).await, ["after", "before", "seen"]);
     for device in [&laptop, &owner] {
@@ -206,7 +214,6 @@ async fn a_device_another_enrolled_resets_and_the_root_signed_device_it_ends_can
         None,
     )?)?;
     write_note(&owner, "before").await;
-    // The owner's node signed the laptop's grant; the reset ends that node.
     let laptop = Device::new(Database::join(
         open(&root.path().join("laptop"), &hub),
         &owner.invite_as(json!({"kind": "issuer"})).await,
@@ -217,19 +224,25 @@ async fn a_device_another_enrolled_resets_and_the_root_signed_device_it_ends_can
         .session
         .sign_out_everywhere_else(owner.root(), ResetKeep::default())
         .await?;
-    // The laptop's identity and grants survive the reset it signed.
     snap::ok(laptop.session.status()).await;
     write_note(&laptop, "after").await;
-    assert_eq!(notes(&laptop).await, ["after", "before"]);
+    assert_eq!(
+        notes(&laptop).await,
+        ["after", "before"],
+        "the resetting device's identity and grants survive though the ended node signed them"
+    );
     assert_eq!(
         laptop.session.freshness().await?,
         Freshness::FencedByOwner {
             reset: receipt.reset
         }
     );
-    // The owner, whose chain the root signed directly, is ended and refused.
     learn_ended(&owner).await;
-    assert_eq!(revocation_reason(&owner).await["type"], "reset");
+    assert_eq!(
+        revocation_reason(&owner).await["type"],
+        "reset",
+        "the root-signed device the reset ends is ended too"
+    );
     refuses_as_signed_out(&owner, &owner, receipt.reset).await?;
     for device in [&laptop, &owner] {
         device.close().await;
@@ -271,7 +284,6 @@ async fn devices_invited_after_a_reset_sync_and_write_and_a_signed_out_device_ad
     learn_ended(&laptop).await;
     refuses_as_signed_out(&laptop, &owner, receipt.reset).await?;
 
-    // A phone joins through the owner's invitation after the reset.
     let phone = join(
         &root.path().join("phone"),
         &hub,
@@ -281,9 +293,12 @@ async fn devices_invited_after_a_reset_sync_and_write_and_a_signed_out_device_ad
     phone.sync().await.map_err(|error| error.to_string())?;
     write_note(&phone, "phone").await;
     phone.sync().await.map_err(|error| error.to_string())?;
-    assert_eq!(notes(&owner).await, ["before", "phone"]);
+    assert_eq!(
+        notes(&owner).await,
+        ["before", "phone"],
+        "a device joins through the owner's invitation after the reset"
+    );
     assert_eq!(phone.session.freshness().await?, Freshness::LocallyAnchored);
-    // A tablet the phone invites joins too: an admitted device admits.
     let tablet = join(
         &root.path().join("tablet"),
         &hub,
@@ -296,47 +311,70 @@ async fn devices_invited_after_a_reset_sync_and_write_and_a_signed_out_device_ad
     write_note(&tablet, "tablet").await;
     tablet.sync().await.map_err(|error| error.to_string())?;
     phone.sync().await.map_err(|error| error.to_string())?;
-    assert_eq!(notes(&owner).await, ["before", "phone", "tablet"]);
+    assert_eq!(
+        notes(&owner).await,
+        ["before", "phone", "tablet"],
+        "a device admitted after the reset admits others"
+    );
     assert_eq!(notes(&tablet).await, ["before", "phone", "tablet"]);
 
-    // The signed-out laptop still invites, but admits nobody: the device
-    // it enrolls stays ended, so kept devices refuse it as a peer and its
-    // writes never reach them.
-    let stray = join(
+    let enrolled_by_signed_out_laptop = join(
         &root.path().join("stray"),
         &hub,
         &laptop
             .invite_as(json!({"kind": "writer", "scopes": ["notes"]}))
             .await,
     )?;
-    let contact = stray.contact().await;
+    let contact = enrolled_by_signed_out_laptop.contact().await;
     for kept in [&owner, &phone] {
         let refused = kept
             .add_peer(&contact)
             .await
             .err()
             .ok_or("a kept device added the stray")?;
-        assert_eq!(refused["code"], "rejected", "{refused}");
+        assert_eq!(
+            refused["code"], "rejected",
+            "kept devices refuse a device a signed-out one enrolled: {refused}"
+        );
     }
     let _ = snap::observe(async {
-        stray.session.execute("BEGIN", Vec::new()).await?;
-        let id = stray.session.next_id("notes").await?;
-        stray
+        enrolled_by_signed_out_laptop
+            .session
+            .execute("BEGIN", Vec::new())
+            .await?;
+        let id = enrolled_by_signed_out_laptop
+            .session
+            .next_id("notes")
+            .await?;
+        enrolled_by_signed_out_laptop
             .session
             .execute(
                 "INSERT INTO notes(key,id) VALUES('stray',?)",
                 vec![id.sql()],
             )
             .await?;
-        stray.session.execute("COMMIT", Vec::new()).await
+        enrolled_by_signed_out_laptop
+            .session
+            .execute("COMMIT", Vec::new())
+            .await
     })
     .await;
-    common::introduce(&laptop, &stray).await;
-    let _ = stray.sync().await;
+    common::introduce(&laptop, &enrolled_by_signed_out_laptop).await;
+    let _ = enrolled_by_signed_out_laptop.sync().await;
     let _ = laptop.sync().await;
     let _ = owner.sync().await;
-    assert_eq!(notes(&owner).await, ["before", "phone", "tablet"]);
-    for device in [&stray, &tablet, &phone, &laptop, &owner] {
+    assert_eq!(
+        notes(&owner).await,
+        ["before", "phone", "tablet"],
+        "writes of a device a signed-out one enrolled never reach kept devices"
+    );
+    for device in [
+        &enrolled_by_signed_out_laptop,
+        &tablet,
+        &phone,
+        &laptop,
+        &owner,
+    ] {
         device.close().await;
     }
     Ok(())
@@ -371,7 +409,6 @@ async fn a_reset_keeps_the_custodians_it_knows_unless_told_otherwise() -> Result
         .sign_out_everywhere_else(owner.root(), ResetKeep::default())
         .await?;
     assert_eq!(receipt.kept, [own, server_node, backup_node].into());
-    // Excepting one signs it out; the rest stay kept.
     let again = owner
         .session
         .sign_out_everywhere_else(
@@ -382,7 +419,11 @@ async fn a_reset_keeps_the_custodians_it_knows_unless_told_otherwise() -> Result
             },
         )
         .await?;
-    assert_eq!(again.kept, [own, server_node].into());
+    assert_eq!(
+        again.kept,
+        [own, server_node].into(),
+        "excepting one device signs it out and the rest stay kept"
+    );
     for device in [&backup, &server, &owner] {
         device.close().await;
     }

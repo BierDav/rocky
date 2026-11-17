@@ -15,6 +15,46 @@ pub struct EvictReport {
     pub recovery_unconfirmed: bool,
 }
 
+/// Tables of an evicted scope's local state, keyed by its local id.
+const EVICTED_SCOPE_STATE: &[&str] = &[
+    "secure_seal_anchors",
+    "secure_applied",
+    "secure_stubs",
+    "secure_logs",
+    "secure_checkpoints",
+    "secure_rebootstrap",
+    "secure_rebootstrap_stubs",
+    "secure_rebootstrap_pages",
+    "secure_checkpoint_pages",
+    "secure_checkpoint_stubs",
+    "secure_compaction_live_creations",
+];
+/// Seal bounds and drops of an evicted scope: held again, it verifies its
+/// seals afresh, as one never held, so its bounds place no members.
+const EVICTED_SEAL_BOUNDS: &[&str] = &["secure_seal_bounds", "secure_seal_drops"];
+/// The replayed bases a rebuild starts a scope from: an evicted one has no
+/// rows to start from.
+const EVICTED_REPLAYED_BASES: &[&str] = &[
+    "secure_replayed_seals",
+    "secure_replayed_seal_rows",
+    "secure_replayed_snapshots",
+    "secure_replayed_base_source",
+    "secure_replayed_base_rows",
+    "secure_base_transition",
+    "secure_base_cleanup",
+    "secure_replayed_staged",
+];
+/// The replay ledger of an evicted scope, keyed by the encoded scope. Only
+/// it goes: permanent marks, the summary and admission evidence stay, so
+/// returning frames this file admitted apply again and reuse stays refused.
+const EVICTED_REPLAY_LEDGER: &[&str] = &[
+    "secure_retention",
+    "secure_peer_frontiers",
+    "secure_identity_ledger",
+    "secure_custody_receipts",
+    "secure_custody_challenges",
+];
+
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Explicitly drops a scope's rows, ciphertext and checkpoints after its
     /// partition custody prerequisite. An interrupted eviction resumes on the
@@ -50,8 +90,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let mut inner = self.inner.lock(crate::replica::Class::Background).await;
             if inner.eviction_step(scope, &mut report).await? {
                 inner.load_direct().await?;
-                // Held rows the evicted scope's delete actions changed are
-                // derived again against what this device still holds.
                 inner.retry_rederive(scope.domain).await?;
                 return Ok(report);
             }
@@ -136,7 +174,6 @@ impl<A: RowApplication> Inner<A> {
                     ]),
                 )
                 .await?;
-            // The typed rows go with the first step: an evicted scope is unavailable.
             inner.cause(crate::observe::Cause::Authority);
             inner.clear_typed(scope).await?;
             let batch = collect_rows(
@@ -184,33 +221,11 @@ impl<A: RowApplication> Inner<A> {
             let done = rows == 0 && batch.is_empty() && archive_pages == 0 && checkpoints == 0;
             if done {
                 if let Some(id) = id {
-                    for table in [
-                        "secure_seal_anchors",
-                        "secure_applied",
-                        "secure_stubs",
-                        "secure_logs",
-                        "secure_checkpoints",
-                        "secure_rebootstrap",
-                        "secure_rebootstrap_stubs",
-                        "secure_rebootstrap_pages",
-                        "secure_checkpoint_pages",
-                        "secure_checkpoint_stubs",
-                        "secure_compaction_live_creations",
-                        // Held again, the scope verifies its seals afresh,
-                        // as one never held: its bounds place no members.
-                        "secure_seal_bounds",
-                        "secure_seal_drops",
-                        // A rebuild starts a scope from these: an evicted
-                        // one has no rows to start from.
-                        "secure_replayed_seals",
-                        "secure_replayed_seal_rows",
-                        "secure_replayed_snapshots",
-                        "secure_replayed_base_source",
-                        "secure_replayed_base_rows",
-                        "secure_base_transition",
-                        "secure_base_cleanup",
-                        "secure_replayed_staged",
-                    ] {
+                    for table in EVICTED_SCOPE_STATE
+                        .iter()
+                        .chain(EVICTED_SEAL_BOUNDS)
+                        .chain(EVICTED_REPLAYED_BASES)
+                    {
                         inner
                             .conn
                             .execute(format!("DELETE FROM {table} WHERE scope=?"), [id])
@@ -220,16 +235,7 @@ impl<A: RowApplication> Inner<A> {
                         .store_scope_state(id, 0, 0, &checkpoint::Lt::new(), 0)
                         .await?;
                 }
-                // Only the replay ledger goes: permanent marks, the summary
-                // and admission evidence stay, so returning frames this file
-                // admitted apply again and reuse stays refused.
-                for table in [
-                    "secure_retention",
-                    "secure_peer_frontiers",
-                    "secure_identity_ledger",
-                    "secure_custody_receipts",
-                    "secure_custody_challenges",
-                ] {
+                for table in EVICTED_REPLAY_LEDGER {
                     inner
                         .conn
                         .execute(format!("DELETE FROM {table} WHERE scope=?"), [blob.clone()])

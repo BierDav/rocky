@@ -148,6 +148,10 @@ async fn an_existing_link_refreshes_graph_pages_and_both_followed_tip_claims() {
     );
 }
 
+/// A seal digest starting at or above this byte sorts late enough that its
+/// dependents cheaply precede it in digest order.
+const LATE_DIGEST_FIRST_BYTE: u8 = 192;
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn graph_handshake_verifies_dependencies_across_digest_sorted_pages() {
     let f = Fixture::with_publisher(PrivateKey::from_bytes(&[71; 32]));
@@ -155,10 +159,9 @@ async fn graph_handshake_verifies_dependencies_across_digest_sorted_pages() {
     let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
     let a = super::revocations::open(&f, &dir, "a.db", &alice).await;
     let b = super::revocations::open(&f, &dir, "b.db", &bob).await;
-    // Choose a seal whose dependents can precede it in digest order cheaply.
     let seal = (0..256)
         .map(|sequence| seal(&f, sequence))
-        .find(|seal| seal.id().unwrap()[0] >= 192)
+        .find(|seal| seal.id().unwrap()[0] >= LATE_DIGEST_FIRST_BYTE)
         .unwrap();
     let seal_id = seal.id().unwrap();
     let mut statements = vec![TipStatement::Seal(seal.clone())];
@@ -254,10 +257,8 @@ async fn a_forged_graph_record_refuses_the_handshake_without_installing_its_pref
         panic!("bookmark fixture");
     };
     moved.statement.name = "forged".into();
-    // Bypass the sender's admission deliberately; the receiving peer must verify.
-    a.inner
-        .lock(crate::replica::Class::Background)
-        .await
+    let bypassing_sender_admission = a.inner.lock(crate::replica::Class::Background).await;
+    bypassing_sender_admission
         .conn
         .execute(
             "INSERT INTO secure_tip_statements(digest,statement) VALUES(?,?)",
@@ -265,9 +266,13 @@ async fn a_forged_graph_record_refuses_the_handshake_without_installing_its_pref
         )
         .await
         .unwrap();
+    drop(bypassing_sender_admission);
     let (left, right) = super::revocations::hello((&alice, &a), (&bob, &b), &f).await;
     assert!(left.is_err());
-    assert!(right.is_err());
+    assert!(
+        right.is_err(),
+        "the receiving peer verifies a record the sender stored without admission"
+    );
     assert!(ids(&b).await.is_empty());
     assert!(b.snapshot(f.public).await.unwrap().rows.is_empty());
 }
@@ -290,19 +295,18 @@ async fn a_stalled_request_lane_does_not_hold_control_or_another_lane() {
         far.push(Box::new(b));
     }
     left.attach_lanes(near).unwrap();
-    // The peer is not reading any of the added lanes. This signed frame
-    // cannot fit its one-byte pipe, but control must still be delivered.
+    let frame_overflowing_an_unread_one_byte_lane = Frame {
+        channel: 2,
+        through: Vec::new(),
+        direction: false,
+        message: Message::Channel(Packet::Data {
+            generation: 0,
+            bytes: vec![1; 8192],
+            last: true,
+        }),
+    };
     left.writer
-        .send(Frame {
-            channel: 2,
-            through: Vec::new(),
-            direction: false,
-            message: Message::Channel(Packet::Data {
-                generation: 0,
-                bytes: vec![1; 8192],
-                last: true,
-            }),
-        })
+        .send(frame_overflowing_an_unread_one_byte_lane)
         .await
         .unwrap();
     left.writer
@@ -325,10 +329,10 @@ async fn a_stalled_request_lane_does_not_hold_control_or_another_lane() {
     .await
     .unwrap()
     .unwrap();
-    assert!(matches!(
-        control.message,
-        Message::Ready { persistent: true }
-    ));
+    assert!(
+        matches!(control.message, Message::Ready { persistent: true }),
+        "control is delivered while the peer reads none of the added lanes"
+    );
     right.attach_lanes(far).unwrap();
     left.writer
         .send(Frame {

@@ -162,7 +162,6 @@ async fn there_and_back(rebuild: Rebuild, dev_version: u32) {
         .unwrap();
     }
     sync(&lineage, &alice, &dave, &dave_key).await;
-    // Dave, still at the first tip, writes late, beyond the coming seal.
     write(&dave, "UPDATE items SET title='late' WHERE key='0002'").await;
     let first = seal(&lineage, &alice).await.id().unwrap();
     if matches!(rebuild, Rebuild::Base) {
@@ -175,14 +174,16 @@ async fn there_and_back(rebuild: Rebuild, dev_version: u32) {
         .publish_tip_statements(&open_dev(&lineage, first, dev_version))
         .await
         .unwrap();
-    // The late write walks the `continue` seal onto `main`.
     for frame in super::switches::authored(&dave, &dave_key).await {
         alice.receive(frame).await.unwrap();
     }
-    // An unsent write on `main` of the field `dev` may remove.
     write(&alice, "UPDATE items SET note='x' WHERE key='0002'").await;
     let main_state = note_rows(&[("0001", "title", Some("old")), ("0002", "late", Some("x"))]);
-    assert_eq!(select(&alice, NOTES).await, main_state);
+    assert_eq!(
+        select(&alice, NOTES).await,
+        main_state,
+        "a late write from the first tip walks the `continue` seal onto `main`"
+    );
     let kept = matches!(rebuild, Rebuild::Rewind).then(|| first);
     let at_first = vec![
         vec![text("0001"), text("title")],
@@ -206,7 +207,6 @@ async fn there_and_back(rebuild: Rebuild, dev_version: u32) {
     if let Some(first) = kept {
         assert_eq!(at_seal(&alice, first, TITLES).await, at_first);
     }
-    // A write on `dev`, by its own line node, stays there.
     let branch_node = PrivateKey::new();
     alice
         .register_line_node(crate::LineNode {
@@ -230,16 +230,16 @@ async fn there_and_back(rebuild: Rebuild, dev_version: u32) {
     let journal = crate::storage::rows(&alice.inner.lock(crate::replica::Class::Background).await.conn,"SELECT 'O',scope,author,sequence FROM secure_identity_own UNION ALL SELECT 'R',entry,bytes,chain FROM secure_admission_entries UNION ALL SELECT 'C',identity,entry,provenance FROM secure_admission_claims").await.unwrap();
     let before = rewound(&alice).await;
     follow(&lineage, &alice, (&identity, &alice_key), "main", 3).await;
-    // Only the kept seal's own schema restores unfiltered.
     assert_eq!(
         rewound(&alice).await > before,
         matches!(rebuild, Rebuild::Rewind),
-        "{rebuild:?}"
+        "only the kept seal's own schema restores unfiltered: {rebuild:?}"
     );
     assert_eq!(select(&alice, NOTES).await, main_state);
     assert_eq!(
         scalar(&alice, "SELECT count(*) FROM secure_identity_ledger").await,
-        1
+        1,
+        "a write on `dev`, by its own line node, stays there"
     );
     assert_eq!(crate::storage::rows(&alice.inner.lock(crate::replica::Class::Background).await.conn,"SELECT 'O',scope,author,sequence FROM secure_identity_own UNION ALL SELECT 'R',entry,bytes,chain FROM secure_admission_entries UNION ALL SELECT 'C',identity,entry,provenance FROM secure_admission_claims").await.unwrap(), journal);
     assert!(alice.held_changes().await.unwrap().is_empty());
@@ -248,12 +248,15 @@ async fn there_and_back(rebuild: Rebuild, dev_version: u32) {
         assert_eq!(at_seal(&alice, first, TITLES).await, at_first);
     }
     alice.audit(lineage.scope("items")).await.unwrap();
-    // The unsent `main` write was kept for `main` and is sent now.
     dave.follow_bookmark(lineage.domain, "main")
         .await
         .unwrap_or_else(|_| panic!("dave follows main"));
     sync(&lineage, &alice, &dave, &dave_key).await;
-    assert_eq!(select(&dave, NOTES).await, main_state);
+    assert_eq!(
+        select(&dave, NOTES).await,
+        main_state,
+        "the unsent `main` write was kept for `main` and is sent now"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -298,7 +301,6 @@ async fn rolled_back(rebuild: Rebuild, removing: bool) {
     )
     .await
     .unwrap();
-    // The note was sent: the removal does not hold it back.
     let bob_key = PrivateKey::new();
     let bob = lineage
         .open(&dir.path().join("bob.db"), &bob_key, 3, None)
@@ -350,11 +352,9 @@ async fn rolled_back(rebuild: Rebuild, removing: bool) {
         note_rows(&[("0001", "title", Some("old"))]),
         "{rebuild:?}"
     );
-    // Intents have no rows to re-author: the unsent write goes with its
-    // line.
     assert!(
         alice.held_changes().await.unwrap().is_empty(),
-        "{rebuild:?}"
+        "intents have no rows to re-author, so the unsent write goes with its line: {rebuild:?}"
     );
     alice.audit(lineage.scope("items")).await.unwrap();
 }
@@ -430,7 +430,6 @@ async fn identical_revert(rebuild: Rebuild) {
     if !matches!(rebuild, Rebuild::Replay) {
         alice.compact(lineage.domain, 0).await.unwrap();
     }
-    // `dev` opens on B's seal; Alice goes there and back to C.
     let b_seal = alice
         .tip_graph(lineage.domain)
         .await

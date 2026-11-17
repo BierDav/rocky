@@ -205,8 +205,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 if previous.is_none() && inner.installed_typed().await?.is_some() {
                     return Err(Error::Incompatible("a complete projection cannot become a readable projection; reinstall the database".into()));
                 }
-                // Grants may widen, as a renewal adds a table granted like a
-                // held one; the plan below projects it. They never narrow.
                 if let Some(previous) = previous.as_ref()
                     && !previous.is_subset(&allowed)
                 {
@@ -255,8 +253,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await?;
             let expected: Vec<SqlValue> = record.iter().cloned().map(SqlValue::Blob).collect();
             match stored.first() {
-                // Grants that widened over the same schema project the
-                // tables they add through a plan, as another schema does.
                 Some(row) if *row == expected => {
                     if inner.projection_grew(&typed).await? {
                         inner.record_growth().await?;
@@ -264,8 +260,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     }
                     return Ok(false);
                 }
-                // Another schema of the same definition: rebuild the tables
-                // through a projection plan.
                 Some(_) => {
                     inner.record_plan(&schema, domain, &readers).await?;
                     return Ok(true);
@@ -309,8 +303,6 @@ impl<A: RowApplication> Inner<A> {
         if domain.app != self.definition.app || !domains.contains(&domain.domain) {
             return Err(denied("typed tables need a domain of the signed manifest"));
         }
-        // The generation is the installed application's; the tables must be
-        // exactly the signed ones.
         let expected = schema.manifest_at(&domains, self.definition.schema, self.definition.engine);
         if expected.hash() != self.manifest {
             return Err(Error::Incompatible(
@@ -413,8 +405,6 @@ impl<A: RowApplication> Inner<A> {
         let mut typed = self
             .authorized_projection(Typed::new(schema, decode(domain)?, &decode(readers)?)?)
             .await?;
-        // Tables wider grants allow since are not created yet: a later
-        // `install_tables` projects them through a plan.
         if let Some(recorded) = self.projection_access().await? {
             typed = typed.restrict(&recorded);
         }

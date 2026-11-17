@@ -53,6 +53,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await
     }
     /// Forward original bytes only. Restart a pass after subscription changes or new insertions.
+    /// The frames leave the device, so every commit they may include is
+    /// flushed first, without the replica lock so local statements do not
+    /// wait for it.
     pub async fn transfer_page(
         &self,
         peer: PublicKey,
@@ -61,8 +64,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         after: Option<Hash>,
         byte_quota: usize,
     ) -> Result<CiphertextPage, Error> {
-        // Frames leave the device: flush every commit they may include,
-        // first without the replica so local statements do not wait for it.
         self.flush().await?;
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner = flushed(inner, &self.inner).await?;
@@ -85,7 +86,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 return Err(denied("ciphertext custody denied"));
             }
         }
-        // Never a silent gap: every page names the scopes with pruned history.
         let mut pruned = Vec::new();
         for scope in scopes {
             if inner.has_pruned_prefix(*scope).await? {
@@ -146,7 +146,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             last = Some(id);
             frames.push(frame);
         }
-        // Skipped frames can leave a full query short of a full page.
         let next = if limited { last } else { None };
         let page = inner.offered_page(frames, next, pruned).await?;
         drop(flush_guard(inner, &self.inner).await?);
@@ -162,7 +161,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let grants = inner.verify_chain(credentials, peer, now()?)?;
         let Some(frame) = inner.frame(id).await? else {
-            // Pruned since the peer's page: there is nothing left to record.
             return Ok(());
         };
         let scope = frame.scope()?;
@@ -179,12 +177,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner.conn.execute("INSERT INTO secure_ack VALUES(?,?,?) ON CONFLICT(peer,hash) DO UPDATE SET applied=MAX(applied,excluded.applied)", bindings(vec![SqlValue::Blob(rocky_credentials::PeerId::of(peer).as_bytes().to_vec()), SqlValue::Blob(id.as_bytes().to_vec()), SqlValue::Integer(i64::from(applied))])).await?;
             Ok(())
         })?;
-        // The peer is told its acknowledgment is recorded.
         flush_guard(inner, &self.inner).await.map(|_| ())
     }
 }
 
 impl<A: RowApplication> Inner<A> {
+    /// Reports `Deleted` only for a settled tombstone: an evicting scope is
+    /// unavailable, never deleted, and pending or importing rows never prove
+    /// a deletion.
     pub(super) async fn companion(
         &self,
         scope: ResourceScope,
@@ -192,13 +192,12 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Companion, Error> {
         self.require_scope_readable(scope).await?;
         let has_key = self.readable(scope)?;
-        // An evicted scope is unavailable, never deleted.
-        let record = if has_key && self.holding(scope).await? != Some(roles::Holding::Evicting) {
+        let readable_held = has_key && self.holding(scope).await? != Some(roles::Holding::Evicting);
+        let record = if readable_held {
             self.key_row(scope, row).await?
         } else {
             None
         };
-        // An unfinished import never proves a deletion.
         match record {
             Some(record) if !record.deleted => Ok(Companion::Present(record.fields)),
             Some(_) if !self.pending_now(scope).await? && !self.importing(scope).await? => {
@@ -258,8 +257,6 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<SecurePage, Error> {
         self.require_scope_readable(scope).await?;
         let has_key = self.readable(scope)?;
-        // Rows of a scope that no longer follows the peers, or whose
-        // import is unfinished, are not complete.
         let holding = self.holding(scope).await?;
         let mut page = SecurePage {
             revision: self.revision,
@@ -278,7 +275,6 @@ impl<A: RowApplication> Inner<A> {
         let mut last = after;
         let mut used = 0usize;
         loop {
-            // Tombstones are skipped, so a page may need several chunks.
             let chunk = collect_rows(
                 self.conn
                     .query(

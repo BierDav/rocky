@@ -31,21 +31,20 @@ async fn resigned_clock_scope_signer_and_unconnected_backlinks_never_complete() 
     source.sign(&f.key);
     let mut bad_signature = original.clone();
     bad_signature.sign(&current_line);
-    let mut partition = original.clone();
-    // Another partition's keyed scope.
-    partition.extensions.scope.encryption = [3; 32];
-    partition.sign(&f.key);
-    // These are privileged signed mutations, not admissible receive examples.
-    for (header, error) in [
+    let mut other_partition = original.clone();
+    other_partition.extensions.scope.encryption = [3; 32];
+    other_partition.sign(&f.key);
+    let stored_directly_not_received = [
         (clock, true),
         (source, true),
-        (partition, true),
+        (other_partition, true),
         (bad_signature, true),
         (fork, false),
         (other_scope, true),
         (other_signer, true),
         (other_original, true),
-    ] {
+    ];
+    for (header, error) in stored_directly_not_received {
         let hash = header.hash();
         f.replica
             .inner

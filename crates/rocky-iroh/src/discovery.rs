@@ -42,9 +42,17 @@ pub const RENDEZVOUS_AGE: u64 = 3600;
 const RECORD_VERSION: u8 = 1;
 const RECORD_NAME: &str = "_rocky";
 const RECORD_TTL: u32 = 30;
+/// Bytes of one TXT string of the record. TXT answers are a set, so each
+/// chunk carries its index as `index=text`.
 const TXT_CHUNK: usize = 200;
 const REQUEST: Duration = Duration::from_secs(15);
 const FOUND: usize = 64;
+/// Local discovery retries this long after failing, as permission or
+/// network changes may recover without a new endpoint.
+const LOCAL_RETRY: Duration = Duration::from_secs(30);
+/// Members spread their rendezvous writes over up to this much past the
+/// interval instead of writing together.
+const RENDEZVOUS_JITTER: Duration = Duration::from_secs(30);
 
 /// The public address-lookup service whose pkarr relay holds the record.
 pub const DEFAULT_RENDEZVOUS: &str = iroh::address_lookup::N0_DNS_PKARR_RELAY_PROD;
@@ -194,11 +202,10 @@ pub(crate) fn merge(own: Entry, held: Vec<Entry>, time: u64) -> Vec<Entry> {
     let mut others: Vec<Entry> = held
         .into_iter()
         .filter(|entry| {
-            entry.node != own.node
-                && entry.address.id != own.address.id
-                && entry.seen.saturating_add(RENDEZVOUS_AGE) >= time
-                // A clock ahead of ours must not pin a contact forever.
-                && entry.seen <= time.saturating_add(RENDEZVOUS_AGE)
+            let is_other = entry.node != own.node && entry.address.id != own.address.id;
+            let expired = entry.seen.saturating_add(RENDEZVOUS_AGE) < time;
+            let from_a_clock_far_ahead = entry.seen > time.saturating_add(RENDEZVOUS_AGE);
+            is_other && !expired && !from_a_clock_far_ahead
         })
         .collect();
     others.sort_by(|a, b| b.seen.cmp(&a.seen).then(a.node.cmp(&b.node)));
@@ -236,7 +243,6 @@ pub(crate) fn record(topic: &[u8; 32], entries: &[Entry]) -> Result<SignedPacket
         .as_bytes()
         .chunks(TXT_CHUNK)
         .enumerate()
-        // TXT answers are a set: the index restores their order.
         .map(|(index, chunk)| format!("{index}={}", String::from_utf8_lossy(chunk)))
         .collect();
     Ok(SignedPacket::from_txt_strings(
@@ -318,6 +324,11 @@ fn relay_client(endpoint: &Endpoint, relay: &str) -> Result<PkarrRelayClient, Fa
 #[cfg(target_family = "wasm")]
 fn relay_client(_: &Endpoint, relay: &str) -> Result<PkarrRelayClient, Failure> {
     Ok(PkarrRelayClient::new(relay.parse()?))
+}
+
+fn rendezvous_jitter() -> Duration {
+    let bound = u64::try_from(RENDEZVOUS_JITTER.as_millis()).unwrap_or(u64::MAX);
+    Duration::from_millis(rand::thread_rng().next_u64() % bound)
 }
 
 fn now() -> u64 {
@@ -433,16 +444,16 @@ impl Finder {
                 },
             };
             self.fail(0, result.err().map(|error| error.to_string()));
-            // Permission or network changes may recover without a new endpoint.
             tokio::select! {
                 changed = endpoints.changed() => if changed.is_err() { return; },
-                _ = rocky_platform::time::sleep(Duration::from_secs(30)) => {},
+                _ = rocky_platform::time::sleep(LOCAL_RETRY) => {},
             }
         }
     }
+    /// Queues a found peer. A full queue drops the hint; the path reports
+    /// it again.
     fn report(&self, node: [u8; 32], address: &EndpointAddr, path: &str, local: bool) {
         if let Ok(address) = serde_json::to_string(address) {
-            // A full queue drops the hint; the path reports it again.
             let _ = self.0.sender.try_send(Found {
                 node,
                 address,
@@ -471,10 +482,8 @@ impl Finder {
                 }
             }
             self.fail(1, failure);
-            // Members spread over the interval instead of writing together.
-            let jitter = Duration::from_millis(rand::thread_rng().next_u64() % 30_000);
             tokio::select! {
-                () = rocky_platform::time::sleep(RENDEZVOUS_INTERVAL + jitter) => {}
+                () = rocky_platform::time::sleep(RENDEZVOUS_INTERVAL + rendezvous_jitter()) => {}
                 changed = endpoints.changed() => {
                     if changed.is_err() {
                         return;
@@ -483,6 +492,8 @@ impl Finder {
             }
         }
     }
+    /// A record that could not be read is never overwritten, since the
+    /// last writer wins.
     async fn rendezvous_once(
         &self,
         endpoint: &Endpoint,
@@ -493,9 +504,7 @@ impl Finder {
         let client = relay_client(endpoint, relay)?;
         let held = match client.resolve(rendezvous_key(topic).public()).await {
             Ok(packet) => entries(topic, &packet),
-            // No member wrote the record yet.
             Err(error) if absent(&error) => Vec::new(),
-            // An unread record is not overwritten: the last writer wins.
             Err(error) => {
                 return Err(format!("the rendezvous record was not read: {error:#}").into());
             }
@@ -610,13 +619,12 @@ mod tests {
         let held: Vec<Entry> = (1..=9)
             .map(|node| entry(node, 1000 + node as u64))
             .collect();
-        // The byte bound holds five contacts that name a relay.
         let merged = merge(entry(20, 2000), held.clone(), 2000);
         assert_eq!(
             merged.iter().map(|entry| entry.node[0]).collect::<Vec<_>>(),
-            [20, 9, 8, 7, 6]
+            [20, 9, 8, 7, 6],
+            "the byte bound holds five contacts that name a relay"
         );
-        // The count bound holds six smaller ones.
         let direct = |mut entry: Entry| {
             entry.address.addrs.retain(|addr| !addr.is_relay());
             entry
@@ -626,19 +634,28 @@ mod tests {
             held.into_iter().map(direct).collect(),
             2000,
         );
-        assert_eq!(small.len(), RENDEZVOUS_CONTACTS);
+        assert_eq!(
+            small.len(),
+            RENDEZVOUS_CONTACTS,
+            "the count bound holds six contacts without a relay"
+        );
         let packet = record(&topic, &merged)?;
         assert!(packet.as_bytes().len() <= SignedPacket::MAX_BYTES);
         assert_eq!(entries(&topic, &packet), merged);
-        // Another topic neither names nor opens the record.
-        assert!(entries(&[8; 32], &packet).is_empty());
+        assert!(
+            entries(&[8; 32], &packet).is_empty(),
+            "another topic does not open the record"
+        );
         assert_ne!(
             rendezvous_key(&topic).public(),
-            rendezvous_key(&[8; 32]).public()
+            rendezvous_key(&[8; 32]).public(),
+            "another topic names another record"
         );
-        // The record names no member in the clear.
         let text = packet.txt_records(RECORD_NAME).concat();
-        assert!(!text.contains("relay.example.org"));
+        assert!(
+            !text.contains("relay.example.org"),
+            "the record names no member in the clear"
+        );
         Ok(())
     }
 
@@ -652,6 +669,16 @@ mod tests {
                 .map(|entry| (entry.node[0], entry.seen))
                 .collect::<Vec<_>>(),
             [(3, 5000), (2, 5000)]
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_contact_from_a_clock_far_ahead_is_not_kept_forever() {
+        let ahead = entry(2, 5000 + RENDEZVOUS_AGE + 1);
+        let merged = merge(entry(1, 5000), vec![ahead], 5000);
+        assert_eq!(
+            merged.iter().map(|entry| entry.node[0]).collect::<Vec<_>>(),
+            [1]
         );
     }
 

@@ -2,8 +2,7 @@
 use super::*;
 use crate::replica::incoming::Outcome;
 
-/// Metadata rows examined per refresh step. Provisional until separated
-/// phone costs are measured.
+/// Metadata rows examined per refresh step.
 const REFRESH_RECORDS: usize = 64;
 #[derive(Clone, Default)]
 struct Refresh {
@@ -95,9 +94,8 @@ impl<A: RowApplication> Inner<A> {
             if !self.can_read_key(scope, &local) || !self.holds(scope).await? {
                 return Err(denied("held change requires a readable held scope"));
             }
-            // An intent or outcome record is held whole: it has no rows for
-            // the application to re-author.
-            if payload.intent().is_some() || payload.outcome().is_some() {
+            let has_no_rows_to_reauthor = payload.intent().is_some() || payload.outcome().is_some();
+            if has_no_rows_to_reauthor {
                 continue;
             }
             let writes = payload.clone().into_writes();
@@ -187,8 +185,6 @@ impl<A: RowApplication> Inner<A> {
         }
         let mut migration = false;
         for (frame, _) in frames {
-            // The ledger replays applied frames only: a pending one's hold
-            // leaves it as it is.
             let key = frame.id()?.as_bytes().to_vec();
             if !collect_rows(
                 self.conn
@@ -430,8 +426,6 @@ impl<A: RowApplication> Inner<A> {
                 pass.discover = false;
                 return Ok(true);
             }
-            // The operation's unique (author,scope,sequence) index preserves the
-            // original signer/log order without sorting the whole scope.
             pass.records = collect_rows(self.conn.query(
                 "SELECT o.hash,p.scope,p.tip,p.author,p.sequence,o.sequence,o.status FROM secure_operations o LEFT JOIN secure_position_sources p ON p.hash=o.hash AND p.kind=0 WHERE o.author=? AND o.scope=? AND o.sequence>? ORDER BY o.sequence LIMIT ?",
                 bindings(vec![SqlValue::Blob(pass.signer.clone()), SqlValue::Blob(encode(&scope)?), SqlValue::Integer(pass.sequence), SqlValue::Integer(REFRESH_RECORDS as i64)]),
@@ -441,8 +435,6 @@ impl<A: RowApplication> Inner<A> {
                 crate::replica::lock::WorkUnit::HeldRefreshRecord,
                 pass.records.len() as u64,
             );
-            // A short page already proves this signer's end. Keep its buffered
-            // records, then discover the next signer without an empty query.
             pass.discover = pass.records.len() < REFRESH_RECORDS;
             if pass.records.is_empty() {
                 return Ok(true);
@@ -558,7 +550,6 @@ impl<A: RowApplication> Inner<A> {
         let mut paths = BTreeMap::new();
         let mut held = 0;
         let mut reseeds = BTreeSet::new();
-        // A page of frames at a time: the backlog can exceed memory.
         let mut after = (Vec::new(), Vec::new(), -1);
         loop {
             let records = collect_rows(self.conn.query(
@@ -870,8 +861,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .try_into()
                     .map_err(|_| Error::Corrupt("held frame hash".into()))?,
             );
-            // A resolved held change is not served again; a held intent has
-            // no held change and replays wherever its line continues.
             match present {
                 SqlValue::Integer(1) => {}
                 SqlValue::Integer(0) => {
@@ -928,7 +917,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 };
                 match inner.frame_reach(frame)? {
                     tips::FrameReach::Held => {}
-                    // A seal here already covers it: receiving it changes nothing.
                     tips::FrameReach::Live | tips::FrameReach::Sealed if late()? => {}
                     _ => return Err(denied("held transfer names a live or unrelated frame")),
                 }

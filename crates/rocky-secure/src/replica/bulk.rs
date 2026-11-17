@@ -94,7 +94,6 @@ impl<A: RowApplication> Inner<A> {
         else {
             return Err(Error::Corrupt("migration proof record".into()));
         };
-        // Private, unsigned and equivocated publications never leave through frames.
         if !matches!(conflict, SqlValue::Null) {
             return Err(denied("migration publication equivocated"));
         }
@@ -112,6 +111,12 @@ impl<A: RowApplication> Inner<A> {
             descriptor,
         }))
     }
+    /// An outcome record is never a migration frame: one written on a
+    /// migration tip this replica does not follow needs no descriptor.
+    fn is_outcome_record(&self, frame: &EncryptedFrame) -> bool {
+        self.row_payload(frame)
+            .is_ok_and(|payload| payload.outcome().is_some())
+    }
     pub(super) async fn check_migration_frame(
         &self,
         frame: &EncryptedFrame,
@@ -127,13 +132,7 @@ impl<A: RowApplication> Inner<A> {
                 {
                     return Err(denied("migration inclusion proof missing"));
                 }
-            } else if !self
-                .row_payload(frame)
-                .is_ok_and(|payload| payload.outcome().is_some())
-            {
-                // An outcome record is never a migration frame: one written on
-                // a migration tip this replica does not follow needs no
-                // descriptor.
+            } else if !self.is_outcome_record(frame) {
                 let graph = self.graph_for(op.header.extensions.scope.domain)?;
                 if let Some(opening) = graph.openings.iter().find(|o| o.tip().ok() == Some(tip)) {
                     let parent = graph
@@ -170,7 +169,6 @@ impl<A: RowApplication> Inner<A> {
                 time,
             )
             .map_err(credential)?;
-        // This uses the same canonical frame path and schema requirements as row admission.
         if !matches!(
             self.frame_reach(frame)?,
             tips::FrameReach::Live | tips::FrameReach::Sealed

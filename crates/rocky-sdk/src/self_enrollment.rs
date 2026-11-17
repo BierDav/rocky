@@ -188,7 +188,11 @@ impl Settings {
         )
     }
     /// Installs a new node of `provider`'s identity from a node of the
-    /// same identity that `contact` names.
+    /// same identity that `contact` names, an issuer too when its identity's
+    /// authority is. An identity may relink through its last, now-unlinked
+    /// installation, whose sealed bundle is provisioning evidence, not a
+    /// live data peer. The answering node persists the identity's
+    /// certificate before any sync.
     pub(crate) async fn enroll_identity(
         path: &Path,
         (intent, vault): (Intent, Vault),
@@ -298,7 +302,6 @@ impl Settings {
         );
         settings.generation = bundle.record.generation;
         settings.bootstrap = Some(bundle.bootstrap);
-        // The followed graph authenticates the schema record.
         settings.verify_schema()?;
         settings.learn_revocations(&bundle.revocations)?;
         let domain = settings.domain()?;
@@ -327,17 +330,15 @@ impl Settings {
             }
         }
         if issues {
-            // Its identity's authority makes this node an issuer too.
             settings.authority = Some(crate::enrollment::Issuing::default());
             settings.learn_revocations(&RevocationSet::new())?;
             crate::enrollment::hold_naming(&vault, bundle.naming.as_deref())?;
         }
-        // An identity may relink through its last, now-unlinked installation.
-        // Its sealed bundle is provisioning evidence, not a live data peer.
-        if !settings
-            .revocations
-            .ends_node_of(identity, record.node, false)
-        {
+        let answering_node_is_live_peer =
+            !settings
+                .revocations
+                .ends_node_of(identity, record.node, false);
+        if answering_node_is_live_peer {
             settings.add_peer(&vault, contact)?;
         }
         settings.learn_issuers(&vault, &bundle.issuers);
@@ -345,7 +346,6 @@ impl Settings {
             .credentials
             .certificate()
             .ok_or("missing linked certificate")?;
-        // The answering node persists the identity's certificate before any sync.
         let reply = exchange(
             transport,
             &addresses,
@@ -415,10 +415,12 @@ mod tests {
         let mut bundle: Bundle = serde_json::from_slice(&answer.open(&request, &secret)?)?;
         bundle.verify_database(a.database_context()?)?;
         assert!(bundle.verify_database(b.database_context()?).is_err());
-        // Even relabeling the envelope cannot change the signed authority.
         bundle.mesh = b.mesh;
         bundle.domain = b.domain;
-        assert!(bundle.verify_database(b.database_context()?).is_err());
+        assert!(
+            bundle.verify_database(b.database_context()?).is_err(),
+            "relabeling the envelope cannot change the signed authority"
+        );
         let (other_request, other_secret) =
             IdentityRequest::sign(&*person, &node, audience, now()?, b.database_context()?)?;
         assert!(answer.open(&other_request, &other_secret).is_err());

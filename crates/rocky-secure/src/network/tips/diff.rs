@@ -3,7 +3,9 @@ use super::*;
 
 impl NativeSession {
     /// Fixed binary ranges give both sides the same subdivision even when
-    /// their sets differ. Dependencies are admitted only after the full diff.
+    /// their sets differ. Dependencies can be in a later hash range, so the
+    /// whole outgoing diff is pushed and the final empty push admits the
+    /// union.
     pub(super) async fn reconcile_graph<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -149,8 +151,6 @@ impl NativeSession {
                     verify_missing(&incoming, &wanted)?;
                     learned.extend(incoming);
                 }
-                // Keep the whole outgoing diff together: dependencies can be in
-                // a later hash range. The final empty push admits the union.
                 for statements in statement_pages(outgoing)? {
                     pushed = true;
                     self.send(TipMessage::Push {

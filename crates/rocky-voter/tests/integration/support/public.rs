@@ -67,8 +67,8 @@ impl PublicCluster {
             let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
             let (tcp_address, udp_address) = (tcp.local_addr().unwrap(), udp.local_addr().unwrap());
-            // Keep every address distinct and unavailable throughout certification.
-            reservations.push((tcp, udp));
+            let held_distinct_until_certified = (tcp, udp);
+            reservations.push(held_distinct_until_certified);
             let keys = dir.path().join(format!("keys-{id}"));
             let printed: serde_json::Value = serde_json::from_str(&run(&[
                 Path::new("keys"),
@@ -143,13 +143,7 @@ impl PublicCluster {
             let id = index as u64 + 1;
             drop(reservation);
             cluster.spawn(id, true);
-            // Do not let a status connection claim the released ephemeral port
-            // as its source address before the voter has bound it.
-            cluster
-                .wait(&format!("voter {id} listening"), async || {
-                    cluster.log(id).contains("serving voters at")
-                })
-                .await;
+            cluster.wait_bound(id).await;
             cluster.wait_online(id, &admin).await;
         }
         admin.initialize(1).await.unwrap();
@@ -197,17 +191,25 @@ impl PublicCluster {
         )
         .unwrap()
     }
+    /// Waits until voter `id` has bound its released port, so no status
+    /// connection claims that ephemeral port as its source address first.
+    async fn wait_bound(&self, id: u64) {
+        self.wait(&format!("voter {id} listening"), async || {
+            self.log(id).contains("serving voters at")
+        })
+        .await;
+    }
     pub async fn wait_online(&self, id: u64, admin: &NetworkCoordinator) {
         self.wait(&format!("voter {id} online"), async || {
             admin.status(id).await.is_ok()
         })
         .await;
     }
+    /// The unfenced leader; a fenced voter may report its backup's leadership.
     pub async fn wait_leader(&self, admin: &NetworkCoordinator) -> u64 {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         loop {
             for id in 1..=3 {
-                // A fenced voter may report the leadership of its backup.
                 if let Ok(status) = admin.status(id).await
                     && status.leader == Some(id)
                     && !status.fenced

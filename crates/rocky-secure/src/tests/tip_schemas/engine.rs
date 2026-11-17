@@ -87,32 +87,36 @@ async fn a_build_on_another_engine_follows_read_only_until_a_tip_names_it() {
         .unwrap();
     follow_main(&lineage, &alice).await;
     crate::tests::exchange_graphs(&alice, &bob, lineage.domain).await;
-    // Identical builds name the same engine in the same manifest.
     assert_eq!(
         alice.generations().await.unwrap().manifest,
-        bob.generations().await.unwrap().manifest
+        bob.generations().await.unwrap().manifest,
+        "identical builds name the same engine in the same manifest"
     );
     assert_eq!(engine(&bob).await, EngineStatus::Current);
     insert(&alice, "one", "replayed by both").await;
     sync(&lineage, &alice, &bob, &bob_key).await;
     assert_eq!(keys(&bob).await, vec![vec![text("one")]]);
 
-    // Bob upgrades Rocky before the owner does.
     bob.replay_on(upgraded()).await;
-    assert_eq!(engine(&bob).await, EngineStatus::AwaitingOwner);
+    assert_eq!(
+        engine(&bob).await,
+        EngineStatus::AwaitingOwner,
+        "Bob upgraded Rocky before the owner did"
+    );
     let refused = session(&bob)
         .await
         .run("UPDATE items SET title='refused'", vec![])
         .await
         .unwrap_err();
     assert!(refused.to_string().contains("replay engine"), "{refused}");
-    // Alice's write reaches Bob and waits, stored, instead of replaying.
     insert(&alice, "two", "waits on bob").await;
     sync(&lineage, &alice, &bob, &bob_key).await;
-    assert_eq!(keys(&bob).await, vec![vec![text("one")]]);
+    assert_eq!(
+        keys(&bob).await,
+        vec![vec![text("one")]],
+        "Alice's write reaches Bob and waits, stored, instead of replaying"
+    );
 
-    // An upgraded owner opens a tip on the new engine; Bob follows it,
-    // replays what waited after the seal and writes again.
     let (target, statements) = open_on(&lineage, &bob, upgraded()).await;
     bob.receive_tip_statements(&statements).await.unwrap();
     assert!(
@@ -124,10 +128,10 @@ async fn a_build_on_another_engine_follows_read_only_until_a_tip_names_it() {
     insert(&bob, "three", "bob").await;
     assert_eq!(
         keys(&bob).await,
-        vec![vec![text("one")], vec![text("three")], vec![text("two")]]
+        vec![vec![text("one")], vec![text("three")], vec![text("two")]],
+        "following the upgraded owner's tip, Bob replays what waited and writes again"
     );
 
-    // Alice, not upgraded, waits read-only at the old tip, also after a restart.
     alice.receive_tip_statements(&statements).await.unwrap();
     assert_eq!(alice.pending_schema().await.unwrap().unwrap().tip, target);
     let refused = switch(&lineage, &alice, &alice_key, target, upgraded())
@@ -146,9 +150,9 @@ async fn a_build_on_another_engine_follows_read_only_until_a_tip_names_it() {
             .await
             .run("UPDATE items SET title='refused'", vec![])
             .await
-            .is_err()
+            .is_err(),
+        "Alice, not upgraded, stays read-only at the old tip after a restart"
     );
-    // Once upgraded, Alice follows the new tip and writes.
     alice.replay_on(upgraded()).await;
     assert!(
         switch(&lineage, &alice, &alice_key, target, upgraded())

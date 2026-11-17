@@ -124,6 +124,11 @@ impl CompiledSchema for InventoryApp {
         &["drafts"]
     }
 }
+/// Drafts whose note starts with the bound prefix, matched exactly: `LIKE`
+/// would fold case and read wildcards.
+const DRAFTS_WITH_NOTE_PREFIX: &str =
+    "SELECT node,sequence,note FROM drafts WHERE substr(note,1,length(?))=?";
+
 impl StoredApplication for InventoryApp {
     type Row = (OperationId, String);
     fn descriptor(&self) -> ApplicationDescriptor {
@@ -251,11 +256,9 @@ impl StoredApplication for InventoryApp {
     ) -> Result<Vec<ReadView>, Invalid> {
         self.admit_read(context.scope, context.caller, policy)?;
         let drafts = match &policy.note_prefix {
-            // Exact prefix match; LIKE would fold case and read wildcards.
             Some(prefix) => ReadView {
                 name: "drafts".into(),
-                sql: "SELECT node,sequence,note FROM drafts WHERE substr(note,1,length(?))=?"
-                    .into(),
+                sql: DRAFTS_WITH_NOTE_PREFIX.into(),
                 values: vec![SqlValue::Text(prefix.clone()); 2],
                 key: rocky_core::columns(&["node", "sequence"]),
                 not_null: rocky_core::columns(&[]),

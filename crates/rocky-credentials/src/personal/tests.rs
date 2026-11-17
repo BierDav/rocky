@@ -208,18 +208,20 @@ fn the_genesis_pins_root_owner_namespace_and_mode() {
     let error = p.genesis.verify_personal(root, owner, &other).unwrap_err();
     assert_eq!(personal(error), PersonalError::NamespaceMismatch);
 
-    // The same definition signed as shared is a downgrade.
     let shared = SignedManifest::sign(&p.manifest, DatabaseKind::Shared, &p.root).unwrap();
     let error = shared
         .verify_personal(root, owner, &p.namespace)
         .unwrap_err();
-    assert_eq!(personal(error), PersonalError::ModeMismatch);
+    assert_eq!(
+        personal(error),
+        PersonalError::ModeMismatch,
+        "the same definition signed as shared is a downgrade"
+    );
     assert_ne!(
         shared.descriptor().unwrap(),
         p.genesis.descriptor().unwrap()
     );
 
-    // Swapping the signed mode breaks the root's signature.
     #[derive(Serialize, Deserialize)]
     struct Mirror {
         body: Vec<u8>,
@@ -230,15 +232,20 @@ fn the_genesis_pins_root_owner_namespace_and_mode() {
         crate::decode_bounded(&p.genesis.to_bytes().unwrap(), 1 << 20).unwrap();
     mirror.kind = DatabaseKind::Shared;
     let swapped = SignedManifest::from_bytes(&encode(&mirror).unwrap()).unwrap();
-    assert!(swapped.verify(root).is_err());
+    assert!(
+        swapped.verify(root).is_err(),
+        "swapping the signed mode breaks the root's signature"
+    );
 
-    // The root cannot pin itself as owner or a domain the owner does not locate.
     let kind = |owner| DatabaseKind::Personal {
         owner,
         namespace: p.namespace.clone(),
         creation: [0; 16],
     };
-    assert!(SignedManifest::sign(&p.manifest, kind(root), &p.root).is_err());
+    assert!(
+        SignedManifest::sign(&p.manifest, kind(root), &p.root).is_err(),
+        "the root cannot pin itself as owner"
+    );
     let elsewhere = manifest(root, DomainId([9; 16]));
     assert!(SignedManifest::sign(&elsewhere, kind(owner), &p.root).is_err());
 }
@@ -272,10 +279,12 @@ fn devices_signed_in_against_one_snapshot_merge_in_every_order_without_forks() {
         laptop.exchange_digest(NOW).unwrap(),
         phone.exchange_digest(NOW).unwrap()
     );
-    // Merging again deduplicates by certificate ID.
     let before = laptop.clone();
     p.merge(&mut laptop, &phone);
-    assert_eq!(laptop, before);
+    assert_eq!(
+        laptop, before,
+        "merging again deduplicates by certificate ID"
+    );
     assert!(
         !laptop
             .admit_personal(phone_chain.certificate().unwrap().clone(), &p.context)
@@ -297,7 +306,6 @@ fn a_tombstone_dominates_every_replay_in_every_order() {
         chain.certificate().unwrap().id().unwrap()
     );
 
-    // A holder that learned the replay before the tombstone drops it.
     let mut early = held.clone();
     early.admit_personal(replay.clone(), &p.context).unwrap();
     p.merge(&mut early, &tombstone);
@@ -309,7 +317,8 @@ fn a_tombstone_dominates_every_replay_in_every_order() {
         personal(error),
         PersonalError::Tombstoned {
             node: PeerId::of(node.public_key())
-        }
+        },
+        "a holder that learned the replay before the tombstone drops it"
     );
     assert_eq!(late, before);
     assert!(!late.link(replay.clone()).unwrap());
@@ -357,14 +366,16 @@ fn the_device_limit_refuses_without_removing_a_sibling() {
     for chain in &chains {
         assert!(p.verifies(chain, &set));
     }
-    // Independent additions beyond the limit still merge; nothing is evicted.
     let mut elsewhere = RevocationSet::new();
     elsewhere
         .admit_personal(extra.certificate().unwrap().clone(), &p.context)
         .unwrap();
     p.merge(&mut set, &elsewhere);
     for chain in chains.iter().chain([&extra]) {
-        assert!(p.verifies(chain, &set));
+        assert!(
+            p.verifies(chain, &set),
+            "independent additions beyond the limit still merge; nothing is evicted"
+        );
     }
 }
 
@@ -391,7 +402,6 @@ fn wrong_bindings_and_forged_possession_change_nothing() {
     assert_eq!(personal(error), PersonalError::WrongBinding);
     assert_eq!(set, snapshot);
 
-    // Another key's possession proof never certifies the node.
     let mut forged = p.replay(&node);
     let other = p.replay(&PrivateKey::new());
     let mut extended = forged.capability.extended().unwrap();
@@ -399,12 +409,15 @@ fn wrong_bindings_and_forged_possession_change_nothing() {
     forged.capability.extension = crate::Extension::new(extended).unwrap();
     let resigned = SignedCapability::sign(forged.capability.clone(), &p.owner).unwrap();
     let error = set.link(resigned.clone()).unwrap_err();
-    assert_eq!(personal(error), PersonalError::Possession);
+    assert_eq!(
+        personal(error),
+        PersonalError::Possession,
+        "another key's possession proof never certifies the node"
+    );
     let error = set.admit_personal(resigned, &p.context).unwrap_err();
     assert_eq!(personal(error), PersonalError::Possession);
     assert_eq!(set, snapshot);
 
-    // A leaf binding another grant does not verify under this chain's grant.
     let regranted = CredentialChain(vec![
         Authority::owner(&p.root)
             .issue_trusted(p.owner.public_key(), p.context.database.scope, NOW + 1)
@@ -412,7 +425,10 @@ fn wrong_bindings_and_forged_possession_change_nothing() {
     ]);
     let (_, chain) = p.device();
     let crossed = regranted.with_certificate(chain.certificate().unwrap().clone());
-    assert!(p.verifies(&chain, &set));
+    assert!(
+        p.verifies(&chain, &set),
+        "a leaf binding another grant does not verify under this chain's grant"
+    );
     assert!(!p.verifies(&crossed, &set));
 }
 
@@ -425,10 +441,13 @@ fn a_shared_genesis_refuses_personal_certificates() {
     let shared = SignedManifest::sign(&p.manifest, DatabaseKind::Shared, &p.root).unwrap();
     let mut held = RevocationSet::new();
     held.link(certificate.clone()).unwrap();
-    // Pinning judges what a set already holds, and changes nothing on refusal.
     let mut pinning = held.clone();
     let error = pinning.pin(&shared, root).unwrap_err();
-    assert_eq!(personal(error), PersonalError::ModeMismatch);
+    assert_eq!(
+        personal(error),
+        PersonalError::ModeMismatch,
+        "pinning judges what a set already holds"
+    );
     assert!(pinning.genesis().is_none());
 
     let mut pinned = RevocationSet::new();
@@ -438,11 +457,13 @@ fn a_shared_genesis_refuses_personal_certificates() {
     assert!(pinned.merge(&held, root, p.manifest.app, NOW).is_err());
     assert_eq!(pinned.certificates().count(), 0);
     assert!(!p.verifies(&device, &pinned));
-    // A merge keeps this holder's pin; another genesis is refused.
     pinned
         .merge(&RevocationSet::new(), root, p.manifest.app, NOW)
         .unwrap();
-    assert!(pinned.genesis().is_some());
+    assert!(
+        pinned.genesis().is_some(),
+        "a merge keeps this holder's pin"
+    );
     assert!(pinned.pin(&p.genesis, root).is_err());
 }
 
@@ -458,7 +479,6 @@ fn a_personal_genesis_admits_only_its_owners_bound_devices() {
     assert!(p.verifies(&device, &set));
     let before = set.clone();
 
-    // The owner's node never takes a membership sequence here.
     let sequenced = p
         .grant
         .clone()
@@ -467,10 +487,13 @@ fn a_personal_genesis_admits_only_its_owners_bound_devices() {
     let error = set
         .link(sequenced.certificate().unwrap().clone())
         .unwrap_err();
-    assert_eq!(personal(error), PersonalError::WrongBinding);
+    assert_eq!(
+        personal(error),
+        PersonalError::WrongBinding,
+        "the owner's node never takes a membership sequence here"
+    );
     assert!(!p.verifies(&sequenced, &set));
 
-    // Nor a personal certificate bound to another genesis.
     let node = PrivateKey::new();
     let unbound = p
         .grant
@@ -480,11 +503,13 @@ fn a_personal_genesis_admits_only_its_owners_bound_devices() {
     let error = set
         .link(unbound.certificate().unwrap().clone())
         .unwrap_err();
-    assert_eq!(personal(error), PersonalError::WrongBinding);
+    assert_eq!(
+        personal(error),
+        PersonalError::WrongBinding,
+        "a personal certificate bound to another genesis is refused"
+    );
     assert!(!p.verifies(&unbound, &set));
 
-    // The root's trusted grant to anyone else carries no authority here,
-    // nor do that identity's devices.
     let stranger = Personal::new(2).owner;
     let trusted = CredentialChain(vec![
         Authority::owner(&p.root)
@@ -495,7 +520,10 @@ fn a_personal_genesis_admits_only_its_owners_bound_devices() {
         .clone()
         .certify(&stranger, PrivateKey::new().public_key())
         .unwrap();
-    assert!(!p.verifies(&strangers, &set));
+    assert!(
+        !p.verifies(&strangers, &set),
+        "the root's trusted grant to anyone else carries no authority here"
+    );
     let error = trusted
         .clone()
         .certify_personal(&stranger, &node, (owner, p.context.descriptor))
@@ -544,6 +572,5 @@ fn devices_a_reset_signed_out_leave_the_device_limit() {
     .unwrap();
     p.merge(&mut set, &RevocationSet::try_from(vec![reset]).unwrap());
     assert!(set.personal_devices(owner).unwrap().is_empty());
-    // Signed out, not tombstoned: they sign in again as new nodes.
     p.sign_in(&set);
 }

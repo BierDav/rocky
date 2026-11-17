@@ -287,7 +287,6 @@ async fn a_future_import_does_not_make_verified_empty_partition_history_missing(
             .unwrap()
             .is_empty()
     );
-    // The intent is named as an import, never as missing history.
     let blockers = replica.blockers().await.unwrap();
     super::blockers::assert_named(
         &blockers,
@@ -299,7 +298,7 @@ async fn a_future_import_does_not_make_verified_empty_partition_history_missing(
         blockers
             .iter()
             .all(|blocker| !matches!(blocker.kind, crate::BlockerKind::SealRebootstrap { .. })),
-        "{blockers:?}"
+        "the intent is named as an import, never as missing history: {blockers:?}"
     );
     let session = replica
         .session([f.scope("A"), f.scope("B")].into())
@@ -440,23 +439,27 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
         ReceiveStatus::Applied
     );
     assert!(reader.receive(fb.clone()).await.is_err());
-    // A keyless custodian cannot learn a partition from its frames: an
-    // entitled peer's offer registers it.
-    assert!(custody.receive(fa.clone()).await.is_err());
+    assert!(
+        custody.receive(fa.clone()).await.is_err(),
+        "a keyless custodian cannot learn a partition from its frames"
+    );
     f.register(&custody, "A").await;
     assert_eq!(
         custody.receive(fa.clone()).await.unwrap(),
-        ReceiveStatus::Custody
+        ReceiveStatus::Custody,
+        "an entitled peer's offer registers the partition with a keyless custodian"
     );
     assert!(custody.receive(fb.clone()).await.is_err());
-    // A valid author signature cannot downgrade a partitioned table to a legacy frame.
     let legacy = {
         let mut operation = fa.operation().unwrap();
         operation.header.extensions.row_format = 15;
         operation.header.sign(&author);
         fa.with_header(operation.header.to_bytes())
     };
-    assert!(legacy.operation().is_err());
+    assert!(
+        legacy.operation().is_err(),
+        "a valid author signature cannot downgrade a partitioned table to a legacy frame"
+    );
     assert!(custody.receive(legacy).await.is_err());
 
     assert!(!reader.table_complete(f.scope("A").table).await.unwrap());
@@ -827,25 +830,29 @@ async fn an_unheld_partition_is_placed_without_its_tuple_or_a_confirmable_scope(
         .config
         .credentials
         .clone();
-    // The writer shows the header to a member that holds another list.
     let page = writer
         .placement_page(reader_key.public_key(), &credentials, *request)
         .await
         .unwrap();
-    assert_eq!(page.headers.len(), 1);
-    // Neither the tuple nor its value is in anything the reader received.
+    assert_eq!(
+        page.headers.len(),
+        1,
+        "the writer shows the header to a member that holds another list"
+    );
     let received = [encode(&page).unwrap(), hidden.to_bytes().unwrap()];
     let tuple = encode(&f.tuple("secret-partition")).unwrap();
     for bytes in &received {
-        assert!(!bytes.windows(tuple.len()).any(|window| window == tuple));
+        assert!(
+            !bytes.windows(tuple.len()).any(|window| window == tuple),
+            "the tuple is in nothing the reader received"
+        );
         assert!(
             !bytes
                 .windows(16)
-                .any(|window| window == b"secret-partition")
+                .any(|window| window == b"secret-partition"),
+            "the tuple's value is in nothing the reader received"
         );
     }
-    // A guessed tuple confirms nothing: no naming secret the reader holds,
-    // and no unkeyed digest, gives the header's scope.
     let placed = crate::wire::verified_header(&page.headers[0].0).unwrap();
     let table = f.scope("A").table;
     let names = reader
@@ -865,15 +872,20 @@ async fn an_unheld_partition_is_placed_without_its_tuple_or_a_confirmable_scope(
             f.tuple("secret-partition")
                 .scope(f.domain, table, name)
                 .unwrap(),
-            placed.extensions.scope
+            placed.extensions.scope,
+            "a guessed tuple under no naming secret the reader holds gives the header's scope"
         );
     }
     assert_ne!(
         rocky_core::commitment("rocky.partition-scope.v1", &tuple),
-        placed.extensions.scope.encryption
+        placed.extensions.scope.encryption,
+        "a guessed tuple's unkeyed digest does not give the header's scope"
     );
-    // The signed header still places the position outside the reader's lists.
-    assert_eq!(reader.receive_placements(*request, page).await.unwrap(), 1);
+    assert_eq!(
+        reader.receive_placements(*request, page).await.unwrap(),
+        1,
+        "the signed header still places the position outside the reader's lists"
+    );
     assert!(reader.wanted_placements().await.unwrap().is_empty());
     let inner = reader.inner.lock(crate::replica::Class::Background).await;
     let tuples = crate::storage::rows(&inner.conn, "SELECT tuple FROM secure_partitions")
@@ -916,44 +928,50 @@ async fn a_frame_whose_keyed_scope_and_sealed_tuple_disagree_is_refused() {
         crate::wire::Opened::open(&[1; 32], &operation.header.extensions, frame.body_bytes())
             .unwrap();
     assert_eq!(opened.partition, Some(f.tuple("A")));
-    // Re-signs `header` over a body sealing `partition` under `key`.
-    let forge = |mut header: p2panda_core::Header<crate::wire::Extensions>,
-                 key: [u8; 32],
-                 partition: Option<PartitionTuple>| {
-        let sealed = encode(&crate::wire::Opened {
-            partition,
-            payload: opened.payload.clone(),
-        })
-        .unwrap();
-        let body =
-            crate::wire::encrypt(&key, &encode(&header.extensions).unwrap(), &sealed).unwrap();
-        let payload = p2panda_core::Body::new(&body);
-        header.payload_size = payload.size();
-        header.payload_hash = Some(payload.hash());
-        header.sign(&author);
-        frame.with_header(header.to_bytes()).with_body(body)
-    };
-    // A's keyed scope over B's tuple, and over no tuple.
+    let resign_over_a_body_sealing_partition_under_key =
+        |mut header: p2panda_core::Header<crate::wire::Extensions>,
+         key: [u8; 32],
+         partition: Option<PartitionTuple>| {
+            let sealed = encode(&crate::wire::Opened {
+                partition,
+                payload: opened.payload.clone(),
+            })
+            .unwrap();
+            let body =
+                crate::wire::encrypt(&key, &encode(&header.extensions).unwrap(), &sealed).unwrap();
+            let payload = p2panda_core::Body::new(&body);
+            header.payload_size = payload.size();
+            header.payload_hash = Some(payload.hash());
+            header.sign(&author);
+            frame.with_header(header.to_bytes()).with_body(body)
+        };
     for partition in [Some(f.tuple("B")), None] {
-        let forged = forge(operation.header.clone(), [1; 32], partition);
-        assert!(!matches!(
-            reader.receive(forged).await,
-            Ok(ReceiveStatus::Applied)
-        ));
+        let forged = resign_over_a_body_sealing_partition_under_key(
+            operation.header.clone(),
+            [1; 32],
+            partition,
+        );
+        assert!(
+            !matches!(reader.receive(forged).await, Ok(ReceiveStatus::Applied)),
+            "A's keyed scope over B's tuple, or over no tuple, is refused"
+        );
     }
-    // A's tuple under a scope keyed by another naming secret, with B's key.
     let mut header = operation.header.clone();
     header.extensions.scope = f
         .tuple("A")
         .scope(f.domain, f.scope("A").table, &f.naming("B"))
         .unwrap();
-    let forged = forge(header, [2; 32], Some(f.tuple("A")));
-    assert!(!matches!(
-        reader.receive(forged).await,
-        Ok(ReceiveStatus::Applied)
-    ));
-    // The genuine frame still applies.
-    assert_eq!(reader.receive(frame).await.unwrap(), ReceiveStatus::Applied);
+    let forged =
+        resign_over_a_body_sealing_partition_under_key(header, [2; 32], Some(f.tuple("A")));
+    assert!(
+        !matches!(reader.receive(forged).await, Ok(ReceiveStatus::Applied)),
+        "A's tuple under a scope keyed by another naming secret, with B's key, is refused"
+    );
+    assert_eq!(
+        reader.receive(frame).await.unwrap(),
+        ReceiveStatus::Applied,
+        "the genuine frame still applies"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

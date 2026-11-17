@@ -16,6 +16,13 @@ use support::snapshot as snap;
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
+const SQLITE_ERROR: i32 = 1;
+const SQLITE_ABORT: i32 = 4;
+const SQLITE_READONLY: i32 = 8;
+const SQLITE_TOOBIG: i32 = 18;
+const SQLITE_AUTH: i32 = 23;
+const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
+
 const SHOPPING: &str = r#"{"format":6,"application":"shopping","version":3,"tables":[
  {"name":"lists","class":"replayed","columns":[
    {"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],
@@ -67,7 +74,8 @@ fn expression(sql: &str) -> Expr {
     };
     expr
 }
-// The fixture adapter obtains each inserted identity through the public SQL allocator.
+/// Rewrites an insert into `lists` or `items` so each row carries an
+/// identity from the public SQL allocator, as a driver adapter would.
 async fn identity_insert(connection: &Connection, sql: &str) -> Result<String, Failure> {
     let Ok(mut statements) = Parser::parse_sql(&SQLiteDialect {}, sql) else {
         return Ok(sql.into());
@@ -100,7 +108,6 @@ async fn identity_insert(connection: &Connection, sql: &str) -> Result<String, F
             }
         }
         SetExpr::Select(select) => {
-            // Each selected row takes the next allocated identity.
             let statement = connection.statement();
             let sql = format!("SELECT count(*) FROM ({query})");
             let mut page = connection.execute(statement, sql, vec![]).await?;
@@ -249,7 +256,6 @@ async fn a_writer_transaction_is_one_bundle_and_savepoints_nest() -> Result<(), 
         )
         .await?;
     }
-    // Nested savepoints, as Room nests transactions: the inner one rolls back.
     run(&writer, "SAVEPOINT 'outer'").await?;
     run(&writer, "SAVEPOINT 'inner'").await?;
     run(&writer, "DELETE FROM items WHERE key = 'i3'").await?;
@@ -257,9 +263,11 @@ async fn a_writer_transaction_is_one_bundle_and_savepoints_nest() -> Result<(), 
     run(&writer, "RELEASE SAVEPOINT 'inner'").await?;
     run(&writer, "UPDATE items SET completed = 1 WHERE key = 'i1'").await?;
     run(&writer, "RELEASE SAVEPOINT 'outer'").await?;
-    // The writer reads its own writes. A reader's statement would wait for
-    // the commit: readers never hold the writer, the writer holds the replica.
-    assert_eq!(count(&writer, "items").await?, 3);
+    assert_eq!(
+        count(&writer, "items").await?,
+        3,
+        "the writer reads its own writes; a nested savepoint's rollback undoes only its delete"
+    );
     run(&writer, "END TRANSACTION").await?;
     assert!(!writer.in_transaction().await?);
     assert_eq!(count(&reader, "items").await?, 3);
@@ -277,13 +285,13 @@ async fn a_writer_transaction_is_one_bundle_and_savepoints_nest() -> Result<(), 
             SqlValue::Blob(vec![1, 2])
         ]
     );
-    // Parent and children: one bundle, one frame for each table's scope,
-    // and the outcome record each member's log carries.
     let after = published(root.path())?;
-    assert_eq!((after.0 - before.0, after.1 - before.1), (1, 4));
+    assert_eq!(
+        (after.0 - before.0, after.1 - before.1),
+        (1, 4),
+        "parent and children publish one bundle: a frame per table's scope and the outcome record"
+    );
 
-    // Inserted and deleted in one transaction: its statements still
-    // replicate, since another replica's replay may differ.
     run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
     all(
         &writer,
@@ -294,13 +302,19 @@ async fn a_writer_transaction_is_one_bundle_and_savepoints_nest() -> Result<(), 
     run(&writer, "DELETE FROM lists WHERE key = 'gone'").await?;
     run(&writer, "END TRANSACTION").await?;
     let after = published(root.path())?;
-    assert_eq!(after, (before.0 + 2, before.1 + 5));
-    // A transaction that only began and ended never took the file.
+    assert_eq!(
+        after,
+        (before.0 + 2, before.1 + 5),
+        "an insert deleted in the same transaction still replicates: another replay may differ"
+    );
     run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
     run(&writer, "END TRANSACTION").await?;
-    assert_eq!(published(root.path())?, after);
+    assert_eq!(
+        published(root.path())?,
+        after,
+        "a transaction that only began and ended publishes nothing"
+    );
 
-    // Engine errors keep SQLite's extended codes; the transaction goes on.
     run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
     let duplicate = all(
         &writer,
@@ -313,10 +327,15 @@ async fn a_writer_transaction_is_one_bundle_and_savepoints_nest() -> Result<(), 
     let duplicate = duplicate
         .downcast::<rocky_sdk::SqlFailure>()
         .map_err(|_| "code")?;
-    assert_eq!(duplicate.code, 1555, "{duplicate}");
-    assert!(writer.in_transaction().await?);
+    assert_eq!(
+        duplicate.code, SQLITE_CONSTRAINT_PRIMARYKEY,
+        "engine errors keep SQLite's extended codes: {duplicate}"
+    );
+    assert!(
+        writer.in_transaction().await?,
+        "an engine error leaves the transaction open"
+    );
     run(&writer, "ROLLBACK TRANSACTION").await?;
-    // The engine catalog and pragmas stay denied without a profile.
     for sql in [
         "PRAGMA user_version",
         "SELECT * FROM sqlite_master",
@@ -326,7 +345,10 @@ async fn a_writer_transaction_is_one_bundle_and_savepoints_nest() -> Result<(), 
         let error = error
             .downcast::<rocky_sdk::SqlFailure>()
             .map_err(|_| "code")?;
-        assert_eq!(error.code, 23, "{sql}: {error}");
+        assert_eq!(
+            error.code, SQLITE_AUTH,
+            "the engine catalog and pragmas stay denied without a profile: {sql}: {error}"
+        );
     }
     writer.close().await;
     reader.close().await;
@@ -364,7 +386,6 @@ async fn a_row_id_is_reserved_before_its_insert_in_the_same_transaction() -> Res
         _ => Err("one row"),
     };
 
-    // Reserved, then inserted, in one transaction: one bundle.
     exact(&writer, "BEGIN IMMEDIATE TRANSACTION", vec![]).await?;
     let first = id(exact(&writer, "SELECT rocky_next_id('items')", vec![]).await?)?;
     let second = id(exact(&writer, "select ROCKY_NEXT_ID(?);", vec![text("items")]).await?)?;
@@ -387,29 +408,38 @@ async fn a_row_id_is_reserved_before_its_insert_in_the_same_transaction() -> Res
         ]
     );
     let after = published(root.path())?;
-    assert_eq!(after.0 - before.0, 1);
+    assert_eq!(
+        after.0 - before.0,
+        1,
+        "reserving and inserting in one transaction publishes one bundle"
+    );
 
-    // A rollback releases the reservation: the next transaction gets it again.
     for _ in 0..2 {
         exact(&writer, "BEGIN IMMEDIATE TRANSACTION", vec![]).await?;
         let third = id(exact(&writer, "SELECT rocky_next_id('items')", vec![]).await?)?;
-        assert_eq!((third.writer(), third.sequence()), (first.writer(), 3));
+        assert_eq!(
+            (third.writer(), third.sequence()),
+            (first.writer(), 3),
+            "a rollback releases the reservation to the next transaction"
+        );
         exact(&writer, "ROLLBACK", vec![]).await?;
     }
     assert_eq!(published(root.path())?, after);
 
-    // Only a write transaction reserves ids.
     let outside = exact(&writer, "SELECT rocky_next_id('items')", vec![])
         .await
         .err()
         .ok_or("outside a transaction")?;
-    assert_eq!(outside.code, 1, "{outside}");
+    assert_eq!(
+        outside.code, SQLITE_ERROR,
+        "only a write transaction reserves ids: {outside}"
+    );
     assert!(outside.message.contains("open transaction"), "{outside}");
     let read = exact(&reader, "SELECT rocky_next_id('items')", vec![])
         .await
         .err()
         .ok_or("on a reader")?;
-    assert_eq!(read.code, 8, "{read}");
+    assert_eq!(read.code, SQLITE_READONLY, "{read}");
     exact(&writer, "BEGIN IMMEDIATE TRANSACTION", vec![]).await?;
     for (sql, params) in [
         ("SELECT rocky_next_id(7)", vec![]),
@@ -442,22 +472,21 @@ async fn bundle_limits_and_the_lease_fail_the_transaction_without_splitting_it()
             .map(|failure| *failure)
     };
 
-    // Seeds of 32 and 64 rows; a statement crossing them replays 2,048.
+    let (title_a_seeds, all_seeds) = (32, 65);
     run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
-    for key in 0..65 {
+    for key in 0..all_seeds {
         all(
             &writer,
             "INSERT INTO lists(key,title) VALUES(?,?)",
             vec![
                 text(&format!("s{key:02}")),
-                text(if key < 32 { "a" } else { "b" }),
+                text(if key < title_a_seeds { "a" } else { "b" }),
             ],
         )
         .await?;
     }
     run(&writer, "END TRANSACTION").await?;
     let seeded = published(root.path())?;
-    // 2,049 replayed rows: the commit fails as a whole.
     run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
     all(
         &writer,
@@ -473,10 +502,16 @@ async fn bundle_limits_and_the_lease_fail_the_transaction_without_splitting_it()
             .ok_or("rows")?,
     )
     .map_err(|_| "code")?;
-    assert_eq!(refused.code, 18, "{refused}");
+    assert_eq!(
+        refused.code, SQLITE_TOOBIG,
+        "a statement replaying more rows than a bundle holds fails the commit: {refused}"
+    );
     assert!(!writer.in_transaction().await?);
-    assert_eq!(count(&writer, "lists").await?, 65);
-    // An intent frame over a range page's bytes fails the same way.
+    assert_eq!(
+        count(&writer, "lists").await?,
+        all_seeds,
+        "a commit over the limit fails as a whole"
+    );
     run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
     all(
         &writer,
@@ -491,9 +526,11 @@ async fn bundle_limits_and_the_lease_fail_the_transaction_without_splitting_it()
             .ok_or("bytes")?,
     )
     .map_err(|_| "code")?;
-    assert!(refused.message.contains("quota"), "{refused}");
-    assert_eq!(count(&writer, "lists").await?, 65);
-    // Exactly the limit commits as one bundle of one intent frame.
+    assert!(
+        refused.message.contains("quota"),
+        "an intent frame over a range page's bytes fails the commit: {refused}"
+    );
+    assert_eq!(count(&writer, "lists").await?, all_seeds);
     run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
     all(
         &writer,
@@ -504,7 +541,11 @@ async fn bundle_limits_and_the_lease_fail_the_transaction_without_splitting_it()
     .await?;
     run(&writer, "END TRANSACTION").await?;
     let after = published(root.path())?;
-    assert_eq!((after.0 - seeded.0, after.1 - seeded.1), (1, 1));
+    assert_eq!(
+        (after.0 - seeded.0, after.1 - seeded.1),
+        (1, 1),
+        "exactly the replayed-row limit commits as one bundle of one intent frame"
+    );
     assert!(seeded.0 > before.0);
     writer.close().await;
     database.close().await?;
@@ -523,7 +564,6 @@ async fn the_write_lease_times_out_and_aborts_until_acknowledged() -> Result<(),
         .await?;
     run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
     run(&writer, "INSERT INTO lists(key,title) VALUES('l1','held')").await?;
-    // The lease ends on its own; wait for that, at most a few seconds.
     let error = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             match all(&writer, "SELECT count(*) FROM lists", Vec::new()).await {
@@ -536,10 +576,15 @@ async fn the_write_lease_times_out_and_aborts_until_acknowledged() -> Result<(),
     let error = error
         .downcast::<rocky_sdk::SqlFailure>()
         .map_err(|_| "code")?;
-    assert_eq!(error.code, 4, "{error}");
-    assert!(error.message.contains("Timeout"), "{error}");
-    // Still a transaction for the driver, until it rolls back.
-    assert!(writer.in_transaction().await?);
+    assert_eq!(error.code, SQLITE_ABORT, "{error}");
+    assert!(
+        error.message.contains("Timeout"),
+        "the lease ends on its own: {error}"
+    );
+    assert!(
+        writer.in_transaction().await?,
+        "a timed-out lease stays a transaction for the driver until it rolls back"
+    );
     run(&writer, "ROLLBACK TRANSACTION").await?;
     assert!(!writer.in_transaction().await?);
     assert_eq!(count(&writer, "lists").await?, 0);
@@ -554,21 +599,23 @@ async fn readers_page_snapshots_and_never_hold_the_writer() -> Result<(), Failur
     let database = create(open(root.path(), None), None).await?.database;
     let writer = database.connect(WRITER).await?;
     let reader = database.connect(READER).await?;
-    // 600 lists, in transactions under the intent statement quota.
+    let batch_under_intent_statement_quota = 200;
     for batch in 0..3 {
         run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
-        for i in 1..=200 {
+        for i in 1..=batch_under_intent_statement_quota {
             all(
                 &writer,
                 "INSERT INTO lists(key,title) VALUES(?,'list')",
-                vec![text(&format!("l{:04}", batch * 200 + i))],
+                vec![text(&format!(
+                    "l{:04}",
+                    batch * batch_under_intent_statement_quota + i
+                ))],
             )
             .await?;
         }
         run(&writer, "END TRANSACTION").await?;
     }
 
-    // An open cursor and an open read transaction do not stop a commit.
     let streaming = reader.statement();
     let first = reader
         .execute(
@@ -584,17 +631,14 @@ async fn readers_page_snapshots_and_never_hold_the_writer() -> Result<(), Failur
     let transaction = database.connect(READER).await?;
     run(&transaction, "BEGIN DEFERRED TRANSACTION").await?;
     assert_eq!(count(&transaction, "lists").await?, 600);
-    let delete_started = std::time::Instant::now();
-    // A blocked writer never finishes; the bound only has to outlast a loaded CI host.
-    tokio::time::timeout(Duration::from_secs(60), async {
+    let outlasts_a_loaded_ci_host = Duration::from_secs(60);
+    tokio::time::timeout(outlasts_a_loaded_ci_host, async {
         run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
         run(&writer, "DELETE FROM lists WHERE key > 'l0100'").await?;
         run(&writer, "END TRANSACTION").await
     })
     .await
-    .map_err(|_| "a reader blocked the writer")??;
-    eprintln!("500-row delete and commit: {:?}", delete_started.elapsed());
-    // Both still read their snapshot; a new statement reads the commit.
+    .map_err(|_| "an open cursor or read transaction blocked the writer")??;
     let mut seen = first.rows.len();
     loop {
         let page = reader.next(streaming).await?;
@@ -603,30 +647,43 @@ async fn readers_page_snapshots_and_never_hold_the_writer() -> Result<(), Failur
             break;
         }
     }
-    assert_eq!(seen, 600);
-    assert_eq!(count(&transaction, "lists").await?, 600);
+    assert_eq!(seen, 600, "an open cursor still reads its snapshot");
+    assert_eq!(
+        count(&transaction, "lists").await?,
+        600,
+        "an open read transaction still reads its snapshot"
+    );
     run(&transaction, "END TRANSACTION").await?;
-    assert_eq!(count(&transaction, "lists").await?, 100);
+    assert_eq!(
+        count(&transaction, "lists").await?,
+        100,
+        "a new statement reads the commit"
+    );
     assert_eq!(count(&reader, "lists").await?, 100);
-    // Readers refuse writes with SQLite's read-only code.
     for sql in ["DELETE FROM lists", "BEGIN IMMEDIATE TRANSACTION"] {
         let error = all(&reader, sql, Vec::new()).await.err().ok_or(sql)?;
         let error = error
             .downcast::<rocky_sdk::SqlFailure>()
             .map_err(|_| "code")?;
-        assert_eq!(error.code, 8, "{sql}: {error}");
+        assert_eq!(
+            error.code, SQLITE_READONLY,
+            "readers refuse writes with SQLite's read-only code: {sql}: {error}"
+        );
     }
-    // `query_only` switches a connection's kind between transactions, as in SQLite.
     run(&writer, "PRAGMA query_only = 1").await?;
     let flag = all(&writer, "PRAGMA query_only", Vec::new()).await?;
     assert_eq!(flag, vec![vec![SqlValue::Integer(1)]]);
-    assert!(all(&writer, "DELETE FROM lists", Vec::new()).await.is_err());
+    assert!(
+        all(&writer, "DELETE FROM lists", Vec::new()).await.is_err(),
+        "`query_only` makes the writer read-only, as in SQLite"
+    );
     run(&writer, "PRAGMA query_only = 0").await?;
     run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
     assert!(
         all(&writer, "PRAGMA query_only = 1", Vec::new())
             .await
-            .is_err()
+            .is_err(),
+        "`query_only` switches only between transactions"
     );
     run(&writer, "DELETE FROM lists WHERE key = 'l0001'").await?;
     run(&writer, "END TRANSACTION").await?;
@@ -695,17 +752,15 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
     .await?;
     run(&writer_a, "END TRANSACTION").await?;
     snap::value(b.session().sync_once()).await?;
-    // One change covers both tables: the bundle applied as a whole.
     let change = tokio::time::timeout(Duration::from_secs(5), events.next()).await??;
     assert_eq!(
         change.tables,
-        vec!["items".to_string(), "lists".to_string()]
+        vec!["items".to_string(), "lists".to_string()],
+        "one change covers both tables: the bundle applies as a whole"
     );
     assert!(change.causes.contains(&"sync".to_string()), "{change:?}");
     assert_eq!(count(&reader_b, "items").await?, 2);
 
-    // A whole-row update that changes only the title, concurrent with a
-    // change of `completed` elsewhere: under `changed` both survive.
     run(&writer_a, "UPDATE items SET key = 'i1', list = 'l1', title = 'Oat milk', completed = 0, note = NULL WHERE key = 'i1'").await?;
     run(&writer_b, "UPDATE items SET completed = 1 WHERE key = 'i1'").await?;
     snap::value(b.session().sync_once()).await?;
@@ -717,7 +772,11 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
             Vec::new(),
         )
         .await?;
-        assert_eq!(rows, vec![vec![text("Oat milk"), SqlValue::Integer(1)]]);
+        assert_eq!(
+            rows,
+            vec![vec![text("Oat milk"), SqlValue::Integer(1)]],
+            "a whole-row update changing only the title and a concurrent change of `completed` both survive"
+        );
     }
     for connection in [writer_a, writer_b, reader_b] {
         connection.close().await;
@@ -781,14 +840,16 @@ async fn room_schema_reads_refresh_authority_before_a_deferred_transaction_uses_
             .is_empty()
     );
     run(&writer, "ROLLBACK").await?;
-    // The first real statement must use the refreshed session too.
     run(&writer, "BEGIN DEFERRED TRANSACTION").await?;
     snap::value(async {
         database.session().renew().await?;
         database.session().info().await
     })
     .await?;
-    assert_eq!(count(&writer, "items").await?, 0);
+    let first_real_statement = count(&writer, "items")
+        .await
+        .map_err(|error| format!("the first real statement uses the refreshed session: {error}"))?;
+    assert_eq!(first_real_statement, 0);
     run(&writer, "ROLLBACK").await?;
     writer.close().await;
     database.close().await?;
@@ -823,7 +884,6 @@ async fn room_housekeeping_is_answered_from_the_catalog_and_the_file() -> Result
             .map(|failure| *failure)
     };
 
-    // Connection setup, as Room 2.8.4 sends it.
     assert_eq!(
         one(all(&writer, "PRAGMA journal_mode = WAL", vec![]).await?),
         Some(text("wal"))
@@ -842,10 +902,10 @@ async fn room_housekeeping_is_answered_from_the_catalog_and_the_file() -> Result
         one(all(&reader, "PRAGMA query_only", vec![]).await?),
         Some(SqlValue::Integer(1))
     );
-    // The schema's version is Room's database version.
     assert_eq!(
         one(all(&writer, "PRAGMA user_version", vec![]).await?),
-        Some(SqlValue::Integer(3))
+        Some(SqlValue::Integer(3)),
+        "the schema's version is Room's database version"
     );
     run(&writer, "PRAGMA user_version = 3").await?;
     let moved = failure(
@@ -860,9 +920,11 @@ async fn room_housekeeping_is_answered_from_the_catalog_and_the_file() -> Result
         "{moved}"
     );
 
-    // The identity table lives with the connection; validation runs first.
     let exists = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'room_master_table'";
-    assert!(all(&writer, exists, vec![]).await?.is_empty());
+    assert!(
+        all(&writer, exists, vec![]).await?.is_empty(),
+        "Room's identity table lives with the connection, created after validation"
+    );
     run(&writer, "BEGIN EXCLUSIVE TRANSACTION").await?;
     run(
         &writer,
@@ -885,13 +947,12 @@ async fn room_housekeeping_is_answered_from_the_catalog_and_the_file() -> Result
         .await?),
         Some(text("abc123"))
     );
-    // Room's own table statements for an installed table and index change nothing.
     run(
         &writer,
         "CREATE TABLE IF NOT EXISTS `items` (`key` TEXT NOT NULL, `id` INTEGER NOT NULL, PRIMARY KEY(`key`))",
     )
-    .await?;
-    // An entity must carry Rocky's id field and leave its ids to Rocky.
+    .await
+    .map_err(|error| format!("Room's statement for an installed table changes nothing: {error}"))?;
     for (sql, reason) in [
         (
             "CREATE TABLE IF NOT EXISTS `items` (`key` TEXT NOT NULL, `note` TEXT, PRIMARY KEY(`key`, `note`))",
@@ -904,28 +965,31 @@ async fn room_housekeeping_is_answered_from_the_catalog_and_the_file() -> Result
     ] {
         let refused =
             failure(all(&writer, sql, vec![]).await.err().ok_or(sql)?).map_err(|_| "code")?;
-        assert_eq!(refused.code, 1, "{sql}");
-        assert!(refused.message.contains(reason), "{refused}");
+        assert_eq!(refused.code, SQLITE_ERROR, "{sql}");
+        assert!(
+            refused.message.contains(reason),
+            "an entity carries Rocky's id field and leaves its ids to Rocky: {refused}"
+        );
     }
     run(
         &writer,
         "CREATE INDEX IF NOT EXISTS `items_by_list` ON `items` (`list`, `title` DESC)",
     )
-    .await?;
+    .await
+    .map_err(|error| format!("Room's statement for an installed index changes nothing: {error}"))?;
     for sql in [
         "CREATE TABLE IF NOT EXISTS `extra` (`id` TEXT NOT NULL, PRIMARY KEY(`id`))",
         "CREATE INDEX IF NOT EXISTS `index_items_title` ON `items` (`title`)",
     ] {
         let refused =
             failure(all(&writer, sql, vec![]).await.err().ok_or(sql)?).map_err(|_| "code")?;
-        assert_eq!(refused.code, 1, "{sql}");
+        assert_eq!(refused.code, SQLITE_ERROR, "{sql}");
         assert!(
             refused.message.contains("installed Rocky schema"),
             "{refused}"
         );
     }
 
-    // Schema validation reads the real table: the answers are the file's.
     for (asked, engine) in [
         ("PRAGMA table_info(`items`)", "PRAGMA table_info(\"items\")"),
         ("PRAGMA index_list(`items`)", "PRAGMA index_list(\"items\")"),
@@ -939,7 +1003,11 @@ async fn room_housekeeping_is_answered_from_the_catalog_and_the_file() -> Result
         ),
     ] {
         let answered = all(&reader, asked, vec![]).await?;
-        assert_eq!(answered, engine_pragma(root.path(), engine)?, "{asked}");
+        assert_eq!(
+            answered,
+            engine_pragma(root.path(), engine)?,
+            "schema validation reads the real table's answers from the file: {asked}"
+        );
     }
     let columns = all(&reader, "PRAGMA table_info(`items`)", vec![]).await?;
     assert_eq!(columns.len(), 6);
@@ -966,11 +1034,11 @@ async fn room_housekeeping_is_answered_from_the_catalog_and_the_file() -> Result
             .any(|row| row[1] == text("items_by_list") && row[3] == text("c")),
         "{indexes:?}"
     );
-    // Protocol tables and unknown names answer nothing.
     assert!(
         all(&reader, "PRAGMA table_info(`secure_operations`)", vec![])
             .await?
-            .is_empty()
+            .is_empty(),
+        "protocol tables answer nothing"
     );
     assert!(
         all(
@@ -979,7 +1047,8 @@ async fn room_housekeeping_is_answered_from_the_catalog_and_the_file() -> Result
             vec![]
         )
         .await?
-        .is_empty()
+        .is_empty(),
+        "unknown names answer nothing"
     );
     assert!(
         all(
@@ -990,7 +1059,6 @@ async fn room_housekeeping_is_answered_from_the_catalog_and_the_file() -> Result
         .await?
         .is_empty()
     );
-    // Anything Room 2.8.4 does not send stays denied.
     for sql in [
         "PRAGMA foreign_keys = OFF",
         "PRAGMA wal_checkpoint(TRUNCATE)",
@@ -1000,8 +1068,8 @@ async fn room_housekeeping_is_answered_from_the_catalog_and_the_file() -> Result
             failure(all(&writer, sql, vec![]).await.err().ok_or(sql)?)
                 .map_err(|_| "code")?
                 .code,
-            23,
-            "{sql}"
+            SQLITE_AUTH,
+            "anything Room 2.8.4 does not send stays denied: {sql}"
         );
     }
     writer.close().await;
@@ -1043,16 +1111,25 @@ async fn room_reads_each_reference_action_when_references_share_a_partition_colu
             ..READER
         })
         .await?;
-    // Rows of one key share its id: (id, seq, table, from, to, on_update, on_delete, match).
     let mut keys = BTreeMap::<i64, (SqlValue, Vec<SqlValue>, SqlValue)>::new();
     for row in all(&reader, "PRAGMA foreign_key_list(`items`)", vec![]).await? {
-        let SqlValue::Integer(id) = row[0] else {
-            return Err("foreign key id".into());
+        let [
+            SqlValue::Integer(id),
+            _seq,
+            table,
+            from,
+            _to,
+            _on_update,
+            on_delete,
+            _match,
+        ] = &row[..]
+        else {
+            return Err(format!("a foreign key row: {row:?}").into());
         };
         let key = keys
-            .entry(id)
-            .or_insert_with(|| (row[2].clone(), Vec::new(), row[6].clone()));
-        key.1.push(row[3].clone());
+            .entry(*id)
+            .or_insert_with(|| (table.clone(), Vec::new(), on_delete.clone()));
+        key.1.push(from.clone());
     }
     let mut keys: Vec<_> = keys.into_values().collect();
     keys.sort_by_key(|(table, _, _)| format!("{table:?}"));
@@ -1155,15 +1232,14 @@ async fn an_older_room_application_validates_the_schema_it_declares() -> Result<
     created.session().create_bookmark("main", None).await?;
     created.session().follow("main").await?;
     created.close().await?;
-    // The issuer's next application version adds a nullable rank.
-    let newer = SHOPPING
+    let next_version_adding_a_nullable_rank = SHOPPING
         .replace(r#""version":3"#, r#""version":4"#)
         .replace(
             r#"{"name":"note","type":"blob"}"#,
             r#"{"name":"note","type":"blob"},{"name":"rank","type":"integer"}"#,
         );
     let database = Database::open(Open {
-        schema: &newer,
+        schema: &next_version_adding_a_nullable_rank,
         ..open(root.path(), None)
     })?
     .database;
@@ -1186,8 +1262,6 @@ async fn an_older_room_application_validates_the_schema_it_declares() -> Result<
     writer.close().await;
     database.close().await?;
 
-    // The version 3 application opens the version 4 database: Room sees
-    // its own version and tables as it declares them.
     let database = Database::open(open(root.path(), None))?.database;
     assert_eq!(
         snap::value(database.session().generation()).await?["application"],
@@ -1196,7 +1270,8 @@ async fn an_older_room_application_validates_the_schema_it_declares() -> Result<
     let writer = database.connect(room.clone()).await?;
     assert_eq!(
         all(&writer, "PRAGMA user_version", vec![]).await?,
-        vec![vec![SqlValue::Integer(3)]]
+        vec![vec![SqlValue::Integer(3)]],
+        "a version 3 application on a version 4 database sees its own version"
     );
     let declared = columns(all(&writer, "PRAGMA table_info(items)", vec![]).await?);
     assert_eq!(
@@ -1205,18 +1280,26 @@ async fn an_older_room_application_validates_the_schema_it_declares() -> Result<
             .iter()
             .filter(|name| *name != "rank")
             .cloned()
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        "an older application sees its tables as it declares them"
     );
     assert_eq!(
         all(&writer, "PRAGMA index_list(items)", vec![]).await?,
         indexes
     );
-    // An unchanged table is the installed one.
-    assert!(!columns(all(&writer, "PRAGMA table_info(lists)", vec![]).await?).is_empty());
+    assert!(
+        !columns(all(&writer, "PRAGMA table_info(lists)", vec![]).await?).is_empty(),
+        "an unchanged table is the installed one"
+    );
     assert_eq!(count(&writer, "items").await?, 0);
     writer.close().await;
     database.close().await?;
     Ok(())
+}
+
+/// Seals the current tip to continue; a continue seal's id is its successor tip.
+async fn continue_seal_id(database: &Database) -> Result<Value, Failure> {
+    Ok(snap::value(database.session().seal(false)).await?["tip"].clone())
 }
 
 /// The SQLite code `sql` fails with.
@@ -1264,8 +1347,7 @@ async fn a_connection_bound_to_a_kept_seal_reads_it_and_never_writes() -> Result
     )
     .await?;
     run(&writer, "END TRANSACTION").await?;
-    // A continue seal's id is its successor tip.
-    let first = snap::value(database.session().seal(false)).await?["tip"].clone();
+    let first = continue_seal_id(&database).await?;
     run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
     run(&writer, "UPDATE items SET title='Oat milk' WHERE key='i1'").await?;
     run(
@@ -1274,7 +1356,7 @@ async fn a_connection_bound_to_a_kept_seal_reads_it_and_never_writes() -> Result
     )
     .await?;
     run(&writer, "END TRANSACTION").await?;
-    let second = snap::value(database.session().seal(false)).await?["tip"].clone();
+    let second = continue_seal_id(&database).await?;
     run(&writer, "DELETE FROM items WHERE key='i1'").await?;
     let seal = |value: &Value| -> Result<rocky_core::Commitment, Failure> {
         let hex = value.as_str().ok_or("seal")?;
@@ -1304,31 +1386,38 @@ async fn a_connection_bound_to_a_kept_seal_reads_it_and_never_writes() -> Result
         .await?;
     let items = "SELECT title FROM items ORDER BY key";
     assert_eq!(titles(all(&at_first, items, vec![]).await?), ["Milk"]);
-    // The bookmark's tip is open: it shows the seal it starts from.
     let at_main = database
         .connect(bound(rocky_sdk::Binding::Bookmark("main".into())))
         .await?;
     assert_eq!(
         titles(all(&at_main, items, vec![]).await?),
-        ["Oat milk", "Eggs"]
+        ["Oat milk", "Eggs"],
+        "a bookmark's open tip shows the seal it starts from"
     );
     assert_eq!(titles(all(&writer, items, vec![]).await?), ["Eggs"]);
-    // Writes fail with SQLite's read-only code, in or outside a transaction.
     for sql in [
         "INSERT INTO items(key,list,title,completed) VALUES('i9','l1','x',0)",
         "UPDATE items SET title='x'",
         "DELETE FROM items",
         "PRAGMA query_only = 0",
     ] {
-        assert_eq!(failing(&at_first, sql).await?, 8, "{sql}");
+        assert_eq!(
+            failing(&at_first, sql).await?,
+            SQLITE_READONLY,
+            "a bound connection refuses writes outside a transaction: {sql}"
+        );
     }
     run(&at_first, "BEGIN IMMEDIATE TRANSACTION").await?;
     assert_eq!(titles(all(&at_first, items, vec![]).await?), ["Milk"]);
-    assert_eq!(failing(&at_first, "DELETE FROM items").await?, 8);
+    assert_eq!(
+        failing(&at_first, "DELETE FROM items").await?,
+        SQLITE_READONLY,
+        "a bound connection refuses writes inside a transaction"
+    );
     run(&at_first, "END TRANSACTION").await?;
-    // Unlimited bound connections may be open at once.
+    let unlimited = 8;
     let mut many = Vec::new();
-    for _ in 0..8 {
+    for _ in 0..unlimited {
         many.push(
             database
                 .connect(bound(rocky_sdk::Binding::Seal(seal(&second)?)))
@@ -1336,14 +1425,18 @@ async fn a_connection_bound_to_a_kept_seal_reads_it_and_never_writes() -> Result
         );
     }
     for connection in &many {
-        assert_eq!(count(connection, "items").await?, 2);
+        assert_eq!(
+            count(connection, "items").await?,
+            2,
+            "any number of bound connections may be open at once"
+        );
     }
-    // A seal this device does not keep cannot be bound.
     assert!(
         database
             .connect(bound(rocky_sdk::Binding::Seal([7; 32])))
             .await
-            .is_err()
+            .is_err(),
+        "a seal this device does not keep cannot be bound"
     );
     Ok(())
 }

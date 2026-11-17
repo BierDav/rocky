@@ -62,6 +62,14 @@ struct Peer {
     database: Arc<Database>,
     session: Session,
 }
+/// Turns off background sync so only explicit syncs exchange: a failed
+/// background attempt would put a peer in backoff, which an explicit sync skips.
+async fn only_explicit_syncs(peers: &[&Peer]) -> Result<(), Failure> {
+    for peer in peers {
+        snap::value(peer.session.set_automatic_sync(false)).await?;
+    }
+    Ok(())
+}
 impl Peer {
     fn new(database: Arc<Database>) -> Result<Self, Failure> {
         Ok(Self {
@@ -240,7 +248,6 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
     snap::value(issuer.session.seal(false)).await?;
     snap::value(issuer.session.compact(0)).await?;
     snap::value(writer.sync_once()).await?;
-    // The unused partition is not unverified history.
     let status = snap::value(writer.session.status()).await?;
     assert!(
         status["data"]["blockers"]
@@ -248,7 +255,7 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
             .ok_or("blockers")?
             .iter()
             .all(|blocker| blocker["kind"]["type"] != "seal_rebootstrap"),
-        "{status}"
+        "an unused partition is not unverified history: {status}"
     );
     let again = snap::value(writer.session.next_partition("lists")).await?;
     assert_eq!(again["id"], prepared["id"]);
@@ -274,7 +281,6 @@ async fn preparing_an_own_id_does_not_claim_an_unrelated_group_members_state() -
     schema["tables"][2]["foreign_keys"] = json!([]);
     let (issuer, writer) = checkpoint_writer(root.path(), &hub, &schema.to_string()).await?;
     snap::value(writer.session.next_partition("lists")).await?;
-    // The prepared list's own scope writes.
     let list = writer
         .insert(
             "lists",
@@ -282,8 +288,6 @@ async fn preparing_an_own_id_does_not_claim_an_unrelated_group_members_state() -
             "INSERT INTO lists(id,title) VALUES(?,'Prepared')",
         )
         .await?;
-    // The unrelated member still needs a verified state: status names it,
-    // with what clears it, and a write there is refused with it.
     let status = snap::value(writer.session.status()).await?;
     let rebootstraps: Vec<&Value> = status["data"]["blockers"]
         .as_array()
@@ -291,7 +295,10 @@ async fn preparing_an_own_id_does_not_claim_an_unrelated_group_members_state() -
         .iter()
         .filter(|blocker| blocker["kind"]["type"] == "seal_rebootstrap")
         .collect();
-    assert!(!rebootstraps.is_empty(), "{status}");
+    assert!(
+        !rebootstraps.is_empty(),
+        "status names the unrelated member's missing verified state: {status}"
+    );
     let error = writer
         .insert(
             "items",
@@ -334,7 +341,6 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
         .is_err()
     );
     let prepared = snap::value(writer.session.next_partition("lists")).await?;
-    // Preparation survives a restart before the first row commits.
     let Peer {
         database, session, ..
     } = writer;
@@ -349,7 +355,11 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
             "INSERT INTO lists(id,title) VALUES(?,'Member list')",
         )
         .await?;
-    assert_eq!(prepared["id"], list.as_str());
+    assert_eq!(
+        prepared["id"],
+        list.as_str(),
+        "a prepared partition survives a restart before its first row commits"
+    );
     let issuer_node = snap::value(issuer.session.info()).await?["node"].clone();
     snap::value(writer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([issuer_node])).expect("typed fixture"), None)).await?;
     snap::value(writer.sync_once()).await?;
@@ -413,11 +423,7 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
         .to_owned();
     let writer =
         Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
-    // Only the explicit syncs below exchange: a failed background attempt
-    // would put the peer in backoff, which an explicit sync skips.
-    for peer in [&issuer, &writer] {
-        snap::value(peer.session.set_automatic_sync(false)).await?;
-    }
+    only_explicit_syncs(&[&issuer, &writer]).await?;
 
     let prepared = snap::value(issuer.session.next_partition("lists")).await?;
     let list = issuer
@@ -448,10 +454,9 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
     let node = snap::value(writer.session.info()).await?["node"].clone();
     snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
         .await?;
-    // One sync delivers the envelope; the join's own bootstrap finishes
-    // although partitioned tables offer no checkpoint of their own scope,
-    // and the list starts from one.
-    snap::value(writer.sync_once()).await?;
+    snap::value(writer.sync_once()).await.map_err(|error| {
+        format!("one sync delivers the envelope and the list's checkpoint: {error}")
+    })?;
     assert_eq!(
         writer
             .column(&format!("SELECT title FROM lists WHERE id = X'{list}'"))
@@ -467,7 +472,6 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
         [json!(category)]
     );
 
-    // The writer deletes the category; the issuer's item keeps its list.
     snap::value(writer.session.execute(
         &(snap::text(
             &(format!("DELETE FROM categories WHERE list = X'{list}' AND id = X'{category}'")),
@@ -482,7 +486,8 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
                 "SELECT category IS NULL FROM items WHERE list = X'{list}'"
             ))
             .await?,
-            [json!("1")]
+            [json!("1")],
+            "deleting a category leaves the item in its list"
         );
     }
     for peer in [writer, issuer] {
@@ -548,13 +553,11 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
         )
         .await?;
     let node = snap::value(writer.session.info()).await?["node"].clone();
-    // The list's base sits at a seal; the writer imports it.
     snap::value(issuer.session.seal(false)).await?;
     snap::value(issuer.session.compact(0)).await?;
     snap::value(issuer.session.share_partition(rocky_sdk::PartitionTarget::Group { group: "list".to_owned(), values: (values(&list)).clone() }, serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(json!([node])).expect("typed fixture"), None))
         .await?;
     snap::value(writer.sync_once()).await?;
-    // Its node credential lets the writer insert into the shared list.
     writer
         .insert(
             "items",
@@ -613,14 +616,17 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
             .iter()
             .any(|event| event["scopes"][0]["table"].is_string())
     );
-    // A caught-up observer waits for the next event.
     let token = activity["token"].clone();
     let waiting = snap::value(writer.session.next_activity(snap::integer(&(token)) as u64));
     let (next, _) = tokio::join!(
         waiting,
         snap::value(writer.session.set_networking_enabled(false))
     );
-    assert_eq!(kinds(&next?), ["networking_disabled"]);
+    assert_eq!(
+        kinds(&next?),
+        ["networking_disabled"],
+        "a caught-up observer waits for the next event"
+    );
     for peer in [writer, issuer] {
         peer.database.close().await?;
     }
@@ -761,14 +767,13 @@ async fn an_issuer_keeping_every_seal_migrates_its_lists() -> Result<(), Failure
             .await?,
         [json!("Milk"), json!("Bread")]
     );
-    // The seal stays kept across the migration.
     let inspected = snap::value(issuer.session.inspect_tips()).await?;
     let kept_seals = inspected["nodes"][0]["kept_seals"].clone();
     assert!(
         kept_seals
             .as_array()
             .is_some_and(|seals| seals.contains(&kept)),
-        "{inspected}"
+        "the seal stays kept across the migration: {inspected}"
     );
     issuer.database.close().await?;
     Ok(())
@@ -829,8 +834,6 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
         [json!("Eggs"), json!("Milk")]
     );
 
-    // Reopening installs the group keys after the projection is built; the
-    // items' parent list then anchors them again, on both devices.
     let Peer {
         database, session, ..
     } = writer;
@@ -839,7 +842,8 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
     let reopened = Peer::new(Database::open(open(&root.path().join("b"), &hub, "b"))?.database)?;
     assert_eq!(
         reopened.column(&titles).await?,
-        [json!("Eggs"), json!("Milk")]
+        [json!("Eggs"), json!("Milk")],
+        "after reopening, the items' parent list anchors them again"
     );
     let Peer {
         database, session, ..
@@ -908,6 +912,17 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
     Ok(())
 }
 
+/// Syncs each issuer once. The first session may refuse a tuple the other
+/// never saw; the issuer exchange installs it and retries within that sync,
+/// and the other issuer learns this one's tuple on its own sync.
+async fn sync_each_learning_the_others_tuple(peers: &[&Peer]) -> Result<(), Failure> {
+    for peer in peers {
+        snap::value(peer.sync_once()).await?;
+    }
+    Ok(())
+}
+/// Each issuer shares its list with the other; whichever side dials hands
+/// over or collects the envelope.
 #[tokio::test]
 async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Result<(), Failure> {
     let root = support::small_directory()?;
@@ -929,11 +944,7 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
         let sql = format!("INSERT INTO lists(id,title) VALUES(?,'{title}')");
         lists.push(peer.insert("lists", None, &sql).await?);
     }
-    // The first session may refuse an unknown tuple; the issuer exchange
-    // installs it and retries within this sync. The peer learns ours on its sync.
-    for peer in [&a, &b] {
-        snap::value(peer.sync_once()).await?;
-    }
+    sync_each_learning_the_others_tuple(&[&a, &b]).await?;
     for (from, to, list) in [(&a, &b, &lists[0]), (&b, &a, &lists[1])] {
         let node = snap::value(to.session.info()).await?["node"].clone();
         snap::value(
@@ -950,7 +961,6 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
             ),
         )
         .await?;
-        // Whichever dials hands over or collects the envelope.
         snap::value(from.sync_once()).await?;
         snap::value(to.sync_once()).await?;
     }
@@ -961,8 +971,10 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
             [json!("From a"), json!("From b")]
         );
     }
-    // Once both hold both lists, nothing is refused any more.
-    assert!(refused(&a).await?.unwrap_or_default().is_empty());
+    assert!(
+        refused(&a).await?.unwrap_or_default().is_empty(),
+        "once both hold both lists, nothing is refused"
+    );
     for peer in [a, b] {
         peer.database.close().await?;
     }
@@ -978,18 +990,24 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
     issuer.session.create_bookmark("main", None).await?;
     issuer.follow("main").await?;
-    // An issuer's migration opening inherits the line's signed minimum.
-    snap::value(issuer.session.set_genesis_minimum(1)).await?;
-    // Raw grants name the three tables, as the shopping app's device kinds do.
-    let grants: Vec<Value> = TABLES
+    let inherited_by_migration_openings = 1;
+    snap::value(
+        issuer
+            .session
+            .set_genesis_minimum(inherited_by_migration_openings),
+    )
+    .await?;
+    let grants_naming_every_table: Vec<Value> = TABLES
         .iter()
         .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
         .collect();
     let invitation = snap::value(
         issuer.session.invite(
             Some(rocky_sdk::GrantProfile::Grants {
-                grants: serde_json::from_value::<Vec<rocky_sdk::credentials::Grant>>(json!(grants))
-                    .expect("typed fixture"),
+                grants: serde_json::from_value::<Vec<rocky_sdk::credentials::Grant>>(json!(
+                    grants_naming_every_table
+                ))
+                .expect("typed fixture"),
             }),
             None,
         ),
@@ -1000,7 +1018,6 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         .to_owned();
     let writer =
         Peer::new(Database::join(open(&b, &hub, "b"), &invitation)?.database)?.with_identity(&b);
-    // A partial replica holds only the lists shared with it.
     snap::value(
         writer.session.set_replica_role(
             serde_json::from_value::<rocky_sdk::ReplicaRoleConfig>(json!({"role":"Partial"}))
@@ -1056,31 +1073,30 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         "SELECT i.title FROM item_categories c JOIN items i ON i.list = c.list AND i.id = c.item WHERE c.list = X'{list}' AND i.list = X'{list}' AND c.category = X'{dairy}' ORDER BY i.title"
     );
     assert_eq!(issuer.column(&linked).await?, [json!("Milk")]);
-    // Before updating, the writer's older application follows the migration
-    // and adds an item, which reaches the issuer.
-    let behind = Peer::new(Database::open(at(&b, &hub, "b", SCHEMA))?.database)?.with_identity(&b);
-    snap::value(behind.sync_once()).await?;
-    behind
+    let older_application =
+        Peer::new(Database::open(at(&b, &hub, "b", SCHEMA))?.database)?.with_identity(&b);
+    snap::value(older_application.sync_once()).await?;
+    older_application
         .insert(
             "items",
             Some(&list),
             &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Jam')"),
         )
         .await?;
-    snap::value(behind.sync_once()).await?;
+    snap::value(older_application.sync_once()).await?;
     assert_eq!(
         issuer
             .column(&format!(
                 "SELECT title FROM items WHERE list = X'{list}' ORDER BY title"
             ))
             .await?,
-        [json!("Bread"), json!("Jam"), json!("Milk")]
+        [json!("Bread"), json!("Jam"), json!("Milk")],
+        "an older application follows the migration and its item reaches the issuer"
     );
-    behind.database.close().await?;
+    older_application.database.close().await?;
     let writer = Peer::new(Database::open(at(&b, &hub, "b", ORDERED))?.database)?.with_identity(&b);
     snap::value(writer.sync_once()).await?;
     assert_eq!(writer.column(&linked).await?, [json!("Milk")]);
-    // The writer's grants never named `item_categories`; they follow `items`.
     let bread = writer
         .column(&format!(
             "SELECT id FROM items WHERE list = X'{list}' AND title = 'Bread'"
@@ -1097,7 +1113,8 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
     snap::value(writer.sync_once()).await?;
     assert_eq!(
         issuer.column(&linked).await?,
-        [json!("Bread"), json!("Milk")]
+        [json!("Bread"), json!("Milk")],
+        "grants that never named item_categories follow items"
     );
     for peer in [writer, issuer] {
         peer.database.close().await?;
@@ -1114,18 +1131,24 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
     issuer.session.create_bookmark("main", None).await?;
     issuer.follow("main").await?;
-    // An issuer's migration opening inherits the line's signed minimum.
-    snap::value(issuer.session.set_genesis_minimum(1)).await?;
-    // Raw grants name the three tables, as the shopping app's device kinds do.
-    let grants: Vec<Value> = TABLES
+    let inherited_by_migration_openings = 1;
+    snap::value(
+        issuer
+            .session
+            .set_genesis_minimum(inherited_by_migration_openings),
+    )
+    .await?;
+    let grants_naming_every_table: Vec<Value> = TABLES
         .iter()
         .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
         .collect();
     let invitation = snap::value(
         issuer.session.invite(
             Some(rocky_sdk::GrantProfile::Grants {
-                grants: serde_json::from_value::<Vec<rocky_sdk::credentials::Grant>>(json!(grants))
-                    .expect("typed fixture"),
+                grants: serde_json::from_value::<Vec<rocky_sdk::credentials::Grant>>(json!(
+                    grants_naming_every_table
+                ))
+                .expect("typed fixture"),
             }),
             None,
         ),
@@ -1184,31 +1207,30 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         "SELECT i.title FROM item_categories c JOIN items i ON i.list = c.list AND i.id = c.item WHERE c.list = X'{list}' AND i.list = X'{list}' AND c.category = X'{dairy}' ORDER BY i.title"
     );
     assert_eq!(issuer.column(&linked).await?, [json!("Milk")]);
-    // Before updating, the writer's older application follows the migration
-    // and adds an item, which reaches the issuer.
-    let behind = Peer::new(Database::open(at(&b, &hub, "b", SCHEMA))?.database)?.with_identity(&b);
-    snap::value(behind.sync_once()).await?;
-    behind
+    let older_application =
+        Peer::new(Database::open(at(&b, &hub, "b", SCHEMA))?.database)?.with_identity(&b);
+    snap::value(older_application.sync_once()).await?;
+    older_application
         .insert(
             "items",
             Some(&list),
             &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Jam')"),
         )
         .await?;
-    snap::value(behind.sync_once()).await?;
+    snap::value(older_application.sync_once()).await?;
     assert_eq!(
         issuer
             .column(&format!(
                 "SELECT title FROM items WHERE list = X'{list}' ORDER BY title"
             ))
             .await?,
-        [json!("Bread"), json!("Jam"), json!("Milk")]
+        [json!("Bread"), json!("Jam"), json!("Milk")],
+        "an older application follows the migration and its item reaches the issuer"
     );
-    behind.database.close().await?;
+    older_application.database.close().await?;
     let writer = Peer::new(Database::open(at(&b, &hub, "b", ORDERED))?.database)?.with_identity(&b);
     snap::value(writer.sync_once()).await?;
     assert_eq!(writer.column(&linked).await?, [json!("Milk")]);
-    // The writer's grants never named `item_categories`; they follow `items`.
     let bread = writer
         .column(&format!(
             "SELECT id FROM items WHERE list = X'{list}' AND title = 'Bread'"
@@ -1225,7 +1247,8 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
     snap::value(writer.sync_once()).await?;
     assert_eq!(
         issuer.column(&linked).await?,
-        [json!("Bread"), json!("Milk")]
+        [json!("Bread"), json!("Milk")],
+        "grants that never named item_categories follow items"
     );
     for peer in [writer, issuer] {
         peer.database.close().await?;

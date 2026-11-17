@@ -3,9 +3,8 @@ mod cancellation;
 use super::*;
 use std::future::Future;
 
-// SQLite runs on another thread. Keep Tokio runnable so its paused clock
-// advances only where the test explicitly advances it. Yield host CPU to
-// SQLite between polls; spinning workers otherwise contend with its threads.
+/// Runs `future` on a paused clock that advances only where the test says,
+/// parking between polls so SQLite's own threads get the host CPU.
 pub(super) fn frozen<F: Future>(future: F) -> impl Future<Output = F::Output> {
     let mut future = Box::pin(future);
     async move {
@@ -191,7 +190,6 @@ async fn a_joined_member_receives_later_writes_without_a_poll_or_contact_copy()
             }
             until(|| hub.dials_to("member") > 0).await;
             settled(&issuer).await;
-            // The member's first handshake signals that its listener is ready.
             member.sync(&*transport(&member).await?).await?;
             until(|| {
                 issuer
@@ -332,7 +330,6 @@ async fn peer_signals(bootstrap: bool) -> Result<(), Failure> {
             tokio::time::advance(Duration::from_secs(15)).await;
 
             settled(&a).await;
-            // An authenticated inbound session resets just its peer, even if empty.
             hub.stall_peer("d", false);
             let d = &peers[2];
             let dials = hub.dials_to("d");
@@ -342,8 +339,11 @@ async fn peer_signals(bootstrap: bool) -> Result<(), Failure> {
             hub.wait_dials("d", dials + 1).await;
 
             settled(&a).await;
-            assert_eq!(rows(d).await?, ["1", "2"]);
-            // After inbound success resets its deadline, an explicit pass reaches every ready peer.
+            assert_eq!(
+                rows(d).await?,
+                ["1", "2"],
+                "an authenticated inbound session resets just its peer"
+            );
             hub.stall_peer("d", true);
             hub.network_changed();
 
@@ -414,7 +414,6 @@ async fn unreachable_idle_peers_have_no_retry_timer_for_an_hour() -> Result<(), 
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-            // An unreachable contact creates no enrollment or registry work to retry.
             let peer = PrivateKey::new().public_key();
             a.configure(|settings| {
                 settings.peers.insert(
@@ -436,7 +435,10 @@ async fn unreachable_idle_peers_have_no_retry_timer_for_an_hour() -> Result<(), 
             start(&a, true).await?;
             statuses.changed().await?;
             settled(&a).await;
-            assert!(a.retry_deadline().is_none());
+            assert!(
+                a.retry_deadline().is_none(),
+                "an unreachable contact creates no enrollment or registry work to retry"
+            );
             let dials = hub.counts()[1];
             tokio::time::advance(Duration::from_secs(3600)).await;
             tokio::task::yield_now().await;
@@ -498,7 +500,6 @@ async fn metadata_work_arms_an_idle_peer_retry_without_resetting_backoff() -> Re
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-            // An unreachable contact creates no enrollment or registry work to retry.
             let peer = PrivateKey::new().public_key();
             a.configure(|settings| {
                 settings.peers.insert(
@@ -520,12 +521,18 @@ async fn metadata_work_arms_an_idle_peer_retry_without_resetting_backoff() -> Re
             start(&a, true).await?;
             statuses.changed().await?;
             settled(&a).await;
-            assert!(a.retry_deadline().is_none());
+            assert!(
+                a.retry_deadline().is_none(),
+                "an unreachable contact creates no enrollment or registry work to retry"
+            );
             let dials = hub.dials_to("b");
-            // Key installation and holding changes request work without a row frame.
             a.wake_sync();
             until(|| a.retry_deadline().is_some()).await;
-            assert_eq!(hub.dials_to("b"), dials);
+            assert_eq!(
+                hub.dials_to("b"),
+                dials,
+                "key installation and holding changes request work without a row frame"
+            );
             let deadline = a.retry_deadline().ok_or("retry deadline")?;
             tokio::time::advance(deadline.saturating_duration_since(tokio::time::Instant::now()))
                 .await;
@@ -631,7 +638,6 @@ async fn going_online_does_not_republish_offline() -> Result<(), Failure> {
         .run_until(frozen(async {
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
-            // With no contact, every automatic pass keeps the published status.
             let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
             start(&a, true).await?;
             settled(&a).await;
@@ -680,7 +686,6 @@ async fn a_retry_wakeup_still_initializes_an_unattempted_peer() -> Result<(), Fa
                     .unwrap_or_else(PoisonError::into_inner)
                     .is_empty()
             );
-            // A queued frame wakeup can precede enabling the worker.
             let (status, retry) = a.sync_pass(&*transport(&a).await?, true, true).await?;
             assert_eq!(status.state, SyncState::Connected);
             assert!(!retry);

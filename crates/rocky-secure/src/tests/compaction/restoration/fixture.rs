@@ -107,7 +107,6 @@ impl HeldPrefix {
             ])
             .await
             .unwrap();
-        // Register the target's genuine line node as ordinary consumers do.
         let identity = PrivateKey::from_bytes(&rocky_core::commitment(
             "lineage.user",
             key.public_key().as_bytes(),

@@ -6,7 +6,6 @@ async fn held_frames_and_separate_signed_void_records_require_every_link() {
     let mut f = HeldPrefix::new(4).await;
     let scope = f.lineage.scope("items");
     f.replica.receive(f.frames[3].clone()).await.unwrap();
-    // Exercise actual incoming records, not the local unsent-cancellation policy.
     let middle =
         crate::SignedVoid::sign(&f.key, vec![f.frames[2].header_bytes().to_vec()]).unwrap();
     let first = crate::SignedVoid::sign(&f.key, vec![f.frames[0].header_bytes().to_vec()]).unwrap();
@@ -44,7 +43,6 @@ async fn held_frames_and_separate_signed_void_records_require_every_link() {
         panic!("middle void")
     };
     let (first_digest, digest) = (first_digest.clone(), digest.clone());
-    // Privileged corruption controls: a signed header alone does not replace its record.
     f.replica
         .inner
         .lock(crate::replica::Class::Background)
@@ -57,7 +55,10 @@ async fn held_frames_and_separate_signed_void_records_require_every_link() {
         .await
         .unwrap();
     let corrupt = super::super::audit::snapshot(&f.replica).await;
-    assert!(f.replica.restored(scope).await.is_err());
+    assert!(
+        f.replica.restored(scope).await.is_err(),
+        "a signed header alone does not replace its zeroed void record"
+    );
     assert_eq!(super::super::audit::snapshot(&f.replica).await, corrupt);
     f.replica
         .inner

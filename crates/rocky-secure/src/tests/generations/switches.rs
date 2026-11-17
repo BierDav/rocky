@@ -36,7 +36,6 @@ async fn import(
         .expect("a base");
     let checkpoint = offered.id().unwrap();
     target.begin_rebootstrap(offered.clone()).await.unwrap();
-    // The base's tip and every tip after it on the path need their schemas.
     lineage.install_required(target).await;
     let mut after = None;
     loop {
@@ -79,8 +78,8 @@ async fn a_seal_to_a_new_schema_keeps_local_work_and_a_follower_switches_only_wi
     crate::tests::exchange_graphs(&alice, &bob, lineage.domain).await;
     insert(&alice, 0..2).await;
     sync(&lineage, &alice, &bob, &bob_key).await;
-    // Alice's third row has not left her device when the schema changes.
-    insert(&alice, 2..3).await;
+    let third_row_unsent_at_the_schema_change = 2..3;
+    insert(&alice, third_row_unsent_at_the_schema_change).await;
     let original = alice.followed_tip().await;
     let statements = lineage.publish(&alice, 2).await.unwrap();
     let target = alice
@@ -90,7 +89,6 @@ async fn a_seal_to_a_new_schema_keeps_local_work_and_a_follower_switches_only_wi
         .bookmark("main")
         .unwrap()
         .unwrap();
-    // Until the switch, the workspace waits read-only at the old tip.
     let pending = alice.pending_schema().await.unwrap().unwrap();
     assert_eq!(
         (pending.tip, pending.manifest),
@@ -101,9 +99,9 @@ async fn a_seal_to_a_new_schema_keeps_local_work_and_a_follower_switches_only_wi
             .await
             .run("UPDATE items SET title='refused'", vec![])
             .await
-            .is_err()
+            .is_err(),
+        "until the switch, the workspace waits read-only at the old tip"
     );
-    // A projection other than the tip's schema activates nothing.
     alice
         .install_tip_schema(target, lineage.definition(2), b"checked".to_vec())
         .await
@@ -125,7 +123,11 @@ async fn a_seal_to_a_new_schema_keeps_local_work_and_a_follower_switches_only_wi
             .await
             .is_err()
     );
-    assert_eq!(alice.followed_tip().await, original);
+    assert_eq!(
+        alice.followed_tip().await,
+        original,
+        "a projection other than the tip's schema activates nothing"
+    );
     assert!(
         lineage
             .follow(&alice, lineage.config(2, &alice_key), 2, &statements)
@@ -133,7 +135,6 @@ async fn a_seal_to_a_new_schema_keeps_local_work_and_a_follower_switches_only_wi
             .unwrap()
     );
     assert_eq!(alice.followed_tip().await, target);
-    // Existing rows gained the new column, empty; the new table exists.
     assert_eq!(
         select(&alice, "SELECT key,title,note FROM items ORDER BY key").await,
         (0..3)
@@ -142,7 +143,8 @@ async fn a_seal_to_a_new_schema_keeps_local_work_and_a_follower_switches_only_wi
                 text(&format!("title {id}")),
                 SqlValue::Null
             ])
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        "existing rows gain the new column, empty"
     );
     let writer = session(&alice).await;
     identity_insert(
@@ -157,7 +159,6 @@ async fn a_seal_to_a_new_schema_keeps_local_work_and_a_follower_switches_only_wi
         .unwrap();
     drop(writer);
 
-    // Bob, still at the old tip, is served nothing across the tips.
     let credentials = lineage.credentials(1, &bob_key);
     alice
         .admit_peer(bob_key.public_key(), &credentials, bob.followed_tip().await)
@@ -177,9 +178,9 @@ async fn a_seal_to_a_new_schema_keeps_local_work_and_a_follower_switches_only_wi
     ));
     assert_eq!(
         select(&bob, "SELECT count(*) FROM items").await,
-        vec![vec![SqlValue::Integer(2)]]
+        vec![vec![SqlValue::Integer(2)]],
+        "a peer still at the old tip is served nothing across the tips"
     );
-    // Following the bookmark switches Bob with it, and then he catches up.
     assert!(
         lineage
             .follow(&bob, lineage.config(2, &bob_key), 2, &statements)
@@ -194,7 +195,8 @@ async fn a_seal_to_a_new_schema_keeps_local_work_and_a_follower_switches_only_wi
             vec![text("0001"), SqlValue::Null],
             vec![text("0002"), SqlValue::Null],
             vec![text("0100"), text("with a note")],
-        ]
+        ],
+        "following the bookmark switches the peer, which then catches up"
     );
     alice.audit(items).await.unwrap();
     bob.audit(items).await.unwrap();
@@ -228,7 +230,6 @@ async fn a_base_at_a_seal_of_the_previous_schema_rebootstraps_typed_rows_and_tom
         )
         .await
         .unwrap();
-    // The schema change is the seal; Alice compacts at it and prunes.
     assert!(
         lineage
             .advance(&alice, lineage.config(2, &alice_key), 2)
@@ -248,9 +249,11 @@ async fn a_base_at_a_seal_of_the_previous_schema_rebootstraps_typed_rows_and_tom
         .await
         .unwrap();
     let report = alice.compact(lineage.domain, 0).await.unwrap();
-    assert!(report.pruned > 0);
+    assert!(
+        report.pruned > 0,
+        "the schema change is a seal the writer compacts at and prunes"
+    );
     let base = alice.checkpoint(items).await.unwrap();
-    // The base sits at the seal of the first schema's tip.
     assert_eq!(base.statement.seal, report.compacted);
     assert_eq!(
         alice
@@ -259,7 +262,8 @@ async fn a_base_at_a_seal_of_the_previous_schema_rebootstraps_typed_rows_and_tom
             .unwrap()
             .schema(base.statement.tip)
             .unwrap(),
-        lineage.definition(1).hash()
+        lineage.definition(1).hash(),
+        "the base sits at the seal of the first schema's tip"
     );
     identity_insert(
         &session(&alice).await,
@@ -269,8 +273,6 @@ async fn a_base_at_a_seal_of_the_previous_schema_rebootstraps_typed_rows_and_tom
     .await
     .unwrap();
 
-    // Carol joins at the domain root, follows `main` to the second schema
-    // and imports the first schema's base through the path's fields.
     let carol = lineage
         .open(&dir.path().join("carol.db"), &carol_key, 1, None)
         .await
@@ -283,13 +285,16 @@ async fn a_base_at_a_seal_of_the_previous_schema_rebootstraps_typed_rows_and_tom
             .unwrap()
     );
     let offered = import(&lineage, &alice, &carol, &carol_key, items).await;
-    assert_eq!(offered.id().unwrap(), base.id().unwrap());
-    // The empty `tags` scope has no state Carol verified: Alice's signed
-    // empty base at the seal, once listed, is what Carol imports.
+    assert_eq!(
+        offered.id().unwrap(),
+        base.id().unwrap(),
+        "a joiner following `main` to the second schema imports the first schema's base"
+    );
     let needs = carol.seal_rebootstraps(lineage.domain).await.unwrap();
     assert_eq!(
         needs.iter().map(|need| need.scope).collect::<Vec<_>>(),
-        vec![lineage.scope("tags")]
+        vec![lineage.scope("tags")],
+        "the empty `tags` scope has no state the joiner verified"
     );
     super::super::compaction::list_checkpoints(&lineage, &alice).await;
     crate::tests::exchange_graphs(&alice, &carol, lineage.domain).await;
@@ -317,7 +322,6 @@ async fn a_base_at_a_seal_of_the_previous_schema_rebootstraps_typed_rows_and_tom
         select(&carol, "SELECT note FROM items WHERE key='0100'").await,
         vec![vec![text("noted")]]
     );
-    // The base keeps the old numeric identity's sequence mark.
     let old_id =
         rocky_core::RowIdentity::new(crate::writer::writer(&alice_key.public_key()), 4).unwrap();
     assert!(
@@ -328,7 +332,8 @@ async fn a_base_at_a_seal_of_the_previous_schema_rebootstraps_typed_rows_and_tom
                 vec![old_id.sql()]
             )
             .await
-            .is_err()
+            .is_err(),
+        "the base keeps the old numeric identity's sequence mark"
     );
 }
 
@@ -352,7 +357,6 @@ async fn an_open_replica_follows_an_additive_schema_in_place() {
     insert(&alice, 0..3).await;
     let statements = lineage.publish(&alice, 3).await.unwrap();
     let target = alice.pending_schema().await.unwrap().unwrap().tip;
-    // Bob switches first and writes on the new tip.
     assert!(
         lineage
             .follow(&bob, lineage.config(3, &bob_key), 3, &statements)
@@ -370,19 +374,20 @@ async fn an_open_replica_follows_an_additive_schema_in_place() {
     assert!(!newer.is_empty());
     let mut observer = alice.observe_tables(None).await.unwrap();
     let before = session(&alice).await;
-    // A record that does not derive the tip's schema is refused; nothing is saved.
     assert!(
         alice
             .install_tip_schema(target, lineage.definition(5), b"forged".to_vec())
             .await
-            .is_err()
+            .is_err(),
+        "a record that does not derive the tip's schema is refused"
     );
     assert!(
         alice
             .tip_schema(lineage.definition(5).hash())
             .await
             .unwrap()
-            .is_none()
+            .is_none(),
+        "a refused schema record saves nothing"
     );
 
     assert!(
@@ -392,9 +397,15 @@ async fn an_open_replica_follows_an_additive_schema_in_place() {
             .unwrap()
     );
     assert_eq!(alice.followed_tip().await, target);
-    // An additive switch keeps sessions and notifies no observer.
-    assert!(before.run("SELECT 1", vec![]).await.is_ok());
-    assert_eq!(observer.try_next().unwrap(), None);
+    assert!(
+        before.run("SELECT 1", vec![]).await.is_ok(),
+        "an additive switch keeps sessions"
+    );
+    assert_eq!(
+        observer.try_next().unwrap(),
+        None,
+        "an additive switch notifies no observer"
+    );
     for frame in newer {
         let _ = alice.receive(frame).await;
     }
@@ -405,14 +416,13 @@ async fn an_open_replica_follows_an_additive_schema_in_place() {
             .chain([vec![text("0100"), SqlValue::Null, SqlValue::Integer(7)]])
             .collect::<Vec<_>>()
     );
-    // Following the current schema again changes nothing.
     assert!(
         !lineage
             .follow(&alice, lineage.config(3, &alice_key), 3, &statements)
             .await
-            .unwrap()
+            .unwrap(),
+        "following the current schema again changes nothing"
     );
-    // Its writes reach the peer on the same tip, and the file reopens there.
     identity_insert(
         &session(&alice).await,
         "INSERT INTO tags VALUES('t','label')",
@@ -425,13 +435,18 @@ async fn an_open_replica_follows_an_additive_schema_in_place() {
     }
     assert_eq!(
         select(&bob, "SELECT label FROM tags").await,
-        vec![vec![text("label")]]
+        vec![vec![text("label")]],
+        "writes after the switch reach the peer on the same tip"
     );
     drop(before);
     drop(observer);
     drop(alice);
     let alice = lineage.reopen(&alice_path, &alice_key, 1, 3).await.unwrap();
-    assert_eq!(alice.followed_tip().await, target);
+    assert_eq!(
+        alice.followed_tip().await,
+        target,
+        "the file reopens on the switched tip"
+    );
     alice.audit(items).await.unwrap();
     assert_eq!(
         select(&alice, "SELECT count(*) FROM items").await,
@@ -480,10 +495,15 @@ async fn a_schema_removes_a_field_and_a_table_on_every_replica_that_follows_it()
             .await
             .unwrap()
     );
-    // Exactly the new schema, every remaining row visible.
     let reader = session(&alice).await;
-    assert!(reader.run("SELECT note FROM items", vec![]).await.is_err());
-    assert!(reader.run("SELECT * FROM tags", vec![]).await.is_err());
+    assert!(
+        reader.run("SELECT note FROM items", vec![]).await.is_err(),
+        "the removed field is gone"
+    );
+    assert!(
+        reader.run("SELECT * FROM tags", vec![]).await.is_err(),
+        "the removed table is gone"
+    );
     drop(reader);
     let expected = vec![
         vec![text("0001"), text("one")],
@@ -491,14 +511,12 @@ async fn a_schema_removes_a_field_and_a_table_on_every_replica_that_follows_it()
     ];
     assert_eq!(
         select(&alice, "SELECT key,title FROM items ORDER BY key").await,
-        expected
+        expected,
+        "every remaining row stays visible"
     );
     alice.compact(lineage.domain, 0).await.unwrap();
     alice.audit(items).await.unwrap();
 
-    // Carol, offline at the old tip, edits a kept and a removed field and
-    // the removed table. Across the `continue` her transaction replays on
-    // the new schema, which lacks `note`: all of it drops.
     write(
         &carol,
         "UPDATE items SET title='uno', note='carol' WHERE key='0001'",
@@ -510,10 +528,10 @@ async fn a_schema_removes_a_field_and_a_table_on_every_replica_that_follows_it()
     }
     assert_eq!(
         select(&alice, "SELECT title FROM items WHERE key='0001'").await,
-        vec![vec![text("one")]]
+        vec![vec![text("one")]],
+        "an offline transaction touching a removed field replays on the new schema and drops whole"
     );
     alice.audit(items).await.unwrap();
-    // The removal survives reopening and dropping schemas nothing needs.
     drop(alice);
     let alice = lineage.reopen(&alice_path, &alice_key, 3, 4).await.unwrap();
     alice.audit(items).await.unwrap();
@@ -527,7 +545,8 @@ async fn a_schema_removes_a_field_and_a_table_on_every_replica_that_follows_it()
     ];
     assert_eq!(
         select(&alice, "SELECT key,title FROM items ORDER BY key").await,
-        kept
+        kept,
+        "the removal survives reopening and dropping schemas nothing needs"
     );
     write(&carol, "UPDATE items SET note='again' WHERE key='0002'").await;
     for frame in authored(&carol, &carol_key).await {
@@ -565,8 +584,8 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() {
     for replica in [bob, dave, erin] {
         crate::tests::exchange_graphs(alice, replica, lineage.domain).await;
     }
-    // A: notes written while the field exists.
-    for (key, note) in [("0001", "old"), ("0002", "stale")] {
+    let notes_written_while_the_field_exists = [("0001", "old"), ("0002", "stale")];
+    for (key, note) in notes_written_while_the_field_exists {
         identity_insert(
             &session(alice).await,
             &format!("INSERT INTO items VALUES('{key}','title','{note}',NULL)"),
@@ -578,9 +597,7 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() {
     for (target, key) in [(bob, bob_key), (dave, dave_key)] {
         sync(&lineage, alice, target, key).await;
     }
-    // Dave, offline at A, writes the field late, beyond every seal.
     write(dave, "UPDATE items SET note='late at A' WHERE key='0002'").await;
-    // A -> B (no `note`) -> C (`note` again). Alice walks each step.
     crate::tests::check_frontier_cache(alice, items).await;
     crate::tests::check_frontier_cache(bob, items).await;
     let removed = lineage.publish(alice, 4).await.unwrap();
@@ -600,7 +617,6 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() {
             .await
             .unwrap()
     );
-    // Bob follows A -> C at once: B's schema is needed for the path.
     assert!(
         lineage
             .follow(bob, lineage.config(5, bob_key), 5, &readded)
@@ -611,7 +627,8 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() {
         bob.tip_schema(lineage.definition(4).hash())
             .await
             .unwrap()
-            .is_some()
+            .is_some(),
+        "following A to C at once still needs B's schema for the path"
     );
     let notes = "SELECT key,note FROM items ORDER BY key";
     let empty = vec![
@@ -622,15 +639,17 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() {
     assert_eq!(select(bob, notes).await, empty);
     crate::tests::check_frontier_cache(alice, items).await;
     crate::tests::check_frontier_cache(bob, items).await;
-    // Dave's late write at A crosses B: its `note` never reaches C.
     for replica in [alice, bob] {
         for frame in authored(dave, dave_key).await {
             let _ = replica.receive(frame).await;
         }
-        assert_eq!(select(replica, notes).await, empty);
+        assert_eq!(
+            select(replica, notes).await,
+            empty,
+            "a late write at A crosses B, so its `note` never reaches C"
+        );
         replica.audit(items).await.unwrap();
     }
-    // A write at C carries the field again.
     write(alice, "UPDATE items SET note='at C' WHERE key='0001'").await;
     for frame in authored(alice, alice_key).await {
         let _ = bob.receive(frame).await;
@@ -639,8 +658,11 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() {
         vec![text("0001"), text("at C")],
         vec![text("0002"), SqlValue::Null],
     ];
-    assert_eq!(select(bob, notes).await, written);
-    // A base at A's seal, imported at C, carries no earlier note either.
+    assert_eq!(
+        select(bob, notes).await,
+        written,
+        "a write at C carries the field again"
+    );
     let statements = crate::tests::all_tip_statements(alice).await;
     assert!(
         lineage
@@ -651,6 +673,10 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() {
     import(&lineage, alice, erin, erin_key, items).await;
     crate::tests::check_frontier_cache(erin, items).await;
     sync(&lineage, alice, erin, erin_key).await;
-    assert_eq!(select(erin, notes).await, written);
+    assert_eq!(
+        select(erin, notes).await,
+        written,
+        "a base at A's seal, imported at C, carries no earlier note either"
+    );
     erin.audit(items).await.unwrap();
 }

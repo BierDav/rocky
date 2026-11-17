@@ -707,9 +707,12 @@ impl Node {
         }
         Ok(())
     }
-    /// Publishes `statements` once they have the effect `expected` checks
-    /// on the graph they extend; a statement that would lose to a lower
-    /// digest is refused rather than published.
+    /// Publishes `statements` once they have the effect `expected` checks on
+    /// the graph they extend; a statement that would lose to a lower digest is
+    /// refused rather than published. The replica's codes, `sealed` and
+    /// `coordinator_unavailable`, stay. Once published the graph holds the
+    /// statements and later signing chains after them; a move of the followed
+    /// bookmark may have switched lines.
     async fn publish_tips(
         &self,
         scope: Scope,
@@ -722,17 +725,14 @@ impl Node {
             statement.append(&mut graph);
         }
         expected(&graph)?;
-        // The replica's codes stay: `sealed`, `coordinator_unavailable`.
         let before = self.replica.followed_tip().await;
         self.prepare_terminal_credentials().await?;
         let published = self.replica.publish_tip_statements(&statements).await;
-        // The graph now holds the statements; later signing chains after them.
         drop(signer);
         self.wake_sync();
         published?;
         self.finalize_seals().await;
         self.followed_tip_changed(before).await;
-        // A move of the followed bookmark may have switched lines.
         self.ensure_tip_node().await?;
         self.observations.touch();
         Ok(())
@@ -797,7 +797,8 @@ impl Node {
     }
 
     /// `continue` seals the followed tip and moves its bookmark on, in one
-    /// batch; `close` ends it and leaves the bookmark read-only.
+    /// batch; `close` ends it and leaves the bookmark read-only. Records for
+    /// transactions only this replica holds whole let the seal cover them.
     pub(super) async fn seal_followed(&self, scope: Scope, close: bool) -> Result<(), Failure> {
         let (followed, name) = self
             .replica
@@ -813,8 +814,6 @@ impl Node {
         }
         let mut signer = self.tip_signer(scope).await?;
         self.hold_chain(&mut signer, scope).await?;
-        // Records for transactions only this replica holds whole let the
-        // seal cover them.
         self.replica.publish_missing_outcomes().await?;
         let seal = self.seal_statement(&signer, scope, tip, close).await?;
         let mut statements = vec![TipStatement::Seal(seal.clone())];
@@ -1072,7 +1071,8 @@ impl Node {
         Ok(())
     }
 
-    /// Opens a tip on `seal`; only the owner and trusted identities may.
+    /// Opens a tip on `seal`; only the owner and trusted identities may. A
+    /// branch starts from the seal's state, which this device must hold.
     pub(super) async fn open_tip(
         &self,
         scope: Scope,
@@ -1087,7 +1087,6 @@ impl Node {
             return Err(refused("only the owner or a trusted identity opens tips"));
         }
         self.hold_chain(&mut signer, scope).await?;
-        // A branch starts from the seal's state, which this device must hold.
         self.replica.finalize_path(scope).await?;
         if self.replica.held_seal(scope, seal).await?.is_none() {
             return Err(refused(

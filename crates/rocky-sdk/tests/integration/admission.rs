@@ -11,6 +11,13 @@ async fn statements(device: &Device) -> serde_json::Value {
     snap::ok(device.session.info()).await["revocations"]["statements"].clone()
 }
 
+async fn finish_issuer_bootstrap(members: &[Device]) -> Result<(), Failure> {
+    for device in members {
+        device.sync().await.map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 /// C admits B, which it has no contact for, and refuses D in the round in
 /// which A told it of D's revocation. D, revoked while it was away, learns
 /// it from C with no issuer running, reports `revoked` and stops syncing.
@@ -32,10 +39,7 @@ async fn a_member_admits_a_peer_without_a_contact_and_refuses_one_revoked_this_r
     let [b, c, d] = &members[..] else {
         return Err("members".into());
     };
-    // Finish issuer bootstrap before exercising roster-free peer admission.
-    for device in &members {
-        device.sync().await.map_err(|error| error.to_string())?;
-    }
+    finish_issuer_bootstrap(&members).await?;
     let (b_node, d_node) = (b.node().await, d.node().await);
     let c_contact = c.contact().await;
     for device in [&a, b, d] {
@@ -45,10 +49,13 @@ async fn a_member_admits_a_peer_without_a_contact_and_refuses_one_revoked_this_r
             .map_err(|e| e.to_string())?;
     }
 
-    // C has no contact for B and serves it: B's chain admits it.
     b.add(1, "Milk").await;
     b.sync().await.map_err(|error| error.to_string())?;
-    assert_eq!(c.titles().await, ["Milk"]);
+    assert_eq!(
+        c.titles().await,
+        ["Milk"],
+        "C serves B by its chain without a contact for it"
+    );
     let met = c.peer(&b_node).await;
     assert_eq!(met["is_configured"], false, "{met}");
     assert!(
@@ -56,30 +63,45 @@ async fn a_member_admits_a_peer_without_a_contact_and_refuses_one_revoked_this_r
         "{met}"
     );
 
-    // A revokes D while D is away and tells C, then is gone.
     snap::ok(
         a.session
             .revoke_identity(&(snap::text(&(d.identity().await)))),
     )
     .await;
     a.sync().await.map_err(|error| error.to_string())?;
-    assert_eq!(statements(c).await, 1);
+    assert_eq!(
+        statements(c).await,
+        1,
+        "A tells C of D's revocation while D is away"
+    );
     a.close().await;
 
-    // In the same round C refuses D, which learns why from C.
     d.add(2, "Jam").await;
     let refused = d.sync().await.err().ok_or("a revoked device synced")?;
     assert_eq!(refused["code"], "revoked", "{refused}");
     assert!(!snap::ok(d.session.status()).await["authority"]["verified_revocation"].is_null());
-    assert_eq!(c.titles().await, ["Milk"]);
+    assert_eq!(
+        c.titles().await,
+        ["Milk"],
+        "C refuses D in the round it learned of the revocation"
+    );
     assert_eq!(c.peer(&d_node).await, serde_json::Value::Null);
-    // D stops syncing: it is refused before it dials.
-    let again = d.sync().await.err().ok_or("a revoked device synced")?;
-    assert_eq!(again["code"], "revoked", "{again}");
-    // B and C still sync.
+    let again = d
+        .sync()
+        .await
+        .err()
+        .ok_or("a revoked device dialed again")?;
+    assert_eq!(
+        again["code"], "revoked",
+        "a revoked device is refused before it dials: {again}"
+    );
     b.add(3, "Tea").await;
     b.sync().await.map_err(|error| error.to_string())?;
-    assert_eq!(c.titles().await, ["Milk", "Tea"]);
+    assert_eq!(
+        c.titles().await,
+        ["Milk", "Tea"],
+        "unrevoked members keep syncing"
+    );
     assert_eq!(statements(b).await, 1);
     for device in [b, c, d] {
         device.close().await;

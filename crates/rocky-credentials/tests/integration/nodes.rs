@@ -46,7 +46,6 @@ fn revoking(root: &PrivateKey, revocation: impl FnOnce(&mut Revocation)) -> Revo
 fn a_certificate_outlives_three_renewals_and_ends_with_its_identity() {
     let (root, identity, node) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
     let none = RevocationSet::new();
-    // A capability for a day, and the one certificate its identity signs.
     let mut capability = Authority::owner(&root)
         .issue(
             identity.public_key(),
@@ -57,7 +56,7 @@ fn a_certificate_outlives_three_renewals_and_ends_with_its_identity() {
                 clock_skew: std::time::Duration::from_secs(0),
             },
         )
-        .unwrap();
+        .expect("a day's capability is issued");
     let certificate = CredentialChain(vec![capability.clone()])
         .certify(&identity, node.public_key())
         .unwrap()
@@ -66,8 +65,6 @@ fn a_certificate_outlives_three_renewals_and_ends_with_its_identity() {
         .clone();
     assert_eq!(certificate.capability.expires, NEVER);
     assert!(certificate.capability.grants.is_empty());
-    // Three renewals replace the capability only; the identity signs none
-    // of them, and the same certificate verifies under each.
     for renewal in 1..=3 {
         let time = NOW + renewal * DAY - 60;
         let expired =
@@ -75,7 +72,8 @@ fn a_certificate_outlives_three_renewals_and_ends_with_its_identity() {
         assert!(
             expired
                 .verify(root.public_key(), node.public_key(), &none, time + 120)
-                .is_err()
+                .is_err(),
+            "a renewal replaces the capability only; the same certificate verifies under each"
         );
         capability = Authority::owner(&root)
             .renew(
@@ -100,7 +98,6 @@ fn a_certificate_outlives_three_renewals_and_ends_with_its_identity() {
         assert_eq!(verified.principal, identity.public_key());
         assert_eq!(verified.grants, vec![grant()]);
     }
-    // Revoking the identity refuses the certificate under any capability.
     let chain = CredentialChain(vec![capability]).with_certificate(certificate);
     let time = NOW + 3 * DAY;
     assert!(
@@ -114,16 +111,17 @@ fn a_certificate_outlives_three_renewals_and_ends_with_its_identity() {
     assert!(
         chain
             .verify(root.public_key(), node.public_key(), &revoked, time)
-            .is_err()
+            .is_err(),
+        "revoking the identity refuses the certificate under any capability"
     );
-    // Revoking only the node refuses it as well.
     let unlinked = revoking(&root, |statement| {
         statement.nodes = [PeerId::of(node.public_key())].into();
     });
     assert!(
         chain
             .verify(root.public_key(), node.public_key(), &unlinked, time)
-            .is_err()
+            .is_err(),
+        "revoking only the node refuses it as well"
     );
 }
 
@@ -137,10 +135,12 @@ fn issuers_sign_with_node_keys_and_a_revoked_node_signs_nothing_new() {
     ]);
     let node = PrivateKey::new();
     let node_chain = trusted.clone().certify(&issuer, node.public_key()).unwrap();
-    // The node, not the identity, signs a capability; it names the
-    // identity as its issuer and verifies as the identity's grant.
     let authority = Authority::issuer(&node, &node_chain).unwrap();
-    assert_eq!(authority.identity().unwrap(), issuer.public_key());
+    assert_eq!(
+        authority.identity().unwrap(),
+        issuer.public_key(),
+        "the node signs a capability naming the identity as its issuer"
+    );
     let link = authority
         .issue(
             member.public_key(),
@@ -168,10 +168,10 @@ fn issuers_sign_with_node_keys_and_a_revoked_node_signs_nothing_new() {
             .verify(root.public_key(), member_node.public_key(), &none, NOW)
             .is_ok()
     );
-    // The identity's own key signing an issuer statement is refused.
-    assert!(Endorsement::sign(&issuer, &trusted, "rocky.test", &1u8).is_err());
-    // Its grants come from a link its node signed for it; its node
-    // certificate holds none.
+    assert!(
+        Endorsement::sign(&issuer, &trusted, "rocky.test", &1u8).is_err(),
+        "the identity's own key signing an issuer statement is refused"
+    );
     let held = authority
         .hold(
             vec![grant()],
@@ -183,7 +183,10 @@ fn issuers_sign_with_node_keys_and_a_revoked_node_signs_nothing_new() {
             },
         )
         .unwrap();
-    assert_eq!(held.capability.expires, NEVER);
+    assert_eq!(
+        held.capability.expires, NEVER,
+        "the node certificate holds no grants; they come from a link its node signed"
+    );
     let own = CredentialChain(vec![trusted.0[0].clone(), held])
         .with_certificate(node_chain.certificate().unwrap().clone());
     assert_eq!(
@@ -196,16 +199,14 @@ fn issuers_sign_with_node_keys_and_a_revoked_node_signs_nothing_new() {
         .unwrap(),
         vec![grant()]
     );
-    // Once the root revokes the signing node, what it signed is refused
-    // and it signs nothing that verifies; another node of the identity
-    // still issues.
     let unlinked = revoking(&root, |statement| {
         statement.nodes = [PeerId::of(node.public_key())].into();
     });
     assert!(
         member_chain
             .verify(root.public_key(), member_node.public_key(), &unlinked, NOW)
-            .is_err()
+            .is_err(),
+        "once the root revokes the signing node, what it signed is refused"
     );
     let other = PrivateKey::new();
     let other_chain = trusted

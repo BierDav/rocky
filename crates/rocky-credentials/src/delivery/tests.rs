@@ -18,9 +18,12 @@ fn only_the_recipient_opens_a_delivery_and_nothing_else_is_in_the_clear() {
         !bytes.windows(4).any(|window| window == b"list"),
         "the payload is sealed"
     );
-    // Two sealings of one payload share no ciphertext or digest.
     let again = SealedDelivery::seal(recipient.public_key(), &payload).unwrap();
-    assert_ne!(again.digest().unwrap(), delivery.digest().unwrap());
+    assert_ne!(
+        again.digest().unwrap(),
+        delivery.digest().unwrap(),
+        "two sealings of one payload share no ciphertext or digest"
+    );
     assert_eq!(SealedDelivery::from_bytes(&bytes).unwrap(), delivery);
 }
 

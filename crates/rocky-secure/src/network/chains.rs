@@ -77,7 +77,8 @@ impl NativeSession {
         }
     }
     /// The frames whose chain this session carried, with it, and the number
-    /// of the others. Those are incomplete: they are neither received nor
+    /// of the others. Only the table supplies a chain; one sent inside a page
+    /// is ignored. The others are incomplete: they are neither received nor
     /// acknowledged, so a later pass on another session sends them again.
     pub(super) fn complete_frames(
         &self,
@@ -86,7 +87,6 @@ impl NativeSession {
         let mut complete = Vec::with_capacity(frames.len());
         let mut incomplete = 0;
         for mut frame in frames {
-            // Only the table supplies a chain: one sent inside a page is ignored.
             frame.take_chain();
             match self.chains.received.get(&frame.chain_digest()?) {
                 Some(chain) => complete.push(frame.with_chain(chain.clone())),

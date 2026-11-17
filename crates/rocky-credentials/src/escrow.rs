@@ -401,29 +401,41 @@ mod tests {
             payload
         );
         assert_eq!(parsed.tag(), tag);
-        // The record carries neither the payload nor the secret in clear.
-        assert!(!bytes.windows(5).any(|window| window == b"acme/"));
+        assert!(
+            !bytes.windows(5).any(|window| window == b"acme/"),
+            "the record carries no payload in clear"
+        );
         assert!(!bytes.windows(32).any(|window| window == secret));
-        // Lengths are padded: a longer payload of the same bucket looks alike.
         let longer = RootEscrow::seal(root.public_key(), tag, &[1; 200])?;
-        assert_eq!(longer.sealed.len(), parsed.sealed.len());
-        // Another root, or a device key, opens nothing.
-        assert!(parsed.open(&RootKey::generate()).is_err());
+        assert_eq!(
+            longer.sealed.len(),
+            parsed.sealed.len(),
+            "lengths are padded within a bucket"
+        );
+        assert!(
+            parsed.open(&RootKey::generate()).is_err(),
+            "another root opens nothing"
+        );
         let device = PrivateKey::from_bytes(&[9; 32]);
         assert!(
             parsed
                 .open(&RootKey::from_secret(*device.as_bytes()))
                 .is_err()
         );
-        // A changed tag or byte fails authentication.
         let mut forged = parsed.clone();
         forged.tag = escrow_tag(root.public_key(), &[8; 32]);
-        assert!(forged.open(&root).is_err());
+        assert!(
+            forged.open(&root).is_err(),
+            "a changed tag fails authentication"
+        );
         let mut flipped = parsed.clone();
         flipped.sealed[20] ^= 1;
         assert!(flipped.open(&root).is_err());
-        // Tags depend on the secret and the root.
-        assert_ne!(escrow_tag(RootKey::generate().public_key(), &secret), tag);
+        assert_ne!(
+            escrow_tag(RootKey::generate().public_key(), &secret),
+            tag,
+            "tags depend on the secret and the root"
+        );
         Ok(())
     }
 
@@ -450,8 +462,10 @@ mod tests {
         vouched.verify(database, [5; 32])?;
         let decoded: MetadataEscrow = decode_bounded(&encode(&vouched)?, MAX_VOUCHED_BYTES)?;
         decoded.verify(database, [5; 32])?;
-        // Another descriptor or database, or a tampered body, is refused.
-        assert!(vouched.verify(database, [6; 32]).is_err());
+        assert!(
+            vouched.verify(database, [6; 32]).is_err(),
+            "another descriptor is refused"
+        );
         let mut elsewhere = database;
         elsewhere.scope.domain = rocky_core::DomainId([4; 16]);
         assert!(vouched.verify(elsewhere, [5; 32]).is_err());

@@ -68,7 +68,6 @@ fn retry_records_expire_and_are_bounded_per_signer() {
     let id = genesis.id().unwrap();
     let time = now().unwrap();
     let limits = Limits::default();
-    // Membership requests keep their outcome, refusals included.
     let acquire = |n: u64, time| {
         let mut identity = [0; 32];
         identity[..8].copy_from_slice(&n.to_le_bytes());
@@ -84,11 +83,13 @@ fn retry_records_expire_and_are_bounded_per_signer() {
     }
     assert_eq!(
         metadata.apply_at(time, &acquire(u64::MAX, time)),
-        Err(CoordinationError::Backpressure)
+        Err(CoordinationError::Backpressure),
+        "retained membership outcomes, refusals included, fill the retry budget"
     );
-    // A retry within the window returns the retained outcome; a different
-    // operation under the same ID conflicts.
-    assert!(metadata.apply_at(time, &acquire(0, time)).is_ok());
+    assert!(
+        metadata.apply_at(time, &acquire(0, time)).is_ok(),
+        "a retry within the window returns the retained outcome"
+    );
     let conflict = self_certified(
         id,
         acquire(0, time).id,
@@ -101,11 +102,11 @@ fn retry_records_expire_and_are_bounded_per_signer() {
         metadata.apply_at(time, &conflict),
         Err(CoordinationError::RequestConflict)
     );
-    // After the window the records are gone and their signed requests are too old.
     let later = time + limits.retry_window + 1;
     assert_eq!(
         metadata.apply_at(later, &acquire(0, time)),
-        Err(CoordinationError::Expired)
+        Err(CoordinationError::Expired),
+        "after the window a signed request is too old to apply"
     );
     assert_eq!(metadata.retry_records(), 0);
     let _ = metadata.apply_at(later, &acquire(1, later));
@@ -115,7 +116,6 @@ fn retry_records_expire_and_are_bounded_per_signer() {
 #[test]
 fn membership_replays_cannot_reverse_a_later_configuration_after_retry_expiry() {
     let (genesis, ..) = certified();
-    // Use a genesis with a known membership signing key.
     let authority = PrivateKey::new();
     let root = PrivateKey::new();
     let mut config = genesis.genesis;

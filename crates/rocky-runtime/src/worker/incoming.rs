@@ -40,7 +40,11 @@ where
     /// Starts from nothing, so a retried attempt cannot double-count an
     /// earlier partial pass. With `open`, the operations after the
     /// checkpoint and the strong ledger are also validated; history behind
-    /// the checkpoint is verified by the explicit audit.
+    /// the checkpoint is verified by the explicit audit. Everything behind
+    /// an author's pruned prefix was applied before it was pruned. Local
+    /// operations after the applied frontier wait to be applied again on an
+    /// imported checkpoint, but none is ever missing, so the newest one is
+    /// the local sequence counter.
     pub(super) async fn restore(&mut self, open: bool) -> Result<(), Error> {
         self.load_retention().await?;
         let budget = rows(
@@ -74,23 +78,12 @@ where
         }
         let mut frontier = BTreeMap::new();
         let authors: BTreeSet<_> = self.config.authors.iter().map(|(node, _)| *node).collect();
-        let mut newest = 0;
+        let mut newest_local = 0;
         for node in authors {
-            // Applied operations of an author have no gaps; later ones are
-            // pending or rejected, so this walks back over that tail only.
-            let mut applied = self
-                .conn()
-                .query(
-                    "SELECT sequence FROM rocky_operations WHERE node=? AND status='applied' ORDER BY sequence DESC LIMIT 1",
-                    [node.0.to_vec()],
-                )
-                .await?;
-            let retained = match applied.next().await? {
-                Some(row) => row.get::<i64>(0)? as u64,
-                None => 0,
-            };
-            // Everything behind the pruned prefix was applied before it was pruned.
-            let applied = retained.max(self.retention.pruned_prefix(node));
+            let applied = self
+                .newest_retained_applied(node)
+                .await?
+                .max(self.retention.pruned_prefix(node));
             if applied > 0 {
                 frontier.insert(node, AuthorSequence::new(applied)?);
             }
@@ -102,7 +95,7 @@ where
                         [node.0.to_vec()],
                     )
                     .await?;
-                newest = match last.next().await? {
+                newest_local = match last.next().await? {
                     Some(row) => (row.get::<i64>(0)? as u64).max(applied),
                     None => applied,
                 };
@@ -111,9 +104,7 @@ where
                 self.validate_tail(node, applied).await?;
             }
         }
-        // Local operations after the applied frontier wait to be applied
-        // again on an imported checkpoint; none is ever missing.
-        if newest != *sequence as u64 {
+        if newest_local != *sequence as u64 {
             return Err(Error::Corrupt(
                 "counters differ from canonical history".into(),
             ));
@@ -125,6 +116,22 @@ where
         self.lamport = *clock as u64;
         self.revision = LocalRevision::new(*revision as u64)?;
         Ok(())
+    }
+    /// The newest retained applied operation of an author. Applied ones have
+    /// no gaps and later ones are pending or rejected, so the descending
+    /// search walks back over that tail only.
+    async fn newest_retained_applied(&self, node: NodeId) -> Result<u64, Error> {
+        let mut applied = self
+            .conn()
+            .query(
+                "SELECT sequence FROM rocky_operations WHERE node=? AND status='applied' ORDER BY sequence DESC LIMIT 1",
+                [node.0.to_vec()],
+            )
+            .await?;
+        Ok(match applied.next().await? {
+            Some(row) => row.get::<i64>(0)? as u64,
+            None => 0,
+        })
     }
     /// Checks one author's operations after the checkpoint: canonical bytes
     /// under the right key, an applied prefix without gaps up to `applied`,
@@ -207,11 +214,11 @@ where
             None => Ok(None),
         }
     }
-    /// Checks the dependencies of `op` against retained operations.
+    /// Checks the dependencies of `op` against retained operations. Those
+    /// behind the pruned prefix were applied; their clocks are gone.
     pub(super) async fn readiness(&self, op: &Envelope) -> Result<Readiness, Error> {
         let mut pending = false;
         for dependency in &op.dependencies {
-            // Behind the pruned prefix everything was applied; its clock is gone.
             if self.retention.below_pruned_prefix(*dependency) {
                 continue;
             }
@@ -268,7 +275,8 @@ where
         Ok(identities)
     }
     /// The contiguous held prefix of every author's log, and the first
-    /// retained operations above it that are not rejected.
+    /// retained operations above it that are not rejected. Received, pending
+    /// and rejected operations extend the applied prefix while contiguous.
     async fn held(&self) -> Result<(rocky_core::AppliedFrontier, Vec<OperationId>), Error> {
         let applied = super::retention::marks(&self.applied_frontier());
         let mut nodes: Vec<_> = self.config.authors.iter().map(|(node, _)| *node).collect();
@@ -278,8 +286,6 @@ where
         for node in nodes {
             let mut prefix =
                 super::retention::at(&applied, node).max(self.retention.pruned_prefix(node));
-            // Received, pending and rejected operations extend the prefix
-            // while they are contiguous.
             loop {
                 let mut records = self
                     .conn()
@@ -473,6 +479,10 @@ where
             next: if more { last } else { None },
         })
     }
+    /// Stores one received operation as pending. A late copy of one applied
+    /// and pruned is a duplicate, whatever it would do to rows that changed
+    /// or were deleted since. Its time is validated against every retained
+    /// dependency, pending ones included.
     async fn receive(&mut self, bytes: Vec<u8>) -> Result<Acknowledgment, Error> {
         if bytes.len() > rocky_core::MAX_PAYLOAD_BYTES + 256 {
             return Err(ProtocolError::InvalidLength.into());
@@ -482,8 +492,6 @@ where
         if op.scope != self.identity.scope {
             return Err(ProtocolError::ForeignScope.into());
         }
-        // Applied and pruned: a late copy is a duplicate, whatever it would
-        // do to rows that changed or were deleted since.
         if self.retention.below_pruned_prefix(op.id) {
             return Ok(Acknowledgment {
                 id: op.id,
@@ -512,7 +520,6 @@ where
                 "unknown operation attributed to this node".into(),
             ));
         }
-        // Validate time against all available dependency bytes, including pending ones.
         if let Readiness::Invalid(error) = self.readiness(&op).await? {
             return Err(error);
         }
@@ -541,7 +548,6 @@ where
         })
         .await?;
         self.lamport = clock;
-        // The pending backlog a read reports grew.
         self.unpublished.meta = true;
         self.retained += 1;
         self.retained_bytes = self
@@ -555,7 +561,9 @@ where
     }
     /// One writer step for a bounded batch. Every record is received in its
     /// own savepoint, so a refused one rolls back alone; one application pass
-    /// follows in another. The whole step shares the group's commit.
+    /// follows in another, so a failed pass rolls back alone and its
+    /// receipts apply later. The whole step shares the group's commit, so a
+    /// failed rollback, which leaves the connection state unknown, ends it.
     async fn receive_page(
         &mut self,
         records: Vec<Vec<u8>>,
@@ -563,7 +571,6 @@ where
         let mut results = Vec::with_capacity(records.len());
         for bytes in records {
             match self.receive(bytes).await {
-                // The connection state is unknown: the group must not commit.
                 Err(error @ Error::Rollback { .. }) => return Err(error),
                 result => results.push(result),
             }
@@ -574,7 +581,6 @@ where
         {
             return Ok(results);
         }
-        // A failed pass rolls back alone; the receipts stay and apply later.
         if let Err(error @ Error::Rollback { .. }) = self.process_pending().await {
             return Err(error);
         }
@@ -696,6 +702,7 @@ where
         }
     }
     /// Stores a pending operation's outcome: its statements, or its rejection.
+    /// A refused local operation is also kept to be reported, not dropped.
     async fn settle_pending(
         &mut self,
         op: &Envelope,
@@ -709,7 +716,6 @@ where
                 "applied"
             }
             Err(error) => {
-                // A refused local operation is reported, not dropped.
                 if op.id.node == self.identity.node {
                     self.conn()
                         .execute(
@@ -740,9 +746,11 @@ where
         }
         Ok(())
     }
+    /// Records a peer's acknowledgment, which behind the pruned prefix is no
+    /// longer needed. The outbox entry goes once every delivery target
+    /// received the operation; a held frontier from catch-up counts as receipt.
     async fn acknowledge(&mut self, peer: NodeId, ack: Acknowledgment) -> Result<(), Error> {
         self.validate_peer(peer)?;
-        // Behind the pruned prefix the acknowledgment is no longer needed.
         if self.retention.below_pruned_prefix(ack.id) {
             return Ok(());
         }
@@ -759,7 +767,6 @@ where
             worker.conn().execute("INSERT INTO rocky_peer_ack VALUES(?,?,?,?) ON CONFLICT(peer,node,sequence) DO UPDATE SET applied=MAX(applied,excluded.applied)", crate::sqlite::params![peer.0.to_vec(), ack.id.node.0.to_vec(), ack.id.sequence.get() as i64, i64::from(ack.applied)]).await?;
             let mut delivered = true;
             for target in &worker.config.delivery_targets {
-                // A held frontier from catch-up counts as receipt too.
                 if worker.retention.held_by(*target, ack.id) { continue; }
                 let mut retained = worker.conn().query("SELECT 1 FROM rocky_peer_ack WHERE peer=? AND node=? AND sequence=?", crate::sqlite::params![target.0.to_vec(), ack.id.node.0.to_vec(), ack.id.sequence.get() as i64]).await?;
                 if retained.next().await?.is_none() { delivered = false; }
@@ -822,6 +829,9 @@ where
             None => None,
         })
     }
+    /// A peer's delivery progress. Local operations are exactly
+    /// `1..=sequence`; those behind the pruned prefix were acknowledged before
+    /// they were pruned, unless the peer is declared behind.
     async fn progress(&self, peer: NodeId) -> Result<PeerProgress, Error> {
         let acks = self.peer_acknowledgments(peer).await?;
         let received: BTreeSet<_> = acks.iter().map(|ack| ack.id).collect();
@@ -830,9 +840,6 @@ where
             .filter(|ack| ack.applied)
             .map(|ack| ack.id)
             .collect();
-        // Local operations are exactly 1..=sequence. Those behind the
-        // pruned prefix were acknowledged before they were pruned, unless the peer
-        // is declared behind.
         let pruned = self.retention.acknowledged_behind(peer, self.identity.node);
         let (held, reported) = self.retention.reported(peer);
         let local = |ids: &BTreeSet<OperationId>, mark: u64| {
@@ -887,7 +894,6 @@ where
                     self.fault = Some(Fault::AbortAfterWrites(n - 1));
                 }
                 Fault::AbortAfterWrites(_) => std::process::abort(),
-                // Applied by the file writer, never stored on a worker.
                 Fault::AbortBeforeCommit
                 | Fault::AbortAfterCommit
                 | Fault::FailCommit
@@ -897,7 +903,6 @@ where
                 | Fault::CheckpointFrames(_)
                 | Fault::VmSteps(_) => {}
                 Fault::FailBeforeCommit => return Err(Error::InjectedFailure),
-                // Taken by the follow-up pass after the write.
                 Fault::FailFollowing => self.fault = Some(Fault::FailFollowing),
                 Fault::RetryBeforeCommit(n) if n > 0 => {
                     self.fault = Some(Fault::RetryBeforeCommit(n - 1));

@@ -22,6 +22,8 @@ use tokio::sync::Mutex;
 /// A Raft log entry: the leader-proposed authority time and a client request.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Proposal {
+    /// Authority time, read from the leader's clock when it proposes;
+    /// followers never read their clocks.
     pub time: u64,
     pub request: Request,
 }
@@ -98,6 +100,9 @@ pub struct Backup {
     pub index: u64,
 }
 const BACKUP: &str = "BACKUP";
+/// Written before the first state image, so it outlives a lost image and an
+/// interrupted provisioning fails closed.
+const PROVISIONED: &str = "PROVISIONED";
 const BACKUP_LABEL: &str = "rocky.voter-backup.v1";
 /// The durable Raft log state. An update drafts a shallow copy: entries
 /// are shared, and a changed log copies only the map's pointers.
@@ -105,6 +110,7 @@ const BACKUP_LABEL: &str = "rocky.voter-backup.v1";
 struct Image {
     hard: Hard,
     fence: Option<Fence>,
+    /// A purge Raft asked for before the snapshot covering it was durable.
     pending_purge: Option<LogId<u64>>,
     logs: Arc<BTreeMap<u64, Arc<Entry<Types>>>>,
     snapshot: Option<SnapshotMeta<u64, BasicNode>>,
@@ -367,7 +373,7 @@ impl Store {
         lock.try_lock_exclusive()
             .map_err(|_| CoordinationError::Denied)?;
         let identity = genesis.id()?;
-        let marker_path = path.join("PROVISIONED");
+        let marker_path = path.join(PROVISIONED);
         let (logs_dir, snapshots_dir) = (path.join("log"), path.join("snapshots"));
         let state_path = path.join("state.cbor");
         let (image, machine) = if state_path.exists() {
@@ -419,7 +425,6 @@ impl Store {
             for dir in [&logs_dir, &snapshots_dir] {
                 std::fs::create_dir_all(dir).map_err(|_| CoordinationError::Corrupt)?;
             }
-            // The marker must outlive a lost image; interruption during provisioning fails closed.
             atomic_write(&marker_path, &identity, "provision")
                 .map_err(|_| CoordinationError::Corrupt)?;
             atomic_write(&state_path, &seal(STATE_LABEL, &image.hard)?, "provision")
@@ -448,20 +453,7 @@ impl Store {
         snapshots_dir: &Path,
     ) -> Result<(Image, Machine), CoordinationError> {
         let purged = hard.purged.map(|id| id.index);
-        // The newest readable snapshot that covers every purged entry.
-        let mut snapshot = None;
-        for (_, path) in numbered(snapshots_dir)?.into_iter().rev() {
-            let Ok(file) = unseal::<SnapshotFile>(SNAPSHOT_LABEL, &read(&path)?) else {
-                continue;
-            };
-            if file.format != FORMAT || file.identity != hard.identity {
-                return Err(CoordinationError::UnsupportedFormat);
-            }
-            if purged.is_none_or(|p| file.meta.last_log_id.is_some_and(|id| id.index >= p)) {
-                snapshot = Some(file);
-                break;
-            }
-        }
+        let snapshot = newest_snapshot_covering(snapshots_dir, &hard)?;
         if snapshot.is_none() && purged.is_some() {
             return Err(CoordinationError::Corrupt);
         }
@@ -487,8 +479,8 @@ impl Store {
         };
         let mut logs = BTreeMap::new();
         for (index, path) in numbered(logs_dir)? {
-            if purged.is_some_and(|p| index <= p) {
-                // A purge interrupted after its durable record.
+            let left_by_interrupted_purge = purged.is_some_and(|p| index <= p);
+            if left_by_interrupted_purge {
                 std::fs::remove_file(&path).map_err(|_| CoordinationError::Corrupt)?;
                 continue;
             }
@@ -802,17 +794,12 @@ impl Store {
         }
         check_store_format(backup, true)?;
         copy_store(backup, path)?;
-        // The backup's own leadership is stale: its log may lack entries it
-        // committed later, so it restarts as a follower of its last term.
         let state = path.join("state.cbor");
         let mut hard: Hard = unseal(STATE_LABEL, &read(&state)?)?;
         if hard.identity != manifest.identity {
             return Err(CoordinationError::Configuration);
         }
-        hard.vote = hard.vote.map(|vote| Vote {
-            committed: false,
-            ..vote
-        });
+        hard.vote = hard.vote.map(as_follower);
         atomic_write(&state, &seal(STATE_LABEL, &hard)?, "restore")
             .map_err(|_| CoordinationError::Corrupt)?;
         let fence = Fence {
@@ -987,16 +974,17 @@ impl RaftLogStorage<Types> for Store {
             Err(error) => Err(error),
         }
     }
+    /// Removes entries highest first, so an interruption leaves a
+    /// contiguous prefix.
     async fn truncate(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
         self.update(move |store, image| {
-            // Highest first, so an interruption leaves a contiguous prefix.
-            let doomed: Vec<_> = image
+            let highest_first: Vec<_> = image
                 .logs
                 .range(log_id.index..)
                 .map(|(i, _)| *i)
                 .rev()
                 .collect();
-            for index in doomed {
+            for index in highest_first {
                 std::fs::remove_file(store.logs_dir().join(file_name(index))).map_err(io_error)?;
                 Arc::make_mut(&mut image.logs).remove(&index);
             }
@@ -1004,16 +992,16 @@ impl RaftLogStorage<Types> for Store {
         })
         .await
     }
+    /// Raft can purge before installing its incoming snapshot, so recovery
+    /// entries stay until a durable snapshot covers them.
     async fn purge(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
         self.update(move |store, image| {
-            if image
+            let covered_by_durable_snapshot = image
                 .snapshot
                 .as_ref()
                 .and_then(|meta| meta.last_log_id)
-                .is_none_or(|snapshot| snapshot.index < log_id.index)
-            {
-                // Raft can purge before installing its incoming snapshot. Keep recovery
-                // entries until that snapshot is durable.
+                .is_some_and(|snapshot| snapshot.index >= log_id.index);
+            if !covered_by_durable_snapshot {
                 image.pending_purge = Some(log_id);
                 return Ok(());
             }
@@ -1034,6 +1022,9 @@ impl RaftStateMachine<Types> for Store {
         let machine = self.0.machine.read().await;
         Ok((machine.applied, machine.membership.clone()))
     }
+    /// Applies each entry whole: its fallible file write and signature check
+    /// come before the state lock. Applied state is durable through
+    /// committed entries and snapshots, so applying writes nothing itself.
     async fn apply<I>(
         &mut self,
         entries: I,
@@ -1047,8 +1038,6 @@ impl RaftStateMachine<Types> for Store {
             let pending = store.0.machine.blocking_read().metadata.pending_logs();
             let mut replies = Vec::new();
             for entry in entries {
-                // Each entry applies whole: its fallible file write and its
-                // signature check come before the state lock.
                 let reply = match entry.payload {
                     EntryPayload::Blank => {
                         store.0.machine.blocking_write().applied = Some(entry.log_id);
@@ -1081,7 +1070,6 @@ impl RaftStateMachine<Types> for Store {
             if pending != store.0.machine.blocking_read().metadata.pending_logs() {
                 store.0.deadlines.send_replace(());
             }
-            // Applied state is durable through committed entries and snapshots.
             crash("apply.after_apply");
             Ok(replies)
         })
@@ -1151,10 +1139,10 @@ impl RaftStateMachine<Types> for Store {
     reason = "OpenRaft fixes the storage error type."
 )]
 impl RaftSnapshotBuilder<Types> for Store {
+    /// Encodes under the shared guard: only apply waits for it, and this
+    /// exclusive worker excludes apply anyway.
     async fn build_snapshot(&mut self) -> Result<Snapshot<Types>, StorageError<u64>> {
         self.exclusive(move |store| {
-            // Encoded under the shared guard: only apply, which this
-            // worker excludes anyway, waits for it.
             let (data, meta) = {
                 let machine = store.0.machine.blocking_read();
                 let data = encode(&machine.metadata).map_err(io_error)?;
@@ -1176,6 +1164,35 @@ impl RaftSnapshotBuilder<Types> for Store {
             })
         })
         .await
+    }
+}
+
+/// The newest readable snapshot that covers every purged entry.
+fn newest_snapshot_covering(
+    snapshots_dir: &Path,
+    hard: &Hard,
+) -> Result<Option<SnapshotFile>, CoordinationError> {
+    let purged = hard.purged.map(|id| id.index);
+    for (_, path) in numbered(snapshots_dir)?.into_iter().rev() {
+        let Ok(file) = unseal::<SnapshotFile>(SNAPSHOT_LABEL, &read(&path)?) else {
+            continue;
+        };
+        if file.format != FORMAT || file.identity != hard.identity {
+            return Err(CoordinationError::UnsupportedFormat);
+        }
+        if purged.is_none_or(|p| file.meta.last_log_id.is_some_and(|id| id.index >= p)) {
+            return Ok(Some(file));
+        }
+    }
+    Ok(None)
+}
+
+/// A backup's own leadership is stale: its log may lack entries it
+/// committed later, so it restarts as a follower of its last term.
+fn as_follower(vote: Vote<u64>) -> Vote<u64> {
+    Vote {
+        committed: false,
+        ..vote
     }
 }
 

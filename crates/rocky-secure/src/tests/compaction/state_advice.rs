@@ -91,13 +91,7 @@ async fn state_advice_requires_64_frames_and_covers_every_requester_log() {
         .state
         .is_none()
     );
-    // Missing read keys must not prevent serving retained ciphertext frames.
-    a.inner
-        .lock(crate::replica::Class::Background)
-        .await
-        .config
-        .keys
-        .clear();
+    drop_every_read_key(&a).await;
     let page = a
         .range_page(
             keys[1].public_key(),
@@ -109,7 +103,22 @@ async fn state_advice_requires_64_frames_and_covers_every_requester_log() {
         .await
         .unwrap();
     assert!(page.state.is_none());
-    assert_eq!(page.frames.len(), 32);
+    assert_eq!(
+        page.frames.len(),
+        32,
+        "missing read keys do not prevent serving retained ciphertext frames"
+    );
+}
+
+/// Forgets every key `replica` was configured with.
+async fn drop_every_read_key(replica: &Replica) {
+    replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .keys
+        .clear();
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -151,7 +160,6 @@ async fn advised_import_reapplies_a_write_authored_after_the_frontier_request() 
                 .is_err()
         );
         assert!(b.rebootstrap_progress(scope).await.unwrap().is_none());
-        // Local work can commit while the peer's response is in flight.
         insert(&b, "unsent", "local").await;
         let report = session
             .bootstrap_advised_scope(&b, scope, MAX_SECURE_FRAME / 2, Some(&advice))
@@ -166,7 +174,10 @@ async fn advised_import_reapplies_a_write_authored_after_the_frontier_request() 
     });
     served.unwrap();
     assert_eq!(titles(&a).await, titles(&b).await);
-    assert!(titles(&b).await.iter().any(|row| row[1] == text("local")));
+    assert!(
+        titles(&b).await.iter().any(|row| row[1] == text("local")),
+        "local work committed while the peer's response was in flight survives"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

@@ -3,9 +3,21 @@
 use super::*;
 use rocky_core::replay::{DropReason, TransactionOutcome};
 
-// Exhaustive delivery schedules run across threads.
+/// Native only: exhaustive delivery schedules run across threads.
 #[cfg(not(target_family = "wasm"))]
 mod convergence;
+
+/// Deletes every outcome record `replica` published, as if they were lost.
+async fn lose_outcome_records(replica: &EncryptedReplica<TypedRows>) {
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    for table in ["secure_outcomes", "secure_outcome_members"] {
+        inner
+            .conn
+            .execute(&format!("DELETE FROM {table}"), ())
+            .await
+            .unwrap();
+    }
+}
 
 async fn keys(
     f: &Fixture,
@@ -109,29 +121,28 @@ async fn a_partial_holder_drops_its_member_when_a_full_holders_record_says_so() 
     let full = open("x.sqlite", &x, None).await;
     let partial = open("r.sqlite", &r, Some(&["A"])).await;
 
-    // X creates `k` in B; the writer, not having seen it, creates `a` in A
-    // and `k` in B in one transaction, which X must drop.
-    let [earlier] = insert(&f, &full, &["A", "B"], &[("B", "k", 1)], 1)
+    let [x_creates_k_in_b] = insert(&f, &full, &["A", "B"], &[("B", "k", 1)], 1)
         .await
         .try_into()
         .unwrap();
-    let later = insert(&f, &writer, &["A", "B"], &[("A", "a", 1), ("B", "k", 2)], 2).await;
-    assert_eq!(later.len(), 2);
+    let writers_bundle_unaware_of_x =
+        insert(&f, &writer, &["A", "B"], &[("A", "a", 1), ("B", "k", 2)], 2).await;
+    assert_eq!(writers_bundle_unaware_of_x.len(), 2);
     let member = |name| {
-        later
+        writers_bundle_unaware_of_x
             .iter()
             .find(|frame| frame.scope().unwrap() == f.scope(name))
             .unwrap()
             .clone()
     };
-    // A bundle applies once every member this replica holds is present.
     let mut statuses = Vec::new();
-    for frame in &later {
+    for frame in &writers_bundle_unaware_of_x {
         statuses.push(full.receive(frame.clone()).await.unwrap());
     }
     assert_eq!(
         statuses,
-        [ReceiveStatus::PendingDependencies, ReceiveStatus::Applied]
+        [ReceiveStatus::PendingDependencies, ReceiveStatus::Applied],
+        "a bundle applies once every member this replica holds is present"
     );
     assert_eq!(
         keys(&f, &full, &["A", "B"]).await,
@@ -146,38 +157,50 @@ async fn a_partial_holder_drops_its_member_when_a_full_holders_record_says_so() 
         reason: DropReason::Constraint,
         sealed: false,
     });
-    assert_eq!(full.transaction_outcome(txn).await.unwrap(), dropped);
+    assert_eq!(
+        full.transaction_outcome(txn).await.unwrap(),
+        dropped,
+        "X drops the writer's transaction recreating `k`"
+    );
 
-    // R holds only A: its member applies provisionally.
     assert_eq!(
         partial.receive(member("A")).await.unwrap(),
         ReceiveStatus::Applied
     );
-    assert_eq!(keys(&f, &partial, &["A"]).await.len(), 1);
+    assert_eq!(
+        keys(&f, &partial, &["A"]).await.len(),
+        1,
+        "R holds only A, so its member applies provisionally"
+    );
     assert_eq!(
         partial.transaction_outcome(txn).await.unwrap(),
         Some(TransactionOutcome::Applied { sealed: false })
     );
-    // X's record in A's log names B, which R does not hold: R drops too.
     let [record] = records(&f, &full, &x, "A").await.try_into().unwrap();
     assert_eq!(
         partial.receive(record).await.unwrap(),
         ReceiveStatus::Applied
     );
-    assert!(keys(&f, &partial, &["A"]).await.is_empty());
+    assert!(
+        keys(&f, &partial, &["A"]).await.is_empty(),
+        "X's record in A's log names B, which R does not hold, so R drops too"
+    );
     assert_eq!(partial.transaction_outcome(txn).await.unwrap(), dropped);
 
-    // The writer learns of the earlier create: its own transaction rewinds
-    // and drops the same way, so its record agrees with X's.
     assert_eq!(
-        writer.receive(earlier).await.unwrap(),
+        writer.receive(x_creates_k_in_b).await.unwrap(),
         ReceiveStatus::Applied
     );
-    assert_eq!(writer.transaction_outcome(txn).await.unwrap(), dropped);
+    assert_eq!(
+        writer.transaction_outcome(txn).await.unwrap(),
+        dropped,
+        "learning of the earlier create, the writer's own transaction rewinds and drops"
+    );
     for record in records(&f, &full, &x, "A").await {
         assert_eq!(
             writer.receive(record).await.unwrap(),
-            ReceiveStatus::Applied
+            ReceiveStatus::Applied,
+            "the writer's outcome agrees with X's record"
         );
     }
 }
@@ -205,8 +228,10 @@ async fn a_seal_covers_a_transaction_once_every_member_has_a_record() {
     f.key(&writer, "B", [2; 32]).await;
     f.key(&partial, "A", [1; 32]).await;
     let both = insert(&f, &writer, &["A", "B"], &[("A", "a", 1), ("B", "b", 1)], 1).await;
-    // The author records its transaction in every member's log at commit.
-    let [record] = records(&f, &writer, &w, "A").await.try_into().unwrap();
+    let [record] = records(&f, &writer, &w, "A")
+        .await
+        .try_into()
+        .expect("the author records its transaction in every member's log at commit");
     let member = both
         .iter()
         .find(|frame| frame.scope().unwrap() == f.scope("A"))
@@ -216,9 +241,12 @@ async fn a_seal_covers_a_transaction_once_every_member_has_a_record() {
         partial.receive(member).await.unwrap(),
         ReceiveStatus::Applied
     );
-    // Only its own record names member 0: B has none here yet.
     partial.seal_replayed_for_test(f.scope("A")).await.unwrap();
-    assert_eq!(partial.unsealed_replayed_transactions().await.unwrap(), 1);
+    assert_eq!(
+        partial.unsealed_replayed_transactions().await.unwrap(),
+        1,
+        "only A's own record names its member; B has none here yet"
+    );
     assert_eq!(
         partial.receive(record).await.unwrap(),
         ReceiveStatus::Applied
@@ -226,19 +254,13 @@ async fn a_seal_covers_a_transaction_once_every_member_has_a_record() {
     partial.seal_replayed_for_test(f.scope("A")).await.unwrap();
     assert_eq!(partial.unsealed_replayed_transactions().await.unwrap(), 0);
 
-    // A replica holding the transaction whole fills in a lost record.
-    {
-        let inner = writer.inner.lock(crate::replica::Class::Background).await;
-        for table in ["secure_outcomes", "secure_outcome_members"] {
-            inner
-                .conn
-                .execute(&format!("DELETE FROM {table}"), ())
-                .await
-                .unwrap();
-        }
-    }
+    lose_outcome_records(&writer).await;
     writer.publish_missing_outcomes().await.unwrap();
-    assert_eq!(records(&f, &writer, &w, "A").await.len(), 2);
+    assert_eq!(
+        records(&f, &writer, &w, "A").await.len(),
+        2,
+        "a replica holding the transaction whole fills in a lost record"
+    );
     assert_eq!(records(&f, &writer, &w, "B").await.len(), 2);
     writer.publish_missing_outcomes().await.unwrap();
     assert_eq!(records(&f, &writer, &w, "A").await.len(), 2);
@@ -273,14 +295,13 @@ async fn a_rewind_waits_for_its_partition_keys_and_records_only_changed_outcomes
         assert_eq!(status.unwrap(), ReceiveStatus::Applied);
     }
 
-    // Reopened with only A's key, the reader cannot redo the transaction's
-    // member in B: the earlier arrival waits instead of being rejected.
     drop(reader);
     let reader = open("r.sqlite", &r).await;
     f.key(&reader, "A", [1; 32]).await;
     assert_ne!(
         reader.receive(earlier.clone()).await.unwrap(),
-        ReceiveStatus::Rejected
+        ReceiveStatus::Rejected,
+        "with only A's key the reader cannot redo the member in B, so the earlier arrival waits"
     );
     assert!(matches!(
         sql_on(&f, &reader, &["A"])
@@ -295,14 +316,16 @@ async fn a_rewind_waits_for_its_partition_keys_and_records_only_changed_outcomes
     f.key(&reader, "B", [2; 32]).await;
     assert_eq!(keys(&f, &reader, &["A", "B"]).await.len(), 3);
 
-    // The writer rewinds too; its transaction redoes with the same outcome,
-    // so it publishes no new record.
     assert_eq!(
         writer.receive(earlier).await.unwrap(),
         ReceiveStatus::Applied
     );
     assert_eq!(keys(&f, &writer, &["A", "B"]).await.len(), 3);
-    assert_eq!(records(&f, &writer, &w, "A").await.len(), 1);
+    assert_eq!(
+        records(&f, &writer, &w, "A").await.len(),
+        1,
+        "the writer's rewound transaction redoes with the same outcome and publishes no new record"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -335,8 +358,6 @@ async fn a_disagreeing_outcome_record_is_refused_as_divergence_naming_both_engin
         .find(|frame| frame.scope().unwrap() == f.scope("A"))
         .unwrap();
     let txn = transaction(member, [1; 32], &f);
-    // The forger signs again that the transaction dropped, as another
-    // engine would decide after the same prefixes.
     forger
         .forge_outcome_for_test(
             txn,
@@ -375,10 +396,10 @@ async fn a_disagreeing_outcome_record_is_refused_as_divergence_naming_both_engin
         "{divergence:?}"
     );
     assert_eq!(divergence.refused, "forged engine");
-    // The refused record changes nothing.
     assert_eq!(
         reader.transaction_outcome(txn).await.unwrap(),
-        Some(TransactionOutcome::Applied { sealed: false })
+        Some(TransactionOutcome::Applied { sealed: false }),
+        "a refused forged record changes nothing"
     );
     assert_eq!(keys(&f, &reader, &["A", "B"]).await.len(), 2);
 }

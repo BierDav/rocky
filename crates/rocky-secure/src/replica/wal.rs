@@ -104,8 +104,8 @@ impl Passive {
             {
                 let mut state = checkpoint.state();
                 if result.is_ok() {
-                    // A truncation must not inherit the previous WAL's size mark.
-                    if state.epoch == epoch {
+                    let wal_not_truncated_since_measured = state.epoch == epoch;
+                    if wal_not_truncated_since_measured {
                         state.mark = size;
                     }
                     #[cfg(test)]

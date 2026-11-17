@@ -115,7 +115,7 @@ async fn dropping_branch_frames_preserves_main_and_requires_catchup_on_return() 
         })
         .await
         .unwrap();
-    let frame = replica
+    let dev_frame = replica
         .author(
             [1; 32],
             vec![change(f.public, 1, None, Some(f.app().name("Dev")))],
@@ -156,9 +156,13 @@ async fn dropping_branch_frames_preserves_main_and_requires_catchup_on_return() 
         .await
         .unwrap();
     assert!(replica.drop_tip(dev).await.is_err());
-    // The reader acknowledges the original frame offered before switching.
     replica
-        .acknowledge(peer.public_key(), &peer_chain, frame.id().unwrap(), true)
+        .acknowledge(
+            peer.public_key(),
+            &peer_chain,
+            dev_frame.id().unwrap(),
+            true,
+        )
         .await
         .unwrap();
     assert!(
@@ -198,7 +202,7 @@ async fn dropping_branch_frames_preserves_main_and_requires_catchup_on_return() 
             .await
             .is_err()
     );
-    replica.receive(frame.clone()).await.unwrap();
+    replica.receive(dev_frame.clone()).await.unwrap();
     let next = replica
         .author(
             [4; 32],
@@ -207,7 +211,7 @@ async fn dropping_branch_frames_preserves_main_and_requires_catchup_on_return() 
         )
         .await
         .unwrap();
-    let old = frame.operation().unwrap();
+    let old = dev_frame.operation().unwrap();
     let new = next.operation().unwrap();
     assert_eq!(new.header.public_key, branch_node.public_key());
     assert!(new.header.seq_num > old.header.seq_num);

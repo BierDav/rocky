@@ -89,15 +89,14 @@ impl<A: RowApplication> Inner<A> {
             Phase::Payload => {
                 let (table, key) = PAYLOADS[pass.payload];
                 if let Some(id) = pass.deleting {
-                    // A new completed pull may have replaced the garbage since
-                    // the last step; its header protects all of its payload.
-                    let header = collect_rows(
+                    let replaced_by_completed_pull = !collect_rows(
                         self.conn
                             .query("SELECT 1 FROM secure_pulled WHERE scope=?", [id])
                             .await?,
                     )
-                    .await?;
-                    if header.is_empty() {
+                    .await?
+                    .is_empty();
+                    if !replaced_by_completed_pull {
                         let records = collect_rows(self.conn.query(
                             format!("SELECT {key} FROM {table} WHERE scope=? ORDER BY {key} LIMIT ?"),
                             [id, CLEANUP_ROWS as i64],

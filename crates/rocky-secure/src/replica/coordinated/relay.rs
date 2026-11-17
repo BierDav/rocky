@@ -94,7 +94,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 return Ok(StagedCloseStatus::Pending);
             }
         }
-        // A retained proof remains usable even after coordinator retention.
         let known = self.staged_close_finality(bytes).await?;
         if !matches!(known, StagedCloseStatus::Pending) {
             return Ok(known);
@@ -138,7 +137,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         {
             let mut inner = self.inner.lock(crate::replica::Class::Background).await;
             transaction!(inner, |inner| {
-                // A relay with its proof is settled: only unproven ones count.
                 let records = rows(
                     &inner.conn,
                     "SELECT seal FROM secure_close_relays WHERE proof IS NULL",
@@ -165,8 +163,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             })?;
             drop(flush_guard(inner, &self.inner).await?);
         }
-        // A genesis-looking head after a previous dispatch may be forgotten
-        // evidence. Never recreate that source log on a retry.
         let head = match coordinator.log_head(log).await {
             Ok(head) => head,
             Err(_) => return Ok(StagedCloseStatus::Pending),
@@ -188,12 +184,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 Some([SqlValue::Integer(1)])
             )
         };
-        if head.terminal.is_some() || (dispatched && head.epoch == 0) {
+        let head_may_be_forgotten_evidence = dispatched && head.epoch == 0;
+        if head.terminal.is_some() || head_may_be_forgotten_evidence {
             return self.staged_close_finality(bytes).await;
         }
         {
             let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-            // Recheck authority before marking dispatch durable.
             inner.relay_graph(&seal).await?;
             transaction!(inner, |inner| {
                 inner
@@ -255,8 +251,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if let Some(proof) = stored {
             return Ok(StagedCloseStatus::Finality(proof));
         }
-        // Published with its finality, the close is settled for good: the
-        // public record answers, and the relay's journal row goes.
         if let Some(proof) = public_finality(&graph, id)? {
             let mut inner = self.inner.lock(crate::replica::Class::Background).await;
             graph
@@ -287,7 +281,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 )
                 .map_err(credential)?;
             transaction!(inner, |inner| {
-                // Proof-only contacts do not consume submission journal slots.
                 inner
                     .conn
                     .execute(

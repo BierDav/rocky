@@ -118,10 +118,12 @@ async fn pages_cover_a_result_once_and_cursors_are_bound_to_their_query() {
             .collect::<Vec<_>>()
     );
     assert!(passes.iter().all(|page| page.revision.get() == 5));
-    // A page that ends exactly at the result's end reports no cursor.
     let exact = pages(&a, ordered, ReadOptions::new(scope(1), 5)).await;
-    assert_eq!((exact.len(), exact[0].rows.len()), (1, 5));
-    // The byte limit ends a page too; each note weighs six bytes.
+    assert_eq!(
+        (exact.len(), exact[0].rows.len()),
+        (1, 5),
+        "a page that ends exactly at the result's end reports no cursor"
+    );
     let narrow = ReadOptions {
         max_bytes: 13,
         ..ReadOptions::new(scope(1), 1024)
@@ -132,20 +134,23 @@ async fn pages_cover_a_result_once_and_cursors_are_bound_to_their_query() {
             .iter()
             .map(|page| page.rows.len())
             .collect::<Vec<_>>(),
-        [2, 2, 1]
+        [2, 2, 1],
+        "the byte limit ends a page too; each note weighs six bytes"
     );
-    // One row beyond the limit cannot be paged and is a quota error.
     let tiny = ReadOptions {
         max_bytes: 3,
         ..ReadOptions::new(scope(1), 8)
     };
-    assert!(matches!(
-        a.read(query(ordered), tiny).await,
-        Err(Error::Quota {
-            resource: "read result bytes",
-            limit: 3
-        })
-    ));
+    assert!(
+        matches!(
+            a.read(query(ordered), tiny).await,
+            Err(Error::Quota {
+                resource: "read result bytes",
+                limit: 3
+            })
+        ),
+        "one row beyond the limit cannot be paged and is a quota error"
+    );
     for max_bytes in [0, MAX_FRAME_BYTES + 1] {
         let options = ReadOptions {
             max_bytes,
@@ -156,7 +161,6 @@ async fn pages_cover_a_result_once_and_cursors_are_bound_to_their_query() {
             Err(Error::Quota { .. })
         ));
     }
-    // A cursor continues only the query, values and scope that issued it.
     let cursor = a
         .read(query(ordered), ReadOptions::new(scope(1), 2))
         .await
@@ -164,11 +168,14 @@ async fn pages_cover_a_result_once_and_cursors_are_bound_to_their_query() {
         .next
         .unwrap();
     let continued = ReadOptions::new(scope(1), 2).after(cursor.clone());
-    assert!(matches!(
-        a.read(query("SELECT note FROM drafts"), continued.clone())
-            .await,
-        Err(Error::Rejected(_))
-    ));
+    assert!(
+        matches!(
+            a.read(query("SELECT note FROM drafts"), continued.clone())
+                .await,
+            Err(Error::Rejected(_))
+        ),
+        "a cursor continues only the query, values and scope that issued it"
+    );
     let bound = BoundQuery {
         sql: format!("{ordered} LIMIT ?"),
         values: vec![SqlValue::Integer(4)],
@@ -198,8 +205,11 @@ async fn pages_cover_a_result_once_and_cursors_are_bound_to_their_query() {
         b.read(query(ordered), continued).await,
         Err(Error::Protocol(ProtocolError::ForeignScope))
     ));
-    // The text form round-trips and tampering with it does not widen a read.
-    assert_eq!(ReadCursor::decode(&cursor.encode()).unwrap(), cursor);
+    assert_eq!(
+        ReadCursor::decode(&cursor.encode()).unwrap(),
+        cursor,
+        "the text form round-trips and tampering with it does not widen a read"
+    );
     for text in ["", "2", "2:zz", &format!("x:{}", "0".repeat(64))] {
         assert!(ReadCursor::decode(text).is_err(), "{text}");
     }
@@ -222,11 +232,14 @@ async fn ordered_reads_continue_by_key_and_stay_inside_the_view() {
     }
     let two = ReadOptions::new(scope(1), 2);
     let by_note = "SELECT note FROM drafts ORDER BY note";
-    // A `LIMIT` leaves the same order but only an offset can continue it.
     let by_offset = "SELECT note FROM drafts ORDER BY note LIMIT 100";
     let first = a.read(query(by_note), two.clone()).await.unwrap();
     let offset = a.read(query(by_offset), two.clone()).await.unwrap();
-    assert_eq!(texts(&first), ["private c", "public b"]);
+    assert_eq!(
+        texts(&first),
+        ["private c", "public b"],
+        "a `LIMIT` leaves the same order but only an offset can continue it"
+    );
     assert_eq!(first.rows, offset.rows);
     let (keyed, counted) = (first.next.unwrap(), offset.next.unwrap());
     assert_eq!(
@@ -234,31 +247,27 @@ async fn ordered_reads_continue_by_key_and_stay_inside_the_view() {
         (CursorKind::Keyset, CursorKind::Offset)
     );
     assert_eq!(ReadCursor::decode(&keyed.encode()).unwrap(), keyed);
-    // A row written before the position: the key cursor continues after the
-    // last row read, the offset cursor repeats it.
     note(&a, "a new first row").await;
     let next = |sql: &'static str, cursor: &ReadCursor| {
         a.read(query(sql), two.clone().after(cursor.clone()))
     };
     assert_eq!(
         texts(&next(by_note, &keyed).await.unwrap()),
-        ["public d", "public f"]
+        ["public d", "public f"],
+        "a row written before the position: the key cursor continues after the last row read, the offset cursor repeats it"
     );
     assert_eq!(
         texts(&next(by_offset, &counted).await.unwrap()),
         ["public b", "public d"]
     );
-    // Each kind continues only the query that issued it.
-    assert!(matches!(
-        next(by_offset, &keyed).await,
-        Err(Error::Rejected(_))
-    ));
+    assert!(
+        matches!(next(by_offset, &keyed).await, Err(Error::Rejected(_))),
+        "each kind continues only the query that issued it"
+    );
     assert!(matches!(
         next("SELECT note FROM drafts", &keyed).await,
         Err(Error::Rejected(_))
     ));
-    // Descending over the key continues by key; over a column that is not
-    // declared never NULL, by offset. Both cover the result once.
     for (sql, kind, expected) in [
         (
             "SELECT note FROM drafts ORDER BY sequence DESC",
@@ -286,16 +295,19 @@ async fn ordered_reads_continue_by_key_and_stay_inside_the_view() {
         ),
     ] {
         let passes = pages(&a, sql, two.clone()).await;
-        assert_eq!(passes.iter().flat_map(texts).collect::<Vec<_>>(), expected);
+        assert_eq!(
+            passes.iter().flat_map(texts).collect::<Vec<_>>(),
+            expected,
+            "descending pages cover the result once: {sql}"
+        );
         assert!(
             passes
                 .iter()
                 .filter_map(|page| page.next.as_ref())
                 .all(|cursor| cursor.kind() == kind),
-            "{sql}"
+            "descending continues by key only over columns declared never NULL: {sql}"
         );
     }
-    // A continued page seeks in the key's index instead of skipping rows.
     let by_key = "SELECT note FROM drafts ORDER BY node, sequence";
     let cursor = a
         .read(query(by_key), two.clone())
@@ -310,11 +322,9 @@ async fn ordered_reads_continue_by_key_and_stay_inside_the_view() {
     assert!(
         plan.iter().any(|step| step.starts_with("SEARCH"))
             && plan.iter().all(|step| !step.contains("TEMP B-TREE")),
-        "{plan:?}"
+        "a continued page seeks in the key's index instead of skipping rows: {plan:?}"
     );
     runtime.close().await.unwrap();
-    // A key cursor is client data. Whatever values it holds, the seek runs
-    // inside the authorized view.
     let runtime = open(&dir, Some("public")).await;
     let a = runtime.domain(scope(1)).unwrap();
     let cursor = a
@@ -325,23 +335,28 @@ async fn ordered_reads_continue_by_key_and_stay_inside_the_view() {
         .unwrap();
     let encoded = cursor.encode();
     let (binding, _) = encoded.rsplit_once(':').unwrap();
-    // An empty text, an empty blob and zero sort before every stored row.
     let forged = ReadCursor::decode(&format!("{binding}:t,b,i0")).unwrap();
     let all = ReadOptions::new(scope(1), 100).after(forged);
     let seen = texts(&a.read(query(by_note), all).await.unwrap());
-    assert_eq!(seen, ["public b", "public d", "public f", "public h"]);
+    assert_eq!(
+        seen,
+        ["public b", "public d", "public f", "public h"],
+        "a key cursor is client data. Whatever values it holds, the seek runs inside the authorized view: an empty text, an empty blob and zero sort before every stored row"
+    );
     for key in ["", "n", "i", "t0", "x00", "i1,"] {
         assert!(
             ReadCursor::decode(&format!("{binding}:{key}")).is_err(),
             "{key}"
         );
     }
-    // Values of another shape are not this query's cursor.
     let short = ReadCursor::decode(&format!("{binding}:i1")).unwrap();
-    assert!(matches!(
-        a.read(query(by_note), two.clone().after(short)).await,
-        Err(Error::Rejected(_))
-    ));
+    assert!(
+        matches!(
+            a.read(query(by_note), two.clone().after(short)).await,
+            Err(Error::Rejected(_))
+        ),
+        "values of another shape are not this query's cursor"
+    );
     runtime.close().await.unwrap();
 }
 
@@ -381,13 +396,15 @@ async fn denied_rows_protocol_tables_and_other_domains_are_unreachable_in_every_
         "SELECT note FROM drafts WHERE note LIKE '%private%' OR 1=1",
         "SELECT note FROM drafts LIMIT 100",
     ] {
-        // One row per page, so every row also crosses a paging cursor.
         let seen: Vec<_> = pages(&a, sql, one.clone())
             .await
             .iter()
             .flat_map(texts)
             .collect();
-        assert!(!seen.is_empty(), "{sql}");
+        assert!(
+            !seen.is_empty(),
+            "one row per page, so every row also crosses a paging cursor: {sql}"
+        );
         assert!(
             seen.iter()
                 .all(|text| text.starts_with("public") && !text.contains("elsewhere")),
@@ -406,17 +423,15 @@ async fn denied_rows_protocol_tables_and_other_domains_are_unreachable_in_every_
         values: vec![SqlValue::Text("private one".into())],
     };
     assert!(a.read(private, one.clone()).await.unwrap().rows.is_empty());
-    // The unfiltered domain still reads its own rows, and only those.
     assert_eq!(
         pages(&b, "SELECT note FROM drafts", ReadOptions::new(scope(2), 1))
             .await
             .iter()
             .flat_map(texts)
             .collect::<Vec<_>>(),
-        ["public elsewhere"]
+        ["public elsewhere"],
+        "the unfiltered domain still reads its own rows, and only those"
     );
-    // Columns outside the view, stored names, protocol tables and the other
-    // domain's namespace are not addressable.
     let other = crate::runtime::namespace(scope(2));
     let own = crate::runtime::namespace(scope(1));
     for sql in [
@@ -440,7 +455,10 @@ async fn denied_rows_protocol_tables_and_other_domains_are_unreachable_in_every_
             .to_string(),
     ] {
         let result = a.read(query(&sql), one.clone()).await;
-        assert!(result.is_err(), "{sql}: {result:?}");
+        assert!(
+            result.is_err(),
+            "columns outside the view, stored names, protocol tables and the other domain's namespace are not addressable: {sql}: {result:?}"
+        );
     }
     runtime.close().await.unwrap();
 }
@@ -476,12 +494,14 @@ async fn point_reads_use_the_stored_tables_indexes_through_a_filtered_view() {
         plan.iter().all(|step| !step.starts_with("SCAN")),
         "{plan:?}"
     );
-    // The plan of a continued page is the same search behind an offset.
     let scan = a
         .explain_read(query("SELECT note FROM drafts"), options.clone())
         .await
         .unwrap();
-    assert!(scan.iter().any(|step| step.starts_with("SCAN")), "{scan:?}");
+    assert!(
+        scan.iter().any(|step| step.starts_with("SCAN")),
+        "the plan of a continued page is the same search behind an offset: {scan:?}"
+    );
     assert!(matches!(
         a.explain_read(query("SELECT * FROM rocky_operations"), options.clone())
             .await,
@@ -513,27 +533,31 @@ async fn observers_wake_for_their_domain_only_and_share_one_execution() {
     for watcher in &mut watchers {
         assert!(watcher.next().await.unwrap().rows.is_empty());
     }
-    // Eight observers of one query, one execution.
-    assert_eq!(executed(), 1);
+    assert_eq!(executed(), 1, "eight observers of one query, one execution");
     let drafts_before = reads.counters(drafts);
     for text in ["one", "two", "three"] {
         note(&a, text).await;
     }
-    // Draft writes advance the drafts view; the other domain sees nothing.
     assert_eq!(
         reads.counters(drafts),
-        (drafts_before.0 + 3, drafts_before.1)
+        (drafts_before.0 + 3, drafts_before.1),
+        "draft writes advance the drafts view; the other domain sees nothing"
     );
-    // Three commits coalesce into one snapshot, executed once for all eight.
     for watcher in &mut watchers {
         let snapshot = watcher.next().await.unwrap();
         assert_eq!(texts(&snapshot), ["one", "two", "three"]);
         assert_eq!(snapshot.revision.get(), 3);
     }
-    assert_eq!(executed(), 2);
-    // Nothing changed since: a further `next` waits instead of reading again.
+    assert_eq!(
+        executed(),
+        2,
+        "three commits coalesce into one snapshot, executed once for all eight"
+    );
     let mut waiting = Box::pin(watchers[0].next());
-    assert!(futures_poll(&mut waiting).is_none());
+    assert!(
+        futures_poll(&mut waiting).is_none(),
+        "nothing changed since: a further `next` waits instead of reading again"
+    );
     assert!(futures_poll(&mut Box::pin(idle.next())).is_none());
     note(&a, "four").await;
     assert_eq!(texts(&waiting.await.unwrap()).len(), 4);

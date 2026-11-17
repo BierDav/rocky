@@ -140,11 +140,12 @@ async fn foreign_expired_and_self_signed_chains_are_refused_before_anything_is_r
             accepted.err()
         );
         assert!(dialed.is_err(), "{case}");
-        // The acceptor said nothing: the stranger saw neither its hello nor its chain.
-        assert!(read.lock().unwrap().is_empty(), "{case}");
+        assert!(
+            read.lock().unwrap().is_empty(),
+            "the acceptor said nothing, so the stranger saw neither its hello nor its chain: {case}"
+        );
         assert_eq!(a.recorded_peers().await, 0, "{case}");
     }
-    // A member is recorded once it is served.
     insert(&a, &f, 1, "served").await;
     let (left, right) = hello((&alice, &a), (&bob, &b), &f).await;
     let (mut client, mut server) = testing::requests(right.unwrap(), left.unwrap())
@@ -154,7 +155,11 @@ async fn foreign_expired_and_self_signed_chains_are_refused_before_anything_is_r
     served.unwrap();
     pulled.unwrap();
     assert_eq!(a.recorded_peers().await, 0);
-    assert_eq!(b.recorded_peers().await, 1);
+    assert_eq!(
+        b.recorded_peers().await,
+        1,
+        "a member is recorded once it is served"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -171,45 +176,45 @@ async fn a_revoked_peer_learns_its_statement_and_both_sides_end_the_session() {
         Err(Error::Rejected(message)) => message,
         other => panic!("expected a refusal, got {:?}", other.err()),
     };
-    // The revoked side ends with the statement that revokes it, which its
-    // replica does not keep.
-    let told = |result: Result<Link, Error>, node: &PrivateKey| match result {
-        Err(Error::Application(error)) => {
-            let Revoked(statement) = error.downcast_ref::<Revoked>().unwrap();
-            assert!(
-                statement
-                    .statement
-                    .nodes
-                    .contains(&rocky_credentials::PeerId::of(node.public_key()))
-            );
-            assert_eq!(error.to_string(), REVOKED);
-        }
-        other => panic!("expected the revocation, got {:?}", other.err()),
-    };
-    // Dave dials Alice: Alice refuses him, and he leaves knowing why.
+    let told_with_the_revoking_statement =
+        |result: Result<Link, Error>, node: &PrivateKey| match result {
+            Err(Error::Application(error)) => {
+                let Revoked(statement) = error.downcast_ref::<Revoked>().unwrap();
+                assert!(
+                    statement
+                        .statement
+                        .nodes
+                        .contains(&rocky_credentials::PeerId::of(node.public_key()))
+                );
+                assert_eq!(error.to_string(), REVOKED);
+            }
+            other => panic!("expected the revocation, got {:?}", other.err()),
+        };
     let (alice_side, dave_side) = hello((&alice, &a), (&dave, &d), &f).await;
     assert_eq!(rejected(alice_side), PEER_REVOKED);
-    told(dave_side, &dave);
-    // Dave keeps Erin's statement, not his own.
+    told_with_the_revoking_statement(dave_side, &dave);
     let held = d.revocations().await;
     assert_eq!(held.len(), 1);
-    assert!(held.revokes(&erin.public_key()));
-    // Alice dials Erin, who accepts: the same, with the sides swapped.
+    assert!(
+        held.revokes(&erin.public_key()),
+        "a revoked replica keeps others' statements, not its own"
+    );
     let (erin_side, alice_side) = hello((&erin, &e), (&alice, &a), &f).await;
-    told(erin_side, &erin);
+    told_with_the_revoking_statement(erin_side, &erin);
     assert_eq!(rejected(alice_side), PEER_REVOKED);
     assert!(e.revocations().await.revokes(&dave.public_key()));
     assert_eq!(a.recorded_peers().await, 0);
-    // Both still open: a replica never holds the statement revoking itself.
     drop((d, e));
-    open(&f, &dir, "d.db", &dave).await;
-    open(&f, &dir, "e.db", &erin).await;
+    let reopens_without_the_statement_revoking_itself = [("d.db", &dave), ("e.db", &erin)];
+    for (name, node) in reopens_without_the_statement_revoking_itself {
+        open(&f, &dir, name, node).await;
+    }
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn another_session_version_is_refused_with_the_authentication_error() {
-    // The first version and the parent format, `rocky.link.v10`.
-    for version in [1, 10] {
+    let first_version_and_parent_format_v10 = [1, 10];
+    for version in first_version_and_parent_format_v10 {
         refused_session_version(version).await;
     }
 }
@@ -257,15 +262,17 @@ async fn full_revocation_sets_converge_when_equal_or_missing() {
     a.learn_revocations(&full).await.unwrap();
     b.learn_revocations(&full).await.unwrap();
 
-    // Equal sets: the exchange after the hellos is one digest each way.
     let started = web_time::Instant::now();
     let (left, right) = hello((&alice, &a), (&bob, &b), &f).await;
     let elapsed = started.elapsed();
     let spent = right.unwrap().handshake_bytes;
-    assert_eq!(left.unwrap().handshake_bytes, spent);
+    assert_eq!(
+        left.unwrap().handshake_bytes,
+        spent,
+        "with equal sets the exchange after the hellos is one digest each way"
+    );
     eprintln!("1,024 equal statements: {spent} bytes after the hellos, handshake {elapsed:?}");
 
-    // 1,024 against none: every page fits a frame and the sets end equal.
     let started = web_time::Instant::now();
     let (left, right) = hello((&alice, &a), (&carol, &c), &f).await;
     let elapsed = started.elapsed();
@@ -278,7 +285,8 @@ async fn full_revocation_sets_converge_when_equal_or_missing() {
             .statements()
             .cloned()
             .collect::<Vec<_>>(),
-        full.statements().cloned().collect::<Vec<_>>()
+        full.statements().cloned().collect::<Vec<_>>(),
+        "against an empty set every page fits a frame and the sets end equal"
     );
     assert_eq!(
         c.revocation_digest().await.unwrap(),
@@ -320,7 +328,6 @@ async fn unconfigured_peers_stay_within_the_bound_and_the_least_recently_served_
     }
     let kept = MAX_UNCONFIGURED_PEERS + 2;
     assert_eq!(a.recorded_peers().await, kept);
-    // The two kept whatever the bound, and the most recent strangers, stay.
     let present = async |key: &PrivateKey| {
         let inner = a.inner.lock(crate::replica::Class::Background).await;
         let mut rows = inner
@@ -335,20 +342,31 @@ async fn unconfigured_peers_stay_within_the_bound_and_the_least_recently_served_
             .unwrap();
         rows.next().await.unwrap().is_some()
     };
-    assert!(present(&configured).await && present(&full_node).await);
-    assert!(present(&strangers[299]).await && present(&strangers[300 - 256]).await);
+    assert!(
+        present(&configured).await && present(&full_node).await,
+        "configured peers stay whatever the bound"
+    );
+    assert!(
+        present(&strangers[299]).await && present(&strangers[300 - 256]).await,
+        "the most recent strangers stay"
+    );
     assert!(!present(&strangers[0]).await && !present(&strangers[300 - 257]).await);
 
-    // Serving an existing peer refreshes its place before the next eviction.
     let oldest = strangers.len() - MAX_UNCONFIGURED_PEERS;
     serve(&strangers[oldest]).await;
     let newcomer = PrivateKey::new();
     serve(&newcomer).await;
-    assert!(present(&strangers[oldest]).await && present(&newcomer).await);
+    assert!(
+        present(&strangers[oldest]).await && present(&newcomer).await,
+        "serving an existing peer refreshes its place before the next eviction"
+    );
     assert!(!present(&strangers[oldest + 1]).await);
     assert!(present(&configured).await && present(&full_node).await);
     assert_eq!(a.recorded_peers().await, kept);
 }
+
+/// Real time a handshake may take: far below `MAX_CLOCK_AHEAD`.
+const HANDSHAKE_TIME_SLACK: u64 = 5_000_000;
 
 /// Polls `future` with this thread's clock `seconds` ahead, as a device
 /// whose wall clock runs ahead does.
@@ -370,9 +388,7 @@ async fn each_side_of_a_handshake_learns_the_others_clock_offset() {
     let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
     let a = open(&f, &dir, "a.db", &alice).await;
     let b = open(&f, &dir, "b.db", &bob).await;
-    // Real time passes during the handshake; seconds of it are far below
-    // `MAX_CLOCK_AHEAD`.
-    let near = |offset: i64, expected: i64| offset.abs_diff(expected) < 5_000_000;
+    let near = |offset: i64, expected: i64| offset.abs_diff(expected) < HANDSHAKE_TIME_SLACK;
     for ahead in [0, 3600] {
         let (near_end, far_end) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
         let (dialed, accepted) = tokio::join!(

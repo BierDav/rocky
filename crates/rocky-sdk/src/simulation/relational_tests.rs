@@ -76,6 +76,9 @@ async fn check(seed: u64, scenario: Scenario) -> Result<Report, Failure> {
     assert!(failure(&report).is_none(), "{}", report.dump());
     Ok(report)
 }
+/// Gate tests for soak seeds that together reach every step kind, crash
+/// point and wait, picked from the `covers` lines `relational_soak` prints.
+/// Keep one `Frozen` seed so the gate covers a standing wall clock.
 macro_rules! seeds {
     ($($name:ident = $seed:expr, $wall:ident),* $(,)?) => {$(
         #[tokio::test(start_paused = true)]
@@ -84,10 +87,6 @@ macro_rules! seeds {
         }
     )*};
 }
-// Soak-sized seeds that together reach every step kind, crash point and
-// wait the soak's seeds 20000..20200 (moving) and 20000..20100 (frozen)
-// reached: a greedy cover of the `covers` lines `relational_soak` prints.
-// One frozen seed keeps a standing wall clock in the gate.
 seeds!(
     seed_20080 = 20080,
     Moving,
@@ -188,7 +187,6 @@ async fn relational_soak() -> Result<(), Failure> {
     for seed in first..first + count {
         let scenario = soak_size(seed);
         let steps = plan(seed, scenario);
-        // The plan's step kinds, to choose the gate's `seeds!` from.
         let kinds: std::collections::BTreeSet<String> = steps
             .iter()
             .map(|step| {
@@ -203,9 +201,7 @@ async fn relational_soak() -> Result<(), Failure> {
         for (what, times) in &report.coverage {
             *coverage.entry(what.clone()).or_default() += times;
         }
-        // Two soaks of one build compare by these lines.
         println!("seed {seed} replay {}", report.digest());
-        // What the seed reached, to choose the gate's `seeds!` from.
         println!(
             "seed {seed} covers {kinds:?} {:?}",
             report.coverage.keys().collect::<Vec<_>>()

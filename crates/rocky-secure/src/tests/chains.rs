@@ -2,7 +2,7 @@
 //! chain table and stored chains.
 use super::*;
 use crate::network::NativeSession;
-use crate::replica::checkpoint::Stage;
+use crate::replica::checkpoint::{STEP_OPERATIONS, Stage};
 use crate::wire::{Chain, INCOMPLETE_FRAME};
 use rocky_core::FieldSelection;
 
@@ -101,17 +101,24 @@ async fn a_session_carries_an_authors_chain_once_across_its_pages() {
     });
     served.unwrap();
     let (report, carried) = report;
-    // Two pages of frames, and the one chain they name crossed once.
     assert_eq!((report.frames, report.incomplete, report.lag), (40, 0, 0));
     assert_eq!(report.pages, 2);
-    assert_eq!(carried, chain);
+    assert_eq!(
+        carried, chain,
+        "the one chain two pages of frames name crosses once"
+    );
     assert_eq!(b.snapshot(f.public).await.unwrap().rows.len(), 40);
-    // Stored once, too, beside the 40 operations that name it.
-    assert_eq!(b.chain_census().await, ([a_chain.digest()].into(), 0));
-    // With the chain inside every header a page held few frames.
+    assert_eq!(
+        b.chain_census().await,
+        ([a_chain.digest()].into(), 0),
+        "the chain is stored once beside the operations that name it"
+    );
     let before = (quota / (weight + chain)).min(32);
     let after = (quota / weight).min(32);
-    assert!(before < after && after == 32, "{before} then {after}");
+    assert!(
+        before < after && after == 32,
+        "a chain inside every header would fit fewer frames per page: {before} then {after}"
+    );
     println!(
         "P11 frames_per_page grants=20 quota={quota} frame={weight} chain={chain} before={before} after={after} frame_bytes={} chain_bytes={carried}",
         report.bytes
@@ -126,14 +133,17 @@ async fn a_frame_whose_chain_the_receiver_lacks_is_refused_and_arrives_on_the_ne
     let (a, a_chain) = open(&f, &dir, &alice, 2).await;
     let (b, b_chain) = open(&f, &dir, &bob, 2).await;
     let mut frame = insert(&a, &f, 1).await;
-    // Outside a session a frame without its chain is refused whole.
     frame.take_chain();
     let error = b.receive(frame.clone()).await.unwrap_err();
-    assert!(error.to_string().contains(INCOMPLETE_FRAME), "{error}");
-    // So is one beside a chain its header does not name.
+    assert!(
+        error.to_string().contains(INCOMPLETE_FRAME),
+        "outside a session a frame without its chain is refused whole: {error}"
+    );
     let error = b.receive(frame.with_chain(b_chain.clone())).await;
-    assert!(error.unwrap_err().to_string().contains(INCOMPLETE_FRAME));
-    // A peer that claims to have carried the chain sends the frame bare.
+    assert!(
+        error.unwrap_err().to_string().contains(INCOMPLETE_FRAME),
+        "a frame beside a chain its header does not name is refused"
+    );
     let (mut server, mut client) = sessions((&alice, &a, &a_chain), (&bob, &b, &b_chain)).await;
     server.withhold_chains();
     let (served, report) = tokio::join!(server.serve_to_end(&a), async {
@@ -144,11 +154,13 @@ async fn a_frame_whose_chain_the_receiver_lacks_is_refused_and_arrives_on_the_ne
     served.unwrap();
     assert_eq!((report.frames, report.incomplete), (1, 1));
     assert_eq!(report.lag, 1);
-    // Neither admitted nor stored, and nothing of it is kept.
-    assert_eq!(count(&b, "SELECT hash FROM secure_operations").await, 0);
+    assert_eq!(
+        count(&b, "SELECT hash FROM secure_operations").await,
+        0,
+        "a bare frame from a peer claiming to have carried its chain is not stored"
+    );
     assert_eq!(b.chain_census().await, (BTreeSet::new(), 0));
     assert!(b.snapshot(f.public).await.unwrap().rows.is_empty());
-    // The next pass, on its own session, carries the chain and the frame.
     let (mut server, mut client) = sessions((&alice, &a, &a_chain), (&bob, &b, &b_chain)).await;
     let (served, report) = tokio::join!(server.serve_to_end(&a), async {
         let report = client.catch_up(&b, f.public, MAX_SECURE_FRAME / 2).await;
@@ -156,7 +168,11 @@ async fn a_frame_whose_chain_the_receiver_lacks_is_refused_and_arrives_on_the_ne
         report.unwrap()
     });
     served.unwrap();
-    assert_eq!((report.frames, report.incomplete, report.lag), (1, 0, 0));
+    assert_eq!(
+        (report.frames, report.incomplete, report.lag),
+        (1, 0, 0),
+        "the next pass, on its own session, carries the chain and the frame"
+    );
     assert_eq!(b.snapshot(f.public).await.unwrap().rows.len(), 1);
 }
 
@@ -182,13 +198,16 @@ async fn a_pushed_frame_without_its_chain_is_not_received() {
         assert_eq!(pushed.frames, 1);
         let held = usize::from(!withhold);
         assert_eq!(count(&b, "SELECT hash FROM secure_operations").await, held);
-        // Only a carried frame retains its chain; link admission does not.
         let chains = if withhold {
             BTreeSet::new()
         } else {
             [a_chain.digest()].into()
         };
-        assert_eq!(b.chain_census().await, (chains, 0));
+        assert_eq!(
+            b.chain_census().await,
+            (chains, 0),
+            "only a carried frame retains its chain; link admission does not"
+        );
     }
 }
 
@@ -208,7 +227,6 @@ async fn a_chain_revoked_during_a_session_admits_no_later_frame_of_it() {
         let carried = client.carried_chain_bytes();
         assert!(carried > 0);
         assert_eq!(c.snapshot(f.public).await.unwrap().rows.len(), 1);
-        // Alice writes again; Carol then learns that Alice is revoked.
         b.receive(insert(&a, &f, 2).await).await.unwrap();
         let revoked = revoking(
             &f.publisher,
@@ -217,10 +235,15 @@ async fn a_chain_revoked_during_a_session_admits_no_later_frame_of_it() {
             &[],
         );
         c.learn_revocations(&revoked).await.unwrap();
-        // The session already carried her chain and does not send it again;
-        // the frame that names it is verified, and refused, all the same.
-        assert!(client.catch_up(&c, f.public, quota).await.is_err());
-        assert_eq!(client.carried_chain_bytes(), carried);
+        assert!(
+            client.catch_up(&c, f.public, quota).await.is_err(),
+            "a frame naming an already carried chain is still verified, and refused"
+        );
+        assert_eq!(
+            client.carried_chain_bytes(),
+            carried,
+            "the session does not send a carried chain again"
+        );
         client.close().await.unwrap();
     });
     served.unwrap();
@@ -235,9 +258,7 @@ async fn a_chain_goes_with_the_last_operation_that_names_it() {
     let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
     let (a, a_chain) = open(&f, &dir, &alice, 2).await;
     let (b, b_chain) = open(&f, &dir, &bob, 2).await;
-    // Bob holds 12 operations of Alice and three of his own; a pruning
-    // batch is eight operations in tests.
-    for row in 0..12 {
+    for row in 0..ALICE_OPERATIONS_BOB_HOLDS {
         let frame = insert(&a, &f, row).await;
         let id = frame.id().unwrap();
         b.receive(frame).await.unwrap();
@@ -262,24 +283,42 @@ async fn a_chain_goes_with_the_last_operation_that_names_it() {
     )
     .await
     .unwrap();
-    // Interrupted after the first batch: Alice's remaining operations keep
-    // her chain, and no operation is left without its chain.
     b.inject_stage_fault(Stage::Prune, 1).await;
     assert!(b.prune(f.public).await.is_err());
-    assert_eq!(count(&b, "SELECT hash FROM secure_operations").await, 7);
-    assert_eq!(b.chain_census().await, (both, 0));
-    // Alice never acknowledged Bob's own operations, so those stay; hers
-    // are all pruned, and her chain goes in the batch that takes the last.
+    assert_eq!(
+        count(&b, "SELECT hash FROM secure_operations").await,
+        usize::from(ALICE_OPERATIONS_BOB_HOLDS) + 3 - STEP_OPERATIONS
+    );
+    assert_eq!(
+        b.chain_census().await,
+        (both, 0),
+        "after the first batch, Alice's remaining operations keep her chain"
+    );
     let report = b.prune(f.public).await.unwrap();
-    assert_eq!(report.pruned, 4);
+    assert_eq!(
+        report.pruned,
+        (usize::from(ALICE_OPERATIONS_BOB_HOLDS) - STEP_OPERATIONS) as u64
+    );
     assert!(matches!(
         report.blocked,
         Some(PruneBlock::Unacknowledged { .. })
     ));
-    assert_eq!(count(&b, "SELECT hash FROM secure_operations").await, 3);
-    assert_eq!(b.chain_census().await, ([b_chain.digest()].into(), 0));
+    assert_eq!(
+        count(&b, "SELECT hash FROM secure_operations").await,
+        3,
+        "Bob's own operations, never acknowledged, stay"
+    );
+    assert_eq!(
+        b.chain_census().await,
+        ([b_chain.digest()].into(), 0),
+        "Alice's chain goes in the batch that takes her last operation"
+    );
     assert_eq!(b.audit(f.public).await.unwrap().operations, 3);
 }
+
+/// Alice's operations Bob holds beside three of his own: more than one
+/// pruning batch of [`STEP_OPERATIONS`].
+const ALICE_OPERATIONS_BOB_HOLDS: u16 = 12;
 
 /// A private row the source authored and checkpointed, for the target to
 /// bootstrap.
@@ -319,7 +358,6 @@ async fn checkpointed() -> Checkpointed {
         .await
         .unwrap();
     compacted_base(&source, &f.publisher, f.private).await;
-    // Enrollment hands the target the graph and the bookmark to follow.
     exchange_graphs(&source, &target, f.private.domain).await;
     Checkpointed {
         f,
@@ -360,7 +398,6 @@ async fn an_installed_checkpoint_is_not_imported_again() {
     served.unwrap();
     assert!(revisions[0].0 && !revisions[1].0);
     assert_eq!(revisions[0].1, revisions[1].1);
-    // The never-written public scope is a signed empty base at the seal.
     let empty = import_needed_bases(
         &c.source,
         &c.target,
@@ -370,7 +407,10 @@ async fn an_installed_checkpoint_is_not_imported_again() {
     )
     .await;
     assert_eq!(empty.len(), 1);
-    assert_eq!(empty[0].statement.scope, c.f.public);
+    assert_eq!(
+        empty[0].statement.scope, c.f.public,
+        "the never-written public scope is a signed empty base at the seal"
+    );
     assert_signed_empty(&empty[0]);
     assert_eq!(
         c.target.snapshot(c.f.private).await.unwrap().rows,

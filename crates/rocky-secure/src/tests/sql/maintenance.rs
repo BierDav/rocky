@@ -41,7 +41,7 @@ async fn failed_flush_keeps_sql_maintenance_queued_until_retry() {
     assert!(!replica.maintenance_queued(t.items).await);
 }
 
-// Pauses work that natively runs on a blocking thread; a Worker runs it in place.
+/// Native only: it pauses work on a blocking thread, which a Worker runs in place.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn commit_during_flush_keeps_current_state_out_of_maintenance() {
@@ -83,7 +83,19 @@ async fn commit_during_flush_keeps_current_state_out_of_maintenance() {
     );
 }
 
-// Pauses work that natively runs on a blocking thread; a Worker runs it in place.
+/// Stands in for a first sync that learns keys or credentials mid-flush.
+#[cfg(not(target_family = "wasm"))]
+async fn learn_keys_or_credentials_while_the_writer_is_released(
+    replica: &EncryptedReplica<TypedRows>,
+) {
+    replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .authority += 1;
+}
+
+/// Native only: it pauses work on a blocking thread, which a Worker runs in place.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn authority_change_during_flush_leaves_held_listing_current() {
@@ -108,17 +120,12 @@ async fn authority_change_during_flush_leaves_held_listing_current() {
         result = &mut listing => panic!("listing did not flush: {result:?}"),
         result = entered => result.unwrap(),
     }
-    // A first sync learns keys or credentials while the writer is released.
-    replica
-        .inner
-        .lock(crate::replica::Class::Background)
-        .await
-        .authority += 1;
+    learn_keys_or_credentials_while_the_writer_is_released(&replica).await;
     resume.send(()).unwrap();
     assert!(listing.await.unwrap().is_empty());
 }
 
-// The backup reads nothing authority-dependent before its flush.
+/// The backup reads nothing authority-dependent before its flush.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn authority_change_during_flush_leaves_backup_current() {
@@ -144,11 +151,7 @@ async fn authority_change_during_flush_leaves_backup_current() {
         result = &mut backup => panic!("backup did not flush: {result:?}"),
         result = entered => result.unwrap(),
     }
-    replica
-        .inner
-        .lock(crate::replica::Class::Background)
-        .await
-        .authority += 1;
+    learn_keys_or_credentials_while_the_writer_is_released(&replica).await;
     resume.send(()).unwrap();
     backup.await.unwrap();
     assert!(rocky_platform::fs::exists(&target));

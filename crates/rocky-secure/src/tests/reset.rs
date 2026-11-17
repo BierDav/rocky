@@ -83,22 +83,14 @@ async fn a_reset_keeps_fenced_frames_and_refuses_hidden_and_later_ones_in_both_o
     let c = open(&f, &dir, "custodian.db", &custodian).await;
     let x = open(&f, &dir, "x.db", &xavier).await;
     let y = open(&f, &dir, "y.db", &yara).await;
-    // The observers x and y stay, as custodians do; every replica a reset
-    // does not keep is ended itself. The owner applied the laptop's first
-    // write; its second stayed hidden.
     let seen = insert(&l, &f, 1, "laptop seen").await;
     let hidden = insert(&l, &f, 2, "laptop hidden").await;
     assert_eq!(
         o.receive(seen.clone()).await.unwrap(),
         ReceiveStatus::Applied
     );
-    let statement = reset(
-        &f,
-        &o,
-        &[&owner, &custodian, &xavier, &yara],
-        BTreeSet::new(),
-    )
-    .await;
+    let kept_observers_and_custodians = [&owner, &custodian, &xavier, &yara];
+    let statement = reset(&f, &o, &kept_observers_and_custodians, BTreeSet::new()).await;
     let fence = &statement.statement.reset().unwrap().fence;
     assert_eq!(fence.len(), 1);
     assert_eq!(fence[0].logs[0].writer, laptop.public_key());
@@ -107,15 +99,17 @@ async fn a_reset_keeps_fenced_frames_and_refuses_hidden_and_later_ones_in_both_o
     let kept = insert(&c, &f, 4, "custodian").await;
     let own = insert(&o, &f, 5, "owner").await;
 
-    // The reset first, then the frames.
     x.learn_revocations(&set(&[&statement])).await.unwrap();
     assert_eq!(
         x.receive(seen.clone()).await.unwrap(),
-        ReceiveStatus::Applied
+        ReceiveStatus::Applied,
+        "learning the reset first, x keeps the write the owner applied"
     );
-    assert!(x.receive(hidden.clone()).await.is_err());
+    assert!(
+        x.receive(hidden.clone()).await.is_err(),
+        "learning the reset first, x refuses the write hidden from the owner"
+    );
     assert!(x.receive(later.clone()).await.is_err());
-    // The hidden frame first, waiting on its predecessor, then the reset.
     assert_eq!(
         y.receive(hidden.clone()).await.unwrap(),
         ReceiveStatus::PendingDependencies
@@ -125,16 +119,22 @@ async fn a_reset_keeps_fenced_frames_and_refuses_hidden_and_later_ones_in_both_o
         y.receive(seen.clone()).await.unwrap(),
         ReceiveStatus::Applied
     );
-    assert_eq!(status(&y, &hidden).await, ReceiveStatus::Rejected);
+    assert_eq!(
+        status(&y, &hidden).await,
+        ReceiveStatus::Rejected,
+        "a hidden frame waiting on its predecessor is rejected once the reset arrives"
+    );
     assert!(y.receive(later.clone()).await.is_err());
-    // The signer refuses them too; survivors and custodians keep syncing.
-    assert!(o.receive(hidden.clone()).await.is_err());
+    assert!(
+        o.receive(hidden.clone()).await.is_err(),
+        "the signer refuses the fenced frames too"
+    );
     for replica in [&o, &x, &y] {
         for frame in [&kept, &own] {
             let received = replica.receive(frame.clone()).await.unwrap();
             assert!(
                 matches!(received, ReceiveStatus::Applied | ReceiveStatus::Duplicate),
-                "{received:?}"
+                "survivors and custodians keep syncing: {received:?}"
             );
         }
     }
@@ -196,38 +196,41 @@ async fn concurrent_resets_end_both_signers_and_a_following_reset_readmits() {
     }
     x.learn_revocations(&set(&[&by_bob])).await.unwrap();
     x.learn_revocations(&set(&[&by_alice])).await.unwrap();
-    // Bob's fence keeps what he applied of Alice; nothing after it stands.
     assert_eq!(
         x.receive(shared.clone()).await.unwrap(),
-        ReceiveStatus::Applied
+        ReceiveStatus::Applied,
+        "Bob's fence keeps what he applied of Alice"
     );
-    assert!(x.receive(alice_late.clone()).await.is_err());
+    assert!(
+        x.receive(alice_late.clone()).await.is_err(),
+        "nothing after Bob's fence stands"
+    );
     assert!(x.receive(bob_late.clone()).await.is_err());
-    // The owner signs in again: a new node, admitted by a following reset.
-    // It holds what it fences before it learns the resets that end it.
     assert_eq!(
         n.receive(shared.clone()).await.unwrap(),
-        ReceiveStatus::Applied
+        ReceiveStatus::Applied,
+        "the owner's new node holds what it fences before it learns the resets that end it"
     );
     n.learn_revocations(&set(&[&by_alice, &by_bob]))
         .await
         .unwrap();
     let follows = n.revocations().await.reset_heads();
     assert_eq!(follows.len(), 2);
-    let again = reset(&f, &n, &[&fresh, &custodian, &xavier], follows).await;
+    let following_reset = reset(&f, &n, &[&fresh, &custodian, &xavier], follows).await;
     let first = insert(&n, &f, 4, "signed in again").await;
-    // Learned before the following reset, the new node's frame is refused;
-    // the following reset judges it again.
-    // A refused frame is not stored; sent again after it, it applies.
-    assert!(x.receive(first.clone()).await.is_err());
-    x.learn_revocations(&set(&[&again])).await.unwrap();
+    assert!(
+        x.receive(first.clone()).await.is_err(),
+        "before the following reset, the new node's frame is refused and not stored"
+    );
+    x.learn_revocations(&set(&[&following_reset]))
+        .await
+        .unwrap();
     assert_eq!(
         x.receive(first.clone()).await.unwrap(),
-        ReceiveStatus::Applied
+        ReceiveStatus::Applied,
+        "sent again after the following reset, the refused frame applies"
     );
     assert!(x.receive(alice_late).await.is_err());
-    // A frame stored before the resets that end its writer is rejected with
-    // them; the following reset returns it to pending without a resend.
     let c = open(&f, &dir, "custodian.db", &custodian).await;
     let second = insert(&n, &f, 5, "signed in again later").await;
     assert_eq!(
@@ -241,11 +244,18 @@ async fn concurrent_resets_end_both_signers_and_a_following_reset_readmits() {
     c.learn_revocations(&set(&[&by_alice, &by_bob]))
         .await
         .unwrap();
-    assert_eq!(status(&c, &second).await, ReceiveStatus::Rejected);
-    c.learn_revocations(&set(&[&again])).await.unwrap();
     assert_eq!(
         status(&c, &second).await,
-        ReceiveStatus::PendingDependencies
+        ReceiveStatus::Rejected,
+        "a frame stored before the resets that end its writer is rejected with them"
+    );
+    c.learn_revocations(&set(&[&following_reset]))
+        .await
+        .unwrap();
+    assert_eq!(
+        status(&c, &second).await,
+        ReceiveStatus::PendingDependencies,
+        "the following reset returns it to pending without a resend"
     );
     assert_eq!(
         c.receive(first.clone()).await.unwrap(),
@@ -262,7 +272,6 @@ async fn a_replica_never_holds_any_reset_that_ends_it() {
     let a = open(&f, &dir, "alice.db", &alice).await;
     let b = open(&f, &dir, "bob.db", &bob).await;
     let x = open(&f, &dir, "x.db", &xavier).await;
-    // Concurrent resets, each ending x; a session sends both at once.
     let by_alice = reset(&f, &a, &[&alice], BTreeSet::new()).await;
     let by_bob = reset(&f, &b, &[&bob], BTreeSet::new()).await;
     let own = x
@@ -272,8 +281,9 @@ async fn a_replica_never_holds_any_reset_that_ends_it() {
         .config
         .credentials
         .clone();
+    let concurrent_resets_each_ending_x = vec![by_alice.clone(), by_bob.clone()];
     let revoking = x
-        .learn_session_revocations(vec![by_alice.clone(), by_bob.clone()], &own)
+        .learn_session_revocations(concurrent_resets_each_ending_x, &own)
         .await
         .unwrap();
     assert!(revoking.is_some());
@@ -294,9 +304,7 @@ async fn resets_too_large_to_share_a_frame_travel_in_the_handshake() {
         .iter()
         .map(|key| PeerId::of(key.public_key()))
         .collect();
-    // Resets fencing many writers this replica never saw, which together
-    // exceed one frame.
-    let large = || {
+    let fencing_unseen_writers_beyond_one_frame = || {
         let mut logs: Vec<_> = (0..rocky_credentials::MAX_FENCE_LOGS)
             .map(|_| rocky_credentials::FenceLog {
                 writer: PrivateKey::new().public_key(),
@@ -332,7 +340,11 @@ async fn resets_too_large_to_share_a_frame_travel_in_the_handshake() {
         )
         .unwrap()
     };
-    let resets = [large(), large(), large()];
+    let resets = [
+        fencing_unseen_writers_beyond_one_frame(),
+        fencing_unseen_writers_beyond_one_frame(),
+        fencing_unseen_writers_beyond_one_frame(),
+    ];
     let bytes: usize = resets
         .iter()
         .map(|signed| signed.to_bytes().unwrap().len())

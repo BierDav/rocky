@@ -22,7 +22,7 @@ pub(crate) fn connect(
     );
 }
 
-// The same SQLite locking and WAL behavior on every target.
+/// The same SQLite locking and WAL behavior on every target.
 #[cfg(test)]
 mod tests {
     use crate::{sqlite::Connection, storage::collect_rows};
@@ -76,10 +76,16 @@ mod tests {
         other.run_now("COMMIT").unwrap();
         assert_eq!(count(&writer).await, 3);
 
-        // The last connection checkpoints; a new one rebuilds the wal-index.
         drop((writer, reader, other));
+        assert!(
+            rocky_platform::fs::len(&path).unwrap() > 0,
+            "the last connection checkpoints into the file"
+        );
         let reopened = Connection::open_read_only(&path).unwrap();
-        assert_eq!(count(&reopened).await, 3);
-        assert!(rocky_platform::fs::len(&path).unwrap() > 0);
+        assert_eq!(
+            count(&reopened).await,
+            3,
+            "a new connection rebuilds the wal-index"
+        );
     }
 }

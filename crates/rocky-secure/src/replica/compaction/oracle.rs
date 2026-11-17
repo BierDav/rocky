@@ -108,7 +108,6 @@ impl<A: RowApplication> Inner<A> {
                 rows(&self.conn, &format!("SELECT * FROM {table} ORDER BY 1,2")).await?,
             );
         }
-        // Queued ledgers are unavailable; audit verifies that lifecycle separately.
         snapshot.insert("usable identity ledger".into(), rows(&self.conn,"SELECT l.* FROM secure_identity_ledger l WHERE NOT EXISTS(SELECT 1 FROM secure_rebuild_scopes q WHERE q.scope=l.scope) ORDER BY l.scope,l.author").await?);
         let mut drops = Vec::new();
         for record in rows(
@@ -149,9 +148,9 @@ impl<A: RowApplication> Inner<A> {
         &self,
         scope: ResourceScope,
     ) -> Result<(), Error> {
-        // A direct import exposes a verified prefix, not a complete replay.
-        // Refuse the full audit until its atomic switch finishes.
-        if self.direct.contains(&scope) && self.replayed_scope(scope) {
+        let exposes_only_verified_prefix =
+            self.direct.contains(&scope) && self.replayed_scope(scope);
+        if exposes_only_verified_prefix {
             let id = self
                 .find_scope_id(scope)
                 .await?
@@ -170,9 +169,9 @@ impl<A: RowApplication> Inner<A> {
                 since: None,
             }]));
         }
-        // An interrupted installation has an explicitly partial typed image;
-        // verify_tail still checks all of its staged canonical row transforms.
-        if self.schema_switching().await? || self.plan_status().await?.is_some() {
+        let typed_image_partial =
+            self.schema_switching().await? || self.plan_status().await?.is_some();
+        if typed_image_partial {
             return Ok(());
         }
         if self
@@ -200,8 +199,6 @@ impl<A: RowApplication> Inner<A> {
         self.conn.execute("SAVEPOINT projection_oracle", ()).await?;
         let state = self.take_oracle_state();
         let actual = async {
-            // verify_tail already compared the canonical full replay, including
-            // staged schema transforms, with these authoritative stored rows.
             if self.replayed_scope(scope) {
                 self.replay_from_frames(now()?).await?;
             } else {

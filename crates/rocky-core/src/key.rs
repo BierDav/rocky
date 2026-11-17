@@ -11,6 +11,11 @@ pub struct KeyColumn {
     pub collation: Collation,
 }
 
+/// The sign bit flipped, big-endian, so byte order is numeric order.
+fn ordered_integer_bytes(value: i64) -> Vec<u8> {
+    ((value as u64) ^ (1 << 63)).to_be_bytes().to_vec()
+}
+
 /// The components of a key: a count, then per component its storage class,
 /// collation, `u32` length and bytes. `values` are in primary-key order.
 pub fn key_components(columns: &[KeyColumn], values: &[SqlValue]) -> Result<Vec<u8>, ValueError> {
@@ -24,12 +29,7 @@ pub fn key_components(columns: &[KeyColumn], values: &[SqlValue]) -> Result<Vec<
             .store(value.clone())?
         {
             SqlValue::Null => return Err(ValueError::Null),
-            // Sign bit flipped, big-endian: byte order is numeric order.
-            SqlValue::Integer(value) => (
-                1,
-                Collation::Binary,
-                ((value as u64) ^ (1 << 63)).to_be_bytes().to_vec(),
-            ),
+            SqlValue::Integer(value) => (1, Collation::Binary, ordered_integer_bytes(value)),
             SqlValue::Real(value) => (2, Collation::Binary, value.bits().to_be_bytes().to_vec()),
             SqlValue::Text(text) => (3, column.collation, column.collation.fold(&text)),
             SqlValue::Blob(blob) => (4, Collation::Binary, blob),
@@ -101,33 +101,42 @@ mod tests {
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn components_carry_class_length_and_collation() {
-        // Lengths keep ("a","bc") apart from ("ab","c").
         let pair = [column(Affinity::Text, Collation::Binary); 2];
         let key = |a: &str, b: &str| {
             key_components(&pair, &[SqlValue::Text(a.into()), SqlValue::Text(b.into())]).unwrap()
         };
-        assert_ne!(key("a", "bc"), key("ab", "c"));
+        assert_ne!(
+            key("a", "bc"),
+            key("ab", "c"),
+            "lengths keep adjacent components apart"
+        );
         assert_ne!(text(Collation::Binary, "A"), text(Collation::Binary, "a"));
         assert_eq!(
             text(Collation::Nocase, "ABC"),
             text(Collation::Nocase, "abc")
         );
-        // NOCASE folds ASCII only, as SQLite does.
-        assert_ne!(text(Collation::Nocase, "É"), text(Collation::Nocase, "é"));
+        assert_ne!(
+            text(Collation::Nocase, "É"),
+            text(Collation::Nocase, "é"),
+            "NOCASE folds ASCII only, as SQLite does"
+        );
         assert_eq!(text(Collation::Rtrim, "a  "), text(Collation::Rtrim, "a"));
         assert_ne!(text(Collation::Rtrim, " a"), text(Collation::Rtrim, "a"));
-        // No Unicode normalization: composed and decomposed forms differ.
         assert_ne!(
             text(Collation::Binary, "\u{e9}"),
-            text(Collation::Binary, "e\u{301}")
+            text(Collation::Binary, "e\u{301}"),
+            "no Unicode normalization: composed and decomposed forms differ"
         );
-        // The same bytes as TEXT and as BLOB are different keys.
         let blob = key_components(
             &[column(Affinity::Blob, Collation::Binary)],
             &[SqlValue::Blob(b"a".to_vec())],
         )
         .unwrap();
-        assert_ne!(blob, text(Collation::Binary, "a"));
+        assert_ne!(
+            blob,
+            text(Collation::Binary, "a"),
+            "the same bytes as TEXT and as BLOB are different keys"
+        );
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn numeric_components_follow_affinity() {

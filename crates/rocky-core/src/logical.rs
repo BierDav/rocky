@@ -275,6 +275,13 @@ pub enum Profile {
     /// `rocky-secure`: typed tables over encrypted rows of reader scopes.
     Secure,
 }
+impl Profile {
+    fn replays_intents(self) -> bool {
+        matches!(self, Self::Secure)
+    }
+}
+/// 2^63, an exact double: an integral REAL strictly within ±2^63 is an INTEGER.
+const TWO_POW_63: f64 = -(i64::MIN as f64);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SchemaError {
     /// Not a well-formed canonical descriptor.
@@ -347,9 +354,7 @@ impl Affinity {
             | (Self::Blob, value @ SqlValue::Blob(_)) => Ok(value),
             (Self::Integer, SqlValue::Real(real)) => {
                 let real = real.get();
-                // 2^63 is an exact double; an integral REAL below it is an INTEGER.
-                let limit = -(i64::MIN as f64);
-                if real.fract() == 0.0 && (-limit..limit).contains(&real) {
+                if real.fract() == 0.0 && (-TWO_POW_63..TWO_POW_63).contains(&real) {
                     Ok(SqlValue::Integer(real as i64))
                 } else {
                     Err(ValueError::Class(self))
@@ -470,8 +475,9 @@ fn spanned(sql: &str) -> Option<Vec<(Token, std::ops::Range<usize>)>> {
                 .peek()
                 .filter(|(_, next)| next.is_ascii_alphanumeric() || *next == '_' || *next == '.')
             {
-                // A dot continues a number, never a name.
-                if *next == '.' && !word.bytes().all(|byte| byte.is_ascii_digit()) {
+                let dot_after_name =
+                    *next == '.' && !word.bytes().all(|byte| byte.is_ascii_digit());
+                if dot_after_name {
                     break;
                 }
                 word.push(*next);
@@ -744,6 +750,8 @@ impl LogicalTable {
         }
         Ok(())
     }
+    /// Whether SQLite can enforce this table's constraints during replay;
+    /// the schema checks references across tables.
     fn installable(&self) -> Result<(), Incompatibility> {
         let statement = tokenize(&self.create_sql).unwrap_or_default();
         let references = statement
@@ -756,8 +764,6 @@ impl LogicalTable {
             }
             return Ok(());
         }
-        // SQLite enforces a replayed table's constraints during replay;
-        // references are checked across tables by the schema.
         if references != self.foreign_keys.len() {
             return Err(Incompatibility::ForeignKey);
         }
@@ -897,8 +903,9 @@ fn replicated_table<'a>(schema: &'a LogicalSchema, table: &'a LogicalTable) -> R
         },
     }
 }
+/// JSON of a value holding only strings, numbers, booleans and lists, which
+/// always serializes.
 fn json(value: &impl Serialize) -> String {
-    // These values hold only strings, numbers, booleans and lists.
     serde_json::to_string(value).unwrap_or_default()
 }
 
@@ -1118,6 +1125,17 @@ impl LogicalSchema {
         }
         Ok(())
     }
+    /// The first column of a reference from `table` across replication
+    /// classes. No spelling of one can converge, so it is refused first.
+    fn cross_class_reference(&self, table: &LogicalTable) -> Option<String> {
+        table.foreign_keys.iter().find_map(|key| {
+            self.tables
+                .iter()
+                .find(|target| target.sql_name.eq_ignore_ascii_case(&key.table))
+                .filter(|target| target.class != table.class)
+                .map(|_| key.columns.first().cloned().unwrap_or_default())
+        })
+    }
     /// Whether this runtime can install the schema and keep it convergent.
     pub fn installable(&self) -> Result<(), SchemaError> {
         self.require_row_identity()?;
@@ -1129,18 +1147,8 @@ impl LogicalSchema {
             })
         };
         for table in &self.tables {
-            // A reference across replication classes is refused first: no
-            // spelling of it can converge.
-            for key in &table.foreign_keys {
-                if let Some(target) = self
-                    .tables
-                    .iter()
-                    .find(|target| target.sql_name.eq_ignore_ascii_case(&key.table))
-                    && target.class != table.class
-                {
-                    let column = key.columns.first().cloned().unwrap_or_default();
-                    return incompatible(&table.sql_name, Incompatibility::ClassReference(column));
-                }
+            if let Some(column) = self.cross_class_reference(table) {
+                return incompatible(&table.sql_name, Incompatibility::ClassReference(column));
             }
             if let Err(reason) = table.installable() {
                 return incompatible(&table.sql_name, reason);
@@ -1151,8 +1159,8 @@ impl LogicalSchema {
                         if target.column(name).is_none() {
                             return invalid(format!("{} column {name}", target.sql_name));
                         }
-                        // A reference holds the parent's portable identity.
-                        if name.eq_ignore_ascii_case("id")
+                        let references_portable_identity = name.eq_ignore_ascii_case("id");
+                        if references_portable_identity
                             && table
                                 .column(column)
                                 .is_some_and(|column| column.affinity != Affinity::Blob)
@@ -1240,8 +1248,7 @@ impl LogicalSchema {
         if let Err(error) = self.installable() {
             return vec![error];
         }
-        // Only the secure profile replays intents.
-        if profile == Profile::Secure {
+        if profile.replays_intents() {
             return Vec::new();
         }
         self.typed()
@@ -1504,7 +1511,6 @@ mod tests {
             schema.replicated_fingerprint(),
             local.replicated_fingerprint()
         );
-        // Replay enforces indexes, so replicas agree on them.
         let mut indexed = schema.clone();
         indexed.tables[0].indexes.push(LogicalIndex {
             name: "by_title".into(),
@@ -1519,7 +1525,8 @@ mod tests {
         });
         assert_ne!(
             schema.replicated_fingerprint(),
-            indexed.replicated_fingerprint()
+            indexed.replicated_fingerprint(),
+            "replay enforces indexes, so replicas agree on them"
         );
         let domain = [DomainId([1; 16])];
         assert_eq!(
@@ -1527,7 +1534,6 @@ mod tests {
             local.manifest(&domain).hash()
         );
         schema.manifest(&domain).validate().unwrap();
-        // Names are identities: a renamed table or column is another item.
         let mut renamed = schema.clone();
         let table = &mut renamed.tables[0];
         table.sql_name = "shopping".into();
@@ -1539,22 +1545,27 @@ mod tests {
         renamed.installable().unwrap();
         assert_ne!(
             schema.manifest(&domain).hash(),
-            renamed.manifest(&domain).hash()
+            renamed.manifest(&domain).hash(),
+            "names are identities: a renamed table or column is another item"
         );
         assert_ne!(
             schema.field_id(&schema.tables[0], &schema.tables[0].columns[1]),
             renamed.field_id(&renamed.tables[0], &renamed.tables[0].columns[1])
         );
-        // A new type or another publisher is another definition.
         let mut retyped = schema.clone();
         retyped.tables[0].columns[1].affinity = Affinity::Blob;
         assert_ne!(
             schema.replicated_fingerprint(),
-            retyped.replicated_fingerprint()
+            retyped.replicated_fingerprint(),
+            "a new type is another definition"
         );
         let mut published = schema.clone();
         published.publisher = [8; 32];
-        assert_ne!(schema.app_id(), published.app_id());
+        assert_ne!(
+            schema.app_id(),
+            published.app_id(),
+            "another publisher is another definition"
+        );
         assert_ne!(
             schema.table_id(&schema.tables[0]),
             published.table_id(&published.tables[0])
@@ -1562,7 +1573,6 @@ mod tests {
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn replayed_tables_refuse_mixed_references() {
-        // `items` references `parents` by its identity.
         let reason = |child: TableClass, parent: TableClass| {
             let mut schema = schema();
             let mut parents = schema.tables[0].clone();
@@ -1598,7 +1608,6 @@ mod tests {
         assert_eq!(reason(Replayed, LocalOnly), mixed);
         assert_eq!(reason(LocalOnly, Replayed), mixed);
         assert_eq!(reason(Replayed, Replayed), None);
-        // Only the secure profile replays.
         let schema = schema();
         assert_eq!(schema.installable(), Ok(()));
         assert_eq!(
@@ -1606,7 +1615,8 @@ mod tests {
             Err(SchemaError::Incompatible {
                 table: "items".into(),
                 reason: Incompatibility::Unsupported(Replayed),
-            })
+            }),
+            "only the secure profile replays"
         );
         assert_eq!(schema.supported_on(Profile::Secure), Ok(()));
     }
@@ -1637,13 +1647,13 @@ mod tests {
             reason(&|table| table.create_sql.push_str(" CHECK(random() > 0)")),
             Some(Incompatibility::Function("random".into()))
         );
-        // Local constraints are SQLite's own on a local-only table.
         assert_eq!(
             reason(&|table| {
                 table.class = TableClass::LocalOnly;
                 table.auto_generate = true;
             }),
-            None
+            None,
+            "local constraints are SQLite's own on a local-only table"
         );
     }
 

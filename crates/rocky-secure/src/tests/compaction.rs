@@ -120,6 +120,9 @@ pub(super) async fn delete(replica: &Replica, key: &str) {
         .await
         .unwrap();
 }
+/// Churn cycles enough that some rival frontier has a lower digest.
+const RIVAL_CHURN: usize = 12;
+
 /// Inserts and deletes `cycles` rows.
 async fn churn(replica: &Replica, cycles: usize, prefix: &str) {
     for cycle in 0..cycles {
@@ -163,10 +166,13 @@ async fn compacting_at_a_seal_leaves_only_live_rows_and_survives_reopen() {
     churn(&replica, 8, "a").await;
     assert_eq!(stored(&replica).await, (0, 0));
     let first = seal(&lineage, &replica).await;
-    // Sealing alone changes no row; the next maintenance step finalizes.
     let report = replica.compact(lineage.domain, 0).await.unwrap();
     assert_eq!(report.waiting, None);
-    assert_eq!(report.finalized, Some(first.id().unwrap()));
+    assert_eq!(
+        report.finalized,
+        Some(first.id().unwrap()),
+        "the maintenance step after a seal finalizes it"
+    );
     assert_eq!(report.compacted, Some(first.id().unwrap()));
     assert_eq!(stored(&replica).await, (1, 0));
     assert_eq!(
@@ -174,12 +180,15 @@ async fn compacting_at_a_seal_leaves_only_live_rows_and_survives_reopen() {
         vec![vec![text("live"), text("kept")]]
     );
 
-    // Writes after the seal: the next seal finalizes and compacts them too.
     churn(&replica, 8, "b").await;
     insert(&replica, "later", "after the seal").await;
     let second = seal(&lineage, &replica).await;
     let report = replica.compact(lineage.domain, 0).await.unwrap();
-    assert_eq!(report.compacted, Some(second.id().unwrap()));
+    assert_eq!(
+        report.compacted,
+        Some(second.id().unwrap()),
+        "the next seal compacts writes after the first"
+    );
     assert_eq!(stored(&replica).await, (2, 0));
     let expected = vec![
         vec![text("later"), text("after the seal")],
@@ -261,11 +270,10 @@ async fn compacted_and_uncompacted_devices_apply_late_frames_across_two_seals_al
             .await
             .unwrap();
     }
-    // C writes offline on the genesis tip; none of it reaches the seals.
-    update(&c, "x", "late edit").await;
-    update(&c, "y", "edit of a deleted row").await;
-    insert(&c, "z", "late insert").await;
-    // A deletes y, seals, writes and seals again.
+    let offline_on_genesis = &c;
+    update(offline_on_genesis, "x", "late edit").await;
+    update(offline_on_genesis, "y", "edit of a deleted row").await;
+    insert(offline_on_genesis, "z", "late insert").await;
     delete(&a, "y").await;
     seal(&lineage, &a).await;
     insert(&a, "w", "between the seals").await;
@@ -274,15 +282,13 @@ async fn compacted_and_uncompacted_devices_apply_late_frames_across_two_seals_al
     let compacted = a.compact(lineage.domain, 0).await.unwrap();
     assert_eq!(compacted.waiting, None);
     assert!(compacted.compacted.is_some());
-    // Each maintenance step finalizes at most one seal. Finish the path
-    // explicitly for the comparison with a device that compacted it.
-    b.finalize_path(lineage.domain).await.unwrap();
+    b.finalize_path(lineage.domain)
+        .await
+        .expect("finishing the path, as maintenance finalizes one seal per step");
     let status = b.compaction_status(lineage.domain).await.unwrap();
     assert_eq!(status.finalized, compacted.finalized);
     assert_eq!(status.compacted, None);
     assert_eq!(status.uncompacted.len(), 2);
-    // C comes online: it learns the seals and follows main on; its late
-    // frames walk both seals and apply alike on A and B.
     c.receive_tip_statements(&a.tip_statements(None, 32).await.unwrap())
         .await
         .unwrap();
@@ -294,10 +300,17 @@ async fn compacted_and_uncompacted_devices_apply_late_frames_across_two_seals_al
         vec![text("z"), text("late insert")],
     ];
     assert_eq!(titles(&a).await, expected);
-    assert_eq!(titles(&b).await, expected);
-    // C, back online, follows main to the same rows.
+    assert_eq!(
+        titles(&b).await,
+        expected,
+        "late offline frames walk both seals and apply alike on a compacted and an uncompacted device"
+    );
     sync(&lineage, &a, &c, &keys[2]).await;
-    assert_eq!(titles(&c).await, expected);
+    assert_eq!(
+        titles(&c).await,
+        expected,
+        "the offline writer, back online, follows main to the same rows"
+    );
 }
 
 /// A seal of `seal`'s tip with a lower digest, and the move of `main` onto
@@ -346,25 +359,27 @@ async fn a_seal_left_uncompacted_that_loses_is_rebuilt_and_a_compacted_one_reboo
     let replica = open(&lineage, &dir, "keep", &key).await;
     follow_main(&lineage, &replica).await;
     insert(&replica, "a", "first").await;
-    // Enough frames that some rival frontier has a lower digest.
-    churn(&replica, 12, "c").await;
+    churn(&replica, RIVAL_CHURN, "c").await;
     let first = seal(&lineage, &replica).await;
     insert(&replica, "b", "second").await;
     let second = rivalled_seal(&lineage, &replica).await;
     let report = replica.compact(lineage.domain, 1).await.unwrap();
     assert_eq!(report.finalized, Some(second.id().unwrap()));
     assert_eq!(report.compacted, Some(first.id().unwrap()));
-    // A concurrent seal of the second's tip wins; the device rebuilds from
-    // its base at the first seal and ends on the winner.
     let (winner, statements) = rival(&lineage, &second);
     replica.receive_tip_statements(&statements).await.unwrap();
     assert_eq!(
         replica.followed_tip().await,
-        winner.successor().unwrap().unwrap()
+        winner.successor().unwrap().unwrap(),
+        "a device whose uncompacted seal loses ends on the winner"
     );
     let status = replica.compaction_status(lineage.domain).await.unwrap();
     assert_eq!(status.rebootstrap, None);
-    assert_eq!(status.compacted, Some(first.id().unwrap()));
+    assert_eq!(
+        status.compacted,
+        Some(first.id().unwrap()),
+        "the device rebuilds from its base at the first seal"
+    );
     assert_eq!(
         titles(&replica).await,
         vec![
@@ -375,10 +390,8 @@ async fn a_seal_left_uncompacted_that_loses_is_rebuilt_and_a_compacted_one_reboo
     let report = replica.compact(lineage.domain, 0).await.unwrap();
     assert_eq!(report.compacted, Some(winner.id().unwrap()));
 
-    // With nothing left uncompacted, a winning rival needs a rebootstrap:
-    // the device follows the winner, its rows wait and writes are refused.
     insert(&replica, "c", "third").await;
-    churn(&replica, 12, "d").await;
+    churn(&replica, RIVAL_CHURN, "d").await;
     let third = rivalled_seal(&lineage, &replica).await;
     replica.compact(lineage.domain, 0).await.unwrap();
     let (winner, statements) = rival(&lineage, &third);
@@ -388,7 +401,11 @@ async fn a_seal_left_uncompacted_that_loses_is_rebuilt_and_a_compacted_one_reboo
         winner.successor().unwrap().unwrap()
     );
     let status = replica.compaction_status(lineage.domain).await.unwrap();
-    assert_eq!(status.rebootstrap, Some(third.id().unwrap()));
+    assert_eq!(
+        status.rebootstrap,
+        Some(third.id().unwrap()),
+        "with nothing left uncompacted, a winning rival needs a rebootstrap"
+    );
     let refused = session(&replica)
         .await
         .run("DELETE FROM items WHERE key=?", vec![text("a")])
@@ -397,10 +414,8 @@ async fn a_seal_left_uncompacted_that_loses_is_rebuilt_and_a_compacted_one_reboo
         refused
             .as_ref()
             .is_err_and(|error| error.to_string().contains("rebootstrap")),
-        "{refused:?}"
+        "writes are refused while a rebootstrap is needed: {refused:?}"
     );
-    // The graph lists no checkpoint at the winner; the device holds every
-    // frame, so it replays them.
     let scope = lineage.scope("items");
     let needs = replica.seal_rebootstraps(lineage.domain).await.unwrap();
     assert_eq!(
@@ -409,12 +424,16 @@ async fn a_seal_left_uncompacted_that_loses_is_rebuilt_and_a_compacted_one_reboo
             scope,
             listed: Vec::new(),
             replay: crate::FrameReplay::Local,
-        }]
+        }],
+        "with no checkpoint listed at the winner, a device holding every frame replays them"
     );
-    // A reset must replay retained frames without waiting for another incoming frame.
     replica.replay_at_seals(scope, true).await.unwrap();
     let status = replica.compaction_status(lineage.domain).await.unwrap();
-    assert_eq!((status.rebootstrap, status.compacted), (None, None));
+    assert_eq!(
+        (status.rebootstrap, status.compacted),
+        (None, None),
+        "a reset replays retained frames without waiting for another incoming frame"
+    );
     let expected = vec![
         vec![text("a"), text("first")],
         vec![text("b"), text("second")],
@@ -564,15 +583,11 @@ async fn a_compacted_seal_that_loses_rebootstraps_from_a_checkpoint_the_graph_li
     let b = open(&lineage, &dir, "b", &keys[1]).await;
     follow_main(&lineage, &a).await;
     insert(&a, "x", "kept").await;
-    churn(&a, 12, "c").await;
+    churn(&a, RIVAL_CHURN, "c").await;
     sync(&lineage, &a, &b, &keys[1]).await;
     b.follow_bookmark(lineage.domain, "main").await.unwrap();
-    // A compacts its seal at once; B receives the frames and then a rival
-    // seal that wins, compacts there and lists its checkpoint.
     insert(&a, "y", "late").await;
-    // Keep the last frame a birth: the rival must exclude a newer identity,
-    // rather than only the delete at the end of the helper's churn.
-    let sealed = loop {
+    let sealed_with_a_birth_last_so_the_rival_excludes_a_newer_identity = loop {
         let tip = a.followed_tip().await;
         let frontier = a.seal_frontier(lineage.domain, false).await.unwrap();
         let signed = sign_seal(&lineage, tip, frontier);
@@ -582,6 +597,7 @@ async fn a_compacted_seal_that_loses_rebootstraps_from_a_checkpoint_the_graph_li
         delete(&a, "y").await;
         insert(&a, "y", "late").await;
     };
+    let sealed = sealed_with_a_birth_last_so_the_rival_excludes_a_newer_identity;
     a.compact(lineage.domain, 0).await.unwrap();
     sync(&lineage, &a, &b, &keys[1]).await;
     let (winner, statements) = rival(&lineage, &sealed);
@@ -591,12 +607,15 @@ async fn a_compacted_seal_that_loses_rebootstraps_from_a_checkpoint_the_graph_li
     let records = list_checkpoints(&lineage, &b).await;
     assert_eq!(records.len(), 2);
 
-    // A learns the winner and the record: its compacted seal lost.
     a.receive_tip_statements(&b.tip_statements(None, 32).await.unwrap())
         .await
         .unwrap();
     let status = a.compaction_status(lineage.domain).await.unwrap();
-    assert_eq!(status.rebootstrap, Some(sealed.id().unwrap()));
+    assert_eq!(
+        status.rebootstrap,
+        Some(sealed.id().unwrap()),
+        "learning the winner and its record, the compacted seal lost"
+    );
     let graph = a.tip_graph(lineage.domain).await.unwrap();
     let listed = graph.checkpoints_at(winner.id().unwrap()).unwrap();
     assert_eq!(listed.len(), 2);
@@ -641,8 +660,6 @@ async fn a_compacted_seal_that_loses_rebootstraps_from_a_checkpoint_the_graph_li
     assert_eq!(imported_empty, empty.id().unwrap());
     assert_eq!(scalar(&a, "SELECT count(*) FROM tags").await, 0);
 
-    // The winner's marks cover only the identities its own state created,
-    // below y's, which A still holds and has applied.
     let offered = b
         .checkpoint_offer(
             keys[0].public_key(),
@@ -656,14 +673,18 @@ async fn a_compacted_seal_that_loses_rebootstraps_from_a_checkpoint_the_graph_li
         panic!("{:?}", offered.statement.identities);
     };
     let late = live_mark(&a, scope, mark.author).await;
-    assert!(mark.sequence < late, "{mark:?} {late}");
+    assert!(
+        mark.sequence < late,
+        "the winner's marks cover only identities its own state created: {mark:?} {late}"
+    );
     let y = last_operation(&a, scope).await;
-    // It imports the listed checkpoint; its frames the winner left out
-    // apply again on top as late frames.
     let report = import_checkpoint_report(&lineage, &b, &a, &keys[0], scope).await;
     assert_eq!(report.checkpoint, listed_items.statement.checkpoint);
     assert!(report.rejected.is_empty(), "{:?}", report.rejected);
-    assert!(report.reapplied.contains(&y), "{report:?}");
+    assert!(
+        report.reapplied.contains(&y),
+        "frames the winner left out apply again on top as late frames: {report:?}"
+    );
     assert_eq!(live_mark(&a, scope, mark.author).await, late);
     assert!(a.finish_seal_rebootstrap(lineage.domain).await.unwrap());
     let status = a.compaction_status(lineage.domain).await.unwrap();
@@ -673,10 +694,13 @@ async fn a_compacted_seal_that_loses_rebootstraps_from_a_checkpoint_the_graph_li
         titles(&a).await,
         vec![vec![text("x"), text("kept")], vec![text("y"), text("late")]]
     );
-    // It finalizes from the imported base and compacts at the winner.
     let report = a.compact(lineage.domain, 0).await.unwrap();
     assert_eq!(report.waiting, None);
-    assert_eq!(report.compacted, Some(winner.id().unwrap()));
+    assert_eq!(
+        report.compacted,
+        Some(winner.id().unwrap()),
+        "it finalizes from the imported base and compacts at the winner"
+    );
     insert(&a, "z", "after").await;
     assert_eq!(titles(&a).await.len(), 3);
 }
@@ -704,7 +728,7 @@ async fn a_pruned_device_whose_compacted_seal_loses_replays_frames_from_a_peer()
     .await
     .unwrap();
     insert(&a, "x", "kept").await;
-    churn(&a, 12, "c").await;
+    churn(&a, RIVAL_CHURN, "c").await;
     insert(&a, "y", "late").await;
     let sealed = rivalled_seal(&lineage, &a).await;
     sync(&lineage, &a, &b, &keys[1]).await;
@@ -717,7 +741,6 @@ async fn a_pruned_device_whose_compacted_seal_loses_replays_frames_from_a_peer()
     .unwrap();
     let report = a.compact(lineage.domain, 0).await.unwrap();
     assert!(report.pruned > 0);
-    // B, which compacts nothing and lists nothing, takes the winner.
     let (_, statements) = rival(&lineage, &sealed);
     b.receive_tip_statements(&statements).await.unwrap();
     a.receive_tip_statements(&statements).await.unwrap();
@@ -760,10 +783,11 @@ async fn a_pruned_device_whose_compacted_seal_loses_replays_frames_from_a_peer()
     assert!(
         a.replay_at_seals(scope, false)
             .await
-            .is_err_and(|error| error.to_string().contains("peer"))
+            .is_err_and(|error| error.to_string().contains("peer")),
+        "pruned frames must come from a peer"
     );
-    // A keeps what it holds and takes the pruned frames from B again.
-    a.replay_at_seals(scope, true).await.unwrap();
+    let keep_what_it_holds = true;
+    a.replay_at_seals(scope, keep_what_it_holds).await.unwrap();
     let label = crate::scope_label(&scope);
     let waiting = a.blockers().await.unwrap();
     use super::blockers::assert_named;
@@ -781,7 +805,6 @@ async fn a_pruned_device_whose_compacted_seal_loses_replays_frames_from_a_peer()
         )
         .await,
     );
-    // The write is refused for the scope's own rebootstrap, among the rest.
     assert_named(
         &refusal,
         &label,
@@ -920,16 +943,21 @@ async fn compaction_at_seals_plateaus_under_insert_delete_churn() {
             .await,
         );
         println!("seal compaction churn: cycles={cycle}; {counts:?}");
-        // One live base row and the latest empty-scope proof.
-        assert_eq!(counts, ((1, 0), 0, 0, 0, 4, 1, 1));
+        assert_eq!(
+            counts,
+            ((1, 0), 0, 0, 0, 4, 1, 1),
+            "one live base row and the latest empty-scope proof remain"
+        );
         if let Some(previous) = plateau {
             assert_eq!(previous, counts);
         }
         plateau = Some(counts);
         let measured = receipts::accounting(&a, &dir.path().join("a.db"), cycle).await;
-        // Replayed inserts are no births: admission evidence does not grow.
         if let Some(previous) = admission {
-            assert_eq!(measured.entries, previous.entries);
+            assert_eq!(
+                measured.entries, previous.entries,
+                "replayed inserts are no births, so admission evidence does not grow"
+            );
             assert_eq!(measured.grants, previous.grants);
             assert_eq!(measured.chains, previous.chains);
             assert_eq!(measured.bounded, previous.bounded);

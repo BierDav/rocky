@@ -103,11 +103,11 @@ fn a_challenge_proves_its_responder_and_only_the_derived_genesis() {
         account.genesis.descriptor().unwrap()
     );
     assert_eq!(challenge.responder, responder.public_key());
-    // Another hello, account, namespace or location is refused.
     assert!(
         challenge
             .verify(&PersonalHello::fresh(), account.database, pinned)
-            .is_err()
+            .is_err(),
+        "another hello is refused"
     );
     let other = fixture(2, "account root");
     assert!(
@@ -129,7 +129,6 @@ fn a_challenge_proves_its_responder_and_only_the_derived_genesis() {
             )
             .is_err()
     );
-    // A responder relaying another database's genesis proves nothing here.
     let relayed = PersonalChallenge::answer(
         &hello,
         account.database,
@@ -138,11 +137,16 @@ fn a_challenge_proves_its_responder_and_only_the_derived_genesis() {
         [7; 32],
     )
     .unwrap();
-    assert!(relayed.verify(&hello, account.database, pinned).is_err());
-    // A signature over another nonce does not verify.
+    assert!(
+        relayed.verify(&hello, account.database, pinned).is_err(),
+        "a responder relaying another database's genesis proves nothing here"
+    );
     let mut forged = challenge.clone();
     forged.nonce = [8; 32];
-    assert!(forged.verify(&hello, account.database, pinned).is_err());
+    assert!(
+        forged.verify(&hello, account.database, pinned).is_err(),
+        "a signature over another nonce does not verify"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -155,11 +159,11 @@ fn an_authorization_binds_root_owner_node_audience_and_descriptor() {
     authorization.verify(&audience).unwrap();
     assert_eq!(authorization.node(), node.public_key());
     assert_eq!(authorization.nonce(), [5; 32]);
-    // Another responder, owner or descriptor is refused.
     assert!(
         authorization
             .verify(&account.audience(&PrivateKey::new()))
-            .is_err()
+            .is_err(),
+        "another responder is refused"
     );
     let other = fixture(2, "account root");
     let mut wrong = audience;
@@ -168,17 +172,18 @@ fn an_authorization_binds_root_owner_node_audience_and_descriptor() {
     let mut wrong = audience;
     wrong.descriptor = other.genesis.descriptor().unwrap();
     assert!(authorization.verify(&wrong).is_err());
-    // An identity signature alone, without the root, proves nothing.
     let mut forged = authorization.clone();
     forged.root = account.owner.sign(Purpose::Statement, b"x").unwrap();
-    assert!(forged.verify(&audience).is_err());
+    assert!(
+        forged.verify(&audience).is_err(),
+        "an identity signature alone, without the root, proves nothing"
+    );
     let mut forged = authorization.clone();
     forged.possession = PrivateKey::new().sign(b"x");
     assert!(matches!(
         forged.verify(&audience),
         Err(Error::Personal(crate::PersonalError::Possession))
     ));
-    // Another root cannot sign for this database.
     assert!(
         PersonalAuthorization::sign(
             (&other.root, &account.owner),
@@ -187,11 +192,15 @@ fn an_authorization_binds_root_owner_node_audience_and_descriptor() {
             (account.genesis.descriptor().unwrap(), [5; 32]),
             act,
         )
-        .is_err()
+        .is_err(),
+        "another root cannot sign for this database"
     );
-    // The answer opens only with the authorization's exchange secret.
     let answer = authorization.answer(b"bootstrap").unwrap();
-    assert_eq!(answer.open(&authorization, &secret).unwrap(), b"bootstrap");
+    assert_eq!(
+        answer.open(&authorization, &secret).unwrap(),
+        b"bootstrap",
+        "the answer opens with the authorization's exchange secret"
+    );
     let (again, other_secret) = account.authorize(&node, &responder, [5; 32], act);
     assert!(answer.open(&again, &other_secret).is_err());
     assert!(answer.open(&authorization, &other_secret).is_err());
@@ -237,7 +246,6 @@ fn a_publication_names_exactly_its_certificate() {
         .check()
         .is_err()
     );
-    // A bootstrap authorization publishes nothing.
     let (authorization, _) = account.authorize(
         &node,
         &responder,
@@ -250,6 +258,7 @@ fn a_publication_names_exactly_its_certificate() {
             certificate,
         }
         .check()
-        .is_err()
+        .is_err(),
+        "a bootstrap authorization publishes nothing"
     );
 }

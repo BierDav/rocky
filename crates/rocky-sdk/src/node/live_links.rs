@@ -466,13 +466,14 @@ impl Node {
         self.synced(status);
     }
 
+    /// Publishes committed changes to every open link. Each peer's pass runs
+    /// as its own future, so one slow peer never delays the others.
     pub(super) async fn publish_links(self: Arc<Self>, service: Arc<Link>) {
         let mut stage = service.stage.subscribe();
         let mut frames = self.replica.observe_frames().await;
         let mut membership = self.replica.observe_membership().await;
         let mut revisions = self.replica.observe_revision();
         let mut ready = service.live.events.subscribe();
-        // Each peer's pass runs here, so one slow peer never delays the others.
         let mut passes = stream::FuturesUnordered::new();
         loop {
             tokio::select! {
@@ -511,6 +512,8 @@ impl Node {
             }
         }
     }
+    /// Dials the peers that need a link. Reconciliation retries a failed
+    /// attempt; only a busy refusal permits native sync.
     pub(super) async fn open_links(self: &Arc<Self>, service: &Arc<Link>) {
         if !self.automatic.load(Ordering::SeqCst) || !self.online.load(Ordering::SeqCst) {
             return;
@@ -574,7 +577,6 @@ impl Node {
                         if node.learned.load(Ordering::SeqCst) {
                             node.wake_sync();
                         }
-                        // Reconciliation retries the link; only busy refusal permits native sync.
                         node.activity
                             .record_changed(crate::ActivityKind::LinkAttemptFailed {
                                 peer: (peer).to_owned(),
@@ -587,6 +589,10 @@ impl Node {
         tokio::pin!(attempts);
         while attempts.next().await.is_some() {}
     }
+    /// Admits an opened link and runs it until its stage closes it, which
+    /// owns cancellation even for outbound links. The first change hint asks
+    /// for no control pass: a transfer can resolve the handshake snapshot
+    /// before the hint arrives.
     pub(super) async fn admit_link(
         self: &Arc<Self>,
         service: Arc<Link>,
@@ -709,7 +715,6 @@ impl Node {
         if !initial.is_empty() {
             changed.send_replace(Some(ChangeHint {
                 scopes: initial,
-                // A transfer can resolve the handshake snapshot before this hint arrives.
                 control: false,
             }));
         }
@@ -718,9 +723,8 @@ impl Node {
             if !self.foreground.load(Ordering::SeqCst) {
                 return Err("live links are disabled in the background".into());
             }
-            // Serialize admission with receipt of self-ending evidence.
-            let current = self.settings.lock().await;
-            if let Some(statement) = current.revocation(&self.path)? {
+            let admission_excludes_revocation_receipt = self.settings.lock().await;
+            if let Some(statement) = admission_excludes_revocation_receipt.revocation(&self.path)? {
                 return Err(Box::new(crate::enrollment::Revoked(statement)));
             }
             let mut entries = service
@@ -728,16 +732,19 @@ impl Node {
                 .entries
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            // Crossed dials keep the preferred direction. A peer opens a
-            // second persistent link the same way only once it lost the
-            // first, as a restarted process does: that one replaces it.
-            if entries.get(&peer).is_some_and(|old| {
-                ((old.dialed == preferred && old.dialed != dialed)
-                    || (old.dialed == dialed && !persistent))
-                    && !old.handle.is_closed()
+            let existing_link_wins = entries.get(&peer).is_some_and(|old| {
+                let crossed_dial = old.dialed != dialed;
+                let restarted_peer_relinks = persistent;
+                let old_direction_kept = match crossed_dial {
+                    true => old.dialed == preferred,
+                    false => !restarted_peer_relinks,
+                };
+                let old_is_live = !old.handle.is_closed()
                     && old.close.borrow().is_none()
-                    && !old.authority.has_changed().unwrap_or(true)
-            }) {
+                    && !old.authority.has_changed().unwrap_or(true);
+                old_direction_kept && old_is_live
+            });
+            if existing_link_wins {
                 false
             } else {
                 if let Some(old) = entries.insert(
@@ -822,7 +829,6 @@ impl Node {
         });
         self.link_status_changed();
         let node = self.clone();
-        // The stage watch owns cancellation even for outbound links.
         let close_rx = close.subscribe();
         let changed_tx = changed.clone();
         crate::reactor::spawn_local("live_link", async move {
@@ -832,11 +838,8 @@ impl Node {
                 .run_link(&service, opened, close_rx, changed_tx, authority)
                 .await;
             node.link_ended(peer);
-            // A link that ran its course reconciled both stores, whichever
-            // side dialed.
-            if result.is_ok()
-                && let Err(error) = node.witnessed_by(peer).await
-            {
+            let reconciled_both_stores = result.is_ok();
+            if reconciled_both_stores && let Err(error) = node.witnessed_by(peer).await {
                 tracing::warn!(%error, "the witnessing owner device could not be recorded");
             }
             let removed = {
@@ -895,7 +898,13 @@ impl Node {
         });
         Ok(())
     }
-    /// Publishes changed scopes to one peer and records its receipt.
+    /// Publishes changed scopes to one peer and records its receipt. A held
+    /// prefix below the cursor is the receiver's repair, not a resend, and
+    /// a metadata-only change still takes a scoped control pass. After a
+    /// refused preflight the hinted peer repairs the range and later edits
+    /// publish from the new frontier; its token is read after it, so commits
+    /// between the reads stay in the repair. Unsent scopes keep their old
+    /// token so the next publication sends them.
     async fn signal_link(&self, service: &Link, peer: PublicKey, id: u64) -> Result<(), Failure> {
         #[cfg(test)]
         drop(service.live.publishing.lock().await);
@@ -946,7 +955,6 @@ impl Node {
             };
             match outcome {
                 rocky_secure::network::PublicationOutcome::Published(receipt) => {
-                    // A held prefix below the cursor is the receiver's repair, not a resend.
                     for frontier in &receipt.frontiers {
                         match next.get_mut(&frontier.scope) {
                             Some(cursor) => acknowledge(cursor, frontier),
@@ -961,9 +969,9 @@ impl Node {
                     }
                     tracing::debug!(?peer, reasons = ?receipt.reasons, repair_all = receipt.repair_all, "publication receipt");
                     scopes.extend(receipt.repair);
-                    // Metadata-only changes still need a scoped control pass.
                     for scope in changed {
-                        if next.get(&scope) == cursors.get(&scope) {
+                        let metadata_only = next.get(&scope) == cursors.get(&scope);
+                        if metadata_only {
                             control = true;
                             scopes.insert(scope);
                         }
@@ -974,8 +982,6 @@ impl Node {
                     reason,
                 } => {
                     tracing::debug!(?peer, %reason, "publication preflight requires repair");
-                    // The hinted peer repairs the rejected range; later edits publish from here.
-                    // The token follows the frontier, so commits between them stay in the repair.
                     for scope in failed {
                         let frontier = self.replica.frontier(scope).await?;
                         if next.get(&scope) != Some(&frontier) {
@@ -1009,10 +1015,10 @@ impl Node {
                 control |= pending.control;
             }
             control |= scopes.len() > link::SIGNAL_SCOPES;
-            // Unsent scopes keep their old token so the next publication can send them.
-            for scope in scopes.iter().skip(link::SIGNAL_SCOPES) {
-                if let Some(token) = old.get(scope) {
-                    entry.frontiers.insert(*scope, *token);
+            let unsent = scopes.iter().skip(link::SIGNAL_SCOPES);
+            for scope in unsent {
+                if let Some(old_token) = old.get(scope) {
+                    entry.frontiers.insert(*scope, *old_token);
                 }
             }
             entry.changed.send_replace(Some(ChangeHint {
@@ -1022,6 +1028,8 @@ impl Node {
         }
         Ok::<_, Failure>(())
     }
+    /// Records a peer's receipt of a publication. Each scope's token is read
+    /// before its frontier, so a commit between the reads stays dirty.
     async fn received_publication(
         &self,
         service: &Link,
@@ -1031,8 +1039,7 @@ impl Node {
     ) -> Result<(), Failure> {
         for shared in &receipt.frontiers {
             let scope = shared.scope;
-            // Capture the token first: a commit between these reads must stay dirty.
-            let token = self.link_scope_state(scope).await?;
+            let token_before_frontier = self.link_scope_state(scope).await?;
             #[cfg(test)]
             let gate = service
                 .live
@@ -1060,7 +1067,7 @@ impl Node {
             acknowledge(cursor, shared);
             entry.cursor_generation = entry.cursor_generation.wrapping_add(1);
             if *cursor == frontier {
-                entry.frontiers.insert(scope, token);
+                entry.frontiers.insert(scope, token_before_frontier);
             }
         }
         Ok(())

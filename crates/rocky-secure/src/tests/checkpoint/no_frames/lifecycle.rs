@@ -159,22 +159,21 @@ async fn an_installed_no_frames_base_reopens_under_an_interrupted_keyed_import()
     let (b, b_credentials) = open(&f, &path, &keys[1]).await;
     share_graph(&f, &a, (&b, &keys[1], &b_credentials)).await;
     let empty = import_no_frames(&f, &a, (&b, &keys[1], &b_credentials)).await;
-    // K holds the key, writes the private scope and compacts a later seal.
-    let (k, k_credentials) = open_keyed(&f, &dir.path().join("k.db"), &keys[2]).await;
-    sync(&f, &a, (&k, &keys[2], &k_credentials)).await;
-    private_row(&f, &k, 9).await;
-    seal_main(&k, &f.publisher, f.public.domain).await;
+    let (key_holder, k_credentials) = open_keyed(&f, &dir.path().join("k.db"), &keys[2]).await;
+    let k = &key_holder;
+    sync(&f, &a, (k, &keys[2], &k_credentials)).await;
+    private_row(&f, k, 9).await;
+    seal_main(k, &f.publisher, f.public.domain).await;
     k.compact(f.public.domain, 0).await.unwrap();
     let keyed = k.checkpoint(f.private).await.unwrap();
     assert!(keyed.statement.key_epoch().is_some());
     assert_eq!(keyed.statement.rows.count, 1);
-    // B learns the key and stages K's page over its no-frames base.
     b.install_key_epoch(KeyMaterial::new(f.private, 1, [22; 32]))
         .await
         .unwrap();
-    share_graph(&f, &k, (&b, &keys[1], &b_credentials)).await;
+    share_graph(&f, k, (&b, &keys[1], &b_credentials)).await;
     b.begin_rebootstrap(keyed.clone()).await.unwrap();
-    let page = page_of(&k, (&keys[1], &b_credentials), &keyed, None).await;
+    let page = page_of(k, (&keys[1], &b_credentials), &keyed, None).await;
     b.stage_checkpoint_page(page).await.unwrap();
     assert!(
         count(
@@ -185,14 +184,15 @@ async fn an_installed_no_frames_base_reopens_under_an_interrupted_keyed_import()
             > 0
     );
     drop(b);
-    // The installed base is checked in its own store, the import in its.
-    // The application supplies the key again at open.
     let b = open_keyed(&f, &path, &keys[1]).await.0;
     b.audit(f.public).await.unwrap();
-    b.audit(f.private).await.unwrap();
+    b.audit(f.private)
+        .await
+        .expect("the installed base and the staged import audit in their own stores");
     assert_eq!(
         b.checkpoint(f.private).await.unwrap().id().unwrap(),
-        empty.id().unwrap()
+        empty.id().unwrap(),
+        "the no-frames base stays installed while the keyed import is staged"
     );
     let (_, _, complete) = b.rebootstrap_progress(f.private).await.unwrap().unwrap();
     assert!(complete);
@@ -220,21 +220,25 @@ async fn an_installed_keyed_base_reopens_under_a_staged_no_frames_import_or_pull
         PrivateKey::new(),
         PrivateKey::new(),
     ];
-    // K holds the key: its base of the empty private scope is keyed.
     let (k, _) = open_keyed(&f, &dir.path().join("k.db"), &keys[0]).await;
     k.author_buffered(handle(1), insert(&f, 1, "base"), vec![])
         .await
         .unwrap();
     compacted(&f, &k).await;
     let keyed = k.checkpoint(f.private).await.unwrap();
-    assert!(keyed.statement.key_epoch().is_some());
-    // A, keyless, signs a no-frames base at a later seal.
+    assert!(
+        keyed.statement.key_epoch().is_some(),
+        "a key holder's base of the empty private scope is keyed"
+    );
     let (a, a_credentials) = open(&f, &dir.path().join("a.db"), &keys[1]).await;
     sync(&f, &k, (&a, &keys[1], &a_credentials)).await;
     seal_main(&a, &f.publisher, f.public.domain).await;
     a.compact(f.public.domain, 0).await.unwrap();
     let empty = a.checkpoint(f.private).await.unwrap();
-    assert!(empty.statement.no_frames());
+    assert!(
+        empty.statement.no_frames(),
+        "a keyless replica signs a no-frames base at a later seal"
+    );
     let sealed = empty.statement.seal.unwrap();
     for (index, pull) in [(2, false), (3, true)] {
         let path = dir.path().join(format!("b{index}.db"));
@@ -364,7 +368,6 @@ async fn tampered_no_frames_records_fail_open_and_audit_in_their_own_store() {
     compacted(&f, &a).await;
     let empty = a.checkpoint(f.private).await.unwrap();
     let sealed = empty.statement.seal.unwrap();
-    // A staged and a pulled no-frames record, each on its own node.
     let staged_path = dir.path().join("staged.db");
     let (staged, staged_credentials) = open(&f, &staged_path, &keys[1]).await;
     share_graph(&f, &a, (&staged, &keys[1], &staged_credentials)).await;
@@ -417,12 +420,12 @@ async fn tampered_no_frames_records_fail_open_and_audit_in_their_own_store() {
         vec![forged.to_bytes().unwrap()],
     )
     .await;
-    // The untampered files still open and audit.
-    for (path, key) in [
+    let untampered = [
         (&a_path, &keys[0]),
         (&staged_path, &keys[1]),
         (&pulled_path, &keys[2]),
-    ] {
+    ];
+    for (path, key) in untampered {
         reopen(&f, path, key).await;
     }
     let _ = sealed;
@@ -434,38 +437,42 @@ async fn a_frame_that_passed_the_early_check_is_refused_once_a_no_frames_base_in
     let key = PrivateKey::new();
     let (d, path) = x.bystander("d", &key).await;
     d.begin_rebootstrap(x.claim.clone()).await.unwrap();
-    // The frame passes the early check while no base is installed; the
-    // base installs before the frame's own transaction runs.
-    let (reached, resume) = d.gate_next_receive().await;
+    let (passed_early_check, resume) = d.gate_next_receive().await;
     let receiving = {
         let (d, frame) = (d.clone(), x.covered.clone());
         rocky_platform::task::spawn(async move { d.receive(frame).await })
     };
-    reached.await.unwrap();
+    passed_early_check.await.unwrap();
     d.finish_rebootstrap(x.f.private).await.unwrap();
     resume.send(()).unwrap();
     let error = receiving.await.unwrap().unwrap_err();
-    assert!(error.to_string().contains("contradicts"), "{error}");
+    assert!(
+        error.to_string().contains("contradicts"),
+        "a base installed before the frame's transaction runs refuses it: {error}"
+    );
     assert_eq!(count(&d, "SELECT COUNT(*) FROM secure_operations").await, 0);
-    // A covered void is refused too and stores nothing; one after the seal
-    // is admitted as usual.
     let results = d.receive_voids(&[x.void(&x.voidable)]).await;
     let error = results.into_iter().next().unwrap().unwrap_err();
-    assert!(error.to_string().contains("contradicts"), "{error}");
+    assert!(
+        error.to_string().contains("contradicts"),
+        "a covered void is refused too: {error}"
+    );
     assert_eq!(count(&d, "SELECT COUNT(*) FROM secure_voids").await, 0);
     let after = x.after(10).await;
     let results = d.receive_voids(&[x.void(&after)]).await;
     assert_eq!(
         results.into_iter().next().unwrap().unwrap(),
-        ReceiveStatus::Applied
+        ReceiveStatus::Applied,
+        "a void after the seal is admitted as usual"
     );
-    // A held transfer of a live frame is refused before intake runs; the
-    // contradiction check of held frames is not exercised here.
     let error = d
         .receive_held_frames(vec![x.covered.clone()])
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("live or unrelated"), "{error}");
+    assert!(
+        error.to_string().contains("live or unrelated"),
+        "a held transfer of a live frame is refused before intake runs: {error}"
+    );
     assert_eq!(count(&d, "SELECT COUNT(*) FROM secure_operations").await, 0);
     drop(d);
     reopen(&x.f, &path, &key).await;
@@ -476,18 +483,23 @@ async fn covered_evidence_drops_a_pulled_candidate_in_its_own_commit() {
     let x = contradicted().await;
     let key = PrivateKey::new();
     let (d, path) = x.pulled("d", &key).await;
-    // Evidence after the seal keeps the candidate.
     let after = x.after(10).await;
     d.receive(after).await.unwrap();
-    assert_eq!(pulled_rows(&d).await, 1);
-    // A store that fails before commit keeps neither the frame nor the drop.
+    assert_eq!(
+        pulled_rows(&d).await,
+        1,
+        "evidence after the seal keeps the candidate"
+    );
     d.inject_group_fault(Some(crate::replica::group::GroupFault::FailBeforeCommit))
         .await;
     assert!(d.receive(x.covered.clone()).await.is_err());
     d.inject_group_fault(None).await;
-    assert_eq!(pulled_rows(&d).await, 1);
+    assert_eq!(
+        pulled_rows(&d).await,
+        1,
+        "a store that fails before commit keeps neither the frame nor the drop"
+    );
     let held = count(&d, "SELECT COUNT(*) FROM secure_operations").await;
-    // The covered frame is stored and the candidate leaves with it.
     assert_ne!(
         d.receive(x.covered.clone()).await.unwrap(),
         ReceiveStatus::Applied
@@ -496,7 +508,11 @@ async fn covered_evidence_drops_a_pulled_candidate_in_its_own_commit() {
         count(&d, "SELECT COUNT(*) FROM secure_operations").await,
         held + 1
     );
-    assert_eq!(pulled_rows(&d).await, 0);
+    assert_eq!(
+        pulled_rows(&d).await,
+        0,
+        "the covered frame is stored and the candidate leaves with it"
+    );
     drop(d);
     let d = reopen(&x.f, &path, &key).await;
     let domain = x.f.public.domain;
@@ -511,7 +527,6 @@ async fn covered_evidence_drops_a_pulled_candidate_in_its_own_commit() {
             .contains(&x.f.private)
     );
     assert!(d.checkpoint(x.f.private).await.is_err());
-    // A covered void drops a candidate the same way.
     let (v, v_path) = x.pulled("v", &key).await;
     let results = v.receive_voids(&[x.void(&x.voidable)]).await;
     assert_eq!(
@@ -519,7 +534,11 @@ async fn covered_evidence_drops_a_pulled_candidate_in_its_own_commit() {
         ReceiveStatus::Applied
     );
     assert_eq!(count(&v, "SELECT COUNT(*) FROM secure_voids").await, 1);
-    assert_eq!(pulled_rows(&v).await, 0);
+    assert_eq!(
+        pulled_rows(&v).await,
+        0,
+        "a covered void drops a candidate the same way"
+    );
     drop(v);
     reopen(&x.f, &v_path, &key).await;
 }
@@ -549,41 +568,48 @@ async fn revoking_the_signer_refuses_a_no_frames_state_before_it_is_used() {
     let x = contradicted().await;
     let signer = PrivateKey::new();
     let credentials = x.f.credentials(&signer, x.f.full());
-    // An uncontradicted statement of a signer revoked later.
-    let honest = resigned(&x.empty, &signer, &credentials, |_| {});
+    let uncontradicted_by_later_revoked_signer = resigned(&x.empty, &signer, &credentials, |_| {});
     let revoked = crate::tests::revoking(
         &x.f.publisher,
         x.f.app().definition().app,
         &[],
         &[credentials.certificate().unwrap().id().unwrap()],
     );
+    let honest = uncontradicted_by_later_revoked_signer;
     let private = x.f.private;
-    // Revoked between begin and finish of a pull: refused, not corrupt.
     let key = PrivateKey::new();
     let (d, path) = x.bystander("pull", &key).await;
     d.begin_seal_pull(honest.clone()).await.unwrap();
     d.learn_revocations(&revoked).await.unwrap();
     let error = d.finish_seal_pull(private).await.unwrap_err();
-    assert!(matches!(error, Error::Rejected(_)), "{error}");
+    assert!(
+        matches!(error, Error::Rejected(_)),
+        "revoked between begin and finish of a pull: refused, not corrupt: {error}"
+    );
     assert!(d.rebootstrap_progress(private).await.unwrap().is_none());
     assert_eq!(pulled_rows(&d).await, 0);
     drop(d);
     reopen(&x.f, &path, &key).await;
-    // Revoked between begin and finish of an import: nothing installs.
     let (d, path) = x.bystander("import", &key).await;
     d.begin_rebootstrap(honest.clone()).await.unwrap();
     d.learn_revocations(&revoked).await.unwrap();
     assert!(d.finish_rebootstrap(private).await.is_err());
-    assert!(d.checkpoint(private).await.is_err());
+    assert!(
+        d.checkpoint(private).await.is_err(),
+        "revoked between begin and finish of an import: nothing installs"
+    );
     drop(d);
     reopen(&x.f, &path, &key).await;
-    // Revoked once pulled: learning the revocation drops the candidate.
     let (d, path) = x.bystander("kept", &key).await;
     d.begin_seal_pull(honest).await.unwrap();
     d.finish_seal_pull(private).await.unwrap();
     assert_eq!(pulled_rows(&d).await, 1);
     d.learn_revocations(&revoked).await.unwrap();
-    assert_eq!(pulled_rows(&d).await, 0);
+    assert_eq!(
+        pulled_rows(&d).await,
+        0,
+        "learning the revocation drops an already pulled candidate"
+    );
     drop(d);
     reopen(&x.f, &path, &key).await;
 }
@@ -775,7 +801,6 @@ async fn following_through_a_pulled_no_frames_seal_installs_it_and_serves_it_onw
     );
     drop(x.b);
     let b = reopen(f, &x.b_path, &x.b_key).await;
-    // Onward: a joiner on the branch imports the same statement from B.
     let c_key = PrivateKey::new();
     let (c, c_credentials) = open(f, &x._dir.path().join("c.db"), &c_key).await;
     c.receive_tip_statements(&crate::tests::all_tip_statements(&b).await)
@@ -783,7 +808,11 @@ async fn following_through_a_pulled_no_frames_seal_installs_it_and_serves_it_onw
         .unwrap();
     c.follow_bookmark(f.public.domain, "dev").await.unwrap();
     let served = import_no_frames(f, &b, (&c, &c_key, &c_credentials)).await;
-    assert_eq!(served.id().unwrap(), empty.id().unwrap());
+    assert_eq!(
+        served.id().unwrap(),
+        empty.id().unwrap(),
+        "a joiner on the branch imports the same statement onward"
+    );
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -791,13 +820,7 @@ async fn a_pulled_state_that_no_longer_passes_neither_starts_a_branch_nor_is_dro
     let x = dev_pull(true).await;
     let (f, b) = (&x.f, &x.b);
     let domain = f.public.domain;
-    // The signer's revocation reaches the set without the revalidation
-    // learning it runs: reading availability must not count the state.
-    b.inner
-        .lock(crate::replica::Class::Background)
-        .await
-        .config
-        .revocations = x.revoked(1);
+    set_revocations_without_revalidation(b, x.revoked(1)).await;
     let before = pulled_rows(b).await;
     let tip = b.followed_tip().await;
     let refused = b.follow_bookmark(domain, "dev").await.unwrap_err();
@@ -811,10 +834,23 @@ async fn a_pulled_state_that_no_longer_passes_neither_starts_a_branch_nor_is_dro
         b.seal_pull_scopes(domain, x.first).await.unwrap(),
         vec![f.private]
     );
-    // Reading writes nothing.
-    assert_eq!(pulled_rows(b).await, before);
+    assert_eq!(pulled_rows(b).await, before, "reading writes nothing");
     drop(x.b);
     reopen(f, &x.b_path, &x.b_key).await;
+}
+
+/// Puts `revocations` in `replica`'s set without the revalidation learning
+/// them runs, so reads must judge pulled states themselves.
+async fn set_revocations_without_revalidation(
+    replica: &Replica,
+    revocations: rocky_credentials::RevocationSet,
+) {
+    replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .config
+        .revocations = revocations;
 }
 
 /// The contradicted fixture's bystander D holding A's public base at the
@@ -859,7 +895,6 @@ async fn needing(
 }
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn learning_a_revocation_drops_the_signers_pulled_states_before_any_follow() {
-    // The restated no-frames state alone, or both of A's states, one keyed.
     for restated in [true, false] {
         let x = dev_pull(restated).await;
         let (f, b) = (&x.f, &x.b);
@@ -874,13 +909,17 @@ async fn learning_a_revocation_drops_the_signers_pulled_states_before_any_follow
         assert_eq!(x.pulled_scopes().await, 2 - dropped.len() as i64);
         let mut wanted = b.seal_pull_scopes(domain, x.first).await.unwrap();
         wanted.sort();
-        assert_eq!(wanted, dropped);
-        // The seal is no longer held: following the branch is refused
-        // until it is pulled again, and nothing was installed.
+        assert_eq!(
+            wanted, dropped,
+            "revoking the restater drops its no-frames state; revoking A drops both of A's states"
+        );
         let tip = b.followed_tip().await;
         let refused = b.follow_bookmark(domain, "dev").await.unwrap_err();
-        assert!(refused.to_string().contains("does not hold"), "{refused}");
-        assert_eq!(b.followed_tip().await, tip);
+        assert!(
+            refused.to_string().contains("does not hold"),
+            "following the branch is refused until the seal is pulled again: {refused}"
+        );
+        assert_eq!(b.followed_tip().await, tip, "nothing was installed");
         assert_ne!(
             b.held_seal(domain, x.first).await.unwrap(),
             Some(crate::HeldSeal::Checkpoint)
@@ -928,8 +967,7 @@ async fn a_covered_placement_is_refused_under_a_base_and_drops_a_candidate() {
         from: 0,
         to: header.extensions.author_sequence,
     };
-    // Custody of the private scope ended: its positions arrive as placements.
-    let public_only: Vec<_> = f
+    let custody_of_private_scope_ended: Vec<_> = f
         .full()
         .into_iter()
         .filter(|grant| grant.scope == f.public)
@@ -947,7 +985,7 @@ async fn a_covered_placement_is_refused_under_a_base_and_drops_a_candidate() {
             false => x.pulled(name, &key).await,
         };
         drop(d);
-        let config = f.config(&key, public_only.clone(), &[f.public]);
+        let config = f.config(&key, custody_of_private_scope_ended.clone(), &[f.public]);
         let credentials = config.credentials.clone();
         let d = EncryptedReplica::open(&path, f.app(), config)
             .await
@@ -963,19 +1001,26 @@ async fn a_covered_placement_is_refused_under_a_base_and_drops_a_candidate() {
         match installed {
             true => {
                 let error = received.unwrap_err();
-                assert!(error.to_string().contains("contradicts"), "{error}");
+                assert!(
+                    error.to_string().contains("contradicts"),
+                    "a covered placement is refused under an installed base: {error}"
+                );
                 assert_eq!(count(&d, "SELECT COUNT(*) FROM secure_placements").await, 0);
             }
             false => {
                 assert!(received.unwrap() > 0);
-                assert_eq!(pulled_rows(&d).await, 0);
+                assert_eq!(
+                    pulled_rows(&d).await,
+                    0,
+                    "a covered placement drops a pulled candidate"
+                );
             }
         }
         drop(d);
         let d = EncryptedReplica::open(
             &path,
             f.app(),
-            f.config(&key, public_only.clone(), &[f.public]),
+            f.config(&key, custody_of_private_scope_ended.clone(), &[f.public]),
         )
         .await
         .unwrap();
@@ -992,7 +1037,6 @@ async fn an_expired_pulled_state_covers_nothing_and_install_drops_it() {
     let domain = f.public.domain;
     let signer = PrivateKey::new();
     let current = f.credentials(&signer, f.full());
-    // Control: a valid needed state is installed before readiness is judged.
     let valid = resigned(&x.claim, &signer, &current, |_| {});
     let (d, _, _) = needing(&x, "valid", &valid).await;
     assert!(
@@ -1006,17 +1050,17 @@ async fn an_expired_pulled_state_covers_nothing_and_install_drops_it() {
     assert_eq!(pulled_rows(&d).await, 0);
     assert_eq!(
         d.checkpoint(f.private).await.unwrap().id().unwrap(),
-        valid.id().unwrap()
+        valid.id().unwrap(),
+        "control: a valid needed state is installed before readiness is judged"
     );
-    // The same statement under a chain valid only in the past.
     let time = crate::now().unwrap();
-    let past = f.chain(
+    let valid_only_in_the_past = f.chain(
         &signer,
         f.full(),
         &f.publisher,
         (time - 2 * DAY, time - DAY),
     );
-    let expired = resigned(&x.claim, &signer, &past, |_| {});
+    let expired = resigned(&x.claim, &signer, &valid_only_in_the_past, |_| {});
     d.verify_checkpoint_at_for_test(&expired, time - 3 * DAY / 2)
         .await
         .unwrap();
@@ -1037,8 +1081,10 @@ async fn an_expired_pulled_state_covers_nothing_and_install_drops_it() {
             .await
             .unwrap();
     }
-    // An unrelated staged import of the scope at another seal.
-    e.begin_rebootstrap(x.empty.clone()).await.unwrap();
+    let unrelated_import_at_another_seal = x.empty.clone();
+    e.begin_rebootstrap(unrelated_import_at_another_seal)
+        .await
+        .unwrap();
     let staged = "SELECT quote(signed)||quote(sets)||complete||direct FROM secure_rebootstrap";
     let staged_before = crate::storage::rows(
         &e.inner.lock(crate::replica::Class::Background).await.conn,
@@ -1047,11 +1093,11 @@ async fn an_expired_pulled_state_covers_nothing_and_install_drops_it() {
     .await
     .unwrap();
     drop(e);
-    // Open and the full audit check only its integrity.
     let e = reopen(f, &path, &key).await;
     assert_ne!(
         e.held_seal(domain, x.sealed).await.unwrap(),
-        Some(crate::HeldSeal::Checkpoint)
+        Some(crate::HeldSeal::Checkpoint),
+        "open and the full audit check only the expired state's integrity"
     );
     assert!(
         e.seal_pull_scopes(domain, x.sealed)
@@ -1060,22 +1106,29 @@ async fn an_expired_pulled_state_covers_nothing_and_install_drops_it() {
             .contains(&f.private)
     );
     let finalized = e.compaction_status(domain).await.unwrap().finalized;
-    // A failure later in the installing transaction keeps the candidate.
     e.inject_stage_fault(Stage::Settle, 0).await;
     assert!(matches!(
         e.finish_seal_rebootstrap(domain).await,
         Err(Error::InjectedFailure)
     ));
-    assert_eq!(pulled_rows(&e).await, 1);
-    // Install refuses it, the drop commits and the scope keeps waiting.
+    assert_eq!(
+        pulled_rows(&e).await,
+        1,
+        "a failure later in the installing transaction keeps the candidate"
+    );
     assert!(!e.finish_seal_rebootstrap(domain).await.unwrap());
-    assert_eq!(pulled_rows(&e).await, 0);
+    assert_eq!(
+        pulled_rows(&e).await,
+        0,
+        "install refuses it and the drop commits"
+    );
     assert!(
         e.seal_rebootstraps(domain)
             .await
             .unwrap()
             .iter()
-            .any(|need| need.scope == f.private)
+            .any(|need| need.scope == f.private),
+        "the scope keeps waiting"
     );
     assert_eq!(
         crate::storage::rows(
@@ -1123,14 +1176,12 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
         share_graph(&f, &a, (replica, key, credentials)).await;
     }
     let covered = private_row(&f, &e, 9).await;
-    // Written on the same tip, but C never holds it before L.
-    let suffix = private_row(&f, &e, 10).await;
+    let suffix_unheld_at_the_close = private_row(&f, &e, 10).await;
     assert_ne!(
         c.receive(covered.clone()).await.unwrap(),
         ReceiveStatus::Applied
     );
     sync(&f, &a, (&c, &keys[2], &c_credentials)).await;
-    // An issuer closes main's tip at L; main itself stays there.
     let issuer = PrivateKey::new();
     let chain = CredentialChain(vec![
         Authority::owner_in(
@@ -1145,7 +1196,7 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
         .unwrap(),
     ]);
     let tip = c.followed_tip().await;
-    let sealed = SignedSeal::endorse(
+    let issuer_close = SignedSeal::endorse(
         SealStatement {
             format: SEAL_FORMAT,
             scope: domain,
@@ -1158,11 +1209,11 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
         &chain,
     )
     .unwrap();
-    c.receive_tip_statements(&[crate::TipStatement::Seal(sealed.clone())])
+    c.receive_tip_statements(&[crate::TipStatement::Seal(issuer_close.clone())])
         .await
         .unwrap();
     let claim = resigned(&empty, &keys[0], &a_credentials, |s| {
-        s.seal = Some(sealed.id().unwrap());
+        s.seal = Some(issuer_close.id().unwrap());
         s.tip = tip;
         s.sequence += 1;
         s.previous = Some(empty.id().unwrap());
@@ -1176,24 +1227,32 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
         d.receive_tip_statements(&statements).await.unwrap();
     }
     d.follow_bookmark(domain, "main").await.unwrap();
-    assert_eq!(d.followed_tip().await, tip);
+    assert_eq!(
+        d.followed_tip().await,
+        tip,
+        "main stays on the tip the issuer closed"
+    );
     d.begin_rebootstrap(claim.clone()).await.unwrap();
     d.finish_rebootstrap(f.private).await.unwrap();
-    // A frame beyond L's frontier is retained; one L includes is refused.
-    // Beyond the closed tip's seal it is stored, keyless here.
-    assert_eq!(d.receive(suffix).await.unwrap(), ReceiveStatus::MissingKey);
+    assert_eq!(
+        d.receive(suffix_unheld_at_the_close).await.unwrap(),
+        ReceiveStatus::MissingKey,
+        "a frame beyond the close's frontier is stored, keyless here"
+    );
     let retained = count(&d, "SELECT COUNT(*) FROM secure_operations").await;
     assert_eq!(retained, 1);
     let refused = |d: Replica| {
         let covered = covered.clone();
         async move {
             let error = d.receive(covered).await.unwrap_err();
-            assert!(error.to_string().contains("contradicts"), "{error}");
+            assert!(
+                error.to_string().contains("contradicts"),
+                "a frame the close includes is refused: {error}"
+            );
             d
         }
     };
     let d = refused(d).await;
-    // The sealer's revocation excludes L: no seal wins the tip now.
     d.learn_revocations(&crate::tests::revoking(
         &f.publisher,
         domain.app,
@@ -1202,7 +1261,11 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
     ))
     .await
     .unwrap();
-    assert_eq!(d.tip_graph(domain).await.unwrap().seal(tip).unwrap(), None);
+    assert_eq!(
+        d.tip_graph(domain).await.unwrap().seal(tip).unwrap(),
+        None,
+        "the sealer's revocation leaves no seal winning the tip"
+    );
     assert_eq!(d.followed_tip().await, tip);
     let d = refused(d).await;
     assert_eq!(
@@ -1210,7 +1273,6 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
         retained
     );
     drop(d);
-    // The recorded fact still audits against exactly L.
     let d = reopen(&f, &path, &keys[3]).await;
     assert_eq!(
         count(&d, "SELECT COUNT(*) FROM secure_operations").await,
@@ -1222,13 +1284,14 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
     )
     .await
     .unwrap();
-    assert!(stored.iter().any(|row| match &row[0] {
-        rocky_core::SqlValue::Blob(bytes) => *bytes == claim.to_bytes().unwrap(),
-        _ => false,
-    }));
-    // The owner closes T with a different frontier. The frame is now truly
-    // Held by the live graph, but the installed fact still covers it at L.
-    let close = SignedSeal::sign(
+    assert!(
+        stored.iter().any(|row| match &row[0] {
+            rocky_core::SqlValue::Blob(bytes) => *bytes == claim.to_bytes().unwrap(),
+            _ => false,
+        }),
+        "the recorded claim still audits against exactly the issuer's close"
+    );
+    let owner_close_with_other_frontier = SignedSeal::sign(
         SealStatement {
             format: SEAL_FORMAT,
             scope: domain,
@@ -1240,7 +1303,7 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
         &f.publisher,
     )
     .unwrap();
-    d.receive_tip_statements(&[crate::TipStatement::Seal(close)])
+    d.receive_tip_statements(&[crate::TipStatement::Seal(owner_close_with_other_frontier)])
         .await
         .unwrap();
     assert_eq!(
@@ -1253,7 +1316,10 @@ async fn an_installed_no_frames_base_audits_against_its_exact_seal_after_the_sea
     );
     let revision = d.stored_and_memory_revision().await;
     let error = d.receive_held_frames(vec![covered]).await.unwrap_err();
-    assert!(error.to_string().contains("contradicts"), "{error}");
+    assert!(
+        error.to_string().contains("contradicts"),
+        "the installed claim still covers a frame the live graph holds: {error}"
+    );
     assert_eq!(d.stored_and_memory_revision().await, revision);
     assert_eq!(
         rows(
@@ -1282,10 +1348,8 @@ async fn an_author_log_fork_rolls_back_the_pulled_candidate_drop() {
         crate::wire::Opened::open(&[22; 32], &header.extensions, x.covered.body_bytes())
             .unwrap()
             .payload;
-    let mut extension = header.extensions.clone();
-    // A different authentic frame occupies the same scope-log position,
-    // but its domain sequence is past the candidate's recorded frontier.
-    extension.author_sequence = x
+    let mut same_log_position_past_the_frontier = header.extensions.clone();
+    same_log_position_past_the_frontier.author_sequence = x
         .voidable
         .operation()
         .unwrap()
@@ -1296,7 +1360,7 @@ async fn an_author_log_fork_rolls_back_the_pulled_candidate_drop() {
     let fork = crate::wire::author(
         &x.e_key,
         crate::wire::FrameDraft {
-            extensions: extension,
+            extensions: same_log_position_past_the_frontier,
             chain: x.covered.chain().unwrap().clone(),
             encryption_key: &[22; 32],
             log: (header.seq_num, header.backlink, header.timestamp),
@@ -1316,11 +1380,13 @@ async fn an_author_log_fork_rolls_back_the_pulled_candidate_drop() {
     )
     .await
     .unwrap();
-    // Intake drops the contradicted candidate, then the real store's fork
-    // check refuses this request. Its savepoint must restore the drop.
     let error = d.receive(x.covered.clone()).await.unwrap_err();
     assert!(error.to_string().contains("author log fork"), "{error}");
-    assert_eq!(pulled_stores(&d).await, before);
+    assert_eq!(
+        pulled_stores(&d).await,
+        before,
+        "the refused request's savepoint restores the candidate intake dropped"
+    );
     assert_eq!(d.stored_and_memory_revision().await, revision);
     assert_eq!(
         rows(
@@ -1428,8 +1494,10 @@ async fn a_schema_unavailable_at_install_drops_only_its_pulled_candidate() {
     );
     d.begin_seal_pull(claim).await.unwrap();
     d.finish_seal_pull(x.f.private).await.unwrap();
-    // A separate import at the root schema must survive this refusal.
-    d.begin_rebootstrap(x.empty.clone()).await.unwrap();
+    let separate_import_at_the_root_schema = x.empty.clone();
+    d.begin_rebootstrap(separate_import_at_the_root_schema)
+        .await
+        .unwrap();
     let staging = rows(
         &d.inner.lock(crate::replica::Class::Background).await.conn,
         "SELECT * FROM secure_rebootstrap ORDER BY scope",
@@ -1455,8 +1523,10 @@ async fn a_schema_unavailable_at_install_drops_only_its_pulled_candidate() {
     )
     .await
     .unwrap();
-    // Lose only the extra tip's catalog entry; the live/root definition stays.
-    d.set_catalog_entry_for_test(manifest, None).await.unwrap();
+    let without_extra_tip_entry = None;
+    d.set_catalog_entry_for_test(manifest, without_extra_tip_entry)
+        .await
+        .unwrap();
     assert_eq!(pulled_rows(&d).await, 1);
     assert!(!d.install_pulled_for_test(x.f.private).await.unwrap());
     assert_eq!(pulled_rows(&d).await, 0);
@@ -1467,7 +1537,8 @@ async fn a_schema_unavailable_at_install_drops_only_its_pulled_candidate() {
         )
         .await
         .unwrap(),
-        staging
+        staging,
+        "a separate import at the root schema survives the refusal"
     );
     assert_eq!(
         rows(
@@ -1521,17 +1592,23 @@ async fn a_pulled_seal_off_the_path_stays_cached_and_installs_nothing() {
     seal_main(&a, &f.publisher, domain).await;
     let first = seal_on(&a, domain, tip).await;
     sync(&f, &a, (&b, &keys[1], &credentials)).await;
-    // B's bases sit at the first seal, A's at the second.
-    assert_eq!(b.compact(domain, 0).await.unwrap().compacted, Some(first));
+    assert_eq!(
+        b.compact(domain, 0).await.unwrap().compacted,
+        Some(first),
+        "B's bases sit at the first seal"
+    );
     a.author_buffered(handle(2), insert(&f, 2, "two"), vec![])
         .await
         .unwrap();
     let tip = a.followed_tip().await;
     seal_main(&a, &f.publisher, domain).await;
     let second = seal_on(&a, domain, tip).await;
-    assert_eq!(a.compact(domain, 0).await.unwrap().compacted, Some(second));
+    assert_eq!(
+        a.compact(domain, 0).await.unwrap().compacted,
+        Some(second),
+        "A's bases sit at the second seal"
+    );
     sync(&f, &a, (&b, &keys[1], &credentials)).await;
-    // B pulls A's states at the second seal while both follow main.
     a.admit_peer(keys[1].public_key(), &credentials, b.followed_tip().await)
         .await
         .unwrap();
@@ -1575,7 +1652,6 @@ async fn a_pulled_seal_off_the_path_stays_cached_and_installs_nothing() {
     .await
     .unwrap();
     assert_eq!(before.len(), 2);
-    // A branch opens at the first seal; its path does not pass the second.
     let opening = SignedTipOpening::sign(
         TipOpeningStatement {
             format: TIP_OPENING_FORMAT,
@@ -1652,7 +1728,6 @@ async fn a_revocation_that_moves_the_followed_bookmark_through_a_pulled_seal_dro
     b.follow_bookmark(domain, "dev").await.unwrap();
     let opened = b.followed_tip().await;
     assert_eq!(x.pulled_scopes().await, 0);
-    // An issuer seals the branch and moves `dev` on; B compacts there.
     let issuer = PrivateKey::new();
     let chain = CredentialChain(vec![
         Authority::owner_in(
@@ -1666,7 +1741,7 @@ async fn a_revocation_that_moves_the_followed_bookmark_through_a_pulled_seal_dro
         .issue_issuer(issuer.public_key(), crate::tests::validity())
         .unwrap(),
     ]);
-    let sealed = SignedSeal::endorse(
+    let issuer_seal_of_the_branch = SignedSeal::endorse(
         SealStatement {
             format: SEAL_FORMAT,
             scope: domain,
@@ -1687,14 +1762,14 @@ async fn a_revocation_that_moves_the_followed_bookmark_through_a_pulled_seal_dro
             scope: domain,
             name: "dev".into(),
             from: Some(opened),
-            to: Some(sealed.successor().unwrap().unwrap()),
+            to: Some(issuer_seal_of_the_branch.successor().unwrap().unwrap()),
         },
         rocky_credentials::testing::lane_for(&issuer, &chain),
         &chain,
     )
     .unwrap();
     b.receive_tip_statements(&[
-        crate::TipStatement::Seal(sealed.clone()),
+        crate::TipStatement::Seal(issuer_seal_of_the_branch.clone()),
         crate::TipStatement::Bookmark(moved),
     ])
     .await
@@ -1702,10 +1777,9 @@ async fn a_revocation_that_moves_the_followed_bookmark_through_a_pulled_seal_dro
     assert_ne!(b.followed_tip().await, opened);
     assert_eq!(
         b.compact(domain, 0).await.unwrap().compacted,
-        Some(sealed.id().unwrap())
+        Some(issuer_seal_of_the_branch.id().unwrap()),
+        "B's bases move to the issuer's seal"
     );
-    // B's private base moved to the issuer's seal; it pulls the first
-    // seal's private state again, restated by a signer about to be revoked.
     a.receive_tip_statements(&crate::tests::all_tip_statements(b).await)
         .await
         .unwrap();
@@ -1728,7 +1802,9 @@ async fn a_revocation_that_moves_the_followed_bookmark_through_a_pulled_seal_dro
             .unwrap()
             .unwrap();
         assert_eq!(offered.statement.seal, Some(x.first));
-        let offered = resigned(&offered, &x.restater, &x.signers[1], |_| {});
+        let restated_by_a_signer_about_to_be_revoked =
+            resigned(&offered, &x.restater, &x.signers[1], |_| {});
+        let offered = restated_by_a_signer_about_to_be_revoked;
         b.begin_seal_pull(offered.clone()).await.unwrap();
         let mut after = None;
         while !offered.statement.no_frames() {
@@ -1753,10 +1829,6 @@ async fn a_revocation_that_moves_the_followed_bookmark_through_a_pulled_seal_dro
         pulled.insert(scope, offered);
     }
     assert_eq!(pulled.keys().collect::<Vec<_>>(), vec![&f.private]);
-    // One set revokes the issuer and the restating signer: `dev` returns
-    // to the branch's opening through the first seal, B's private base
-    // leaves the path, and the revoked state is gone before that follow
-    // could install it.
     let mut revoked = x.revoked(1);
     revoked
         .merge(
@@ -1778,16 +1850,25 @@ async fn a_revocation_that_moves_the_followed_bookmark_through_a_pulled_seal_dro
         )
         .unwrap();
     b.learn_revocations(&revoked).await.unwrap();
-    assert_eq!(b.followed_tip().await, opened);
+    assert_eq!(
+        b.followed_tip().await,
+        opened,
+        "revoking the issuer returns `dev` to the branch's opening"
+    );
     assert_eq!(b.revocations().await, expected);
     assert_ne!(
         b.checkpoint(f.private)
             .await
             .ok()
             .map(|signed| signed.id().unwrap()),
-        Some(pulled[&f.private].id().unwrap())
+        Some(pulled[&f.private].id().unwrap()),
+        "the revoked restated state is never installed by that follow"
     );
-    assert_eq!(x.pulled_scopes().await, 0);
+    assert_eq!(
+        x.pulled_scopes().await,
+        0,
+        "the revoked state is gone before the follow could install it"
+    );
     assert!(
         b.seal_rebootstraps(domain)
             .await

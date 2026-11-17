@@ -30,7 +30,6 @@ async fn a_refused_or_pending_record_leaves_the_rest_of_its_page_committed() {
     let log = GroupLog::default();
     crate::tests::fault(&replica, Fault::RecordGroups(log.clone())).await;
     let id = |index: usize| Envelope::decode(&operations[index]).unwrap().id;
-    // Accepted, undecodable, waiting for its predecessor, and a duplicate.
     let page = vec![
         operations[0].clone(),
         vec![1, 2, 3],
@@ -42,33 +41,45 @@ async fn a_refused_or_pending_record_leaves_the_rest_of_its_page_committed() {
         id: id(index),
         applied,
     };
-    assert_eq!(results[0].as_ref().unwrap(), &applied(0, true));
+    assert_eq!(
+        results[0].as_ref().unwrap(),
+        &applied(0, true),
+        "accepted, undecodable, waiting for its predecessor, and a duplicate"
+    );
     assert!(matches!(results[1], Err(Error::Protocol(_))));
     assert_eq!(results[2].as_ref().unwrap(), &applied(2, false));
     assert_eq!(results[3].as_ref().unwrap(), &applied(0, true));
     assert_eq!(rows(&replica).await, 1);
-    // A receipt that fails inside its savepoint rolls back alone.
     crate::tests::fault(&replica, Fault::FailBeforeCommit).await;
     let results = replica
         .receive_page(vec![operations[1].clone(), operations[3].clone()])
         .await
         .unwrap();
-    assert!(matches!(results[0], Err(Error::InjectedFailure)));
+    assert!(
+        matches!(results[0], Err(Error::InjectedFailure)),
+        "a receipt that fails inside its savepoint rolls back alone"
+    );
     assert_eq!(results[1].as_ref().unwrap(), &applied(3, false));
     assert_eq!(rows(&replica).await, 1);
     let state = replica.sync_state().await.unwrap();
     assert_eq!(state.received, vec![id(2), id(3)]);
     assert!(state.holds(id(0)) && !state.holds(id(1)));
-    // The missing predecessor releases everything that waited for it.
     let results = replica
         .receive_page(vec![operations[1].clone()])
         .await
         .unwrap();
-    assert_eq!(results[0].as_ref().unwrap(), &applied(1, true));
+    assert_eq!(
+        results[0].as_ref().unwrap(),
+        &applied(1, true),
+        "the missing predecessor releases everything that waited for it"
+    );
     assert_eq!(rows(&replica).await, 4);
-    // Each page was one step of one group: one commit and one flush.
     let groups = log.lock().unwrap().clone();
-    assert_eq!(groups.len(), 3);
+    assert_eq!(
+        groups.len(),
+        3,
+        "each page was one step of one group: one commit and one flush"
+    );
     assert!(groups.iter().all(|group| group.len() == 1));
     runtime.close().await.unwrap();
     let runtime = open_node(&dir.path().join("node.db"), NODE, grouped()).await;
@@ -139,8 +150,11 @@ async fn submit_waits_for_queue_space_instead_of_reporting_backpressure() {
     for receipt in queued {
         receipt.committed().await.unwrap();
     }
-    // Admitted after everything that was already queued.
-    assert_eq!(waiting.await.unwrap().id.sequence.get(), count + 2);
+    assert_eq!(
+        waiting.await.unwrap().id.sequence.get(),
+        count + 2,
+        "admitted after everything that was already queued"
+    );
     assert_eq!(replica.queue_depth().commands, 0);
     let stats = replica.writer_stats();
     assert!(stats.steps >= count + 2 && stats.groups >= 2 && stats.groups < stats.steps);

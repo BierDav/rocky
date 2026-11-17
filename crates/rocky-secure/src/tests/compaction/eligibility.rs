@@ -19,8 +19,6 @@ async fn an_open_revocation_loader_retry_keeps_supplied_statements_past_expired_
     let issuer = PrivateKey::from_bytes(&[255; 32]);
     let replica = open(&lineage, &dir, "node", &key).await;
     follow_main(&lineage, &replica).await;
-    // An issuer's statement expires; a root statement never does. Its
-    // chain is valid at the statement's time.
     let signer = PrivateKey::from_bytes(&[251; 32]);
     let signer_chain = CredentialChain(vec![
         Authority::owner_in(
@@ -52,7 +50,10 @@ async fn an_open_revocation_loader_retry_keeps_supplied_statements_past_expired_
         mode: rocky_credentials::RevocationMode::Lost,
         recovery: None,
     };
-    assert!(!expired.live(now().unwrap()));
+    assert!(
+        !expired.live(now().unwrap()),
+        "an issuer's statement expires, though its chain was valid at the statement's time"
+    );
     let expired = RevocationSet::try_from(vec![
         rocky_credentials::SignedRevocation::sign(
             expired,
@@ -77,11 +78,11 @@ async fn an_open_revocation_loader_retry_keeps_supplied_statements_past_expired_
         crate::tests::compaction::scalar(&replica, "SELECT revision FROM secure_metadata").await;
     let supplied = configured_revocations(&lineage, &issuer);
     replica.inject_failure(1, 0).await;
-    // The actual E1 loader runs twice through transaction!'s Busy retry.
-    let pending = replica
+    let pending_after_a_busy_retry_of_the_loader = replica
         .retry_open_revocations_for_test(supplied.clone())
         .await
         .unwrap();
+    let pending = pending_after_a_busy_retry_of_the_loader;
     assert_eq!(pending, supplied);
     assert_eq!(
         crate::tests::compaction::scalar(&replica, "SELECT revision FROM secure_metadata").await,

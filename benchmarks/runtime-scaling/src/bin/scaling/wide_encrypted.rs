@@ -145,7 +145,6 @@ pub async fn run() -> Result<(), Failure> {
                 time,
             )?);
         }
-        // Report pure verification separately; chains name no manifest.
         let pure = Instant::now();
         for _ in 0..1000 {
             std::hint::black_box(credentials.verify(

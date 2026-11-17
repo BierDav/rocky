@@ -215,15 +215,14 @@ pub mod testing {
         Authority::issuer(node, &chain).expect("an issuer node")
     }
     /// Who signs for `identity` under its issuer links `chain`: its own key
-    /// when the chain is empty (the root), otherwise a fresh node of it,
-    /// whose key is leaked.
+    /// when the chain is empty (the root), otherwise a fresh node of it, whose
+    /// key is leaked. A key the chain does not end at still certifies a node of
+    /// its own, for statements meant to be refused.
     pub fn signer<'a>(identity: &'a dyn IdentityProvider, chain: &CredentialChain) -> Signer<'a> {
         if chain.0.is_empty() {
             return Signer::Key(identity);
         }
         let node: &'static PrivateKey = Box::leak(Box::new(PrivateKey::new()));
-        // A key the chain does not end at still certifies a node of its own,
-        // for statements meant to be refused.
         let certificate = certificate(
             identity,
             node,

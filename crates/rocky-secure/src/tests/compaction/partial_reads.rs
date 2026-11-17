@@ -3,17 +3,20 @@
 use super::*;
 use crate::MAX_SNAPSHOT_ROWS;
 
+/// More tags than one checkpoint page of at most 256 rows holds.
+const MORE_TAGS_THAN_ONE_PAGE: usize = 300;
+/// Tag inserts per transaction, within the 256 statements one may hold.
+const TAGS_PER_TRANSACTION: usize = 150;
+
 /// `a` holds two items and three tags, sealed and compacted.
 async fn source(lineage: &Lineage, dir: &Scratch, key: &PrivateKey) -> Replica {
     let a = open(lineage, dir, "a", key).await;
     follow_main(lineage, &a).await;
     insert(&a, "x", "first").await;
     insert(&a, "y", "second").await;
-    // More tags than one page holds, in transactions of at most 256
-    // statements.
     let sql = session(&a).await;
-    for tag in 0..300 {
-        if tag % 150 == 0 {
+    for tag in 0..MORE_TAGS_THAN_ONE_PAGE {
+        if tag % TAGS_PER_TRANSACTION == 0 {
             if tag > 0 {
                 sql.run("COMMIT", vec![]).await.unwrap();
             }
@@ -108,8 +111,7 @@ async fn scoped(lineage: &Lineage, j: &Replica) {
             .await
             .is_err()
     );
-    // Reads change nothing.
-    assert_eq!(state(j).await, before);
+    assert_eq!(state(j).await, before, "reads change nothing");
     author_refused(j).await;
     let status = j.compaction_status(lineage.domain).await.unwrap();
     assert!(status.finalized.is_none() && status.waiting.is_some());
@@ -123,7 +125,6 @@ async fn a_verified_scope_reads_and_writes_while_an_unbegun_one_waits() {
     let a = source(&lineage, &dir, &keys[0]).await;
     let j = items_only(&lineage, &dir, &a, &keys[1]).await;
     scoped(&lineage, &j).await;
-    // The same after a reopen without any network.
     drop(j);
     let j = open(&lineage, &dir, "j", &keys[1]).await;
     scoped(&lineage, &j).await;
@@ -158,7 +159,6 @@ async fn a_direct_import_shows_its_verified_pages_incomplete_until_it_finishes()
         .unwrap();
     let checkpoint = offered.id().unwrap();
     j.begin_rebootstrap(offered).await.unwrap();
-    // A page holds at most 256 rows.
     let first = a
         .checkpoint_page(
             keys[1].public_key(),
@@ -245,7 +245,10 @@ async fn an_unauthenticated_staged_statement_proves_nothing_for_its_scope() {
                 .await
                 .is_err()
         );
-        // The verified items scope stays readable.
-        assert_eq!(titles(&j).await.len(), 2);
+        assert_eq!(
+            titles(&j).await.len(),
+            2,
+            "the verified items scope stays readable"
+        );
     }
 }

@@ -185,7 +185,6 @@ async fn profiles_bound_reads_and_writes_across_renewal() -> Result<(), Failure>
     let writer = json!({"kind": "writer", "scopes": ["notes"]});
     let r = join(root, &hub, "r", &a.invite_as(reader.clone()).await)?;
     let w = join(root, &hub, "w", &a.invite_as(writer.clone()).await)?;
-    // A profile that names nothing, or an unknown collection, invites nobody.
     for profile in [
         json!({"kind": "reader", "scopes": []}),
         json!({"kind": "writer", "scopes": ["unknown"]}),
@@ -200,7 +199,10 @@ async fn profiles_bound_reads_and_writes_across_renewal() -> Result<(), Failure>
             ),
         )
         .await;
-        assert!(refused.is_err(), "{profile}");
+        assert!(
+            refused.is_err(),
+            "a profile naming nothing or an unknown collection invites nobody: {profile}"
+        );
     }
     item(&a, 1, "Milk").await?;
     note(&a, 2, "Hello").await?;
@@ -213,10 +215,15 @@ async fn profiles_bound_reads_and_writes_across_renewal() -> Result<(), Failure>
         assert_eq!(identity(root, "r")?["profile"], reader);
         assert_eq!(identity(root, "r")?["keys"], json!({"items": [1]}));
         assert_eq!(identity(root, "w")?["keys"], json!({"notes": [1]}));
-        // The reader reads its collection and writes nothing.
-        assert_eq!(items(&r).await?, ["Milk"]);
-        assert!(item(&r, 10, "Forged").await.is_err());
-        assert!(note(&r, 11, "Forged").await.is_err());
+        assert_eq!(items(&r).await?, ["Milk"], "a reader reads its collection");
+        assert!(
+            item(&r, 10, "Forged").await.is_err(),
+            "a reader writes nothing"
+        );
+        assert!(
+            note(&r, 11, "Forged").await.is_err(),
+            "a reader writes nothing"
+        );
         assert!(
             snap::observe(
                 r.session.invite(
@@ -231,10 +238,15 @@ async fn profiles_bound_reads_and_writes_across_renewal() -> Result<(), Failure>
             .is_err()
         );
         assert!(notes(&r).await.unwrap_or_default().is_empty());
-        // The scoped writer neither reads nor writes the other collection.
         assert_eq!(notes(&w).await?, ["Hello"]);
-        assert!(item(&w, 12, "Forged").await.is_err());
-        assert!(items(&w).await.unwrap_or_default().is_empty());
+        assert!(
+            item(&w, 12, "Forged").await.is_err(),
+            "a scoped writer does not write another collection"
+        );
+        assert!(
+            items(&w).await.unwrap_or_default().is_empty(),
+            "a scoped writer does not read another collection"
+        );
         assert!(snap::observe(w.session.identities()).await.is_err());
         Ok(())
     };
@@ -255,7 +267,6 @@ async fn profiles_bound_reads_and_writes_across_renewal() -> Result<(), Failure>
     synced(&w).await?;
     assert_eq!(notes(&a).await?, ["From writer", "Hello"]);
     assert_eq!(items(&a).await?, ["Milk"]);
-    // The issuer lists each identity with the profile it enrolled as.
     let identities = snap::ok(a.session.identities()).await;
     let mut profiles: Vec<Value> = identities["identities"]
         .as_array()
@@ -265,7 +276,11 @@ async fn profiles_bound_reads_and_writes_across_renewal() -> Result<(), Failure>
         .map(|record| record["profile"].clone())
         .collect();
     profiles.sort_by_key(Value::to_string);
-    assert_eq!(profiles, [reader, writer]);
+    assert_eq!(
+        profiles,
+        [reader, writer],
+        "the issuer lists each identity with the profile it enrolled as"
+    );
     for device in [&a, &r, &w] {
         device.close().await;
     }
@@ -284,29 +299,34 @@ async fn an_issuer_device_enrolls_and_renews_while_the_creator_is_closed() -> Re
         "i",
         &a.invite_as(json!({"kind": "issuer"})).await,
     )?;
-    // Only the explicit syncs below exchange: a failed background attempt
-    // would put the peer in backoff, which an explicit sync skips.
     manual(&[&a, &i]).await;
     item(&a, 1, "Milk").await?;
     synced(&i).await?;
     let (creator, issuer) = (session(&a).await, session(&i).await);
     assert_eq!(issuer["issuer"], json!(true));
     assert_eq!(issuer["profile"], json!({"kind": "issuer"}));
-    // Each device signs with its own identity through its chain: the
-    // root is the publisher, and no device stores it.
     assert_ne!(issuer["node"], creator["node"]);
-    assert_ne!(issuer["principal"], creator["principal"]);
+    assert_ne!(
+        issuer["principal"], creator["principal"],
+        "each device signs with its own identity through its chain"
+    );
     let (owner, paired) = (identity(root, "a")?, identity(root, "i")?);
-    assert_eq!(paired["publisher"], owner["publisher"]);
+    assert_eq!(
+        paired["publisher"], owner["publisher"],
+        "the root is the publisher of every chain"
+    );
     assert_ne!(owner["identity"], owner["publisher"]);
     assert_ne!(paired["identity"], paired["publisher"]);
-    assert_eq!(secret(root, "a", "publisher")?, None);
+    assert_eq!(
+        secret(root, "a", "publisher")?,
+        None,
+        "no device stores the root"
+    );
     assert_eq!(secret(root, "i", "identity")?, None);
     assert_eq!(secret(root, "a", "identity")?, None);
     for name in ["publisher", "user"] {
         assert_eq!(secret(root, "i", name)?, None);
     }
-    // Revoking another issuer is the recovery path of `tests/issuers.rs`.
     let scope = a.database.scope();
     a.close().await;
 
@@ -371,10 +391,10 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     )
     .await;
     assert_eq!(revoked["revocations"]["statements"], 1);
-    // Only the collections the revoked reader could read get a new epoch.
     assert_eq!(
         identity(root, "a")?["keys"],
-        json!({"issuer_registry": [1], "items": [1, 2], "notes": [1]})
+        json!({"issuer_registry": [1], "items": [1, 2], "notes": [1]}),
+        "only the collections the revoked reader could read get a new epoch"
     );
     assert!(identity(root, "a")?["authority"]["rotation"].is_null());
     item(&a, 2, "After").await?;
@@ -390,12 +410,18 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     item(&b, 3, "Rotated").await?;
     synced(&b).await?;
     assert_eq!(items(&a).await?, ["After", "Before", "Rotated"]);
-    // A writer of another collection learns the policy, not the new key.
     synced(&w).await?;
-    assert_eq!(session(&w).await["revocations"]["statements"], 1);
-    assert_eq!(identity(root, "w")?["keys"], json!({"notes": [1]}));
+    assert_eq!(
+        session(&w).await["revocations"]["statements"],
+        1,
+        "a writer of another collection learns the revocation"
+    );
+    assert_eq!(
+        identity(root, "w")?["keys"],
+        json!({"notes": [1]}),
+        "a writer of another collection does not get the new key"
+    );
 
-    // The revoked reader gets neither the new key nor new rows.
     assert!(common::exchange_failed(&c.sync().await));
     assert!(
         snap::observe(async {
@@ -406,14 +432,19 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
         .is_err()
     );
     assert!(!snap::ok(c.session.status()).await["authority"]["verified_revocation"].is_null());
-    assert_eq!(secret(root, "c", "reader.items.2")?, None);
+    assert_eq!(
+        secret(root, "c", "reader.items.2")?,
+        None,
+        "the revoked reader gets no new key"
+    );
     assert!(secrets(root, "c")?.iter().all(|name| !name.ends_with(".2")));
     assert_eq!(identity(root, "c")?["keys"], json!({"items": [1]}));
     assert!(
         !items(&c)
             .await
             .unwrap_or_default()
-            .contains(&"After".into())
+            .contains(&"After".into()),
+        "the revoked reader gets no new rows"
     );
     for device in [&a, &b, &c, &w] {
         device.close().await;
@@ -424,7 +455,6 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
         !snap::ok(reopened.session.status()).await["authority"]["verified_revocation"].is_null()
     );
     reopened.close().await;
-    // A local file cannot forge a publisher's revocation notice.
     let notice = root.join("c/revoked.json");
     let original = std::fs::read(&notice)?;
     let mut tampered: Value = serde_json::from_slice(&original)?;
@@ -432,19 +462,28 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     tampered["statement"]["statement"]["time"] = json!(999);
     std::fs::write(&notice, serde_json::to_vec(&tampered)?)?;
     let reopened = reopen(root, &hub, "c")?;
-    assert!(snap::observe(reopened.session.status()).await.is_err());
+    assert!(
+        snap::observe(reopened.session.status()).await.is_err(),
+        "a local file cannot forge a publisher's revocation notice"
+    );
     reopened.close().await;
     std::fs::write(&notice, original)?;
 
-    // A lost key epoch is an error at open, and is not made again.
     let before = secrets(root, "b")?;
     let role = before
         .iter()
         .find(|name| name.contains(".reader.items.2."))
         .ok_or("epoch 2 key")?;
     std::fs::remove_file(root.join("b/secrets").join(role))?;
-    assert!(reopen(root, &hub, "b").is_err());
-    assert_eq!(secrets(root, "b")?.len(), before.len() - 1);
+    assert!(
+        reopen(root, &hub, "b").is_err(),
+        "a lost key epoch is an error at open"
+    );
+    assert_eq!(
+        secrets(root, "b")?.len(),
+        before.len() - 1,
+        "a lost key epoch is not made again"
+    );
     Ok(())
 }
 
@@ -470,8 +509,6 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     for device in [&a, &b, &c] {
         device.close().await;
     }
-    // The intent and the record it acts on were saved and the new key
-    // made; then the device stopped.
     let path = root.join("a/identity.json");
     let mut saved: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
     let manifest = SignedManifest::from_bytes(
@@ -513,11 +550,11 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     });
     std::fs::write(&path, saved.to_string())?;
     let installation = saved["installation"].as_str().ok_or("installation")?;
-    let made = [7; 32];
+    let made_before_the_device_stopped = [7; 32];
     std::fs::write(
         root.join("a/secrets")
             .join(format!("rocky.{installation}.rotation.reader.items.2")),
-        made,
+        made_before_the_device_stopped,
     )?;
 
     for round in 0..2 {
@@ -542,7 +579,6 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
                 .any(|record| record["identity"] == c_identity && record["revoked"] == true),
             "{listed}"
         );
-        // The statement signed at completion is the one the intent named.
         let authority: rocky_sdk::credentials::RevocationSet =
             serde_json::from_value(saved["revocations"].clone())?;
         assert_eq!(
@@ -550,9 +586,14 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
                 .get(&statement_id)
                 .ok_or("completed statement")?
                 .statement,
-            statement
+            statement,
+            "the statement signed at completion is the one the intent named"
         );
-        assert_eq!(secret(root, "a", "reader.items.2")?, Some(made));
+        assert_eq!(
+            secret(root, "a", "reader.items.2")?,
+            Some(made_before_the_device_stopped),
+            "completion keeps the key made before the device stopped"
+        );
         if round == 0 {
             item(&a, 2, "After").await?;
         }
@@ -562,7 +603,10 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     let b = reopen(root, &hub, "b")?;
     synced(&b).await?;
     assert_eq!(session(&b).await["revocations"]["statements"], 1);
-    assert_eq!(secret(root, "b", "reader.items.2")?, Some(made));
+    assert_eq!(
+        secret(root, "b", "reader.items.2")?,
+        Some(made_before_the_device_stopped)
+    );
     assert_eq!(items(&b).await?, ["After", "Before"]);
     let c = reopen(root, &hub, "c")?;
     assert!(common::exchange_failed(&c.sync().await));
@@ -580,17 +624,15 @@ fn issued(
     user: rocky_sdk::credentials::PublicKey,
     grants_of: &str,
 ) -> Result<Credentials, Failure> {
-    // The creating device's trusted identity issues, below its grant.
     let creator = identity(root, "a")?;
     let node = PrivateKey::from_bytes(&secret(root, "a", "node")?.ok_or("node")?);
     let held: CredentialChain = serde_json::from_value(creator["credentials"].clone())?;
     let issuer = held.capabilities();
     let revocations: rocky_sdk::credentials::RevocationSet =
         serde_json::from_value(creator["revocations"].clone())?;
-    // The grants of an enrolled device's profile, without its keys.
     let model: CredentialChain =
         serde_json::from_value(identity(root, grants_of)?["credentials"].clone())?;
-    let grants = model
+    let grants_without_keys = model
         .0
         .iter()
         .rev()
@@ -605,7 +647,7 @@ fn issued(
         .as_secs();
     let capability = authority.issue(
         user,
-        grants,
+        grants_without_keys,
         rocky_credentials::Validity {
             issued_at: now,
             lifetime: std::time::Duration::from_secs(3600),
@@ -628,7 +670,6 @@ async fn supplied_credentials_install_without_an_enrollment() -> Result<(), Fail
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let a = create(root, &hub, "a")?;
-    // A writer of `items` whose grants the outside issuer copies.
     let model = join(root, &hub, "model", &a.invite().await)?;
     model.close().await;
     item(&a, 1, "Milk").await?;
@@ -668,8 +709,6 @@ async fn supplied_credentials_install_without_an_enrollment() -> Result<(), Fail
         })
     };
     let items_only = vec![("items".to_owned(), 1, items_key)];
-    // A chain for another device, a key the grants do not read and a
-    // missing reader key are all refused before anything is installed.
     let stranger = PrivateKey::new().public_key();
     for refused in [
         supplied(stranger, items_only.clone())?,
@@ -679,8 +718,14 @@ async fn supplied_credentials_install_without_an_enrollment() -> Result<(), Fail
         )?,
         supplied(keys.identity, Vec::new())?,
     ] {
-        assert!(Database::install(open(&directory, &hub, "s"), refused).is_err());
-        assert!(!directory.join("identity.json").exists());
+        assert!(
+            Database::install(open(&directory, &hub, "s"), refused).is_err(),
+            "a chain for another device, an unreadable key or a missing reader key is refused"
+        );
+        assert!(
+            !directory.join("identity.json").exists(),
+            "a refused install stores nothing"
+        );
     }
     let s = Device::new(Database::install(
         open(&directory, &hub, "s"),
@@ -696,16 +741,18 @@ async fn supplied_credentials_install_without_an_enrollment() -> Result<(), Fail
     );
     assert_eq!(secret(root, "s", "reader.notes")?, None);
 
-    // The issuer serves only devices it knows or was told about.
     a.add_peer(&s.contact().await)
         .await
         .map_err(|e| e.to_string())?;
     s.add(3, "Eggs").await;
     synced(&s).await?;
     assert_eq!(items(&s).await?, ["Eggs", "Milk"]);
-    assert_eq!(items(&a).await?, ["Eggs", "Milk"]);
+    assert_eq!(
+        items(&a).await?,
+        ["Eggs", "Milk"],
+        "the issuer serves a device it was told about"
+    );
     assert!(notes(&s).await.unwrap_or_default().is_empty());
-    // Any issuer renews it with the grants it was supplied.
     snap::ok(async {
         s.session.renew().await?;
         s.session.info().await
@@ -713,10 +760,13 @@ async fn supplied_credentials_install_without_an_enrollment() -> Result<(), Fail
     .await;
     assert_eq!(
         session(&s).await["profile"],
-        json!({"kind": "writer", "scopes": ["items"]})
+        json!({"kind": "writer", "scopes": ["items"]}),
+        "any issuer renews supplied credentials with their grants"
     );
-    // Installed once: the directory now holds a domain.
-    assert!(common::node_keys(&directory, None).is_err());
+    assert!(
+        common::node_keys(&directory, None).is_err(),
+        "credentials install once: the directory now holds a domain"
+    );
     for device in [&a, &s] {
         device.close().await;
     }

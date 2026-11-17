@@ -274,6 +274,9 @@ pub const MAX_SNAPSHOT_ROWS: usize = 1024;
 pub const MAX_SNAPSHOT_BYTES: usize = 1024 * 1024;
 /// Stored rows fetched per query while filling a page.
 const PAGE_CHUNK: usize = 256;
+/// The commit counter on open: ahead of the durable mark, because a reopened
+/// file may hold commits a crashed process never flushed.
+const OPENED_COMMIT: u64 = 1;
 #[derive(Clone, Debug)]
 pub struct CiphertextPage {
     pub frames: Vec<EncryptedFrame>,
@@ -695,8 +698,6 @@ impl Flusher {
             let _ = entered.send(());
             let _ = resume.recv();
         }
-        // Without a WAL every commit is in the database file, which
-        // checkpoints flush.
         rocky_platform::fs::sync(&self.wal).map_err(Error::Io)?;
         self.durable.fetch_max(commit, Ordering::AcqRel);
         #[cfg(test)]
@@ -729,7 +730,6 @@ async fn flush_guard<'a, A: RowApplication>(
     inner: Guard<tokio::sync::MutexGuard<'a, Inner<A>>>,
     owner: &'a ReplicaLock<Inner<A>>,
 ) -> Result<Guard<tokio::sync::MutexGuard<'a, Inner<A>>>, Error> {
-    // Authority only grows, so one check covers every reacquisition.
     let authority = inner.authority;
     let inner = flushed(inner, owner).await?;
     if inner.authority != authority {
@@ -955,7 +955,6 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
     }
     positions::check_schema(&conn).await?;
     compaction::check_incremental_schema(&conn).await?;
-    // Admission evidence is never an empty journal by absence.
     if rows(&conn, "SELECT 1 FROM secure_admission_context WHERE id=1")
         .await?
         .is_empty()
@@ -1099,7 +1098,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         {
             return Err(denied("compiled application differs from the domain root"));
         }
-        // The genesis judges every node certificate this replica holds.
         config
             .revocations
             .pin(&config.manifest, config.publisher)
@@ -1228,8 +1226,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             frames: watch::channel(()).0,
             imported: watch::channel(0).0,
             wal,
-            // A reopened file may hold commits a crashed process never flushed.
-            commit: 1,
+            commit: OPENED_COMMIT,
             flusher: flusher.clone(),
             changes: 0,
             wal_limits: (group::WAL_CHECKPOINT_BYTES, group::WAL_LIMIT_BYTES),
@@ -1296,7 +1293,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             #[cfg(test)]
             busy_hook: None,
         };
-        // Schema, metadata and later additive tables install in one transaction.
         let supplied_revocations = inner.config.revocations.clone();
         transaction!(&mut inner, |inner| {
             let tables = rows(
@@ -1579,7 +1575,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await?
         {
             (group::Done::Author(frame), _) => Ok(frame),
-            // The handle did commit once; its frame is no longer retained.
             (group::Done::Pruned(_), _) => Err(denied(
                 "mutation handle was committed before the pruned prefix",
             )),
@@ -1702,8 +1697,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 results[index] = Some(Err(error));
                 continue;
             }
-            // Covered history of a scope proven empty at a seal is a conflict;
-            // an early exit, `receive_step` decides under the storing lock.
             let contradicted = match frame.operation_ref() {
                 Ok(operation) => {
                     self.inner
@@ -1778,9 +1771,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn maintain(&self) -> bool {
         loop {
             let mut inner = self.inner.lock(Class::Background).await;
-            // Our own cleanup commits may continue. Another writer must first
-            // become durable before maintenance can use its current state.
-            if inner.flusher.durable() < inner.commit && inner.maintenance.commit != inner.commit {
+            let foreign_commit_not_durable =
+                inner.flusher.durable() < inner.commit && inner.maintenance.commit != inner.commit;
+            if foreign_commit_not_durable {
                 return false;
             }
             let Some(scope) = inner.deferred_maintenance.first().copied() else {
@@ -1955,8 +1948,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         let mut revoking = None;
         let mut others = Vec::new();
-        // A reset ends this node only while no reset following it keeps the
-        // node: judge resets against everything held and sent.
         let mut all = self.revocations().await;
         for signed in &statements {
             if signed.statement.reset().is_some() {
@@ -1971,7 +1962,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             single
                 .verify_in(own.database_context(publisher).map_err(credential)?)
                 .map_err(credential)?;
-            // Every reset that ends this node, not only the first.
             let ends_own = if signed.statement.reset().is_some() {
                 let id = signed.id().map_err(credential)?;
                 all.ending_resets(&node).contains(&id)
@@ -2201,7 +2191,6 @@ impl<A: RowApplication> Inner<A> {
         })
     }
     fn validate_keys(&self, time: u64) -> Result<(), Error> {
-        // `can_read_key` for every key at once.
         let readable: BTreeSet<_> = self
             .local_grants(time)?
             .iter()
@@ -2263,8 +2252,6 @@ impl<A: RowApplication> Inner<A> {
         {
             return Err(denied("held source schema is not installed"));
         }
-        // Only bytes are shared by digest: the chain is verified here, for
-        // every frame, against the current revocations.
         self.verify_header_authority(&operation.header, frame.chain()?.credentials(), time)
     }
     /// The write authority a frame was admitted with: its chain at its own
@@ -2420,7 +2407,6 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         let Some(row) = result.next().await? else {
-            // A pruned operation is known as applied while its stub exists.
             return match self.stub(id).await? {
                 Some(_) => Ok(ReceiveStatus::Applied),
                 None => Err(denied("missing stored operation")),
@@ -2468,7 +2454,6 @@ impl<A: RowApplication> Inner<A> {
         if stored != input {
             return Err(Error::Conflict);
         }
-        // A handle outlives its pruned operation inside `RetentionLimits::handles`.
         Ok(Some(self.frame(hash).await?.ok_or(hash)))
     }
     /// Backpressure once retained history reaches the hard bound; automatic
@@ -2563,8 +2548,6 @@ impl<A: RowApplication> Inner<A> {
             .map_err(credential)?;
         self.opening_revocations = (merged != stored).then_some(merged);
         self.invalidate_context();
-        // Verify the stored projection and L before applying the new exclusion
-        // through the ordinary atomic revocation path.
         self.config.revocations = stored;
         *self
             .local
@@ -2580,7 +2563,10 @@ impl<A: RowApplication> Inner<A> {
 
 /// Commits run at `synchronous=NORMAL`; `Inner::flush` makes them durable
 /// before anything leaves the device. Flushes and checkpoints use the full
-/// device flush. Verified at open.
+/// device flush. Foreign keys are enforced for typed tables; Rocky's own
+/// tables declare none. Checkpoints run between groups and a busy file is
+/// retried by the replica, not by SQLite, so automatic checkpoints and the
+/// busy timeout are off. Verified at open.
 async fn configure(conn: &ScopedConnection) -> Result<(), Error> {
     let durability = [
         (
@@ -2610,12 +2596,10 @@ async fn configure(conn: &ScopedConnection) -> Result<(), Error> {
             return Err(Error::Durability(format!("{read} is not {expected:?}")));
         }
     }
-    // Typed tables keep real foreign keys; Rocky's own tables declare none.
     rows(conn, "PRAGMA foreign_keys=ON").await?;
     if rows(conn, "PRAGMA foreign_keys").await? != vec![vec![SqlValue::Integer(1)]] {
         return Err(Error::Incompatible("foreign keys are not enforced".into()));
     }
-    // Checkpoints run between groups; a busy file is retried by the replica, not by SQLite.
     for (set, read) in [
         ("PRAGMA wal_autocheckpoint=0", "PRAGMA wal_autocheckpoint"),
         ("PRAGMA busy_timeout=0", "PRAGMA busy_timeout"),
@@ -2680,8 +2664,6 @@ impl<A: RowApplication> Inner<A> {
             "UPDATE secure_metadata SET revocations=? WHERE id=1"
         };
         let bytes = merged.to_bytes().map_err(credential)?;
-        // Seals and moves of a revoked signer leave resolution with the
-        // set, and the followed bookmark moves in the same commit.
         let old_graphs = self.graphs.clone();
         let old_tip = self.workspace.tip;
         let old_author = self.node_author.clone();
@@ -2690,8 +2672,6 @@ impl<A: RowApplication> Inner<A> {
         let old_revocations = self.config.revocations.clone();
         let result = transaction!(self, |inner| {
             inner.invalidate_context();
-            // Checks inside the commit, such as installing a pulled state,
-            // see the merged set.
             inner.config.revocations = merged.clone();
             inner.graphs = old_graphs.clone();
             inner.workspace.tip = old_tip;

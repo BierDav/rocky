@@ -174,6 +174,7 @@ struct Link {
     transport: Arc<dyn Transport>,
     owned: bool,
     stage: watch::Sender<Stage>,
+    /// The accept loop, which holds the transport's inbound queue until it ends.
     server: std::sync::Mutex<Option<rocky_platform::task::JoinHandle<()>>>,
     synchronizer: std::sync::Mutex<Option<rocky_platform::task::JoinHandle<()>>>,
     publisher: std::sync::Mutex<Option<rocky_platform::task::JoinHandle<()>>>,
@@ -216,8 +217,9 @@ struct PeerRetry {
     pending: RepairWork,
     link: bool,
     link_retry: crate::scheduling::Retry,
-    // Retry resets and newly hinted work invalidate different completions.
+    /// Bumped when the retry resets, invalidating completions begun before.
     generation: u64,
+    /// Bumped when new work is hinted, invalidating completions that missed it.
     work_generation: u64,
 }
 struct SyncFailure {
@@ -729,7 +731,6 @@ impl Node {
         self.synced(SyncStatus::new(SyncState::Idle));
         *self.current.lock().unwrap_or_else(PoisonError::into_inner) = None;
         drop(slot);
-        // The accept loop holds the transport's inbound queue until it ends.
         let server = link
             .server
             .lock()
@@ -1073,7 +1074,8 @@ impl Node {
     }
 
     /// Replaces this device's credentials with supplied ones and teaches
-    /// the replica, as a renewal does.
+    /// the replica, as a renewal does. New grants may make more members of
+    /// a held group readable.
     async fn install_supplied(&self, supplied: crate::Supplied) -> Result<(), Failure> {
         let current = self.settings.lock().await.clone();
         let renewed = current
@@ -1098,7 +1100,6 @@ impl Node {
             expires: (settings.expires()) as u64,
             keys: fresh,
         });
-        // New grants may make more members of a held group readable.
         self.hold_keys(&settings, &settings.partitions(&self.domain())?)
             .await?;
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? =
@@ -1119,6 +1120,8 @@ impl Node {
             .map(|link| link.transport.kind().to_owned())
             .unwrap_or_default()
     }
+    /// Sets and reports a scope's retention. A base forms only at a seal,
+    /// through `compact`; maintenance here prunes behind it.
     async fn retention(
         &self,
         collection: &str,
@@ -1135,7 +1138,6 @@ impl Node {
         if let Some(policy) = policy {
             self.replica.set_retention_policy(scope, policy).await?;
         }
-        // A base forms only at a seal, through `compact`; this prunes behind it.
         if maintain {
             self.replica.prune(scope).await?;
         }
@@ -1219,9 +1221,8 @@ impl Node {
         let mut control = self.sync_control.subscribe();
         loop {
             let mut transport = self.current().and_then(|service| service.changes.clone());
-            // Read before the status and anchored to that instant: an expiry
-            // while the status is computed must still wake this wait.
-            let (time, read) = (self.status_time()?, rocky_platform::time::Instant::now());
+            let (time_before_status, instant_before_status) =
+                (self.status_time()?, rocky_platform::time::Instant::now());
             let status = self.observed_status().await?;
             if status.token != after {
                 return Ok(status);
@@ -1248,10 +1249,10 @@ impl Node {
                 }
                 _ = async {
                     let settings = self.settings.lock().await;
-                    let expires = std::iter::once(settings.expires()).chain(settings.revocations.statements().map(|notice| notice.expiry_day().saturating_mul(rocky_credentials::DAY))).chain(self.health_deadline(time)).chain(self.stale_deadline(time)).filter(|expires| *expires > time && *expires < rocky_credentials::NEVER / 2).min();
+                    let expires = std::iter::once(settings.expires()).chain(settings.revocations.statements().map(|notice| notice.expiry_day().saturating_mul(rocky_credentials::DAY))).chain(self.health_deadline(time_before_status)).chain(self.stale_deadline(time_before_status)).filter(|expires| *expires > time_before_status && *expires < rocky_credentials::NEVER / 2).min();
                     drop(settings);
                     if let Some(expires) = expires {
-                        rocky_platform::time::sleep_until(read + Duration::from_secs(expires - time)).await;
+                        rocky_platform::time::sleep_until(instant_before_status + Duration::from_secs(expires - time_before_status)).await;
                     } else {
                         std::future::pending().await
                     }
@@ -1433,12 +1434,11 @@ impl Node {
             })
             .collect();
         for identity in &lost {
-            // Named ones are revoked with a cut, which keeps their history.
-            let revoked = {
+            let revoked_with_cut = {
                 let settings = self.settings.lock().await;
                 settings.revocations.revokes_trusted(identity) || settings.tombstoned(identity)
             };
-            if revoked {
+            if revoked_with_cut {
                 continue;
             }
             let target = crate::enrollment::Revoke::TrustedIdentity(
@@ -1535,6 +1535,11 @@ impl Node {
         cut.sort_by_key(|cut| (cut.identity, cut.lane));
         Ok((cut, dropped))
     }
+    /// Revokes `target`, rotating keys before completing the revocation so
+    /// the statement refuses the device even if completion fails. Members
+    /// then refuse the revoked author's frames and no longer open the earlier
+    /// epoch's; a checkpoint at a later seal carries those rows. Stage-branch
+    /// heads a full cut left out are past the cut with all they signed.
     async fn revoke_with(
         &self,
         target: crate::enrollment::Revoke,
@@ -1548,8 +1553,6 @@ impl Node {
         } else {
             Default::default()
         };
-        // Stage-branch heads a full cut left out: what they signed past
-        // the live chain is past the cut.
         let dropped = dropped
             .iter()
             .map(|(lane, head)| crate::DroppedStage {
@@ -1606,12 +1609,7 @@ impl Node {
         let status = settings.revocation_status()?;
         drop(settings);
         self.forget_readers().await;
-        // Rotated first: the statement refuses the device even if this fails.
         Box::pin(self.complete_revocation()).await?;
-        // Members no longer accept the revoked author's frames, nor open
-        // the earlier epoch's; a checkpoint at a seal after them carries
-        // those rows instead.
-
         if let Err(error) = self.push_revocations().await {
             self.activity
                 .record(crate::ActivityKind::RevocationsUnpushed {
@@ -1635,7 +1633,8 @@ impl Node {
     }
     /// Teaches the replica what the identity already records: the
     /// revocations, this device's chain and new key epochs, earlier ones
-    /// first.
+    /// first. The line node is certified again from the renewed identity
+    /// links, under the settings the caller holds.
     pub(super) async fn apply(
         &self,
         settings: &mut Shared<Settings>,
@@ -1651,8 +1650,6 @@ impl Node {
         {
             client.certify(certificate.clone());
         }
-        // A line node is certified again from the renewed identity links,
-        // under the settings the caller holds.
         if let Err(error) = self.refresh_line_node(settings).await {
             self.activity
                 .record_changed(crate::ActivityKind::LineNodeFailed {
@@ -1675,8 +1672,11 @@ impl Node {
     }
     /// Renews this device's credentials: from its issuers on a member,
     /// self-signed on an issuer, which asks the other issuers first when
-    /// `learn` is set. New reader keys arrive with the renewal. Returns
-    /// whether anything changed.
+    /// `learn` is set. New reader keys arrive with the renewal; a table
+    /// granted like a held one is projected, and held where its group
+    /// partitions are. A member restores newly revoked authors by
+    /// checkpoint, however it learned of them. Returns whether anything
+    /// changed.
     async fn renew(
         &self,
         transport: Option<&dyn Transport>,
@@ -1721,10 +1721,10 @@ impl Node {
         }
         self.learned.store(false, Ordering::SeqCst);
         let mut settings = self.settings.lock().await;
-        // A member restores newly revoked authors by checkpoint, however it
-        // learned of them.
-        if (!epochs_only || !settings.issuer()) && settings.lacks(&renewed.revocations)? {
-            rocky_credentials::write_private(&self.path.with_file_name("bootstrap.json"), b"true")?;
+        let restores_revoked_authors =
+            (!epochs_only || !settings.issuer()) && settings.lacks(&renewed.revocations)?;
+        if restores_revoked_authors {
+            self.request_checkpoint_import()?;
         }
         if epochs_only {
             renewed.chain = settings.credentials.clone();
@@ -1740,9 +1740,8 @@ impl Node {
             self.apply(&mut settings, keys).await?;
             self.hold_keys(&settings, &settings.partitions(&self.domain())?)
                 .await?;
-            // A table granted like a held one is projected, and held where
-            // its group partitions are, once granted.
-            if settings.granted(&self.domain()).len() > readable {
+            let grants_widened = settings.granted(&self.domain()).len() > readable;
+            if grants_widened {
                 let domain = self.domain();
                 let mut widened = (**settings).clone();
                 crate::database::attach(
@@ -1783,7 +1782,6 @@ impl Node {
         if self.settings.lock().await.issuer() {
             Box::pin(self.complete_revocation()).await?;
         }
-        // An issuer's own record names its current capability.
         if !epochs_only && let Err(error) = Box::pin(self.record_self()).await {
             self.activity.record(crate::ActivityKind::RegistryFailed {
                 error: (error.to_string()).to_owned(),
@@ -1830,7 +1828,8 @@ impl Node {
         }
     }
 
-    /// Records a peer's reachability when it changed and what a sync moved.
+    /// Records a peer's reachability when it changed, not on every sync,
+    /// and what a sync moved.
     fn record_reach(
         &self,
         peer: PublicKey,
@@ -1859,8 +1858,8 @@ impl Node {
                             peer: (peer).to_owned(),
                         });
                 }
-                // Recorded when the set changes, not on every sync.
-                if transfer.refused != refused_before {
+                let refusals_changed = transfer.refused != refused_before;
+                if refusals_changed {
                     let scopes = transfer
                         .refused
                         .iter()
@@ -2073,8 +2072,8 @@ impl Node {
                 break;
             }
             control.borrow_and_update();
-            // Another watch may have won the select while explicit work was queued.
-            if events.has_changed().unwrap_or(false) {
+            let missed_queued_work = events.has_changed().unwrap_or(false);
+            if missed_queued_work {
                 self.pending_sync();
                 retry_only = false;
             }
@@ -2169,6 +2168,20 @@ impl Node {
             .await
             .map(|(_, status, retry)| (status, retry))
     }
+    /// One sync pass. Seals and finality records come first, so they reach
+    /// peers in this pass's graph exchange. Adopting a generation renews
+    /// nothing: a table it granted like a held one joins the grants at a
+    /// renewal asked for once per generation. Learned statements, or frames
+    /// waiting for an unheld key epoch, renew for the rotated keys before
+    /// rows move; without a renewal rows still move and the keys wait.
+    /// Following another tip retries refused links at once, and a pass the
+    /// app asked for skips every backoff. Coverage by other peers never
+    /// replaces the exchange owed to the inviter, nor, after a renewal, the
+    /// pass under the new authority. Old-authority sessions finish before
+    /// the one renewal, and even their successes are judged again against
+    /// the learned revocations. A failure renewal cannot repair, see
+    /// [`renewal_cannot_repair`], leaves other links alone. A pass that fails
+    /// after importing checkpoint pages goes on soon.
     async fn run_sync_pass(
         &self,
         transport: &dyn Transport,
@@ -2177,9 +2190,7 @@ impl Node {
         report: &std::sync::Mutex<Vec<crate::PeerReconciliation>>,
         first_attempt_id: u64,
     ) -> Result<(SyncStatus, bool), Failure> {
-        if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
-            return Err(Box::new(crate::enrollment::Revoked(statement)));
-        }
+        self.ensure_not_revoked().await?;
         if !self.online.load(Ordering::SeqCst) {
             return Ok((SyncStatus::new(SyncState::NetworkingDisabled), false));
         }
@@ -2218,8 +2229,6 @@ impl Node {
         }
         let _activity = SyncActivity(self.sync_state.clone());
         self.sync_state.send_replace(SyncActivityState::Syncing);
-        // Finality records and member seals reach peers in this pass's
-        // graph exchange.
         let routine = self.seal_routinely().await;
         self.finalize_seals().await;
         let members = self.publish_for_members().await;
@@ -2253,17 +2262,14 @@ impl Node {
         }
         let settings = self.settings.lock().await.clone();
         let member = !settings.issuer();
-        // Adopting a generation renews nothing. A table it granted like one
-        // this member holds joins its grants at a renewal, asked for once
-        // per generation while an issuer is reachable.
-        let widen = member
+        let renew_to_widen_grants = member
             && settings.profile_widens(&self.domain())?
             && self
                 .widened
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .insert(HEXLOWER.encode(&settings.domain()?.manifest().hash()));
-        if widen || settings.expires() < now()?.saturating_add(settings.ttl / 2) {
+        if renew_to_widen_grants || settings.expires() < now()?.saturating_add(settings.ttl / 2) {
             let renewed = self.renew(Some(transport), false, None, false).await;
             if let Err(error) = &renewed {
                 self.activity.record(crate::ActivityKind::RenewalFailed {
@@ -2277,29 +2283,20 @@ impl Node {
             }
         }
         let renewable = member || !settings.issuers.is_empty();
-        // A served session brought statements, or frames wait for a key
-        // epoch this device lacks, as after a restart that forgot the
-        // statements were new: renew for the rotated keys before moving rows.
-        if renewable && (self.learned.load(Ordering::SeqCst) || self.awaits_key_epoch().await) {
+        if renewable && self.awaits_rotated_keys().await {
             let _ = self.renew(Some(transport), true, None, true).await;
-            if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
-                return Err(Box::new(crate::enrollment::Revoked(statement)));
-            }
+            self.ensure_not_revoked().await?;
         }
-        // Links refused while peers followed other tips are retried at once
-        // after this device follows another tip, however it moved.
         let tip = self.replica.followed_tip().await;
-        if self
+        let follows_another_tip = self
             .backoff_tip
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .replace(tip)
-            .is_some_and(|earlier| earlier != tip)
-        {
+            .is_some_and(|earlier| earlier != tip);
+        if follows_another_tip {
             self.reset_retry(None);
         }
-        // A sync the app asked for tries every peer now; only automatic
-        // passes wait out a peer's backoff.
         if !automatic {
             self.pending_sync();
         }
@@ -2374,7 +2371,6 @@ impl Node {
             .into_iter()
             .filter(|scope| !self.domain().partitioned_table(scope))
             .collect();
-        // A pass that failed after importing checkpoint pages goes on soon.
         let imports = self.replica.observe_imports().await;
         let imported = *imports.borrow();
         let mut covered = std::collections::BTreeSet::new();
@@ -2397,8 +2393,6 @@ impl Node {
                     break;
                 }
                 if !needed.is_empty() && needed.iter().all(|scope| covered.contains(scope)) {
-                    // Coverage by others never stands in for the one
-                    // exchange a joined device owes its inviter.
                     let inviter = self.awaited_inviter();
                     let mut choices = self.choices.lock().unwrap_or_else(PoisonError::into_inner);
                     let mut owed = Vec::new();
@@ -2479,25 +2473,16 @@ impl Node {
                     results.push((peer, contact, generation, result));
                 }
             }
-            // A peer told this device of its own revocation.
-            if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
-                return Err(Box::new(crate::enrollment::Revoked(statement)));
-            }
+            self.ensure_not_revoked().await?;
             let failed = |result: &Result<(bool, sync::Transfer), Failure>| {
                 result
                     .as_ref()
                     .is_err_and(|error| !error.is::<ServiceError>())
             };
-            // Renewing cannot repair a broken or stalled stream, or a replaced
-            // checkpoint, and would cancel other active links.
             let renewal_peer = results
                 .iter()
                 .filter(|(_, _, _, result)| {
-                    failed(result)
-                        && !result.as_ref().is_err_and(|error| {
-                            matches!(error.downcast_ref::<Error>(), Some(Error::Io(_)))
-                                || matches!(error.downcast_ref::<Error>(), Some(Error::Rejected(reason)) if reason.starts_with("link ") || reason.ends_with(" timeout") || reason.starts_with("checkpoint superseded"))
-                        })
+                    failed(result) && !result.as_ref().is_err_and(renewal_cannot_repair)
                 })
                 .min_by_key(|(peer, _, _, _)| !settings.issuers.contains(peer))
                 .map(|(peer, _, _, _)| *peer);
@@ -2505,17 +2490,11 @@ impl Node {
                 && renewable
                 && let Some(peer) = renewal_peer
             {
-                // Finish old-authority sessions before renewing once. Even a successful
-                // old handshake must be checked again against the learned revocations.
                 let renewed = self
                     .renew(Some(transport), true, Some(peer), false)
                     .await
                     .is_ok();
-                if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
-                    return Err(Box::new(crate::enrollment::Revoked(statement)));
-                }
-                // Without a renewal, a sync that stopped for learned
-                // statements still moves its rows; new keys wait.
+                self.ensure_not_revoked().await?;
                 let learned = |result: &Result<(bool, sync::Transfer), Failure>| {
                     result
                         .as_ref()
@@ -2531,7 +2510,6 @@ impl Node {
                         .map(|(peer, _)| peer)
                         .collect();
                     results.retain(|(peer, _, _, _)| admitted.contains(peer));
-                    // Coverage from the previous authority cannot skip its replacement pass.
                     covered.clear();
                     let again = |result: &Result<_, Failure>| match renewed {
                         true => result.is_ok() || failed(result),
@@ -2657,7 +2635,8 @@ impl Node {
     /// Keeps the statements the replica learned in sessions in this
     /// identity. One that revokes this device, which the replica does not
     /// keep, is recorded as after a refused renewal; rows of a newly revoked
-    /// author arrive by checkpoint.
+    /// author arrive by checkpoint, which membership evidence alone does not
+    /// require.
     async fn absorb_revocations(&self, outcome: Option<&Failure>) -> Result<(), Failure> {
         let rotates_locally = {
             let settings = self.settings.lock().await;
@@ -2682,12 +2661,8 @@ impl Node {
                 draft.drop_revoked_deliveries();
                 self.learned.store(true, Ordering::SeqCst);
             }
-            // Membership evidence alone does not require importing a checkpoint.
             if !draft.issuer() && !added.is_empty() {
-                rocky_credentials::write_private(
-                    &self.path.with_file_name("bootstrap.json"),
-                    b"true",
-                )?;
+                self.request_checkpoint_import()?;
             }
         }
         if let Some(statement) = revoking
@@ -2732,16 +2707,31 @@ impl Node {
         if pending.iter().any(|scope| !self.scopes().contains(scope)) {
             return Err(refused("bootstrap intent names an ungranted scope"));
         }
-        // Keyless custody scopes cannot import a checkpoint; they sync rows.
-        // Nor can a partitioned table's own scope, which holds no rows.
         let settings = self.settings.lock().await;
-        Ok(pending
-            .into_iter()
-            .filter(|scope| {
-                settings.reads_whole(&self.domain(), scope)
-                    && !self.domain().partitioned_table(scope)
-            })
-            .collect())
+        let imports_checkpoint = |scope: &ResourceScope| {
+            let holds_keys = settings.reads_whole(&self.domain(), scope);
+            let holds_rows = !self.domain().partitioned_table(scope);
+            holds_keys && holds_rows
+        };
+        Ok(pending.into_iter().filter(imports_checkpoint).collect())
+    }
+    /// Fails with [`crate::enrollment::Revoked`] once a statement ends this device.
+    async fn ensure_not_revoked(&self) -> Result<(), Failure> {
+        match self.settings.lock().await.revocation(&self.path)? {
+            Some(statement) => Err(Box::new(crate::enrollment::Revoked(statement))),
+            None => Ok(()),
+        }
+    }
+    /// Marks that the next sync imports a checkpoint, which restores rows
+    /// of newly revoked authors however this device learned of them.
+    fn request_checkpoint_import(&self) -> Result<(), Failure> {
+        rocky_credentials::write_private(&self.path.with_file_name("bootstrap.json"), b"true")?;
+        Ok(())
+    }
+    /// Whether to renew for rotated keys before moving rows: a served session
+    /// brought statements, or frames wait for a key epoch this device lacks.
+    async fn awaits_rotated_keys(&self) -> bool {
+        self.learned.load(Ordering::SeqCst) || self.awaits_key_epoch().await
     }
     /// Whether received frames wait for a key epoch this device lacks.
     async fn awaits_key_epoch(&self) -> bool {
@@ -2787,10 +2777,9 @@ impl Node {
         Ok(Some(serde_json::to_vec(&intent)?))
     }
     /// Tells the replica which scopes the bootstrap intent imports, so
-    /// peers hold back their history for them.
+    /// peers hold back their history for them. An intent the bootstrap
+    /// refuses holds nothing back; the bootstrap reports it.
     pub(crate) async fn refresh_importing(&self) -> Result<(), Failure> {
-        // An intent the bootstrap itself refuses holds nothing back; the
-        // bootstrap reports it.
         let pending = match rocky_platform::fs::read(self.path.with_file_name("bootstrap.json")) {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
                 Ok(intent) => self.bootstrap_pending(&intent).await.unwrap_or_default(),
@@ -2833,6 +2822,7 @@ impl Node {
         now.duration_since(seen.1) < IMPORT_SOURCE
     }
     /// Syncs with one peer, then keeps the revocations its sessions brought.
+    /// A scope the peer refuses to share was never its to serve.
     async fn reconcile(
         &self,
         transport: &dyn Transport,
@@ -2862,7 +2852,6 @@ impl Node {
                     failures.retain(|(_, known), _| known != scope);
                 }
             }
-            // A scope the peer does not share was never its to serve.
             for scope in &transfer.refused {
                 if !unanswered(scope) {
                     failures.remove(&(peer, *scope));
@@ -3017,6 +3006,8 @@ impl Node {
         }
         result
     }
+    /// Requests a link to `peer`. A refusal, a full link budget included,
+    /// backs off; nothing else syncs.
     async fn request_link_observed(
         &self,
         transport: &dyn Transport,
@@ -3086,7 +3077,6 @@ impl Node {
                     self.absorb_revocations(Some(&error)).await?;
                     continue;
                 }
-                // A refusal, a full link budget included, backs off; nothing else syncs.
                 return Err(error);
             }
             if let Some(open) = service.live.handle(peer) {
@@ -3115,6 +3105,16 @@ impl Node {
         span.record("outcome", if result.is_ok() { "ok" } else { "error" });
         result
     }
+    /// Delivers envelopes before taking the shared checkpoint import slot and
+    /// releases the slot before draining, so neither a stalled dial nor the
+    /// peer's reverse exchange through another peer waits on it. Delivery
+    /// runs on the exchange's first session, so a list it opens syncs in
+    /// this exchange. The pass covers admission's full repair; later hints
+    /// stay pending. A bootstrap learns its ancestor schemas first, or it
+    /// would back off a usable peer, and shares the staged checkpoint state
+    /// with recovery during ordinary sync; a peer without a checkpoint
+    /// leaves the intent for another. Only concrete holdings sync: table
+    /// roots stay in the SQL catalog.
     async fn exchange_inner(
         &self,
         transport: &dyn Transport,
@@ -3127,7 +3127,6 @@ impl Node {
             .ok_or(ServiceError::NetworkRequired("sync"))?;
         let revocations = self.replica.revocation_digest().await?;
         let link = self.request_link(transport, peer, contact).await?;
-        // This pass covers admission's full repair; hints arriving after this stay pending.
         let repair_generation = self
             .retries
             .lock()
@@ -3163,9 +3162,6 @@ impl Node {
             keep: Some(&keep),
         };
         let reconcile = upstream.link.begin_reconcile().await?;
-        // Envelopes first, on the exchange's first session: a list a
-        // delivery opens syncs in this exchange. A stalled dial must not
-        // hold the shared checkpoint import slot.
         let mut first = match self.deliver(&upstream).await {
             Ok(delivered) => Some(delivered),
             Err(error) => {
@@ -3174,8 +3170,7 @@ impl Node {
                 return Err(error);
             }
         };
-        // Recovery during ordinary sync shares the same staged checkpoint state as bootstrap.
-        let _bootstrap = self.bootstrap.lock().await;
+        let import_slot = self.bootstrap.lock().await;
         let marker = self.path.with_file_name("bootstrap.json");
         let mut bootstrapped = sync::Transfer {
             repair_generation,
@@ -3186,8 +3181,6 @@ impl Node {
         if rocky_platform::fs::exists(&marker) {
             self.sync_state
                 .send_replace(SyncActivityState::Bootstrapping);
-            // An ancestor checkpoint needs its verified schema before import;
-            // learning it after this exchange would back off a usable peer.
             self.acquire_schemas(transport).await?;
             let expected = rocky_platform::fs::read(&marker)?;
             let pending = self
@@ -3201,7 +3194,6 @@ impl Node {
                     peer: (peer).to_owned(),
                     scopes: pending.len(),
                 });
-            // `None`: this peer offers no checkpoint; intent stays for another.
             let completed = sync::bootstrap(
                 &self.replica,
                 &upstream,
@@ -3252,7 +3244,6 @@ impl Node {
             }
         }
         self.sync_state.send_replace(SyncActivityState::Syncing);
-        // Table roots remain in the SQL catalog; only concrete holdings sync.
         let selected = self
             .retries
             .lock()
@@ -3287,9 +3278,7 @@ impl Node {
             first,
         )
         .await;
-        // Draining waits for the peer's reverse exchange, which may need
-        // this node's import slot through another peer. Release it first.
-        drop(_bootstrap);
+        drop(import_slot);
         let (retry, transfer) = match reconciled {
             Err(error) => {
                 self.observations
@@ -3359,6 +3348,10 @@ impl Node {
         Ok(())
     }
 
+    /// Answers a peer. Enrollment and its policy lookup may be forwarded;
+    /// schema, resolution and membership messages are answered here. As in a
+    /// session, a requester may carry the statement that ends this node: it
+    /// is recorded, never held.
     async fn answer_peer(&self, request: PeerRequest) -> Result<PeerReply, Failure> {
         if !matches!(
             request,
@@ -3371,16 +3364,14 @@ impl Node {
                 return Err(Box::new(crate::enrollment::Revoked(statement)));
             }
         }
-        // Enrollment and its policy lookup may be forwarded. Schema,
-        // resolution and membership messages are answered locally.
-        if matches!(
+        let is_enrollment = matches!(
             request,
             PeerRequest::Pair(_)
                 | PeerRequest::Renew(_)
                 | PeerRequest::Epochs(_)
                 | PeerRequest::Policy
-        ) && let Some(reply) = self.forward_enrollment(&request).await?
-        {
+        );
+        if is_enrollment && let Some(reply) = self.forward_enrollment(&request).await? {
             return Ok(reply);
         }
         if matches!(
@@ -3411,9 +3402,6 @@ impl Node {
                 )?;
                 let registry = self.registry().await?;
                 let mut current = self.settings.lock().await;
-                // Like a session, the requester may carry the
-                // statement that ends this node: it is recorded,
-                // never held.
                 if let Some(statement) = current.revoking(&request.revocations)? {
                     if current.revocation(&self.path)?.is_none() {
                         current.record_revocation(&self.path, statement.clone())?;
@@ -3657,7 +3645,6 @@ impl Node {
     }
     async fn read(&self, client: &Client, query: Query) -> Result<crate::ReadPage, Failure> {
         match self.read_once(client, query.clone()).await {
-            // An authority change ends the cached session; read again once.
             Err(error) if is_authority(&error) => {
                 *client.reader.lock().await = None;
                 self.read_once(client, query).await
@@ -3832,6 +3819,19 @@ fn replica_refusal(error: &Failure) -> Option<&rocky_secure::Refusal> {
         _ => None,
     }
 }
+/// Whether `error` is a broken or stalled stream or a replaced checkpoint,
+/// which renewing cannot repair and would only cancel other active links for.
+fn renewal_cannot_repair(error: &Failure) -> bool {
+    match error.downcast_ref::<Error>() {
+        Some(Error::Io(_)) => true,
+        Some(Error::Rejected(reason)) => {
+            reason.starts_with("link ")
+                || reason.ends_with(" timeout")
+                || reason.starts_with("checkpoint superseded")
+        }
+        _ => false,
+    }
+}
 fn is_authority(error: &Failure) -> bool {
     matches!(
         error.downcast_ref::<Error>(),
@@ -3890,15 +3890,12 @@ pub(crate) fn call_failure(error: &Failure) -> crate::CallFailure {
     } else {
         match error.downcast_ref::<Error>() {
             Some(Error::Rejected(_) | Error::Protocol(_)) => ("rejected", false),
-            // Blocked work proceeds once its blockers clear.
             Some(Error::Blocked(_)) => ("blocked", true),
             Some(Error::Incompatible(_)) => ("unsupported_generation", false),
             Some(Error::Sql(SqlError::Denied)) => ("denied", false),
             Some(Error::Sql(
                 SqlError::Capture(_) | SqlError::Statement { .. } | SqlError::Unsupported(_),
             )) => ("rejected", false),
-            // Missing rows or keys arrive by sync; a scope this device does
-            // not hold needs a subscription first.
             Some(Error::Sql(SqlError::Unavailable { reason, .. })) => match reason {
                 Unavailable::Incomplete | Unavailable::KeyMissing => ("missing_dependencies", true),
                 Unavailable::NotHeld => ("rejected", false),
@@ -4016,18 +4013,12 @@ mod error_tests {
         assert_eq!(code(sealed), ("sealed".into(), false));
     }
 }
-// Multi-node protocol suites: native transports, threads, paused clocks and
-// native temporary directories.
 #[cfg(all(test, not(target_family = "wasm")))]
 mod delivery_tests;
 
 #[cfg(all(test, not(target_family = "wasm")))]
-mod wide_schema_tests;
-// Multi-node protocol suites: native transports, threads, paused clocks and
-// native temporary directories.
-#[cfg(all(test, not(target_family = "wasm")))]
 mod revocation_tests;
-// Multi-node protocol suites: native transports, threads, paused clocks and
-// native temporary directories.
 #[cfg(all(test, not(target_family = "wasm")))]
 mod sync_tests;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod wide_schema_tests;

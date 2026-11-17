@@ -197,9 +197,7 @@ impl Configuration {
                 self.directory.join("secrets"),
             ))
         });
-        // This account's sign-in that saved its identity but was never
-        // handed out is complete: it opens as installed.
-        if let Some(finished) =
+        if let Some(saved_but_never_handed_out) =
             crate::personal::prepare_sign_in(&self.directory, &account, &secrets)?
         {
             drop(account);
@@ -208,8 +206,8 @@ impl Configuration {
                 .map_err(Refused::from_failure)?;
             return Ok(crate::PersonalOpened {
                 opened,
-                restored: finished.restored,
-                freshness: finished.freshness,
+                restored: saved_but_never_handed_out.restored,
+                freshness: saved_but_never_handed_out.freshness,
             });
         }
         match &source {
@@ -242,7 +240,6 @@ impl Configuration {
         let opened = match Database::launch_sign_in(self.options(), sign_in).await {
             Ok(opened) => opened,
             Err(error) => {
-                // A sign-in that kept no intent leaves nothing behind.
                 crate::personal::tidy(&self.directory, before.as_deref());
                 return Err(Refused::from_failure(error));
             }
@@ -317,7 +314,8 @@ impl Configuration {
         .await
     }
     /// Runs `install` on `archive` staged in the directory as
-    /// `{install}.backup`, which is removed whether it finishes or stops.
+    /// `{install}.backup`, which is removed whether it finishes or stops. An
+    /// interrupted personal create or sign-in has no database yet.
     async fn staged<F, Installing>(
         &self,
         archive: &[u8],
@@ -351,8 +349,8 @@ impl Configuration {
     }
     /// Opens an existing installation. Startup runs off the caller's async executor.
     pub async fn open(&self) -> Result<Opened, Failure> {
-        // An interrupted personal create or sign-in has no database yet.
-        if crate::personal::unfinished(&self.directory) {
+        let interrupted_personal_install = crate::personal::unfinished(&self.directory);
+        if interrupted_personal_install {
             return Err(
                 "a personal install is unfinished in this directory: call the same \
                  create_personal or sign_in again"

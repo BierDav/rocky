@@ -31,11 +31,11 @@ impl Settings {
         };
         let engine = rocky_core::EngineIdentity::current();
         if at(engine)? == installed {
-            Ok(crate::DeclaredSchema::Current)
-        } else if version > self.generation
-            // The same tables on this build's engine: an owner opens a tip with it.
-            || (version == self.generation && self.engine != engine && at(self.engine)? == installed)
-        {
+            return Ok(crate::DeclaredSchema::Current);
+        }
+        let same_tables_on_this_engine =
+            version == self.generation && self.engine != engine && at(self.engine)? == installed;
+        if version > self.generation || same_tables_on_this_engine {
             Ok(crate::DeclaredSchema::Ahead)
         } else {
             Ok(crate::DeclaredSchema::Behind)

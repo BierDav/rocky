@@ -573,7 +573,6 @@ impl TryFrom<ReplicatedAuthority> for RevocationSet {
             }
             set.add_link(certificate)?;
         }
-        // A replayed device certificate never outlives its tombstone.
         set.prune_tombstoned();
         for admission in value.admissions {
             if set.add_admission(admission)?.is_none() {
@@ -869,6 +868,8 @@ impl RevocationSet {
             .map(|link| (link.identity, link.node))
             .collect()
     }
+    /// Adds `signed` and returns whether it was new; callers check the size
+    /// of what they insert.
     fn insert(&mut self, signed: SignedRevocation) -> Result<bool, Error> {
         self.bind(signed.database)?;
         let id = signed.id()?;
@@ -877,7 +878,6 @@ impl RevocationSet {
         }
         self.derived = Derived::default();
         self.subjects.extend(signed.statement.subjects().copied());
-        // Callers check the size of what they insert.
         if signed.identity_unlink() {
             if let Some(certificate) = signed.chain.certificate() {
                 self.add_link(certificate.clone())?;
@@ -935,15 +935,15 @@ impl RevocationSet {
                     })
                     .map(|(id, known)| (known.statement.time, *id))
                     .min();
-                if root_cut || earlier.is_some_and(|earlier| earlier <= (signed.statement.time, id))
-                {
+                let lane_already_fixed = root_cut
+                    || earlier.is_some_and(|earlier| earlier <= (signed.statement.time, id));
+                if lane_already_fixed {
                     continue;
                 }
-                // The first unlink fixes this lane; retries cannot widen its heads.
                 self.cuts.remove(&key);
             }
-            // Root authority supersedes an unlink's heads, in either arrival order.
-            if signed.root() && !root_cut {
+            let root_supersedes_unlink = signed.root() && !root_cut;
+            if root_supersedes_unlink {
                 self.cuts.remove(&key);
             }
             let heads = self.cuts.entry(key).or_default();
@@ -1026,10 +1026,9 @@ impl RevocationSet {
             }
         }
         for certificate in other.certificates.values() {
-            // A replayed device certificate never outlives its tombstone.
-            if crate::PersonalLink::of(certificate)?
-                .is_some_and(|link| next.tombstones(link.owner, link.node))
-            {
+            let replayed_after_tombstone = crate::PersonalLink::of(certificate)?
+                .is_some_and(|link| next.tombstones(link.owner, link.node));
+            if replayed_after_tombstone {
                 continue;
             }
             next.add_link(certificate.clone())?;
@@ -1053,8 +1052,7 @@ impl RevocationSet {
         };
         for signed in self.statements.values() {
             if signed.live(time) {
-                // Every held statement was inserted once already.
-                let _ = set.insert(signed.clone());
+                set.reinsert(signed.clone());
             }
         }
         set
@@ -1312,6 +1310,25 @@ impl RevocationSet {
         }
         Ok(false)
     }
+    /// Adds a statement a set already accepted once, which cannot be refused.
+    fn reinsert(&mut self, signed: SignedRevocation) {
+        let _ = self.insert(signed);
+    }
+    /// Whether `signed` still ends `link`'s node: a reset ends a node only
+    /// while no later reset keeps it.
+    fn reset_still_ends(
+        &self,
+        id: &Commitment,
+        signed: &SignedRevocation,
+        link: &SignedCapability,
+    ) -> Result<bool, Error> {
+        Ok(signed.statement.reset().is_none()
+            || link
+                .capability
+                .extended()?
+                .node
+                .is_some_and(|node| self.resets().ending(&node).any(|(ending, _)| ending == id)))
+    }
     fn first_ending(
         &self,
         chain: &CredentialChain,
@@ -1319,12 +1336,8 @@ impl RevocationSet {
     ) -> Result<Option<&SignedRevocation>, Error> {
         for (id, signed) in &self.statements {
             for (index, link) in chain.0.iter().enumerate().skip(start) {
-                // A reset ends a node only while no later reset keeps it.
                 if signed.ends_at(link, chain.protected(index)?)?
-                    && (signed.statement.reset().is_none()
-                        || link.capability.extended()?.node.is_some_and(|node| {
-                            self.resets().ending(&node).any(|(ending, _)| ending == id)
-                        }))
+                    && self.reset_still_ends(id, signed, link)?
                 {
                     return Ok(Some(signed));
                 }
@@ -1334,8 +1347,7 @@ impl RevocationSet {
     }
     fn resets(&self) -> &crate::reset::Resets {
         self.derived.resets.get_or_init(|| {
-            // A node a statement names, or whose key it ends, admits nobody.
-            let revoked = |signer: &PublicKey| {
+            let admits_nobody = |signer: &PublicKey| {
                 self.subjects.contains(signer)
                     || self.references.contains(&crate::PeerId::of(*signer))
             };
@@ -1348,7 +1360,7 @@ impl RevocationSet {
                 self.admissions
                     .values()
                     .map(|signed| &signed.admission)
-                    .filter(|admission| !revoked(&admission.signer))
+                    .filter(|admission| !admits_nobody(&admission.signer))
                     .map(|admission| {
                         (
                             admission.node,
@@ -1404,8 +1416,7 @@ impl RevocationSet {
             };
             for signed in self.statements.values() {
                 if signed.statement.reset().is_none() {
-                    // Every held statement was inserted once already.
-                    let _ = set.insert(signed.clone());
+                    set.reinsert(signed.clone());
                 }
             }
             Box::new(set)

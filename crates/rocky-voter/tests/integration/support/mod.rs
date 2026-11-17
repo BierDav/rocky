@@ -63,6 +63,8 @@ pub struct Cluster {
     children: Vec<Option<Child>>,
 }
 impl Cluster {
+    /// The root certifies the genesis and is discarded: no root secret is
+    /// written or retained in the running cluster.
     pub async fn start() -> Self {
         let dir = TempDir::new().unwrap();
         let root = PrivateKey::new();
@@ -120,11 +122,9 @@ impl Cluster {
             &directory_key,
         )
         .unwrap();
-        // Valid certificates have an explicit finite lifetime.
-        let mut control = directory.control;
-        control.not_before = timestamp() - 1;
-        control.expires = timestamp() + 3600;
-        let directory = ControlCertificate::sign(control, &directory_key).unwrap();
+        let directory =
+            ControlCertificate::sign(with_finite_lifetime(directory.control), &directory_key)
+                .unwrap();
         let genesis = CertifiedGenesis::sign(
             Genesis {
                 mesh,
@@ -151,7 +151,6 @@ impl Cluster {
         )
         .unwrap();
         std::fs::write(dir.path().join("genesis.cbor"), genesis.to_bytes().unwrap()).unwrap();
-        // No root secret is written or retained in the running cluster.
         drop(root);
         drop(listeners);
         let mut cluster = Self {
@@ -338,8 +337,16 @@ pub async fn append(
     }
 }
 
-// Removing the leader can outlast one client call. Retry the same plan;
-// a retained request must neither reapply nor reverse a later membership.
+/// Retries the same membership plan, since removing the leader can outlast
+/// one client call; a retained request must neither reapply nor reverse a
+/// later membership.
+/// Valid certificates have an explicit finite lifetime.
+fn with_finite_lifetime(mut control: DomainControl) -> DomainControl {
+    control.not_before = timestamp() - 1;
+    control.expires = timestamp() + 3600;
+    control
+}
+
 pub async fn membership_after_election(
     admin: &NetworkCoordinator,
     id: Commitment,

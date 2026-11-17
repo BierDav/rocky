@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 mod clock;
-// Exhaustive delivery schedules run across threads.
+/// Native only: exhaustive delivery schedules run across threads.
 #[cfg(not(target_family = "wasm"))]
 mod convergence;
 mod restrictions;
@@ -761,8 +761,8 @@ async fn exchange(
         let mut fresh = Vec::new();
         for device in devices.iter_mut() {
             device.receive(history).await;
-            // Commits, and the records rewinds publish.
-            fresh.extend(device.fresh().await);
+            let commits_and_records_rewinds_publish = device.fresh().await;
+            fresh.extend(commits_and_records_rewinds_publish);
         }
         if fresh.is_empty() {
             break;
@@ -790,8 +790,6 @@ async fn unique_and_check_violations_drop_the_later_transaction_everywhere() {
     .await;
     let receiver = devices.pop().unwrap();
     let red = ids[0];
-    // Neither author has seen the other: each insert and each raise holds
-    // locally, but not after the other's.
     for device in &devices {
         device
             .commit(
@@ -808,7 +806,11 @@ async fn unique_and_check_violations_drop_the_later_transaction_everywhere() {
             .unwrap();
     }
     let expected = exchange(&c, &mut devices, &receiver, &mut history).await;
-    assert_eq!(expected.dropped(), 2);
+    assert_eq!(
+        expected.dropped(),
+        2,
+        "each author's insert and raise held locally, but not after the other's"
+    );
     let mut violations = Vec::new();
     for (transaction, outcome) in &expected.outcomes {
         if !matches!(outcome, TransactionOutcome::Applied { .. }) {
@@ -831,7 +833,6 @@ async fn unique_and_check_violations_drop_the_later_transaction_everywhere() {
         violations[1].starts_with("UNIQUE constraint failed: members.email"),
         "{violations:?}"
     );
-    // A local violation is the statement's error.
     assert!(
         constraint_error(
             devices[0]
@@ -839,10 +840,15 @@ async fn unique_and_check_violations_drop_the_later_transaction_everywhere() {
                 .await
                 .unwrap_err()
         )
-        .starts_with("CHECK constraint failed")
+        .starts_with("CHECK constraint failed"),
+        "a local violation is the statement's error"
     );
     assert!(devices[0].fresh().await.is_empty());
 }
+
+/// A NULL operand makes the range check pass.
+const INSERT_RANGE_PASSING_ITS_CHECK_WITH_NULL: &str =
+    "INSERT INTO ranges(lo,hi,width,id) VALUES(1,2,NULL,#id)";
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn checks_pass_null_and_hold_after_every_statement() {
@@ -852,13 +858,11 @@ async fn checks_pass_null_and_hold_after_every_statement() {
         &c,
         root.path(),
         2,
-        // A NULL check passes.
-        &["INSERT INTO ranges(lo,hi,width,id) VALUES(1,2,NULL,#id)"],
+        &[INSERT_RANGE_PASSING_ITS_CHECK_WITH_NULL],
     )
     .await;
     let receiver = devices.pop().unwrap();
     let range = ids[0];
-    // The final state would be valid, the intermediate row is not.
     let error = devices[0]
         .commit(
             &c,
@@ -869,7 +873,10 @@ async fn checks_pass_null_and_hold_after_every_statement() {
         )
         .await
         .unwrap_err();
-    assert!(constraint_error(error).starts_with("CHECK constraint failed"));
+    assert!(
+        constraint_error(error).starts_with("CHECK constraint failed"),
+        "an invalid intermediate row is refused although the final state would be valid"
+    );
     devices[0]
         .commit(
             &c,
@@ -890,6 +897,10 @@ async fn checks_pass_null_and_hold_after_every_statement() {
     );
 }
 
+/// Precedes its order in the transaction, which only a deferred key allows.
+const INSERT_LINE_BEFORE_ITS_ORDER_UNDER_A_DEFERRED_KEY: &str =
+    "INSERT INTO lines(parent,amount,id) VALUES(#next(orders),5,#id)";
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn foreign_keys_drop_orphans_and_cascades_rewind_with_their_transaction() {
     let c = Constrained::new();
@@ -902,8 +913,7 @@ async fn foreign_keys_drop_orphans_and_cascades_rewind_with_their_transaction() 
             "INSERT INTO teams(name,cap,id) VALUES('red',2,#id)",
             "INSERT INTO teams(name,cap,id) VALUES('blue',2,#id)",
             "INSERT INTO teams(name,cap,id) VALUES('green',2,#id)",
-            // Deferred: the line precedes its order in the transaction.
-            "INSERT INTO lines(parent,amount,id) VALUES(#next(orders),5,#id)",
+            INSERT_LINE_BEFORE_ITS_ORDER_UNDER_A_DEFERRED_KEY,
             "INSERT INTO orders(total,id) VALUES(5,#id)",
         ],
     )
@@ -922,8 +932,6 @@ async fn foreign_keys_drop_orphans_and_cascades_rewind_with_their_transaction() 
         .unwrap();
     history.extend(devices[0].fresh().await);
     devices[1].receive(&history).await;
-    // An immediate key refuses the statement; a dangling deferred one the
-    // commit.
     assert!(
         constraint_error(
             devices[0]
@@ -934,7 +942,8 @@ async fn foreign_keys_drop_orphans_and_cascades_rewind_with_their_transaction() 
                 .await
                 .unwrap_err()
         )
-        .starts_with("FOREIGN KEY constraint failed")
+        .starts_with("FOREIGN KEY constraint failed"),
+        "an immediate key refuses the statement"
     );
     assert_eq!(
         constraint_error(
@@ -946,11 +955,9 @@ async fn foreign_keys_drop_orphans_and_cascades_rewind_with_their_transaction() 
                 .await
                 .unwrap_err()
         ),
-        "FOREIGN KEY constraint failed: lines"
+        "FOREIGN KEY constraint failed: lines",
+        "a dangling deferred key refuses the commit"
     );
-    // The first author deletes blue, cascading to its member, and the order
-    // with its line; the second, not having seen that, adds to both. Its
-    // children of deleted parents drop, whatever order replicas see.
     devices[0]
         .commit(&c, &[&format!("DELETE FROM teams WHERE id={blue}")])
         .await
@@ -978,8 +985,6 @@ async fn foreign_keys_drop_orphans_and_cascades_rewind_with_their_transaction() 
         )
         .await
         .unwrap();
-    // A cascade rolls back with its transaction: the later raise of red
-    // beyond its cap drops the delete of green beside it.
     devices[1]
         .commit(&c, &[&format!("UPDATE teams SET cap=cap+1 WHERE id={red}")])
         .await
@@ -1001,12 +1006,21 @@ async fn foreign_keys_drop_orphans_and_cascades_rewind_with_their_transaction() 
             .map(|row| row[row.len() - 1].clone())
             .collect()
     };
-    assert_eq!(ids_of("teams"), [red, green].map(SqlValue::from));
-    assert_eq!(expected.rows["members"].len(), 1);
-    assert!(expected.rows["lines"].is_empty() && expected.rows["orders"].is_empty());
+    assert_eq!(
+        ids_of("teams"),
+        [red, green].map(SqlValue::from),
+        "a cascade rolls back with its transaction: raising red beyond its cap drops the delete of green beside it"
+    );
+    assert_eq!(
+        expected.rows["members"].len(),
+        1,
+        "a member added to deleted blue by an author who had not seen the delete drops"
+    );
+    assert!(
+        expected.rows["lines"].is_empty() && expected.rows["orders"].is_empty(),
+        "a line added to a deleted order drops, whatever order replicas see"
+    );
     assert_eq!(expected.dropped(), 3, "{expected:?}");
-    // A transaction whose delete action reaches another of its members
-    // could replay in another order: it is refused.
     let error = devices[0]
         .commit(
             &c,
@@ -1017,7 +1031,10 @@ async fn foreign_keys_drop_orphans_and_cascades_rewind_with_their_transaction() 
         )
         .await
         .unwrap_err();
-    assert!(matches!(error, Error::Rejected(_)), "{error:?}");
+    assert!(
+        matches!(error, Error::Rejected(_)),
+        "a transaction whose delete action reaches another of its members could replay in another order, so it is refused: {error:?}"
+    );
 }
 
 /// A write passes the clock of every row it references, not only of those
@@ -1090,7 +1107,6 @@ async fn assertions_refuse_local_commits_and_drop_replays_until_a_rewind_release
     .await;
     let receiver = devices.pop().unwrap();
     let (red, line, order) = (ids[0], ids[1], ids[2]);
-    // An insert, an update and a delete can each break the header total.
     for statements in [
         vec![format!(
             "INSERT INTO lines(parent,amount,id) VALUES({order},1,#id)"
@@ -1101,7 +1117,8 @@ async fn assertions_refuse_local_commits_and_drop_replays_until_a_rewind_release
         let statements: Vec<&str> = statements.iter().map(String::as_str).collect();
         assert_eq!(
             constraint_error(devices[0].commit(&c, &statements).await.unwrap_err()),
-            "assertion order_total failed"
+            "assertion order_total failed",
+            "an insert, an update and a delete can each break the header total: {statements:?}"
         );
     }
     assert!(devices[0].fresh().await.is_empty());
@@ -1115,10 +1132,6 @@ async fn assertions_refuse_local_commits_and_drop_replays_until_a_rewind_release
         )
         .await
         .unwrap();
-    // The first author adds a member to red and removes it again; the
-    // second, seeing neither, adds another. Received in arrival order, the
-    // second's waits on the cap until the removal ordered before it
-    // arrives and the rewind places it after.
     devices[0]
         .commit(
             &c,
@@ -1154,7 +1167,8 @@ async fn assertions_refuse_local_commits_and_drop_replays_until_a_rewind_release
         Some(TransactionOutcome::Dropped {
             reason: DropReason::Constraint,
             sealed: false,
-        })
+        }),
+        "received in arrival order, the second author's member waits on the cap"
     );
     assert_eq!(
         receiver
@@ -1170,7 +1184,8 @@ async fn assertions_refuse_local_commits_and_drop_replays_until_a_rewind_release
     let rewind = crate::sqlite::statements() - before;
     assert_eq!(
         receiver.replica.transaction_outcome(late).await.unwrap(),
-        Some(TransactionOutcome::Applied { sealed: false })
+        Some(TransactionOutcome::Applied { sealed: false }),
+        "the removal ordered before it arrives and the rewind places the member after"
     );
     assert_eq!(
         receiver.replica.transaction_violation(late).await.unwrap(),
@@ -1204,21 +1219,18 @@ async fn statements_per_assertion_are_recorded() {
     let (red, order) = (ids[0], ids[1]);
     let mut counts = Vec::new();
     for (label, statements) in [
-        // No assertion and no deferred key.
         (
-            "plain",
+            "no_assertion_or_deferred_key",
             vec!["INSERT INTO ranges(lo,hi,width,id) VALUES(1,2,3,#id)".to_string()],
         ),
-        // team_cap.
         (
-            "one_assertion",
+            "team_cap_assertion",
             vec![format!(
                 "INSERT INTO members(team,email,id) VALUES({red},'s@example',#id)"
             )],
         ),
-        // A deferred key and order_total.
         (
-            "deferred_key_and_assertion",
+            "deferred_key_and_order_total_assertion",
             vec![
                 format!("INSERT INTO lines(parent,amount,id) VALUES({order},4,#id)"),
                 format!("UPDATE orders SET total=4 WHERE id={order}"),
@@ -1233,8 +1245,6 @@ async fn statements_per_assertion_are_recorded() {
         counts.push((label, crate::sqlite::statements() - before));
     }
     println!("P5 receive_statements {counts:?}");
-    // Replayed rows keep no record: the undo of an unsealed member is all
-    // a replayed row stores beside the table.
     let inner = devices[1]
         .replica
         .inner
@@ -1247,5 +1257,9 @@ async fn statements_per_assertion_are_recorded() {
     .await
     .unwrap();
     println!("P5 replayed_row_records/max_undo_bytes {sizes:?}");
-    assert_eq!(sizes[0][0], SqlValue::Integer(0));
+    assert_eq!(
+        sizes[0][0],
+        SqlValue::Integer(0),
+        "replayed rows keep no record: an unsealed member's undo is all they store beside the table"
+    );
 }

@@ -89,20 +89,24 @@ impl Trace {
         ) {
             eprintln!("rollback diagnostic: snapshot save error={error}");
         }
-        // These public observations are later, non-atomic and never drive progress.
-        for (name, peer) in peers {
-            let observations = [
-                ("status", snap::value(peer.session.status()).await),
-                ("tip", snap::value(peer.session.tip_status()).await),
-                ("tips", snap::value(peer.session.inspect_tips()).await),
-                ("compaction", snap::value(peer.session.compaction()).await),
-            ];
-            for (observation, result) in observations {
-                eprintln!(
-                    "rollback diagnostic: later_public peer={name} unix_ms={} observation={observation} result={result:?}",
-                    now()
-                );
-            }
+        log_later_public_observations(peers).await;
+    }
+}
+/// Logs each peer's public status after the failure. These observations are
+/// later than the refusal and not atomic with it, and never drive progress.
+async fn log_later_public_observations(peers: &[(&str, &Peer)]) {
+    for (name, peer) in peers {
+        let observations = [
+            ("status", snap::value(peer.session.status()).await),
+            ("tip", snap::value(peer.session.tip_status()).await),
+            ("tips", snap::value(peer.session.inspect_tips()).await),
+            ("compaction", snap::value(peer.session.compaction()).await),
+        ];
+        for (observation, result) in observations {
+            eprintln!(
+                "rollback diagnostic: later_public peer={name} unix_ms={} observation={observation} result={result:?}",
+                now()
+            );
         }
     }
 }

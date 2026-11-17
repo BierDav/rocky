@@ -80,11 +80,10 @@ impl CustodyPeer {
             )?
         };
         let peer = Self { database };
-        // Opening is synchronous, outside the caller's async runtime.
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let synchronous_open_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        let configured = runtime.block_on(async {
+        let configured = synchronous_open_runtime.block_on(async {
             for contact in config.peers {
                 peer.database.session().add_peer(&contact).await?;
             }
@@ -97,7 +96,7 @@ impl CustodyPeer {
             Ok::<_, Failure>(())
         });
         if let Err(error) = configured {
-            let _ = runtime.block_on(peer.close());
+            let _ = synchronous_open_runtime.block_on(peer.close());
             return Err(error);
         }
         Ok(peer)

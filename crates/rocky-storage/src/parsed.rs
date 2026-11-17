@@ -95,12 +95,15 @@ mod tests {
             assert!(Arc::ptr_eq(&first, &parse(sql).unwrap()));
         }
         assert_eq!(parses() - before, 1);
-        // A stream of distinct texts keeps a statement that is still used.
         for index in 0..GENERATION * 3 {
             parse(&format!("SELECT {index} AS parsed_stream_marker")).unwrap();
             parse(sql).unwrap();
         }
-        assert_eq!(parses() - before, 1 + 3 * GENERATION as u64);
+        assert_eq!(
+            parses() - before,
+            1 + 3 * GENERATION as u64,
+            "a stream of distinct texts keeps a statement that is still used"
+        );
         assert!(parse("SELECT FROM WHERE").is_err());
     }
 }

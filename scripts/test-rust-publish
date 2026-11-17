@@ -82,6 +82,7 @@ class PublishTest(unittest.TestCase):
         self.assertEqual(PUBLISH["retry_delay"]("status 429 Too Many Requests"), 601)
         self.assertEqual(PUBLISH["retry_delay"]("status 429 Too Many Requests", 60), 61)
         self.assertEqual(PUBLISH["retry_delay"]("status 429 Please try again after bad GMT"), 601)
+        self.assertEqual(PUBLISH["retry_delay"]("failed to get a 200 OK response, got 429"), 601)
         self.assertIsNone(PUBLISH["retry_delay"]("status 403 Forbidden"))
 
     def process(self, code, output):

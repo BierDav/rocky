@@ -67,7 +67,7 @@ def is_published(name, version):
 
 
 def retry_delay(output, interval=600):
-    if not re.search(r"status 429\b", output):
+    if not re.search(r"(?:status|got) 429\b", output):
         return None
     match = re.search(r"Please try again after ([^\r\n]+? GMT)", output)
     if match:

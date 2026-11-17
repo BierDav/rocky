@@ -1,10 +1,7 @@
-//! Spans of the link and its sessions. Fields are short hashes, counts,
-//! durations and error categories; never payloads, keys or credentials.
 use crate::{Error, PublicKey};
 use tracing::{Span, field::Empty};
 use web_time::Instant;
 
-/// A peer's key as a short hex prefix.
 pub(crate) fn peer(key: &PublicKey) -> String {
     let mut hex = key.to_hex();
     hex.truncate(12);
@@ -16,7 +13,6 @@ pub(crate) fn session(channel: u16) -> Span {
 pub(crate) fn serve(session: &Span, channel: u16, family: &'static str) -> Span {
     tracing::debug_span!(parent: session, "serve", channel, family, outcome = Empty)
 }
-/// Records a result's outcome on `span`.
 pub(crate) fn outcome<T>(span: &Span, result: &Result<T, Error>) {
     span.record(
         "outcome",
@@ -26,7 +22,6 @@ pub(crate) fn outcome<T>(span: &Span, result: &Result<T, Error>) {
         },
     );
 }
-/// One request a session sent and the answer it waits for.
 pub(crate) struct Request {
     span: Span,
     started: Instant,

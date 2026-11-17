@@ -1,4 +1,3 @@
-//! Only installed verified prefixes root restoration; staging does not.
 use super::*;
 
 async fn stage(f: &HeldPrefix) {

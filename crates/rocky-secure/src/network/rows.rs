@@ -1,8 +1,5 @@
-//! Row transfer: pulls by subscription, ranges by frontier, pushes, scope
-//! lists and remote reads.
 use super::*;
 
-/// Frames in one transfer page.
 pub(super) const MAX_SECURE_PAGE: usize = 32;
 
 #[derive(Serialize, Deserialize)]
@@ -28,7 +25,6 @@ pub(super) enum RowMessage {
     RangeFrames {
         page: Box<RangePage>,
     },
-    /// The puller's frontier after a page, as acknowledgment.
     Held {
         frontier: ScopeFrontier,
     },
@@ -58,49 +54,33 @@ pub(super) enum RowMessage {
     ReadRows {
         package: EncryptedPackage,
     },
-    /// Heads the asker's pending frames wait on and it lacks.
     RevokedHeadsQuery {
         scope: ResourceScope,
         heads: Vec<Hash>,
     },
-    /// The signed header and chain of those whose author is revoked.
     RevokedHeads {
         heads: Vec<crate::wire::RevokedHead>,
     },
 }
 
-/// What one catch-up pass of a scope did.
 #[derive(Clone, Debug, Default)]
 pub struct CatchUp {
-    /// Optional base advice, returned before applying the accompanying frames.
     pub state: Option<crate::StateAdvice>,
-    /// Frames received, including duplicates.
     pub frames: usize,
     pub pages: usize,
-    /// This replica is behind the peer's pruned_prefix and must rebootstrap.
     pub behind: bool,
-    /// Encoded bytes of the frames received.
     pub bytes: usize,
-    /// Applied operations the peer reported that this replica still lacks.
     pub lag: u64,
-    /// The session's byte budget ran low; continue on a new session.
     pub exhausted: bool,
-    /// Frames refused because the session never carried their chain; a
-    /// pass on another session receives them.
     pub incomplete: usize,
 }
-/// What one push of a scope did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Pushed {
     pub frames: usize,
-    /// Encoded bytes of the frames sent.
     pub bytes: usize,
-    /// The peer is behind this replica's pruned_prefix and must rebootstrap from it.
     pub behind: bool,
-    /// The session's byte budget ran low; continue on a new session.
     pub exhausted: bool,
 }
-/// One sync of a scope: rebootstrap if needed, then catch up.
 #[derive(Clone, Debug)]
 pub struct ScopeSync {
     pub rebootstrap: Option<RebootstrapReport>,
@@ -108,7 +88,6 @@ pub struct ScopeSync {
 }
 
 impl NativeSession {
-    /// Exact lookup authorized by local followed-path or retained history requirements.
     pub async fn acquire_migration_publication<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -143,9 +122,6 @@ impl NativeSession {
         }
         Ok(())
     }
-    /// Pulls every frame of `scope` this replica lacks in bounded pages and
-    /// pipelines the next request while applying each page. Stops at once when this
-    /// replica is behind the peer's pruned_prefix.
     pub async fn catch_up<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -155,11 +131,6 @@ impl NativeSession {
         self.catch_up_with_state(replica, scope, quota, false).await
     }
 
-    /// Stops before receiving a page with advice when `take_state` is set.
-    /// The caller may import it or resume with advice disabled. Each request
-    /// names only a committed frontier; one requested ahead lets the cursor
-    /// skip the page being applied, and a stale one only costs frames sent
-    /// again.
     pub async fn catch_up_with_state<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -174,7 +145,7 @@ impl NativeSession {
         let mut last_reported_held = None;
         let mut asked = false;
         loop {
-            if !asked && self.low(quota) {
+            if !asked && self.budget_low(quota) {
                 report.exhausted = true;
                 return Ok(report);
             }
@@ -221,7 +192,7 @@ impl NativeSession {
                 report.state = Some(state);
                 return Ok(report);
             }
-            asked = page.next.is_some() && !self.low(quota);
+            asked = page.next.is_some() && !self.budget_low(quota);
             if asked {
                 self.send(RowMessage::Range {
                     frontier: replica.frontier(scope).await?,
@@ -281,9 +252,6 @@ impl NativeSession {
             }
         }
     }
-    /// Asks the peer for evidence of the heads `scope`'s pending frames wait
-    /// on: revoked frames are never served, so one never received stays
-    /// unknown until a peer shows its author revoked.
     async fn resolve_revoked_heads<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -300,8 +268,6 @@ impl NativeSession {
         };
         replica.receive_revoked_heads(scope, heads).await
     }
-    /// Sends the peer every frame of `scope` it lacks, in bounded pages; the
-    /// peer answers each page with its frontier, recorded as acknowledgment.
     pub async fn push<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -312,7 +278,7 @@ impl NativeSession {
         let mut after = None;
         let mut pushed = Pushed::default();
         loop {
-            if self.low(quota) {
+            if self.budget_low(quota) {
                 pushed.exhausted = true;
                 return Ok(pushed);
             }
@@ -357,7 +323,6 @@ impl NativeSession {
             }
         }
     }
-    /// The peer's frontier of `scope`, recorded as its acknowledgment.
     pub async fn peer_frontier<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -376,7 +341,6 @@ impl NativeSession {
             .await?;
         Ok(frontier)
     }
-    /// A separate signed, flushed storage attestation; row ACKs never count.
     pub async fn request_custody<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -419,7 +383,6 @@ impl NativeSession {
         }
         Ok(())
     }
-    /// Scopes the peer holds and this replica may hold too, 64 per page.
     pub async fn peer_scopes(
         &mut self,
         after: Option<ResourceScope>,
@@ -438,9 +401,6 @@ impl NativeSession {
         }
         Ok((scopes, next))
     }
-    /// Reads rows of a scope this replica does not hold from the peer. The
-    /// page states the peer's revision, frontier and completeness and is
-    /// not stored.
     pub async fn read_remote<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -466,7 +426,6 @@ impl NativeSession {
         }
         Ok(page)
     }
-    /// Boxed: receipt construction would otherwise enlarge every row answer.
     async fn answer_custody<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -608,9 +567,6 @@ impl NativeSession {
     }
 }
 
-/// Admits the void records a page carries before its frames: each must be
-/// of a requested scope. A refused record is skipped; the frames after it
-/// keep waiting.
 pub(super) async fn receive_voids<A: RowApplication>(
     replica: &EncryptedReplica<A>,
     voids: &[SignedVoid],

@@ -1,7 +1,3 @@
-//! Root escrow records carried with frames: a receiver keeps only those a
-//! key holder of their scope vouched for, one per issuer, so forged ones
-//! never displace a genuine record and are counted against the peer that
-//! carried them.
 use super::*;
 use crate::network::NativeSession;
 use crate::wire::Chain;
@@ -102,8 +98,6 @@ async fn forged_escrow_records_sent_first_never_displace_the_genuine_one() {
     assert!(reason.contains("could not read"), "{reason}");
 }
 
-/// Records of `slot` vouched for by `devices` fresh devices that the
-/// identity `issuer` enrolled with the full grants.
 fn vouched_under(
     f: &Fixture,
     issuer: &PrivateKey,
@@ -132,8 +126,6 @@ fn vouched_under(
         .collect()
 }
 
-/// A compromised issuer's devices flood an epoch, then a holder under
-/// another issuer carries its record.
 async fn flooded(f: &Fixture, dir: &Scratch) -> (Replica, PrivateKey, PrivateKey, VouchedEscrow) {
     let (b, _) = open(f, dir, &PrivateKey::new()).await;
     let slot = (f.public, *b.key_epochs(f.public).await.last().unwrap());
@@ -305,7 +297,7 @@ async fn evicting_a_scope_drops_its_carried_escrow_records_unless_frames_stay() 
     carry().await;
     {
         let mut inner = b.inner.lock(crate::replica::Class::Background).await;
-        transaction!(@commit inner, |inner| {
+        transaction!(@without_wal_checkpoint inner, |inner| {
             inner
                 .conn
                 .execute(
@@ -331,7 +323,7 @@ async fn evicting_a_scope_drops_its_carried_escrow_records_unless_frames_stay() 
 
     {
         let mut inner = b.inner.lock(crate::replica::Class::Background).await;
-        transaction!(@commit inner, |inner| {
+        transaction!(@without_wal_checkpoint inner, |inner| {
             inner
                 .conn
                 .execute("DELETE FROM secure_held_frames", ())

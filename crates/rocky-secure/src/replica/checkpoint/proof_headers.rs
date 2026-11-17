@@ -1,4 +1,3 @@
-//! First references let resumed checkpoint streams send each birth header once.
 use super::served::Served;
 use super::*;
 

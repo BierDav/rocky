@@ -1,4 +1,3 @@
-//! A SQL commit that fails after sealing leaves nothing behind.
 use super::compaction::{Replica, follow_main, open};
 use super::generations::{Lineage, select, session, text};
 use super::*;

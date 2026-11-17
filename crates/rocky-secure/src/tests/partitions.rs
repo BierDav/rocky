@@ -82,7 +82,6 @@ impl Fixture {
         )])
         .unwrap()
     }
-    /// Each list's own naming secret: holding one names no other list.
     fn naming(&self, name: &str) -> rocky_core::PartitionName {
         rocky_core::keyed_commitment(&crate::tests::PARTITION_NAME, "test.list", name.as_bytes())
     }
@@ -202,7 +201,6 @@ async fn sql_on(
         .unwrap()
 }
 
-/// Inserts `(list, key, amount)` rows in one transaction.
 async fn insert(
     f: &Fixture,
     replica: &EncryptedReplica<TypedRows>,

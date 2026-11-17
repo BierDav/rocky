@@ -1,6 +1,3 @@
-//! The owner's recovery seal ends a tip's log with the exact head it
-//! replaces, and enters the graph only once enough trusted nodes
-//! acknowledged it. Rocky writes no entries, so a recovery abandons none.
 use super::seals::{compose, follow_main, seal, share};
 use super::*;
 use crate::TipStatement;
@@ -9,7 +6,6 @@ use rocky_credentials::{
     SignedGenesisLine, SignedSeal,
 };
 
-/// The owner's `continue` seal of `tip` that replaces `recovery`'s head.
 async fn recovery_seal(
     lineage: &Lineage,
     node: &Replica,

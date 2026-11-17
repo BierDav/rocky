@@ -1,10 +1,7 @@
-//! Holding evidence never replaces current credential verification.
 use super::*;
 use crate::network::holdings::{HoldingProof, key_proof};
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Whether a peer must prove holding `scope`: partitioned and unknown
-    /// scopes need proof, known unpartitioned tables keep their grant-only rule.
     pub(crate) async fn holding_required(&self, scope: ResourceScope) -> bool {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         if inner.partitioned(scope) {

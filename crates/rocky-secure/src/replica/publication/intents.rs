@@ -1,17 +1,8 @@
-//! Migrations of replayed tables publish their program, not its rows. The
-//! issuer's execution commits with each partition's copy of the program
-//! staged behind a cursor; bounded transactions author the copies as
-//! bundles, and a last one records the publication. No frame of it is
-//! offered before that last transaction commits.
 use super::*;
 use rocky_core::replay::IntentStatement;
 
-/// One partition's members in publication order: each scope's statements
-/// and the undo and births of the issuer's execution there.
 const PUBLICATION_INTENTS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_publication_intents(publication BLOB NOT NULL,position INTEGER NOT NULL,members BLOB NOT NULL,PRIMARY KEY(publication,position)) WITHOUT ROWID";
-/// The leading positions authored, of `total`.
 const PUBLICATION_CURSORS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_publication_cursors(publication BLOB PRIMARY KEY,next INTEGER NOT NULL,total INTEGER NOT NULL) WITHOUT ROWID";
-/// Frames of a publication still being authored; never offered.
 const PUBLICATION_UNSENT_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_publication_unsent(hash BLOB PRIMARY KEY,publication BLOB NOT NULL) WITHOUT ROWID";
 pub(in crate::replica) const SCHEMA: &[&str] = &[
     PUBLICATION_INTENTS_TABLE,
@@ -19,13 +10,18 @@ pub(in crate::replica) const SCHEMA: &[&str] = &[
     PUBLICATION_UNSENT_TABLE,
 ];
 
-/// Bundles one authoring transaction writes. On the replayed 100k fixture a
-/// chunk dirties about 184 pages plus 36 per bundle, at most 471 for eight:
-/// under half of Android's 1,024-page writer cache.
 pub const PUBLICATION_CHUNK_BUNDLES: u64 = 8;
+const ANDROID_WRITER_CACHE_PAGES: u64 = 1024;
+const MEASURED_CHUNK_PAGES_ON_THE_REPLAYED_100K_FIXTURE: u64 = 184;
+const MEASURED_PAGES_PER_BUNDLE_ON_THE_REPLAYED_100K_FIXTURE: u64 = 36;
+const HALF_THE_ANDROID_WRITER_CACHE_PAGES: u64 = ANDROID_WRITER_CACHE_PAGES / 2;
+const _: () = assert!(
+    MEASURED_CHUNK_PAGES_ON_THE_REPLAYED_100K_FIXTURE
+        + MEASURED_PAGES_PER_BUNDLE_ON_THE_REPLAYED_100K_FIXTURE * PUBLICATION_CHUNK_BUNDLES
+        < HALF_THE_ANDROID_WRITER_CACHE_PAGES,
+    "a publication chunk must dirty under half the Android writer cache"
+);
 
-/// A partition's copy of the program in one scope, with the encoded undo
-/// and the births of the issuer's execution there.
 type Member = (
     ResourceScope,
     Vec<IntentStatement>,
@@ -33,13 +29,9 @@ type Member = (
     Vec<checkpoint::IdentityMark>,
 );
 
-/// Bundles and WAL pages of each authoring transaction, recorded while
-/// `ROCKY_MEASURE_PUBLICATION_PAGES` is set in qualification builds.
 #[cfg(feature = "qualification")]
 pub static CHUNK_PAGES: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());
 
-/// The WAL frames the connection's file holds; with `restart` the WAL is
-/// checkpointed and emptied first.
 #[cfg(feature = "qualification")]
 async fn wal_pages<A: RowApplication>(inner: &Inner<A>, restart: bool) -> Result<u64, Error> {
     let mode = if restart { "TRUNCATE" } else { "PASSIVE" };
@@ -53,7 +45,6 @@ async fn wal_pages<A: RowApplication>(inner: &Inner<A>, restart: bool) -> Result
     }
 }
 
-/// Exits the process at `point` in qualification builds.
 fn kill(point: &str) {
     #[cfg(feature = "qualification")]
     super::super::crash::qualification_kill(point);
@@ -62,9 +53,6 @@ fn kill(point: &str) {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Stores each partition's members of a migration program inside the
-    /// caller's transaction, which committed the issuer's execution. False
-    /// when the publication was staged before; the caller rolls back.
     pub(in crate::replica) async fn stage_intents(
         &self,
         publication: Commitment,
@@ -122,7 +110,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(true)
     }
-    /// The next position to author and the total of a staged publication.
     pub(in crate::replica) async fn publication_cursor(
         &self,
         publication: Commitment,
@@ -144,9 +131,6 @@ impl<A: RowApplication> Inner<A> {
             Some(_) => Err(Error::Corrupt("publication cursor".into())),
         }
     }
-    /// Authors positions `start..end` through the ordinary bundle path and
-    /// advances the cursor with them. A position whose handle committed
-    /// before is not authored again.
     async fn author_intent_chunk(
         &mut self,
         publication: Commitment,
@@ -235,9 +219,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Records an authored publication and commits its schema stage, then
-    /// publishes the outcome of each bundle of several members after the
-    /// migration's initial run of frames.
     async fn finish_intents(&mut self, publication: Commitment, total: u64) -> Result<(), Error> {
         let stage = self
             .migration_stage(publication)
@@ -290,7 +271,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Frames that must not leave: publications still being authored.
     pub(crate) async fn unsent(&self) -> Result<HashSet<Hash>, Error> {
         let mut unsent = HashSet::new();
         for record in rows(&self.conn, "SELECT hash FROM secure_publication_unsent").await? {
@@ -304,7 +284,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Whether `publication` committed its execution and still authors bundles.
     pub async fn publication_staged(&self, publication: Commitment) -> Result<bool, Error> {
         Ok(self
             .inner
@@ -314,20 +293,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await?
             .is_some())
     }
-    /// Authors the rest of a staged publication from its cursor, one bounded
-    /// chunk per transaction, then records it in one last transaction. A
-    /// refused chunk leaves the publication staged for the next call.
     pub async fn author_staged_publication(&self, publication: Commitment) -> Result<(), Error> {
         while self.author_publication_step(publication).await? {
             rocky_platform::task::yield_now().await;
         }
         Ok(())
     }
-    /// Authors the next chunk, or records the authored publication; false
-    /// once nothing is left. Each step first waits out a running passive
-    /// checkpoint and cuts the WAL: a truncating checkpoint fails beside a
-    /// passive one, and back-to-back steps would then grow the WAL one chunk
-    /// at a time.
     pub(crate) async fn author_publication_step(
         &self,
         publication: Commitment,

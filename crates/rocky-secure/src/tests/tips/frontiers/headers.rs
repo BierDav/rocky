@@ -1,4 +1,3 @@
-//! Stored-header syntax reuse never caches live coverage decisions.
 use super::*;
 use rocky_core::SqlValue;
 use std::collections::BTreeSet;
@@ -228,7 +227,6 @@ async fn replace_header(replica: &Replica, bytes: &[u8]) {
         .unwrap();
 }
 
-/// Drops every memoized stored header, so excluded rows are read cold.
 async fn reset_to_a_cold_header_memo(replica: &Replica) {
     replica
         .inner

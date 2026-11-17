@@ -1,4 +1,3 @@
-//! Incoming author-signed cancellation records remain distinct from payloads.
 use super::*;
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

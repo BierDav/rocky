@@ -2,7 +2,6 @@ use super::*;
 use identity::receipts;
 use std::borrow::Cow;
 
-/// A merged write, its new record and the previous decoded record.
 pub(super) type MergedRow = (RowChange, Materialized, Option<Materialized>);
 pub(super) struct Materialization<'p> {
     pub rows: Vec<MergedRow>,
@@ -10,33 +9,22 @@ pub(super) struct Materialization<'p> {
     pub payload: Cow<'p, RowPayload>,
 }
 
-/// What admitting one frame adds to the admission evidence: a first
-/// admission's receipt, and restorations minted on re-admission.
 #[derive(Default)]
 pub(super) struct Admission {
     receipt: Option<receipts::FrameReceipt>,
     restorations: Vec<receipts::Restoration>,
     observations: Vec<receipts::CarryObservation>,
 }
-/// How a birth is admitted.
 enum Class {
-    /// Not a numeric birth.
     Plain,
-    /// A first admission's original creation.
     Created(rocky_core::RowIdentity, Commitment),
-    /// A first admission's carried creation.
     Carried(rocky_core::RowIdentity, Commitment, PublicKey),
-    /// An original assignment or carry this file admitted before.
     Exact,
     Observe(receipts::CarryObservation),
-    /// A withheld birth restored now, with its receipt.
     Restore(u64, rocky_core::RowIdentity, Commitment),
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Admits one frame's exact writes against `grants` and merges each with
-    /// the stored row. The application validates the signed transition and
-    /// the actual candidate.
     pub(super) async fn materialize(
         &self,
         frame: &EncryptedFrame,
@@ -419,9 +407,6 @@ impl<A: RowApplication> Inner<A> {
             payload,
         })
     }
-    /// The checks every applied write passes: its partition, the
-    /// application's write rule, its scope, one write per row and the
-    /// installed fields.
     pub(super) async fn check_write(
         &self,
         write: &RowWrite,
@@ -457,9 +442,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Reserves the identities `frame` consumed, even those whose row is
-    /// definitely dropped. The frame is replay-eligible here, so the ledger
-    /// folds its own births too.
     async fn reserve_births(
         &self,
         scope: ResourceScope,
@@ -589,9 +571,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-/// Whether a merged candidate changes anything. An edit merged into a
-/// permanent tombstone has neither image: the delete wins and the edit
-/// still applies, so its author's log continues.
 pub(super) fn changes(change: &RowChange) -> bool {
     change.before.is_some() || change.after.is_some()
 }
@@ -600,8 +579,6 @@ pub(super) fn exact(writes: &[RowWrite]) -> Vec<RowChange> {
     writes.iter().map(|write| write.change.clone()).collect()
 }
 
-/// Merges one row-frame write into the stored row: every published field
-/// whose stored stamp this operation's stamp exceeds takes the after value.
 pub(super) fn merge_row(
     write: &RowWrite,
     current: Option<Materialized>,

@@ -1,11 +1,6 @@
-//! Stored rows' history and the switch that restores from it. While a seal
-//! is kept, a change to a stored row writes the version it replaces, as the
-//! live tables' history does; a tip whose path passes a kept seal then
-//! starts from that seal's rows plus the operations after it.
 use super::*;
 use checkpoint::{Overlay, STEP_OPERATIONS, STEP_ROWS, Sets};
 
-/// A scope's id and the last applied position a kept seal includes.
 pub(in crate::replica) type KeptBound = (i64, i64);
 
 macro_rules! clock {
@@ -18,7 +13,6 @@ macro_rules! active {
         "EXISTS(SELECT 1 FROM secure_kept_marks) AND COALESCE((SELECT rows_paused FROM secure_kept_clock WHERE id=1),0)=0"
     };
 }
-/// Whether a kept seal may still see the version at `$image`'s key.
 macro_rules! needed {
     ($image:literal) => {
         concat!(
@@ -31,7 +25,6 @@ macro_rules! needed {
     };
 }
 
-/// A stored row's replaced versions; no `fields` where it was absent.
 pub(super) const ROWS: &str = "CREATE TABLE IF NOT EXISTS secure_stored_history(scope BLOB NOT NULL,row BLOB NOT NULL,version INTEGER NOT NULL,fields BLOB,PRIMARY KEY(scope,row,version)) WITHOUT ROWID";
 pub(super) const ROWS_BY_VERSION: &str = "CREATE INDEX IF NOT EXISTS secure_stored_history_version ON secure_stored_history(scope,version)";
 pub(super) const ROWS_DELETE: &str = concat!(
@@ -52,8 +45,6 @@ pub(super) const ROWS_UPDATE: &str = concat!(
     needed!("OLD"),
     "; END"
 );
-/// Records an upsert or a replace, which changes the row at the key without
-/// an update or delete trigger of its own.
 pub(super) const ROWS_INSERT: &str = concat!(
     "CREATE TRIGGER IF NOT EXISTS secure_kept_rows_insert BEFORE INSERT ON secure_rows FOR EACH ROW WHEN ",
     active!(),
@@ -67,12 +58,10 @@ pub(super) const ROWS_INSERT: &str = concat!(
     needed!("r"),
     "; END"
 );
-/// Deletes the stored versions no kept seal needs any more.
 pub(super) const PRUNE_ROWS: &str = "DELETE FROM secure_stored_history WHERE NOT EXISTS(SELECT 1 FROM secure_kept_marks AS k WHERE k.mark<secure_stored_history.version AND k.mark>=COALESCE((SELECT MAX(p.version) FROM secure_stored_history AS p WHERE p.scope=secure_stored_history.scope AND p.row=secure_stored_history.row AND p.version<secure_stored_history.version),-1))";
 
 const BEFORE: &str = "secure_stored_history_before";
 
-/// A kept seal stored rows rebuild from.
 pub(in crate::replica) struct Rewind {
     seal: Commitment,
     mark: i64,
@@ -82,7 +71,6 @@ impl Rewind {
     pub(in crate::replica) fn mark(&self) -> (Commitment, i64) {
         (self.seal, self.mark)
     }
-    /// The seal's mark and scope `id`'s bound there.
     pub(in crate::replica) fn at(&self, id: i64) -> Option<(i64, i64)> {
         self.bounds
             .iter()
@@ -92,8 +80,6 @@ impl Rewind {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Runs `work`, a bulk replacement of `scope`'s stored rows, recording
-    /// what it changes in history at the end rather than row by row.
     pub(in crate::replica) async fn in_rows_bulk<T>(
         &self,
         scope: ResourceScope,
@@ -176,16 +162,12 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Kept `seal`'s mark and bounds, when it was kept under the installed
-    /// schema.
     pub(in crate::replica) async fn kept_rewind(
         &self,
         seal: Commitment,
     ) -> Result<Option<Rewind>, Error> {
         self.kept_at(seal, Some(self.manifest)).await
     }
-    /// Kept `seal`'s mark and bounds under `manifest`, or under any schema:
-    /// views read its frozen copies, whichever schema kept them.
     pub(in crate::replica) async fn kept_at(
         &self,
         seal: Commitment,
@@ -215,9 +197,6 @@ impl<A: RowApplication> Inner<A> {
             _ => Err(Error::Corrupt("kept seal".into())),
         }
     }
-    /// The kept seal a switch to the followed tip restores, with its mark
-    /// and bounds: the newest finalized on the tip's path that was kept
-    /// under the installed schema.
     pub(in crate::replica) async fn rewind_seal(
         &self,
         domain: Scope,
@@ -266,8 +245,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(None)
     }
-    /// Whether scope `id` rebuilds from a kept seal of the followed path:
-    /// its replay base, if any, lies on the path before it.
     pub(in crate::replica) async fn rewinds(
         &self,
         scope: ResourceScope,
@@ -284,14 +261,6 @@ impl<A: RowApplication> Inner<A> {
                 }),
         })
     }
-    /// Inside the caller's transaction, rebuilds scope `id`'s stored rows
-    /// from the kept seal marked `mark`, whose state included its applied
-    /// positions through `bound`: rows changed since are restored from
-    /// history, the operations in `(bound, through]` replay on top, those
-    /// of the followed tip only for a `tip` switch, and only rows that
-    /// differ from the live ones are written and projected. `ledger` holds
-    /// the identity marks of the kept state. Returns the row ids of every
-    /// row it looked at.
     pub(in crate::replica) async fn rewind_rows(
         &mut self,
         scope: ResourceScope,

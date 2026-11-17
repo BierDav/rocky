@@ -1,4 +1,3 @@
-//! Graph admission, constant-row-cost sealing and line isolation.
 use super::*;
 mod frontiers;
 mod refresh;
@@ -140,8 +139,6 @@ async fn late_frames_on_a_previously_continued_abandoned_line_are_held() {
     assert_eq!(a.held_changes().await.unwrap().len(), 1);
 }
 
-/// A moved bookmark holds the writes it leaves behind a page of stored
-/// frames at a time, however large the backlog.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_moved_bookmark_holds_its_abandoned_writes_a_page_at_a_time() {
     let f = Fixture::new();
@@ -170,9 +167,6 @@ async fn a_moved_bookmark_holds_its_abandoned_writes_a_page_at_a_time() {
     assert!(replica.snapshot(f.public).await.unwrap().rows.is_empty());
 }
 
-/// Holding a batch reseeds each scope's replay ledger once, and only for
-/// frames it had applied: a moved bookmark rereads the ledger's history a
-/// bounded number of times, and held intake not at all.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn holding_a_batch_reseeds_each_ledger_once() {
     const APPLIED_FRAMES: u8 = 10;
@@ -224,9 +218,6 @@ async fn holding_a_batch_reseeds_each_ledger_once() {
     assert_eq!(target.snapshot(f.public).await.unwrap().rows.len(), 4);
 }
 
-/// A tip statement batch reads no stored header while the followed path's
-/// schemas are installed, and reseeds replay ledgers once, only where it
-/// changed what the workspace sees.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn tip_statement_batches_rescan_only_what_they_change() {
     use crate::replica::lock::WorkUnit;
@@ -268,8 +259,6 @@ async fn tip_statement_batches_rescan_only_what_they_change() {
     assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 8);
 }
 
-/// Walking the followed path hashes each statement a bounded number of
-/// times, not once per seal walked.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn walking_the_followed_path_hashes_each_seal_a_bounded_number_of_times() {
     let f = Fixture::new();
@@ -288,8 +277,6 @@ async fn walking_the_followed_path_hashes_each_seal_a_bounded_number_of_times() 
     assert!(crate::replica::take_hashed() <= 2 * seals.len());
 }
 
-/// A failed admission leaves the very graph it found, uncopied; readers
-/// share it too.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_failed_admission_restores_the_shared_graph_uncopied() {
     use std::borrow::Borrow;
@@ -450,8 +437,6 @@ fn branch(f: &Fixture, seal: &SignedSeal) -> (TipId, Vec<TipStatement>) {
         ],
     )
 }
-/// Clones the stored row record `count - 1` times, so graph-metadata scaling
-/// is measured without row capture or encryption cost.
 async fn clone_stored_row_records(replica: &Replica, count: i64) {
     replica.inner.lock(crate::replica::Class::Background).await.conn.execute(
         "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<?) INSERT INTO secure_row_records SELECT scope,CAST(printf('%032d',i) AS BLOB),fields FROM secure_row_records,n",
@@ -731,7 +716,6 @@ async fn concurrent_issuer_seals_choose_the_lower_continuation_on_every_device()
     );
 }
 
-/// Native only, like the coordinator and its memory log.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_coordinated_seal_enters_the_graph_only_after_ending_its_tips_log() {
@@ -836,9 +820,6 @@ async fn a_coordinated_seal_enters_the_graph_only_after_ending_its_tips_log() {
     assert_eq!(coordinator.head(log).unwrap().terminal, Some(terminal));
 }
 
-/// Two trusted nodes seal routinely at the same threshold. The loser of the
-/// tip's log must not follow its own seal before the winner arrives: the
-/// winner becomes final and the loser's author log would cross a fork.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_own_seal_that_lost_the_tips_log_is_not_published_before_the_winner_arrives() {
@@ -1815,8 +1796,6 @@ async fn the_owners_backward_move_beats_an_issuers_forward_move_and_revocation_r
     );
 }
 
-/// A cut held refuses what the revoked identity signs past its head on
-/// arrival; a replica that held such a statement deletes it. Both count it.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_held_cut_refuses_and_prunes_what_follows_its_head() {
     let f = Fixture::new();

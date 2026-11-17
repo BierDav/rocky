@@ -1,4 +1,3 @@
-//! Signer sets are interned locally and remain part of canonical row commitments.
 use super::*;
 
 pub(super) const SCHEMA: &[&str] = &[

@@ -10,10 +10,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
-/// Frames decoded recently, by a digest of their bytes. A frame is decoded
-/// several times as it is received and applied, and each decoding encodes
-/// the header again for its canonical form, its hash and its signature;
-/// the result depends on the bytes alone.
 static DECODED: LazyLock<Mutex<HashMap<Hash, Operation<Extensions>>>> =
     LazyLock::new(Mutex::default);
 const DECODED_FRAMES: usize = 256;
@@ -21,7 +17,6 @@ const DECODED_FRAMES: usize = 256;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PackageKind {
     Checkpoint,
-    /// Rows read on behalf of a peer that does not hold the scope.
     Read,
 }
 
@@ -30,35 +25,23 @@ pub(crate) struct Extensions {
     pub tip: rocky_core::TipId,
     pub scope: ResourceScope,
     pub generation: rocky_core::KeyEpoch,
-    /// The digest of the author's credential chain; see `Chain`.
     pub chain: Commitment,
-    /// Whether a node certificate's writer signed this frame as a table
-    /// author: its header key is then the writer of its stamps and births.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub authored: bool,
-    /// Domain-wide position of this node, independent of its per-scope log.
     pub author_sequence: u64,
     pub row_format: u8,
     pub births: Vec<serde_bytes::ByteArray<32>>,
 }
 
 impl Extensions {
-    /// The table author of a frame `signer` signed: its writer identity.
     pub(crate) fn author(&self, signer: &PublicKey) -> Option<rocky_core::WriterId> {
         self.authored.then(|| crate::writer::writer(signer))
     }
 }
 
-/// Source-schema ordinals and frame-bound birth statements, without
-/// existence counts; a partition's tuple only inside the sealed body.
-/// Writers are full node keys.
 pub(crate) const ROW_FORMAT: u8 = 17;
-/// The refusal of a frame whose credential chain the receiver lacks.
 pub(crate) const INCOMPLETE_FRAME: &str = "incomplete frame: its credential chain is unknown";
 
-/// A credential chain with the digest a frame header names it by. The digest
-/// shares the chain's bytes between frames, sessions and stored operations;
-/// it carries no authority, and every use still verifies the chain.
 #[derive(Clone, Debug)]
 pub(crate) struct Chain {
     digest: Commitment,
@@ -95,10 +78,6 @@ impl<'de> Deserialize<'de> for Chain {
     }
 }
 
-/// A signed header, its sealed body and, beside them, the author's
-/// credential chain. The header signs the chain's digest only: a session
-/// carries the chain once and sends its frames without it, and a replica
-/// stores it once. A frame without its chain is incomplete and is refused.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EncryptedFrame {
     #[serde(with = "serde_bytes")]
@@ -109,12 +88,10 @@ pub struct EncryptedFrame {
     chain: Option<Chain>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) migration: Option<crate::replica::MigrationMembership>,
-    /// The verified operation of these immutable bytes, once decoded.
     #[serde(skip)]
     decoded: std::sync::OnceLock<Box<Operation<Extensions>>>,
 }
 impl EncryptedFrame {
-    /// A frame without its chain, as storage and a session page hold it.
     pub(crate) fn bare(header: Vec<u8>, body: Vec<u8>) -> Self {
         Self {
             header,
@@ -130,7 +107,6 @@ impl EncryptedFrame {
     pub(crate) fn body_bytes(&self) -> &[u8] {
         &self.body
     }
-    /// The frame with another body, as a test tampers with one.
     #[cfg(test)]
     pub(crate) fn with_body(&self, body: Vec<u8>) -> Self {
         Self {
@@ -143,7 +119,6 @@ impl EncryptedFrame {
         self.chain = Some(chain);
         self
     }
-    /// The frame under another signed header, as a forger alters one.
     #[cfg(test)]
     pub(crate) fn with_header(&self, header: Vec<u8>) -> Self {
         Self {
@@ -152,23 +127,18 @@ impl EncryptedFrame {
             ..self.clone()
         }
     }
-    /// Removes the chain, which a session sends once before the frame.
     pub(crate) fn take_chain(&mut self) -> Option<Chain> {
         self.chain.take()
     }
-    /// The digest the signed header names its chain by.
     pub(crate) fn chain_digest(&self) -> Result<Commitment, Error> {
         Ok(self.operation_ref()?.header.extensions.chain)
     }
-    /// The author's chain, which must be the one the header names.
     pub(crate) fn chain(&self) -> Result<&Chain, Error> {
         match &self.chain {
             Some(chain) if chain.digest() == self.chain_digest()? => Ok(chain),
             _ => Err(denied(INCOMPLETE_FRAME)),
         }
     }
-    /// Bytes a page or a retention bound counts for the frame: its header
-    /// and body with their encoding, without the chain.
     pub(crate) fn stored_bytes(&self) -> Result<u64, Error> {
         u64::try_from(self.header.len())
             .ok()
@@ -184,7 +154,6 @@ impl EncryptedFrame {
                 encode(proof).map_or(usize::MAX, |bytes| bytes.len())
             }))
     }
-    /// The frame with its chain, for a transport outside a native session.
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         if self.weight() > MAX_SECURE_FRAME {
             return Err(denied("secure frame quota"));
@@ -209,15 +178,12 @@ impl EncryptedFrame {
     pub fn scope(&self) -> Result<ResourceScope, Error> {
         Ok(self.operation_ref()?.header.extensions.scope)
     }
-    /// The key epoch the frame is sealed under: the root escrow records
-    /// of that epoch travel with it.
     pub(crate) fn generation(&self) -> Result<rocky_core::KeyEpoch, Error> {
         Ok(self.operation_ref()?.header.extensions.generation)
     }
     pub(crate) fn operation(&self) -> Result<Operation<Extensions>, Error> {
         self.operation_ref().cloned()
     }
-    /// The verified operation, decoded once per frame: its bytes never change.
     pub(crate) fn operation_ref(&self) -> Result<&Operation<Extensions>, Error> {
         if let Some(operation) = self.decoded.get() {
             return Ok(operation);
@@ -263,9 +229,6 @@ impl EncryptedFrame {
     }
 }
 
-/// A dependency's signed header and its author's chain: what proves to a
-/// peer that never received the frame that its author is revoked. Revoked
-/// frames are never served, so without it an unknown head looks missing.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RevokedHead {
     #[serde(with = "serde_bytes")]
@@ -282,7 +245,6 @@ impl RevokedHead {
     pub(crate) fn chain(&self) -> &Chain {
         &self.chain
     }
-    /// The signed header, once it verifies and names this chain.
     pub(crate) fn verify(&self) -> Result<Header<Extensions>, Error> {
         let header = verified_header(&self.header)?;
         if header.extensions.chain != self.chain.digest() {
@@ -292,7 +254,6 @@ impl RevokedHead {
     }
 }
 
-/// A row frame's signed header without its body: what a placement shows.
 pub(crate) fn verified_header(bytes: &[u8]) -> Result<Header<Extensions>, Error> {
     let header: Header<Extensions> = decode(bytes)?;
     check_header(&header)?;
@@ -300,7 +261,6 @@ pub(crate) fn verified_header(bytes: &[u8]) -> Result<Header<Extensions>, Error>
     Ok(header)
 }
 
-/// The row format and authenticated metadata every row header satisfies.
 fn check_header(header: &Header<Extensions>) -> Result<(), Error> {
     {
         if header.extensions.row_format != ROW_FORMAT {
@@ -349,8 +309,6 @@ pub(crate) fn decrypt(key: &[u8; 32], aad: &[u8], bytes: &[u8]) -> Result<Vec<u8
         )
         .map_err(|_| denied("missing/wrong key or corrupt ciphertext"))
 }
-/// A frame body as sealed: a partition's tuple travels only here, so the
-/// signed header names the partition by its keyed scope alone.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Opened {
     pub partition: Option<rocky_core::PartitionTuple>,
@@ -358,7 +316,6 @@ pub(crate) struct Opened {
     pub payload: Vec<u8>,
 }
 impl Opened {
-    /// Opens a frame body sealed under `key` for `extensions`.
     pub(crate) fn open(
         key: &[u8; 32],
         extensions: &Extensions,
@@ -416,10 +373,6 @@ pub(crate) fn author(key: &PrivateKey, draft: FrameDraft<'_>) -> Result<Encrypte
     Ok(frame)
 }
 
-/// A frame's place in a transaction bundle. Every member carries the same
-/// `members`: entry `i` names member `i`'s scope and sequence, sealed under
-/// that member's scope key, so a reader learns only the partitions it holds
-/// keys for and how many members there are.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct Membership {
     pub transaction: Commitment,
@@ -427,7 +380,6 @@ pub(crate) struct Membership {
     #[serde(with = "member_bytes")]
     pub members: Vec<Vec<u8>>,
 }
-/// Encodes ciphertexts as byte strings, not arrays of encoded integers.
 mod member_bytes {
     use serde::{Deserialize, Serialize};
 
@@ -459,9 +411,7 @@ struct BundleBody {
     carried: BTreeMap<Commitment, crate::replica::moves::Carried>,
     membership: Option<Membership>,
     writes: Vec<RowWrite>,
-    /// A replayed table's part of the bundle, instead of `writes`.
     intent: Option<rocky_core::replay::Intent>,
-    /// How a replica replayed a transaction, alone in its frame.
     outcome: Option<rocky_core::replay::OutcomeRecord>,
 }
 #[derive(Serialize, Deserialize)]
@@ -471,7 +421,6 @@ struct WitnessBody {
     body: Vec<u8>,
     creations: Vec<(Commitment, Commitment)>,
 }
-/// A current row payload, always protected by a creation witness envelope.
 #[derive(Clone)]
 pub(crate) struct RowPayload {
     #[cfg(test)]
@@ -688,7 +637,6 @@ impl RowPayload {
     }
 }
 
-/// Separately encrypted outputs. The aggregate commitment covers ciphertext and routing metadata.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EncryptedPackage {
     pub scope: ResourceScope,

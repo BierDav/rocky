@@ -1,11 +1,7 @@
-//! Owner resets on replicas: the fence keeps what the signer applied of an
-//! ended writer and refuses the rest, whichever order frames and the reset
-//! arrive in.
 use super::revocations::{insert, open};
 use super::*;
 use rocky_credentials::{PeerId, Reset, RootDecision};
 
-/// Signs, under one lock with `signer`'s fence, a reset keeping `keep`.
 async fn reset(
     f: &Fixture,
     signer: &EncryptedReplica<Employees>,

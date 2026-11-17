@@ -1,4 +1,3 @@
-//! Retained per-scope accounting survives a losing seal without claiming its state.
 use super::*;
 use rocky_credentials::AuthorMark;
 
@@ -34,7 +33,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Before deleting verified accounting, retain it only while all scope frames remain.
     pub(in crate::replica) async fn anchor_seal_coverage(
         &self,
         scope: ResourceScope,

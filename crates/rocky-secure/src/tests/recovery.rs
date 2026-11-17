@@ -1,5 +1,3 @@
-//! Recovery that needs no new frame: frames whose keys arrive later,
-//! quarantine, durable import failure counts and bounded maintenance.
 use super::blockers::named;
 use super::*;
 use crate::{BlockerKind, WaitReason};
@@ -81,9 +79,6 @@ async fn frames_whose_key_arrives_later_apply_without_another_frame() {
     assert!(target.blockers().await.unwrap().is_empty());
 }
 
-/// A frame whose application fails as its own fault waits alone: another
-/// log of the same group applies, and the frame applies once a key, grant,
-/// schema or the tip graph changes, not before.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_quarantined_frame_waits_alone_until_its_cause_changes() {
     let f = Fixture::new();
@@ -233,8 +228,6 @@ async fn maintenance_finalizes_one_seal_per_step() {
     }
 }
 
-/// Pending log heads list one per acquisition in tests; counts of
-/// different authors' logs still add up across pages.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn paged_pending_blockers_add_up_across_authors() {
     let f = Fixture::new();

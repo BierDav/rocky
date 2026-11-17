@@ -1,4 +1,3 @@
-//! Exact original-node chain proof; no intake, replay or evidence writes.
 use super::*;
 use p2panda_core::{Header, validate_backlink};
 mod records;

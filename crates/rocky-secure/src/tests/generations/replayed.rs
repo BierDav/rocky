@@ -1,5 +1,3 @@
-//! Replayed tables across a schema change: a late transaction replays in
-//! the successor against its schema, or drops as `Schema`.
 use super::*;
 
 async fn outcomes(replica: &EncryptedReplica<TypedRows>) -> Vec<Vec<SqlValue>> {

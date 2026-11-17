@@ -1,4 +1,3 @@
-//! Retained signed headers at one domain position must not hide a conflict.
 use super::*;
 use crate::storage::{bindings, rows};
 use rocky_core::SqlValue;

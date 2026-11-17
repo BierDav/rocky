@@ -1,12 +1,6 @@
-//! Restrictions are transition checks: a posted entry never changes or
-//! goes, the audit log only grows. Author commits refuse a violation;
-//! replay drops it with reason `Restricted` wherever it orders after the
-//! posting, whatever the delivery schedule.
 use super::convergence::{History, deliver_all, runtime, unit};
 use super::*;
 
-/// Entries of batches (cascade) whose posted rows are immutable, ignoring
-/// case as the status column compares, and an append-only audit log.
 fn ledger() -> Constrained {
     let json = serde_json::json!({
         "format": 6,
@@ -38,7 +32,6 @@ fn ledger() -> Constrained {
 const UPDATE_POSTED: &str = "restriction posted_entries refuses this update of entries";
 const DELETE_POSTED: &str = "restriction posted_entries refuses this delete of entries";
 
-/// Native only: it uses a temporary directory across threads.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn restrictions_refuse_local_updates_and_deletes_of_protected_rows() {
@@ -159,10 +152,6 @@ async fn restrictions_refuse_local_updates_and_deletes_of_protected_rows() {
     assert_eq!(rows["audit"].len(), 2);
 }
 
-/// After `setup`, the first author posts an entry. The second edits it and
-/// the third deletes its batch, neither having seen the posting, which
-/// orders before both; an author skipping its own checks edits the audit
-/// log; a draft edit applies.
 async fn posting_history(root: &Path) -> History {
     let c = ledger();
     let (mut d, ids, mut setup) = devices(
@@ -242,7 +231,6 @@ async fn posting_history(root: &Path) -> History {
     }
 }
 
-/// Native only: it blocks on its own runtime, which a browser Worker cannot.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn edits_ordered_after_a_posting_drop_alike_in_every_order() {

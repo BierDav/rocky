@@ -1,6 +1,3 @@
-//! Final seals: trusted nodes acknowledge the terminal entry that ended a
-//! tip's log, and the record they publish makes that seal win on every
-//! device, the owner's later seal included.
 use super::seals::{bookmark, join_main, seal, share};
 use super::*;
 use crate::TipStatement;

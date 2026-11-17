@@ -1,4 +1,3 @@
-//! Privileged retained-store corruption never proves restoration.
 use super::*;
 use crate::storage::{bindings, collect_rows};
 
@@ -246,8 +245,6 @@ async fn restoration_never_admits_unknown_own_frames_without_or_above_its_exact_
     );
 }
 
-/// Writes a placement for every fixture frame straight into the store, as
-/// the off-custody placement protocol would for a scope held elsewhere.
 async fn place_every_frame_directly(f: &HeldPrefix, scope: ResourceScope) {
     for frame in &f.frames {
         let operation = frame.operation_ref().unwrap();

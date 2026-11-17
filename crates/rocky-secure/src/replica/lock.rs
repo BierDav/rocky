@@ -13,17 +13,8 @@ pub(crate) enum Class {
     Background,
 }
 
-/// Interactive acquisitions a background acquisition defers to before it
-/// queues anyway, so background work still advances under continuous writes.
 pub(crate) const STARVATION_YIELDS: u64 = 8;
 
-/// The raw mutex stays private so every acquisition has a class and a caller.
-///
-/// Interactive acquisitions register before they wait. A background
-/// acquisition starts only when none is registered, and rechecks after it
-/// obtains the mutex, so an interactive one waits for at most the one
-/// background step already running. Transitions and other oversized steps
-/// acquire as background and therefore start only when the gate is quiet.
 pub(crate) struct ReplicaLock<T> {
     mutex: Arc<Mutex<T>>,
     gate: Arc<Gate>,
@@ -38,11 +29,8 @@ struct Gate {
 }
 #[derive(Default, Clone, Copy)]
 struct GateState {
-    /// Registered interactive waiters.
     waiting: u64,
-    /// Interactive acquisitions so far; counts the starvation guard's yields.
     acquired: u64,
-    /// Background grants so far and whether one holds, for the step counter.
     #[cfg(any(test, feature = "qualification"))]
     background_grants: u64,
     #[cfg(any(test, feature = "qualification"))]
@@ -61,7 +49,6 @@ impl Gate {
     }
 }
 
-/// An interactive waiter's registration; dropping it unacquired cancels it.
 struct Registration {
     gate: Arc<Gate>,
     #[cfg(any(test, feature = "qualification"))]
@@ -80,8 +67,6 @@ impl Registration {
             start,
         }
     }
-    /// Background steps this waiter waited for: the one running when it
-    /// registered plus any granted afterwards.
     fn acquired(self) -> u64 {
         self.gate.update(|state| {
             state.acquired += 1;
@@ -164,7 +149,9 @@ impl<T> ReplicaLock<T> {
                 guard,
                 #[cfg(any(test, feature = "qualification"))]
                 work_start,
-                _timing: Hold {
+                _recorded_after_release: Hold {
+                    #[cfg(test)]
+                    after_record: None,
                     site,
                     class,
                     acquired,
@@ -190,8 +177,6 @@ impl<T> ReplicaLock<T> {
     }
 }
 
-/// Waits until no interactive waiter is registered, unless this acquisition
-/// has deferred to `STARVATION_YIELDS` interactive acquisitions already.
 async fn background<G, F: Future<Output = G>>(gate: &Gate, lock: impl Fn() -> F) -> G {
     let mut first_deferral = None;
     loop {
@@ -227,14 +212,14 @@ async fn background<G, F: Future<Output = G>>(gate: &Gate, lock: impl Fn() -> F)
 }
 
 pub(crate) struct Guard<G> {
-    /// Declared before `_timing` so the mutex is released before the
-    /// completed hold is recorded.
     guard: G,
-    _timing: Hold,
+    _recorded_after_release: Hold,
     #[cfg(any(test, feature = "qualification"))]
     work_start: [u64; 25],
 }
 struct Hold {
+    #[cfg(test)]
+    after_record: Option<Box<dyn FnOnce() + Send + Sync>>,
     site: &'static Location<'static>,
     class: Class,
     acquired: Instant,
@@ -253,21 +238,21 @@ struct Hold {
 #[cfg(any(test, feature = "qualification"))]
 impl<G> Guard<G> {
     pub(crate) fn row_work(&mut self, bound: u64) {
-        self._timing.normal_rows = bound;
+        self._recorded_after_release.normal_rows = bound;
     }
 }
 #[cfg(any(test, feature = "qualification"))]
 impl<G> Guard<G> {
     pub(crate) fn units(&mut self, unit: &'static str, count: u64) {
         if count > 0 {
-            self._timing.units.push((unit, count));
+            self._recorded_after_release.units.push((unit, count));
         }
     }
 }
 #[cfg(any(test, feature = "qualification"))]
 impl<G> Drop for Guard<G> {
     fn drop(&mut self) {
-        let end = self._timing.measurements.work_snapshot();
+        let end = self._recorded_after_release.measurements.work_snapshot();
         for (index, unit) in [
             "replayed_frame",
             "base_row",
@@ -300,9 +285,15 @@ impl<G> Drop for Guard<G> {
         {
             let count = end[index].saturating_sub(self.work_start[index]);
             if count > 0 {
-                self._timing.units.push((unit, count));
+                self._recorded_after_release.units.push((unit, count));
             }
         }
+    }
+}
+#[cfg(test)]
+impl<G> Guard<G> {
+    fn after_hold_recorded(&mut self, probe: impl FnOnce() + Send + Sync + 'static) {
+        self._recorded_after_release.after_record = Some(Box::new(probe));
     }
 }
 impl<G: Deref> Deref for Guard<G> {
@@ -337,6 +328,10 @@ impl Drop for Hold {
             &self.units,
             self.normal_rows,
         );
+        #[cfg(test)]
+        if let Some(probe) = self.after_record.take() {
+            probe();
+        }
     }
 }
 
@@ -349,12 +344,10 @@ mod qualification {
     pub(super) fn connection() -> Option<u64> {
         CONNECTION.try_with(|id| *id).ok()
     }
-    /// Carries an SDK SQL connection identity across its server-side task.
     #[cfg(feature = "qualification")]
     pub async fn with_measurement_connection<T>(id: u64, future: impl Future<Output = T>) -> T {
         CONNECTION.scope(id, future).await
     }
-    /// Opt-in, replica-local histograms. Disabled until `start` is called.
     #[derive(Clone, Default)]
     pub struct LockMeasurements(Arc<Recording>);
     #[derive(Default)]
@@ -396,7 +389,6 @@ mod qualification {
     pub struct Measurements {
         pub holders: BTreeMap<(String, String), HolderMeasurements>,
         pub flush_us: Vec<u64>,
-        /// Background steps each interactive acquisition waited for.
         pub interactive_steps: Vec<u64>,
         pub connections: BTreeMap<u64, ConnectionMeasurements>,
         pub checkpoints: BTreeMap<String, Vec<(u64, u64)>>,
@@ -405,9 +397,7 @@ mod qualification {
     pub struct HolderMeasurements {
         pub wait_us: Vec<u64>,
         pub hold_us: Vec<u64>,
-        /// Indivisible requests, excluded from the ordinary hold histogram.
         pub oversized_request_us: Vec<u64>,
-        /// (work count, full acquisition hold in microseconds).
         pub units: BTreeMap<String, Vec<(u64, u64)>>,
     }
     #[derive(Default, Debug)]
@@ -444,7 +434,6 @@ mod qualification {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Measurements::default());
         }
-        /// Drains the interval while continuing to record the next one.
         pub fn take(&self) -> Measurements {
             self.0
                 .data
@@ -595,7 +584,7 @@ mod tests {
         let line = line!() + 1;
         let future = mutex.lock(Class::Interactive);
         let mut guard = future.await;
-        guard._timing.acquired -= Duration::from_millis(2);
+        guard._recorded_after_release.acquired -= Duration::from_millis(2);
         drop(guard);
         let events = events.0.lock().unwrap();
         let fields = &events[0];
@@ -615,7 +604,7 @@ mod tests {
         let mutex = ReplicaLock::new((), measurements.clone());
         measurements.start();
         let mut guard = mutex.lock(Class::Background).await;
-        guard._timing.acquired -= Duration::from_millis(2);
+        guard._recorded_after_release.acquired -= Duration::from_millis(2);
         measurements.work(WorkUnit::BaseRow, 7);
         drop(guard);
         let line = line!() + 1;
@@ -743,6 +732,63 @@ mod tests {
             task.await.unwrap();
         }
         assert_eq!(*order.lock().unwrap(), ["first", "second", "third"]);
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_hold_is_recorded_only_after_its_lock_is_released() {
+        let (_, lock, measurements) = order();
+        let lock = Arc::new(lock);
+        for class in [Class::Interactive, Class::Background] {
+            let free_when_recorded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let mut guard = lock.lock(class).await;
+            let (probe, free) = (lock.clone(), free_when_recorded.clone());
+            guard.after_hold_recorded(move || {
+                free.store(
+                    probe.mutex.try_lock().is_ok(),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            });
+            drop(guard);
+            assert!(
+                free_when_recorded.load(std::sync::atomic::Ordering::SeqCst),
+                "the {class:?} hold was recorded while its mutex was still held"
+            );
+        }
+        assert_eq!(measurements.stop().holders.len(), 2);
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn background_work_waits_without_touching_the_mutex_while_an_interactive_waiter_is_registered()
+     {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let gate = Arc::new(Gate::default());
+        let mutex = Mutex::new(());
+        let attempts = AtomicUsize::new(0);
+        let registered = Registration::new(&gate);
+        let waiting = background(&gate, || {
+            let (attempts, mutex) = (&attempts, &mutex);
+            async move {
+                attempts.fetch_add(1, SeqCst);
+                rocky_platform::task::yield_now().await;
+                mutex.lock().await
+            }
+        });
+        tokio::pin!(waiting);
+        for _ in 0..16 {
+            std::future::poll_fn(|context| {
+                assert!(waiting.as_mut().poll(context).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+        }
+        assert_eq!(
+            attempts.load(SeqCst),
+            0,
+            "a registered interactive waiter keeps background work off the mutex"
+        );
+        drop(registered);
+        drop(waiting.await);
+        assert_eq!(attempts.load(SeqCst), 1);
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

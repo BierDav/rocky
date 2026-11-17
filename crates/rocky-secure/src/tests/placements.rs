@@ -1,6 +1,3 @@
-//! Signed header placements: a node that cannot hold a scope learns where a
-//! seal's positions in it lie from their signed headers alone, and finalizes
-//! and compacts the seal.
 use super::compaction::{Replica, follow_main, insert, scalar, seal, sync};
 use super::generations::{Lineage, identity_insert, session};
 use super::*;
@@ -8,8 +5,6 @@ use crate::{PlacementPage, PlacementRequest};
 use std::collections::BTreeSet;
 mod conflicts;
 
-/// Same-database table grants added to each renewed chain, enough to force a
-/// page boundary despite small size variations in random signatures and keys.
 const PAGE_BOUNDARY_TABLE_GRANTS: u8 = 4;
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -97,7 +92,6 @@ async fn chain(replica: &Replica) -> CredentialChain {
         .credentials
         .clone()
 }
-/// Asks `source` for every placement `target` wants, as `target`'s session.
 async fn place(source: &Replica, target: &(PrivateKey, Replica)) -> usize {
     let credentials = chain(&target.1).await;
     let mut stored = 0;
@@ -111,8 +105,6 @@ async fn place(source: &Replica, target: &(PrivateKey, Replica)) -> usize {
     stored
 }
 
-/// Alice holds `items` and `tags`; bob only `items`. Alice's last frames
-/// before her seal are in `tags`, so bob misses their positions.
 async fn pair() -> Pair {
     let lineage = Lineage::new();
     let dir = Scratch::new().await;
@@ -559,7 +551,6 @@ async fn a_frame_at_a_placed_position_replaces_it_and_another_header_is_equivoca
     );
 }
 
-/// Moves every frame and void of `scope` that `source` holds to `target`.
 async fn sync_scope(
     lineage: &Lineage,
     source: &Replica,
@@ -598,7 +589,6 @@ async fn sync_scope(
     }
     let _ = lineage;
 }
-/// Revokes the identity behind a node `lineage.open` enrolled.
 fn revoking_node(lineage: &Lineage, node: PublicKey) -> RevocationSet {
     let user = PrivateKey::from_bytes(&rocky_core::commitment("lineage.user", node.as_bytes()));
     crate::tests::revoking(

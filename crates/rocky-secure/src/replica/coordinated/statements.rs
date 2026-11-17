@@ -1,7 +1,3 @@
-//! Tip statements on a trusted node: a seal ends its tip's coordinated log
-//! with its digest before it enters the graph; the owner's recovery is a
-//! terminal entry that ends a log no ordinary seal can. Seals waiting for
-//! their terminal entry are journaled.
 use super::*;
 use crate::TipStatement;
 use rocky_core::{CoordinationError, LogHead, LogTerminal};
@@ -11,59 +7,26 @@ pub(in crate::replica) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_terminal_credentials(node BLOB PRIMARY KEY,credentials BLOB NOT NULL) WITHOUT ROWID",
     PENDING_TIPS,
 ];
-/// Statement batches whose seals wait for their tip's terminal entry: this
-/// node's own publication, flushed before the coordinator sees it, and
-/// received seals it could not confirm yet. Never part of the graph.
 const PENDING_TIPS: &str = "CREATE TABLE IF NOT EXISTS secure_pending_tips(batch BLOB PRIMARY KEY,own INTEGER NOT NULL,statements BLOB NOT NULL) WITHOUT ROWID";
-/// Received batches a node keeps waiting at once; more wait for a resend.
 const MAX_PENDING_RECEIVED: usize = 32;
 
-/// Where a seal's tip log stands after its terminal entry was submitted.
 enum Ending {
-    /// Ended by this seal, or, for a received seal, by a terminal entry this
-    /// replica holds no statement for: the graph decides between them.
     Ended,
-    /// Another seal ended the log first: one this replica holds, or any
-    /// for this node's own seal.
     Lost,
-    /// Never enters the graph: a recovery the log did not commit.
     Refused(&'static str, String),
-    /// Not confirmed yet; the coordinator may have committed it after a lost reply.
     Unconfirmed { code: &'static str, reason: String },
 }
-/// Where the seal that leads into a tip stands at the coordinator.
 pub(super) enum Entry {
     Won,
     Lost,
-    /// Not known yet: retried later.
-    Waiting {
-        code: &'static str,
-        reason: String,
-    },
+    Waiting { code: &'static str, reason: String },
 }
-/// What coordinating a batch decided.
 pub(in crate::replica) struct Coordinated {
-    /// May enter the graph now.
     pub kept: Vec<TipStatement>,
-    /// Wait for their seal's terminal entry, with what depends on them.
     pub deferred: Vec<TipStatement>,
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Splits `statements` into those that may enter the graph and those
-    /// that wait. A recovery on every device waits for verified finality,
-    /// and a seal its finality record proves enters without the coordinator.
-    /// Only a composed log of the coordinator the owner's settings name
-    /// counts. Without one, received ordinary seals enter immediately and
-    /// this node's own seals do too unless the settings name a coordinator:
-    /// then `strict` refuses them with `coordinator_required`, or
-    /// `coordinator_mismatch` beside another log, and a journaled one waits. Every new ordinary seal is verified and
-    /// its tip's log ended first; a seal whose log the coordinator did not
-    /// confirm ended waits with what depends on it, and a recovery the log
-    /// did not commit is dropped with its dependents, as is this node's own
-    /// seal once another seal of its tip is final. `strict`, for this node's
-    /// own publication, fails instead, and also when another seal ended the
-    /// log first, so nothing is published.
     pub(in crate::replica) async fn coordinate_tip_statements(
         &self,
         statements: &[TipStatement],
@@ -255,8 +218,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(coordinated)
     }
-    /// The composed log when it may end `graph`'s tip logs: the settings
-    /// name its coordinator, or name none.
     pub(in crate::replica) fn usable_log(
         &self,
         graph: &rocky_credentials::TipGraph,
@@ -266,8 +227,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         Ok(graph_names(graph, log.as_ref())?.then_some(log))
     }
-    /// Why this node may not seal `graph`'s tips: its settings name a
-    /// coordinator and the composed log is none or another service's.
     pub(in crate::replica) fn named_log_refusal(
         &self,
         graph: &rocky_credentials::TipGraph,
@@ -287,8 +246,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             )),
         })
     }
-    /// `scope`'s graph with `statements` of a batch added, revoked
-    /// statements left out: what coordinating the batch judges seals by.
     pub(super) async fn batch_graph(
         &self,
         scope: rocky_core::Scope,
@@ -304,11 +261,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .map_err(credential)?;
         Ok(graph)
     }
-    /// Where the seal that leads into `seal`'s tip stands: won when final
-    /// or the terminal entry of its own tip's log; lost when another seal
-    /// ended that log, so the tip is on a losing branch whose log is never
-    /// ended; waiting while that log is unended or unreachable. A line's
-    /// first tip has no such seal.
     pub(super) async fn entry_standing(
         &self,
         graph: &rocky_credentials::TipGraph,
@@ -341,9 +293,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             },
         })
     }
-    /// Ends `seal`'s tip log with it unless it ended already. A recovery, and
-    /// this node's `own` seal, is confirmed only by the exact terminal entry
-    /// it is.
     async fn end_log(
         &self,
         seal: &SignedSeal,
@@ -410,7 +359,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Err(error) => Ok(unavailable(error)),
         }
     }
-    /// What the terminal entry `ended` that ended `seal`'s log means for it.
     async fn ended_by(
         &self,
         seal: &SignedSeal,
@@ -450,8 +398,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ending::Ended
         })
     }
-    /// Journals a batch, flushed, before its seals reach the coordinator.
-    /// Received batches beyond the bound are not kept; a peer resends them.
     pub(in crate::replica) async fn journal_tips(
         &self,
         statements: &[TipStatement],
@@ -499,9 +445,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.publish_revision().await?;
         Ok(batch)
     }
-    /// Ends the logs of journaled seals and admits what they confirm: own
-    /// batches after a restart or a lost reply, with the same bytes, and
-    /// received ones. Returns the statements admitted.
     pub async fn settle_tip_statements(&self) -> Result<usize, Error> {
         let mut admitted = 0;
         loop {
@@ -512,11 +455,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             admitted += round;
         }
     }
-    /// Admits each journaled batch once. A revoked or permanently invalid
-    /// candidate, or a statement the graph refuses, never blocks later
-    /// batches: an own batch keeps its exact submission bytes even if another
-    /// statement was revoked after external commitment, while a received one
-    /// leaves the quota and its peer resends it.
     async fn settle_round(&self) -> Result<usize, Error> {
         let (pending, own) = {
             let inner = self.inner.lock(crate::replica::Class::Background).await;
@@ -571,7 +509,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(admitted)
     }
-    /// Forgets own journaled batches chained after `dropped`, transitively.
     async fn forget_chained_after(&self, mut dropped: BTreeSet<Commitment>) -> Result<(), Error> {
         if dropped.is_empty() {
             return Ok(());
@@ -618,7 +555,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         drop(flush_guard(inner, &self.inner).await?);
         Ok(())
     }
-    /// Forgets a received journaled batch admission refused; own batches stay.
     pub(in crate::replica) async fn forget_refused(
         &self,
         batch: Commitment,
@@ -641,7 +577,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         drop(flush_guard(inner, &self.inner).await?);
         Ok(())
     }
-    /// Forgets an own journaled batch the coordinator refused for good.
     pub(in crate::replica) async fn forget_own_batch(
         &self,
         batch: Commitment,
@@ -651,10 +586,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         drop(flush_guard(inner, &self.inner).await?);
         Ok(())
     }
-    /// This node's live statements on `identity`'s chain through `lane`,
-    /// held or journaled, and the live link its next one takes: after all
-    /// of them. Staged statements, which may be withdrawn, are on their own
-    /// branch and count for neither.
     pub async fn own_chain(
         &self,
         scope: rocky_core::Scope,
@@ -691,8 +622,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .collect();
         Ok((next, statements))
     }
-    /// Whether a statement of `statements` names as predecessor an own
-    /// journaled statement the graph does not hold yet.
     pub(in crate::replica) async fn after_pending(
         &self,
         statements: &[TipStatement],
@@ -729,10 +658,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(false)
     }
-    /// Whether `statements` seal, ordinarily, a tip this node's journaled
-    /// seal still waits to end: a second seal could only lose to it, so
-    /// journaling one per attempt would only grow the journal and the
-    /// coordinator's load. The owner's recovery ends a stuck log regardless.
     pub(in crate::replica) async fn reseals_waiting_tip(
         &self,
         statements: &[TipStatement],
@@ -757,8 +682,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 if seal.statement.recovery.is_none() && waiting.contains(&seal.statement.tip))
         }))
     }
-    /// Refuses own statements chained after a staged one: the stage may be
-    /// withdrawn and never published.
     pub(in crate::replica) async fn refuse_after_stage(
         &self,
         statements: &[TipStatement],
@@ -787,8 +710,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(())
     }
-    /// Unadmitted candidates, for relay to trusted nodes that can inspect
-    /// and acknowledge them. They are never returned by `tip_statements`.
     pub async fn pending_tip_candidates(&self) -> Result<Vec<Vec<TipStatement>>, Error> {
         Ok(self
             .inner
@@ -818,15 +739,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         .await?;
         Ok(!found.is_empty())
     }
-    /// Verifies `statements` against the graph they extend, as admission does.
     pub(in crate::replica) async fn check_statements(
         &self,
         statements: &[TipStatement],
     ) -> Result<(), Error> {
         self.check_statements_over(statements, false).await
     }
-    /// `check_statements`, over this node's journaled statements too when
-    /// `pending`.
     pub(in crate::replica) async fn check_statements_over(
         &self,
         statements: &[TipStatement],
@@ -864,7 +782,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 impl<A: RowApplication> Inner<A> {
-    /// Journaled batches, own ones or received ones when `own` names which.
     pub(crate) async fn pending_tips(
         &self,
         own: Option<bool>,
@@ -921,8 +838,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Replaces the unresolved remainder without losing ownership or the
-    /// original batch identity, in the graph admission transaction.
     pub(in crate::replica) async fn replace_pending_tips(
         &self,
         batch: Commitment,
@@ -939,7 +854,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Drops a journaled batch inside the caller's transaction.
     pub(in crate::replica) async fn forget_tips(&self, batch: Commitment) -> Result<(), Error> {
         self.conn
             .execute(
@@ -950,22 +864,14 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 }
-/// The refusal code of a node without a log of the coordinator its
-/// database's settings name.
 pub const COORDINATOR_REQUIRED: &str = "coordinator_required";
-/// The refusal code of a node whose log is another coordinator's than the
-/// one its database's settings name.
 pub const COORDINATOR_MISMATCH: &str = "coordinator_mismatch";
-/// Whether `log` may end `graph`'s tip logs: the settings name its
-/// coordinator, or name none.
 fn graph_names(graph: &rocky_credentials::TipGraph, log: &dyn DomainLog) -> Result<bool, Error> {
     Ok(graph
         .coordinator()
         .map_err(credential)?
         .is_none_or(|bundle| bundle.identity == log.identity()))
 }
-/// Whether a seal of `seal`'s tip other than `seal` is final: its log
-/// ended with that seal, so `seal` never can.
 fn another_seal_is_final(
     graph: &rocky_credentials::TipGraph,
     seal: &SignedSeal,
@@ -983,9 +889,6 @@ fn another_seal_is_final(
     }
     Ok(false)
 }
-/// Extends `refused` with every statement of `statements` that depends on
-/// one in it: an opening on a refused seal, a move off a refused seal's tip
-/// or naming a tip a refused statement identifies, and so on transitively.
 fn dependents(
     statements: &[TipStatement],
     refused: &mut BTreeSet<Commitment>,
@@ -1037,9 +940,6 @@ fn dependents(
     }
 }
 
-/// A seal the coordinator did not confirm. `code` is the JSON error code;
-/// `submitted` when it may still commit after a lost reply, so the journal
-/// keeps it to send again.
 #[derive(Debug)]
 pub struct Unconfirmed {
     pub code: &'static str,
@@ -1052,7 +952,6 @@ impl std::fmt::Display for Unconfirmed {
 }
 impl std::error::Error for Unconfirmed {}
 
-/// Why the replica refused a call. `code` is the JSON error code.
 #[derive(Debug)]
 pub struct Refusal {
     pub code: &'static str,

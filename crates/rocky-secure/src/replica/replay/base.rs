@@ -1,25 +1,10 @@
-//! A replayed scope's rows at a seal: its replay base. Replayed tables keep
-//! no row records, so a checkpoint of one carries `(row id, image)` pairs
-//! committed by an LtHash, and a rebuild starts from them. An image keys
-//! each value by its field id, so it outlives the seal's schema. Stored
-//! images name each field id by its ordinal in `secure_replayed_fields`;
-//! digests and pages use the full image.
 use super::*;
 use crate::replica::checkpoint::Sets;
 
-/// The seals a scope's rows were taken at, empty ones included, with each
-/// seal's encoded `SealedOutcomes`. Kept while the seal leaves the path.
 const REPLAYED_SEALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_replayed_seals(scope INTEGER NOT NULL,seal BLOB NOT NULL,outcomes BLOB NOT NULL,version INTEGER NOT NULL,PRIMARY KEY(scope,seal)) WITHOUT ROWID";
-/// Rows at the scope's checkpoint, and those of an import in progress.
 const REPLAYED_BASE_ROWS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_replayed_base_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,image BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID";
-/// A locally compacted base borrows immutable seal rows. Imported bases
-/// own their rows instead. The selector changes with the signed checkpoint.
 const REPLAYED_BASE_SOURCE_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_replayed_base_source(scope INTEGER PRIMARY KEY,seal BLOB NOT NULL,version INTEGER NOT NULL) WITHOUT ROWID";
-/// The field ids stored images name; never deleted.
 const REPLAYED_FIELDS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_replayed_fields(ordinal INTEGER PRIMARY KEY,field BLOB NOT NULL UNIQUE)";
-/// While rows are taken at a seal: per lowercase table and encoded key,
-/// the row's image before the earliest open member that changed it, and
-/// that member's order; no image when the member created it.
 const SEAL_UNDONE_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_seal_undone(tbl TEXT NOT NULL,key BLOB NOT NULL,era INTEGER NOT NULL,clock INTEGER NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,image BLOB,PRIMARY KEY(tbl,key)) WITHOUT ROWID";
 pub(in crate::replica) const SCHEMA: &[&str] = &[
     REPLAYED_SEALS_TABLE,
@@ -38,7 +23,6 @@ pub(in crate::replica) const SCHEMA: &[&str] = &[
 
 const ROW_LABEL: &str = "rocky.replayed-row.v1";
 
-/// Each field id followed by its encoded value, in field order.
 fn fields_blob(fields: &RowFields) -> Vec<u8> {
     let mut bytes = Vec::new();
     for (field, value) in fields {
@@ -58,10 +42,8 @@ fn blob_fields(bytes: &[u8]) -> Result<RowFields, Error> {
     Ok(fields)
 }
 
-/// One field id of an image with its encoded value.
 type ImageField<'a> = (&'a [u8; 32], &'a [u8]);
 
-/// Each field id of an image with its encoded value.
 fn image_fields(mut bytes: &[u8]) -> Result<Vec<ImageField<'_>>, Error> {
     let corrupt = || Error::Corrupt("replayed base image".into());
     let mut fields = Vec::new();
@@ -74,14 +56,12 @@ fn image_fields(mut bytes: &[u8]) -> Result<Vec<ImageField<'_>>, Error> {
     Ok(fields)
 }
 
-/// One encoded value and what follows it.
 fn split_value(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     let mut rest = bytes;
     SqlValue::decode(&mut rest).ok()?;
     Some(bytes.split_at(bytes.len() - rest.len()))
 }
 
-/// The encoded primary key of a row image.
 fn key_bytes(key: &[usize], image: &[SqlValue]) -> Vec<u8> {
     let mut bytes = Vec::new();
     for index in key {
@@ -92,7 +72,6 @@ fn key_bytes(key: &[usize], image: &[SqlValue]) -> Vec<u8> {
     bytes
 }
 
-/// The field ids `images` name.
 pub(in crate::replica) fn fields_of<'a>(
     images: impl IntoIterator<Item = &'a [u8]>,
 ) -> Result<BTreeSet<[u8; 32]>, Error> {
@@ -105,7 +84,6 @@ pub(in crate::replica) fn fields_of<'a>(
     Ok(fields)
 }
 
-/// The field dictionary of stored images, both ways.
 #[derive(Default)]
 pub(in crate::replica) struct FieldOrdinals {
     ordinals: BTreeMap<[u8; 32], u64>,
@@ -113,8 +91,6 @@ pub(in crate::replica) struct FieldOrdinals {
 }
 
 impl FieldOrdinals {
-    /// `image` as stored: each field's ordinal as a LEB128 varint, then its
-    /// value.
     pub(in crate::replica) fn pack(&self, image: &[u8]) -> Result<Vec<u8>, Error> {
         let mut packed = Vec::with_capacity(image.len() / 4);
         for (field, value) in image_fields(image)? {
@@ -135,7 +111,6 @@ impl FieldOrdinals {
         }
         Ok(packed)
     }
-    /// The full image of a stored one.
     pub(in crate::replica) fn unpack(&self, packed: &[u8]) -> Result<Vec<u8>, Error> {
         let mut image = Vec::with_capacity(packed.len() * 4);
         for (ordinal, value) in packed_fields(packed)? {
@@ -175,7 +150,6 @@ fn packed_fields(mut packed: &[u8]) -> Result<Vec<(u64, &[u8])>, Error> {
     Ok(fields)
 }
 
-/// Stored `(row, packed image)` records with their full images.
 fn unpack_records(
     records: Vec<Vec<SqlValue>>,
     ordinals: &FieldOrdinals,
@@ -191,14 +165,12 @@ fn unpack_records(
         .collect()
 }
 
-/// Adds one base row to `sets`.
 pub(in crate::replica) fn add_row(sets: &mut Sets, row: &Commitment, image: &[u8]) {
     sets.rows += 1;
     sets.digest
         .add(ROW_LABEL, &[row.as_slice(), image].concat());
 }
 
-/// The summary of `rows`, as a checkpoint statement commits it.
 pub(in crate::replica) fn base_sets(rows: &[(Commitment, Vec<u8>)]) -> Sets {
     let mut sets = Sets::new();
     for (row, image) in rows {
@@ -208,7 +180,6 @@ pub(in crate::replica) fn base_sets(rows: &[(Commitment, Vec<u8>)]) -> Sets {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Only the dictionary entries referenced by a bounded chunk of stored images.
     pub(in crate::replica) async fn chunk_field_ordinals<'a>(
         &self,
         images: impl IntoIterator<Item = &'a [u8]>,
@@ -244,7 +215,6 @@ impl<A: RowApplication> Inner<A> {
         );
         Ok(ordinals)
     }
-    /// The stored images' field dictionary, with every field of `fields`.
     pub(in crate::replica) async fn field_ordinals(
         &self,
         fields: BTreeSet<[u8; 32]>,
@@ -267,7 +237,6 @@ impl<A: RowApplication> Inner<A> {
         }
         self.stored_field_ordinals().await
     }
-    /// The stored images' field dictionary.
     pub(in crate::replica) async fn stored_field_ordinals(&self) -> Result<FieldOrdinals, Error> {
         let mut ordinals = FieldOrdinals::default();
         for record in rows(
@@ -290,7 +259,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(ordinals)
     }
-    /// The live rows of replayed scope `scope`, by row id.
     pub(in crate::replica) async fn replayed_images(
         &self,
         scope: ResourceScope,
@@ -299,8 +267,6 @@ impl<A: RowApplication> Inner<A> {
             .await?
             .ok_or_else(|| Error::Corrupt("replayed scope".into()))
     }
-    /// The rows of replayed scope `scope` at kept `seal`, marked `mark`,
-    /// by row id; none when the seal kept its table under other columns.
     pub(in crate::replica) async fn kept_images(
         &self,
         scope: ResourceScope,
@@ -308,7 +274,6 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Option<Vec<(Commitment, Vec<u8>)>>, Error> {
         self.scanned_images(scope, Some(kept)).await
     }
-    /// The rows of `scope` from one scan of its table, live or at `kept`.
     async fn scanned_images(
         &self,
         scope: ResourceScope,
@@ -368,11 +333,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(Some(rows))
     }
 
-    /// Takes the rows of every replayed scope of `scopes` at `seal`, just
-    /// finalized at `depth`: the live rows with every member after the seal
-    /// undone, and the seal's outcomes. A scope the seal leaves undecided
-    /// (`leaves_open`) takes none. Rows move a page at a time, so the
-    /// table and the open members' undo never sit in memory whole.
     pub(in crate::replica) async fn take_seal_rows(
         &self,
         seal: Commitment,
@@ -440,10 +400,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Fills `secure_seal_undone`, a page of open members at a time: per
-    /// row an open member changed, its image before the earliest of them.
-    /// The seal leaves none of the members it covers open, so these all
-    /// follow it.
     async fn undo_open_members(&self) -> Result<(), Error> {
         let mut after = None;
         loop {
@@ -503,9 +459,6 @@ impl<A: RowApplication> Inner<A> {
             }
         }
     }
-    /// Takes the rows of `scopes`, partitions of one table, at `seal`: its
-    /// live rows a page at a time, each one an open member changed replaced
-    /// by its image in `secure_seal_undone`.
     async fn take_table_rows(
         &self,
         seal: Commitment,
@@ -633,8 +586,6 @@ impl<A: RowApplication> Inner<A> {
                 .await?;
         }
     }
-    /// Stores `images` of `projected`'s table at `seal` under the snapshot
-    /// version of their scope; rows of scopes not taken are skipped.
     async fn store_seal_images(
         &self,
         seal: Commitment,
@@ -682,9 +633,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Without compaction, keeps scope `id` the rows of only the newest
-    /// `SEAL_SNAPSHOTS` seals of `domain` finalized through `depth`, besides
-    /// those its base, a base in preparation or a kept seal names.
     pub(in crate::replica) async fn release_seal_rows(
         &self,
         domain: rocky_core::Scope,
@@ -710,7 +658,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    /// The rows taken at `seal`; none when they were not taken.
     pub(in crate::replica) async fn seal_rows(
         &self,
         id: i64,
@@ -733,7 +680,6 @@ impl<A: RowApplication> Inner<A> {
             .await
             .map(Some)
     }
-    /// The outcomes taken at `seal`; none when they were not taken.
     pub(in crate::replica) async fn seal_outcomes(
         &self,
         id: i64,
@@ -767,8 +713,6 @@ impl<A: RowApplication> Inner<A> {
             None => Ok(None),
         }
     }
-    /// The rows of `table`, `secure_replayed_base` or
-    /// `secure_replayed_staged`, or of a seal, ordered by row id.
     pub(in crate::replica) async fn stored_images(
         &self,
         table: &str,
@@ -793,8 +737,6 @@ impl<A: RowApplication> Inner<A> {
         crate::replica::held_at_once(records.len());
         unpack_records(records, &ordinals)
     }
-    /// Up to `STEP_ROWS` rows of scope `id` in `table`, as `stored_images`
-    /// without a seal, after row `after`.
     pub(in crate::replica) async fn stored_page(
         &self,
         table: &str,
@@ -821,8 +763,6 @@ impl<A: RowApplication> Inner<A> {
         crate::replica::held_at_once(records.len());
         unpack_records(records, ordinals)
     }
-    /// Makes `rows` the scope's replay base and forgets the seal rows of
-    /// seals not finalized after `depth`.
     pub(in crate::replica) async fn store_base(
         &self,
         id: i64,
@@ -857,8 +797,6 @@ impl<A: RowApplication> Inner<A> {
         }
         self.forget_seal_rows(id, depth.unwrap_or(i64::MAX)).await
     }
-    /// `store_base` of scope `id`'s staged rows, copied as stored: both
-    /// tables pack images with the same dictionary.
     pub(in crate::replica) async fn store_staged_base(&self, id: i64) -> Result<(), Error> {
         for sql in [
             "DELETE FROM secure_replayed_base_source WHERE scope=?",
@@ -889,9 +827,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// `rows`, a base at a seal of tip `source`, as the scope's current
-    /// typed rows: a field the table lacks, or one some tip since `source`
-    /// lacked, takes its default.
     fn current_images(
         &self,
         scope: ResourceScope,
@@ -929,8 +864,6 @@ impl<A: RowApplication> Inner<A> {
             })
             .collect()
     }
-    /// Each column of scope `scope`'s table with its field id, whether rows
-    /// at a seal of tip `source` keep it, and its default.
     fn restored_columns(
         &self,
         scope: ResourceScope,
@@ -964,9 +897,6 @@ impl<A: RowApplication> Inner<A> {
             })
             .collect())
     }
-    /// Whether `rows`, at a seal of tip `source`, carry every field the
-    /// current table keeps from them. Rows taken under a schema off the
-    /// path, as after an owner's rollback, may lack one.
     pub(in crate::replica) fn images_serve(
         &self,
         scope: ResourceScope,
@@ -986,8 +916,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(true)
     }
-    /// Refuses base rows, at a seal of tip `source`, whose identity a
-    /// signed mark does not cover.
     pub(in crate::replica) fn check_base_identities(
         &self,
         scope: ResourceScope,
@@ -1025,8 +953,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Writes `rows`, a base at a seal of tip `source`, into the scope's
-    /// replayed table, emptied first.
     pub(in crate::replica) async fn restore_images(
         &self,
         scope: ResourceScope,
@@ -1042,7 +968,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// `restore_images` of scope `id`'s staged rows, a page at a time.
     pub(in crate::replica) async fn restore_staged(
         &self,
         scope: ResourceScope,

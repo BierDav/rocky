@@ -1,15 +1,11 @@
-//! Committed frontier caching. Validity belongs to the replica, never SQLite counters.
 use super::*;
 
 #[derive(Default)]
 pub(super) struct Frontiers {
     generation: u64,
     entries: HashMap<ResourceScope, (u64, TipId, ScopeFrontier)>,
-    /// The last row replay ledger, extended as a replay advances.
     pub(super) replay_ledger: Option<ReplayLedger>,
 }
-/// A row replay ledger of scope number `id` towards `target` from the base
-/// at `base` through `through`.
 pub(super) struct ReplayLedger {
     pub(super) id: i64,
     pub(super) target: TipId,
@@ -30,7 +26,6 @@ impl<A> Inner<A> {
         drop(cache);
         self.readiness.invalidate();
     }
-    /// Also used after rollback and after restoring an earlier in-memory context.
     pub(crate) fn invalidate_context(&self) {
         self.context_epoch.fetch_add(1, Ordering::Relaxed);
         self.invalidate_frontiers();
@@ -45,7 +40,6 @@ impl<A> Inner<A> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
     }
-    /// A failed refresh may have marked scopes whose held writes rolled back.
     pub(crate) fn invalidate_held_refresh(&self) {
         self.held_refresh
             .lock()

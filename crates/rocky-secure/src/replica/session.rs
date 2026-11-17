@@ -1,43 +1,24 @@
-//! Authorized sessions: a principal's bounded view of a secure replica and
-//! its transactions, which commit as bundles.
 use super::*;
 
-/// What a session is bound to. Authentication and enrollment supply these
-/// when the replica opens; no call argument can claim another principal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionStatus {
-    /// The user the node's credential chain delegates from: the login identity.
     pub principal: PublicKey,
-    /// The device signing identity that authors every operation.
     pub node: PublicKey,
     pub manifest: Commitment,
-    /// The digest of the live revocations the credentials were verified under.
     pub revocations: Commitment,
-    /// How many live revocation statements the replica holds.
     pub revoked: usize,
-    /// The earliest expiry in the credential chain, in seconds.
     pub expires: u64,
-    /// The resource set the session was opened with.
     pub scopes: BTreeSet<ResourceScope>,
-    /// Scopes of `scopes` whose rows the session reads: whole-row read and an installed key.
     pub readable: BTreeSet<ResourceScope>,
-    /// Scopes of `scopes` with an insert, update or delete grant.
     pub writable: BTreeSet<ResourceScope>,
 }
 
-/// How an update publishes the values it assigns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpdateMode {
-    /// Only values that differ from the row before the transaction.
     Changed,
-    /// Every assigned value, equal or not. Needs rights to each one.
     Assigned,
 }
 
-/// A principal's handle on an `EncryptedReplica`. Every call checks that
-/// the replica's authority has not changed since the session opened, that
-/// the credentials are still valid now and that the scope is in the
-/// session's set. A revocation, credential, key or logout change ends it.
 pub struct SecureSession<A> {
     pub(super) replica: EncryptedReplica<A>,
     pub(super) authority: u64,
@@ -54,8 +35,6 @@ impl<A> Clone for SecureSession<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Opens a session over `scopes`, each of which the node's credentials
-    /// must name.
     pub async fn session(
         &self,
         scopes: BTreeSet<ResourceScope>,
@@ -68,9 +47,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             status,
         })
     }
-    /// Commits `writes` as one bundle, which may span scopes and exceed one
-    /// frame. The frames are returned after a flush; the same handle and
-    /// writes return them again, other writes conflict.
     pub async fn author_bundle(
         &self,
         handle: Commitment,
@@ -113,9 +89,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             _ => Err(denied("missing authoring result")),
         }
     }
-    /// Replaces the node's credential chain, as a renewal or attenuation.
-    /// Keys the new grants cannot read whole are evicted, and every session
-    /// ends.
     pub async fn renew_credentials(&self, credentials: CredentialChain) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let grants = inner.resolve_chain(
@@ -165,9 +138,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.bump_authority();
         Ok(())
     }
-    /// Ends every session and drops all keys from memory, so nothing more
-    /// is decrypted or authored. Authorized plaintext already stored stays
-    /// at rest; deleting it is the deployment's decision.
     pub async fn logout(&self) {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.config.keys.clear();
@@ -235,9 +205,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(status)
     }
-    /// Refuses a session opened under an earlier authority. A commit calls
-    /// it under the replica lock, inside the write transaction: that is the
-    /// commit's linearization point.
     pub(super) fn check_authority(&self, authority: Option<u64>) -> Result<(), Error> {
         match authority {
             Some(authority) if authority != self.authority => {
@@ -249,7 +216,6 @@ impl<A: RowApplication> Inner<A> {
             _ => Ok(()),
         }
     }
-    /// Checks a session call: authority, current credentials and scope.
     fn admit_session(
         &self,
         session: &SessionStatus,
@@ -262,8 +228,6 @@ impl<A: RowApplication> Inner<A> {
         }
         self.local_grants(now()?)
     }
-    /// A row as a writer sees it: None when absent or deleted. Requires the
-    /// scope's key and whole-row read authority.
     async fn image(
         &self,
         scope: ResourceScope,
@@ -281,7 +245,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> SecureSession<A> {
-    /// The session's bindings, after checking it is still valid.
     pub async fn status(&self) -> Result<SessionStatus, Error> {
         self.status_with(crate::replica::Class::Background).await
     }
@@ -331,8 +294,6 @@ impl<A: RowApplication> SecureSession<A> {
     }
 }
 
-/// One staged row: its image when the transaction first touched it, its
-/// current image and the fields updates assigned.
 #[derive(Clone)]
 struct Staged {
     before: Option<RowFields>,
@@ -340,17 +301,11 @@ struct Staged {
     assigned: BTreeSet<Commitment>,
 }
 
-/// Writes staged in memory and committed as one bundle. Each call is
-/// admitted against the session's current authority; the commit admits the
-/// exact write plan again under the replica lock. Dropping it discards the
-/// writes. A row another writer changed meanwhile fails the commit with
-/// `Error::Conflict`.
 pub struct SecureTransaction<A> {
     session: SecureSession<A>,
     rows: BTreeMap<(ResourceScope, Commitment), Staged>,
 }
 impl<A: RowApplication> SecureTransaction<A> {
-    /// The row with this transaction's writes.
     pub async fn get(&mut self, scope: ResourceScope, row: Commitment) -> Result<Companion, Error> {
         self.edit(scope, row, |_| Ok(()))
             .await
@@ -375,7 +330,6 @@ impl<A: RowApplication> SecureTransaction<A> {
         .await
         .map(drop)
     }
-    /// Sets `values` on an existing row; other fields keep their values.
     pub async fn update(
         &mut self,
         scope: ResourceScope,
@@ -408,9 +362,6 @@ impl<A: RowApplication> SecureTransaction<A> {
         .await
         .map(drop)
     }
-    /// The checked write plan: one write per changed row. Unchanged
-    /// permission-controlling fields are not republished, since mergeable
-    /// writes to them are refused.
     pub async fn writes(&self) -> Result<Vec<RowWrite>, Error> {
         let inner = self
             .session
@@ -424,8 +375,6 @@ impl<A: RowApplication> SecureTransaction<A> {
             .filter_map(|((scope, row), staged)| plan(&inner, *scope, *row, staged))
             .collect())
     }
-    /// Commits every write as one bundle under `handle` and returns its
-    /// frames after a flush. Nothing is committed when nothing changed.
     pub async fn commit(self, handle: Commitment) -> Result<Vec<EncryptedFrame>, Error> {
         let writes = self.writes().await?;
         if writes.is_empty() {
@@ -436,10 +385,6 @@ impl<A: RowApplication> SecureTransaction<A> {
             .bundle_with(handle, writes, Vec::new(), Some(self.session.authority))
             .await
     }
-    /// Admits a call, loads the row on first use and applies `change` to
-    /// it. A change the current grants do not permit is refused at once and
-    /// leaves the staged row as it was; the commit checks again. Returns the
-    /// row's current image.
     async fn edit(
         &mut self,
         scope: ResourceScope,
@@ -492,7 +437,6 @@ impl<A: RowApplication> SecureTransaction<A> {
     }
 }
 
-/// The write a staged row publishes, if any.
 fn plan<A>(
     inner: &Inner<A>,
     scope: ResourceScope,

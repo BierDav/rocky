@@ -1,5 +1,3 @@
-//! A write to a table the target removed waits; restoring the source path
-//! applies it once.
 use super::*;
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

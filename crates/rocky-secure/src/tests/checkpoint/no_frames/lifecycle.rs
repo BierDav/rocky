@@ -1,11 +1,6 @@
-//! Each no-frames record is checked in its own store; covered evidence is
-//! refused under an installed base and drops a pulled candidate in its own
-//! commit; a candidate is checked again when it is used.
 use super::*;
 use std::path::PathBuf;
 
-/// A no-frames claim at a seal that covers `covered`, a private frame of
-/// E that C holds as ciphertext, and `voidable`, another E frame under it.
 struct Contradicted {
     f: Fixture,
     dir: Scratch,
@@ -78,7 +73,6 @@ async fn contradicted() -> Contradicted {
     }
 }
 impl Contradicted {
-    /// A node with the graph that holds none of the private history.
     async fn bystander(&self, name: &str, key: &PrivateKey) -> (Replica, PathBuf) {
         let path = self.dir.path().join(format!("{name}.db"));
         let (replica, _) = open(&self.f, &path, key).await;
@@ -94,7 +88,6 @@ impl Contradicted {
             .unwrap();
         (replica, path)
     }
-    /// A bystander holding the claim as a pulled candidate.
     async fn pulled(&self, name: &str, key: &PrivateKey) -> (Replica, PathBuf) {
         let (replica, path) = self.bystander(name, key).await;
         replica.begin_seal_pull(self.claim.clone()).await.unwrap();
@@ -105,7 +98,6 @@ impl Contradicted {
         assert_eq!(pulled_rows(&replica).await, 1);
         (replica, path)
     }
-    /// A private frame of E after the claimed seal.
     async fn after(&self, row: u8) -> EncryptedFrame {
         private_row(&self.f, &self.e, row).await
     }
@@ -113,7 +105,6 @@ impl Contradicted {
         crate::SignedVoid::sign(&self.e_key, vec![frame.header_bytes().to_vec()]).unwrap()
     }
 }
-/// Rows of every pulled-state table.
 async fn pulled_rows(replica: &Replica) -> i64 {
     count(
         replica,
@@ -306,7 +297,6 @@ async fn an_installed_keyed_base_reopens_under_a_staged_no_frames_import_or_pull
     }
 }
 
-/// Copies the closed file at `from`, with its log, to `to`.
 fn copy_file(from: &Path, to: &Path) {
     rocky_platform::fs::copy(from, to).unwrap();
     let mut wal = from.as_os_str().to_owned();
@@ -317,8 +307,6 @@ fn copy_file(from: &Path, to: &Path) {
         rocky_platform::fs::copy(&wal, &copied).unwrap();
     }
 }
-/// Each `tamper` applied to a copy of the closed file at `path` fails the
-/// full audit of `scope` and the next open.
 async fn refused_when_tampered(
     f: &Fixture,
     path: &Path,
@@ -614,9 +602,6 @@ async fn revoking_the_signer_refuses_a_no_frames_state_before_it_is_used() {
     reopen(&x.f, &path, &key).await;
 }
 
-/// B compacted at a later seal than A, which keeps its seals; B pulls A's
-/// states at the first seal, where a `dev` branch opens. With `resign`,
-/// another authorized signer restates the private no-frames state.
 struct DevPull {
     f: Fixture,
     _dir: Scratch,
@@ -626,12 +611,10 @@ struct DevPull {
     b_path: PathBuf,
     first: Commitment,
     pulled: BTreeMap<ResourceScope, SignedCheckpoint>,
-    /// A's chain and the restating signer's.
     signers: [CredentialChain; 2],
     restater: PrivateKey,
 }
 
-/// The seal the owner just placed on `tip`.
 async fn seal_on(
     replica: &Replica,
     domain: rocky_core::Scope,
@@ -766,7 +749,6 @@ async fn dev_pull(resign: bool) -> DevPull {
     }
 }
 impl DevPull {
-    /// Revokes A's node (`0`) or the restating signer (`1`).
     fn revoked(&self, signer: usize) -> rocky_credentials::RevocationSet {
         crate::tests::revoking(
             &self.f.publisher,
@@ -839,8 +821,6 @@ async fn a_pulled_state_that_no_longer_passes_neither_starts_a_branch_nor_is_dro
     reopen(f, &x.b_path, &x.b_key).await;
 }
 
-/// Puts `revocations` in `replica`'s set without the revalidation learning
-/// them runs, so reads must judge pulled states themselves.
 async fn set_revocations_without_revalidation(
     replica: &Replica,
     revocations: rocky_credentials::RevocationSet,
@@ -853,9 +833,6 @@ async fn set_revocations_without_revalidation(
         .revocations = revocations;
 }
 
-/// The contradicted fixture's bystander D holding A's public base at the
-/// first seal and `claim`, a pulled no-frames state of the private scope at
-/// the later seal, whose frames D lacks: the scope needs it.
 async fn needing(
     x: &Contradicted,
     name: &str,

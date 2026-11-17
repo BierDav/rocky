@@ -1,4 +1,3 @@
-//! Open-time graph exclusion changes L without retiring permanent evidence.
 use super::*;
 use rocky_credentials::Authority;
 

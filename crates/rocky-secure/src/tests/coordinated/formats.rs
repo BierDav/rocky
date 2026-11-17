@@ -1,11 +1,7 @@
-//! Records another release wrote are refused by the format they name, at
-//! open and when this node acknowledges, never read or skipped.
 use super::seals::{bookmark, follow_main, seal};
 use super::*;
 use crate::TipStatement;
 
-/// An earlier release's finality record: format 1, acknowledgments of
-/// format 2 without this release's fields.
 #[derive(serde::Serialize)]
 enum Stored {
     Finality(EarlierFinality),

@@ -1,4 +1,3 @@
-//! Passive checkpoints own a connection, never the replica or reactor.
 use super::*;
 
 #[derive(Default)]

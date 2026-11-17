@@ -212,7 +212,6 @@ pub(super) async fn release(
         .await
         .unwrap();
 }
-/// The migration frames `replica` stores, in sequence order.
 pub(super) async fn frames(replica: &EncryptedReplica<TypedRows>) -> Vec<EncryptedFrame> {
     stored_frames(
         replica,

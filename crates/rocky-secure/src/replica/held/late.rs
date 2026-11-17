@@ -1,8 +1,6 @@
-//! Original signed frames held after a line closes.
 use super::*;
 use crate::replica::incoming::Outcome;
 
-/// Metadata rows examined per refresh step.
 const REFRESH_RECORDS: usize = 64;
 #[derive(Clone, Default)]
 struct Refresh {
@@ -16,8 +14,6 @@ struct Refresh {
 const TOKEN_RECORDS: usize = 64;
 const PAGE_RECORDS: usize = 32;
 
-/// Definite CBOR array header; hashing it and the encoded elements preserves
-/// the existing held-token encoding without assembling the whole array.
 fn token_array_header(count: u64) -> Vec<u8> {
     match count {
         0..=23 => vec![0x80 | count as u8],
@@ -51,9 +47,6 @@ impl TokenSource {
     }
 }
 impl<A: RowApplication> Inner<A> {
-    /// Stores already authenticated held members in the caller's
-    /// transaction. Adds to `reseeds` the scopes whose replay ledger an
-    /// applied member leaves; the caller reseeds them once per batch.
     pub(in crate::replica) async fn hold_members(
         &self,
         frames: &[(EncryptedFrame, RowPayload)],
@@ -296,7 +289,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(Outcome::Applied)
     }
-    /// [`Self::hold_closed_frame`] alone, reseeding what it changed.
     pub(in crate::replica) async fn hold_closed_one(
         &self,
         frame: &EncryptedFrame,
@@ -307,7 +299,6 @@ impl<A: RowApplication> Inner<A> {
         self.reseed_held(reseeds).await?;
         Ok(outcome)
     }
-    /// Reseeds the replay ledgers of the scopes holds changed.
     async fn reseed_held(&self, scopes: BTreeSet<ResourceScope>) -> Result<(), Error> {
         for scope in scopes {
             if let Some(id) = self.find_scope_id(scope).await? {
@@ -360,7 +351,6 @@ impl<A: RowApplication> Inner<A> {
                 .any(|seal| seal.statement.recovery.is_some()),
         ))
     }
-    /// One signer discovery, bounded metadata page, or indivisible held frame.
     async fn refresh_closed_held_step(
         &self,
         scope: ResourceScope,
@@ -531,8 +521,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(true)
     }
-    /// Holds the writes the workspace at `source` applied that `target`
-    /// does not see, before a moved bookmark's workspace rebuild.
     pub(in crate::replica) async fn hold_line_writes(
         &self,
         scope: rocky_core::Scope,
@@ -671,7 +659,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 rocky_platform::task::yield_now().await;
                 let mut inner = self.inner.lock(Class::Background).await;
                 let saved = pass.clone();
-                let more = transaction!(@commit inner, |inner| {
+                let more = transaction!(@without_wal_checkpoint inner, |inner| {
                     pass = saved.clone();
                     inner.refresh_closed_held_step(scope, now()?, &mut pass).await
                 })?;
@@ -692,7 +680,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) {
         self.inner.lock(Class::Background).await.held_token_pause = Some((reached, resume));
     }
-    /// Checks read authority independently of the peer's followed tip.
     pub(crate) async fn authorize_held_reader(
         &self,
         peer: PublicKey,
@@ -720,7 +707,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             && inner.holds(scope).await?)
     }
 
-    /// Original signed frames of unresolved held changes, ordered by hash.
     pub(crate) async fn held_token(
         &self,
         peer: PublicKey,
@@ -899,11 +885,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok((frames, None))
     }
-    /// Accepts only original frames whose line is closed: held here, or an
-    /// intent or outcome frame replaying here in the line opened after the
-    /// close or covered by a seal here.
-    /// Ordinary live frames use `receive`; a relay never replaces their
-    /// author's signature.
     pub async fn receive_held_frames(&self, frames: Vec<EncryptedFrame>) -> Result<(), Error> {
         {
             let inner = self.inner.lock(crate::replica::Class::Background).await;

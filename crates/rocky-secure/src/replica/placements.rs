@@ -1,26 +1,16 @@
-//! Signed header placements: where a seal's frontier positions of scopes
-//! this replica cannot hold lie, proved by each frame's author-signed header
-//! without its body. A header names a partition only by its keyed scope,
-//! so any domain member may see it: one that does not hold the partition
-//! learns only that the position is not its own.
 use super::*;
 use rocky_core::Scope;
 
-/// Two signed headers of one node at one position: kept as evidence.
 const EQUIVOCATIONS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_equivocations(domain BLOB NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,first BLOB NOT NULL,second BLOB NOT NULL,PRIMARY KEY(domain,author,sequence)) WITHOUT ROWID";
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_placements(domain BLOB NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,scope BLOB NOT NULL,hash BLOB NOT NULL,header BLOB NOT NULL,PRIMARY KEY(domain,author,sequence)) WITHOUT ROWID",
     EQUIVOCATIONS_TABLE,
 ];
 
-/// Headers a placement page carries at most.
 pub const MAX_PLACEMENTS: usize = 64;
-/// Placement bytes, leaving room for the native message and its signature.
 const PLACEMENT_BYTES: usize = MAX_SECURE_FRAME - 1024;
-/// Placement requests one pass sends at most.
 const MAX_REQUESTS: usize = 16;
 
-/// Positions `from..=to` of node `author` through `seal`'s frontier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlacementRequest {
@@ -29,12 +19,9 @@ pub struct PlacementRequest {
     pub from: u64,
     pub to: u64,
 }
-/// One frame's signed header, without its body.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Placement(#[serde(with = "serde_bytes")] pub Vec<u8>);
-/// A placement answer: the headers and, once each, the credential chains
-/// they name.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlacementPage {
     pub headers: Vec<Placement>,
@@ -55,10 +42,6 @@ struct PlacementPlan {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// What this replica asks peers to place: the gaps that keep a seal of
-    /// the followed path from being finalized, and those of the seal the
-    /// followed line inherits. Planned in one acquisition; each (seal,
-    /// scope) check then runs in its own.
     async fn placement_plan(&self, domain: Scope) -> Result<PlacementPlan, Error> {
         let path = self.path_seals(domain)?;
         let scopes = self.readiness_scopes(domain).await?;
@@ -102,8 +85,6 @@ impl<A: RowApplication> Inner<A> {
             unverified,
         })
     }
-    /// Answers `request` from the frames and voids this replica holds:
-    /// released positions through the seal's frontier, without bodies.
     async fn placement_page(
         &self,
         peer: PublicKey,
@@ -253,9 +234,6 @@ impl<A: RowApplication> Inner<A> {
             chains: chains.into_values().collect(),
         })
     }
-    /// Verifies and stores `placements` answering `request`, inside one
-    /// transaction. A header of a scope this replica holds is not stored:
-    /// that scope needs the frame itself. Returns how many it stored.
     async fn receive_placements(
         &mut self,
         request: PlacementRequest,
@@ -331,9 +309,6 @@ impl<A: RowApplication> Inner<A> {
         })?;
         Ok(stored)
     }
-    /// Keeps the signed header of a frame a checkpoint supersedes as its
-    /// placement: the position stays proven to lie in the frame's scope, so
-    /// another scope's gap check never counts it as missing.
     pub(in crate::replica) async fn place_superseded(
         &self,
         header: &p2panda_core::Header<Extensions>,
@@ -361,8 +336,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         positions::insert(&self.conn, header, 2, false, false).await
     }
-    /// Stores one verified placement unless a frame, void or placement
-    /// holds its position already; another header there is equivocation.
     async fn place(
         &self,
         domain: Scope,
@@ -400,9 +373,6 @@ impl<A: RowApplication> Inner<A> {
         positions::insert(&self.conn, header, 2, false, false).await?;
         Ok(true)
     }
-    /// The retained operation and void headers of `author` in `domain` from
-    /// `from` through `to`, and whether each has a body, found through the
-    /// position index without reading a body.
     async fn headers_at(
         &self,
         domain: Scope,
@@ -445,7 +415,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(headers)
     }
-    /// Prefers a conflicting retained header when the incoming placement is known.
     async fn header_at(
         &self,
         domain: Scope,
@@ -495,8 +464,6 @@ impl<A: RowApplication> Inner<A> {
         self.place(header.extensions.scope.domain, header, &header.to_bytes())
             .await
     }
-    /// Inside the caller's transaction: a frame stored at a placed position
-    /// replaces its placement; a different header there is equivocation.
     pub(super) async fn settle_placement(
         &self,
         header: &p2panda_core::Header<Extensions>,
@@ -559,8 +526,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Inside the caller's transaction: drops placements every held
-    /// scope's base folded, through the oldest base seal of the path.
     pub(super) async fn prune_placements(&self, domain: Scope) -> Result<(), Error> {
         let path = self.path_seals(domain)?;
         let mut oldest: Option<usize> = None;
@@ -594,9 +559,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// The placement requests this replica wants answered. A receiver
-    /// revalidates every request; a moved authority or tip ends the listing
-    /// early with what it found, and the next pass asks again.
     pub async fn wanted_placements(&self) -> Result<Vec<PlacementRequest>, Error> {
         let plan = {
             let inner = self.inner.lock(crate::replica::Class::Background).await;
@@ -658,7 +620,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(requests)
     }
-    /// Answers a peer's placement request.
     pub async fn placement_page(
         &self,
         peer: PublicKey,
@@ -671,7 +632,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .placement_page(peer, credentials, request)
             .await
     }
-    /// Stores a peer's answer to `request`.
     pub async fn receive_placements(
         &self,
         request: PlacementRequest,
@@ -686,7 +646,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(stored)
     }
-    /// Pairs of different signed headers seen at one node position.
     pub async fn equivocations(&self) -> Result<usize, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         match rows(&inner.conn, "SELECT count(*) FROM secure_equivocations")

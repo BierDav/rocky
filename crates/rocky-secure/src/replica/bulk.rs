@@ -1,4 +1,3 @@
-//! Exact migration provenance and its independently charged durable history.
 use super::*;
 use rocky_core::{MigrationProof, MigrationPublicationStatement};
 use rocky_credentials::SignedMigrationPublication;
@@ -21,7 +20,6 @@ pub(super) const SCHEMA: &[&str] = &[
 pub struct MigrationMembership {
     pub publication: Commitment,
     pub proof: MigrationProof,
-    /// A bounded exact record, never an inventory or a bundle member list.
     pub descriptor: Option<Box<SignedMigrationPublication>>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,8 +109,6 @@ impl<A: RowApplication> Inner<A> {
             descriptor,
         }))
     }
-    /// An outcome record is never a migration frame: one written on a
-    /// migration tip this replica does not follow needs no descriptor.
     fn is_outcome_record(&self, frame: &EncryptedFrame) -> bool {
         self.row_payload(frame)
             .is_ok_and(|payload| payload.outcome().is_some())
@@ -323,7 +319,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(())
     }
-    /// Exact lookup; no enumeration or fetching. Private candidates stay private.
     pub async fn migration_publication(
         &self,
         publication: Commitment,
@@ -373,7 +368,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Release has the same durable boundary as the private graph and frames.
     pub async fn release_uncoordinated_schema(&self, publication: Commitment) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let records = collect_rows(
@@ -403,7 +397,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner = flush_guard(inner, &self.inner).await?;
         inner.publish_revision().await
     }
-    /// Proof-bearing transport admission; the ordinary receive API grants no exemption.
     pub async fn receive_migration_all(
         &self,
         frames: Vec<EncryptedFrame>,

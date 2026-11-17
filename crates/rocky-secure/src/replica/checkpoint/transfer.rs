@@ -1,18 +1,13 @@
-//! The pruned_prefix signal, checkpoint transfer and rebootstrap.
 use super::*;
 
-/// An applied birth without its admission evidence is a missing journal,
-/// never backfilled.
 const UNJOURNALED_BIRTH: &str = "an applied birth has no admission evidence";
 
-/// Logs of a scope whose operations up to a sequence were pruned.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PrunedPage {
     pub scope: ResourceScope,
     pub logs: Vec<(PublicKey, u64)>,
     pub next: Option<PublicKey>,
 }
-/// Checkpoint rows in row order, encrypted with the scope key.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CheckpointPage {
     pub scope: ResourceScope,
@@ -21,11 +16,9 @@ pub struct CheckpointPage {
     #[serde(with = "sealed")]
     pub rows: EncryptedPackage,
     pub next: Option<Commitment>,
-    /// Receiving sessions set this transiently for escrow refusal accounting.
     #[serde(skip)]
     pub(crate) carrier: Option<PublicKey>,
 }
-/// The sealed rows with their ciphertext as one CBOR byte string.
 mod sealed {
     use super::*;
     #[derive(Serialize, Deserialize)]
@@ -60,7 +53,6 @@ mod sealed {
         })
     }
 }
-/// A stored row record and the clock of the row's creation operation.
 #[derive(Clone, Serialize, Deserialize)]
 struct PageRow {
     #[serde(with = "serde_bytes")]
@@ -70,7 +62,6 @@ struct PageRow {
     #[serde(deserialize_with = "rocky_core::bounded_clock")]
     clock: u64,
 }
-/// Encoded bytes of a page row beyond its stored record.
 const ROW_OVERHEAD: usize = 64;
 #[derive(Serialize, Deserialize)]
 struct PagePlain {
@@ -83,18 +74,12 @@ struct PagePlain {
     origins: Vec<serde_bytes::ByteBuf>,
     creations: Vec<Hash>,
     authors: stamp_authors::Authors,
-    /// Each set of author bindings the rows' proofs name, once. The rows
-    /// are signed and name them by digest, so the sets need no signature.
     bindings: Vec<serde_bytes::ByteBuf>,
-    /// Escrow records for the key epoch covered by this checkpoint.
     #[serde(default)]
     escrow: Vec<rocky_credentials::VouchedEscrow>,
     headers: Vec<serde_bytes::ByteBuf>,
-    /// The checkpoint signer's signature of `page_signing_bytes`: a peer
-    /// relaying the checkpoint can neither alter nor move a page's rows.
     signature: Signature,
 }
-/// What the checkpoint signer signs of a page: its place and its rows.
 fn page_signing_bytes(plain: &PagePlain) -> Result<Vec<u8>, Error> {
     let rows = rocky_core::commitment(
         "rocky.checkpoint-page-rows.v1",
@@ -112,15 +97,10 @@ fn page_signing_bytes(plain: &PagePlain) -> Result<Vec<u8>, Error> {
     );
     signing_bytes("rocky.checkpoint-page.v1", &rows)
 }
-/// Maximum rows in the current signed wire page, independent of work steps.
 const PAGE_ROWS: usize = 256;
-/// Rows committed per checkpoint-storage step, including up to eight metadata
-/// records in its first transaction. Small test steps retain interruption
-/// coverage; a qualification build may override it.
 const STORE_ROWS: usize = if cfg!(test) { 8 } else { 128 };
 #[cfg(test)]
 thread_local! {
-    /// Lets the storage-step measurement compare step sizes.
     pub(crate) static STORE_ROWS_FOR_TEST: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
 }
@@ -134,17 +114,12 @@ fn store_rows() -> Result<usize, Error> {
     #[cfg(not(feature = "qualification"))]
     Ok(STORE_ROWS)
 }
-/// Immutable metadata records per commit; combined metadata and row steps
-/// are bounded by `STORE_ROWS`.
 pub(crate) const STORE_METADATA: usize = 8;
-/// Rows decoded and prepared per checkpoint-export acquisition.
 const EXPORT_ROWS: usize = 8;
-/// Frontier offers recorded per checkpoint-export acquisition.
 const EXPORT_LOGS: usize = 1;
 
 struct OpenedPage {
     rows: Vec<(Commitment, PageRow, Materialized)>,
-    /// The encoded sets of author bindings the rows name, checked.
     bindings: Vec<Vec<u8>>,
     headers: Vec<Arc<crypto::CreationHeader>>,
     authors: stamp_authors::Authors,
@@ -164,16 +139,12 @@ enum PageMetadata<'a> {
     Bindings(&'a Vec<u8>),
     Author(&'a WriterId, &'a PublicKey),
 }
-/// Authenticated rows committed in one step, with their complete page's identity.
 struct PageStep {
     rows: Vec<(Commitment, PageRow, Materialized)>,
     next: Option<Commitment>,
     signature: Signature,
     delta: Sets,
 }
-/// Verifies a decoded page against the staged
-/// checkpoint: binding, order and the signer's signature. Pure
-/// computation, run off the replica's thread.
 fn open_page(
     page: CheckpointPage,
     plain: PagePlain,
@@ -374,17 +345,12 @@ fn open_page(
         escrow: plain.escrow,
     })
 }
-/// What a rebootstrap did with the operations this replica held.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RebootstrapReport {
     pub checkpoint: Commitment,
-    /// Held operations the checkpoint covers; their copies were dropped.
     pub superseded: u64,
-    /// Operations beyond the checkpoint that were applied again on top of it.
     pub reapplied: Vec<Hash>,
-    /// Operations beyond the checkpoint that no longer apply, with the reason.
     pub rejected: Vec<(Hash, String)>,
-    /// Operations beyond the checkpoint that wait for a dependency or key.
     pub pending: Vec<Hash>,
 }
 pub(in crate::replica) struct Staging {
@@ -392,8 +358,6 @@ pub(in crate::replica) struct Staging {
     pub(super) cursor: Option<Commitment>,
     pub(in crate::replica) complete: bool,
     pub(super) sets: Sets,
-    /// The scope held nothing when the import began: verified pages go
-    /// straight into its stored rows and projection.
     pub(super) direct: bool,
 }
 
@@ -415,7 +379,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Custody or read authority of a peer over a whole scope.
     pub(crate) fn authorize_peer(
         &self,
         peer: PublicKey,
@@ -425,7 +388,6 @@ impl<A: RowApplication> Inner<A> {
         self.same_tip_peer(peer)?;
         self.authorize_seal_peer(peer, credentials, scope)
     }
-    /// Sealed state is readable across branches under the same scope grants.
     pub(crate) fn authorize_seal_peer(
         &self,
         peer: PublicKey,
@@ -455,8 +417,6 @@ impl<A: RowApplication> Inner<A> {
             self.authorize_peer(peer, credentials, scope)
         }
     }
-    /// Whether `tip` continues or opens on a seal of `ancestor`, directly
-    /// or through further seals.
     pub(in crate::replica) fn descends(
         graph: &rocky_credentials::TipGraph,
         tip: TipId,
@@ -497,10 +457,6 @@ impl<A: RowApplication> Inner<A> {
             direct: row.get::<i64>(4)? == 1,
         }))
     }
-    /// The checks an imported statement passes now: signature and current
-    /// signer authority, a seal in a graph domain, the tip's schema
-    /// generation, and the installed key epoch or a no-frames shape that
-    /// local history does not contradict.
     pub(in crate::replica) async fn verify_import_statement(
         &self,
         signed: &SignedCheckpoint,
@@ -526,9 +482,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Whether `scope` shows the verified pages of a direct import: its
-    /// staged statement still passes the import checks now, at a seal of
-    /// the followed path. Its rows are incomplete until it finishes.
     pub(in crate::replica) async fn authenticated_direct_import(
         &self,
         scope: ResourceScope,
@@ -556,9 +509,6 @@ impl<A: RowApplication> Inner<A> {
             .is_ok_and(|seal| seal.statement.tip == statement.tip)
             && self.path_index(scope.domain, sealed)?.is_some())
     }
-    /// Whether the scope is being imported from a checkpoint: a staged
-    /// import, or the owner's intent while the scope holds no rows yet. A
-    /// scope that holds rows keeps syncing history until its import begins.
     pub(crate) async fn importing(&self, scope: ResourceScope) -> Result<bool, Error> {
         let Some(id) = self.find_scope_id(scope).await? else {
             return Ok(self.importing.contains(&scope));
@@ -589,7 +539,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(staged.next().await?.is_some())
     }
-    /// The key and staged import a page must match, before it is opened.
     async fn expected_page(&self, page: &CheckpointPage) -> Result<([u8; 32], Staging), Error> {
         let scope = page.scope;
         let (_, key) = self.scope_key(scope)?;
@@ -612,8 +561,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok((key, staging))
     }
-    /// Stores one opened page in the caller's transaction: staged for the
-    /// switch, or for a direct import stored and projected.
     async fn store_page(
         &mut self,
         scope: ResourceScope,
@@ -846,7 +793,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// The key that signed `signed`, when this replica holds it.
     fn checkpoint_key(&self, signed: &SignedCheckpoint) -> Option<PrivateKey> {
         let signer = signed.signer();
         self.node_author
@@ -859,7 +805,6 @@ impl<A: RowApplication> Inner<A> {
             .find(|key| key.public_key() == signer)
             .cloned()
     }
-    /// Whether operations of the scope were applied.
     async fn applied_any(&self, id: i64) -> Result<bool, Error> {
         let mut applied = self
             .conn
@@ -867,8 +812,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(applied.next().await?.is_some())
     }
-    /// Whether the scope holds stored rows, a checkpoint or applied
-    /// operations: an import then stages its pages and switches at the end.
     async fn holds_anything(&self, scope: ResourceScope, id: i64) -> Result<bool, Error> {
         if self.replayed_scope(scope) && self.holds_replayed_rows(scope).await? {
             return Ok(true);
@@ -884,8 +827,6 @@ impl<A: RowApplication> Inner<A> {
         .await?;
         Ok(held != vec![vec![SqlValue::Integer(0)]])
     }
-    /// Undoes a direct import's rows so the scope holds nothing again.
-    /// Operations applied over them wait to apply after the next import.
     pub(super) async fn abort_direct(
         &mut self,
         scope: ResourceScope,
@@ -913,7 +854,8 @@ impl<A: RowApplication> Inner<A> {
         ] {
             self.conn.execute(sql, [id]).await?;
         }
-        self.store_scope_state(id, 0, 0, &Lt::new(), 0).await?;
+        self.store_scope_state(id, 0, 0, &LtHash16::new(), 0)
+            .await?;
         if self.replayed_scope(scope) {
             self.clear_replayed(scope).await?;
         }
@@ -921,8 +863,6 @@ impl<A: RowApplication> Inner<A> {
         self.reseed_ledger(scope, id).await?;
         self.clear_staging(id).await
     }
-    /// Reads which scopes a direct import is filling, after a commit that
-    /// began or ended one.
     pub(in crate::replica) async fn load_direct(&mut self) -> Result<(), Error> {
         let mut direct = BTreeSet::new();
         for record in collect_rows(
@@ -943,7 +883,6 @@ impl<A: RowApplication> Inner<A> {
         self.direct = direct;
         Ok(())
     }
-    /// The end and signature of the imported checkpoint's page after `after`.
     async fn page_record(
         &self,
         id: i64,
@@ -990,7 +929,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Whether the scope has pruned history a peer may be behind.
     pub(crate) async fn has_pruned_prefix(&self, scope: ResourceScope) -> Result<bool, Error> {
         match self.find_scope_id(scope).await? {
             Some(id) => Ok(!self.logs(id, None, true, 1).await?.is_empty()),
@@ -1059,8 +997,6 @@ impl<A: RowApplication> Inner<A> {
             .map(|(_, signed)| signed))
     }
 
-    /// The checkpoint this replica can serve: verified and signed under the
-    /// current policy.
     pub(in crate::replica) async fn served_checkpoint(
         &mut self,
         scope: ResourceScope,
@@ -1100,8 +1036,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// The pruned prefix of every log in a scope, 256 logs per page. A peer
-    /// compares it with what it holds through `behind_pruned`.
     pub async fn pruned_page(
         &self,
         peer: PublicKey,
@@ -1127,8 +1061,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .collect(),
         })
     }
-    /// True when a peer pruned operations this replica neither holds nor has
-    /// pruned itself: the gap can only be closed by a rebootstrap.
     pub async fn behind_pruned(&self, pruned_prefix: &PrunedPage) -> Result<bool, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let id = inner.find_scope_id(pruned_prefix.scope).await?;
@@ -1165,8 +1097,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(false)
     }
-    /// The signed checkpoint a peer behind the pruned_prefix starts from:
-    /// a base at a seal, never one the peer signed itself.
     pub async fn checkpoint_offer(
         &self,
         peer: PublicKey,
@@ -1178,7 +1108,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         drop(flush_guard(inner, &self.inner).await?);
         Ok(offered)
     }
-    /// Whether `signed` is the verified checkpoint this replica last switched to.
     pub(crate) async fn checkpoint_installed(
         &self,
         signed: &SignedCheckpoint,
@@ -1200,9 +1129,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.checkpoint_key(signed).is_some()
     }
-    /// One page of the checkpoint's rows after `after`, sealed with the scope
-    /// key, within `byte_quota` encoded bytes. A checkpoint that was replaced
-    /// meanwhile is refused; the peer starts again from a new offer.
     pub async fn checkpoint_page(
         &self,
         peer: PublicKey,
@@ -1286,10 +1212,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.check_export_source(&source)?;
             }
         }
-        /// Room for the ciphertext's CBOR byte-string framing in the page.
         const PAGE_FRAMING_BYTES: usize = 2048;
-        /// Room for the stored bytes' CBOR framing in the sealed plaintext,
-        /// which must fit one package.
         const PACKAGE_FRAMING_BYTES: usize = 1024;
         let budget = (byte_quota - PAGE_FRAMING_BYTES)
             .min(rocky_core::MAX_PAYLOAD_BYTES - PACKAGE_FRAMING_BYTES);
@@ -1633,8 +1556,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await
             .checkpoint_store_pause = Some((reached, resume));
     }
-    /// Discards only this staged checkpoint before falling back to frames.
-    /// Direct imports undo their partial rows; retained local operations settle again.
     pub async fn cancel_rebootstrap(
         &self,
         scope: ResourceScope,
@@ -1666,8 +1587,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Ok(())
     }
 
-    /// Starts importing a peer's signed checkpoint for a scope this replica
-    /// reads in whole. Nothing changes until `finish_rebootstrap`.
     pub async fn begin_rebootstrap(&self, signed: SignedCheckpoint) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.verify_import_statement(&signed).await?;
@@ -1743,8 +1662,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })?;
         inner.load_direct().await
     }
-    /// The checkpoint being imported for a scope, the last row staged and
-    /// whether every page arrived.
     pub async fn rebootstrap_progress(
         &self,
         scope: ResourceScope,
@@ -1762,7 +1679,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             None => Ok(None),
         }
     }
-    /// The node that signed the checkpoint being imported for a scope.
     pub async fn rebootstrap_signer(
         &self,
         scope: ResourceScope,
@@ -1776,11 +1692,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await?
             .map(|staging| staging.signed.signer()))
     }
-    /// Imports the next page of checkpoint rows; pages arrive in order.
-    /// The page is opened and verified against its signer off the
-    /// replica's thread. A direct import writes the rows into the scope and
-    /// its projection, readable once the page commits; otherwise they are
-    /// staged for the switch.
     pub async fn stage_checkpoint_page(&self, page: CheckpointPage) -> Result<(), Error> {
         let span = tracing::debug_span!(
             "checkpoint_page",
@@ -1793,12 +1704,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         crate::network::trace::outcome(&span, &result);
         result
     }
-    /// Stages one signed page. Its rows are authenticated, and conflicts
-    /// anywhere in the page rejected, before any prefix is stored; only a
-    /// complete page publishes its cursor and signature, and a retry
-    /// validates the durable prefix. Only writes to this scope or a changed
-    /// authority or workspace invalidate that preflight, so other scopes
-    /// import concurrently.
     async fn stage_checkpoint_page_inner(&self, page: CheckpointPage) -> Result<(), Error> {
         if self
             .inner
@@ -2009,7 +1914,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner.verify_import_statement(&staging.signed).await?;
             #[cfg(any(test, feature = "qualification"))]
             inner.units("checkpoint_store_metadata", chunk.len() as u64);
-            transaction!(@commit inner, |inner| inner.store_page_metadata(chunk).await)?;
+            transaction!(@without_wal_checkpoint inner, |inner| inner.store_page_metadata(chunk).await)?;
             source = (writes.count(), inner.authority, inner.workspace.tip);
         }
         let finish_cursor = opened.rows.last().map(|(row, ..)| *row);
@@ -2132,7 +2037,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.units("checkpoint_store_metadata", metadata.len() as u64);
                 inner.units("checkpoint_store_row", chunk.rows.len() as u64);
             }
-            transaction!(@commit inner, |inner| {
+            transaction!(@without_wal_checkpoint inner, |inner| {
                 if chunk_index == 0 && !escrow.is_empty() {
                     inner
                         .keep_carried_escrow_rows(escrow_peer, &escrow, escrow_time)
@@ -2151,9 +2056,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(())
     }
-    /// `stage_checkpoint_page` for a replayed scope: the page's row images
-    /// are staged for the switch, which checks them against the statement.
-    /// A direct import shows them at once: its scope holds nothing else.
     async fn stage_replayed_page(&self, page: CheckpointPage) -> Result<(), Error> {
         let mut inner = self.inner.lock(Class::Background).await;
         let (key, staging) = inner.expected_page(&page).await?;
@@ -2272,8 +2174,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.imported.send_modify(|pages| *pages += 1);
         Ok(())
     }
-    /// The stored rows of `checkpoint` this replica has imported: all of
-    /// them once it switched to it.
     pub async fn imported_rows(
         &self,
         scope: ResourceScope,
@@ -2296,10 +2196,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             _ => 0,
         })
     }
-    /// Verifies the staged rows against the signed checkpoint, then switches
-    /// the scope to them in one transaction: held operations the checkpoint
-    /// covers are dropped, and every other operation this replica had applied
-    /// is applied again on top or reported as rejected with its reason.
     pub async fn finish_rebootstrap(
         &self,
         scope: ResourceScope,
@@ -2385,10 +2281,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// When a replacement of an off-path base leaves this node's pruned own
-    /// positions uncovered by `frontier`, keeps the old own endpoint as a
-    /// restoration obligation: those frames may return, and authoring waits
-    /// for them.
     async fn keep_uncovered_own_endpoint(
         &mut self,
         scope: ResourceScope,
@@ -2408,10 +2300,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Inside the caller's transaction, switches `scope` to its verified
-    /// staged import of `signed`: held operations the checkpoint covers are
-    /// dropped, and every other operation this replica had applied is
-    /// applied again on top or reported as rejected with its reason.
     pub(super) async fn switch_to_staged(
         &mut self,
         scope: ResourceScope,
@@ -2605,7 +2493,7 @@ impl<A: RowApplication> Inner<A> {
         }
         match replayed {
             true => {
-                self.store_scope_state(id, 0, 0, &Lt::new(), statement.operations)
+                self.store_scope_state(id, 0, 0, &LtHash16::new(), statement.operations)
                     .await?
             }
             false => {
@@ -2695,8 +2583,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Refuses statement marks naming another signer for an author that the
-    /// concrete or the allocation scope already binds.
     async fn check_statement_marks(
         &self,
         scope: ResourceScope,
@@ -2716,9 +2602,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Refuses checkpoint rows of scope `id` in `rows` whose original
-    /// creation contradicts a claim this file holds on that identity. The
-    /// same original, carried, is accepted.
     pub(super) async fn check_row_provenance(
         &self,
         scope: ResourceScope,
@@ -2755,7 +2638,6 @@ impl<A: RowApplication> Inner<A> {
             }
         }
     }
-    /// Refuses one row record whose proof contradicts a known claim.
     pub(super) async fn check_record_provenance(
         &self,
         allocation: i64,
@@ -2777,8 +2659,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// A checkpoint that ends before this replica's own pruned_prefix would lose
-    /// the operations between them.
     async fn check_frontier(&self, id: i64, signed: &SignedCheckpoint) -> Result<(), Error> {
         if self.base_off_path(signed.statement.scope, id).await? {
             return Ok(());
@@ -2792,8 +2672,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Drops held operations the checkpoint covers and returns, in their old
-    /// application order, the applied ones beyond it, reset to pending.
     async fn supersede(
         &self,
         scope: ResourceScope,
@@ -2895,8 +2773,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-/// Re-seals a page's rows after `edit`, keeping its binding and signature:
-/// what a reader holding the scope key could forge.
 #[cfg(test)]
 pub(crate) fn forge_page(
     page: &mut CheckpointPage,

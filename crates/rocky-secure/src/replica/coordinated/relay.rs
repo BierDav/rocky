@@ -1,4 +1,3 @@
-//! Private, exact closing-seal relays. These records never enter graph settlement.
 use super::*;
 use rocky_credentials::{SealAction, SealFinality, SignedSeal, TipGraph};
 
@@ -7,7 +6,6 @@ pub(in crate::replica) const SCHEMA: &[&str] = &[
 ];
 const MAX_INCOMING_RELAYS: usize = 64;
 
-/// The finality record `graph` holds for `seal`, which no revocation ended.
 pub(in crate::replica) fn public_finality(
     graph: &TipGraph,
     seal: Commitment,
@@ -23,7 +21,6 @@ pub(in crate::replica) fn public_finality(
 pub use rocky_credentials::StagedCloseStatus;
 
 impl<A: RowApplication> Inner<A> {
-    /// Reconstructs the exported graph, without any private staged records.
     pub(super) async fn public_graph(&self, scope: Scope) -> Result<TipGraph, Error> {
         let root = self.graph_for(scope)?.genesis_schema;
         let mut graph = TipGraph::new(scope, root);
@@ -46,8 +43,6 @@ impl<A: RowApplication> Inner<A> {
             .map_err(credential)?;
         Ok(graph)
     }
-    /// Inside the caller's transaction, drops the relay of a close whose
-    /// finality the public graph holds.
     pub(in crate::replica) async fn forget_relay(&self, seal: Commitment) -> Result<(), Error> {
         self.conn
             .execute(
@@ -78,8 +73,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Journals only the signed close before attempting its ordinary source terminal.
-    /// No opening, move, schema, or migration frames are admitted by this API.
     pub async fn relay_staged_close(&self, bytes: &[u8]) -> Result<StagedCloseStatus, Error> {
         let seal = SignedSeal::from_bytes(bytes).map_err(credential)?;
         let id = seal.id().map_err(credential)?;
@@ -222,9 +215,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.staged_close_finality(bytes).await
     }
 
-    /// Acknowledges only an exact committed terminal, without admitting its seal.
-    /// A verified rival proof is evidence of conflict; a reply alone is not.
-    /// Only finality at the coordinator the settings name answers.
     pub async fn staged_close_finality(&self, bytes: &[u8]) -> Result<StagedCloseStatus, Error> {
         let seal = SignedSeal::from_bytes(bytes).map_err(credential)?;
         let id = seal.id().map_err(credential)?;

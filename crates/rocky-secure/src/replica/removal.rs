@@ -1,11 +1,9 @@
-//! Local row counts and workspace filtering; signed replay bases stay immutable.
 use super::checkpoint::Sets;
 use super::*;
 
 pub(super) const SCHEMA: &[&str] =
     &["CREATE TABLE IF NOT EXISTS secure_rebuild_scopes(scope BLOB PRIMARY KEY) WITHOUT ROWID"];
 
-/// Each named projection table's stored row count.
 pub async fn local_row_counts(
     path: &Path,
     tables: &[&str],
@@ -29,9 +27,6 @@ pub async fn local_row_counts(
     Ok(counts)
 }
 
-/// Each named projection table's row count and LtHash digest of its rows,
-/// every column included in name order: replicas holding the same rows,
-/// identities included, have equal digests whatever their history.
 pub async fn local_table_digests(
     path: &Path,
     tables: &[&str],
@@ -40,7 +35,7 @@ pub async fn local_table_digests(
     let file = crate::sqlite::Connection::open_read_only(path)?;
     let mut digests = BTreeMap::new();
     for table in tables {
-        let mut digest = super::checkpoint::Lt::new();
+        let mut digest = super::checkpoint::LtHash16::new();
         let mut count = 0;
         let mut columns = Vec::new();
         for column in file.rows(
@@ -135,7 +130,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(changed)
     }
-    /// Recomputes a scope's row counts and digest from its stored rows.
     pub(super) async fn recount(&self, id: i64, scope: ResourceScope) -> Result<(), Error> {
         let blob = encode(&scope)?;
         let mut sets = Sets::new();

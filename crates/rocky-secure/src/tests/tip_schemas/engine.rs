@@ -1,5 +1,3 @@
-//! A tip's schema commits the replay engine: a build on another engine
-//! follows read-only and replays nothing until a tip names its engine.
 use super::super::compaction::{Replica, bookmark, follow_main, insert, sync};
 use super::super::generations::{Lineage, select, session, text};
 use super::*;
@@ -10,8 +8,6 @@ use rocky_credentials::{SEAL_FORMAT, SealStatement};
 fn upgraded() -> EngineIdentity {
     EngineIdentity::of(BUNDLED_SQLITE_VERSION, REPLAY_SEMANTICS + 1)
 }
-/// The owner seals the tip `replica` follows at what it applied and
-/// continues it with the same tables on `engine`.
 async fn open_on(
     lineage: &Lineage,
     replica: &Replica,
@@ -41,7 +37,6 @@ async fn open_on(
         ],
     )
 }
-/// Installs `target`'s schema on `engine` and switches to it.
 async fn switch(
     lineage: &Lineage,
     replica: &Replica,

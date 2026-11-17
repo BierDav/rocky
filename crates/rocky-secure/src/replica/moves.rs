@@ -1,10 +1,8 @@
-//! Move provenance and field ordering, independent of source-key availability.
 use super::*;
 use serde::{Deserialize, Serialize};
 
 mod compact;
 
-/// The current creation proof and statement version; others are refused.
 const PROOF_VERSION: u8 = 3;
 
 struct VerifiedBindings<'a> {
@@ -14,7 +12,6 @@ struct VerifiedBindings<'a> {
     signer: PublicKey,
 }
 
-/// Only the last historical chain success in one materialization attempt.
 #[derive(Default)]
 pub(super) struct FrameBindings<'a> {
     last: Option<VerifiedBindings<'a>>,
@@ -29,7 +26,6 @@ pub(super) struct CreationClaim<'a> {
     pub families: &'a rocky_credentials::GrantFamilies,
 }
 
-/// The digest a stored proof names an encoded set of author bindings by.
 pub(super) fn bindings_digest(encoded: &[u8]) -> Commitment {
     rocky_core::commitment("rocky.author-bindings.v1", encoded)
 }
@@ -38,9 +34,6 @@ pub(super) fn header_digest(header: &[u8]) -> Commitment {
     rocky_core::commitment("rocky.creation-header.v1", header)
 }
 
-/// A creation proof as a row record stores it. The author bindings its
-/// signature covers repeat on every row an author creates, so they are
-/// stored once in `secure_author_bindings` and named here by digest.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StoredProof {
@@ -115,7 +108,6 @@ impl StoredProof {
     pub(super) fn bindings(&self) -> Commitment {
         self.bindings
     }
-    /// The original creation statement this proof names; see [`provenance`].
     pub(crate) fn provenance(&self) -> Result<Commitment, Error> {
         let calculated = provenance(
             self.version,
@@ -131,9 +123,6 @@ impl StoredProof {
         Ok(self.provenance)
     }
 }
-/// A commitment to an original creation statement: what a row's identity
-/// was first created as, whichever frame carries the proof now. Neither the
-/// signature nor a transport hash enters it.
 fn provenance(
     version: u8,
     manifest: Commitment,
@@ -365,7 +354,6 @@ impl CreationProof {
     pub(super) fn manifest(&self) -> Commitment {
         self.manifest
     }
-    /// The original creation statement this proof names.
     fn computed_provenance(&self) -> Result<Commitment, Error> {
         provenance(
             self.version,
@@ -382,7 +370,6 @@ impl CreationProof {
         }
         Ok(self.provenance)
     }
-    /// The proof as a row record stores it.
     pub(super) fn stored(&self) -> Result<StoredProof, Error> {
         Ok(StoredProof {
             version: self.version,
@@ -404,7 +391,6 @@ pub(crate) struct Carried {
     pub(crate) proof: CreationProof,
     pub(crate) stamps: BTreeMap<Commitment, Stamp>,
     pub(crate) authors: stamp_authors::Authors,
-    /// Present only on a destination insert; sealed with the source key.
     pub(crate) moved_from: Option<Vec<u8>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -424,8 +410,6 @@ pub(super) struct FollowPass {
     pub(super) epoch: u64,
     after: Option<(Vec<u8>, Vec<u8>)>,
     row: Option<FollowRow>,
-    /// Writes to moved rows since the pass started; one may lie behind
-    /// the cursor, so the pass then runs once more from the start.
     moved: Option<(Arc<crate::sqlite::Writes>, String, u64)>,
     rescan: bool,
 }
@@ -445,7 +429,6 @@ struct FollowRow {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Stores the bindings of a proof a row record is about to name.
     pub(super) async fn keep_bindings(&self, proof: &CreationProof) -> Result<(), Error> {
         self.put_creation_header(&proof.header).await?;
         self.put_bindings(&encode(&proof.bindings)?).await
@@ -508,7 +491,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// A stored set of author bindings, encoded as its digest names it.
     pub(super) async fn stored_bindings(&self, digest: Commitment) -> Result<Vec<u8>, Error> {
         let mut found = self
             .conn
@@ -529,7 +511,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(encoded)
     }
-    /// A stored proof with its bindings, as a move carries it.
     pub(super) async fn carried_proof(&self, stored: &StoredProof) -> Result<CreationProof, Error> {
         Ok(CreationProof {
             version: stored.version,
@@ -607,8 +588,6 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_creation_headers(digest BLOB NOT NULL UNIQUE,header BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_author_bindings(digest BLOB PRIMARY KEY,bindings BLOB NOT NULL) WITHOUT ROWID",
 ];
-/// The moved rows each commit follows. `CROSS JOIN` keeps the few marked
-/// moves as the outer loop: without it SQLite scans every stored row.
 pub(crate) const MOVE_SCAN: &str = "SELECT r.scope,r.row,r.fields FROM secure_move_rows m CROSS JOIN secure_row_records r ON r.scope=m.scope AND r.row=m.row";
 impl<A: RowApplication> Inner<A> {
     pub(super) async fn consume(&self, hash: Hash, reason: &str) -> Result<(), Error> {
@@ -1029,7 +1008,6 @@ impl<A: RowApplication> Inner<A> {
         )
         .await
     }
-    /// Move links of the rows a direct import stored.
     pub(super) async fn imported_moves(&self, scope: i64) -> Result<checkpoint::SetSummary, Error> {
         self.move_summary(
             "SELECT row,fields FROM secure_checkpoint_rows WHERE scope=?",

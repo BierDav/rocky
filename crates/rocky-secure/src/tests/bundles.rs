@@ -7,7 +7,6 @@ fn public(f: &Fixture, row: u8, name: &str) -> RowWrite {
 fn private(f: &Fixture, row: u8, salary: &str) -> RowWrite {
     RowWrite::changed(change(f.private, row, None, Some(f.app().salary(salary))))
 }
-/// 40 public names and one private salary: two public frames and one private.
 fn hiring(f: &Fixture) -> Vec<RowWrite> {
     let mut writes: Vec<RowWrite> = (1..=40)
         .map(|row| public(f, row, &format!("employee-{row}")))
@@ -321,8 +320,6 @@ async fn bundle_handles_return_the_same_frames_and_failures_commit_nothing() {
     ));
 }
 
-/// Deletes the bundle member records, as a handle restored by a recovery
-/// import lacks them.
 async fn forget_bundle_members_as_a_recovery_import_does(replica: &EncryptedReplica<Employees>) {
     replica
         .inner

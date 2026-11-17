@@ -1,11 +1,7 @@
-//! Schema changes as seals: a `continue` names the successor's schema, a
-//! follower switches when its bookmark reaches it, and every write reaches
-//! the live tip through the fields each tip on the path has.
 use super::super::compaction::sync;
 use super::*;
 use crate::tests::stored_frames;
 
-/// Every frame `source` authored, for a test to deliver late.
 pub(super) async fn authored(
     source: &EncryptedReplica<TypedRows>,
     key: &PrivateKey,
@@ -16,7 +12,6 @@ pub(super) async fn authored(
         .filter(|frame| frame.operation().unwrap().header.public_key == key.public_key())
         .collect()
 }
-/// Imports `source`'s base of `scope` into `target`, page by page.
 async fn import(
     lineage: &Lineage,
     source: &EncryptedReplica<TypedRows>,

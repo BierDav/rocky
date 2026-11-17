@@ -1,7 +1,5 @@
 use super::*;
 
-/// Checks every original write stays in the replay scope before filtering.
-/// A bundle member replays alone: merging is order independent.
 pub(super) fn replay_changes(
     scope: ResourceScope,
     payload: &RowPayload,

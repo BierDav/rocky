@@ -1,9 +1,6 @@
-//! A relayed author carries the same public membership evidence as a direct peer.
 use super::*;
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Learns revocations from the frames' chains. Membership is independently
-    /// signed, so it holds even if the application payload is refused.
     pub(super) async fn learn_carried_membership(
         &self,
         frames: &[EncryptedFrame],

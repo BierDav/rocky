@@ -1,4 +1,3 @@
-//! Refresh steps borrow graph facts; signed transactions stay distinct.
 use super::*;
 use rocky_core::SqlValue;
 use rocky_credentials::TipGraph;
@@ -142,8 +141,6 @@ async fn fixture() -> (
     (f, dir, a, vec![a0, b0, b1, c0], statement)
 }
 
-/// Direct SQL bypasses the replica's refresh generations, so the held refresh
-/// must be dropped by hand before the next page observes the change.
 async fn forget_held_refresh_after_direct_sql(replica: &Replica) {
     replica
         .inner
@@ -726,7 +723,7 @@ async fn held_tokens_and_pages_bound_raw_rows_and_validate_their_source() {
     );
     let (peer, credentials, expected, raw_count) = {
         let mut inner = a.inner.lock(crate::replica::Class::Background).await;
-        transaction!(@commit inner, |inner| {
+        transaction!(@without_wal_checkpoint inner, |inner| {
             for index in 0..100u8 {
                 let mut key = vec![0; 32];
                 key[31] = index;

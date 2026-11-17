@@ -1,5 +1,3 @@
-//! Admission by chain and revocation set, the statements a handshake
-//! exchanges and the bound on unconfigured peers.
 use super::revocations::{hello, insert, open};
 use super::*;
 use crate::network::{
@@ -14,7 +12,6 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
 
-/// A stream that keeps every byte its owner read: the owner's transcript.
 struct Recorded {
     stream: DuplexStream,
     read: Arc<Mutex<Vec<u8>>>,
@@ -52,7 +49,6 @@ impl AsyncWrite for Recorded {
     }
 }
 
-/// `count` statements revoking distinct capability IDs, or `nodes` when given.
 fn statements(f: &Fixture, count: usize, nodes: &[PublicKey]) -> RevocationSet {
     let time = now().unwrap();
     let signed: Vec<_> = (0..count)
@@ -365,11 +361,8 @@ async fn unconfigured_peers_stay_within_the_bound_and_the_least_recently_served_
     assert_eq!(a.recorded_peers().await, kept);
 }
 
-/// Real time a handshake may take: far below `MAX_CLOCK_AHEAD`.
 const HANDSHAKE_TIME_SLACK: u64 = 5_000_000;
 
-/// Polls `future` with this thread's clock `seconds` ahead, as a device
-/// whose wall clock runs ahead does.
 async fn skewed<T>(seconds: u64, future: impl Future<Output = T>) -> T {
     let mut future = std::pin::pin!(future);
     std::future::poll_fn(|cx| {

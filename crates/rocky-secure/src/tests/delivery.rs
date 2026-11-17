@@ -1,11 +1,8 @@
-//! The delivery family over a real session, against an in-memory owner.
 use super::*;
 use network::{Deliveries, DeliveryFuture, Held, Outgoing};
 use rocky_credentials::{DeliveryReceipt, SealedDelivery};
 use std::sync::{Arc, Mutex};
 
-/// One side's delivery state: what it hands over and deposits, what it
-/// holds for others, and every receipt and deposit it saw.
 #[derive(Default)]
 struct Port {
     key: Option<PrivateKey>,
@@ -18,7 +15,6 @@ struct Port {
     acknowledged: Mutex<Vec<Commitment>>,
     stored: Mutex<Vec<Commitment>>,
     forgotten: Mutex<Vec<Commitment>>,
-    /// Deposits this mailbox refuses beyond.
     room: usize,
 }
 impl Deliveries for Port {
@@ -122,7 +118,6 @@ impl Deliveries for Port {
     }
 }
 
-/// Bytes per large delivery: three pages travel each way.
 const LARGE_DELIVERY: usize = 40 * 1024;
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

@@ -1,21 +1,13 @@
-//! What SQLite cannot check before a replayed transaction's savepoint is
-//! released: its deferred foreign keys, which SQLite checks only at the
-//! outermost `COMMIT`, and the schema's assertions. Both run at the end of
-//! each replayed transaction and at author commit.
 use super::*;
 
-/// A replayed row a transaction changed: its table, lowercase, and its
-/// partition values in `partition_by` order (empty when unpartitioned).
 pub(in crate::replica) type Written = (String, Vec<SqlValue>);
 
-/// Adds `row` to `written` unless it is there.
 pub(in crate::replica) fn note(written: &mut Vec<Written>, row: Written) {
     if !written.contains(&row) {
         written.push(row);
     }
 }
 
-/// The partition values of a row image of `logical`.
 pub(in crate::replica) fn written(
     logical: &rocky_core::LogicalTable,
     image: &[SqlValue],
@@ -35,8 +27,6 @@ pub(in crate::replica) fn written(
     Ok((logical.sql_name.to_ascii_lowercase(), partition))
 }
 
-/// Replayed tables whose rows a write to `table` may change through delete
-/// actions, `table` included.
 pub(in crate::replica) fn cascades(
     schema: &rocky_core::LogicalSchema,
     table: &str,
@@ -58,9 +48,6 @@ pub(in crate::replica) fn cascades(
     reached
 }
 
-/// Replayed tables whose replay order can change `table`'s outcomes,
-/// `table` included: those a foreign key joins to it either way, or an
-/// assertion reads with it, transitively.
 pub(in crate::replica) fn linked(
     schema: &rocky_core::LogicalSchema,
     table: &str,
@@ -103,8 +90,6 @@ pub(in crate::replica) fn linked(
     reached
 }
 
-/// The tables SQLite reads when replaying writes to `changed`: those and
-/// the parents their foreign keys check.
 pub(in crate::replica) fn checked(
     schema: &rocky_core::LogicalSchema,
     changed: &BTreeSet<String>,
@@ -123,10 +108,6 @@ pub(in crate::replica) fn checked(
     read
 }
 
-/// Refuses a transaction of several replayed members that deletes from a
-/// table whose delete actions reach another member's table: members replay
-/// in scope order, so the action could meet that member's rows in another
-/// order than the author's.
 pub(in crate::replica) fn check_member_order<'a>(
     schema: &rocky_core::LogicalSchema,
     members: impl IntoIterator<Item = (&'a str, &'a [rocky_core::replay::IntentStatement])> + Clone,
@@ -159,9 +140,6 @@ pub(in crate::replica) fn check_member_order<'a>(
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// The first constraint the rows `written` leave violated, by name:
-    /// a deferred foreign key (with `deferred_all`, any key), then each
-    /// assertion reading a written table, once per written partition.
     pub(in crate::replica) async fn replayed_violation(
         &self,
         written: &[Written],

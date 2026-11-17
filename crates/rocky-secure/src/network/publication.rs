@@ -1,4 +1,3 @@
-//! One bounded, ordered transfer of committed scopes with a terminal receipt.
 use super::*;
 use std::collections::BTreeSet;
 mod ordering;
@@ -44,11 +43,8 @@ impl PublicationMessage {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PublicationReceipt {
-    /// Durable prefixes, clamped to the exported upper positions.
     pub frontiers: Vec<ScopeFrontier>,
-    /// Authorized scopes whose final state still needs ordinary repair.
     pub repair: Vec<ResourceScope>,
-    /// Unknown dependencies require the ordinary full control/holdings planner.
     pub repair_all: bool,
     pub reasons: Vec<PublicationRepairReason>,
 }
@@ -61,7 +57,6 @@ pub enum PublicationRepairReason {
     Rejected,
     UnknownRequirements,
 }
-/// A failed preflight sends no publication data; callers retain scoped repair.
 pub enum PublicationOutcome {
     Published(PublicationReceipt),
     Repair {
@@ -274,8 +269,6 @@ impl Plan {
 }
 
 impl link::channels::Handle {
-    /// Publishes committed frames, authorizing each scope again after
-    /// preflight and channel reservation, which may outlast a grant.
     pub async fn publish_committed<A: RowApplication>(
         &self,
         replica: &EncryptedReplica<A>,
@@ -644,9 +637,6 @@ fn charge_chain(chain: &CredentialChain, used: &mut usize) -> Result<(), Error> 
     }
     Ok(())
 }
-/// Charges the chains a message references. Reconstructing a vouch clones
-/// its original credentials before verified storage, so each escrow record
-/// is charged its chain.
 pub(super) fn charge_references(
     message: &Message,
     table: &chains::ChainTable,
@@ -708,9 +698,6 @@ pub(super) fn charge_metadata(message: &Message, used: &mut usize) -> Result<(),
     Ok(())
 }
 
-/// Scans definite CBOR before serde can allocate collections from hostile
-/// lengths. Byte strings are opaque; their length is charged, never
-/// interpreted as metadata.
 pub(crate) fn charge(bytes: &[u8], used: &mut usize) -> Result<(), Error> {
     let mut cursor = 0;
     *used = used

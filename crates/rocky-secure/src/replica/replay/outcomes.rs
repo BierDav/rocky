@@ -1,17 +1,8 @@
-//! Outcome records: how a replica replayed the members of a transaction it
-//! holds. A replica holding only some members of a transaction applies
-//! them provisionally and drops them while a record naming a member it
-//! does not hold says the transaction dropped. Records of the same members
-//! after the same prefixes that disagree are divergence.
 use super::*;
 use rocky_core::replay::{BaseMark, OutcomeRecord};
 
-/// The latest record of each publisher per transaction.
 const OUTCOMES_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_outcomes(txn BLOB NOT NULL,publisher BLOB NOT NULL,sequence INTEGER NOT NULL,record BLOB NOT NULL,PRIMARY KEY(txn,publisher)) WITHOUT ROWID";
-/// Members some record names: a seal covers a transaction of several
-/// members once each has one.
 const OUTCOME_MEMBERS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_outcome_members(txn BLOB NOT NULL,member INTEGER NOT NULL,PRIMARY KEY(txn,member)) WITHOUT ROWID";
-/// Refused records that disagreed with a stored one, with both engines.
 const OUTCOME_DIVERGENCE_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_outcome_divergence(txn BLOB NOT NULL,publisher BLOB NOT NULL,stored TEXT NOT NULL,refused TEXT NOT NULL,PRIMARY KEY(txn,publisher)) WITHOUT ROWID";
 pub(in crate::replica) const SCHEMA: &[&str] = &[
     OUTCOMES_TABLE,
@@ -19,20 +10,14 @@ pub(in crate::replica) const SCHEMA: &[&str] = &[
     OUTCOME_DIVERGENCE_TABLE,
 ];
 
-/// Two replicas replayed the same members of a transaction after the same
-/// prefixes and disagree on its outcome. The later record was refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutcomeDivergence {
     pub transaction: Commitment,
-    /// The publisher of the refused record.
     pub publisher: PublicKey,
-    /// The engine of the record this replica kept.
     pub stored: String,
-    /// The engine of the refused record.
     pub refused: String,
 }
 
-/// This build's engine as records name it.
 fn engine() -> String {
     format!(
         "rocky-secure {} {}",
@@ -42,8 +27,6 @@ fn engine() -> String {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// What the partition applied before the recorded member `hash`: the
-    /// last sequence per author.
     async fn prefix(&self, scope: i64, hash: Hash) -> Result<Vec<BaseMark>, Error> {
         let prefix = self.prefix_unbounded(scope, hash).await?;
         if prefix.len() > rocky_core::replay::MAX_OUTCOME_MEMBERS {
@@ -76,9 +59,6 @@ impl<A: RowApplication> Inner<A> {
             .collect()
     }
 
-    /// A digest of each partition linked to `held`, with what it applied
-    /// before them. Replicas holding other linked partitions differ here,
-    /// so their records never compare.
     async fn linked_prefixes(
         &self,
         held: &[(&EncryptedFrame, u16)],
@@ -119,7 +99,6 @@ impl<A: RowApplication> Inner<A> {
         )))
     }
 
-    /// Every stored record of `transaction`, by publisher.
     async fn outcome_records(
         &self,
         transaction: Commitment,
@@ -176,8 +155,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    /// Why another replica's record drops `transaction`, when one that
-    /// names a member not `held` here says so.
     pub(super) async fn remote_drop(
         &self,
         transaction: Commitment,
@@ -198,10 +175,6 @@ impl<A: RowApplication> Inner<A> {
             .find_map(|(.., record)| record.dropped))
     }
 
-    /// Signs how this replica replayed its held members of a transaction
-    /// of several members into each of their logs it holds and may write: after
-    /// replaying them, and as their author at commit; again only when the
-    /// outcome changes.
     pub(in crate::replica) async fn publish_outcome(
         &self,
         transaction: Commitment,
@@ -272,7 +245,6 @@ impl<A: RowApplication> Inner<A> {
         self.sign_outcome(&record, &logs, node, time).await
     }
 
-    /// Whether `node` has frames in `scope`'s log that wait to apply.
     async fn own_pending(&self, scope: ResourceScope, node: PublicKey) -> Result<bool, Error> {
         Ok(!collect_rows(
             self.conn
@@ -285,7 +257,6 @@ impl<A: RowApplication> Inner<A> {
         .await?
         .is_empty())
     }
-    /// Appends `record` to each of `logs` as this node and stores it.
     async fn sign_outcome(
         &self,
         record: &OutcomeRecord,
@@ -307,10 +278,6 @@ impl<A: RowApplication> Inner<A> {
         self.store_outcome(node.as_bytes(), sequence, record).await
     }
 
-    /// Takes in another replica's record. A record that disagrees with one
-    /// of the same members after the same prefixes is divergence, named
-    /// with both engines. One that changes whether this replica's held
-    /// members of the transaction drop rewinds and redoes them.
     pub(in crate::replica) async fn apply_outcome(
         &self,
         frame: &EncryptedFrame,
@@ -398,8 +365,6 @@ impl<A: RowApplication> Inner<A> {
 
 #[cfg(test)]
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Signs this replica's stored record of `transaction` again, with its
-    /// outcome and engine replaced, as a divergent replica would.
     pub(crate) async fn forge_outcome_for_test(
         &self,
         transaction: Commitment,
@@ -431,7 +396,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Outcome records this replica refused as divergence.
     pub async fn outcome_divergences(&self) -> Result<Vec<OutcomeDivergence>, Error> {
         let inner = self.inner.lock(Class::Background).await;
         let corrupt = || Error::Corrupt("outcome divergence".into());
@@ -464,10 +428,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         .collect()
     }
 
-    /// Publishes this replica's record for every open transaction of
-    /// several members it holds whole that some member still lacks one
-    /// for, as when its author is gone. The owner runs this before it
-    /// seals, so the seal can cover them.
     pub async fn publish_missing_outcomes(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock(Class::Background).await;
         let time = now()?;
@@ -476,9 +436,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })
     }
 
-    /// Replayed transactions a finalized seal reached that stay open
-    /// because some member has no outcome record: no replica holding it
-    /// whole has published one. Their drops stay provisional.
     pub async fn awaiting_outcomes(&self) -> Result<Vec<Commitment>, Error> {
         let inner = self.inner.lock(Class::Background).await;
         collect_rows(

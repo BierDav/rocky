@@ -259,9 +259,7 @@ fn wide_row(index: u16) -> [u8; 32] {
     row
 }
 
-/// Rows in each authored operation of the snapshot-limit corpus.
 const ROWS_PER_OPERATION: u16 = 32;
-/// Operations whose rows exceed what a snapshot may hold by one, plus spare.
 const OPERATIONS_PAST_A_SNAPSHOT: u16 = 33;
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -627,8 +625,6 @@ async fn wide_signed_definitions_are_cached_without_weakening_row_admission() {
     assert_eq!(source.snapshot(f.public).await.unwrap().rows.len(), 10);
 }
 
-/// Statements the target prepares to apply ordinary updates: one frame of
-/// 32 updated rows, then a frame updating one row.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_ordinary_update_applies_in_few_statements_per_row() {
     let f = Fixture::new();
@@ -769,10 +765,6 @@ async fn an_ordinary_update_applies_in_few_statements_per_row() {
     );
 }
 
-/// A fixed row/clock/signer corpus also run against the pre-phase replica.
-///
-/// The corpus is deliberately small: this verifies the canonical digest and
-/// record encoding, not the throughput of hashing a large database.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn lthash_fixture_matches_phase_start() {
     let f = Fixture::with_publisher(PrivateKey::from_bytes(&[41; 32]));
@@ -1019,8 +1011,6 @@ async fn author_transaction_and_bundle_acquisitions_are_interactive() {
     }
 }
 
-/// Interned record ids grow with every row; the caches of them stay
-/// bounded through authoring and intake, and reads still find every row.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn interned_record_caches_stay_bounded_during_intake() {
     let f = Fixture::new();

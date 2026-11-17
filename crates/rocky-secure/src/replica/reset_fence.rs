@@ -1,9 +1,6 @@
-//! Owner resets: the fence a reset records and the frames it re-judges.
 use super::*;
 use rocky_credentials::{FenceLog, FenceScope, MAX_FENCE_LOGS};
 
-/// A reset refused before anything was recorded: it would end the signing
-/// replica's own credentials.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResetEndsSigner;
 impl std::fmt::Display for ResetEndsSigner {
@@ -14,9 +11,6 @@ impl std::fmt::Display for ResetEndsSigner {
 impl std::error::Error for ResetEndsSigner {}
 
 impl<A: RowApplication> Inner<A> {
-    /// The applied prefix of every log of a writer `keep` leaves out, in
-    /// every scope this replica tracks. A log with nothing applied is left
-    /// out: the reset keeps none of it.
     pub(super) async fn reset_fence(
         &self,
         keep: &BTreeSet<PeerId>,
@@ -62,10 +56,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(fence)
     }
-    /// Returns to pending the rejected frames of each writer a following
-    /// reset kept since `old`, so the settle pass judges them again against
-    /// `new`: every replica ends with what the held statements decide,
-    /// whichever arrived first.
     pub(super) async fn rejudge_reset_writers(
         &self,
         old: &RevocationSet,

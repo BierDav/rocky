@@ -1,4 +1,3 @@
-//! Installed schema identity and tip-authenticated catalog lookups.
 use super::*;
 use rocky_core::{ApplicationManifest, Generation};
 
@@ -13,17 +12,10 @@ pub struct GenerationStatus {
     pub plan: Option<super::migrate::ProjectionPlan>,
     pub engine: EngineStatus,
 }
-/// How this build's replay engine stands to the tips it follows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngineStatus {
-    /// The followed tip names this build's engine.
     Current,
-    /// The owner moved the bookmark to a tip on another engine: this build
-    /// stays read-only at the old tip until Rocky is upgraded.
     UpgradeRequired,
-    /// The followed tip names another engine: this build is read-only until
-    /// the owner opens a tip with its engine. Identities are not ordered,
-    /// so an older build that enrolled at a newer tip reports this too.
     AwaitingOwner,
 }
 pub(super) struct Definition<A> {
@@ -61,7 +53,6 @@ impl<A> Definition<A> {
     }
 }
 
-/// Grants resolved under the swapped-out definition are stale.
 fn forget_resolved_grants<A>(inner: &Inner<A>) {
     *inner
         .local
@@ -73,16 +64,11 @@ fn forget_resolved_grants<A>(inner: &Inner<A>) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
-/// Why a build whose engine differs from the followed tip's writes nothing.
 pub(super) const ENGINE_AWAITS_OWNER: &str = "this build's replay engine differs from the followed tip's; replayed tables are read-only until the owner opens a tip with this engine";
-/// Why a build does not follow a tip whose schema names another engine.
 pub(super) const ENGINE_UPGRADE_REQUIRED: &str =
     "the tip's schema names another replay engine; upgrade Rocky to follow it";
 
 impl<A: RowApplication> Inner<A> {
-    /// Whether this build may replay the followed tip's intents: the
-    /// installed schema names its engine. Otherwise the workspace follows
-    /// read-only, and incoming frames wait as for a missing schema.
     pub(super) fn engine_matches(&self) -> bool {
         self.definition.engine == self.engine
     }
@@ -139,8 +125,6 @@ impl<A: RowApplication> Inner<A> {
             })
             .ok_or_else(|| Error::Incompatible("tip schema is not installed".into()))
     }
-    /// Verifies a chain under the held revocations. A chain names no
-    /// generation: every generation admits it.
     pub(crate) fn verify_chain(
         &self,
         chain: &CredentialChain,
@@ -149,7 +133,6 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         self.verify_chain_with(chain, key, &self.config.revocations, time)
     }
-    /// Verifies current authority, resolving selectors only for requested scopes.
     pub(crate) fn verify_chain_scopes(
         &self,
         chain: &CredentialChain,
@@ -159,7 +142,6 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         self.resolve_chain_scopes_at(chain, key, &self.config.revocations, time, scopes)
     }
-    /// `verify_chain` under `revocations`.
     pub(crate) fn verify_chain_with(
         &self,
         chain: &CredentialChain,
@@ -169,9 +151,6 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         self.resolve_chain_at(chain, key, revocations, time)
     }
-    /// `revocations` once `manifest`, of a frame or statement, names a
-    /// recorded generation; frames under a dropped generation fetch its
-    /// manifest as they arrive.
     pub(super) fn revocations_for<'a>(
         &self,
         manifest: Commitment,
@@ -191,7 +170,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             engine: inner.engine_status().await?,
         })
     }
-    /// Stands `engine` in for this build's replay engine.
     #[cfg(test)]
     pub(crate) async fn replay_on(&self, engine: rocky_core::EngineIdentity) {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;

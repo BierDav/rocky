@@ -1,22 +1,12 @@
-//! Heads whose author is revoked. Every frame of a revoked author is
-//! refused, so a write that read one before the revocation arrived does
-//! without it. Revoked frames are never served, so a replica that never
-//! received the head cannot tell it from one still on its way. After a
-//! catch-up it names the heads its pending frames wait on; a peer that
-//! holds such a head, or evidence for it, answers with its signed header
-//! and chain. The receiver keeps them and decides as a holder of the frame
-//! does: the head is satisfied while its own revocation set ends the chain.
 use super::*;
 use crate::wire::{Chain, RevokedHead};
 
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_revoked_heads(hash BLOB PRIMARY KEY,scope BLOB NOT NULL,header BLOB NOT NULL,chain BLOB NOT NULL) WITHOUT ROWID",
 ];
-/// Heads one request names: one header's dependency bound.
 pub(crate) const MAX_REVOKED_HEADS: usize = 64;
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Unknown non-backlink heads the scope's pending frames wait on.
     pub(crate) async fn missing_heads(&self, scope: ResourceScope) -> Result<Vec<Hash>, Error> {
         let inner = self.inner.lock(Class::Background).await;
         if !inner.config.revocations.has_revocations() {
@@ -53,8 +43,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(missing.into_iter().take(MAX_REVOKED_HEADS).collect())
     }
-    /// Evidence for those of `heads` in `scope` whose author this replica
-    /// knows revoked, for a peer that may hold the scope.
     pub(crate) async fn revoked_heads(
         &self,
         peer: PublicKey,
@@ -81,9 +69,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(found)
     }
-    /// Keeps the evidence a peer sent for heads of `scope` this replica's
-    /// pending frames wait on, then applies what it unblocks. Evidence that
-    /// does not verify, or names no such head, is ignored.
     pub(crate) async fn receive_revoked_heads(
         &self,
         scope: ResourceScope,
@@ -129,16 +114,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Whether the revocation set ends `chain`: the one rule for a head
-    /// held here and for a head known only by its evidence.
     pub(super) fn revoked_chain(&self, chain: &Chain) -> Result<bool, Error> {
         self.config
             .revocations
             .ends_chain(chain.credentials())
             .map_err(credential)
     }
-    /// The head's signed header and chain, from its stored frame or kept
-    /// evidence.
     async fn revoked_head(&self, id: Hash) -> Result<Option<RevokedHead>, Error> {
         let stored = collect_rows(
             self.conn
@@ -176,8 +157,6 @@ impl<A: RowApplication> Inner<A> {
             None => Ok(None),
         }
     }
-    /// Whether kept evidence shows `id`, a non-backlink head of `header`
-    /// this replica lacks, as a revoked author's earlier frame of its scope.
     pub(super) async fn revoked_evidence(
         &self,
         header: &p2panda_core::Header<Extensions>,

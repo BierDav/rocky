@@ -1,4 +1,3 @@
-//! Diagnostic release probe; excluded from correctness tiers.
 use super::*;
 
 #[tokio::test]

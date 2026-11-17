@@ -1,4 +1,3 @@
-//! The private graph and durable SQL program of a local schema publication.
 use super::*;
 use rocky_core::Scope;
 use rocky_credentials::SealFinality;
@@ -7,7 +6,6 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_staged_schema(publication BLOB PRIMARY KEY,stage BLOB NOT NULL,state TEXT NOT NULL CHECK(state IN('staged','committed','released'))) WITHOUT ROWID",
 ];
 
-/// Exact locally signed statements and an adapter-owned migration program.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SchemaStage {
     pub publication: Commitment,
@@ -93,8 +91,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Removes an uncommitted stage inside the caller's transaction: its
-    /// statements were never offered and its migration never ran.
     pub(super) async fn discard_schema_stage(&self, stage: &SchemaStage) -> Result<(), Error> {
         for statement in &stage.statements {
             self.conn
@@ -120,7 +116,6 @@ impl<A: RowApplication> Inner<A> {
         .await?
         .is_empty())
     }
-    /// Runs in the same transaction as the publication's SQL and frames.
     pub(super) async fn commit_schema_stage(&self, publication: Commitment) -> Result<(), Error> {
         let records = collect_rows(
             self.conn
@@ -223,8 +218,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Releases `stage` and loads the graph it changes in one transaction,
-    /// so the replay ledgers follow the released visibility before commit.
     pub(super) async fn release_and_reload(
         &mut self,
         stage: &SchemaStage,
@@ -246,7 +239,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Stages a local candidate; all signatures are prepared before this call.
     pub async fn stage_schema(&self, stage: SchemaStage) -> Result<(), Error> {
         let graph = self.tip_graph(stage.scope).await?;
         if let Some(refused) = self.named_log_refusal(&graph)? {
@@ -299,7 +291,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             _ => Err(Error::Corrupt("staged schema publication".into())),
         }
     }
-    /// Releases the committed candidate and its immutable frames with verified finality.
     pub async fn release_staged_schema(
         &self,
         publication: Commitment,
@@ -345,9 +336,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
-/// A stage released without finality would enter a coordinated database's
-/// graph unended: refused once its settings name a coordinator, also for a
-/// stage made before they arrived.
 pub(super) fn refuse_uncoordinated_stage(
     stage: &SchemaStage,
     graph: &rocky_credentials::TipGraph,

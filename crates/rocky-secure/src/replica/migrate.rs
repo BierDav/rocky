@@ -1,6 +1,3 @@
-//! Projection plans: a typed schema change is recorded, then recreates its
-//! replayed tables from the installed rows in one transaction. A plan
-//! interrupted before its switch finishes when the replica opens again.
 use super::typed::{Typed, quoted};
 use super::*;
 use rocky_core::{LogicalSchema, SchemaChange, Scope, TableClass};
@@ -9,10 +6,8 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_projection_plan(id INTEGER PRIMARY KEY CHECK(id=1),descriptor BLOB NOT NULL,domain BLOB NOT NULL,readers BLOB NOT NULL)",
 ];
 
-/// A pending projection plan.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectionPlan {
-    /// The fingerprint of the schema being installed.
     pub schema: Commitment,
     pub tables: usize,
 }
@@ -48,7 +43,6 @@ impl<A: RowApplication> Inner<A> {
             readers: decode(readers)?,
         }))
     }
-    /// The installed typed descriptor, domain and readers.
     pub(super) async fn installed_typed(
         &self,
     ) -> Result<Option<(LogicalSchema, Scope, BTreeMap<String, Commitment>)>, Error> {
@@ -75,9 +69,6 @@ impl<A: RowApplication> Inner<A> {
             decode(readers)?,
         )))
     }
-    /// Checks that `schema` may replace the installed typed tables and
-    /// records the plan, inside the caller's transaction. The identical plan
-    /// is kept with its progress; another one pending is refused.
     pub(super) async fn record_plan(
         &self,
         schema: &LogicalSchema,
@@ -86,8 +77,6 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<(), Error> {
         self.record_plan_as(schema, domain, readers, false).await
     }
-    /// `record_plan`; `rebuild` projects again an unchanged schema, as after
-    /// a tip switch whose path filtered stored rows.
     pub(super) async fn record_plan_as(
         &self,
         schema: &LogicalSchema,
@@ -155,9 +144,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Whether a table of `typed`, the authorized projection of the
-    /// installed schema, is not projected yet: a widened grant or an
-    /// adopted generation made it readable.
     pub(super) async fn projection_grew(&self, typed: &Typed) -> Result<bool, Error> {
         for table in &typed.tables {
             let mut found = self
@@ -173,9 +159,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(false)
     }
-    /// Records a plan that rebuilds the installed schema, inside the
-    /// caller's transaction, so that tables its grants now cover are
-    /// projected; a plan already pending covers them too.
     pub(super) async fn record_growth(&self) -> Result<(), Error> {
         if self.plan_record().await?.is_some() {
             return Ok(());
@@ -188,14 +171,12 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Drops the pending plan inside the caller's transaction.
     pub(super) async fn discard_plan(&mut self) -> Result<(), Error> {
         self.conn
             .execute("DELETE FROM secure_projection_plan", ())
             .await?;
         Ok(())
     }
-    /// The pending plan's progress.
     pub(super) async fn plan_status(&self) -> Result<Option<ProjectionPlan>, Error> {
         let Some(record) = self.plan_record().await? else {
             return Ok(None);
@@ -208,7 +189,6 @@ impl<A: RowApplication> Inner<A> {
             tables: record.schema.typed().count(),
         }))
     }
-    /// Switches to the pending plan's tables in one transaction.
     pub(super) async fn finish_plan(&mut self) -> Result<(), Error> {
         let Some(record) = self.plan_record().await? else {
             return Ok(());
@@ -305,8 +285,6 @@ impl<A: RowApplication> Inner<A> {
         self.publish_revision().await?;
         Ok(())
     }
-    /// A local table keeps its rows; only its indexes
-    /// follow the new schema.
     async fn replace_indexes(
         &self,
         installed: &LogicalSchema,
@@ -342,7 +320,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Records the new tables as installed and ends the plan.
     async fn finish_switch(&mut self, record: &Record) -> Result<(), Error> {
         let descriptor = record
             .schema
@@ -374,7 +351,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// The pending projection plan, if a typed schema change is under way.
     pub async fn projection_plan(&self) -> Result<Option<ProjectionPlan>, Error> {
         self.inner
             .lock(crate::replica::Class::Background)
@@ -390,7 +366,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await
     }
     #[cfg(test)]
-    /// Fails the next plan switch before its transaction.
     pub(crate) async fn fail_next_plan_switch(&self) {
         self.inner
             .lock(crate::replica::Class::Background)
@@ -399,7 +374,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
-/// Replayed tables of `installed` that `schema` no longer declares.
 fn removed_replayed<'a>(
     installed: &'a LogicalSchema,
     schema: &'a LogicalSchema,

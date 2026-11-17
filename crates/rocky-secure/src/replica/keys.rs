@@ -1,14 +1,7 @@
-//! Key epochs of a reader scope: one current key that seals new writes and
-//! the earlier ones kept to open retained ciphertext.
 use super::*;
 
-/// Earlier epochs of a scope; `secure_keys` holds the current one.
 const KEY_EPOCHS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_key_epochs(scope BLOB NOT NULL,generation BLOB NOT NULL,key_hash BLOB NOT NULL,PRIMARY KEY(scope,generation))";
-/// Opaque root escrow records, one per key epoch and root-issued identity
-/// atop the vouching chain; an empty epoch slot holds a local whole-domain
-/// record. `carrier` is the peer that carried it, this node for its own.
 const ESCROW_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_escrow(scope BLOB NOT NULL,generation BLOB NOT NULL,issuer BLOB NOT NULL,carrier BLOB NOT NULL,record BLOB NOT NULL,PRIMARY KEY(scope,generation,issuer))";
-/// Carried records refused, by the peer that carried them.
 const ESCROW_REFUSED_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_escrow_refused(peer BLOB PRIMARY KEY,records INTEGER NOT NULL,reason TEXT NOT NULL)";
 pub(super) const SCHEMA: &[&str] = &[KEY_EPOCHS_TABLE, ESCROW_TABLE, ESCROW_REFUSED_TABLE];
 use rocky_credentials::{RootEscrow, VouchedEscrow};
@@ -22,7 +15,6 @@ fn slot_values(slot: &Slot) -> Result<[SqlValue; 2], Error> {
         None => [SqlValue::Blob(Vec::new()), SqlValue::Blob(Vec::new())],
     })
 }
-/// A stored record: vouched under a key epoch, or the domain's own.
 enum Stored {
     Vouched(Box<VouchedEscrow>),
     Domain(RootEscrow),
@@ -56,7 +48,6 @@ fn escrow_row(row: &[SqlValue]) -> Result<(Slot, Stored), Error> {
     ))
 }
 
-/// The root-issued identity atop `chain`, whose escrow slot its records fill.
 fn issuer_of(chain: &CredentialChain) -> Option<Vec<u8>> {
     chain
         .0
@@ -66,7 +57,6 @@ fn issuer_of(chain: &CredentialChain) -> Option<Vec<u8>> {
 fn key_hash(key: &[u8; 32]) -> Vec<u8> {
     rocky_core::commitment("rocky.scope-key.v1", key).to_vec()
 }
-/// The current key of every scope, and the earlier epochs of `keys`.
 pub(super) fn split(keys: Vec<KeyMaterial>) -> (Vec<KeyMaterial>, Vec<KeyMaterial>) {
     let mut newest: BTreeMap<ResourceScope, rocky_core::KeyEpoch> = BTreeMap::new();
     for key in &keys {
@@ -78,10 +68,6 @@ pub(super) fn split(keys: Vec<KeyMaterial>) -> (Vec<KeyMaterial>, Vec<KeyMateria
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// The issuer slot a carried record is kept in, or why it is refused:
-    /// it must be signed by a node whose chain, at the signing time and
-    /// under the current revocations, let it read the whole scope, as a
-    /// frame's author is judged.
     pub(super) fn judge_escrow(
         &self,
         vouched: &VouchedEscrow,
@@ -106,7 +92,6 @@ impl<A: RowApplication> Inner<A> {
             _ => Err("its signer could not read the scope's key"),
         }
     }
-    /// Judges carried records while the caller's import transaction is open.
     pub(super) async fn keep_carried_escrow_rows(
         &self,
         peer: PublicKey,
@@ -138,8 +123,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Keeps a record in its issuer's slot of `slot`. A carried record
-    /// never replaces one this node sealed.
     async fn store_escrow(
         &self,
         slot: &Slot,
@@ -163,7 +146,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Counts `records` refused against the peer that carried them.
     async fn refuse_escrow(&self, peer: &[u8], records: u64, reason: &str) -> Result<(), Error> {
         self.conn
             .execute(
@@ -177,12 +159,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Re-judges the kept carried records of `epoch`, or of every epoch,
-    /// under the current revocations, inside the caller's transaction: a
-    /// refused one is deleted, freeing its issuer's slot, and counted
-    /// against the peer that carried it. The last records of an epoch stay
-    /// when none other is accepted: revoking a lost holder must not leave
-    /// the epoch unrecoverable.
     pub(super) async fn drop_revoked_escrow(
         &self,
         epoch: Option<(ResourceScope, rocky_core::KeyEpoch)>,
@@ -265,10 +241,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Deletes the carried records of an evicted `scope`, inside the
-    /// caller's transaction, unless frames of it are still kept here: a
-    /// record stays wherever ciphertext it recovers stays. This node's own
-    /// records stay; it still holds the key, and they recover it.
     pub(super) async fn forget_evicted_escrow(&self, scope: ResourceScope) -> Result<(), Error> {
         let blob = encode(&scope)?;
         self.conn
@@ -282,8 +254,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// The key that opens ciphertext of `scope` sealed at `generation`:
-    /// the current key or a retained earlier epoch.
     pub(crate) fn opening_key(
         &self,
         scope: ResourceScope,
@@ -295,12 +265,9 @@ impl<A: RowApplication> Inner<A> {
             .chain(&self.history)
             .find(|key| key.scope == scope && key.generation == generation)
     }
-    /// Every installed key, current epochs first.
     pub(super) fn opening_keys(&self) -> impl Iterator<Item = &KeyMaterial> {
         self.config.keys.iter().chain(&self.history)
     }
-    /// Remembers which key material an epoch was used with, inside the
-    /// caller's transaction.
     pub(crate) async fn record_key(&self, key: &KeyMaterial) -> Result<(), Error> {
         let current = self
             .config
@@ -327,7 +294,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// The retained record of a scope's current epoch.
     async fn current_record(
         &self,
         scope: ResourceScope,
@@ -349,7 +315,6 @@ impl<A: RowApplication> Inner<A> {
             _ => Err(denied("corrupt key metadata")),
         }
     }
-    /// Checks a key against what its epoch was used with before.
     async fn matches_record(&self, key: &KeyMaterial) -> Result<(), Error> {
         let mismatch = || denied("key differs from retained crypto state");
         let hash = key_hash(&key.key);
@@ -376,8 +341,6 @@ impl<A: RowApplication> Inner<A> {
             _ => Ok(()),
         }
     }
-    /// Makes `key` the scope's recorded current epoch and keeps the record
-    /// of the one before, inside the caller's transaction.
     async fn record_rotation(&self, key: &KeyMaterial) -> Result<(), Error> {
         let scope = encode(&key.scope)?;
         self.conn
@@ -401,9 +364,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Checks the installed keys against the retained key records at open.
-    /// A current key newer than the record completes a rotation that was
-    /// interrupted before the replica learned it; an older one is refused.
     pub(super) async fn adopt_keys(&mut self) -> Result<(), Error> {
         let mut rotated = Vec::new();
         for key in self.opening_keys() {
@@ -428,7 +388,6 @@ impl<A: RowApplication> Inner<A> {
             Ok(())
         })
     }
-    /// Whether any retained operation of `scope` was sealed at `generation`.
     async fn epoch_in_use(
         &self,
         scope: ResourceScope,
@@ -463,12 +422,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Installs another key epoch of a scope. A generation above the
-    /// current one rotates: it seals every later write, the previous key
-    /// stays to open what it sealed, and every session ends. A generation
-    /// below it is an earlier epoch, kept to open retained ciphertext. The
-    /// same key again does nothing. Original signed bytes are never
-    /// rewritten.
     pub async fn install_key_epoch(&self, key: KeyMaterial) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let time = now()?;
@@ -526,9 +479,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.settle().await?;
         Ok(())
     }
-    /// Drops an earlier key epoch from memory once no retained operation
-    /// was sealed with it: a checkpoint covers them and they were pruned.
-    /// The current epoch is evicted with `evict_key` instead.
     pub async fn retire_key_epoch(
         &self,
         scope: ResourceScope,
@@ -551,9 +501,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.bump_authority();
         Ok(())
     }
-    /// Every registered partition with the key epochs this file recorded
-    /// using there, ascending. An owner that lost its record of a group
-    /// finds which secrets to look for.
     pub async fn retained_partitions(
         &self,
     ) -> Result<
@@ -590,7 +537,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(retained)
     }
-    /// The root escrow records this node sealed, by key epoch and tag.
     pub async fn escrowed(&self) -> Result<BTreeSet<(Slot, Commitment)>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         collect_rows(
@@ -607,16 +553,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
         .map(|row| escrow_row(row).map(|(slot, stored)| (slot, stored.record().tag())))
         .collect()
     }
-    /// Keeps root escrow records this node sealed of the keys it holds,
-    /// each vouched for by this node under its key epoch, which carries it
-    /// with its frames, or local for `None`.
     pub async fn keep_escrow(&self, records: Vec<(Slot, RootEscrow)>) -> Result<(), Error> {
         if records.is_empty() {
             return Ok(());
         }
         let time = now()?;
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        transaction!(@cache_neutral inner, |inner| {
+        transaction!(@keeping_frontier_cache inner, |inner| {
             let own = inner.config.node.public_key();
             let issuer = issuer_of(&inner.config.credentials)
                 .unwrap_or_else(|| own.as_bytes().to_vec());
@@ -638,10 +581,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ok(())
         })
     }
-    /// Keeps the vouched records `peer` carried with frames of their key
-    /// epoch: one per issuer, the root-issued identity atop the vouching
-    /// chain, which a record under the same issuer replaces. Any other
-    /// record is refused and counted against `peer` (`escrow_refusals`).
     #[cfg(test)]
     pub(crate) async fn keep_carried_escrow(
         &self,
@@ -650,7 +589,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<(), Error> {
         self.keep_carried_dependencies(peer, records, None).await
     }
-    /// Boxes the inner future because every sync pull path awaits it.
     pub(crate) async fn keep_carried_dependencies(
         &self,
         peer: PublicKey,
@@ -670,7 +608,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         let time = now()?;
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        transaction!(@cache_neutral inner, |inner| {
+        transaction!(@keeping_frontier_cache inner, |inner| {
             inner.keep_carried_escrow_rows(peer, &records, time).await?;
             if let Some(record) = &metadata {
                 inner.store_custody_metadata(record).await?;
@@ -680,8 +618,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ok(())
         })
     }
-    /// The carried root escrow records refused, by peer: how many and the
-    /// latest reason.
     pub async fn escrow_refusals(&self) -> Result<Vec<(PublicKey, u64, String)>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         rows(
@@ -705,8 +641,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })
         .collect()
     }
-    /// The vouched records of `slots`, which a session carries before
-    /// their frames.
     pub(crate) async fn escrow_of(
         &self,
         slots: &BTreeSet<(ResourceScope, rocky_core::KeyEpoch)>,
@@ -714,8 +648,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.escrow_of(slots, None).await
     }
-    /// As `archived_escrow`, of this open replica: every root escrow record
-    /// it holds, whoever carried it, and the key epochs of its ciphertext.
     pub async fn escrow_inventory(
         &self,
     ) -> Result<
@@ -728,8 +660,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         escrow_inventory(&inner.conn).await
     }
-    /// Reads a closed file, a backup's copy: its root escrow records and
-    /// the key epochs of the ciphertext it holds, which they must cover.
     pub async fn archived_escrow(
         path: &Path,
     ) -> Result<
@@ -747,7 +677,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         );
         escrow_inventory(&conn).await
     }
-    /// The installed key epochs of a scope, ascending; the last is current.
     pub async fn key_epochs(&self, scope: ResourceScope) -> Vec<rocky_core::KeyEpoch> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut epochs: Vec<rocky_core::KeyEpoch> = inner
@@ -760,7 +689,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
-/// A store's root escrow records and the key epochs of its ciphertext.
 async fn escrow_inventory(
     conn: &ScopedConnection,
 ) -> Result<

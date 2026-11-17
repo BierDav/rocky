@@ -1,4 +1,3 @@
-//! Durable ciphertext coverage, independent of reducer progress.
 use super::*;
 use p2panda_core::Signature;
 use rocky_credentials::{MetadataEscrow, PeerId};
@@ -12,12 +11,10 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_eviction_custody(scope BLOB PRIMARY KEY,unconfirmed INTEGER NOT NULL)",
 ];
 
-/// Local retention prerequisites for one exact resource scope.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PartitionCustody {
     pub peers: BTreeSet<PeerId>,
-    /// Required remote durable copies. Zero never requests deletion.
     pub copies: usize,
 }
 
@@ -37,9 +34,7 @@ struct Coverage {
     binding: Commitment,
     challenge: Commitment,
     chain: CredentialChain,
-    /// Complete original ciphertext prefixes, never applied frontiers.
     logs: Vec<(PublicKey, u64, Hash)>,
-    /// Root escrow tags for every credited epoch.
     epochs: BTreeMap<rocky_core::KeyEpoch, Commitment>,
     naming: Option<Commitment>,
     checkpoint: Option<SignedCheckpoint>,
@@ -347,7 +342,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         challenge: Commitment,
     ) -> Result<(), Error> {
         let mut inner = self.inner.lock(Class::Background).await;
-        transaction!(@cache_neutral inner, |inner| {
+        transaction!(@keeping_frontier_cache inner, |inner| {
             inner.conn.execute("INSERT INTO secure_custody_challenges VALUES(?,?,?,?) ON CONFLICT(scope,peer) DO UPDATE SET binding=excluded.binding,challenge=excluded.challenge", [encode(&scope)?, PeerId::of(peer).as_bytes().to_vec(), binding.to_vec(), challenge.to_vec()]).await?;
             Ok(())
         })
@@ -419,7 +414,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .partition_custody(scope)
             .await
     }
-    /// Installs opaque owner-vouched naming material; no reader secret is opened.
     pub async fn keep_custody_metadata(&self, record: MetadataEscrow) -> Result<(), Error> {
         let mut inner = self.inner.lock(Class::Background).await;
         inner.judge_custody_metadata(&record)?;

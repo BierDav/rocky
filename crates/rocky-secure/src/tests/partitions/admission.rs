@@ -1,5 +1,3 @@
-//! Placement privacy across partitions, and replayed partitions across a
-//! schema switch.
 use super::*;
 
 mod filtered;

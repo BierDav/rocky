@@ -1,4 +1,3 @@
-//! Stored frame metadata, invalidated by table writes and rollback.
 use super::*;
 
 #[derive(Default)]

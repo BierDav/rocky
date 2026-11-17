@@ -1,18 +1,10 @@
-//! No-frames checkpoints: a signed fact that a scope's state at a seal holds
-//! no frame history. It needs no key, has no pages and places nothing but
-//! its own scope.
 use super::*;
 
-/// Coverage the graph cannot decide, such as of a frame of a tip it no
-/// longer resolves, cannot be ruled out and counts as covered.
 fn possibly_covers(coverage: Result<bool, Error>) -> bool {
     coverage.unwrap_or(true)
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Whether this replica holds authenticated history of `scope` that the
-    /// state at `seal` includes: a retained frame, void or placement header
-    /// of the scope visible at the seal.
     pub(in crate::replica) async fn covered_scope_evidence(
         &self,
         scope: ResourceScope,
@@ -65,8 +57,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(false)
     }
-    /// Whether scope `id` has, or had, any history of its own here: applied
-    /// or pruned frames, logs, rows or identities.
     async fn scope_history(&self, scope: ResourceScope, id: i64) -> Result<bool, Error> {
         let blob = encode(&scope)?;
         for (sql, binding) in [
@@ -104,10 +94,6 @@ impl<A: RowApplication> Inner<A> {
         }
         self.has_pruned_prefix(scope).await
     }
-    /// Inside the compaction transaction, signs and installs a no-frames
-    /// base of keyless scope `id` at `seal`, when finalization checked the
-    /// scope there (`bound`) and it holds no history of its own. Returns
-    /// whether it did.
     pub(in crate::replica) async fn compact_no_frames(
         &mut self,
         scope: ResourceScope,
@@ -206,9 +192,6 @@ impl<A: RowApplication> Inner<A> {
         self.reseed_ledger(scope, id).await?;
         Ok(true)
     }
-    /// Checks a no-frames checkpoint against this replica before it is
-    /// installed or trusted: its seal and tip in the graph, the tip's
-    /// schema, and no authenticated covered history of the scope here.
     pub(in crate::replica) async fn check_no_frames(
         &self,
         signed: &SignedCheckpoint,
@@ -224,8 +207,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// The seal a no-frames checkpoint sits at, bound to its tip, scope
-    /// and domain; a partitioned table's own scope has none.
     fn no_frames_seal(
         &self,
         signed: &SignedCheckpoint,
@@ -245,7 +226,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(seal.clone())
     }
-    /// The verified no-frames base of `scope`, when it has one.
     pub(in crate::replica) async fn no_frames_base(
         &self,
         scope: ResourceScope,
@@ -259,12 +239,19 @@ impl<A: RowApplication> Inner<A> {
             .and_then(|record| record.signed)
             .filter(|signed| signed.statement.no_frames()))
     }
-    /// A frame, void or placement header that a verified no-frames base of
-    /// its scope says the state at its seal does not include is refused:
-    /// never stored, pruned or applied. Callers run it in the storing
-    /// transaction, under the lock that installs no-frames bases, so neither
-    /// order commits both a base and history it says the seal excludes.
-    pub(in crate::replica) async fn refuse_no_frames_contradiction(
+    pub(in crate::replica) async fn refuse_no_frames_contradiction_in_storing_transaction(
+        &self,
+        header: &p2panda_core::Header<Extensions>,
+    ) -> Result<(), Error> {
+        self.no_frames_contradiction(header).await
+    }
+    pub(in crate::replica) async fn refuse_no_frames_contradiction_before_queueing(
+        &self,
+        header: &p2panda_core::Header<Extensions>,
+    ) -> Result<(), Error> {
+        self.no_frames_contradiction(header).await
+    }
+    async fn no_frames_contradiction(
         &self,
         header: &p2panda_core::Header<Extensions>,
     ) -> Result<(), Error> {
@@ -293,16 +280,12 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Inside the storing transaction, just before scope evidence is
-    /// stored: refuses it under an installed no-frames base that covers
-    /// it, and drops a pulled no-frames state it contradicts or whose
-    /// coverage it cannot decide. A pulled state is a candidate; it never
-    /// suppresses live evidence.
     pub(in crate::replica) async fn no_frames_intake(
         &self,
         header: &p2panda_core::Header<Extensions>,
     ) -> Result<(), Error> {
-        self.refuse_no_frames_contradiction(header).await?;
+        self.refuse_no_frames_contradiction_in_storing_transaction(header)
+            .await?;
         let extensions = &header.extensions;
         let Some(id) = self.find_scope_id(extensions.scope).await? else {
             return Ok(());
@@ -343,14 +326,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Checks no-frames records against their own stores only. An
-    /// installed base is this replica's state: canonical, signed, bound to
-    /// its seal, with no rows, pages or stubs, and no history here that
-    /// contradicts it. A staged import and every pulled state are
-    /// candidates, checked for integrity only: decoded, bound to their row,
-    /// signed and, for no-frames, stored as complete empty state. Whether
-    /// a candidate is still valid is checked when it is used. Runs before
-    /// any key-dependent check.
     pub(in crate::replica) async fn verify_no_frames_records(&self) -> Result<(), Error> {
         let empty = Sets::new().to_bytes();
         for record in rows(
@@ -423,7 +398,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Whether any of `tables` holds a row of scope `id`.
     pub(in crate::replica) async fn stores_anything(
         &self,
         tables: &[&str],
@@ -447,5 +421,19 @@ impl<A: RowApplication> Inner<A> {
         self.find_scope_id(scope)
             .await?
             .ok_or_else(|| Error::Corrupt("checkpoint scope".into()))
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn coverage_the_graph_cannot_decide_counts_as_covered() {
+        assert!(possibly_covers(Err(Error::Corrupt(
+            "unresolved tip".into()
+        ))));
+        assert!(possibly_covers(Ok(true)));
+        assert!(!possibly_covers(Ok(false)));
     }
 }

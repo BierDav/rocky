@@ -1,7 +1,3 @@
-//! Concrete partition addresses and selector resolution.
-//! A partition's scope identity is keyed by its naming secret, so only its
-//! holders and custodians can compute or recognize it: this registry is
-//! the only way from a tuple to its scope.
 use super::*;
 use rocky_core::{PartitionName, PartitionSelection, PartitionTuple};
 
@@ -9,13 +5,9 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_partitions(scope BLOB PRIMARY KEY,tuple BLOB NOT NULL,name BLOB NOT NULL) WITHOUT ROWID",
 ];
 
-/// A partition as one entitled peer reveals it to another: its keyed
-/// scope, tuple and naming secret.
 pub(crate) type PartitionOffer = (ResourceScope, PartitionTuple, PartitionName);
 
 pub(super) const UNREGISTERED_PARTITION: &str = "the partition is not registered here";
-/// The registered keyed scope of `tuple` in `table`: routing never derives
-/// one, since that takes the partition's naming secret.
 pub(super) fn registered_scope(
     partitions: &BTreeMap<ResourceScope, PartitionTuple>,
     domain: rocky_core::Scope,
@@ -29,8 +21,6 @@ pub(super) fn registered_scope(
         .ok_or_else(|| denied(UNREGISTERED_PARTITION))
 }
 
-/// The naming secret a creator keyed by `naming` gives the partition at
-/// `address`; a repeated preparation names the same scopes.
 pub fn created_name(naming: &[u8; 32], address: &Commitment) -> PartitionName {
     rocky_core::keyed_commitment(naming, "rocky.partition-name.v1", address)
 }
@@ -89,8 +79,6 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         self.resolve_chain_at(chain, key, policy, time)
     }
-    /// The registered tuple of a partition scope, which the registry bound
-    /// to the scope with its naming secret; `None` for a table scope.
     pub(super) fn authenticated_partition(
         &self,
         scope: ResourceScope,
@@ -101,8 +89,6 @@ impl<A: RowApplication> Inner<A> {
             None => Ok(None),
         }
     }
-    /// Whether `scope` names a partitioned table; its rows live only in
-    /// the scopes of its partitions, never in the table's own scope.
     pub(super) fn partitioned(&self, scope: ResourceScope) -> bool {
         self.workspace.typed.as_ref().is_some_and(|typed| {
             typed.rows.table(&scope.table).is_some_and(|table| {
@@ -172,8 +158,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// A removed table has no current descriptor. Its authenticated address
-    /// stays structural; restoring its descriptor checks the columns again.
     fn check_retained_tuple(
         &self,
         scope: ResourceScope,
@@ -217,7 +201,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// What this replica reveals of a registered partition to an entitled peer.
     pub(super) fn partition_offer(&self, scope: ResourceScope) -> Option<PartitionOffer> {
         Some((
             scope,
@@ -225,7 +208,6 @@ impl<A: RowApplication> Inner<A> {
             *self.partition_names.get(&scope)?,
         ))
     }
-    /// Persists registrations inside the caller's transaction.
     async fn store_partitions(&self, accepted: &[PartitionOffer]) -> Result<(), Error> {
         for (scope, tuple, name) in accepted {
             self.conn
@@ -246,8 +228,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Local registration learned through an authorized partition offer or
-    /// explicit registration. Conflicting names are never selected by order.
     pub async fn registered_partition(
         &self,
         domain: rocky_core::Scope,
@@ -271,9 +251,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(found)
     }
-    /// Prepares the next own-id partition before its key can leave this node,
-    /// naming it with `naming` (see `created_name`). The write transaction
-    /// still allocates and verifies the identity.
     pub async fn next_partition_identity(
         &self,
         name: &str,
@@ -425,8 +402,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(identity)
     }
-    /// Registers an authorized concrete scope before subscribing or
-    /// installing its key; `name` keys the scope's identity.
     pub async fn register_partition(
         &self,
         scope: ResourceScope,
@@ -525,7 +500,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 impl<A: RowApplication> Inner<A> {
-    /// A held partition whose rows are not all here yet.
     async fn partition_waits(
         &self,
         readiness: &blockers::DomainReadiness,
@@ -625,7 +599,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Keeps small groups together and streams wide groups over bounded pages.
     pub(crate) async fn frontier_batches(
         &self,
         scopes: &[ResourceScope],
@@ -659,7 +632,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Selected repair includes the other eligible holdings in its partition groups.
     pub async fn expand_repair_scopes(
         &self,
         requested: &[ResourceScope],
@@ -723,7 +695,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-/// Custody of a partition without read: the grants of a keyless custody node.
 fn custody_only(grants: &[rocky_core::ResourceGrant]) -> bool {
     grants
         .iter()
@@ -734,7 +705,6 @@ fn custody_only(grants: &[rocky_core::ResourceGrant]) -> bool {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// `chain`'s grants on one concrete partition under the held revocations.
     pub(super) fn partition_grants(
         &self,
         chain: &CredentialChain,
@@ -756,9 +726,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// The partition tuples of `scopes` that `peer` may hold only as keyless
-    /// custody. Revealed to that peer alone, so it can register partitions
-    /// created after it enrolled.
     pub(crate) async fn custody_offers(
         &self,
         peer: PublicKey,
@@ -803,7 +770,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(offers)
     }
-    /// Peer holdings on a link do not subscribe a reader to an unknown partition.
     pub(crate) async fn accept_link_custody_offers(
         &self,
         peer: PublicKey,
@@ -827,9 +793,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.accept_custody_offers(peer, credentials, scopes, &offered)
             .await
     }
-    /// Registers offered partitions this node holds only as keyless custody,
-    /// from a peer authorized to read or keep each of them. Other offers are
-    /// refused; a known partition is unchanged.
     pub(crate) async fn accept_custody_offers(
         &self,
         peer: PublicKey,
@@ -881,7 +844,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
-/// A partition's values in `partition_by` order, as SQL sees them.
 pub(super) fn partition_values(
     schema: &rocky_core::LogicalSchema,
     logical: &rocky_core::LogicalTable,
@@ -904,7 +866,6 @@ pub(super) fn partition_values(
         .collect()
 }
 
-/// A table's partition columns as the SQL rewriter compares them.
 pub(super) fn partition_columns(
     logical: &rocky_core::LogicalTable,
 ) -> Result<Vec<rocky_storage::partition_sql::PartitionColumn>, Error> {

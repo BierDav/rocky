@@ -1,7 +1,3 @@
-//! Coherent file copies for backups, and opening a copy under a fresh
-//! signing identity. The copy keeps every operation, handle, ticket,
-//! result and effect observation with its original identity; the new node
-//! authors its own log and never signs as its predecessor.
 use super::generation::identity;
 use super::*;
 
@@ -10,9 +6,6 @@ pub(super) const SCHEMA: &[&str] = &[
 ];
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Writes a consistent copy of the whole file to `target`, which must
-    /// not exist, after flushing every commit. Writes wait for the copy;
-    /// no transaction is held across anything else. Returns the revision.
     pub async fn backup_into(&self, target: &Path) -> Result<u64, Error> {
         if rocky_platform::fs::exists(target) {
             return Err(denied("the backup target exists"));
@@ -29,10 +22,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await?;
         Ok(inner.revision)
     }
-    /// Opens a copy of another node's file under `config.node`, a fresh
-    /// signing identity. The copy must be of `predecessor`'s file; it is
-    /// rebound once, then opens like any other. The predecessor's frames
-    /// stay its own and are never signed again.
     pub async fn open_restored(
         path: impl AsRef<Path>,
         app: A,
@@ -60,7 +49,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         .await?;
         Self::open(path, app, config).await
     }
-    /// The signing identities this file was restored from, oldest first.
     pub async fn predecessors(&self) -> Result<Vec<PublicKey>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut found = Vec::new();
@@ -85,9 +73,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
-/// Moves the file identity from `predecessor` to `node` for whichever of
-/// `manifests` it is installed with. A file already bound to `node` is
-/// left as it is.
 async fn rebind(
     path: &Path,
     predecessor: PublicKey,
@@ -102,8 +87,6 @@ async fn rebind(
     let Some([SqlValue::Blob(stored)]) = stored.first().map(Vec::as_slice) else {
         return Err(denied("the restored file holds no replica"));
     };
-    /// The new node cannot restore its predecessor's private line signer; an
-    /// unbound genesis line selects the fresh node's own certificate.
     const UNBIND_PREDECESSOR_LINE: &str = "DELETE FROM secure_line_nodes WHERE node=?";
     let (_, tip, bound): (String, TipId, PublicKey) = decode(stored)?;
     if bound == node {

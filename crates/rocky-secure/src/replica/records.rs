@@ -13,11 +13,8 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_row_origins(id INTEGER PRIMARY KEY AUTOINCREMENT,origin BLOB NOT NULL UNIQUE)",
 ];
 
-/// Entries an interned cache keeps; a full one starts over from the file,
-/// so long intake holds a bounded dictionary.
 pub(crate) const INTERNED: usize = if cfg!(test) { 16 } else { 4096 };
 
-/// File-local ids of one interned kind and their values, both ways.
 pub(super) struct Interned<K, V> {
     ids: HashMap<K, i64>,
     values: HashMap<i64, V>,
@@ -51,8 +48,6 @@ impl<K: std::hash::Hash + Eq, V> Interned<K, V> {
     }
 }
 
-/// Field ids follow the installed schemas; the other kinds grow with the
-/// stored rows and are bounded.
 #[derive(Default)]
 pub(super) struct Dictionary {
     fields: HashMap<Commitment, i64>,
@@ -61,13 +56,11 @@ pub(super) struct Dictionary {
     creations: Interned<Hash, Hash>,
     origins: Interned<Vec<u8>, moves::Origin>,
     shapes: Interned<Vec<Commitment>, Vec<Commitment>>,
-    /// Interned scope ids by encoded scope; ids are never reassigned.
     scope_ids: HashMap<Vec<u8>, i64>,
 }
 
 type Field = (i64, Option<serde_bytes::ByteBuf>, Option<usize>);
 
-/// Local ids never enter a row's canonical commitment or a peer's file.
 #[derive(Serialize, Deserialize)]
 pub(super) struct Record<C = u32>(
     Option<(i64, serde_bytes::ByteArray<32>)>,
@@ -108,7 +101,6 @@ impl<A> Inner<A> {
         }
         dictionary.scope_ids.insert(scope, id);
     }
-    /// The entries of the largest bounded kind, author sets included.
     #[cfg(test)]
     pub(crate) fn interned_entries(&self) -> usize {
         let dictionary = self.dictionary();
@@ -437,9 +429,7 @@ impl checkpoint::Sets {
     }
 }
 
-/// Bytes per field by which page legend and stamp indices can exceed local ones.
 const PAGE_INDEX_SLACK_PER_FIELD: usize = 4;
-/// Bytes by which a page's index header can exceed a local one.
 const PAGE_INDEX_SLACK: usize = 4;
 
 impl Record {

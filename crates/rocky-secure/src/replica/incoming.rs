@@ -1,7 +1,5 @@
 use super::*;
 
-/// Settled operations noted before an incremental pass must fall back to a
-/// full one.
 const NOTED: usize = 4096;
 
 #[derive(Default)]
@@ -13,9 +11,7 @@ enum PendingPhase {
     NewRound,
     Clean,
     Finish,
-    /// The last pass completed; only noted changes may ready a frame.
     Settled,
-    /// An incremental round resolves its candidates into heads.
     Retry,
 }
 #[derive(Default)]
@@ -30,15 +26,11 @@ pub(super) struct PendingPass {
     skipped: BTreeSet<Hash>,
     context: i64,
     advanced: bool,
-    /// Revisits only what settled since the pass completed.
     incremental: bool,
-    /// Received frames committed since: retry every unindexed wait.
     received: bool,
     retry: BTreeSet<Hash>,
 }
 impl PendingPass {
-    /// Whether received frames may keep the pass: it completed, or revisits
-    /// only noted changes.
     fn tracks(&self) -> bool {
         self.incremental || matches!(self.phase, PendingPhase::Settled)
     }
@@ -48,8 +40,6 @@ impl PendingPass {
     }
 }
 
-/// Waiting frames by what may end their wait: one dependency settling, or
-/// anything else (`any`), which every incremental pass retries.
 #[derive(Default)]
 pub(super) struct Blocked {
     dependents: BTreeMap<Hash, BTreeSet<Hash>>,
@@ -80,7 +70,6 @@ impl Blocked {
             }
         }
     }
-    /// Takes the frames waiting for `settled`.
     fn unblocked(&mut self, settled: Hash) -> BTreeSet<Hash> {
         let ids = self.dependents.remove(&settled).unwrap_or_default();
         for id in &ids {
@@ -90,12 +79,9 @@ impl Blocked {
     }
 }
 
-/// What a frame's dependencies leave it waiting for.
 pub(super) enum Readiness {
     Ready,
-    /// Only this dependency settling can ready it.
     Dependency(Hash),
-    /// Other state can ready it too, such as a void or a retired creation.
     Other,
 }
 
@@ -109,15 +95,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub(crate) async fn pending_attempts(&self) -> u64 {
         self.inner.lock(Class::Background).await.pending_attempts
     }
-    /// Applies pending frames one bounded transaction at a time, publishing
-    /// after each commit. The replica is released between transactions, so
-    /// a writer that asked for it meanwhile goes first. Applications before
-    /// a failing one stay committed.
     pub(crate) async fn settle(&self) -> Result<(), Error> {
         self.settle_pass(false).await
     }
-    /// [`Self::settle`] after received frames: a completed pass revisits
-    /// only the frames what they settled may ready.
     pub(super) async fn settle_received(&self) -> Result<(), Error> {
         self.settle_pass(true).await
     }
@@ -197,9 +177,6 @@ impl<A: RowApplication> Inner<A> {
         self.decode_row_payload(frame, &self.open_payload(frame)?.payload)
     }
 
-    /// One bounded transaction of `EncryptedReplica::settle`; true when
-    /// more frames may be ready. Unless `incremental`, a completed or
-    /// incremental pass restarts in full.
     pub(super) async fn apply_step(&mut self, time: u64, incremental: bool) -> Result<bool, Error> {
         let span = tracing::debug_span!(
             "apply",
@@ -234,7 +211,7 @@ impl<A: RowApplication> Inner<A> {
                 if !writable {
                     return self.apply_pending(time, group::SETTLE_REQUESTS).await;
                 }
-                let (more, failure) = transaction!(@commit self, |inner| {
+                let (more, failure) = transaction!(@without_wal_checkpoint self, |inner| {
                     inner.cause(crate::observe::Cause::Sync);
                     let result = match inner.apply_pending(time, group::SETTLE_REQUESTS).await {
                         Ok(more) => Ok((more, None)),
@@ -282,31 +259,20 @@ impl<A: RowApplication> Inner<A> {
         crate::network::trace::outcome(&span, &result);
         result
     }
-    /// Whether the pass was current at `commit`. Local authoring adds only
-    /// applied operations of this node's own log: it neither adds pending
-    /// work nor makes waiting work ready, so a pass current before such a
-    /// commit stays current. Otherwise local writes between settle steps
-    /// could restart the pass forever.
     pub(super) fn pending_pass_current(&self, commit: u64) -> bool {
         self.pending_pass.commit == commit
             && self.pending_pass.epoch == self.context_epoch.load(Ordering::Relaxed)
     }
-    /// Keeps a pass that was current before a local authoring commit.
     pub(super) fn keep_pending_pass(&mut self) {
         self.pending_pass.commit = self.commit;
         self.pending_pass.epoch = self.context_epoch.load(Ordering::Relaxed);
     }
-    /// Keeps a completed or incremental pass that was current before a
-    /// committed receive group in an unchanged context: application noted
-    /// what settled, and the next round also retries every unindexed wait.
     pub(super) fn keep_received_pass(&mut self) {
         if self.pending_pass.tracks() {
             self.pending_pass.received = true;
             self.keep_pending_pass();
         }
     }
-    /// One pending discovery, application or cleanup step. Progress is
-    /// recomputed after another transaction changes its source state.
     pub(super) async fn apply_pending(&mut self, time: u64, limit: usize) -> Result<bool, Error> {
         let mut pass = std::mem::take(&mut self.pending_pass);
         let epoch = self.context_epoch.load(Ordering::Relaxed);
@@ -448,9 +414,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(true)
     }
-    /// Starts an incremental round: what settled since the last one, the
-    /// frames waiting for it and, after progress or received frames, every
-    /// unindexed wait. Too many noted changes fall back to a full pass.
     fn retry_round(&mut self, pass: &mut PendingPass) {
         let Some(settled) = self.take_settled() else {
             pass.restart();
@@ -503,7 +466,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Attempts only this request; no scan of unrelated pending logs.
     pub(super) async fn apply_received(
         &mut self,
         frame: &EncryptedFrame,
@@ -587,8 +549,6 @@ impl<A: RowApplication> Inner<A> {
         pass.advanced = true;
         Ok(true)
     }
-    /// Applies or rejects one stored frame inside the caller's transaction,
-    /// in its own savepoint. A storage failure rolls the savepoint back.
     pub(super) async fn apply_frame(
         &self,
         frame: &EncryptedFrame,
@@ -763,8 +723,6 @@ impl<A: RowApplication> Inner<A> {
         self.conn.execute("RELEASE pending", ()).await?;
         result
     }
-    /// Records whether pending head `id` waits for this clock, logging only
-    /// when its author's frames start or stop waiting.
     fn hold_ahead(&mut self, id: Hash, ahead: Option<(PublicKey, u64)>) {
         let waiting =
             |inner: &Self, author: PublicKey| inner.ahead.values().any(|(by, _)| *by == author);
@@ -791,10 +749,6 @@ impl<A: RowApplication> Inner<A> {
             );
         }
     }
-    /// The stamp of a received frame more than `MAX_CLOCK_AHEAD` ahead of
-    /// this clock: it waits rather than drag this replica's hybrid clock and
-    /// last-writer-wins order with it. Every replica applies it once its
-    /// own clock is near, so outcomes still agree. Own frames never wait.
     pub(super) fn clock_ahead(
         &self,
         header: &p2panda_core::Header<Extensions>,
@@ -828,9 +782,6 @@ impl<A: RowApplication> Inner<A> {
         self.note_settled(hash);
         Ok(())
     }
-    /// Whether every dependency is applied or a member of `bundle`, which
-    /// applies with it. A dependency whose frame was pruned counts through
-    /// its log tip, its log's pruned_prefix or its stub.
     pub(super) async fn dependencies_ready(
         &self,
         frame: &EncryptedFrame,
@@ -842,7 +793,6 @@ impl<A: RowApplication> Inner<A> {
             Readiness::Ready
         ))
     }
-    /// [`Self::dependencies_ready`], naming what a waiting frame waits for.
     async fn dependency_wait(
         &self,
         frame: &EncryptedFrame,
@@ -987,9 +937,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(Readiness::Ready)
     }
-    /// Whether a rejected dependency is a head the write read before its
-    /// author's revocation arrived: such a head never applies, and the
-    /// reader's write does without it. A log predecessor never qualifies.
     fn read_head_of_revoked_author(
         &self,
         header: &p2panda_core::Header<Extensions>,
@@ -998,8 +945,6 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<bool, Error> {
         Ok(header.backlink != Some(id) && self.revoked_chain(dependency.chain()?)?)
     }
-    /// How many of an intent's base heads the seal of its scope's installed
-    /// base covers.
     async fn covered_heads(
         &self,
         header: &p2panda_core::Header<Extensions>,
@@ -1033,8 +978,6 @@ impl<A: RowApplication> Inner<A> {
             })
             .count())
     }
-    /// The clock of an applied dependency whose frame is no longer retained,
-    /// or `None` when the dependency is simply unknown.
     async fn pruned_dependency(
         &self,
         header: &p2panda_core::Header<Extensions>,
@@ -1080,8 +1023,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A> Inner<A> {
-    /// Notes that `hash` settled or got a stub: frames waiting for it may
-    /// be ready.
     pub(super) fn note_settled(&self, hash: Hash) {
         let mut settled = self
             .settled
@@ -1094,7 +1035,6 @@ impl<A> Inner<A> {
             _ => *settled = None,
         }
     }
-    /// What settled since the last call; None when too much to track.
     fn take_settled(&self) -> Option<BTreeSet<Hash>> {
         self.settled
             .lock()
@@ -1107,13 +1047,10 @@ pub(super) enum Outcome {
     Applied,
     Rejected(String),
     Waiting(WaitReason),
-    /// Waits only for this dependency to settle.
     Blocked(Hash),
-    /// Waits for this clock to come within `MAX_CLOCK_AHEAD` of the stamp.
     Ahead(u64),
 }
 
-/// A log's first pending frame: sequence, hash, scope and author.
 type Head = (i64, Vec<u8>, Vec<u8>, Vec<u8>);
 fn head(record: Vec<SqlValue>) -> Result<Head, Error> {
     match <[SqlValue; 4]>::try_from(record) {

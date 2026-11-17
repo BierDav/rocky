@@ -241,8 +241,6 @@ impl Fixture {
             .unwrap(),
         )
     }
-    /// Inserts one row into each of `tables` in one SQL transaction; the
-    /// rows of a partition reference the previous table's row.
     pub(crate) async fn insert(
         &self,
         replica: &EncryptedReplica<TypedRows>,

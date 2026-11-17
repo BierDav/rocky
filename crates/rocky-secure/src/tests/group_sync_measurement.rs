@@ -28,8 +28,6 @@ async fn database_bytes(replica: &EncryptedReplica<TypedRows>) -> i64 {
     pages * size
 }
 
-/// The row and pruned-prefix sequence of `rocky-sdk::sync::rows`, over
-/// loopback TCP.
 async fn sync(
     writer: &EncryptedReplica<TypedRows>,
     reader: &EncryptedReplica<TypedRows>,
@@ -114,8 +112,6 @@ async fn assert_rows(replica: &EncryptedReplica<TypedRows>, names: &[&str], part
     }
 }
 
-/// Bytes of the frames a catch-up received: headers, encrypted payloads,
-/// and the credential chains stored once beside them.
 async fn frame_bytes(replica: &EncryptedReplica<TypedRows>, tables: usize) {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let stored = crate::storage::rows(&inner.conn, "SELECT header,body FROM secure_operations")

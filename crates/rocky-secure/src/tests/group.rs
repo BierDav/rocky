@@ -49,7 +49,7 @@ async fn frames(replica: &EncryptedReplica<Employees>, f: &Fixture, node: &Priva
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn open_verifies_buffered_commits_full_flushes_and_manual_checkpoints() {
+async fn open_verifies_buffered_commits_full_flushes_manual_checkpoints_and_no_busy_timeout() {
     let f = Fixture::new();
     let dir = Scratch::new().await;
     let replica = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
@@ -60,6 +60,8 @@ async fn open_verifies_buffered_commits_full_flushes_and_manual_checkpoints() {
         ("PRAGMA fullfsync", SqlValue::Integer(1)),
         ("PRAGMA checkpoint_fullfsync", SqlValue::Integer(1)),
         ("PRAGMA wal_autocheckpoint", SqlValue::Integer(0)),
+        ("PRAGMA busy_timeout", SqlValue::Integer(0)),
+        ("PRAGMA foreign_keys", SqlValue::Integer(1)),
     ] {
         assert_eq!(
             rows(&inner.conn, pragma).await.unwrap(),
@@ -148,10 +150,6 @@ async fn concurrent_authors_share_one_flush_and_keep_their_own_frames() {
     assert_eq!(frames(&replica, &f, &node).await, 8);
 }
 
-/// A group's flush runs after the replica lock is released, so other callers
-/// lead the next group or read meanwhile. Every exposed result still arrives,
-/// and only after a flush that covers it. Needs threads, which a browser
-/// Worker lacks.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn exposed_results_arrive_while_other_leaders_and_readers_run_during_the_flush() {
@@ -449,12 +447,10 @@ async fn wal_stays_bounded_under_sustained_authoring() {
     assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 200);
 }
 
-/// WAL bytes one group's frames may add after the last size check.
 const ONE_GROUP_AFTER_THE_LAST_CHECK: u64 = 128 * 1024;
 
 const CRASH_PHASES: [&str; 3] = ["inside-group", "before-commit", "after-commit"];
 
-/// Runs to an injected process exit in `ROCKY_GROUP_CRASH_PHASE`.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 #[ignore = "invoked by process_exit_inside_a_group_leaves_each_handle_whole_or_absent"]
@@ -515,7 +511,6 @@ async fn process_exit_inside_a_group_leaves_each_handle_whole_or_absent() {
         assert_eq!(frames(&replica, &f, &node).await, 4, "{phase}");
     }
 }
-/// Public futures stay `Send`, so callers can spawn them.
 #[test]
 fn public_futures_are_send() {
     let _: fn(EncryptedReplica<Employees>, Fixture, EncryptedFrame) = |replica, f, frame| {
@@ -639,8 +634,6 @@ async fn buffered_commits_are_flushed_before_they_leave_the_device() {
     assert!(covered(&a).await);
 }
 
-/// Replaces the files at `path` with the copy taken at the last flush, as a
-/// power loss that drops every later buffered commit would.
 pub(super) fn lose_unflushed(copy: &std::path::Path, path: &std::path::Path) {
     let wal = std::path::PathBuf::from(format!("{}-wal", path.display()));
     let shm = std::path::PathBuf::from(format!("{}-shm", path.display()));
@@ -810,7 +803,6 @@ async fn incoming_frames_cache_their_chain_after_membership_learning_and_revocat
     assert!(member.receive(third).await.is_err());
 }
 
-/// Pauses work that natively runs on a blocking thread; a Worker runs it in place.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_paused_group_flush_leaves_the_replica_and_executor_available() {
@@ -835,7 +827,6 @@ async fn a_paused_group_flush_leaves_the_replica_and_executor_available() {
     assert!(author.await.is_ok());
 }
 
-/// Admission, atomic application and empty settlement without maintenance or flush.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_failure_between_group_steps_keeps_committed_handles_retryable() {
     let f = Fixture::new();
@@ -882,7 +873,6 @@ async fn a_failure_between_group_steps_keeps_committed_handles_retryable() {
     assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 8);
 }
 
-/// Pauses work that natively runs on a blocking thread; a Worker runs it in place.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_passive_checkpoint_runs_while_the_replica_is_held() {
@@ -987,7 +977,6 @@ async fn pending_discovery_and_application_are_bounded_across_log_heads() {
     assert_eq!(target.snapshot(f.public).await.unwrap().rows.len(), 4);
 }
 
-/// Frames from distinct authors, stored without applying them.
 async fn staged_heads(
     f: &Fixture,
     dir: &Scratch,
@@ -1022,8 +1011,6 @@ async fn staged_heads(
     target
 }
 
-/// A received frame revisits only the pending frames waiting for what it
-/// settled, never every waiting log head.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn received_frames_revisit_only_the_frames_they_may_ready() {
     const LOGS: u8 = 6;
@@ -1114,8 +1101,6 @@ async fn stored_work_invalidates_pending_discovery_before_application() {
     assert_eq!(target.snapshot(f.public).await.unwrap().rows.len(), 4);
 }
 
-/// Regression: a local write between every settle step restarted the pass,
-/// so a receive waiting for settle never returned while writes continued.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn local_writes_between_pending_steps_do_not_restart_the_pass() {
     let f = Fixture::new();

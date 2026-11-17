@@ -1,4 +1,3 @@
-//! A private close is certified without admitting or exporting its candidate graph.
 use super::*;
 use crate::StagedCloseStatus;
 use rocky_credentials::{SealAction, SignedSeal};
@@ -70,7 +69,6 @@ async fn a_relay_certifies_only_the_exact_private_close() {
     );
 }
 
-/// Relays settled with their proof leave the journal's quota to new ones.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn settled_relays_never_exhaust_the_relay_quota() {
     let fixture = Fixture::new(1).await;
@@ -122,8 +120,6 @@ async fn settled_relays_never_exhaust_the_relay_quota() {
     ));
 }
 
-/// A close published with its finality leaves the relay journal; a retry
-/// still answers with a verified proof.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_published_final_close_leaves_the_relay_journal() {
     let fixture = Fixture::new(1).await;
@@ -351,9 +347,6 @@ async fn a_pending_relay_uses_the_raised_signed_minimum_and_distinct_acknowledge
     );
 }
 
-/// A relay holding the client of a coordinator the settings do not name
-/// ends no log with it, and a proof it took from that log before the
-/// settings arrived no longer answers.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_relay_answers_a_staged_close_only_with_finality_at_the_named_coordinator() {
     let fixture = Fixture::new(1).await;
@@ -397,9 +390,6 @@ async fn a_relay_answers_a_staged_close_only_with_finality_at_the_named_coordina
     }
 }
 
-/// A relay that admitted a seal before it composed a log follows a tip
-/// whose parent's log no node ended: it ends that tip's log for a close
-/// only once the seal leading into the tip ended its parent's.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_relay_never_ends_a_tips_log_before_the_seal_leading_into_it_ended_its_parent() {
     let fixture = Fixture::new(1).await;

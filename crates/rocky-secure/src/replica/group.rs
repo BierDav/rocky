@@ -1,41 +1,19 @@
-//! Group commit for authoring and incoming frames. Callers enqueue requests;
-//! whoever holds the replica lock drains the queue as leader and runs
-//! bounded `BEGIN IMMEDIATE` transactions with one savepoint per request. Results,
-//! the revision watch and everything readers see follow the commit; results
-//! that may leave the device also follow one shared flush.
 use super::*;
 use std::collections::VecDeque;
 use tokio::sync::oneshot::{self, error::TryRecvError};
 
-/// Requests drained for one shared flush, across bounded transactions.
 pub(super) const GROUP_REQUESTS: usize = 64;
-/// Request bytes per group; a single larger request still forms its own group.
 pub(super) const GROUP_BYTES: usize = 4 * 1024 * 1024;
-/// Author requests per transaction. Receive admission also applies a ready
-/// request, so it uses RECEIVE_REQUESTS instead of this admission-only bound.
 const STEP_REQUESTS: usize = 2;
-/// One-row incoming frames per transaction, including ready application.
-/// Larger requests run alone.
 pub(crate) const RECEIVE_REQUESTS: usize = 4;
-/// Encoded input bytes per transaction; a larger atomic request runs alone.
 const STEP_BYTES: usize = 32 * 1024;
-/// One discovery, application or cleanup unit per acquisition.
 pub(super) const SETTLE_REQUESTS: usize = 1;
-/// Rows applied per acquisition; larger atomic frames and bundles are
-/// reported as oversized requests.
 pub(super) const APPLICATION_ROWS: u64 = 1;
-/// WAL size that triggers a passive checkpoint between groups, and the
-/// size a reset WAL is cut back to.
 pub(super) const WAL_CHECKPOINT_BYTES: u64 = 32 * 1024 * 1024;
-/// WAL size that triggers a truncating checkpoint between groups.
 pub(super) const WAL_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
-/// Longest wait of a truncating checkpoint for readers of the old log.
 const TRUNCATE_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
-/// Free pages past which, and at most how many, one step returns to the file
-/// system after a commit.
 pub(crate) const RECLAIM_PAGES: i64 = 1024;
 pub(crate) const RECLAIM_STEP: i64 = 4096;
-/// Combined main and temporary page caches, negative as SQLite counts KiB.
 #[cfg(target_os = "android")]
 pub(super) const CACHE_KIB: i64 = -8 * 1024;
 #[cfg(not(target_os = "android"))]
@@ -53,7 +31,6 @@ pub(super) enum Work {
         input: Commitment,
         writes: Vec<RowWrite>,
         dependencies: Vec<Hash>,
-        /// The session authority the bundle was prepared under, if any.
         authority: Option<u64>,
     },
     Receive(EncryptedFrame),
@@ -61,11 +38,9 @@ pub(super) enum Work {
 pub(super) enum Done {
     Author(EncryptedFrame),
     Bundle(Vec<EncryptedFrame>),
-    /// The handle's operation committed earlier and has been pruned.
     Pruned(Hash),
     Receive(ReceiveStatus),
 }
-/// A request's state inside the group, before its final status is known.
 enum Staged {
     Author(EncryptedFrame),
     Bundle(Vec<EncryptedFrame>),
@@ -78,7 +53,6 @@ type Reply = Result<(Done, u64), Error>;
 pub(super) struct Request {
     work: Work,
     weight: usize,
-    /// The result may leave the device, so it waits for the flush.
     exposed: bool,
     reply: oneshot::Sender<Reply>,
 }
@@ -87,13 +61,11 @@ pub(super) type Queue = std::sync::Mutex<VecDeque<Request>>;
 #[derive(Default)]
 struct Outcome {
     results: Vec<Result<Staged, Error>>,
-    /// Previously blocked work may be ready after this commit.
     more: bool,
     revision: u64,
     pass: Option<Error>,
 }
 
-/// Fault points inside a group, for crash and visibility tests.
 #[cfg(test)]
 #[cfg_attr(
     target_family = "wasm",
@@ -129,9 +101,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ok(())
         })
     }
-    /// Enqueues `work` as contiguous requests and returns their results in order.
-    /// A reply is lost only when its leader was cancelled while waiting out a
-    /// busy file; the outcome is then unknown and retrying by handle is safe.
     pub(super) async fn submit(&self, work: Vec<(Work, usize)>, exposed: bool) -> Vec<Reply> {
         #[cfg(feature = "qualification")]
         let receive_limit = match crate::qualification_bound(
@@ -244,7 +213,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 let class = class.min(class_of(cohort.iter().map(|request| &request.work)));
                 inner = self.inner.lock(class).await;
             }
-            let mut last_commit = inner.commit;
+            let mut last_commit = inner.locked_commit();
             drop(inner);
             if !pending_replies.is_empty() {
                 if let Err(error) = self.settle_received().await {
@@ -255,7 +224,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     let count = pending_replies.len().min(STEP_REQUESTS);
                     let replies = pending_replies.drain(..count).collect();
                     let inner = self.inner.lock(Class::Background).await;
-                    last_commit = inner.commit;
+                    last_commit = inner.locked_commit();
                     let settled = settle_failure
                         .as_ref()
                         .map_or(Ok(()), |error| Err(shared(error)));
@@ -284,7 +253,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-    /// Takes the oldest live requests within the group bounds.
     fn drain(&self) -> Vec<Request> {
         let mut queue = self.queue();
         let mut group = Vec::new();
@@ -309,7 +277,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
-/// Local writes acquire as interactive; everything else is background.
 fn class_of<'a>(mut work: impl Iterator<Item = &'a Work>) -> Class {
     if work.any(|work| matches!(work, Work::Author { .. } | Work::Bundle { .. })) {
         Class::Interactive
@@ -318,7 +285,6 @@ fn class_of<'a>(mut work: impl Iterator<Item = &'a Work>) -> Class {
     }
 }
 
-/// Takes one homogeneous transaction from an already admitted cohort.
 fn step<A: RowApplication>(
     cohort: &mut VecDeque<Request>,
     inner: &Inner<A>,
@@ -367,7 +333,6 @@ fn step<A: RowApplication>(
     group
 }
 
-/// Moves delivered replies into `results`; true when every request has one.
 fn collect(pending: &mut [oneshot::Receiver<Reply>], results: &mut [Option<Reply>]) -> bool {
     for (receiver, slot) in pending.iter_mut().zip(results.iter_mut()) {
         if slot.is_none() {
@@ -381,8 +346,6 @@ fn collect(pending: &mut [oneshot::Receiver<Reply>], results: &mut [Option<Reply
     results.iter().all(Option::is_some)
 }
 
-/// Received frames whose status waits for the rest of the pending pass:
-/// each reply, whether it is exposed, and its final status kind.
 enum PendingReply {
     Stored(Hash),
     Duplicate,
@@ -390,10 +353,9 @@ enum PendingReply {
 }
 type Settling = Vec<(oneshot::Sender<Reply>, bool, PendingReply)>;
 
-/// Results that may leave the device: answered after a flush covers `commit`.
 struct Exposed {
     replies: Vec<(oneshot::Sender<Reply>, Done)>,
-    commit: u64,
+    commit: LockedCommit,
 }
 impl Exposed {
     fn append(all: &mut Option<Self>, next: Option<Self>) {
@@ -406,14 +368,12 @@ impl Exposed {
             }
         }
     }
-    /// One flush covers every exposed result in the group; a cancelled leader
-    /// still owes every queued caller its durable reply.
     async fn answer(self, flusher: Arc<Flusher>) {
         let _ = rocky_platform::task::spawn_blocking(move || {
             let flushed = flusher.flush(self.commit);
             for (reply, done) in self.replies {
                 let _ = reply.send(match &flushed {
-                    Ok(()) => Ok((done, self.commit)),
+                    Ok(()) => Ok((done, self.commit.count())),
                     Err(error) => Err(shared(error)),
                 });
             }
@@ -423,10 +383,6 @@ impl Exposed {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Commits one group and answers its requests after the commit, except
-    /// the exposed ones, which it returns for the flush, and the received
-    /// frames whose status waits for more pending passes. Also returns the
-    /// scopes the group wrote, for maintenance.
     async fn commit_group(
         &mut self,
         group: Vec<Request>,
@@ -449,7 +405,7 @@ impl<A: RowApplication> Inner<A> {
         let receiving = works.iter().any(|work| matches!(work, Work::Receive(_)));
         let epoch = self.context_epoch.load(Ordering::Relaxed);
         let outcome = match now() {
-            Ok(time) => transaction!(@commit self, |inner| inner.run_group(&works, time).await)
+            Ok(time) => transaction!(@without_wal_checkpoint self, |inner| inner.run_group(&works, time).await)
                 .map(|outcome| (outcome, time)),
             Err(error) => Err(error),
         };
@@ -546,12 +502,10 @@ impl<A: RowApplication> Inner<A> {
         }
         let exposed = (!exposed.is_empty()).then_some(Exposed {
             replies: exposed,
-            commit: self.commit,
+            commit: self.locked_commit(),
         });
         (exposed, scopes, settling)
     }
-    /// Answers received frames with their status once the pending pass
-    /// settled, or with its failure; returns the exposed ones for the flush.
     async fn answer_settled(
         &self,
         settling: Settling,
@@ -576,7 +530,7 @@ impl<A: RowApplication> Inner<A> {
         }
         (!exposed.is_empty()).then_some(Exposed {
             replies: exposed,
-            commit: self.commit,
+            commit: self.locked_commit(),
         })
     }
     async fn run_group(&mut self, works: &[Work], time: u64) -> Result<Outcome, Error> {
@@ -694,7 +648,6 @@ impl<A: RowApplication> Inner<A> {
         outcome.revision = self.stored_revision().await?;
         Ok(outcome)
     }
-    /// Admits one incoming frame into custody; application follows in the pass.
     async fn receive_step(&mut self, frame: &EncryptedFrame, time: u64) -> Result<Staged, Error> {
         let bytes =
             usize::try_from(frame.stored_bytes()?).map_err(|_| denied("stored frame size"))?;
@@ -712,7 +665,7 @@ impl<A: RowApplication> Inner<A> {
         }
         self.verify_frame(frame, time)?;
         let operation = frame.operation_ref()?;
-        self.refuse_no_frames_contradiction(&operation.header)
+        self.refuse_no_frames_contradiction_in_storing_transaction(&operation.header)
             .await?;
         let extension = &operation.header.extensions;
         if let Some(key) = self.opening_key(extension.scope, extension.generation)
@@ -793,20 +746,13 @@ impl<A: RowApplication> Inner<A> {
             _ => Err(denied("invalid secure revision")),
         }
     }
-    /// Keeps the WAL bounded: passive past the checkpoint size whenever the
-    /// file has grown since the last one, truncating past the hard limit.
-    /// Best effort: the commit already succeeded, so a failure waits for the
-    /// next transaction.
     pub(crate) async fn checkpoint_if_due(&mut self) {
         self.checkpoint_over(self.wal_limits.1).await;
     }
-    /// Cuts the WAL to the passive size before a large transaction, after
-    /// any running passive checkpoint, which would refuse the truncation.
     pub(super) async fn cut_wal(&mut self) {
         self.passive.clone().wait().await;
         self.checkpoint_over(WAL_CHECKPOINT_BYTES).await;
     }
-    /// [`Self::checkpoint_if_due`], truncating once the WAL holds `limit`.
     pub(super) async fn checkpoint_over(&mut self, limit: u64) {
         self.reclaim_free_pages().await;
         let size = rocky_platform::fs::len(&self.wal).unwrap_or(0);
@@ -824,8 +770,6 @@ impl<A: RowApplication> Inner<A> {
             self.truncate_wal().await;
         }
     }
-    /// One truncating checkpoint, waiting briefly for readers of the old
-    /// log; whether it reset the log.
     async fn truncate_wal(&mut self) -> bool {
         let waits = self
             .conn
@@ -868,8 +812,6 @@ impl<A: RowApplication> Inner<A> {
         }
         complete
     }
-    /// Compaction and pruning free pages; between commits, one bounded
-    /// incremental vacuum step gives them back to the file system.
     async fn reclaim_free_pages(&self) {
         let free = rows(&self.conn, "PRAGMA freelist_count").await;
         if let Ok(free) = free
@@ -905,7 +847,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
-/// The group's failure as reported to each of its callers.
 pub(super) fn shared(error: &Error) -> Error {
     match error {
         #[cfg(test)]

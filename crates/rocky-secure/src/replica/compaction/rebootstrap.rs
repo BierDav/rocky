@@ -1,24 +1,16 @@
-//! Rebootstrap at a seal of the followed path: a held scope whose replay
-//! base left the path, because its compacted seal lost a race, or that was
-//! pruned under a checkpoint at another cut imports a checkpoint the graph
-//! lists at a seal of the path, else replays frames.
 use super::*;
 use rocky_credentials::{CHECKPOINT_RECORD_FORMAT, CheckpointRecordStatement};
 
 pub use rocky_core::FrameReplay;
 
-/// A held scope whose replay base must move to a seal of the followed path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SealRebootstrap {
     pub scope: ResourceScope,
-    /// Checkpoints of the scope the graph lists at seals of the path that
-    /// another node signed, newest seal first.
     pub listed: Vec<Commitment>,
     pub replay: FrameReplay,
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// The seal scope `id`'s replay base sits at, if any.
     pub(in crate::replica) async fn base_seal(&self, id: i64) -> Result<Option<Commitment>, Error> {
         Ok(self
             .checkpoint_record(id, true)
@@ -37,8 +29,6 @@ impl<A: RowApplication> Inner<A> {
                 .as_ref()
                 .is_some_and(|author| author.key.public_key() == key)
     }
-    /// Whether scope `id`'s replay base sits at a seal off the followed
-    /// path: its state is no longer one the path passes through.
     pub(in crate::replica) async fn base_off_path(
         &self,
         scope: ResourceScope,
@@ -51,16 +41,12 @@ impl<A: RowApplication> Inner<A> {
             }
         })
     }
-    /// Read admission of `scope`; see `readable_blockers`.
     pub(in crate::replica) async fn require_scope_readable(
         &self,
         scope: ResourceScope,
     ) -> Result<(), Error> {
         blockers::refuse(self.readable_blockers(scope).await?)
     }
-    /// What every scope of `domain` needs; see `domain_blockers`. A
-    /// refusal also names what holds back `scopes`, which the caller may
-    /// write.
     pub(in crate::replica) async fn require_domain_ready(
         &self,
         domain: Scope,
@@ -77,8 +63,6 @@ impl<A: RowApplication> Inner<A> {
         blocked.dedup();
         blockers::refuse(blocked)
     }
-    /// The checkpoints of `scope` another node signed that the graph lists
-    /// at `seals`, in their order.
     pub(in crate::replica) fn listed_at<'a>(
         &self,
         graph: &rocky_credentials::TipGraph,
@@ -108,7 +92,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(needs)
     }
-    /// What every scope's rebootstrap check of `domain` shares.
     pub(in crate::replica) async fn rebootstrap_plan(
         &self,
         domain: Scope,
@@ -134,7 +117,6 @@ impl<A: RowApplication> Inner<A> {
             scopes: self.readiness_scopes(domain).await?,
         }))
     }
-    /// Whether `scope`'s replay base must move to a seal of the followed path.
     pub(in crate::replica) async fn seal_rebootstrap_of(
         &self,
         plan: &RebootstrapPlan,
@@ -189,10 +171,6 @@ impl<A: RowApplication> Inner<A> {
             replay,
         }))
     }
-    /// Inside the caller's transaction, drops scope `id`'s replay base so
-    /// its rows are rebuilt from frames. With `reset`, its applied state goes
-    /// too: what it holds waits, and the frames it pruned apply again as
-    /// they arrive.
     async fn replay_scope(
         &mut self,
         scope: ResourceScope,
@@ -235,7 +213,7 @@ impl<A: RowApplication> Inner<A> {
         ] {
             self.conn.execute(sql, [id]).await?;
         }
-        self.store_scope_state(id, 0, 0, &checkpoint::Lt::new(), 0)
+        self.store_scope_state(id, 0, 0, &checkpoint::LtHash16::new(), 0)
             .await?;
         if self.replayed_scope(scope) {
             self.clear_replayed(scope).await?;
@@ -243,10 +221,6 @@ impl<A: RowApplication> Inner<A> {
         }
         self.reproject(scope).await
     }
-    /// Inside the caller's transaction, installs the pulled state of every
-    /// scope that needs a seal rebootstrap and has one at a seal of the
-    /// path. Install checks it again; a refused state is dropped and its
-    /// scope stays listed. Returns whether any state installed.
     pub(in crate::replica) async fn install_needed_pulled(
         &mut self,
         domain: Scope,
@@ -265,11 +239,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(installed)
     }
-    /// Inside the caller's transaction, once every held scope's base sits at
-    /// a seal of the path or was dropped for a replay: a domain whose
-    /// compacted seal lost forgets its finalized seals, which it finalizes
-    /// again from the path's start, and its rows are rebuilt at the
-    /// followed tip. Returns whether no scope waits.
     pub(in crate::replica) async fn settle_seal_rebootstrap(
         &mut self,
         domain: Scope,
@@ -331,7 +300,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-/// What each scope's rebootstrap check of one domain shares.
 pub(in crate::replica) struct RebootstrapPlan {
     domain: Scope,
     path: Vec<Commitment>,
@@ -340,8 +308,6 @@ pub(in crate::replica) struct RebootstrapPlan {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// What a stepped rebootstrap listing must not see move: the state
-    /// tables readiness watches, the authority, the tip and the context.
     fn rebootstrap_context(&self) -> (u64, u64, TipId, u64) {
         (
             self.readiness.writes(),
@@ -353,11 +319,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// The held scopes of `domain` whose replay base must move to a seal of
-    /// the followed path, with the checkpoints the graph lists for them.
-    ///
-    /// Plans in one acquisition, then checks one scope per acquisition while
-    /// the plan's context holds; a moved context restarts the listing.
     pub async fn seal_rebootstraps(&self, domain: Scope) -> Result<Vec<SealRebootstrap>, Error> {
         'pass: for _ in 0..super::super::headers::SCAN_PASSES {
             let (plan, context) = {
@@ -382,9 +343,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.seal_rebootstraps(domain).await
     }
-    /// Rebuilds a scope that needs a seal rebootstrap from frames instead of
-    /// a checkpoint: from those it holds, or with `reset` from those a peer
-    /// sends again.
     pub async fn replay_at_seals(&self, scope: ResourceScope, reset: bool) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut need = None;
@@ -413,9 +371,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.finish_seal_rebootstrap(scope.domain).await?;
         Ok(())
     }
-    /// Ends a seal rebootstrap of `domain` once no held scope waits: a
-    /// compacted seal that lost is forgotten and the rows are rebuilt at
-    /// the followed tip. Returns whether none waits.
     pub async fn finish_seal_rebootstrap(&self, domain: Scope) -> Result<bool, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.graph_for(domain)?;
@@ -424,9 +379,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.publish_revision().await?;
         Ok(settled)
     }
-    /// The replay bases at seals of `domain` this node signed that the
-    /// graph does not list yet: records the owner, a trusted identity or an
-    /// issuer may sign so other devices can rebootstrap from them.
     pub async fn unlisted_checkpoints(
         &self,
         domain: Scope,

@@ -1,11 +1,6 @@
-//! A replica killed at a replay crash point reopens and converges: the
-//! interrupted apply, rewind, redo or undo deletion left nothing half done.
 use super::*;
 use crate::CrashPoint;
 
-/// Delivers `before` cleanly, arms `point`, delivers `during` (or seals A
-/// for undo deletion), expects the point to fire, drops the replica
-/// unclosed, reopens it and delivers everything again.
 async fn crash(point: CrashPoint, before: &[usize], during: &[usize]) {
     let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
     let root = rocky_platform::fs::Scratch::new().await;

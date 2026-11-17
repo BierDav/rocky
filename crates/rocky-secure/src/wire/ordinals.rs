@@ -35,7 +35,6 @@ struct Bundle {
 
 pub(super) fn charge_publication(bytes: &[u8], used: &mut usize) -> Result<(), Error> {
     crate::network::publication::charge(bytes, used)?;
-    /// Its byte strings hold further CBOR, which expansion decodes.
     #[derive(Deserialize)]
     struct Metadata {
         origins: Vec<serde_bytes::ByteBuf>,

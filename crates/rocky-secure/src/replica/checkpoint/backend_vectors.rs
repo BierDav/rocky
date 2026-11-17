@@ -1,4 +1,3 @@
-//! Current-format byte fixtures captured on the software backend.
 use super::*;
 use rocky_core::{AppId, DomainId, MeshId, ResourceGrant, Scope};
 use rocky_credentials::{Authority, device_chain};
@@ -70,7 +69,7 @@ fn signed() -> SignedCheckpoint {
     sets.replace(&[8; 32], None, &encode(&materialized(false)).unwrap())
         .unwrap();
     sets.create(Hash::from_bytes([6; 32]), 7);
-    let mut handles = Lt::new();
+    let mut handles = LtHash16::new();
     handles.add(HANDLE_LABEL, &handle_item(&[9; 32], &[10; 32], &[11; 32]));
     SignedCheckpoint::sign(
         CheckpointStatement {
@@ -115,7 +114,7 @@ fn signed() -> SignedCheckpoint {
                 superseded: 4,
                 sole: SetSummary {
                     count: 0,
-                    digest: Lt::new().digest(),
+                    digest: LtHash16::new().digest(),
                 },
             },
             outcomes: SealedOutcomes {
@@ -158,7 +157,7 @@ macro_rules! frozen {
         include_bytes!(concat!("backend_vectors/", $name)).as_slice()
     };
 }
-fn check_lt(actual: &Lt, name: &str, (state, digest): (&[u8], &[u8])) {
+fn check_lt(actual: &LtHash16, name: &str, (state, digest): (&[u8], &[u8])) {
     if let Some(directory) = updating() {
         rewrite(&directory, format!("lt-{name}.bin"), actual.to_bytes());
         rewrite(&directory, format!("lt-{name}-digest.bin"), actual.digest());
@@ -166,14 +165,14 @@ fn check_lt(actual: &Lt, name: &str, (state, digest): (&[u8], &[u8])) {
     }
     assert_eq!(actual.to_bytes(), state);
     assert_eq!(actual.digest().as_slice(), digest);
-    assert!(Lt::from_bytes(state).unwrap() == *actual);
+    assert!(LtHash16::from_bytes(state).unwrap() == *actual);
 }
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn full_lanes_keep_independent_bytes_and_wrapping() {
     let row = [[8; 32].as_slice(), frozen!("materialized-live.cbor")].concat();
     let creation = creation_item(Hash::from_bytes([6; 32]), 7);
     let handle = handle_item(&[9; 32], &[10; 32], &[11; 32]);
-    let mut value = Lt::new();
+    let mut value = LtHash16::new();
     check_lt(
         &value,
         "empty",
@@ -211,14 +210,14 @@ fn full_lanes_keep_independent_bytes_and_wrapping() {
         "mixed",
         (frozen!("lt-mixed.bin"), frozen!("lt-mixed-digest.bin")),
     );
-    let mut opposite = Lt::new();
+    let mut opposite = LtHash16::new();
     opposite.add(HANDLE_LABEL, &handle);
     opposite.add(CREATION_LABEL, &creation);
     opposite.add(ROW_LABEL, &row);
     assert!(opposite == value);
-    let mut left = Lt::new();
+    let mut left = LtHash16::new();
     left.add(ROW_LABEL, &row);
-    let mut right = Lt::new();
+    let mut right = LtHash16::new();
     right.add(HANDLE_LABEL, &handle);
     check_lt(
         &right,
@@ -229,7 +228,6 @@ fn full_lanes_keep_independent_bytes_and_wrapping() {
     left.merge(&right);
     assert!(left == value);
 }
-/// Rewrites one fixture; `updating` never returns a directory on wasm.
 fn rewrite(
     directory: &std::path::Path,
     name: impl AsRef<std::path::Path>,
@@ -244,8 +242,6 @@ fn rewrite(
         bytes.as_ref().len()
     );
 }
-/// The fixture directory when `ROCKY_UPDATE_CHECKPOINT_VECTORS` asks to
-/// rewrite the fixtures instead of checking them.
 fn updating() -> Option<std::path::PathBuf> {
     #[cfg(not(target_family = "wasm"))]
     if std::env::var_os("ROCKY_UPDATE_CHECKPOINT_VECTORS").is_some() {

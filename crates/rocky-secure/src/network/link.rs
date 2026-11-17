@@ -1,8 +1,6 @@
-//! Authenticated live link framing.
 use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
-/// The handshake's version; its signing label carries it, so another is refused.
 pub(super) const HANDSHAKE_VERSION: u32 = 30;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
@@ -10,11 +8,7 @@ mod lanes;
 pub use lanes::{Reader, Writer};
 pub const FRAME_BYTES: usize = 64 * 1024;
 pub const SIGNAL_SCOPES: usize = 64;
-/// The whole handshake and admission, which may wait on a peer busy with
-/// its storage between frames; per-chunk read deadlines alone would let a
-/// trickling peer hold an admission slot for hours. As long as one request.
 const ADMISSION_LIMIT: std::time::Duration = REQUEST_LIMIT;
-/// Bytes of one health message; its owner encodes and bounds it.
 pub const HEALTH_BYTES: usize = 8 * 1024;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -45,16 +39,13 @@ pub enum Message {
     Close {
         reason: CloseReason,
     },
-    /// An opaque mesh health message; the embedder reads it.
     Health(#[serde(with = "serde_bytes")] Vec<u8>),
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Frame {
     pub channel: u16,
-    /// Per-lane delivery barrier for the final reconciliation marker.
     pub through: Vec<u64>,
-    /// The request lane: false for the dialer, true for the acceptor.
     pub direction: bool,
     pub message: Message,
 }
@@ -113,7 +104,6 @@ impl Frame {
 
 pub struct Link {
     pub peer: PublicKey,
-    /// Bytes the handshake itself exchanged, before holdings.
     #[cfg(test)]
     pub(crate) handshake_bytes: usize,
     #[cfg(test)]
@@ -122,10 +112,7 @@ pub struct Link {
     pub offered: Vec<ResourceScope>,
     pub direction: bool,
     pub expires: u64,
-    /// The peer's wall clock less this device's at the handshake, in
-    /// microseconds: positive when the peer's runs ahead.
     pub clock_offset: i64,
-    /// The peer's chain, verified by the handshake.
     pub credentials: CredentialChain,
     pub local_states: std::collections::BTreeMap<ResourceScope, Commitment>,
     pub states: std::collections::BTreeMap<ResourceScope, Commitment>,
@@ -165,7 +152,6 @@ pub(super) fn timed_out(message: &'static str) -> Error {
     Error::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, message))
 }
 impl Link {
-    /// Both ends confirm their independent link budget before any data channel opens.
     pub async fn ready(&mut self, persistent: bool) -> Result<bool, Error> {
         let span = tracing::debug_span!(
             "ready",
@@ -201,8 +187,6 @@ impl Link {
         }
     }
 
-    /// Authenticates the peer over `stream`: `expected` when dialing, whoever
-    /// dialed when accepting. Holdings and scope states follow the handshake.
     pub async fn open<A: RowApplication>(
         stream: impl SessionStream + 'static,
         replica: &EncryptedReplica<A>,
@@ -219,7 +203,6 @@ impl Link {
         ))
         .await
     }
-    /// A handshake under another version, as another build runs.
     #[cfg(test)]
     pub(crate) async fn open_as_version<A: RowApplication>(
         stream: impl SessionStream + 'static,
@@ -372,10 +355,6 @@ impl Link {
     }
 }
 impl Link {
-    /// Carries request channels until either side ends the link: sessions the
-    /// peer opens go to `incoming`. Signals and pushes are ignored; an
-    /// embedder that needs live changes drives the link itself, as the SDK
-    /// does. Liveness is the transport's.
     pub async fn drive(
         self,
         incoming: tokio::sync::mpsc::Sender<NativeSession>,
@@ -427,7 +406,6 @@ impl Link {
         }
     }
 }
-/// A scope's committed receipt state, flushed before its token can leave.
 pub async fn scope_token<A: RowApplication>(
     replica: &EncryptedReplica<A>,
     scope: ResourceScope,
@@ -480,7 +458,7 @@ pub async fn scope_token<A: RowApplication>(
                 .exchange_digest(now()?)
                 .map_err(credential)?,
         ))?;
-        (bytes, inner.flusher.clone(), inner.commit)
+        (bytes, inner.flusher.clone(), inner.locked_commit())
     };
     flusher.flush(commit)?;
     Ok(rocky_core::commitment("rocky.link-scope.v2", &bytes))
@@ -530,8 +508,6 @@ impl NativeSession {
             }
         }
     }
-    /// Exchanges holding proofs in handshake order, so bounded transports
-    /// cannot deadlock.
     async fn exchange_link_holdings<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -624,7 +600,6 @@ impl NativeSession {
     }
 }
 impl FrameWriter {
-    /// Finishes queued frames before a transport resets an unfinished stream.
     pub async fn finish(&mut self) -> Result<(), Error> {
         timeout(TIMEOUT, self.stream.shutdown())
             .await
@@ -663,7 +638,6 @@ impl FrameWriter {
         Ok(())
     }
 }
-/// A link the peer ended between frames; its kind stays `UnexpectedEof`.
 pub(super) fn closed_by_peer() -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::UnexpectedEof,
@@ -671,7 +645,6 @@ pub(super) fn closed_by_peer() -> std::io::Error {
     )
 }
 impl FrameReader {
-    /// Idle reads have no deadline; started frames must keep making chunk progress.
     pub async fn receive(&mut self) -> Result<Frame, Error> {
         let first = self.stream.read_u8().await.map_err(|error| {
             Error::Io(match error.kind() {
@@ -825,9 +798,8 @@ mod tests {
     }
 }
 
-/// Every test here needs tokio's paused clock.
 #[cfg(all(test, not(target_family = "wasm")))]
-mod integration_tests {
+mod paused_clock_tests {
     use super::*;
 
     #[cfg(not(target_family = "wasm"))]
@@ -931,12 +903,10 @@ mod integration_tests {
     }
 }
 
-/// Request sessions on a link both of whose ends this process drives.
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
     pub(crate) type End<'a, A> = (&'a EncryptedReplica<A>, PrivateKey, CredentialChain);
-    /// A dialed and an accepted link over an in-memory pipe.
     pub(crate) async fn sessions<A: RowApplication, B: RowApplication>(
         client: End<'_, A>,
         server: End<'_, B>,
@@ -944,8 +914,6 @@ pub(crate) mod testing {
         let (near, far) = tokio::io::duplex(64 * 1024);
         sessions_over(near, far, client, server).await
     }
-    /// Both ends of a connected byte stream: loopback TCP natively, and an
-    /// in-memory pipe in a browser, which has no sockets.
     #[cfg(not(target_family = "wasm"))]
     pub(crate) async fn connected() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -963,7 +931,6 @@ pub(crate) mod testing {
     pub(crate) async fn connected() -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
         tokio::io::duplex(64 * 1024)
     }
-    /// The dialed and the accepted end of a link, each as its handshake ended.
     pub(crate) async fn links<A: RowApplication, B: RowApplication>(
         near: impl SessionStream + 'static,
         far: impl SessionStream + 'static,
@@ -976,8 +943,6 @@ pub(crate) mod testing {
             Link::open(far, server, server_key, server_chain, None),
         )
     }
-    /// Drives both ends and opens one request channel: the client's session
-    /// and the server's session answering it.
     pub(crate) async fn requests(
         mut dialed: Link,
         mut accepted: Link,
@@ -993,7 +958,6 @@ pub(crate) mod testing {
         let answering = incoming.recv().await.ok_or_else(|| denied("link ended"))?;
         Ok((session, answering))
     }
-    /// The client's request session and the server's session answering it.
     pub(crate) async fn sessions_over<A: RowApplication, B: RowApplication>(
         near: impl SessionStream + 'static,
         far: impl SessionStream + 'static,

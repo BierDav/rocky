@@ -1,4 +1,3 @@
-//! Range indexes preserve signed coordinates through lifecycle changes.
 use super::*;
 use crate::storage::rows;
 use rocky_core::SqlValue;
@@ -169,7 +168,6 @@ async fn position_ranges_merge_split_and_rollback_with_duplicate_custody() {
     inner.audit_positions_for_test().await.unwrap();
 }
 
-/// Held offsets from `base` as maximal inclusive `[start, end]` rows.
 fn maximal_inclusive_runs(held: &BTreeSet<u64>, base: u64) -> Vec<Vec<SqlValue>> {
     let mut runs: Vec<Vec<SqlValue>> = Vec::new();
     for offset in held {
@@ -184,8 +182,6 @@ fn maximal_inclusive_runs(held: &BTreeSet<u64>, base: u64) -> Vec<Vec<SqlValue>>
     runs
 }
 
-/// Sparse sequences each start a range; filling the gaps merges them and
-/// removals split them again, in both range indexes.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn sparse_position_ranges_merge_and_split_like_their_sequences() {
     let f = Fixture::new();

@@ -1,12 +1,9 @@
-//! Kept seals: history tables keep what a seal's rows were, read through
-//! views shaped like the live tables.
 use super::compaction::{Replica, delete, follow_main, insert, open, scalar, seal, sync, titles};
 use super::generations::{Lineage, session, text};
 use super::*;
 use crate::KeptSeals;
 use rocky_core::{Commitment, SqlValue};
 
-/// The rows `sql` reads through a session bound to `seal`.
 pub(super) async fn at_seal(replica: &Replica, seal: Commitment, sql: &str) -> Vec<Vec<SqlValue>> {
     let mut bound = session(replica).await;
     bound.bind_seal(seal).await.unwrap();
@@ -43,7 +40,6 @@ const TITLES: &str = "SELECT key,title FROM items ORDER BY key";
 
 mod admission;
 
-/// Inserts items `000000` up to `rows`, a transaction per 200.
 async fn numbered_items(replica: &Replica, rows: i64) {
     let sql = session(replica).await;
     for chunk in (0..rows).collect::<Vec<_>>().chunks(200) {
@@ -232,7 +228,6 @@ async fn a_seal_learned_before_its_frames_is_shallow_until_they_arrive() {
     );
 }
 
-/// Bytes `table` and its indexes store, from the engine's page statistics.
 async fn stored_bytes(replica: &Replica, table: &str) -> i64 {
     scalar(
         replica,
@@ -392,8 +387,6 @@ async fn a_seal_before_a_removal_still_shows_the_removed_field_and_table() {
     );
 }
 
-/// Pulls `source`'s checkpoint of items, which must sit at `seal`, into
-/// `target` as held state.
 async fn pull_seal(
     lineage: &Lineage,
     source: &Replica,
@@ -578,7 +571,6 @@ async fn a_node_holds_a_seal_it_compacted_past_once_it_pulls_it_from_a_node_that
     );
 }
 
-/// Makes branch switches rebuild from the replay base, writing every row.
 async fn rebuild_every_switch_from_the_replay_base(replica: &Replica) {
     replica
         .inner
@@ -587,7 +579,6 @@ async fn rebuild_every_switch_from_the_replay_base(replica: &Replica) {
         .rebuild_switches = true;
 }
 
-/// What a switch must reproduce: scope digests and the table.
 async fn workspace_state(replica: &Replica) -> Vec<Vec<Vec<SqlValue>>> {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let mut state = Vec::new();
@@ -611,7 +602,6 @@ fn same_state(left: &[Vec<Vec<SqlValue>>], right: &[Vec<Vec<SqlValue>>]) {
         );
     }
 }
-/// Rows the engine changed while following `bookmark`.
 async fn follow_changing(lineage: &Lineage, replica: &Replica, bookmark: &str) -> u64 {
     let changes = async || {
         let inner = replica.inner.lock(crate::replica::Class::Background).await;

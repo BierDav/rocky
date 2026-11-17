@@ -1,5 +1,3 @@
-//! Lazy compaction at seals: finalizing drops what is dead at a seal's
-//! frontier on every device; compacting moves the replay base there.
 use super::generations::{Lineage, identity_insert, select, session, text};
 use super::*;
 use crate::TipStatement;
@@ -11,7 +9,6 @@ use rocky_credentials::{
 
 pub(super) type Replica = EncryptedReplica<TypedRows>;
 
-/// Empty state is a signed fact at this seal, with no invented operations.
 pub(super) fn assert_empty_checkpoint(signed: &crate::SignedCheckpoint, seal: Commitment) {
     signed.verify_signature().unwrap();
     let statement = &signed.statement;
@@ -57,7 +54,6 @@ pub(super) fn bookmark(lineage: &Lineage, from: Option<TipId>, to: TipId) -> Tip
         .unwrap(),
     )
 }
-/// Creates `main` on the genesis tip and follows it.
 pub(super) async fn follow_main(lineage: &Lineage, replica: &Replica) {
     let genesis = replica.followed_tip().await;
     replica
@@ -69,8 +65,6 @@ pub(super) async fn follow_main(lineage: &Lineage, replica: &Replica) {
         .await
         .unwrap();
 }
-/// The owner seals the followed tip at what `replica` holds and moves
-/// `main` on; returns the seal.
 pub(super) fn sign_seal(lineage: &Lineage, tip: TipId, frontier: Vec<AuthorMark>) -> SignedSeal {
     SignedSeal::sign(
         SealStatement {
@@ -120,10 +114,8 @@ pub(super) async fn delete(replica: &Replica, key: &str) {
         .await
         .unwrap();
 }
-/// Churn cycles enough that some rival frontier has a lower digest.
 const RIVAL_CHURN: usize = 12;
 
-/// Inserts and deletes `cycles` rows.
 async fn churn(replica: &Replica, cycles: usize, prefix: &str) {
     for cycle in 0..cycles {
         let key = format!("{prefix}{cycle}");
@@ -143,8 +135,6 @@ pub(super) async fn scalar(replica: &Replica, sql: &str) -> i64 {
         other => panic!("{other:?}"),
     }
 }
-/// Rows of the replay bases and how many are tombstones: replayed bases
-/// hold live rows only.
 async fn stored(replica: &Replica) -> (i64, i64) {
     (
         scalar(replica, "SELECT count(*) FROM secure_replayed_base").await,
@@ -203,8 +193,6 @@ async fn compacting_at_a_seal_leaves_only_live_rows_and_survives_reopen() {
     assert!(status.uncompacted.is_empty());
 }
 
-/// Hands `source`'s graph and the items frames `target` lacks to `target`,
-/// whose node key is `key`.
 pub(super) async fn sync(lineage: &Lineage, source: &Replica, target: &Replica, key: &PrivateKey) {
     target
         .receive_tip_statements(&source.tip_statements(None, 32).await.unwrap())
@@ -313,10 +301,6 @@ async fn compacted_and_uncompacted_devices_apply_late_frames_across_two_seals_al
     );
 }
 
-/// A seal of `seal`'s tip with a lower digest, and the move of `main` onto
-/// its continuation.
-/// A seal of `seal`'s tip with a lower digest that leaves out some of the
-/// sealer's latest frames, which then walk on as late frames.
 fn lower_rival(lineage: &Lineage, seal: &SignedSeal) -> Option<SignedSeal> {
     let latest = seal.statement.frontier.last()?.sequence;
     (1..=latest)
@@ -327,8 +311,6 @@ fn lower_rival(lineage: &Lineage, seal: &SignedSeal) -> Option<SignedSeal> {
         })
         .find(|rival| rival.id().unwrap() < seal.id().unwrap())
 }
-/// Seals the followed tip where a lower-digest rival exists; signatures are
-/// deterministic, so another write changes the digest until one does.
 async fn rivalled_seal(lineage: &Lineage, replica: &Replica) -> SignedSeal {
     for attempt in 0.. {
         let tip = replica.followed_tip().await;
@@ -446,8 +428,6 @@ async fn a_seal_left_uncompacted_that_loses_is_rebuilt_and_a_compacted_one_reboo
     assert_eq!(titles(&replica).await.len(), 4);
 }
 
-/// Imports `source`'s replay base of `scope` into `target`, whose node key
-/// is `key`, page by page.
 pub(super) async fn import_checkpoint(
     lineage: &Lineage,
     source: &Replica,
@@ -459,7 +439,6 @@ pub(super) async fn import_checkpoint(
         .await
         .checkpoint
 }
-/// [`import_checkpoint`], returning the import's report.
 pub(super) async fn import_checkpoint_report(
     lineage: &Lineage,
     source: &Replica,
@@ -502,7 +481,6 @@ pub(super) async fn import_checkpoint_report(
     assert_eq!(report.checkpoint, checkpoint);
     report
 }
-/// The highest-sequence retained operation of `scope`.
 pub(super) async fn last_operation(replica: &Replica, scope: ResourceScope) -> Hash {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let records = crate::storage::collect_rows(
@@ -522,7 +500,6 @@ pub(super) async fn last_operation(replica: &Replica, scope: ResourceScope) -> H
     };
     Hash::from_bytes(hash.as_slice().try_into().unwrap())
 }
-/// `replica`'s live identity mark of `author` in `scope`.
 pub(super) async fn live_mark(
     replica: &Replica,
     scope: ResourceScope,
@@ -550,7 +527,6 @@ pub(super) async fn live_mark(
         other => panic!("{other:?}"),
     }
 }
-/// The owner lists `replica`'s replay bases at seals in the graph.
 pub(super) async fn list_checkpoints(lineage: &Lineage, replica: &Replica) -> Vec<TipStatement> {
     let records: Vec<TipStatement> = replica
         .unlisted_checkpoints(lineage.domain)

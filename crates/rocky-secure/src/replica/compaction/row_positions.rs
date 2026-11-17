@@ -1,8 +1,6 @@
-//! Source row identities and global birth order at applied positions.
 use super::*;
 
 impl<A: RowApplication> Inner<A> {
-    /// Global birth order matters even when a replay visits only a few rows.
     pub(in crate::replica) async fn row_replay_ledger(
         &self,
         scope: ResourceScope,
@@ -116,8 +114,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 impl<A: RowApplication> Inner<A> {
-    /// Storage identities are read in the authenticated source schema, even
-    /// while this workspace filters its table or fields out.
     pub(in crate::replica) fn frame_positions(
         &self,
         frame: &EncryptedFrame,

@@ -34,10 +34,6 @@ impl<A: RowApplication> Inner<A> {
     pub(super) fn injected_commit_fault(&mut self) -> Result<(), Error> {
         Ok(())
     }
-    /// Signs, admits and stores one frame of `writes`, all in one scope,
-    /// with its projection, outbox entry and key record, inside the caller's
-    /// transaction. `payload` encodes the plaintext body for the frame's
-    /// log sequence.
     pub(super) async fn author_frame(
         &self,
         writes: &[RowWrite],

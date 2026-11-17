@@ -1,4 +1,6 @@
 mod admission;
+mod locked_commit;
+pub(crate) use locked_commit::LockedCommit;
 mod live_publication;
 pub(crate) mod lock;
 mod maintenance;
@@ -96,23 +98,18 @@ thread_local! {
     static HELD_AT_ONCE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static HASHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
-/// Notes that a bounded read holds `records` stored records in memory
-/// together, for tests of the largest such batch.
 #[cfg(test)]
 pub(crate) fn held_at_once(records: usize) {
     HELD_AT_ONCE.with(|held| held.set(held.get().max(records)));
 }
-/// The largest batch noted on this thread since the last call.
 #[cfg(test)]
 pub(crate) fn take_held_at_once() -> usize {
     HELD_AT_ONCE.with(|held| held.replace(0))
 }
-/// Notes `statements` tip statements hashed, for tests of graph walks.
 #[cfg(test)]
 pub(crate) fn hashed(statements: usize) {
     HASHED.with(|hashed| hashed.set(hashed.get() + statements));
 }
-/// The statements hashed on this thread since the last call.
 #[cfg(test)]
 pub(crate) fn take_hashed() -> usize {
     HASHED.with(|hashed| hashed.replace(0))
@@ -168,9 +165,6 @@ use std::{
 };
 use tokio::sync::watch;
 
-/// Keys are supplied from external secret storage and are never persisted in protocol tables.
-/// A scope may hold several generations: the highest seals new writes, the
-/// others open what they sealed.
 #[derive(Clone)]
 pub struct KeyMaterial {
     pub scope: ResourceScope,
@@ -185,7 +179,6 @@ impl KeyMaterial {
             key,
         }
     }
-    /// Uses the group secret's identity for every derived table key.
     pub fn at(scope: ResourceScope, generation: rocky_core::KeyEpoch, key: [u8; 32]) -> Self {
         Self {
             scope,
@@ -197,15 +190,11 @@ impl KeyMaterial {
 pub struct SecureConfig {
     pub publisher: PublicKey,
     pub manifest: SignedManifest,
-    /// The revocations this device verified; the replica keeps the union of
-    /// these and every set it learned.
     pub revocations: RevocationSet,
     pub node: PrivateKey,
     pub credentials: CredentialChain,
     pub keys: Vec<KeyMaterial>,
 }
-/// Opening authority with the adapter's canonical table scopes. A partition's
-/// keyed scope must never be supplied as a table scope.
 pub struct OpenConfig {
     security: SecureConfig,
     table_scopes: Option<Vec<ResourceScope>>,
@@ -245,11 +234,9 @@ pub enum ReceiveStatus {
     PendingDependencies,
     MissingKey,
     Applied,
-    /// The original signed writes are held for application-directed re-authoring.
     Held,
     Duplicate,
     Rejected,
-    /// At or before this replica's pruned_prefix: already part of its checkpoint.
     Pruned,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -264,7 +251,6 @@ pub struct SecureSnapshot {
     pub rows: BTreeMap<Commitment, RowFields>,
     pub complete: bool,
 }
-/// One page of a scope's live rows; `next` continues after the last row read.
 #[derive(Clone, Debug)]
 pub struct SecurePage {
     pub revision: u64,
@@ -272,22 +258,20 @@ pub struct SecurePage {
     pub complete: bool,
     pub next: Option<Commitment>,
 }
-/// Limits of one encrypted read.
 pub const MAX_SNAPSHOT_ROWS: usize = 1024;
 pub const MAX_SNAPSHOT_BYTES: usize = 1024 * 1024;
-/// Stored rows fetched per query while filling a page.
 const PAGE_CHUNK: usize = 256;
-/// The commit counter on open: ahead of the durable mark, because a reopened
-/// file may hold commits a crashed process never flushed.
 const OPENED_COMMIT: u64 = 1;
+const OPENED_DURABLE: u64 = 0;
+const _: () = assert!(
+    OPENED_COMMIT > OPENED_DURABLE,
+    "a reopened file may hold commits a crashed process never flushed, so its first commit starts ahead of the durable mark"
+);
 #[derive(Clone, Debug)]
 pub struct CiphertextPage {
     pub frames: Vec<EncryptedFrame>,
     pub next: Option<Hash>,
-    /// Requested scopes with pruned history. A receiver compares
-    /// `pruned_page` with what it holds before it relies on this pass.
     pub pruned: Vec<ResourceScope>,
-    /// Void records consuming the positions before the frames.
     pub voids: Vec<SignedVoid>,
 }
 pub(crate) use rocky_core::SecureStamp as Stamp;
@@ -306,9 +290,7 @@ impl From<PublicKey> for AuthorKey {
     }
 }
 
-/// Decoded signed checkpoints by scope number and kind, with their bytes.
 type DecodedCheckpoints = HashMap<(i64, bool), (Vec<u8>, SignedCheckpoint)>;
-/// Canonical row state. Local records and page legends expand to these identities.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Materialized {
     proof: Option<moves::StoredProof>,
@@ -329,7 +311,6 @@ pub(super) struct Materialized {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     created: Option<Stamp>,
 }
-/// A map keyed by commitments, its keys as byte strings.
 mod byte_keys {
     use super::*;
     pub(super) fn serialize<S: serde::Serializer, V: Serialize>(
@@ -351,7 +332,6 @@ mod byte_keys {
             .collect())
     }
 }
-/// Row fields, keys and values as byte strings.
 mod byte_fields {
     use super::*;
     pub(super) fn serialize<S: serde::Serializer>(
@@ -380,30 +360,19 @@ pub(super) struct Inner<A> {
     _owner: Arc<DatabaseOwner>,
     pub(super) conn: Arc<ScopedConnection>,
     pub(super) app: Arc<A>,
-    /// `config.keys` holds the current key of every scope.
     pub(super) config: SecureConfig,
-    /// `config.credentials` with the digest this device's frames name.
     pub(super) chain: Chain,
-    /// Stored chains decoded recently, by digest.
     chains: std::sync::Mutex<HashMap<Commitment, Chain>>,
     crypto: Arc<crypto::Cache>,
     families: rocky_credentials::GrantFamilies,
-    /// The last checkpoint statement decoded per scope number, newest or
-    /// verified, with its bytes.
     decoded_checkpoints: std::sync::Mutex<DecodedCheckpoints>,
-    /// Frontiers of committed history; invalidated before ordinary write attempts.
     tip_frontiers: std::sync::Mutex<frontiers::Frontiers>,
-    /// Blockers per domain; invalidated with the frontiers, after commits
-    /// and by writes to the state they derive from.
     pub(crate) readiness: blockers::Readiness,
     metadata: metadata::Metadata,
     held_refresh: std::sync::Mutex<BTreeMap<ResourceScope, Commitment>>,
     author_sets: std::sync::Mutex<author_sets::Cache>,
     record_dictionary: std::sync::Mutex<records::Dictionary>,
-    /// During a tip statement admission, what each domain's replay ledgers
-    /// were last seeded under.
     seeded_ledgers: std::sync::Mutex<Option<identity::SeededLedgers>>,
-    /// Parsed headers for the scan oracle.
     #[cfg(test)]
     frontier_headers: std::sync::Mutex<tips::StoredHeaders>,
     migration_syntax: std::sync::Mutex<bulk::syntax::StoredDescriptorSyntax>,
@@ -422,122 +391,66 @@ pub(super) struct Inner<A> {
     node_author: Option<identity::NodeAuthor>,
     pub(crate) credential_signer: Option<PrivateKey>,
     partitions: BTreeMap<ResourceScope, rocky_core::PartitionTuple>,
-    /// The naming secret of each registered partition, for offers to peers
-    /// entitled to it.
     pub(crate) partition_names: BTreeMap<ResourceScope, rocky_core::PartitionName>,
-    /// Earlier key epochs, kept to open retained ciphertext.
     pub(super) history: Vec<KeyMaterial>,
     pub(super) manifest: Commitment,
-    /// Shared: readers and rollback snapshots take a reference; only a
-    /// changed graph is copied.
     pub(super) graphs: BTreeMap<rocky_core::Scope, Arc<rocky_credentials::TipGraph>>,
     catalog: BTreeMap<Commitment, rocky_core::ApplicationManifest>,
     path_fields: std::sync::Mutex<BTreeMap<(TipId, TipId), schemas::PathFields>>,
     graph_cache: std::sync::Mutex<tips::GraphCache>,
-    /// The live tables, the tip they hold and their observers.
     pub(super) workspace: workspace::Workspace,
     line_nodes: BTreeMap<TipId, identity::NodeAuthor>,
     pub(super) definition: rocky_core::ApplicationManifest,
-    /// The engine this build replays with; a test stands in another.
     pub(super) engine: rocky_core::EngineIdentity,
     pub(super) tables: HashSet<Commitment>,
     pub(super) fields: HashSet<Commitment>,
     permission_fields: HashSet<Commitment>,
     domains: HashSet<rocky_core::DomainId>,
     pub(super) revision: u64,
-    /// Grows whenever policy, credentials or keys change; sessions opened
-    /// under an earlier value are refused.
     pub(super) authority: u64,
     membership_events: watch::Sender<()>,
     pub(super) authority_events: watch::Sender<u64>,
-    /// The recovery context after the last call that committed or changed
-    /// keys, grants, schemas or the tip graph; see `quarantine_context`.
     recovery_events: watch::Sender<i64>,
-    /// Set while a tip switch rebuilds a scope's rows.
     rebuilding_tip: bool,
-    /// Supplied exclusions wait until the stored projection and L verify,
-    /// then reconcile atomically through learn_revocations before open returns.
     opening_revocations: Option<RevocationSet>,
-    /// During a tip rebuild: the scope's replay base is a seal on the new
-    /// tip's path, so the rebuild starts from it.
     tip_base: bool,
-    /// Set while a staged publication authors its bundles: one atomic
-    /// transaction of any size, so the retained-history bound cannot hold
-    /// it back; later writes wait until it is delivered and pruned.
     publishing: bool,
-    /// This device's grants as last resolved, for the authority, partition
-    /// count and second they were resolved at: resolving the chain against
-    /// every registered partition otherwise repeats for each frame and scope.
     local: std::sync::Mutex<Option<LocalGrants>>,
-    /// Scopes buffered SQL commits wrote, whose maintenance step `maintain`
-    /// runs after the commit answered.
     deferred_maintenance: BTreeSet<ResourceScope>,
-    /// Scopes the owner imports from a checkpoint: peers do not push their
-    /// history, and maintenance waits until the import ends.
     importing: BTreeSet<ResourceScope>,
-    /// Why each pending log head waited when an apply pass last examined it.
     waits: BTreeMap<Hash, WaitReason>,
-    /// Waiting frames by what may end their wait, for incremental passes.
     blocked: incoming::Blocked,
-    /// Operations that settled or got a stub since a pass last looked;
-    /// None once too many to track.
     settled: std::sync::Mutex<Option<BTreeSet<Hash>>>,
     #[cfg(test)]
     pending_attempts: u64,
-    /// Pending log heads waiting for this clock: their author and stamp.
     ahead: BTreeMap<Hash, (PublicKey, u64)>,
-    /// A frame of an earlier key epoch than its scope's current one applied
-    /// since the last scan, and the followed tip that scan saw.
     earlier_epoch: AtomicBool,
     epochs_scanned: Option<TipId>,
-    /// Rows applied frames wrote since open, for apply spans.
     rows_written: AtomicU64,
     frames_written: AtomicU64,
-    /// Pending frames apply passes applied since open.
     applied_frames: u64,
     pending_pass: incoming::PendingPass,
     follow_pass: moves::FollowPass,
     context_epoch: AtomicU64,
-    /// Scopes whose import writes verified pages straight into their rows;
-    /// operations for them wait until the import ends.
     direct: BTreeSet<ResourceScope>,
-    /// Whether a scope may be marked for `rederive_replayed`; cleared only
-    /// after a committed check finds none.
     rederive_marked: bool,
-    /// This device's verified partition selectors for an authority and
-    /// second: every statement of a partitioned schema asks for them.
     local_selectors: std::sync::Mutex<Option<LocalSelectors>>,
     pub(super) notifications: watch::Sender<u64>,
     pub(super) frames: watch::Sender<()>,
-    /// Checkpoint pages stored since open, by any import.
     pub(super) imported: watch::Sender<u64>,
     wal: PathBuf,
-    /// Commits with changes since open. Nothing leaves the device until the
-    /// flusher's durable watermark covers it.
     pub(super) commit: u64,
     pub(super) flusher: Arc<Flusher>,
-    /// The connection's total changes at the last commit, to skip commits
-    /// that changed nothing. Read through the C API: session statements
-    /// shadow the SQL function on this connection.
     changes: u64,
-    /// Passive and truncating checkpoint sizes.
     wal_limits: (u64, u64),
     pub(super) passive: Arc<wal::Passive>,
     pub(super) limits: RetentionLimits,
-    /// The last failure of automatic checkpointing or pruning.
     maintenance_error: Option<String>,
     maintenance: maintenance::Pass,
-    /// When maintenance runs again after a failure, and how many failed.
     maintenance_backoff: Option<(u64, u32)>,
-    /// Commit that made each scope's checkpoint current, by scope number.
     verified_at: BTreeMap<i64, u64>,
-    /// Peers whose credentials and frontiers are kept whatever the bound.
     configured: BTreeSet<PublicKey>,
-    /// When each peer was last served since open, by a growing count; a
-    /// peer not served since open counts as the least recent.
     served: (u64, BTreeMap<rocky_credentials::PeerId, u64>),
-    /// The generation each admitted session peer declared in its hello:
-    /// what it can admit. Chains name none.
     pub(super) peer_tips: BTreeMap<rocky_credentials::PeerId, TipId>,
     #[cfg(test)]
     checkpoint_export_pause: Option<(
@@ -576,48 +489,35 @@ pub(super) struct Inner<A> {
     )>,
     #[cfg(test)]
     stage_fault: Option<(checkpoint::Stage, usize)>,
-    /// The armed crash point and the one that fired.
     #[cfg(any(test, feature = "qualification"))]
     crash: std::sync::Mutex<(Option<CrashPoint>, Option<CrashPoint>)>,
-    /// Fails publication after this step: 1 journaled, 2 committed at
-    /// the coordinator, 3 inside the admission transaction.
     #[cfg(test)]
     publication_fault: Option<u8>,
     #[cfg(test)]
     schema_stage_pause: Option<staging::StagePause>,
     #[cfg(test)]
     plan_fault: bool,
-    /// The stage fault exits the process instead of returning an error.
     #[cfg(test)]
     stage_exit: bool,
-    /// Adopts generations in a domain with a tip graph, which production
-    /// refuses until schema changes are seals.
     #[cfg(test)]
     pub(super) fail_before_commit: usize,
     #[cfg(test)]
     pub(super) fail_sql_commit: bool,
-    /// Authors replayed effects without checking them, as a replica that
-    /// skips its own admission would.
     #[cfg(test)]
     pub(super) unchecked_replayed_admission: bool,
-    /// Tip switches rebuild from the replay base, as without kept seals.
     #[cfg(test)]
     pub(super) rebuild_switches: bool,
-    /// Scopes rebuilt from a kept seal's rows by tip switches.
     #[cfg(test)]
     pub(super) rewound: usize,
     #[cfg(test)]
     pub(super) retry_before_commit: usize,
     #[cfg(test)]
     pub(super) group_fault: Option<group::GroupFault>,
-    /// Pauses the next receive after its early checks, before it queues:
-    /// signals the first sender, then waits for the second.
     #[cfg(test)]
     receive_gate: Option<(
         tokio::sync::oneshot::Sender<()>,
         tokio::sync::oneshot::Receiver<()>,
     )>,
-    /// Frames whose application fails as their own fault, for quarantine.
     #[cfg(test)]
     pub(super) poisoned: BTreeSet<Hash>,
     #[cfg(test)]
@@ -629,9 +529,6 @@ pub(super) struct Inner<A> {
     #[cfg(test)]
     pub(super) busy_hook: Option<Box<dyn FnMut(usize) + Send + Sync>>,
 }
-/// The durable watermark and the device flush that advances it. Shared, so a
-/// group's flush runs after the replica lock is released and readers and the
-/// next group do not wait behind it.
 pub(super) struct Flusher {
     #[cfg(any(test, feature = "qualification"))]
     measurements: LockMeasurements,
@@ -643,7 +540,6 @@ pub(super) struct Flusher {
         )>,
     >,
     wal: PathBuf,
-    /// The last commit known flushed.
     durable: AtomicU64,
     #[cfg(test)]
     path: PathBuf,
@@ -651,13 +547,12 @@ pub(super) struct Flusher {
     flushes: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     failures: std::sync::atomic::AtomicUsize,
-    /// Copies the file at every flush, to simulate losing later commits.
     #[cfg(test)]
     copy: std::sync::Mutex<Option<PathBuf>>,
 }
 impl Flusher {
-    async fn run(self: Arc<Self>, commit: u64) -> Result<(), Error> {
-        if self.durable() >= commit {
+    async fn run(self: Arc<Self>, commit: LockedCommit) -> Result<(), Error> {
+        if self.durable() >= commit.count() {
             #[cfg(feature = "qualification")]
             self.measurements.flush(std::time::Duration::ZERO);
             return Ok(());
@@ -677,12 +572,8 @@ impl Flusher {
     pub(super) fn durable(&self) -> u64 {
         self.durable.load(Ordering::Acquire)
     }
-    /// Makes every commit up to `commit` durable with one full flush of the
-    /// WAL; a no-op when the watermark already covers it. Commits run at
-    /// `synchronous=NORMAL`, so this is the only flush they get. `commit`
-    /// must have been read under the replica lock: whatever it counts is
-    /// then in the WAL before the flush starts.
-    pub(super) fn flush(&self, commit: u64) -> Result<(), Error> {
+    pub(super) fn flush(&self, commit: LockedCommit) -> Result<(), Error> {
+        let commit = commit.count();
         if self.durable() >= commit {
             return Ok(());
         }
@@ -727,8 +618,6 @@ impl Flusher {
         Ok(())
     }
 }
-/// As [`flushed`], for a caller that already relied on the current authority:
-/// a change while the writer was released is a conflict.
 async fn flush_guard<'a, A: RowApplication>(
     inner: Guard<tokio::sync::MutexGuard<'a, Inner<A>>>,
     owner: &'a ReplicaLock<Inner<A>>,
@@ -740,16 +629,13 @@ async fn flush_guard<'a, A: RowApplication>(
     }
     Ok(inner)
 }
-/// Releases the writer while forcing durability. Rechecking the commit after
-/// reacquiring prevents a serving call from including a newer unflushed write.
-/// A caller that reads its authority only afterwards needs no other check.
 async fn flushed<'a, A: RowApplication>(
     mut inner: Guard<tokio::sync::MutexGuard<'a, Inner<A>>>,
     owner: &'a ReplicaLock<Inner<A>>,
 ) -> Result<Guard<tokio::sync::MutexGuard<'a, Inner<A>>>, Error> {
     loop {
-        let (flusher, commit) = (inner.flusher.clone(), inner.commit);
-        if flusher.durable() >= commit {
+        let (flusher, commit) = (inner.flusher.clone(), inner.locked_commit());
+        if flusher.durable() >= commit.count() {
             let context = inner.quarantine_context();
             inner.recovery_events.send_if_modified(|current| {
                 let changed = *current != context;
@@ -763,29 +649,21 @@ async fn flushed<'a, A: RowApplication>(
         inner = owner.lock(Class::Background).await;
     }
 }
-/// A local commit that power loss may still remove. It is durable once
-/// `EncryptedReplica::durable_commit` reaches `commit`; `flush` forces that.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Buffered<T> {
     pub value: T,
     pub commit: u64,
 }
-/// Resolved grants, shared by the callers within one authority and second.
 pub(super) type Grants = Arc<Vec<rocky_core::ResourceGrant>>;
-/// Grants with the authority, partition count and second they hold for.
 type LocalGrants = ((u64, usize, u64), Grants);
 pub(super) type Selectors = Arc<Vec<rocky_credentials::PartitionGrant>>;
 type LocalSelectors = ((u64, u64), Selectors);
 
-/// Encrypted protocol files use an explicit API; trusted files cannot be opened here.
 pub struct EncryptedReplica<A> {
     pub(super) inner: Arc<ReplicaLock<Inner<A>>>,
     queue: Arc<group::Queue>,
     revisions: watch::Receiver<u64>,
-    /// The coordinated log whose terminal entries this trusted node ends
-    /// and acknowledges.
     domain_log: Arc<std::sync::RwLock<Option<Arc<dyn rocky_core::DomainLog>>>>,
-    /// This node's key, fixed at open, so transaction ids need no lock.
     node: PublicKey,
 }
 impl<A> Clone for EncryptedReplica<A> {
@@ -804,8 +682,6 @@ impl<A> EncryptedReplica<A> {
     pub fn lock_measurements(&self) -> LockMeasurements {
         self.inner.measurements()
     }
-    /// Makes this replica a trusted node of a coordinated log: it ends
-    /// tips' logs with their seals and acknowledges their terminal entries.
     pub fn set_domain_log(&self, log: Option<Arc<dyn rocky_core::DomainLog>>) {
         *self
             .domain_log
@@ -819,13 +695,11 @@ impl<A> EncryptedReplica<A> {
             .clone()
     }
 }
-/// A hybrid clock as SQLite stores it; refused above `MAX_CLOCK`.
 pub(super) fn clock_value(clock: u64) -> Result<SqlValue, Error> {
     i64::try_from(clock)
         .map(SqlValue::Integer)
         .map_err(|_| denied("clock beyond its bound"))
 }
-/// A stored hybrid clock.
 pub(super) fn stored_clock(clock: i64) -> Result<u64, Error> {
     u64::try_from(clock).map_err(|_| Error::Corrupt("stored clock".into()))
 }
@@ -879,7 +753,6 @@ fn protocol_schema() -> impl Iterator<Item = String> {
     .chain(positions::triggers())
 }
 
-/// Refuse another persisted format before opening a writer or changing SDK settings.
 pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
     rocky_storage::database::check_file_format(path).await?;
     if !rocky_platform::fs::len(path).is_ok_and(|len| len > 0) {
@@ -1001,8 +874,6 @@ fn config_families(
     rocky_credentials::GrantFamilies::new(manifest, &scopes.into_iter().collect::<Vec<_>>())
         .map_err(credential)
 }
-/// Checks a configuration against its verified manifest: the revocations,
-/// this node's credentials for that manifest, and keys it may read whole.
 fn check_config_with_families(
     config: &SecureConfig,
     manifest: &rocky_core::ApplicationManifest,
@@ -1072,7 +943,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<Self, Error> {
         Self::open_configured(path, app, config.into(), None).await
     }
-    /// Installs an enrollment's authenticated graph and explicit bookmark.
     pub async fn open_following(
         path: impl AsRef<Path>,
         app: A,
@@ -1132,7 +1002,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             #[cfg(any(test, feature = "qualification"))]
             measurements: LockMeasurements::default(),
             wal: wal.clone(),
-            durable: AtomicU64::new(0),
+            durable: AtomicU64::new(OPENED_DURABLE),
             #[cfg(test)]
             path: path.as_ref().to_path_buf(),
             #[cfg(test)]
@@ -1326,7 +1196,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .conn
                     .execute(
                         "INSERT INTO secure_retained VALUES(1,0,0,0,?)",
-                        [checkpoint::Lt::new().to_bytes()],
+                        [checkpoint::LtHash16::new().to_bytes()],
                     )
                     .await?;
                 inner.create_admission_context().await?;
@@ -1506,8 +1376,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .unwrap() = Some((entered, resumed));
         (waiting, resume)
     }
-    /// Wakes after a frame group commits, including keyless custody receipt.
-    /// Duplicate incoming frames do not wake it; exports still require a flush.
     pub async fn observe_frames(&self) -> watch::Receiver<()> {
         self.inner
             .lock(crate::replica::Class::Background)
@@ -1515,7 +1383,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .frames
             .subscribe()
     }
-    /// Wakes when replicated membership evidence commits, without a row revision.
     pub async fn observe_membership(&self) -> watch::Receiver<()> {
         self.inner
             .lock(crate::replica::Class::Background)
@@ -1523,7 +1390,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .membership_events
             .subscribe()
     }
-    /// Ends authority-bound network links without polling.
     pub async fn observe_authority(&self) -> watch::Receiver<u64> {
         self.inner
             .lock(crate::replica::Class::Background)
@@ -1531,8 +1397,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .authority_events
             .subscribe()
     }
-    /// Changes when keys, grants, schemas, the tip graph or the followed
-    /// tip changed: what local recovery and quarantined frames depend on.
     pub async fn observe_recovery(&self) -> watch::Receiver<i64> {
         self.inner
             .lock(crate::replica::Class::Background)
@@ -1540,8 +1404,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .recovery_events
             .subscribe()
     }
-    /// How long until the first received frame waiting for this clock may
-    /// apply; none when no frame waits for it. Local recovery runs then.
     pub async fn clock_wait(&self) -> Result<Option<std::time::Duration>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let Some(stamp) = inner.ahead.values().map(|(_, stamp)| *stamp).min() else {
@@ -1555,8 +1417,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub fn observe_revision(&self) -> watch::Receiver<u64> {
         self.revisions.clone()
     }
-    /// Changes after every stored checkpoint page, so import progress can
-    /// be shown as it moves.
     pub async fn observe_imports(&self) -> watch::Receiver<u64> {
         self.inner
             .lock(crate::replica::Class::Background)
@@ -1564,9 +1424,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .imported
             .subscribe()
     }
-    /// Concurrent calls share one transaction and one flush; each request
-    /// keeps its own savepoint, admission checks and result. The frame may be
-    /// sent anywhere, so it is returned only after it is flushed.
     pub async fn author(
         &self,
         handle: Commitment,
@@ -1584,9 +1441,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             _ => Err(denied("missing authoring result")),
         }
     }
-    /// Authors without waiting for a flush. Only the operation id is returned:
-    /// the frame leaves the device through `author` with the same handle or
-    /// a transfer page, both of which flush first.
     pub async fn author_buffered(
         &self,
         handle: Commitment,
@@ -1625,17 +1479,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .pop()
             .unwrap_or_else(|| Err(denied("missing authoring result")))
     }
-    /// The status may be acknowledged to the sender, so it is returned only
-    /// after the receipt is flushed.
     pub async fn receive(&self, frame: EncryptedFrame) -> Result<ReceiveStatus, Error> {
         self.receive_all(vec![frame])
             .await
             .pop()
             .unwrap_or_else(|| Err(denied("missing receive result")))
     }
-    /// Receives frames that arrived together, such as one transfer page, in
-    /// shared transactions and one flush. Results are in input order; each
-    /// frame is admitted or refused on its own.
     pub async fn receive_all(
         &self,
         frames: Vec<EncryptedFrame>,
@@ -1646,8 +1495,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .map(|result| result.map(|status| status.value))
             .collect()
     }
-    /// Like `receive_all` without the flush. Do not acknowledge these frames
-    /// to their sender before `flush` or `durable_commit` covers `commit`.
     pub async fn receive_buffered(
         &self,
         frames: Vec<EncryptedFrame>,
@@ -1705,7 +1552,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     self.inner
                         .lock(crate::replica::Class::Background)
                         .await
-                        .refuse_no_frames_contradiction(&operation.header)
+                        .refuse_no_frames_contradiction_before_queueing(&operation.header)
                         .await
                 }
                 Err(error) => Err(error),
@@ -1743,15 +1590,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .map(|result| result.unwrap_or_else(|| Err(denied("missing receive result"))))
             .collect()
     }
-    /// Flushes every commit so far with one device flush; returns the
-    /// durable watermark. The flush runs on a blocking thread without the
-    /// replica, so statements and reads proceed meanwhile.
     pub async fn flush(&self) -> Result<u64, Error> {
         let (flusher, commit) = {
             let inner = self.inner.lock(crate::replica::Class::Background).await;
-            (inner.flusher.clone(), inner.commit)
+            (inner.flusher.clone(), inner.locked_commit())
         };
-        if flusher.durable() < commit {
+        if flusher.durable() < commit.count() {
             let flushing = flusher.clone();
             rocky_platform::task::spawn_blocking(move || flushing.flush(commit))
                 .await
@@ -1759,8 +1603,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(flusher.durable())
     }
-    /// Before the last handle closes the file: refreshes the planner's
-    /// statistics where SQLite finds them stale. Best effort.
     pub async fn optimize(&self) {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let _ = inner.conn.execute("PRAGMA optimize", ()).await;
@@ -1768,9 +1610,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         drop(inner);
         passive.wait().await;
     }
-    /// Runs maintenance queued by SQL commits: one bounded checkpoint or
-    /// pruning step for their scopes, and a WAL checkpoint when due. Returns
-    /// false, leaving work queued, if a newer commit still needs flushing.
     pub async fn maintain(&self) -> bool {
         loop {
             let mut inner = self.inner.lock(Class::Background).await;
@@ -1803,15 +1642,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         }
     }
-    /// Names the scopes the owner is about to import from a checkpoint,
-    /// replacing the previous set. A scope with a staged import counts too.
     pub async fn set_importing(&self, scopes: BTreeSet<ResourceScope>) {
         self.inner
             .lock(crate::replica::Class::Background)
             .await
             .importing = scopes;
     }
-    /// The last commit known to survive power loss.
     pub async fn durable_commit(&self) -> u64 {
         self.inner
             .lock(crate::replica::Class::Background)
@@ -1864,9 +1700,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.history.retain(|key| key.scope != scope);
         inner.bump_authority();
     }
-    /// Whether a mutation handle committed, whatever its writes were. A
-    /// caller that lost a commit's answer checks this before planning the
-    /// writes again. Handles are retained as `RetentionLimits` describes.
     pub async fn handle_committed(&self, handle: Commitment) -> Result<bool, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut result = inner
@@ -1878,16 +1711,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await?;
         Ok(result.next().await?.is_some())
     }
-    /// Flushes first: the status may be acknowledged to the sender.
     pub async fn receipt_status(&self, id: Hash) -> Result<ReceiveStatus, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner = flushed(inner, &self.inner).await?;
         inner.status(id).await
     }
-    /// Merges `revocations` into the set this replica holds: the union of
-    /// the statements that verify, never a refusal for order or overlap. A
-    /// statement that fails verification refuses the whole set and changes
-    /// nothing. Returns the statements it added.
     pub async fn learn_revocations(
         &self,
         revocations: &RevocationSet,
@@ -1898,12 +1726,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.settle().await?;
         Ok(added)
     }
-    /// Signs and merges an owner reset under one lock: its fence is this
-    /// replica's applied prefix of every log of a writer it does not keep,
-    /// so no operation of an ended writer applies here past the fence.
-    /// `sign` sees the held set, which the reset follows and is checked
-    /// against. Nothing is recorded when signing fails, or when the reset
-    /// would end this replica's own credentials.
     pub async fn install_reset<E: From<Error> + From<ResetEndsSigner>>(
         &self,
         keep: &BTreeSet<PeerId>,
@@ -1932,10 +1754,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.settle().await?;
         Ok(signed)
     }
-    /// Merges the statements a session peer sent, except those that revoke
-    /// `own`, this device's chain: a replica never holds a statement that
-    /// revokes itself, which its owner records instead. Returns the first
-    /// of them, verified, if one came.
     pub(crate) async fn learn_session_revocations(
         &self,
         statements: Vec<SignedRevocation>,
@@ -1983,7 +1801,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(revoking)
     }
-    /// The revocations this replica holds.
     pub async fn revocations(&self) -> RevocationSet {
         self.inner
             .lock(crate::replica::Class::Background)
@@ -1992,7 +1809,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .revocations
             .clone()
     }
-    /// The digest of the live revocations, which a session hello carries.
     pub async fn revocation_digest(&self) -> Result<Commitment, Error> {
         self.inner
             .lock(crate::replica::Class::Background)
@@ -2029,8 +1845,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await
             .group_fault = fault;
     }
-    /// Pauses the next receive after its early checks; returns a signal that
-    /// it reached the pause and the sender that resumes it.
     #[cfg(test)]
     pub(crate) async fn gate_next_receive(
         &self,
@@ -2129,7 +1943,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 impl<A: RowApplication> Inner<A> {
-    /// The digest of the live revocations this replica holds.
     pub(crate) fn revocation_digest(&self) -> Result<Commitment, Error> {
         self.config.revocations.digest(now()?).map_err(credential)
     }
@@ -2153,8 +1966,6 @@ impl<A: RowApplication> Inner<A> {
         *local = Some((key, grants.clone()));
         Ok(grants)
     }
-    /// This device's partition selectors under its current credentials,
-    /// verified once per authority and second like `local_grants`.
     pub(super) fn local_selectors(&self, time: u64) -> Result<Selectors, Error> {
         let key = (self.authority, time);
         let mut local = self
@@ -2257,8 +2068,6 @@ impl<A: RowApplication> Inner<A> {
         }
         self.verify_header_authority(&operation.header, frame.chain()?.credentials(), time)
     }
-    /// The write authority a frame was admitted with: its chain at its own
-    /// time, unaffected by later revocations and expiry.
     pub(super) fn historical_frame_authority(
         &self,
         frame: &EncryptedFrame,
@@ -2271,8 +2080,6 @@ impl<A: RowApplication> Inner<A> {
             header.timestamp / 1_000_000,
         )
     }
-    /// A signed row header's write authority under `credentials`, the chain
-    /// its digest names, against the current revocations.
     pub(super) fn verify_header_authority(
         &self,
         header: &p2panda_core::Header<Extensions>,
@@ -2281,10 +2088,6 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         self.header_authority(header, credentials, self.header_revocations(header), time)
     }
-    /// The revocations that judge an operation: an owner reset's fence keeps
-    /// the covered operations of a writer it ends, which every other
-    /// statement still judges; any other operation of that writer stays
-    /// refused with the whole set.
     pub(super) fn header_revocations(
         &self,
         header: &p2panda_core::Header<Extensions>,
@@ -2301,9 +2104,6 @@ impl<A: RowApplication> Inner<A> {
             }
         }
     }
-    /// A placed header's authority. A partition this replica has not
-    /// registered is one it cannot recognize; its header shows only that
-    /// the author may write some partition of the table.
     pub(super) fn placement_authority(
         &self,
         header: &p2panda_core::Header<Extensions>,
@@ -2459,8 +2259,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(Some(self.frame(hash).await?.ok_or(hash)))
     }
-    /// Backpressure once retained history reaches the hard bound; automatic
-    /// checkpointing and pruning start at the soft bound and make room.
     async fn check_budget(&self, incoming: usize) -> Result<(), Error> {
         if self.publishing {
             return Ok(());
@@ -2477,8 +2275,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Counts a committed write transaction for the durable watermark. An
-    /// unreadable counter is treated as a change.
     pub(super) async fn note_commit(&mut self) {
         match self.conn.connection().total_changes() {
             Ok(total) if total == self.changes => {}
@@ -2493,9 +2289,8 @@ impl<A: RowApplication> Inner<A> {
     }
     #[cfg(test)]
     pub(crate) fn flush(&mut self) -> Result<(), Error> {
-        self.flusher.flush(self.commit)
+        self.flusher.flush(self.locked_commit())
     }
-    /// Adopts the committed revision; observers are woken only by a change.
     pub(super) async fn publish_revision(&mut self) -> Result<(), Error> {
         let revision = self.stored_revision().await?;
         self.revision = revision;
@@ -2507,12 +2302,9 @@ impl<A: RowApplication> Inner<A> {
         self.announce();
         Ok(())
     }
-    /// The replica's file.
     pub(super) fn path(&self) -> &Path {
         self._owner.path()
     }
-    /// Checks the file identity and defers new exclusions until its stored
-    /// state has verified under the retained revocations.
     async fn load_revocations(
         &mut self,
         supplied: &RevocationSet,
@@ -2564,49 +2356,61 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-/// Commits run at `synchronous=NORMAL`; `Inner::flush` makes them durable
-/// before anything leaves the device. Flushes and checkpoints use the full
-/// device flush. Foreign keys are enforced for typed tables; Rocky's own
-/// tables declare none. Checkpoints run between groups and a busy file is
-/// retried by the replica, not by SQLite, so automatic checkpoints and the
-/// busy timeout are off. Verified at open.
+enum PragmaValue {
+    Text(&'static str),
+    Integer(i64),
+}
+impl PragmaValue {
+    fn sql(&self) -> SqlValue {
+        match self {
+            Self::Text(text) => SqlValue::Text((*text).into()),
+            Self::Integer(value) => SqlValue::Integer(*value),
+        }
+    }
+}
+type CheckedPragma = (&'static str, &'static str, PragmaValue);
+const COMMITS_BUFFERED_UNTIL_A_FULL_DEVICE_FLUSH: [CheckedPragma; 4] = [
+    (
+        "PRAGMA journal_mode=wal",
+        "PRAGMA journal_mode",
+        PragmaValue::Text("wal"),
+    ),
+    (
+        "PRAGMA synchronous=NORMAL",
+        "PRAGMA synchronous",
+        PragmaValue::Integer(1),
+    ),
+    (
+        "PRAGMA fullfsync=1",
+        "PRAGMA fullfsync",
+        PragmaValue::Integer(1),
+    ),
+    (
+        "PRAGMA checkpoint_fullfsync=1",
+        "PRAGMA checkpoint_fullfsync",
+        PragmaValue::Integer(1),
+    ),
+];
+const TYPED_TABLE_FOREIGN_KEYS_ENFORCED: (&str, &str) =
+    ("PRAGMA foreign_keys=ON", "PRAGMA foreign_keys");
+const REPLICA_OWNS_WAL_CHECKPOINTS_AND_BUSY_RETRIES: [(&str, &str); 2] = [
+    ("PRAGMA wal_autocheckpoint=0", "PRAGMA wal_autocheckpoint"),
+    ("PRAGMA busy_timeout=0", "PRAGMA busy_timeout"),
+];
 async fn configure(conn: &ScopedConnection) -> Result<(), Error> {
-    let durability = [
-        (
-            "PRAGMA journal_mode=wal",
-            "PRAGMA journal_mode",
-            SqlValue::Text("wal".into()),
-        ),
-        (
-            "PRAGMA synchronous=NORMAL",
-            "PRAGMA synchronous",
-            SqlValue::Integer(1),
-        ),
-        (
-            "PRAGMA fullfsync=1",
-            "PRAGMA fullfsync",
-            SqlValue::Integer(1),
-        ),
-        (
-            "PRAGMA checkpoint_fullfsync=1",
-            "PRAGMA checkpoint_fullfsync",
-            SqlValue::Integer(1),
-        ),
-    ];
-    for (set, read, expected) in durability {
+    for (set, read, expected) in &COMMITS_BUFFERED_UNTIL_A_FULL_DEVICE_FLUSH {
+        let expected = expected.sql();
         rows(conn, set).await?;
         if rows(conn, read).await? != vec![vec![expected.clone()]] {
             return Err(Error::Durability(format!("{read} is not {expected:?}")));
         }
     }
-    rows(conn, "PRAGMA foreign_keys=ON").await?;
-    if rows(conn, "PRAGMA foreign_keys").await? != vec![vec![SqlValue::Integer(1)]] {
+    let (set, read) = TYPED_TABLE_FOREIGN_KEYS_ENFORCED;
+    rows(conn, set).await?;
+    if rows(conn, read).await? != vec![vec![SqlValue::Integer(1)]] {
         return Err(Error::Incompatible("foreign keys are not enforced".into()));
     }
-    for (set, read) in [
-        ("PRAGMA wal_autocheckpoint=0", "PRAGMA wal_autocheckpoint"),
-        ("PRAGMA busy_timeout=0", "PRAGMA busy_timeout"),
-    ] {
+    for (set, read) in REPLICA_OWNS_WAL_CHECKPOINTS_AND_BUSY_RETRIES {
         rows(conn, set).await?;
         if rows(conn, read).await? != vec![vec![SqlValue::Integer(0)]] {
             return Err(Error::Incompatible(format!("{read} is not 0")));
@@ -2623,7 +2427,6 @@ async fn configure(conn: &ScopedConnection) -> Result<(), Error> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Merges `revocations` into the held set inside one commit; the caller settles.
     async fn merge_revocations(
         &mut self,
         revocations: &RevocationSet,

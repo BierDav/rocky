@@ -1,4 +1,3 @@
-//! An unrelated exact source definition is acquired through the normal catalog API.
 use super::super::generations::identity_insert;
 use super::*;
 use rocky_core::RowApplication;

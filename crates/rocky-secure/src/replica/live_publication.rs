@@ -1,4 +1,3 @@
-//! Captured export and final durable-state inspection for live publications.
 use super::*;
 
 pub(crate) struct PublicationExport {
@@ -158,7 +157,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     escrow,
                     members,
                 },
-                inner.commit,
+                inner.locked_commit(),
                 inner.flusher.clone(),
             )
         };
@@ -181,8 +180,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     return Err(denied("publication changed during preflight"));
                 }
             }
-            inner.offer(ids).await?;
-            (inner.commit, inner.flusher.clone())
+            inner.record_offered_before_sending(ids).await?;
+            (inner.locked_commit(), inner.flusher.clone())
         };
         flusher.run(commit).await
     }

@@ -1,119 +1,81 @@
-//! Envelope delivery between two admitted peers: the dialer hands over what
-//! it holds for the acceptor, deposits envelopes for others with a mailbox,
-//! then collects what the acceptor holds for it and returns receipts. The
-//! session carries opaque sealed deliveries; their owner implements
-//! `Deliveries`.
 use super::*;
 use rocky_credentials::{DeliveryReceipt, SealedDelivery};
 use std::{future::Future, pin::Pin};
 
-/// Bytes of deliveries one message carries: the session's array encoding of
-/// message bytes doubles them, inside one 256 KiB frame.
 pub const DELIVERY_PAGE: usize = 96 * 1024;
-/// Deliveries or receipts one message carries.
 const MAX_ITEMS: usize = 256;
-/// Collect rounds one session runs.
 const MAX_ROUNDS: usize = 64;
 const MAX_REFUSAL: usize = 256;
 
 pub type DeliveryFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'a>>;
 
-/// What the dialer hands one peer: deliveries addressed to that peer, and
-/// deposits for other recipients when the peer is a mailbox.
 #[derive(Default)]
 pub struct Outgoing {
     pub direct: Vec<SealedDelivery>,
     pub deposits: Vec<SealedDelivery>,
 }
-/// What one side holds for a collecting peer: deliveries addressed to it,
-/// and the receipts of deposits it made.
 #[derive(Default)]
 pub struct Held {
     pub deliveries: Vec<SealedDelivery>,
     pub receipts: Vec<DeliveryReceipt>,
-    /// More is held than fit this page.
     pub more: bool,
 }
-/// What one delivery round moved, as the dialer saw it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Delivered {
-    /// Deliveries the peer acknowledged.
     pub handed: usize,
-    /// Deposits the mailbox stored.
     pub deposited: usize,
-    /// Deposits the mailbox refused; the sender keeps them.
     pub refused: usize,
-    /// Deliveries received from the peer.
     pub received: usize,
-    /// Receipts of this side's deposits the mailbox returned.
     pub receipts: usize,
 }
 
-/// The owner of delivery state: a sender's pending envelopes, a recipient's
-/// installation and a mailbox's deposits. Every call names the session's
-/// authenticated peer; the owner decides what that peer may hand or take.
 pub trait Deliveries: Send + Sync {
-    /// What this side hands `peer`, whose verified chain is `chain`.
     fn outgoing<'a>(
         &'a self,
         peer: PublicKey,
         chain: &'a CredentialChain,
     ) -> DeliveryFuture<'a, Outgoing>;
-    /// Installs what `peer` handed over, returning a receipt for each
-    /// delivery now held here, installed before or not.
     fn receive(
         &self,
         peer: PublicKey,
         deliveries: Vec<SealedDelivery>,
     ) -> DeliveryFuture<'_, Vec<DeliveryReceipt>>;
-    /// Holds `peer`'s deposits for other recipients, as a mailbox: a
-    /// refusal for each one not stored.
     fn deposit<'a>(
         &'a self,
         peer: PublicKey,
         chain: &'a CredentialChain,
         deposits: Vec<SealedDelivery>,
     ) -> DeliveryFuture<'a, Vec<Option<String>>>;
-    /// The mailbox `peer` stored these deposits.
     fn deposited(&self, peer: PublicKey, stored: Vec<Commitment>) -> DeliveryFuture<'_, ()>;
-    /// What this side holds for `peer`, at most about `budget` bytes.
     fn held(&self, peer: PublicKey, budget: usize) -> DeliveryFuture<'_, Held>;
-    /// Receipts `peer` returned, signed by each recipient: for deliveries
-    /// this side handed over, or deposits it holds as a mailbox.
     fn acknowledged(
         &self,
         peer: PublicKey,
         receipts: Vec<DeliveryReceipt>,
     ) -> DeliveryFuture<'_, ()>;
-    /// `peer` keeps the receipts of its deposits: the mailbox forgets them.
     fn forget(&self, peer: PublicKey, digests: Vec<Commitment>) -> DeliveryFuture<'_, ()>;
 }
 
 #[derive(Serialize, Deserialize)]
 pub(super) enum DeliveryMessage {
-    /// Deliveries addressed to the receiving side.
     Hand {
         deliveries: Vec<Blob>,
     },
     Receipts {
         receipts: Vec<Blob>,
     },
-    /// Deliveries for other recipients, for a mailbox to hold.
     Deposit {
         deliveries: Vec<Blob>,
     },
     Deposited {
         refusals: Vec<Option<String>>,
     },
-    /// Asks what the receiving side holds for the sender.
     Collect,
     Collected {
         deliveries: Vec<Blob>,
         receipts: Vec<Blob>,
         more: bool,
     },
-    /// Receipts of collected deliveries, and the digests of collected
-    /// receipts the collector now keeps.
     Taken {
         receipts: Vec<Blob>,
         #[serde(with = "serde_bytes")]
@@ -150,8 +112,6 @@ fn receipts(blobs: Vec<Blob>) -> Result<Vec<DeliveryReceipt>, Error> {
         .map(|Blob(bytes)| DeliveryReceipt::from_bytes(&bytes).map_err(credential))
         .collect()
 }
-/// Pages of at most `DELIVERY_PAGE` bytes and `MAX_ITEMS` deliveries; a
-/// larger delivery travels alone.
 fn pages(items: Vec<SealedDelivery>) -> Result<Vec<Vec<SealedDelivery>>, Error> {
     let mut pages: Vec<Vec<SealedDelivery>> = Vec::new();
     let mut bytes = 0;
@@ -172,8 +132,6 @@ fn pages(items: Vec<SealedDelivery>) -> Result<Vec<Vec<SealedDelivery>>, Error> 
 }
 
 impl NativeSession {
-    /// Serves every family until the peer ends the session: deliveries
-    /// from their owner, and contact metadata through `handler`.
     pub async fn serve_all<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -194,7 +152,6 @@ impl NativeSession {
                 .await?;
         }
     }
-    /// One delivery round with the acceptor: hand over, deposit, collect.
     pub async fn deliver(&mut self, port: &dyn Deliveries) -> Result<Delivered, Error> {
         let mut report = Delivered::default();
         let outgoing = port.outgoing(self.peer, &self.credentials).await?;
@@ -321,6 +278,53 @@ impl NativeSession {
             DeliveryMessage::Receipts { .. }
             | DeliveryMessage::Deposited { .. }
             | DeliveryMessage::Collected { .. } => Err(denied("unexpected delivery request")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+
+    fn delivery(bytes: usize) -> SealedDelivery {
+        SealedDelivery::seal(PrivateKey::new().public_key(), &vec![7; bytes]).unwrap()
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn delivery_pages_bound_bytes_and_items_and_an_oversized_delivery_travels_alone() {
+        let small: Vec<_> = (0..MAX_ITEMS + 1).map(|_| delivery(1)).collect();
+        let sizes: Vec<_> = pages(small).unwrap().iter().map(Vec::len).collect();
+        assert_eq!(sizes, [MAX_ITEMS, 1]);
+
+        let large = delivery(DELIVERY_PAGE + 1);
+        let pages = pages(vec![delivery(1), large, delivery(1)]).unwrap();
+        let sizes: Vec<_> = pages.iter().map(Vec::len).collect();
+        assert_eq!(sizes, [1, 1, 1]);
+        for page in &pages[..2] {
+            let bytes: usize = page.iter().map(SealedDelivery::payload_len).sum();
+            assert!(page.len() == 1 || bytes <= DELIVERY_PAGE);
+        }
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_full_delivery_page_fits_one_signed_frame() {
+        let many_small = (0..MAX_ITEMS)
+            .map(|_| delivery(DELIVERY_PAGE / MAX_ITEMS))
+            .collect();
+        let one_whole = vec![delivery(DELIVERY_PAGE)];
+        for items in [many_small, one_whole] {
+            let pages = pages(items).unwrap();
+            assert_eq!(pages.len(), 1);
+            for page in pages {
+                let deliveries = blobs(&page, SealedDelivery::to_bytes).unwrap();
+                crate::network::budgets::fits_one_frame(
+                    DeliveryMessage::Hand { deliveries }.into(),
+                );
+                let deliveries = blobs(&page, SealedDelivery::to_bytes).unwrap();
+                crate::network::budgets::fits_one_frame(
+                    DeliveryMessage::Deposit { deliveries }.into(),
+                );
+            }
         }
     }
 }

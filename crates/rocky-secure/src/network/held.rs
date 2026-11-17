@@ -1,4 +1,3 @@
-//! Held-change exchange carries each original author's encrypted frames.
 use super::*;
 
 #[derive(Serialize, Deserialize)]
@@ -25,8 +24,6 @@ pub(super) enum HeldMessage {
 }
 
 impl NativeSession {
-    /// Exchanges original held frames in both directions, across tips.
-    /// Returns whether another session is needed to finish the exchange.
     pub async fn sync_held_changes<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -61,7 +58,7 @@ impl NativeSession {
         }
         let mut after = None;
         loop {
-            if self.low(MAX_SECURE_FRAME) {
+            if self.budget_low(MAX_SECURE_FRAME) {
                 return Ok(true);
             }
             let (_, next) = self.pull_held_page(replica, scope, after, quota).await?;
@@ -72,7 +69,7 @@ impl NativeSession {
         }
         after = None;
         loop {
-            if self.low(MAX_SECURE_FRAME) {
+            if self.budget_low(MAX_SECURE_FRAME) {
                 return Ok(true);
             }
             let (_, next) = self.push_held_page(replica, scope, after, quota).await?;
@@ -84,7 +81,6 @@ impl NativeSession {
         Ok(false)
     }
 
-    /// Pulls one held-change page, regardless of the peers' followed tips.
     pub async fn pull_held_page<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -123,7 +119,6 @@ impl NativeSession {
         Ok((count, next))
     }
 
-    /// Pushes one locally held page and returns the cursor after it.
     pub async fn push_held_page<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,

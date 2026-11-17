@@ -1,7 +1,5 @@
-//! Blockers name every reason a scope waits, and refusals carry them.
 use crate::{Blocker, BlockerKind, ClearsBy, Error};
 
-/// The blocker of `scope` whose kind `kind` accepts, if any.
 pub(crate) fn named<'a>(
     blockers: &'a [Blocker],
     scope: &str,
@@ -11,7 +9,6 @@ pub(crate) fn named<'a>(
         .iter()
         .find(|blocker| blocker.scope == scope && kind(&blocker.kind))
 }
-/// Asserts `blockers` names `scope` with a matching kind cleared by `clears_by`.
 pub(crate) fn assert_named(
     blockers: &[Blocker],
     scope: &str,
@@ -24,7 +21,6 @@ pub(crate) fn assert_named(
         "{scope} {clears_by:?} in {blockers:?}"
     );
 }
-/// The blockers a refusal carries.
 pub(crate) fn refused<T>(result: Result<T, Error>) -> Vec<Blocker> {
     match result {
         Err(Error::Blocked(blockers)) => blockers,

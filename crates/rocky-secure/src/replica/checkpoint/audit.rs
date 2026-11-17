@@ -1,16 +1,10 @@
-//! Open-time verification of the retained suffix and the explicit full audit.
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuditReport {
-    /// Retained operations of the scope whose signatures and bindings verified.
     pub operations: u64,
-    /// Stored rows compared with the scope's digest, or a replayed scope's
-    /// table rows; zero without the key.
     pub rows: u64,
-    /// The verified checkpoint the stored rows were checked against.
     pub checkpoint: Option<Commitment>,
-    /// Applied operations after it that were replayed.
     pub replayed: u64,
 }
 
@@ -19,8 +13,6 @@ fn mismatch() -> Error {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Streams the stored rows of one table and scope into their digest.
-    /// With `stubs`, every row's creation operation must still be known.
     async fn row_sets(
         &self,
         sql: &str,
@@ -81,9 +73,6 @@ impl<A: RowApplication> Inner<A> {
             }
         }
     }
-    /// Verifies every keyed scope's operations after its checkpoint. History
-    /// a verified checkpoint covers is left to `audit`; the key records are
-    /// checked by `adopt_keys` before.
     pub(in crate::replica) async fn verify_open(&mut self) -> Result<(), Error> {
         if !rows(&self.conn, "SELECT 1 FROM secure_row_positions p LEFT JOIN secure_applied a ON a.position=p.position WHERE a.position IS NULL OR a.scope<>p.scope UNION ALL SELECT 1 FROM secure_birth_positions p LEFT JOIN secure_applied a ON a.position=p.position WHERE a.position IS NULL OR a.scope<>p.scope LIMIT 1").await?.is_empty() {
             return Err(Error::Corrupt("orphaned row or birth position".into()));
@@ -106,8 +95,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Replays scope `id`'s applied operations after `cursor` over `sets`
-    /// into the scratch overlay.
     async fn audit_replay(
         &mut self,
         scope: ResourceScope,
@@ -117,7 +104,7 @@ impl<A: RowApplication> Inner<A> {
         mut ledger: identity::IdentityLedger,
     ) -> Result<Sets, Error> {
         loop {
-            let (last, next, marks) = transaction!(@commit self, |inner| {
+            let (last, next, marks) = transaction!(@without_wal_checkpoint self, |inner| {
                 let mut next = sets.clone();
                 let mut marks = ledger.clone();
                 let last = inner
@@ -158,7 +145,7 @@ impl<A: RowApplication> Inner<A> {
         let Some(fields) = self.staged_row_fields(scope.domain).await? else {
             return Ok((sets, false));
         };
-        let sets = transaction!(@commit self, |inner| {
+        let sets = transaction!(@without_wal_checkpoint self, |inner| {
             inner.transform_audit_overlay(scope,id,&fields).await
         })?;
         #[cfg(test)]
@@ -213,8 +200,6 @@ impl<A: RowApplication> Inner<A> {
             SqlValue::Integer(id), None,
         ).await
     }
-    /// `verify_tail` for a replayed scope: its base rows match the signed
-    /// checkpoint. The audit's rebuild oracle checks the rows replayed on top.
     async fn verify_replayed_tail(
         &self,
         scope: ResourceScope,
@@ -248,9 +233,6 @@ impl<A: RowApplication> Inner<A> {
             _ => Err(Error::Corrupt("applied positions".into())),
         }
     }
-    /// Replays the applied operations after the scope's verified checkpoint
-    /// over it and compares the result with the stored rows. Returns the
-    /// checkpoint and the operations replayed.
     async fn verify_tail(
         &mut self,
         scope: ResourceScope,
@@ -287,7 +269,7 @@ impl<A: RowApplication> Inner<A> {
         let clear = "DELETE FROM secure_checkpoint_scratch WHERE scope=?";
         let (rebuilding, based) = (self.rebuilding_tip, self.tip_base);
         let verified = async {
-        sets = transaction!(@commit self, |inner| {
+        sets = transaction!(@without_wal_checkpoint self, |inner| {
             inner.conn.execute(clear, [id]).await?;
             inner.prime_path_base(scope, id, Overlay::Scratch, inner.workspace.tip, sets.clone()).await
         })?;
@@ -335,7 +317,7 @@ impl<A: RowApplication> Inner<A> {
         Ok((signed, replayed))
         }.await;
         (self.rebuilding_tip, self.tip_base) = (rebuilding, based);
-        let cleanup = transaction!(@commit self, |inner| {
+        let cleanup = transaction!(@without_wal_checkpoint self, |inner| {
             inner.conn.execute(clear, [id]).await?;
             Ok(())
         });
@@ -344,7 +326,6 @@ impl<A: RowApplication> Inner<A> {
             Ok(report) => cleanup.map(|()| report),
         }
     }
-    /// Verifies every retained operation of a scope in batches.
     async fn audit_operations(&self, scope: ResourceScope, id: Option<i64>) -> Result<u64, Error> {
         let mut cursor = Vec::new();
         let mut count = 0;
@@ -534,7 +515,7 @@ impl<A: RowApplication> Inner<A> {
         if counters != vec![vec![SqlValue::Integer(1)]] {
             return Err(Error::Corrupt("retained history counters".into()));
         }
-        let mut handles = Lt::new();
+        let mut handles = LtHash16::new();
         let mut cursor = Vec::new();
         loop {
             let chunk = collect_rows(
@@ -634,8 +615,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Fresh verification of retained history and global admission evidence,
-    /// plus keyed rows, base and suffix replay. Holds the replica lock throughout.
     pub async fn audit(&self, scope: ResourceScope) -> Result<AuditReport, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.invalidate_records();
@@ -651,8 +630,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         (inner.rebuilding_tip, inner.tip_base)
     }
 
-    /// Fixture-only composition of the production checks under one guard.
-    /// Keyless/unknown slots retain the single audit's partial report meaning.
     #[cfg(any(test, feature = "qualification"))]
     #[doc(hidden)]
     pub async fn audit_scopes(

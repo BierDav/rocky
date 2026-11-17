@@ -1,46 +1,24 @@
-//! Crash points of qualification builds: an armed point fails the step that
-//! reaches it inside its transaction, or right after its commit, as a
-//! process death there would interrupt it. The caller then drops the
-//! replica without closing it.
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CrashPoint {
-    /// After ciphertext, before carried escrow commits.
     Custody,
-    /// A checkpoint page import, before its transaction commits.
     Import,
-    /// Switching a scope to an imported checkpoint.
     Switch,
-    /// One pruning step.
     Prune,
-    /// Compacting at a seal.
     Compact,
-    /// A base digest step, before its cursor commits.
     BasePrepare,
-    /// A base digest step, after its cursor committed.
     BasePrepared,
-    /// After the checkpoint and base selector committed.
     BasePublished,
-    /// A retired base cleanup step, before commit.
     BaseCleanup,
-    /// After a retired base cleanup step committed.
     BaseCleaned,
-    /// Settling a seal rebootstrap.
     Settle,
-    /// Evicting a scope.
     Evict,
-    /// A group commit, before it commits.
     GroupBeforeCommit,
-    /// A group commit, after it committed and before anyone hears of it.
     GroupAfterCommit,
-    /// Replaying a received transaction's intents, before its commit.
     Apply,
-    /// Rewinding applied transactions through their undo records.
     Rewind,
-    /// Between transactions redone after a rewind.
     Redo,
-    /// Deleting undo records a seal covers.
     UndoDeletion,
 }
 impl CrashPoint {
@@ -64,7 +42,6 @@ impl CrashPoint {
         Self::Redo,
         Self::UndoDeletion,
     ];
-    /// The points of replayed tables.
     pub const REPLAY: [Self; 4] = [Self::Apply, Self::Rewind, Self::Redo, Self::UndoDeletion];
     pub(super) fn stage(self) -> Option<checkpoint::Stage> {
         use checkpoint::Stage;
@@ -92,7 +69,6 @@ impl CrashPoint {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Arms `point` for the next step that reaches it; `None` disarms.
     pub async fn arm_crash(&self, point: Option<CrashPoint>) {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         *inner
@@ -100,7 +76,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = (point, None);
     }
-    /// The armed point that fired since it was armed.
     pub async fn crashed(&self) -> Option<CrashPoint> {
         self.inner
             .lock(crate::replica::Class::Background)
@@ -113,7 +88,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Fails once at the armed point.
     pub(super) fn crash_at(&self, point: impl Fn(CrashPoint) -> bool) -> Result<(), Error> {
         let mut crash = self
             .crash
@@ -129,8 +103,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-/// Exits without destructors at the point `ROCKY_SQL_KILL_AT` names, so
-/// SQLite must recover the pending WAL or transaction on the next open.
 #[cfg(feature = "qualification")]
 pub(super) fn qualification_kill(point: &str) {
     if std::env::var("ROCKY_SQL_KILL_AT").is_ok_and(|selected| selected == point) {

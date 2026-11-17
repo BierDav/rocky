@@ -1,7 +1,6 @@
 use super::*;
 use crate::network::{PublicationOutcome, link};
 
-/// Exceeds 64 KiB only together with the parameter copy in the signed SQL intent.
 const TITLE_BYTES_DOUBLED_BY_THE_SIGNED_INTENT: usize = 36 * 1024;
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

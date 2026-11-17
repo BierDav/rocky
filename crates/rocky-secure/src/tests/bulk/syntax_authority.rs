@@ -1,4 +1,3 @@
-//! A warm syntax fact never supplies time, revocation or signature authority.
 use super::syntax::*;
 use super::*;
 

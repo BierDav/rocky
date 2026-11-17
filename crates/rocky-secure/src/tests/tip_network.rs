@@ -1,4 +1,3 @@
-//! Tip graphs are admitted independently of row subscriptions and tip selection.
 use super::*;
 use rocky_credentials::{
     AuthorMark, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, SEAL_FORMAT, SealAction,
@@ -148,8 +147,6 @@ async fn an_existing_link_refreshes_graph_pages_and_both_followed_tip_claims() {
     );
 }
 
-/// A seal digest starting at or above this byte sorts late enough that its
-/// dependents cheaply precede it in digest order.
 const LATE_DIGEST_FIRST_BYTE: u8 = 192;
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

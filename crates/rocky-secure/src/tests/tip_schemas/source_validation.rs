@@ -1,4 +1,3 @@
-//! Resealing a held original and the statements that close its line.
 use super::*;
 use crate::wire::{Chain, RowPayload};
 

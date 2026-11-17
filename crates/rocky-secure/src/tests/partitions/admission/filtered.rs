@@ -1,4 +1,3 @@
-//! A replayed partition after an additive schema switch.
 use super::*;
 use rocky_core::TipId;
 use rocky_credentials::{

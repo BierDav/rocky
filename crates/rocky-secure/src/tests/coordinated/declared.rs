@@ -1,11 +1,3 @@
-//! The owner's database settings naming its coordinator: a node without
-//! that coordinator's log then refuses to seal; every owner-signed
-//! revision is admitted and resolves alike in every order, while the
-//! owner's devices refuse to sign one that uncoordinates the database or
-//! changes its coordinator; only the named coordinator's finality counts; a
-//! seal its finality record proves enters every graph without the
-//! coordinator; and a node keeps at most one seal of a tip waiting for its
-//! log.
 use super::seals::{bookmark, seal, share};
 use super::*;
 use crate::TipStatement;
@@ -38,7 +30,6 @@ pub(super) fn settings(
         .unwrap(),
     )
 }
-/// The owner's settings naming `log` as the database's coordinator.
 pub(super) fn coordinated_by(lineage: &Lineage, revision: u64, log: &MemoryLog) -> TipStatement {
     settings(
         lineage,
@@ -48,8 +39,6 @@ pub(super) fn coordinated_by(lineage: &Lineage, revision: u64, log: &MemoryLog) 
         },
     )
 }
-/// `main` on genesis with a signed minimum of 1, followed by alice and
-/// bob; neither has a coordinated log yet.
 pub(super) async fn follow_main_uncomposed(fixture: &Fixture) {
     let (alice, bob) = (&fixture.alice.1, &fixture.bob.1);
     let line = TipStatement::GenesisLine(
@@ -190,10 +179,6 @@ async fn a_node_without_the_named_coordinators_log_refuses_to_seal() {
     );
 }
 
-/// The field split: a node sealed while it had no coordinated log. Once it
-/// has one, it ends those logs with its seals itself; their finality
-/// records then carry the seals into a node whose coordinator is down,
-/// which also drops its own waiting rival seal.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn seals_made_without_a_log_end_it_once_composed_and_their_finality_carries_them() {
     let fixture = Fixture::new(1).await;
@@ -353,7 +338,6 @@ async fn a_node_keeps_one_seal_of_a_tip_waiting_for_its_log() {
     );
 }
 
-/// Hands `statements` to `node` one batch each, in order.
 pub(super) async fn receive_each(node: &Replica, statements: &[TipStatement]) {
     for statement in statements {
         node.receive_tip_statements(std::slice::from_ref(statement))
@@ -549,9 +533,6 @@ async fn a_conflicting_settings_revision_never_fails_the_batch_it_arrives_in() {
     );
 }
 
-/// A node sealed genesis through a coordinator before the settings named
-/// another: its finality record, admitted first, stops counting once they
-/// arrive, so the named coordinator's seal is the tip's only final seal.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn finality_acknowledged_at_another_coordinator_never_makes_a_seal_final() {
     let fixture = Fixture::new(1).await;
@@ -643,10 +624,6 @@ async fn finality_acknowledged_at_another_coordinator_never_makes_a_seal_final()
     }
 }
 
-/// A node sealed twice without a log; the named coordinator's log of
-/// genesis ended with another seal meanwhile. Composed, the node
-/// acknowledges that seal and stops: it never ends the logs of its own
-/// losing branch.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_node_never_ends_a_log_beyond_a_seal_that_lost_its_tip() {
     let fixture = Fixture::new(1).await;

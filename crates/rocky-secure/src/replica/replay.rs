@@ -1,10 +1,3 @@
-//! Replay of received intents. A partition's transactions run in canonical
-//! stamp order, each in its own savepoint; one whose statements fail or
-//! whose effects its author may not write is dropped with its reason. An
-//! arrival ordered before applied transactions rewinds them through their
-//! undo records, applies, then redoes them. A seal ends rewinds behind it.
-//! Order is `(era, stamp)`: a transaction a finalized seal leaves out
-//! moves to the next era, after every transaction the seal covers.
 use super::*;
 use rocky_core::TableClass;
 use rocky_core::replay::{DropReason, Intent, TransactionOutcome};
@@ -22,25 +15,14 @@ pub(super) use constraints::{
 };
 pub(super) use restrictions::restricted;
 
-/// Replayed members. `violated` names what a `constraint` or `restricted`
-/// drop broke; `births` the identities an applied member created.
 const REPLAYED_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_replayed(scope INTEGER NOT NULL,era INTEGER NOT NULL,clock INTEGER NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,txn BLOB NOT NULL,member INTEGER NOT NULL,members INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,undo BLOB,violated TEXT,births BLOB,PRIMARY KEY(scope,era,clock,author,sequence)) WITHOUT ROWID";
-/// Unsealed transactions, counted at every routine seal check.
 const REPLAYED_UNSEALED_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS secure_replayed_unsealed ON secure_replayed(txn) WHERE sealed=0";
-/// The newest replayed clock, which a new intent passes.
 const REPLAYED_CLOCK_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS secure_replayed_clock ON secure_replayed(clock)";
-/// Outcomes of own members whose record a scope reset removed. `based`
-/// marks an outcome an installed base decided; a based member neither
-/// sealed nor dropped lay past the base's horizon and is unknown here.
 const KEPT_OUTCOMES_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_kept_outcomes(hash BLOB PRIMARY KEY,txn BLOB NOT NULL,scope INTEGER NOT NULL,clock INTEGER NOT NULL,sequence INTEGER NOT NULL,dropped TEXT,sealed INTEGER NOT NULL,violated TEXT,based INTEGER NOT NULL) WITHOUT ROWID";
-/// Scopes whose clear changed rows of other scopes: the domain's rows
-/// are derived again once none waits.
 const REPLAYED_REDERIVE_TABLE: &str =
     "CREATE TABLE IF NOT EXISTS secure_replayed_rederive(scope INTEGER PRIMARY KEY)";
-/// The inputs of a rebuild that left a foreign key violated, and the
-/// violation; it is not retried until they change.
 const REPLAYED_STUCK_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_replayed_stuck(id INTEGER PRIMARY KEY CHECK(id=1),inputs BLOB NOT NULL,violation TEXT NOT NULL)";
 pub(super) const SCHEMA: &[&str] = &[
     REPLAYED_TABLE,
@@ -53,29 +35,20 @@ pub(super) const SCHEMA: &[&str] = &[
     REPLAYED_STUCK_TABLE,
 ];
 
-/// A transaction's members as replayed here, live records first, then the
-/// kept outcomes of members whose record a reset removed.
 const OUTCOME_MEMBERS: &str = "SELECT dropped,sealed,violated,0 FROM secure_replayed WHERE txn=?1 UNION ALL SELECT k.dropped,k.sealed,k.violated,k.based FROM secure_kept_outcomes k WHERE k.txn=?1 AND NOT EXISTS(SELECT 1 FROM secure_replayed r WHERE r.hash=k.hash)";
 
-/// A row as it stood before a replayed transaction changed it. An applied,
-/// unsealed member keeps these until a seal covers it; they never leave
-/// the device.
 pub(super) struct Undo {
     pub(super) table: String,
     pub(super) key: Vec<SqlValue>,
     pub(super) before: Option<Vec<SqlValue>>,
 }
 
-/// What one member's replay changed: the rows' prior images, the
-/// identities of the rows it created and the partitions it wrote.
 pub(super) struct Replayed {
     undo: Vec<Undo>,
     births: Vec<checkpoint::IdentityMark>,
     written: Vec<Written>,
 }
 
-/// Why a transaction dropped, and for `Constraint` or `Restricted` what it
-/// violated.
 pub(super) struct Dropped {
     pub(super) reason: DropReason,
     pub(super) violated: Option<String>,
@@ -89,19 +62,14 @@ impl From<DropReason> for Dropped {
     }
 }
 
-/// A partition's replay position: the era, then the stamp.
 pub(super) type Order = (i64, Stamp);
 
-/// A rewound transaction's members here, to redo in canonical order.
 struct Redo {
     transaction: Commitment,
     members: Vec<(Hash, u16)>,
-    /// Where its earliest member stood.
     order: Order,
 }
 
-/// One held intent member of a transaction: its frame, statements, its
-/// author's grants and its member index.
 pub(super) type Replaying<'a> = (
     &'a EncryptedFrame,
     &'a Intent,
@@ -126,7 +94,6 @@ fn blob_values(mut bytes: &[u8]) -> Result<Vec<SqlValue>, Error> {
     Ok(values)
 }
 
-/// A member's undo column: `NULL` when it changed nothing.
 pub(super) fn undo_blob(undo: &[Undo]) -> Result<SqlValue, Error> {
     if undo.is_empty() {
         return Ok(SqlValue::Null);
@@ -160,7 +127,6 @@ pub(super) fn undo_of(bytes: &[u8]) -> Result<Vec<Undo>, Error> {
         .collect()
 }
 
-/// A row's leading `era,clock,author,sequence`.
 fn order_of(row: &[SqlValue]) -> Result<Order, Error> {
     match row {
         [
@@ -191,17 +157,12 @@ fn order_bindings(scope: i64, (era, stamp): &Order) -> Result<Vec<SqlValue>, Err
     ])
 }
 
-/// The era an arrival joins: one past the domain's last finalized seal.
 const OPEN_ERA: &str = "(SELECT COALESCE(MAX(depth),0) FROM secure_finalized WHERE domain=?)";
 
-/// Why an arrival waits: a transaction it rewinds has a member in a
-/// partition whose key this replica does not hold yet.
 pub(super) const KEY_WAITS: &str = "a rewound transaction waits for its partition key";
 
-/// Events one replayed transaction may capture.
 const REPLAY_CAPTURE: (usize, usize) = (MAX_BUNDLE_ROWS, MAX_BUNDLE_BYTES);
 
-/// A frame's canonical position in its partition.
 pub(super) fn stamp(header: &p2panda_core::Header<Extensions>) -> Stamp {
     Stamp {
         clock: header.timestamp,
@@ -220,19 +181,11 @@ fn reason_name(reason: DropReason) -> &'static str {
     }
 }
 
-/// Unsealed replayed transactions at which an owner seals routinely. This
-/// does not cap a rewind: it covers every unsealed transaction its closure
-/// reaches, more while no owner seals.
 pub const ROUTINE_SEAL_TRANSACTIONS: u64 = 128;
 
-/// Newest finalized seals whose rows a replayed scope keeps until it
-/// compacts: the next replay base, and where a rebuild starts when that
-/// seal loses. Compaction never targets an older seal, unless it is kept.
 pub(crate) const SEAL_SNAPSHOTS: i64 = 2;
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Replayed transactions no seal covers yet: what an early arrival may
-    /// rewind.
     pub async fn unsealed_replayed_transactions(&self) -> Result<u64, Error> {
         let inner = self.inner.lock(Class::Background).await;
         let rows = collect_rows(
@@ -251,14 +204,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
     }
 
-    /// The identity of the transaction this replica committed under
-    /// `handle`, as outcomes and observers name it.
     pub fn transaction_of(&self, handle: Commitment) -> Commitment {
         super::bundle::transaction_id(self.node, &handle)
     }
 
-    /// The constraint, assertion or restriction whose violation dropped
-    /// `transaction` here, as SQLite or the declaration names it.
     pub async fn transaction_violation(
         &self,
         transaction: Commitment,
@@ -270,8 +219,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .and_then(|(_, violated)| violated))
     }
 
-    /// How a transaction with replayed writes stands here: `None` until a
-    /// member of it has replayed. An outcome is final once a seal covers it.
     pub async fn transaction_outcome(
         &self,
         transaction: Commitment,
@@ -285,10 +232,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// A transaction's outcome from its members, with the violation of the
-    /// member that decides a drop. A final member decides; then a member a
-    /// base covers past its horizon, which leaves the outcome unknown; then
-    /// a provisional drop.
     async fn outcome_of(
         &self,
         transaction: Commitment,
@@ -341,9 +284,6 @@ impl<A: RowApplication> Inner<A> {
 
 #[cfg(any(test, feature = "qualification"))]
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Every transaction with a live replay record here, at its earliest
-    /// member's `(era, stamp)`, and whether a seal covers it: what an
-    /// independent reference needs to replay the canonical order.
     pub async fn replayed_positions(
         &self,
     ) -> Result<BTreeMap<Commitment, ((i64, rocky_core::SecureStamp), bool)>, Error> {
@@ -380,9 +320,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(positions)
     }
-    /// Whether `scope`'s installed base sits at a seal of the followed path
-    /// whose frontier covers the member at `stamp`: its rows hold that
-    /// member, which never replayed here after the base.
     pub async fn base_covers(
         &self,
         scope: ResourceScope,
@@ -412,8 +349,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 
 #[cfg(test)]
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Seals everything `scope` applied so far, as a finalized seal would,
-    /// inside one transaction as seal finalization runs it.
     pub(crate) async fn seal_replayed_for_test(&self, scope: ResourceScope) -> Result<(), Error> {
         let mut inner = self.inner.lock(Class::Background).await;
         let id = inner.find_scope_id(scope).await?.ok_or(Error::Closed)?;
@@ -433,9 +368,6 @@ fn reason_named(name: &str) -> Result<DropReason, Error> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// The other stored scopes whose order can change `scope`'s outcomes:
-    /// partitions of its linked tables holding the same partition values,
-    /// or every partition when only one side is partitioned.
     async fn linked_scopes(&self, scope: i64) -> Result<Vec<i64>, Error> {
         let Some(typed) = self.workspace.typed.as_ref() else {
             return Ok(Vec::new());
@@ -515,10 +447,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(ids)
     }
 
-    /// Undoes every unsealed transaction ordered at or after `starts` in
-    /// its partition and the partitions linked to it, and every
-    /// transaction sharing a member with one, latest first. Returns them
-    /// for redo in canonical order.
     async fn rewind(&self, starts: Vec<(i64, Order)>) -> Result<Vec<Redo>, Error> {
         let corrupt = || Error::Corrupt("replayed member".into());
         let mut work = starts;
@@ -625,8 +553,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(redo)
     }
 
-    /// Restores the rows one member changed to their state before it.
-    /// `plans` caches each table's plan by its lowercase name.
     async fn undo(
         &self,
         undo: &[Undo],
@@ -696,9 +622,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Sets a row that stands back in place by an update, and inserts only a
-    /// row that is gone: deleting a standing row would run its delete actions
-    /// on rows outside this undo.
     async fn restore_in_place(
         &self,
         table: &rocky_storage::capture::Table,
@@ -720,9 +643,6 @@ impl<A: RowApplication> Inner<A> {
             other => other,
         }
     }
-    /// Lets a rename leave trigger bodies alone while the switch rebuilds its
-    /// tables: a history trigger may name a history table the switch already
-    /// dropped.
     async fn keep_trigger_bodies_on_rename(&self, keep: bool) -> Result<(), Error> {
         let pragma = if keep {
             "PRAGMA legacy_alter_table=ON"
@@ -733,12 +653,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    /// Rebuilds the replayed `tables` of a schema switch from their live
-    /// rows, which are their only copy: columns both schemas name keep their
-    /// values unless a tip on the switch's `path` lacks them, new ones take
-    /// their defaults. Inside the switch transaction. Every old table is
-    /// renamed before any new one exists: SQLite rewrites references to a
-    /// renamed table, so the old tables only name each other.
     pub(super) async fn rebuild_replayed(
         &self,
         installed: &rocky_core::LogicalSchema,
@@ -852,12 +766,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    /// Rewrites the undo images of replayed tables whose columns a schema
-    /// switch changed into the new column order, so that a rewind across
-    /// the switch restores rows the new tables can hold. A column whose
-    /// field some tip on the switch's `path` lacked takes its default, as
-    /// the rows do: a rewind never brings back a value from before a
-    /// removal, though the column has the same name again.
     pub(super) async fn reshape_undo(
         &self,
         before: &rocky_core::LogicalSchema,
@@ -963,7 +871,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    /// Whether `scope` is a partition of a replayed table.
     pub(super) fn replayed_scope(&self, scope: ResourceScope) -> bool {
         self.workspace.typed.as_ref().is_some_and(|typed| {
             typed.by_scope(scope).is_some_and(|projected| {
@@ -976,9 +883,6 @@ impl<A: RowApplication> Inner<A> {
         })
     }
 
-    /// Whether the scope stored as `id` replayed exactly the transactions
-    /// of the workspace's path after its base, so its rows are the path's
-    /// state. A replayed scope keeps no row records to rebuild from.
     pub(super) async fn replayed_on_path(&self, id: i64) -> Result<bool, Error> {
         let floor = match self.checkpoint_record(id, true).await? {
             None => 0,
@@ -1026,15 +930,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(true)
     }
 
-    /// A seal finalized at depth `era` leaves out the unsealed transactions
-    /// applied after each `(scope, through)` cut: they rewind, with what
-    /// follows them, and redo in the new era, after every transaction the
-    /// seal covers. Those it covers that replayed in a later era, as when a
-    /// scope held again verifies a seal finalized before its frames came
-    /// back, move into the era of the earliest finalized seal covering them.
-    /// Their identity and stamp stay; outcomes may change.
-    /// A kept seal is marked once the live tables hold exactly its state,
-    /// so its history records what the transactions behind it replace.
     pub(super) async fn order_behind_seal(
         &self,
         domain: rocky_core::Scope,
@@ -1154,8 +1049,6 @@ impl<A: RowApplication> Inner<A> {
         self.redo(later, time).await
     }
 
-    /// The frontiers of `domain`'s seals finalized through depth `era`, by
-    /// depth, as writers and their last covered sequence.
     async fn finalized_frontiers(
         &self,
         domain: rocky_core::Scope,
@@ -1194,10 +1087,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(frontiers)
     }
 
-    /// A seal finalized `scope` through `through`: the transactions it
-    /// covers never rewind again, their drops are final and their undo
-    /// records go. One of several members stays open until a record names
-    /// each of them.
     pub(super) async fn seal_replayed(&self, scope: i64, through: i64) -> Result<(), Error> {
         const SEALING: &str = "scope=?1 AND sealed=0 AND hash IN (SELECT hash FROM secure_applied WHERE scope=?1 AND position<=?2) AND (members=1 OR members=(SELECT COUNT(*) FROM secure_outcome_members m WHERE m.txn=secure_replayed.txn))";
         if let Some(author) = self.node_author.as_ref().map(|author| author.writer) {
@@ -1239,11 +1128,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    /// Replays one transaction's held intent members together: one that
-    /// drops drops the transaction in every partition held here, and so
-    /// does another replica's record of a member not held here. Records
-    /// the outcome and, when it applied, the undo of each member; a
-    /// transaction of several members gets this replica's record.
     async fn replay_transaction(
         &self,
         (transaction, members): (Commitment, u16),
@@ -1393,10 +1277,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    /// Replays an arrival's intent members. Unsealed transactions of their
-    /// partitions ordered after them rewind first and redo after, so every
-    /// partition holds its canonical order; a late arrival behind a seal
-    /// orders after the seal's members.
     pub(super) async fn replay_arrival(
         &self,
         transaction: (Commitment, u16),
@@ -1473,9 +1353,6 @@ impl<A: RowApplication> Inner<A> {
         self.redo(redo, time).await
     }
 
-    /// Replays the open transactions that write a table a schema switch
-    /// removed, with what follows them: they no longer compile and drop
-    /// whole.
     pub(super) async fn redo_removed_writes(&self, time: u64) -> Result<(), Error> {
         let mut starts = Vec::new();
         for row in collect_rows(
@@ -1505,9 +1382,6 @@ impl<A: RowApplication> Inner<A> {
         self.redo(redo, time).await
     }
 
-    /// Moves scope `id`'s open members of eras after `open` into it, as
-    /// the seals that began those eras are forgotten. Returns whether that
-    /// reorders them, as when they came from several eras.
     pub(super) async fn join_open_era(&self, id: i64, open: i64) -> Result<bool, Error> {
         let eras = collect_rows(
             self.conn
@@ -1542,12 +1416,9 @@ impl<A: RowApplication> Inner<A> {
         }
     }
 
-    /// Replays rewound transactions again, in canonical order.
     async fn redo(&self, redo: Vec<Redo>, time: u64) -> Result<(), Error> {
         self.redo_recorded(redo, time, None).await
     }
-    /// `redo`; a member `recorded` names keeps the admission it was
-    /// recorded with, under the authority it was admitted with.
     async fn redo_recorded(
         &self,
         redo: Vec<Redo>,
@@ -1620,9 +1491,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    /// Records where a transaction's member stands in its partition's order
-    /// and how it replayed: `None` with its undo when it applied. Without
-    /// an `era` it joins the open one.
     pub(super) async fn record_replayed(
         &self,
         frame: &EncryptedFrame,
@@ -1665,8 +1533,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    /// Notes the identities a recorded member created and raises the
-    /// scope's replay ledger with them.
     pub(super) async fn record_births(
         &self,
         frame: &EncryptedFrame,
@@ -1687,10 +1553,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Runs one member's statements on its partition inside the caller's
-    /// savepoint and admits their effects against the author's grants.
-    /// Returns what it changed, or why the transaction drops; the caller
-    /// rolls back then.
     fn replay_intent(
         &self,
         frame: &EncryptedFrame,
@@ -1880,9 +1742,6 @@ impl<A: RowApplication> Inner<A> {
         }))
     }
 
-    /// The current fields of `logical` missing at some tip between the
-    /// frame's and the workspace's, by column position, with their
-    /// defaults: the frame cannot have written them.
     fn off_path(
         &self,
         header: &p2panda_core::Header<Extensions>,
@@ -1912,8 +1771,6 @@ impl<A: RowApplication> Inner<A> {
             })
             .collect()
     }
-    /// The identity a replayed change creates. Only its writer may create
-    /// one, as `next_id` allocates them.
     pub(super) fn replayed_birth(
         &self,
         change: &RowChange,
@@ -1951,8 +1808,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-/// Sets a touched row's fields that are off the frame's path back to
-/// their value before it, or their default in a row it inserted.
 fn keep_off_path(
     conn: &sqlite::Connection,
     captured: &rocky_storage::capture::Table,
@@ -1989,9 +1844,6 @@ fn keep_off_path(
     Ok(())
 }
 
-/// The change a replayed table's captured row went through, as grants see
-/// it, with its latest image; `None` when it changed nothing, such as an
-/// update to equal values, which needs no right.
 pub(super) fn replayed_change(
     conn: &sqlite::Connection,
     typed: &typed::Typed,

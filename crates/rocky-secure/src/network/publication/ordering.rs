@@ -1,4 +1,3 @@
-//! Causal bundle units, packed independently of scope boundaries.
 use super::*;
 use std::collections::BTreeMap;
 

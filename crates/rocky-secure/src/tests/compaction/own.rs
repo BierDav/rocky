@@ -1,4 +1,3 @@
-//! Covered own-birth maxima are signed and checked before exposing rows.
 use super::*;
 use crate::storage::{bindings, rows};
 

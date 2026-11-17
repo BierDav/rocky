@@ -1,4 +1,3 @@
-//! Disk-backed construction; only one page and the logarithmic tree stack are live.
 use super::*;
 use rocky_core::{MigrationSum, migration_split};
 

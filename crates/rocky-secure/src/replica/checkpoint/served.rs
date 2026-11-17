@@ -1,6 +1,3 @@
-//! Checkpoints this node signs of seals it keeps, for a node that pulls
-//! one: the kept seal's stored rows, restored from history, and the
-//! operations through its bound.
 use super::*;
 
 pub(crate) const SCHEMA: &[&str] = &[
@@ -8,11 +5,8 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_served_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
 ];
 
-/// Where a served checkpoint's rows are.
 pub(in crate::replica) enum Served {
-    /// The scope's replay base.
     Base,
-    /// A kept seal's rows, signed on request.
     Kept,
 }
 impl Served {
@@ -25,9 +19,6 @@ impl Served {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// The checkpoint of `scope` at `seal` this node serves a peer that
-    /// pulls the seal's state: its replay base there, else one it signs of
-    /// the seal it keeps. None when it holds neither.
     pub async fn seal_checkpoint_offer(
         &self,
         peer: PublicKey,
@@ -69,8 +60,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// The checkpoint of scope `id` at `seal` this node can serve, signed
-    /// under the current policy, and where its rows are.
     pub(super) async fn seal_served(
         &self,
         scope: ResourceScope,
@@ -108,7 +97,6 @@ impl<A: RowApplication> Inner<A> {
             _ => Err(Error::Corrupt("served checkpoint".into())),
         }
     }
-    /// The seal checkpoint `checkpoint` of `scope` this node serves.
     pub(super) async fn served_seal_checkpoint(
         &self,
         scope: ResourceScope,
@@ -147,10 +135,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(None)
     }
-    /// Inside the caller's transaction, signs replayed scope `id`'s rows at
-    /// kept `seal` and keeps them to serve. None when the seal is not kept
-    /// under the installed schema, the replay base lies past it, or the
-    /// covered identities or its outcomes are no longer known.
     async fn sign_kept(
         &mut self,
         scope: ResourceScope,
@@ -273,7 +257,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(Some(signed))
     }
-    /// Inside the caller's transaction, forgets what was served of `seal`.
     pub(in crate::replica) async fn drop_served(&self, seal: Commitment) -> Result<(), Error> {
         self.conn
             .execute(

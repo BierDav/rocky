@@ -1,10 +1,7 @@
-//! No-frames checkpoints: a keyless scope proven empty at a seal moves a
-//! joiner on without a key, a page or any payload bypass.
 use super::*;
 use crate::{CheckpointState, TipStatement};
 use rocky_credentials::SignedCheckpointRecord;
 
-/// The owner lists every base `replica` signed at seals of the graph.
 async fn list(f: &Fixture, replica: &Replica) {
     let records: Vec<TipStatement> = replica
         .unlisted_checkpoints(f.public.domain)
@@ -20,7 +17,6 @@ async fn list(f: &Fixture, replica: &Replica) {
     assert!(!records.is_empty());
     replica.publish_tip_statements(&records).await.unwrap();
 }
-/// A node that holds both keys.
 async fn open_keyed(f: &Fixture, path: &Path, node: &PrivateKey) -> (Replica, CredentialChain) {
     let config = f.config(node, f.full(), &[f.public, f.private]);
     let credentials = config.credentials.clone();
@@ -123,7 +119,6 @@ async fn seal_recovery_skips_a_peer_outside_the_missing_scope() {
         crate::ClearsBy::AnyPeer,
     );
 }
-/// A private row `writer` authors on the tip it follows.
 async fn private_row(f: &Fixture, writer: &Replica, row: u8) -> EncryptedFrame {
     writer
         .author(
@@ -139,8 +134,6 @@ async fn private_row(f: &Fixture, writer: &Replica, row: u8) -> EncryptedFrame {
         .await
         .unwrap()
 }
-/// `a` writes ten public rows, seals and compacts, and prunes every covered
-/// public frame once `b` holds them. Returns the private no-frames base.
 async fn compacted_and_pruned(
     f: &Fixture,
     a: &Replica,
@@ -306,7 +299,6 @@ async fn covered_keyless_ciphertext_stays_deferred_and_signs_no_empty_state() {
     );
 }
 
-/// A no-frames statement like `base` with `edit` applied, signed by `node`.
 fn resigned(
     base: &SignedCheckpoint,
     node: &PrivateKey,

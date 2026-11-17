@@ -1,6 +1,4 @@
-//! SQL sessions on typed tables of an encrypted replica.
 use super::*;
-/// Native only: a server thread serves the catch-up over a socket.
 #[cfg(not(target_family = "wasm"))]
 mod catch_up;
 mod intents;
@@ -288,8 +286,6 @@ async fn sql(
 async fn select(session: &SecureSql<TypedRows>, sql: &str) -> Vec<Vec<SqlValue>> {
     session.run(sql, vec![]).await.unwrap().rows
 }
-/// Every frame of `scope` that `source` may send to `target`.
-/// Whether `frame` is an author's outcome record of a bundle.
 fn is_outcome_record(t: &Typed, frame: &EncryptedFrame) -> bool {
     let plaintext = crate::wire::Opened::open(
         &t.key(frame.scope().unwrap()).key,
@@ -327,7 +323,6 @@ fn sql_error(result: Result<SecureRows, Error>) -> SqlError {
     }
 }
 
-/// Runs an `INSERT ... VALUES` with a newly allocated row identity.
 async fn insert(
     session: &SecureSql<TypedRows>,
     sql: &str,
@@ -761,7 +756,6 @@ async fn authority_changes_wait_for_the_lease_and_end_the_session() {
     );
 }
 
-/// Clock skew past the one-hour credential expiry the test issues.
 const PAST_CREDENTIAL_EXPIRY_SECONDS: u64 = 7200;
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -1388,8 +1382,6 @@ async fn secure_cursors_keep_their_snapshot_and_end_when_authority_changes() {
     );
 }
 
-/// A cursor that pins the log past its hard limit is ended so the log
-/// resets; it reports `Aborted(Preempted)` and a new cursor reads on.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_cursor_pinning_the_log_past_its_limit_is_preempted() {
     use crate::cursor::CursorLimits;
@@ -1655,7 +1647,6 @@ async fn identity_descriptor_installs_shared_columns_and_reopens() {
     }
 }
 
-/// Generated from a schema definition, not handwritten identity DDL.
 fn identity_fixture() -> Typed {
     let publisher = PrivateKey::new();
     let definition = r#"{
@@ -2198,7 +2189,6 @@ async fn two_nodes_of_one_principal_write_every_table_under_their_own_keys() {
     writer.run("ROLLBACK", vec![]).await.unwrap();
 }
 
-/// Rows `replica` authors offline: one transaction of `count` salaries.
 async fn author_salaries(
     replica: &EncryptedReplica<TypedRows>,
     scope: ResourceScope,
@@ -2432,8 +2422,6 @@ async fn sql_begin_and_writing_autocommit_are_interactive() {
     }
 }
 
-/// The epoch advances before the commit's lock holder refreshes readers; a
-/// cursor opened between them waits for the refresh instead of failing.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_cursor_racing_a_commit_reads_once_readers_are_refreshed() {
     use crate::cursor::CursorLimits;

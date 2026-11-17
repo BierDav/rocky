@@ -1,6 +1,3 @@
-//! Stored credential chains. Retained operations and the local node author
-//! name a chain by digest; the chain is kept once
-//! and removed with the last of them.
 use super::*;
 use crate::wire::Chain;
 
@@ -10,7 +7,6 @@ pub(super) const SCHEMA: &[&str] = &[
 ];
 
 impl<A: RowApplication> Inner<A> {
-    /// Stores a chain a row of the same transaction is about to name.
     pub(super) async fn keep_chain(&self, chain: &Chain) -> Result<(), Error> {
         identity::check_node_chain(chain.credentials())?;
         if self.chain_kept(chain.digest()).await? {
@@ -34,7 +30,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(kept.next().await?.is_some())
     }
-    /// The stored chain a retained operation names.
     pub(super) async fn stored_chain(&self, digest: Commitment) -> Result<Chain, Error> {
         let cached = || {
             self.chains
@@ -75,7 +70,6 @@ impl<A: RowApplication> Inner<A> {
         let chain = self.stored_chain(frame.chain_digest()?).await?;
         Ok(frame.with_chain(chain))
     }
-    /// A retained operation with the chain its header names.
     pub(crate) async fn stored_frame(
         &self,
         header: Vec<u8>,
@@ -85,9 +79,6 @@ impl<A: RowApplication> Inner<A> {
         frame.migration = self.migration_membership(frame.id()?).await?;
         Ok(frame)
     }
-    /// Removes every chain nothing names any more. Runs in the transaction
-    /// that removed operations, so no
-    /// interruption leaves an operation without its chain.
     pub(super) async fn sweep_chains(&self) -> Result<(), Error> {
         let registered: Vec<Vec<u8>> = self
             .node_author
@@ -118,8 +109,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Every credential chain this store holds: those of retained
-    /// operations and of its own node author. Each was verified when kept.
     pub async fn held_chains(&self) -> Result<Vec<CredentialChain>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         rows(&inner.conn, "SELECT chain FROM secure_chains")
@@ -134,8 +123,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 #[cfg(test)]
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// The digests of the stored chains, and how many retained operations
-    /// name a chain that is not stored.
     pub(crate) async fn chain_census(&self) -> (BTreeSet<Commitment>, usize) {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let stored = rows(&inner.conn, "SELECT digest FROM secure_chains")
@@ -157,5 +144,4 @@ impl<A: RowApplication> EncryptedReplica<A> {
         (stored, unchained)
     }
 }
-/// Decoded chains kept by digest; a replica names few distinct chains.
 const CACHED_CHAINS: usize = 64;

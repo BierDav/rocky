@@ -1,4 +1,3 @@
-//! The single write-transaction helper of the encrypted path.
 use super::replica::Inner;
 use crate::{
     Error,
@@ -6,31 +5,21 @@ use crate::{
 };
 use rocky_core::RowApplication;
 
-/// Runs `$body`, with `$name` bound to `&mut Inner`, as one `BEGIN IMMEDIATE`
-/// transaction that ends through `storage::finish`, then checks the WAL size.
-/// The commit is buffered (`synchronous=NORMAL`) and counted for the durable
-/// watermark; exposing callers flush with `Inner::flush`.
-/// The whole transaction retries with backoff while another connection holds
-/// the file and then reports `Error::RetryExhausted`; inside this process the
-/// replica lock is the only writer. `@commit` skips the WAL check;
-/// `@cache_neutral` preserves committed frontiers and is only for
-/// offer/acknowledgment bookkeeping. A macro because async closures would
-/// make the callers' futures lose `Send`.
 macro_rules! transaction {
-    (@commit $inner:expr, |$name:ident| $body:expr) => {{
+    (@without_wal_checkpoint $inner:expr, |$name:ident| $body:expr) => {{
         transaction!(@attempt $inner, false, |$name| $body)
     }};
-    (@cache_neutral $inner:expr, |$name:ident| $body:expr) => {{
+    (@keeping_frontier_cache $inner:expr, |$name:ident| $body:expr) => {{
         let owner = &mut *$inner;
         let result = transaction!(@attempt owner, true, |$name| $body);
         if result.is_ok() { owner.checkpoint_if_due().await; }
         result
     }};
-    (@attempt $inner:expr, $neutral:expr, |$name:ident| $body:expr) => {{
+    (@attempt $inner:expr, $keep_frontiers:expr, |$name:ident| $body:expr) => {{
         let owner = &mut *$inner;
         let mut attempt = 0;
         loop {
-            if !$neutral { owner.invalidate_frontiers(); }
+            if !$keep_frontiers { owner.invalidate_frontiers(); }
             let result = match owner.conn.execute("BEGIN IMMEDIATE", ()).await {
                 Ok(_) => {
                     owner.untouch();
@@ -54,7 +43,7 @@ macro_rules! transaction {
     }};
     ($inner:expr, |$name:ident| $body:expr) => {{
         let owner = &mut *$inner;
-        let result = transaction!(@commit owner, |$name| $body);
+        let result = transaction!(@without_wal_checkpoint owner, |$name| $body);
         if result.is_ok() {
             owner.checkpoint_if_due().await;
         }
@@ -63,8 +52,6 @@ macro_rules! transaction {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Ends one attempt with its final result, or with `None` after the
-    /// backoff when the file was busy and attempts remain.
     pub(super) async fn retry<T>(
         &mut self,
         attempt: usize,

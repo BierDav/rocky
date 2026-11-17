@@ -1,4 +1,3 @@
-//! Losing-seal coverage is retained accounting, never a state bound at a new seal.
 use super::*;
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -9,13 +8,10 @@ async fn empty_scope_coverage_survives_two_earlier_seals_and_an_items_only_impor
 async fn a_missing_position_beyond_the_anchor_requires_a_listed_checkpoint() {
     coverage_after_import(true, false).await;
 }
-/// The same, with the first base switch interrupted and the restoration of
-/// this node's own pruned suffix checked step by step.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_import_that_leaves_own_pruned_frames_uncovered_waits_for_them() {
     coverage_after_import(true, true).await;
 }
-/// Rows of this node's restoration obligations.
 async fn guards(replica: &Replica) -> i64 {
     scalar(replica, "SELECT count(*) FROM secure_evicted_logs").await
 }
@@ -430,8 +426,6 @@ async fn restoration_endpoints_merge_as_pairs() {
     );
 }
 
-/// A base that supersedes a writer's frames keeps their positions placed in
-/// their scope: another scope that writer never wrote is not missing them.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn superseded_frames_stay_placed_for_scopes_their_writer_never_wrote() {
     let lineage = Lineage::new();

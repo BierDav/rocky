@@ -1,7 +1,3 @@
-//! Replicas of replayed partitions converge whatever the delivery schedule:
-//! every order and packet split of a history, with retransmissions and
-//! restarts, ends in the rows and drops of a from-scratch replay of the
-//! canonical order in plain SQLite.
 use super::*;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use rocky_core::Commitment;
@@ -20,7 +16,6 @@ fn key_of(f: &Fixture, frame: &EncryptedFrame) -> [u8; 32] {
         .1
 }
 
-/// A device that authors in both partitions.
 struct Author {
     replica: EncryptedReplica<TypedRows>,
     node: PrivateKey,
@@ -32,7 +27,6 @@ impl Author {
         Self::at(f, root, number, PrivateKey::new()).await
     }
 
-    /// Opens author `number`'s database at `root` with node key `node`.
     async fn at(f: &Fixture, root: &Path, number: u32, node: PrivateKey) -> Self {
         let replica = f
             .open(
@@ -51,8 +45,6 @@ impl Author {
         }
     }
 
-    /// Frames this device authored since the last call: intents and the
-    /// outcome records its commits and rewinds published.
     async fn fresh(&mut self) -> Vec<EncryptedFrame> {
         let inner = self
             .replica
@@ -113,7 +105,6 @@ fn text(value: &str) -> SqlValue {
     SqlValue::Text(value.into())
 }
 
-/// One replayed member as the reference sees it.
 struct Member {
     scope: ResourceScope,
     stamp: (u64, rocky_core::WriterId, u64),
@@ -122,7 +113,6 @@ struct Member {
     statements: Vec<rocky_core::replay::IntentStatement>,
 }
 
-/// The rows and drop map of a from-scratch replay in canonical order.
 #[derive(Debug, PartialEq)]
 struct Canonical {
     rows: Vec<Vec<SqlValue>>,
@@ -140,15 +130,10 @@ fn sql_value(value: &SqlValue) -> rusqlite::types::Value {
     }
 }
 
-/// Replays every intent member in `frames` in plain SQLite: transactions in
-/// stamp order, each in its own savepoint; one whose statements fail drops
-/// in every partition. Partition orders must agree on that order.
 fn canonical(f: &Fixture, frames: &[EncryptedFrame]) -> Canonical {
     canonical_sealed(f, &[frames], 0)
 }
 
-/// [`canonical`] across seals: each era's transactions replay after every
-/// earlier era's, and drops in the first `sealed` eras are final.
 fn canonical_sealed(f: &Fixture, eras: &[&[EncryptedFrame]], sealed: usize) -> Canonical {
     let mut members = Vec::new();
     for (era, frames) in eras.iter().enumerate() {
@@ -257,7 +242,6 @@ fn canonical_sealed(f: &Fixture, eras: &[&[EncryptedFrame]], sealed: usize) -> C
     Canonical { rows, outcomes }
 }
 
-/// What `replica` holds, in the reference's terms.
 async fn state(
     f: &Fixture,
     replica: &EncryptedReplica<TypedRows>,
@@ -280,17 +264,12 @@ async fn state(
     }
 }
 
-/// A fault injected into one delivery schedule.
 #[derive(Clone, Copy, Debug)]
 enum Fault {
-    /// Close and reopen the receiver after this packet.
     Restart(usize),
-    /// Deliver everything sent so far again after this packet.
     Retransmit(usize),
 }
 
-/// Opens a receiver holding both partitions that writes nothing itself. Its
-/// keys are installed from the device's key store on every open.
 async fn receiver(f: &Fixture, path: &Path, node: &PrivateKey) -> EncryptedReplica<TypedRows> {
     let replica = f
         .open(path, node.clone(), f.grant(None, &[Right::Read]))
@@ -301,16 +280,12 @@ async fn receiver(f: &Fixture, path: &Path, node: &PrivateKey) -> EncryptedRepli
     replica
 }
 
-/// Receives one packet. Restarts here close cleanly, so packets skip the
-/// flush; crashes are the crash tests' concern.
 async fn receive(replica: &EncryptedReplica<TypedRows>, packet: &[EncryptedFrame], fault: Fault) {
     for status in replica.receive_buffered(packet.to_vec()).await {
         assert_ne!(status.unwrap().value, ReceiveStatus::Rejected, "{fault:?}");
     }
 }
 
-/// Delivers `packets` to a new receiver at `path` and checks it against
-/// the reference.
 async fn deliver(
     f: &Fixture,
     path: &Path,
@@ -353,9 +328,6 @@ fn permutations(n: usize) -> Vec<Vec<usize>> {
     all
 }
 
-/// Every order of `units`, split into consecutive packets by a pattern that
-/// rotates through every split across the orders, each with one restart or
-/// retransmission.
 fn schedules(units: &[Vec<EncryptedFrame>]) -> Vec<(Vec<Vec<EncryptedFrame>>, Fault)> {
     let splits = 1usize << (units.len() - 1);
     let mut all = Vec::new();
@@ -382,7 +354,6 @@ fn schedules(units: &[Vec<EncryptedFrame>]) -> Vec<(Vec<Vec<EncryptedFrame>>, Fa
     all
 }
 
-/// Runs every schedule on fresh receivers, spread over threads.
 fn deliver_all(f: &Fixture, schedules: &[(Vec<Vec<EncryptedFrame>>, Fault)], expected: &Canonical) {
     let root = tempfile::tempdir().unwrap();
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
@@ -415,11 +386,6 @@ fn amount(value: i64) -> Vec<SqlValue> {
     vec![SqlValue::Integer(value)]
 }
 
-/// Two authors over partitions A and B, neither seeing the other until the
-/// fifth unit: W1 creates `x` in A; W2 concurrently creates `x` in A and `y`
-/// in B in one transaction, which drops in both; W2 raises `x` in every
-/// held partition; W1 doubles it. With `fifth`, W1 then receives W2's
-/// transactions, rewinds, publishes their records and creates `y`.
 async fn history(f: &Fixture, root: &Path, fifth: bool) -> Vec<Vec<EncryptedFrame>> {
     let mut w1 = Author::open(f, root, 1).await;
     let mut w2 = Author::open(f, root, 2).await;
@@ -496,9 +462,6 @@ fn every_order_of_five_transactions_converges_to_the_canonical_replay() {
     exhaustive(5);
 }
 
-/// A random transaction over keys `k0`..`k3` in A and B, from what the
-/// author holds: creates (some across both partitions, some colliding with
-/// keys other authors may create), increments, assignments and deletes.
 async fn random_transaction(f: &Fixture, author: &Author, rng: &mut StdRng, handle: u8) {
     let held = keys(f, &author.replica, &["A", "B"]).await;
     let has = |list: &str, key: &str| {
@@ -571,16 +534,11 @@ async fn random_transaction(f: &Fixture, author: &Author, rng: &mut StdRng, hand
     }
 }
 
-/// Frames one author published in one step: a commit's members and
-/// records, or the records a rewind published.
 struct Group {
     author: usize,
     frames: Vec<EncryptedFrame>,
 }
 
-/// Appends group `index` after the unreceived groups it depends on. A partition
-/// with a causal gap or a partial bundle refuses reads and writes, so an author
-/// only ever receives whole groups with everything they follow.
 fn with_dependencies(
     index: usize,
     groups: &[Group],
@@ -602,10 +560,6 @@ fn with_dependencies(
     out.extend(groups[index].frames.iter().cloned());
 }
 
-/// Four authors commit 32 transactions, each first receiving a random part
-/// of what the others published. A receiver gets every frame in a random
-/// order and packet split, with retransmissions and a restart; then every
-/// author receives what it lacks. All agree with the reference.
 async fn seeded(seed: u64) {
     let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
     let root = tempfile::tempdir().unwrap();

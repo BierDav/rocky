@@ -1,7 +1,5 @@
-//! Re-signing kept history uses its covered inputs while live evidence grows.
 use super::*;
 
-/// Clears only the serving cache, so the next offer must run `sign_kept`.
 async fn clear_serving_cache_so_the_offer_resigns_kept_history(
     keeper: &Replica,
     scope: &ResourceScope,

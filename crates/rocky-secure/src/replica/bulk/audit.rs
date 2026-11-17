@@ -1,4 +1,3 @@
-//! Provenance is audited independently of whether a frame is still applicable.
 use super::*;
 
 impl<A: RowApplication> Inner<A> {

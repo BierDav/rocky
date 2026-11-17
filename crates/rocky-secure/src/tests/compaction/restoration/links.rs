@@ -1,4 +1,3 @@
-//! Signed retained-store corruptions still require exact original-node links.
 use super::negatives::{filled, preserved};
 use super::*;
 use crate::storage::bindings;

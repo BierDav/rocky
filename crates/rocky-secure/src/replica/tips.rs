@@ -1,4 +1,3 @@
-//! Durable, domain-scoped tip graph and the selected live workspace.
 use super::*;
 pub(super) mod refresh;
 use rocky_core::Scope;
@@ -8,7 +7,6 @@ use rocky_credentials::{
 };
 use std::collections::BTreeMap;
 
-/// Largest stored or exchanged tip statement: a finality record.
 pub(crate) const MAX_TIP_STATEMENT_BYTES: usize = SECURE_MESSAGE_BYTES - 1024;
 
 pub(super) fn graph_statements(graph: &TipGraph) -> Vec<TipStatement> {
@@ -38,10 +36,7 @@ pub(super) fn graph_statements(graph: &TipGraph) -> Vec<TipStatement> {
         .collect()
 }
 
-/// The last terminal acknowledgment each local node signed: its chain's head.
 const ACK_CHAIN_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_ack_chain(lane BLOB PRIMARY KEY,ack BLOB NOT NULL) WITHOUT ROWID";
-/// Statements and acknowledgments a root revocation's cut left out for good,
-/// which the past-cut alert counts.
 const PAST_CUT_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_past_cut(scope BLOB NOT NULL,digest BLOB NOT NULL,identity BLOB NOT NULL,lane BLOB NOT NULL,ack INTEGER NOT NULL CHECK(ack IN(0,1)),PRIMARY KEY(scope,digest)) WITHOUT ROWID";
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_tip_graphs(scope BLOB PRIMARY KEY,genesis BLOB NOT NULL) WITHOUT ROWID",
@@ -52,11 +47,8 @@ pub(super) const SCHEMA: &[&str] = &[
     ACK_CHAIN_TABLE,
     PAST_CUT_TABLE,
 ];
-/// Past-cut statements recorded per chain; more count no further.
 const MAX_PAST_CUT_RECORDS: i64 = 256;
 
-/// A stored statement or batch, read only as far as a finality record's
-/// format, which another release's record names in a shape this one lacks.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum NamedFormats {
@@ -68,8 +60,6 @@ struct OptionalFormat {
     #[serde(default)]
     format: Option<u32>,
 }
-/// The refusal of stored `bytes` that failed to decode because they hold a
-/// finality record another release wrote, named by its format.
 pub(in crate::replica) fn foreign_finality(bytes: &[u8]) -> Option<Error> {
     let statements = match p2panda_core::cbor::decode_cbor::<NamedFormats, _>(bytes).ok()? {
         NamedFormats::One(statement) => vec![statement],
@@ -82,7 +72,6 @@ pub(in crate::replica) fn foreign_finality(bytes: &[u8]) -> Option<Error> {
         .map(|format| credential(rocky_credentials::unsupported_finality(format)))
 }
 
-/// A graph record is always exchanged independently of row subscriptions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TipStatement {
     Seal(SignedSeal),
@@ -91,7 +80,6 @@ pub enum TipStatement {
     GenesisLine(SignedGenesisLine),
     Finality(SealFinality),
     Checkpoint(Box<SignedCheckpointRecord>),
-    /// One revision of the owner's database settings.
     Settings(SignedDatabaseSettings),
 }
 impl TipStatement {
@@ -124,7 +112,6 @@ impl TipStatement {
             Self::Settings(s) => s.statement.scope,
         }
     }
-    /// The trusted identity and chain link of a chained statement.
     pub fn chain_place(&self) -> Option<(PublicKey, rocky_credentials::ChainLink)> {
         let (link, chain) = match self {
             Self::Seal(s) => (s.link, &s.endorsement().chain),
@@ -181,15 +168,12 @@ pub(crate) enum FrameReach {
     Unfollowed,
 }
 
-/// An enrolled node for one line; its key belongs in the caller's secret store.
 #[derive(Clone)]
 pub struct LineNode {
     pub key: PrivateKey,
     pub credentials: CredentialChain,
 }
 
-/// Resolved graph facts are valid only until context invalidation. Credentials
-/// and workspace-base readiness are still checked for every authored frame.
 #[derive(Default)]
 pub(super) struct GraphCache {
     writable: Option<WritableContext>,
@@ -239,7 +223,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// The domain's graph, shared: a caller that changes it copies it.
     pub(in crate::replica) fn scope_graph(&self, scope: Scope) -> Result<Arc<TipGraph>, Error> {
         if scope.app != self.definition.app || !self.domains.contains(&scope.domain) {
             return Err(denied("tip graph belongs to another domain"));
@@ -249,7 +232,6 @@ impl<A: RowApplication> Inner<A> {
             .cloned()
             .ok_or_else(|| denied("domain has no installed tip graph"))
     }
-    /// Where a stored or received frame belongs.
     pub(crate) fn frame_reach(&self, frame: &EncryptedFrame) -> Result<FrameReach, Error> {
         let operation = frame.operation_ref()?;
         let extension = &operation.header.extensions;
@@ -378,7 +360,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(FrameReach::Unfollowed)
     }
-    /// The migration successor of closed `seal` the followed path enters.
     fn opened_after(&self, scope: Scope, seal: &SignedSeal) -> Result<Option<TipId>, Error> {
         let path = self.path_seals(scope)?;
         let id = seal.id().map_err(credential)?;
@@ -436,8 +417,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(bounds)
     }
-    /// Whether `opening` is the migration successor of closed `seal`: a new
-    /// schema, whose late transactions replay there.
     fn migrates(
         graph: &TipGraph,
         seal: &SignedSeal,
@@ -449,14 +428,10 @@ impl<A: RowApplication> Inner<A> {
                     != opening.statement.schema,
         )
     }
-    /// Whether `to` continues `from`'s line: through continuations and
-    /// migration successors, which take its late writes.
     fn line_continues(graph: &TipGraph, from: TipId, to: TipId) -> Result<bool, Error> {
         let path = Self::walk_frame_path(graph, from, to, Vec::new(), false)?;
         Ok(matches!(path.end, PathEnd::Visible) && path.bounds.is_empty())
     }
-    /// A branch inherits only its opening seal's frontier. Continuations and
-    /// migration successors take late writes.
     pub(super) fn visible_frame(
         &self,
         graph: &TipGraph,
@@ -467,9 +442,6 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<bool, Error> {
         Self::frame_path(graph, source, target)?.admits(author, sequence)
     }
-    /// The walk from `target` back to `source` that `visible_frame` checks a
-    /// frame against: the seal frontiers it must be inside, in order, and how
-    /// the walk ends. It depends only on the tips, not the frame.
     pub(super) fn frame_path(
         graph: &TipGraph,
         source: TipId,
@@ -481,11 +453,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Self::walk_frame_path(graph, source, target, bounds, true)
     }
-    /// Whether the state at exactly `seal` includes a frame: bounded by
-    /// that seal's own frontier and walked along its tip's structural
-    /// ancestry with the exact opening seals, whichever seal wins today.
-    /// Recorded facts such as a no-frames base are judged by this, never by
-    /// live visibility.
     pub(super) fn covers_exact(
         graph: &TipGraph,
         source: TipId,
@@ -497,9 +464,6 @@ impl<A: RowApplication> Inner<A> {
         Self::walk_frame_path(graph, source, seal.statement.tip, bounds, false)?
             .admits(author, sequence)
     }
-    /// The walk back from `target` to `source`, or to the tip whose late
-    /// writes `source`'s are ([`TipGraph::late_anchor`]). With `canonical`,
-    /// a continuation of a seal that does not win its tip hides the frame.
     fn walk_frame_path(
         graph: &TipGraph,
         source: TipId,
@@ -512,8 +476,6 @@ impl<A: RowApplication> Inner<A> {
             cursor == source || cursor == anchor
         })
     }
-    /// What visibility gives a domain's replay ledgers at workspace `tip`,
-    /// `followed` or not: equal views admit the same frames.
     pub(super) fn ledger_view(
         graph: &TipGraph,
         tip: TipId,
@@ -537,8 +499,6 @@ impl<A: RowApplication> Inner<A> {
             },
         })
     }
-    /// The walk back from `target` until `reached` names a tip, with the
-    /// frontiers bounding that tip's frames.
     fn walk_back(
         graph: &TipGraph,
         target: TipId,
@@ -855,9 +815,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Leaves the statements `revocations` ends out of every graph's
-    /// resolution and, inside the caller's transaction, follows the
-    /// bookmark to where it now resolves. Returns whether a graph changed.
     pub(in crate::replica) async fn resolve_revoked(
         &mut self,
         revocations: &rocky_credentials::RevocationSet,
@@ -887,11 +844,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(changed)
     }
-    /// Deletes the statements a cut leaves out for good that nothing kept
-    /// refers to, and strips such acknowledgments from finality records,
-    /// dropping a record left below its line's minimum; records both for
-    /// the alert. Inside the caller's transaction; returns whether a graph
-    /// changed.
     pub(in crate::replica) async fn prune_past_cut(
         &mut self,
         revocations: &rocky_credentials::RevocationSet,
@@ -965,9 +917,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(changed)
     }
-    /// Statements this replica keeps state for: seals its bases, replays,
-    /// relays and wanted pulls name, staged statements and the tips it
-    /// follows or writes on. Pruning keeps them.
     async fn pinned_statements(&self) -> Result<BTreeSet<Commitment>, Error> {
         let mut pinned: BTreeSet<Commitment> = [self.workspace.tip.0].into();
         pinned.extend(self.line_nodes.keys().map(|tip| tip.0));
@@ -992,7 +941,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(pinned)
     }
-    /// Records a chained statement a cut leaves out, up to the bound per chain.
     pub(in crate::replica) async fn record_past_cut(
         &self,
         scope: Scope,
@@ -1004,7 +952,6 @@ impl<A: RowApplication> Inner<A> {
         self.record_past(scope, statement.id()?, identity, link.lane, false)
             .await
     }
-    /// Records an acknowledgment a cut leaves out, as [`Self::record_past_cut`].
     pub(in crate::replica) async fn record_past_cut_ack(
         &self,
         scope: Scope,
@@ -1133,10 +1080,6 @@ impl<A: RowApplication> Inner<A> {
         self.node_author = selected;
         Ok(())
     }
-    /// Refuses following `target` onto a seal this node does not hold
-    /// when no replay base lies on its path and a scope off it cannot
-    /// rebuild from the frames it holds: the node pulls that seal's state
-    /// from a node that keeps it first.
     async fn require_held_start(&self, domain: Scope, target: TipId) -> Result<(), Error> {
         let graph = self.graph_for(domain)?;
         if target == self.workspace.tip
@@ -1348,10 +1291,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(None)
     }
-    /// A compacted seal off the new path cannot be undone: its rows wait for
-    /// a rebootstrap at a seal of `path`, unless states pulled at seals of
-    /// `path` replace every base that left it. Scopes whose base stays on the
-    /// path are rebuilt like any other.
     async fn replace_compacted_bases_off_path(
         &mut self,
         domain: Scope,
@@ -1375,9 +1314,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Rebuilds the workspace after the followed tip moved: finalized seals
-    /// off the new path are undone, and a kept seal the new path passes
-    /// starts its scopes from its rows.
     pub(super) async fn rebuild_tip_workspace(&mut self, domain: Scope) -> Result<(), Error> {
         self.index_inherited_held(domain).await?;
         let reopened = self.revalidate_finalized(domain, false).await?;
@@ -1582,11 +1518,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .scope_graph(scope)?;
         Ok(Arc::unwrap_or_clone(graph))
     }
-    /// Verified union; no row scan is needed for seals or forward bookmark
-    /// moves. On a trusted node a seal or move whose terminal log entry
-    /// lost, or is not confirmed yet, waits outside the graph.
-    /// Received seals this node cannot confirm yet wait in the journal for
-    /// `settle_tip_statements`; receipt never catches up through peers.
     pub async fn receive_tip_statements(
         &self,
         statements: &[TipStatement],
@@ -1616,10 +1547,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         admitted
     }
-    /// Leaves out of a received batch the statements a cut this replica
-    /// holds refuses for good, and strips such acknowledgments from its
-    /// finality records, leaving out a record then below its line's
-    /// minimum; records both for the alert.
     async fn refuse_past_cut(
         &self,
         statements: &[TipStatement],
@@ -1673,8 +1600,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(kept)
     }
-    /// The statements and acknowledgments cuts refused or pruned here, per
-    /// identity and lane: `(identity, lane, statements, acknowledgments)`.
     pub async fn past_cut_records(
         &self,
         scope: Scope,
@@ -1716,8 +1641,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(counts)
     }
-    /// Admits verified statements; `journal` names the batch the admission
-    /// settles, forgotten in the same transaction.
     pub(in crate::replica) async fn admit_tip_statements(
         &self,
         statements: &[TipStatement],
@@ -1963,7 +1886,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         drop(flush_guard(inner, &self.inner).await?);
         Ok(target)
     }
-    /// Enrolls through the identity, outside any database transaction.
     pub async fn enroll_line_node(
         &self,
         identity: &dyn rocky_credentials::IdentityProvider,
@@ -2040,8 +1962,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.learn_revocations(&known).await?;
         Ok(LineNode { key, credentials })
     }
-    /// Restores a saved line's signer without selecting it for writes. Checkpoints
-    /// at a shared seal may still need its page signatures on another branch.
     pub async fn restore_line_node(&self, node: LineNode) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if node.credentials.principal() != inner.config.credentials.principal() {
@@ -2143,16 +2063,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.node_author = Some(selected);
         flush_guard(inner, &self.inner).await.map(|_| ())
     }
-    /// Admits this node's own statements. With a composed log, a seal or a
-    /// move off an open tip first commits its digest as the tip's terminal
-    /// log entry; a lost entry fails with `sealed` and nothing is published.
-    /// With a composed log the batch is journaled, flushed, before its seals
-    /// reach the coordinator, and kept after a reply that may have been lost,
-    /// so `settle_tip_statements` sends the same bytes again.
-    /// Refuses, before anything is journaled, own statements that seal a
-    /// tip or chain after a waiting seal while the settings of their
-    /// database name a coordinator this node has no log of: they could only
-    /// wait in the journal, hiding why.
     async fn refuse_without_named_log(&self, statements: &[TipStatement]) -> Result<(), Error> {
         let seals = statements
             .iter()
@@ -2172,8 +2082,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(())
     }
-    /// Whether no database of `statements` names a coordinator other than
-    /// the composed log's.
     async fn named_log_free(&self, statements: &[TipStatement]) -> Result<bool, Error> {
         for scope in statements
             .iter()
@@ -2262,7 +2170,6 @@ const MAX_FRONTIER_HEADERS: usize = 1 << 18;
 #[cfg(test)]
 const MAX_STORED_HEADER_BYTES: usize = 32 * 1024 * 1024;
 
-/// Syntax only: no live status, custody, graph or authority decisions.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub(super) struct StoredHeader {
@@ -2365,15 +2272,11 @@ pub(super) enum PathEnd {
     Hidden,
     Cyclic,
 }
-/// See `Inner::frame_path`.
 #[derive(PartialEq)]
 pub(super) struct FramePath {
     bounds: Vec<Vec<rocky_credentials::AuthorMark>>,
     end: PathEnd,
 }
-/// See `Inner::ledger_view`: each tip the walk passes, with how many of
-/// its frontiers bound that tip's frames, then the whole walk, and the
-/// followed path's seals.
 #[derive(PartialEq)]
 pub(super) struct LedgerView {
     tips: Vec<(TipId, usize)>,

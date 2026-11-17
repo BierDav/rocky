@@ -110,7 +110,6 @@ async fn state_advice_requires_64_frames_and_covers_every_requester_log() {
     );
 }
 
-/// Forgets every key `replica` was configured with.
 async fn drop_every_read_key(replica: &Replica) {
     replica
         .inner

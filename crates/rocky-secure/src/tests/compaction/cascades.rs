@@ -1,6 +1,3 @@
-//! Resetting a parent scope never takes rows of other scopes its delete
-//! actions reach: `tags` references `items` twice, by a cascade and by a
-//! `SET NULL`, and keeps its rows through every refill of `items`.
 use super::super::generations::{identity_insert, select, session};
 use super::*;
 use rocky_core::replay::TransactionOutcome;
@@ -16,7 +13,6 @@ async fn item_id(replica: &Replica, key: &str) -> SqlValue {
         .remove(0)
         .remove(0)
 }
-/// Tags `key` with item `item` through both references.
 async fn tag(replica: &Replica, key: &str, item: &str) -> Commitment {
     let id = item_id(replica, item).await;
     let rows = identity_insert(
@@ -44,7 +40,6 @@ fn tagged(rows: &[(&str, &str)]) -> Vec<Vec<SqlValue>> {
         .map(|(tag, item)| vec![text(tag), text(item), text(item)])
         .collect()
 }
-/// Sends `source`'s graph and its frames of `scope` to `target`.
 async fn sync_scope(
     lineage: &Lineage,
     source: &Replica,
@@ -84,8 +79,6 @@ async fn sync_scope(
     }
 }
 
-/// A seal rebootstrap that replays `items` from its frames clears its rows
-/// first; the tags that reference them come back once the frames stand.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_parent_replayed_from_frames_keeps_the_rows_that_reference_it() {
     let lineage = linked();
@@ -118,10 +111,6 @@ async fn a_parent_replayed_from_frames_keeps_the_rows_that_reference_it() {
     replica.audit(tag_scope).await.unwrap();
 }
 
-/// B writes a new item and a tag of it after the seal, then imports an
-/// `items` base at a later seal that lacks both: the base clears the item
-/// and its tag; the item applies again over the base and its tag returns.
-/// B and the owner then converge.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_imported_parent_base_keeps_children_of_rows_applied_over_it() {
     let lineage = linked();
@@ -173,7 +162,6 @@ async fn an_imported_parent_base_keeps_children_of_rows_applied_over_it() {
     b.audit(tag_scope).await.unwrap();
 }
 
-/// The transactions this replica dropped, by transaction id.
 async fn drops(replica: &Replica) -> Vec<Vec<SqlValue>> {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     crate::storage::rows(
@@ -184,10 +172,6 @@ async fn drops(replica: &Replica) -> Vec<Vec<SqlValue>> {
     .unwrap()
 }
 
-/// An authored transaction's outcome stays readable after its scope's
-/// replay restarts from an imported base that covers it, and across
-/// restarts after compaction. `a_parent_replayed_from_frames_…` covers a
-/// replay from frames.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_authored_outcome_survives_imports_and_restarts_after_compaction() {
     let lineage = Lineage::new();
@@ -232,7 +216,6 @@ async fn reopen(lineage: &Lineage, dir: &Scratch, replica: Replica, key: &Privat
         .unwrap()
 }
 
-/// Tags `key` with item `item` through the `SET NULL` reference only.
 async fn tag_also(replica: &Replica, key: &str, item: &str) -> Commitment {
     let id = item_id(replica, item).await;
     let rows = identity_insert(
@@ -244,7 +227,6 @@ async fn tag_also(replica: &Replica, key: &str, item: &str) -> Commitment {
     .unwrap();
     transaction(replica, rows).await
 }
-/// The full node's key and credentials, which a partial replica names.
 async fn full_node(replica: &Replica) -> (PublicKey, rocky_credentials::CredentialChain) {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     (
@@ -252,7 +234,6 @@ async fn full_node(replica: &Replica) -> (PublicKey, rocky_credentials::Credenti
         inner.config.credentials.clone(),
     )
 }
-/// Makes `replica` a partial replica of `full` holding `held`.
 async fn partial(replica: &Replica, full: &Replica, held: &[ResourceScope]) {
     let (node, credentials) = full_node(full).await;
     replica
@@ -269,7 +250,6 @@ async fn partial(replica: &Replica, full: &Replica, held: &[ResourceScope]) {
             .unwrap();
     }
 }
-/// Every tag with its references, as stored.
 async fn tag_rows(replica: &Replica) -> Vec<Vec<SqlValue>> {
     select(
         replica,
@@ -278,10 +258,6 @@ async fn tag_rows(replica: &Replica) -> Vec<Vec<SqlValue>> {
     .await
 }
 
-/// A partial device that evicts `items` while it keeps `tags` ends with the
-/// rows and outcomes of a fresh partial device that only ever held `tags`:
-/// tags that reference an item drop there, whatever their delete action.
-/// Holding `items` again brings them back as replay orders them.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_evicted_parent_leaves_what_a_replica_never_holding_it_replays() {
     let lineage = linked();
@@ -344,11 +320,6 @@ async fn an_evicted_parent_leaves_what_a_replica_never_holding_it_replays() {
     assert_eq!(tag_rows(&d).await, tag_rows(&a).await);
 }
 
-/// A seals with item `q`; B, which never received it, writes its own `q`
-/// and a tag of it. At A both replay after the seal: B's `q` collides and
-/// drops, so its tag has no parent and drops too. Rebuilding from the
-/// seal's rows must reach the same rows: restoring them must not leave the
-/// keys of the members replayed after them deferred.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_tag_of_an_item_that_drops_after_a_seal_drops_in_every_rebuild() {
     let lineage = linked();
@@ -378,13 +349,10 @@ async fn a_tag_of_an_item_that_drops_after_a_seal_drops_in_every_rebuild() {
     assert!(tags(&a).await.is_empty());
 }
 
-/// The rows of `sql` on `replica`, read under its lock.
 async fn stored(replica: &Replica, sql: &str) -> Vec<Vec<SqlValue>> {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     crate::storage::rows(&inner.conn, sql).await.unwrap()
 }
-/// Sends `source`'s frames of `scope` that `target` lacks to it, except
-/// the one before the last: the last then waits for it.
 async fn sync_with_gap(
     lineage: &Lineage,
     source: &Replica,
@@ -416,13 +384,6 @@ async fn sync_with_gap(
     }
 }
 
-/// A seals and compacts with `p` and a tag of it; B takes both bases and
-/// writes an item `l`, a tag of it and another tag of `p`. A writes `q`,
-/// seals and compacts again, writes `q2` and seals once more (not
-/// compacted), then writes `r1` and `r2`. B receives A's `items` frames
-/// except `r1`, so `r2` waits, and imports A's newer `items` base: clearing
-/// `items` takes B's tags, and `items` still waits for `r1`. Returns A, B,
-/// B's key, B's late tag and the tags B had.
 async fn import_while_a_frame_waits(
     lineage: &Lineage,
     dir: &Scratch,
@@ -469,8 +430,6 @@ async fn import_while_a_frame_waits(
     (a, b, key, late, expected)
 }
 
-/// The frame `items` waited for arrives by ordinary sync: settling derives
-/// the rows again, and B's tags are back.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn children_return_when_a_frame_that_waited_through_an_import_arrives() {
     let lineage = linked();
@@ -491,9 +450,6 @@ async fn children_return_when_a_frame_that_waited_through_an_import_arrives() {
     b.audit(lineage.scope("tags")).await.unwrap();
 }
 
-/// While the rows wait to be derived again, no seal finalizes and nothing
-/// compacts, though B holds every frame of A's last seal; status says why.
-/// Once they are derived again, the seal finalizes.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn no_seal_finalizes_while_rows_wait_to_be_derived_again() {
     let lineage = linked();
@@ -531,10 +487,6 @@ async fn no_seal_finalizes_while_rows_wait_to_be_derived_again() {
     );
 }
 
-/// A and B hold `p` and `q`. B tags both before it hears that A deleted
-/// `p`; A orders the delete first and drops the tag of `p`, seals and
-/// compacts. B's own records still say both tags applied, provisionally.
-/// Returns A, B, their keys and B's two transactions: dropped, applied.
 async fn tagged_before_a_seal_drops_one(
     lineage: &Lineage,
     dir: &Scratch,
@@ -571,7 +523,6 @@ fn sealed_drop() -> Option<TransactionOutcome> {
         sealed: true,
     })
 }
-/// B takes A's bases of both scopes.
 async fn import_both(lineage: &Lineage, a: &Replica, b: &Replica, key: &PrivateKey) {
     crate::tests::exchange_graphs(a, b, lineage.domain).await;
     for scope in [lineage.scope("items"), lineage.scope("tags")] {
@@ -579,10 +530,6 @@ async fn import_both(lineage: &Lineage, a: &Replica, b: &Replica, key: &PrivateK
     }
 }
 
-/// Once B takes A's bases, which cover its tags, it reports how A's seal
-/// decided them, from the bases' sealed outcomes, never its stale records:
-/// the dropped tag as a final `constraint` drop with A's violation. B
-/// keeps outcomes only of what it authored.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_outcome_a_base_covers_reports_the_seals_drop_never_its_stale_record() {
     let lineage = linked();
@@ -609,8 +556,6 @@ async fn an_outcome_a_base_covers_reports_the_seals_drop_never_its_stale_record(
     );
 }
 
-/// A covered tag the seal applied reports `Applied` from the base, as a
-/// final outcome no record changes afterwards.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_applied_outcome_a_base_covers_is_final() {
     let lineage = linked();
@@ -642,9 +587,6 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// A, B through A's bases and C replaying every frame itself report the
-/// same outcome and violation for each of B's transactions, and A and C
-/// state the same sealed outcomes at the seal.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn replicas_at_one_seal_report_identical_outcomes() {
     let lineage = linked();
@@ -697,9 +639,6 @@ async fn replicas_at_one_seal_report_identical_outcomes() {
     assert_eq!(listed[0].transaction, late);
 }
 
-/// A drop list altered after signing, or signed but no replica's, is
-/// refused before anything is staged; one that contradicts an outcome
-/// this replica already sealed is refused at install.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_forged_drop_list_is_refused_on_import() {
     use crate::{SealedOutcome, SealedOutcomes, SealedTransaction};
@@ -780,8 +719,6 @@ async fn a_forged_drop_list_is_refused_on_import() {
     let _ = kept;
 }
 
-/// Kept outcomes go once their member's record is back and a seal covers
-/// it, and only the newest `KEPT_OUTCOMES` stay.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn kept_outcomes_go_once_records_return_and_stay_bounded() {
     let lineage = linked();
@@ -844,8 +781,6 @@ async fn kept_outcomes_go_once_records_return_and_stay_bounded() {
     );
 }
 
-/// An authored outcome stays readable after a seal rebootstrap replays its
-/// scope from frames, and across a restart.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_outcome_survives_a_replay_from_frames_and_a_restart() {
     let lineage = linked();
@@ -872,8 +807,6 @@ async fn an_outcome_survives_a_replay_from_frames_and_a_restart() {
     assert_eq!(tags(&replica).await, tagged(&[("t", "a")]));
 }
 
-/// A rebuild that leaves a foreign key violated rolls back, says why and
-/// is not tried again until what it derives from changes.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_rebuild_that_cannot_hold_is_stuck_until_its_inputs_change() {
     let lineage = linked();
@@ -924,8 +857,6 @@ async fn a_rebuild_that_cannot_hold_is_stuck_until_its_inputs_change() {
     );
 }
 
-/// Drops the `items` base, though `old` in the `tags` base references its
-/// `p`, and marks `items` as a clear of it leaves it.
 async fn clear_the_parent_base_a_child_references(replica: &Replica, items: ResourceScope) {
     {
         let inner = replica.inner.lock(crate::replica::Class::Background).await;
@@ -941,9 +872,6 @@ async fn clear_the_parent_base_a_child_references(replica: &Replica, items: Reso
     replica.mark_rederive_for_test(items).await.unwrap();
 }
 
-/// A partitioned `tags` cannot reference the unpartitioned `items`, so no
-/// reference reaches across partitions into another table's scopes; the
-/// fixture's schema is refused before any replica opens.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 #[should_panic(expected = "a partitioned child cannot reference an unpartitioned parent")]
 async fn a_partitioned_child_of_an_unpartitioned_parent_is_refused() {
@@ -960,10 +888,6 @@ async fn a_partitioned_child_of_an_unpartitioned_parent_is_refused() {
         .await;
 }
 
-/// Measurement, not a gate: how long one rederive of a domain of 100,000
-/// replayed rows holds the replica, once from frames and once from a base.
-/// `cargo test --release -p rocky-secure --lib
-/// tests::compaction::cascades::rederive_of_100000_rows -- --ignored --nocapture`
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 #[ignore = "measurement; run in release"]
 async fn rederive_of_100000_rows() {
@@ -1015,8 +939,6 @@ async fn rederive_of_100000_rows() {
     );
 }
 
-/// A direct import fills a scope that holds nothing, so cancelling it
-/// (`abort_direct`) clears no row: it marks nothing and B's tags stay.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_cancelled_direct_import_reaches_no_rows_and_marks_nothing() {
     let lineage = linked();

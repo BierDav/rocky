@@ -1,4 +1,3 @@
-//! Signed capabilities, encrypted rows and bounded native ciphertext synchronization.
 #[macro_use]
 mod transaction;
 use rocky_storage::{
@@ -34,7 +33,6 @@ pub use replica::{
     TipStatement, UpdateMode, created_name, installed_tip_schema,
 };
 pub use rocky_core::{Blocker, BlockerKind, ClearsBy, WaitReason, domain_label, scope_label};
-/// The credential types live in `rocky-credentials`; these are the same types.
 pub use rocky_credentials as credentials;
 pub use rocky_credentials::{
     Capability, CredentialChain, DatabaseKind, Hash, MAX_CREDENTIAL_DEPTH, PrivateKey, PublicKey,
@@ -49,9 +47,7 @@ use serde::{Serialize, de::DeserializeOwned};
 pub use wire::{EncryptedFrame, EncryptedPackage, PackageKind};
 
 pub const MAX_SECURE_FRAME: usize = 256 * 1024;
-/// Encoded payload budget, leaving room for the signed framing.
 pub(crate) const SECURE_MESSAGE_BYTES: usize = MAX_SECURE_FRAME - 4096;
-/// Counts a prefix by encoded size, including room for family fields and cursors.
 fn page_len<T: Serialize>(items: &[T], limit: usize) -> Result<usize, Error> {
     let mut bytes = 1024;
     let mut count = 0;
@@ -71,12 +67,8 @@ fn page_len<T: Serialize>(items: &[T], limit: usize) -> Result<usize, Error> {
     }
     Ok(count)
 }
-/// Retained protocol artifacts, such as journaled tip statements. Row
-/// operations are bounded by `RetentionLimits` instead.
 pub const MAX_SECURE_RECORDS: usize = 4096;
-/// One native session, and the default soft bound on retained row operations.
 pub const MAX_SECURE_BYTES: usize = 32 * 1024 * 1024;
-/// The short node identity of a device key: contacts are requested by it.
 pub fn secure_node_id(key: PublicKey) -> rocky_core::NodeId {
     let hash = rocky_core::commitment("rocky.secure-node.v1", key.as_bytes());
     let mut id = [0; 16];
@@ -86,7 +78,6 @@ pub fn secure_node_id(key: PublicKey) -> rocky_core::NodeId {
 fn denied(message: &str) -> Error {
     Error::Rejected(message.into())
 }
-/// A credential refusal as this profile reports it.
 fn credential(error: rocky_credentials::Error) -> Error {
     match error {
         rocky_credentials::Error::Protocol(error) => Error::Protocol(error),
@@ -116,7 +107,6 @@ fn decode_bounded<T: Serialize + DeserializeOwned>(bytes: &[u8], limit: usize) -
 fn signing_bytes<T: Serialize>(label: &str, value: &T) -> Result<Vec<u8>, Error> {
     encode(&(label, value))
 }
-/// Microseconds since the epoch: the wall part of hybrid stamp clocks.
 fn micros() -> Result<u64, Error> {
     let time = rocky_platform::time::since_epoch()
         .map(|time| u64::try_from(time.as_micros()).unwrap_or(u64::MAX))
@@ -129,12 +119,16 @@ fn micros() -> Result<u64, Error> {
     );
     Ok(time)
 }
-/// Hybrid time: past every observed clock and at least the wall clock.
-/// Refused above `MAX_CLOCK`, which no replica accepts.
 fn next_clock(observed: u64) -> Result<u64, Error> {
+    next_clock_after(observed, micros)
+}
+fn next_clock_after(
+    observed: u64,
+    wall: impl FnOnce() -> Result<u64, Error>,
+) -> Result<u64, Error> {
     observed
         .checked_add(1)
-        .map(|clock| micros().map(|wall| clock.max(wall)))
+        .map(|clock| wall().map(|wall| clock.max(wall)))
         .transpose()?
         .filter(|clock| *clock <= rocky_core::MAX_CLOCK)
         .ok_or_else(|| denied("hybrid clock beyond its bound"))
@@ -149,23 +143,16 @@ fn now() -> Result<u64, Error> {
 }
 #[cfg(any(test, feature = "qualification"))]
 thread_local! {
-    /// Seconds this test thread's clock runs ahead, to expire credentials
-    /// without sleeping.
     static CLOCK_SKEW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
-/// Runs this thread's clock `seconds` ahead, as a device whose wall clock
-/// is ahead does; returns the prior skew.
 #[cfg(feature = "qualification")]
 pub fn skew_clock(seconds: u64) -> u64 {
     CLOCK_SKEW.with(|skew| skew.replace(seconds))
 }
 #[cfg(test)]
 thread_local! {
-    /// Transactions that apply operations this test thread may still commit
-    /// before the pending pass is interrupted. Discovery does not spend it.
     static APPLY_BUDGET: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
-/// Spends one apply transaction of the thread's budget; false once it ran out.
 #[cfg(test)]
 fn apply_allowed() -> bool {
     APPLY_BUDGET.with(|budget| match budget.get() {
@@ -194,7 +181,6 @@ pub use replica::last_in_place_switch_changes;
 pub use replica::replay::ROUTINE_SEAL_TRANSACTIONS;
 pub use replica::{check_replica_format, local_row_counts, local_table_digests};
 
-/// One-way reference used by durable peer metadata.
 pub use rocky_credentials::PeerId;
 
 #[cfg(feature = "qualification")]
@@ -202,7 +188,6 @@ pub use replica::{
     HolderMeasurements, LockMeasurements, Measurements, with_measurement_connection,
 };
 
-/// Measurement-only overrides are validated before any bounded work starts.
 #[cfg(feature = "qualification")]
 fn qualification_bound(name: &str, default: usize, maximum: usize) -> Result<usize, Error> {
     match std::env::var_os(name) {
@@ -212,5 +197,30 @@ fn qualification_bound(name: &str, default: usize, maximum: usize) -> Result<usi
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|bound| (1..=maximum).contains(bound))
             .ok_or_else(|| denied(&format!("{name} must be between 1 and {maximum}"))),
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn the_hybrid_clock_passes_every_observed_clock_and_never_falls_behind_the_wall() {
+        let wall = 5_000;
+        let at = |observed| next_clock_after(observed, || Ok(wall));
+        assert_eq!(at(0).unwrap(), wall);
+        assert_eq!(at(wall - 1).unwrap(), wall);
+        assert_eq!(at(wall).unwrap(), wall + 1);
+        assert_eq!(at(9_000).unwrap(), 9_001);
+        assert_eq!(
+            at(rocky_core::MAX_CLOCK - 1).unwrap(),
+            rocky_core::MAX_CLOCK
+        );
+        assert!(at(rocky_core::MAX_CLOCK).is_err());
+        assert!(at(u64::MAX).is_err());
+        assert!(
+            next_clock_after(0, || Ok(rocky_core::MAX_CLOCK + 1)).is_err(),
+            "a wall clock beyond the bound is refused too"
+        );
     }
 }

@@ -1,8 +1,6 @@
-//! A checkpoint's identity marks cover exactly the births its state covers.
 use super::*;
 use crate::KeptSeals;
 
-/// `replica`'s only identity author in `scope` and its live mark.
 async fn own_mark(replica: &Replica, scope: ResourceScope) -> (crate::writer::WriterId, u64) {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let records = crate::storage::collect_rows(
@@ -28,8 +26,6 @@ async fn own_mark(replica: &Replica, scope: ResourceScope) -> (crate::writer::Wr
         u64::try_from(*sequence).unwrap(),
     )
 }
-/// Corrupts the attacker's local allocation evidence so it can sign a reuse.
-/// Receivers keep their complete journal and all original refusal assertions.
 async fn rewind_mark(replica: &Replica, scope: ResourceScope, sequence: u64) {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     inner
@@ -63,7 +59,6 @@ async fn rewind_mark(replica: &Replica, scope: ResourceScope, sequence: u64) {
         .await
         .unwrap();
 }
-/// Why `replica` dropped the transaction of `hash`, if it did.
 async fn dropped(replica: &Replica, hash: Hash) -> Option<String> {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     match crate::storage::collect_rows(
@@ -85,8 +80,6 @@ async fn dropped(replica: &Replica, hash: Hash) -> Option<String> {
         _ => None,
     }
 }
-/// `server` holds `writer`'s frames, finalizes and compacts the seal the
-/// writer signs; the writer itself never finalizes.
 async fn compacted_seal(
     lineage: &Lineage,
     writer: &Replica,
@@ -106,8 +99,6 @@ async fn compacted_seal(
     );
     sealed
 }
-/// The forger seals and compacts its own frames, so the rows they retired
-/// are gone from its state too.
 async fn compact_own(lineage: &Lineage, forger: &Replica) -> Commitment {
     let sealed = seal(lineage, forger).await.id().unwrap();
     assert_eq!(
@@ -116,7 +107,6 @@ async fn compact_own(lineage: &Lineage, forger: &Replica) -> Commitment {
     );
     sealed
 }
-/// `target`, following `main`, imports `server`'s bases of every table.
 async fn import_all(
     lineage: &Lineage,
     server: &Replica,
@@ -231,7 +221,6 @@ async fn a_retired_covered_birth_cannot_be_reused_after_an_import() {
     assert_eq!(titles(&j).await, vec![vec![text("x"), text("kept")]]);
 }
 
-/// `target` imports `source`'s kept checkpoint of `scope` at `sealed`.
 async fn import_kept(
     lineage: &Lineage,
     source: &Replica,
@@ -318,12 +307,9 @@ async fn a_kept_checkpoint_signs_the_covered_marks_and_later_births_apply_on_top
     assert_eq!(own_mark(&b, scope).await, (author, covered + 1));
 }
 
-/// Rows of items with their identity, by key.
 async fn identified(replica: &Replica) -> Vec<Vec<SqlValue>> {
     super::super::generations::select(replica, "SELECT key,id,title FROM items ORDER BY key").await
 }
-/// Commits `statements` in one transaction of `replica`; an insert takes
-/// `id` when given, else the next identity.
 async fn transaction(
     replica: &Replica,
     statements: &[(&str, Option<rocky_core::RowIdentity>)],

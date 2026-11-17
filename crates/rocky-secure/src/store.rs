@@ -7,7 +7,6 @@ use p2panda_store::operations::LocalOperationStore;
 use rocky_core::{ResourceScope, SqlValue};
 use std::sync::Arc;
 
-/// This adapter borrows the framework connection; it never opens or commits a transaction.
 #[derive(Clone)]
 pub(crate) struct TransactionStore(pub Arc<ScopedConnection>);
 impl LocalOperationStore<ResourceScope, Extensions> for TransactionStore {
@@ -97,8 +96,6 @@ impl LocalOperationStore<ResourceScope, Extensions> for TransactionStore {
 }
 
 impl TransactionStore {
-    /// Whether the chain with `digest` is kept; an operation is never stored
-    /// without the chain it names.
     async fn keeps_chain(&self, digest: Vec<u8>) -> Result<bool, Error> {
         let mut kept = self
             .0
@@ -108,7 +105,6 @@ impl TransactionStore {
     }
 }
 
-/// Pending log heads, a covering index for `apply_pending`.
 const PENDING_OPERATIONS_INDEX: &str = "CREATE INDEX secure_operations_pending ON secure_operations(scope,author,sequence,hash) WHERE status='pending'";
 
 pub(crate) const SCHEMA: &[&str] = &[

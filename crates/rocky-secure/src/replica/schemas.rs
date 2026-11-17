@@ -1,4 +1,3 @@
-//! Tip-authenticated schema definitions and the records supplied by a language adapter.
 use super::headers::HeaderSource;
 use super::*;
 use rocky_core::{ApplicationManifest, Scope};
@@ -10,18 +9,13 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_pending_schema(id INTEGER PRIMARY KEY CHECK(id=1),scope BLOB NOT NULL,bookmark TEXT NOT NULL,tip BLOB NOT NULL,manifest BLOB NOT NULL,moved INTEGER NOT NULL CHECK(moved IN (0,1)))",
 ];
 
-/// Rows SQLite inserted, updated or deleted in the last in-place switch's
-/// transaction, for the zero-rewrite gate; -1 before any.
 static IN_PLACE_SWITCH_CHANGES: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(-1);
-/// Test instrumentation: the row changes of this process's last in-place
-/// schema switch, which must not grow with the stored rows.
 #[doc(hidden)]
 pub fn last_in_place_switch_changes() -> i64 {
     IN_PLACE_SWITCH_CHANGES.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// A durable intent to switch the live workspace after obtaining its schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingSchema {
     pub scope: Scope,
@@ -30,20 +24,14 @@ pub struct PendingSchema {
     pub manifest: Commitment,
 }
 
-/// The followed tip a replica file committed, with its authenticated schema.
 #[derive(Clone, Debug)]
 pub struct InstalledTipSchema {
     pub tip: TipId,
     pub manifest: Commitment,
     pub record: Vec<u8>,
-    /// Whether `tip` is the asked-for tip or continues from it along the
-    /// winning seal chain.
     pub continues: bool,
 }
 
-/// Reads the authenticated installed tip record before an adapter resumes a
-/// switch whose database commit preceded its settings-file commit; `from`
-/// is the tip the adapter's pending switch named.
 pub async fn installed_tip_schema(
     path: &Path,
     scope: Scope,
@@ -130,7 +118,6 @@ pub async fn installed_tip_schema(
     }))
 }
 
-/// Fields present at every tip between a source and the live workspace.
 #[derive(Clone, Debug)]
 pub(super) struct PathFields {
     pub tables: BTreeSet<Commitment>,
@@ -168,7 +155,6 @@ impl PathFields {
         }
         Some(kept)
     }
-    /// `write` with only these fields, even when none of its own remain.
     pub fn project(&self, write: &RowWrite) -> Option<RowWrite> {
         if !self.tables.contains(&write.change.scope.table) {
             return None;
@@ -265,8 +251,6 @@ impl<A: RowApplication> Inner<A> {
         ).await?;
         Ok(())
     }
-    /// The pending switch's domain, bookmark and whether that bookmark moved
-    /// away from the workspace, as opposed to the device following it.
     pub(super) async fn pending_intent(&self) -> Result<Option<(Scope, String, bool)>, Error> {
         match rows(
             &self.conn,
@@ -287,7 +271,6 @@ impl<A: RowApplication> Inner<A> {
             _ => Err(Error::Corrupt("pending schema switch".into())),
         }
     }
-    /// Whether `tip` is the workspace's tip or one of its ancestors.
     pub(super) fn on_workspace_path(&self, scope: Scope, tip: TipId) -> Result<bool, Error> {
         let graph = self.graph_for(scope)?;
         let mut cursor = self.workspace.tip;
@@ -303,7 +286,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Err(denied("cyclic tip path"))
     }
-    /// The installed or cataloged definition of `manifest`.
     pub(super) fn definition_at(&self, manifest: &Commitment) -> Option<&ApplicationManifest> {
         if *manifest == self.manifest {
             Some(&self.definition)
@@ -314,8 +296,6 @@ impl<A: RowApplication> Inner<A> {
     pub(super) fn path_fields(&self, scope: Scope, source: TipId) -> Result<PathFields, Error> {
         self.path_fields_to(scope, source, self.workspace.tip)
     }
-    /// Fields present at every tip from `source` through `target`, an
-    /// ancestor-or-self path: a base at a seal keeps its own tip's fields.
     pub(super) fn path_fields_to(
         &self,
         scope: Scope,
@@ -376,7 +356,6 @@ impl<A: RowApplication> Inner<A> {
             .insert(key, fields.clone());
         Ok(fields)
     }
-    /// The followed path's requirement state, before any header is seen.
     fn requirement_start(&self) -> Result<Option<Requirements>, Error> {
         let Some((scope, name)) = &self.workspace.followed else {
             return Ok(None);
@@ -403,9 +382,6 @@ impl<A: RowApplication> Inner<A> {
             required: BTreeSet::new(),
         }))
     }
-    /// The schemas the followed path, kept seals and held frames need.
-    /// One unpaged scan, for transitions that act on it in the same
-    /// transaction; `EncryptedReplica::schema_requirements` pages it.
     pub(super) async fn schema_requirements(&self) -> Result<BTreeSet<(TipId, Commitment)>, Error> {
         let Some(mut requirements) = self.requirement_start()? else {
             return Ok(BTreeSet::new());
@@ -503,9 +479,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-/// Puts a failed switch's source definition and typed tables back. A staged
-/// switch keeps its source installed, as after a reopen, so that withdrawal
-/// always has it.
 async fn reinstall_switch_source<A: RowApplication>(
     inner: &mut Inner<A>,
     source: &mut generation::Definition<A>,
@@ -516,7 +489,6 @@ async fn reinstall_switch_source<A: RowApplication>(
     inner.load_schemas().await
 }
 
-/// Requirement state accumulated over a domain's headers.
 struct Requirements {
     domain: rocky_core::Scope,
     graph: TipGraph,
@@ -547,8 +519,6 @@ impl Requirements {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// `Inner::schema_requirements` read in validated pages; `act` runs
-    /// on the result in the acquisition that validated it.
     pub(super) async fn schema_requirements<T>(
         &self,
         historical: bool,
@@ -592,7 +562,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Records the adapter's checked representation of the already installed schema.
     pub async fn record_current_schema(&self, record: Vec<u8>) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| inner
@@ -600,12 +569,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await)?;
         inner.load_schemas().await
     }
-    /// Only schemas needed by the followed path, kept seals or held changes.
     pub async fn required_schemas(&self) -> Result<BTreeSet<(TipId, Commitment)>, Error> {
         self.schema_requirements(true, async |_, required| Ok(required))
             .await
     }
-    /// Missing definitions needed by the live switch, excluding independent views.
     pub async fn missing_live_schemas(&self) -> Result<BTreeSet<Commitment>, Error> {
         self.schema_requirements(
             false,
@@ -613,8 +580,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         )
         .await
     }
-    /// The adapter has authenticated `record` by deriving `definition` from it.
-    /// The replica independently checks its commitment against the required tip.
     pub async fn install_tip_schema(
         &self,
         tip: TipId,
@@ -678,7 +643,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
-/// Security and optional SQL projection for an authenticated tip schema.
 pub struct SchemaConfig {
     pub security: SecureConfig,
     pub tables: Option<(
@@ -1000,8 +964,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(fields.strips(&before).then_some(fields))
     }
-    /// Follows `name`'s current target inside the caller's transaction; a
-    /// staged switch of that bookmark is reconciled instead.
     pub(super) async fn follow_resolved(&mut self, scope: Scope, name: &str) -> Result<(), Error> {
         if let Some((staged, bookmark, _, _)) = self.schema_switch_intent().await?
             && staged == scope
@@ -1014,10 +976,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Inside the caller's transaction, keeps a staged switch while its
-    /// bookmark continues from the staged target, which stays the only
-    /// authority, and withdraws it otherwise. This device's own uncommitted
-    /// publication withdraws only through `withdraw_staged_schema`.
     pub(super) async fn reconcile_staged_switch(&mut self) -> Result<(), Error> {
         let Some((scope, bookmark, _, target)) = self.schema_switch_intent().await? else {
             return Ok(());
@@ -1052,10 +1010,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(false)
     }
-    /// Inside the caller's transaction, ends a staged switch under the
-    /// installed source definition: the intent and plan go, the domain's
-    /// rows are rebuilt from their unstripped bases and history, and the
-    /// bookmark is followed where it now resolves.
     pub(super) async fn withdraw_schema_switch(
         &mut self,
         scope: Scope,
@@ -1125,9 +1079,6 @@ impl<A: RowApplication> Inner<A> {
                 .is_empty(),
         )
     }
-    /// Strips stored rows of the workspace at `source` to `fields` before a
-    /// plan projects them: a removed table's rows go. Returns whether
-    /// anything was stripped.
     async fn strip_rows(
         &mut self,
         scope: Scope,
@@ -1199,7 +1150,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(true)
     }
-    /// The projection and follow change finish in the plan's final transaction.
     pub(super) async fn finish_schema_switch(&mut self) -> Result<(), Error> {
         let records = rows(
             &self.conn,
@@ -1257,8 +1207,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Installs the followed tip's authenticated schema. A plan may be
-    /// interrupted; its final transaction swaps the projection and follow.
     pub async fn switch_schema(
         &self,
         tip: TipId,
@@ -1274,9 +1222,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.settle().await?;
         Ok(switched)
     }
-    /// Withdraws a staged schema publication whose migration has not
-    /// committed, and so never left this device, and switches the
-    /// workspace back to its source tip with that tip's schema, atomically.
     pub async fn withdraw_staged_schema(
         &self,
         publication: Commitment,
@@ -1377,7 +1322,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Drops catalog entries no local reader, retained publication or workspace needs.
     pub async fn drop_unrequired_schemas(&self) -> Result<Vec<Commitment>, Error> {
         self.schema_requirements(true, async |inner, required| {
             inner.drop_unrequired_schemas(required).await

@@ -1,4 +1,3 @@
-//! Same-definition holding borrows the original compiled callbacks and ACL policy.
 use super::*;
 use rocky_core::{ApplicationManifest, RowApplication};
 use std::sync::{

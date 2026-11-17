@@ -1,4 +1,3 @@
-//! Checkpoints, pruning, the pruned_prefix signal and rebootstrap.
 use super::super::replica::checkpoint::Stage;
 use super::*;
 use crate::storage::rows;
@@ -44,8 +43,6 @@ async fn open(f: &Fixture, path: &Path, node: &PrivateKey) -> (Replica, Credenti
         credentials,
     )
 }
-/// Exchanges tip graphs as a link does: each side follows `main` once it
-/// exists, and `source` learns which tip `target` follows.
 async fn share_graph(
     f: &Fixture,
     source: &Replica,
@@ -57,7 +54,6 @@ async fn share_graph(
         .await
         .unwrap();
 }
-/// Tells `server` which tip `client`, whose node key is `key`, follows.
 async fn introduce(
     server: &Replica,
     client: &Replica,
@@ -69,7 +65,6 @@ async fn introduce(
         .await
         .unwrap();
 }
-/// One complete pass from `source` to `target`; the target acknowledges what it applied.
 async fn sync(
     f: &Fixture,
     source: &Replica,
@@ -137,7 +132,6 @@ async fn all_rows(f: &Fixture, replica: &Replica) -> BTreeMap<Commitment, RowFie
         }
     }
 }
-/// Seals what `replica` holds and compacts there; returns the base.
 async fn compacted(f: &Fixture, replica: &Replica) -> SignedCheckpoint {
     seal_and_compact(replica, &f.publisher, f.public.domain).await;
     replica.checkpoint(f.public).await.unwrap()
@@ -296,8 +290,6 @@ async fn a_base_at_a_seal_binds_the_scope_and_survives_a_failed_compaction() {
     );
 }
 
-/// Imports `source`'s no-frames base of the keyless private scope into
-/// `target`: signed, canonical, no pages, no key installed.
 async fn import_no_frames(
     f: &Fixture,
     source: &Replica,
@@ -329,7 +321,6 @@ async fn import_no_frames(
     offered
 }
 
-/// The public scope's base row: the first scope state of these fixtures.
 const PUBLIC_BASE: &str = "scope=(SELECT MIN(id) FROM secure_scope_state)";
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -1144,15 +1135,12 @@ async fn late_copy_of_a_pruned_dependency_releases_a_waiting_frame() {
 }
 
 const CRASH_STEPS: [&str; 4] = ["compact", "prune", "import", "switch"];
-/// Fixed keys, so that the parent reopens what the child wrote.
 fn crash_keys() -> (Fixture, [PrivateKey; 3]) {
     (
         Fixture::with_publisher(PrivateKey::from_bytes(&[41; 32])),
         [42, 43, 44].map(|byte| PrivateKey::from_bytes(&[byte; 32])),
     )
 }
-/// Imports `source`'s checkpoint into `target`, resuming a staged import as
-/// the native session does.
 async fn crash_rebootstrap(
     f: &Fixture,
     source: &Replica,
@@ -1186,7 +1174,6 @@ async fn crash_rebootstrap(
     replica.finish_rebootstrap(f.public).await
 }
 
-/// Runs to an injected process exit inside `ROCKY_CHECKPOINT_CRASH_STEP`.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 #[ignore = "invoked by process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_audits"]
@@ -1239,9 +1226,6 @@ async fn checkpoint_crash_child() {
     panic!("the injected fault at {step} did not exit the process");
 }
 
-/// Process exit inside each step of checkpoint creation, pruning and
-/// rebootstrap: the step's transaction is gone, every file opens and passes
-/// the audit, and the work completes afterwards.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_audits() {
@@ -1399,8 +1383,6 @@ async fn checkpoint_signer_expiry_is_checked_at_the_controlled_admission_clock()
     );
 }
 
-/// A scope being imported from a checkpoint makes none of its own until the
-/// switch: the database thread serves the import instead.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn maintenance_waits_for_a_scope_being_imported() {
     let f = Fixture::new();
@@ -1447,7 +1429,6 @@ async fn maintenance_waits_for_a_scope_being_imported() {
     );
 }
 
-/// The page of `signed` after `after`, as `source` serves it to `peer`.
 async fn page_of(
     source: &Replica,
     peer: (&PrivateKey, &CredentialChain),
@@ -1467,9 +1448,6 @@ async fn page_of(
         .unwrap()
 }
 
-/// A replica that holds nothing of a scope reads each verified page as it
-/// commits; an interrupted import resumes at the next page and ends as the
-/// source's rows, verified like any switch.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_fresh_import_shows_each_verified_page_and_resumes_after_reopen() {
     let f = Fixture::new();
@@ -1530,8 +1508,6 @@ async fn a_fresh_import_shows_each_verified_page_and_resumes_after_reopen() {
         .unwrap();
 }
 
-/// A checkpoint-only restore carries the covered epoch's escrow through the
-/// signed encrypted page and judges it before publishing the staged rows.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn checkpoint_pages_carry_and_judge_escrow() {
     let f = Fixture::new();
@@ -1577,8 +1553,6 @@ async fn checkpoint_pages_carry_and_judge_escrow() {
     assert_eq!(kept[0].record().open(&root).unwrap(), secret);
 }
 
-/// A page whose rows a key holder changed, dropped or reordered, or one
-/// moved to another place, is refused before anything is stored.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_tampered_checkpoint_page_is_refused_before_anything_is_stored() {
     let f = Fixture::new();
@@ -1645,7 +1619,6 @@ async fn a_tampered_checkpoint_page_is_refused_before_anything_is_stored() {
     assert!(!all_rows(&f, &b).await.is_empty());
 }
 
-/// A direct import refuses any row already stored, including one late in a page.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_direct_page_never_overwrites_an_existing_row() {
     let f = Fixture::new();
@@ -1696,7 +1669,6 @@ async fn a_direct_page_never_overwrites_an_existing_row() {
     );
 }
 
-/// Shared creations count once; conflicting clocks in or across pages roll back.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn checkpoint_creation_clocks_agree_within_and_across_pages() {
     let f = Fixture::new();
@@ -1763,8 +1735,6 @@ async fn checkpoint_creation_clocks_agree_within_and_across_pages() {
     }
 }
 
-/// A failed first page leaves no durable cursor. Its already requested
-/// window is discarded with the channel, and a later session resumes it.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_import_asks_for_the_next_page_while_it_stores_the_current_one() {
     let f = Fixture::new();
@@ -1805,13 +1775,10 @@ async fn an_import_asks_for_the_next_page_while_it_stores_the_current_one() {
     );
 }
 
-/// Closes `session` without reading the answer on its way, as a failed sync does.
 fn drop_like_a_failed_sync(session: NativeSession) {
     drop(session);
 }
 
-/// Frames for a scope its import fills wait and apply after the switch; a
-/// local write meanwhile is replayed over the imported rows.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn writes_during_a_fresh_import_apply_over_its_rows_after_the_switch() {
     let f = Fixture::new();
@@ -1869,8 +1836,6 @@ async fn writes_during_a_fresh_import_apply_over_its_rows_after_the_switch() {
     b.audit(f.public).await.unwrap();
 }
 
-/// A holder of an imported checkpoint serves the pages its signer cut and
-/// signed; a third replica verifies them like the signer's own.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_imported_checkpoint_is_served_onward_with_its_signer_pages() {
     let f = Fixture::new();

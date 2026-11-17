@@ -1,21 +1,13 @@
-//! A migration of replayed tables publishes its program: the execution
-//! commits with the program staged, bounded transactions author it, and no
-//! frame of it leaves before the last one records the publication.
 use super::super::generations::{select, text};
 use super::*;
 use crate::{LineNode, SchemaConfig, SchemaStage};
 
-/// A replayed lineage whose generation 3 migration inserts `n` items and
-/// retitles them, committed with its program staged and nothing authored.
-/// With `labels`, `tags` is partitioned and the program also inserts one
-/// tag in each of `labels` partitions, each its own bundle after the items'.
 pub(super) struct Staged {
     pub(super) l: Lineage,
     pub(super) dir: Scratch,
     pub(super) key: PrivateKey,
     pub(super) replica: EncryptedReplica<TypedRows>,
     pub(super) publication: Commitment,
-    /// The migration writer's credentials.
     pub(super) writer: CredentialChain,
 }
 
@@ -176,8 +168,6 @@ pub(super) async fn staged_tags(n: usize, labels: usize) -> Staged {
     }
 }
 
-/// Registers and keys the tag partitions `t0`… `t{labels - 1}`; returns
-/// their scopes.
 async fn hold_tags(
     l: &Lineage,
     replica: &EncryptedReplica<TypedRows>,
@@ -199,10 +189,8 @@ async fn hold_tags(
     scopes
 }
 
-/// Tag partitions of the multi-chunk fixtures: 17 bundles, three chunks.
 const LABELS: usize = 16;
 
-/// The frames a publication's bundles hold so far, in position order.
 async fn authored(replica: &EncryptedReplica<TypedRows>, publication: Commitment) -> Vec<Hash> {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let mut hashes = Vec::new();
@@ -286,9 +274,6 @@ async fn the_execution_commits_staged_and_authoring_records_it_once() {
     );
 }
 
-/// Asserts that a link starting now on the issuer's tip is served none of
-/// `unsent`, by range or by transfer, and that none of it is offered.
-/// Returns the frames it was served.
 async fn link_withholds(
     s: &Staged,
     member: &EncryptedReplica<TypedRows>,
@@ -343,7 +328,10 @@ async fn link_withholds(
         .inner
         .lock(crate::replica::Class::Background)
         .await;
-    let refused = inner.offer(unsent).await.unwrap_err();
+    let refused = inner
+        .record_offered_before_sending(unsent)
+        .await
+        .unwrap_err();
     assert!(
         refused.to_string().contains("still being authored"),
         "{refused}"

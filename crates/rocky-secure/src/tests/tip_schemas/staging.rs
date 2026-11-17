@@ -1,4 +1,3 @@
-//! Final admission binds the frozen parent to the original signed frontier.
 use super::*;
 use crate::{SchemaConfig, SchemaStage};
 use rocky_credentials::{SignedTipOpening, TipOpeningStatement};

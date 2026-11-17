@@ -1,5 +1,3 @@
-//! Blockers derived from stored state. The read, write and import gates
-//! answer from these predicates, and diagnostics read the same lists.
 use super::*;
 use rocky_core::{Scope, domain_label, scope_label};
 
@@ -11,7 +9,6 @@ fn blocker(scope: String, kind: BlockerKind, clears_by: ClearsBy) -> Blocker {
         since: None,
     }
 }
-/// Refuses with every blocker, if any.
 pub(super) fn refuse(blockers: Vec<Blocker>) -> Result<(), Error> {
     if blockers.is_empty() {
         Ok(())
@@ -20,11 +17,6 @@ pub(super) fn refuse(blockers: Vec<Blocker>) -> Result<(), Error> {
     }
 }
 
-/// The stored state blockers derive from, apart from the per-frame tables
-/// a transaction boundary covers: a change to any of them, even inside one
-/// transaction, makes cached readiness stale. Readiness reads only which
-/// scopes have state, so `secure_scope_state`'s per-frame updates do not
-/// count.
 const STATE_TABLES: &[&str] = &[
     "secure_rebootstrap",
     "secure_compaction_lost",
@@ -40,8 +32,6 @@ const STATE_TABLES: &[&str] = &[
     "secure_followed_tip",
 ];
 
-/// One domain's blockers: those every scope shares, kept domain-wide, and
-/// each scope's own.
 #[derive(Default)]
 pub(super) struct DomainReadiness {
     domain: Vec<Blocker>,
@@ -51,7 +41,6 @@ impl DomainReadiness {
     fn add(&mut self, scope: ResourceScope, blocker: Blocker) {
         self.scopes.entry(scope).or_default().push(blocker);
     }
-    /// The domain's blockers and `scope`'s own.
     fn of(&self, scope: ResourceScope) -> Vec<Blocker> {
         let mut blockers = self.domain.clone();
         blockers.extend(self.scopes.get(&scope).into_iter().flatten().cloned());
@@ -64,8 +53,6 @@ impl DomainReadiness {
     }
 }
 
-/// Derived readiness per domain, valid for one generation, one count of
-/// state-table writes and one context (tip, authority, graph, custody).
 pub(crate) struct Readiness {
     writes: Arc<crate::sqlite::Writes>,
     tables: Vec<(String, bool)>,
@@ -96,13 +83,11 @@ impl Readiness {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-    /// Before a write attempt, after a commit and after a rollback.
     pub(super) fn invalidate(&self) {
         let mut cache = self.cache();
         cache.generation = cache.generation.wrapping_add(1);
         cache.domains.clear();
     }
-    /// State-table writes so far.
     pub(super) fn writes(&self) -> u64 {
         self.write_count()
     }
@@ -124,8 +109,6 @@ impl Readiness {
             })
             .map(|(.., readiness)| readiness.clone())
     }
-    /// Keeps `readiness`, derived since `writes` state-table writes, unless
-    /// a write or an invalidation happened meanwhile.
     fn put(
         &self,
         domain: Scope,
@@ -146,7 +129,6 @@ impl Readiness {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// What the cached readiness of `domain` depends on besides stored state.
     fn readiness_context(&self, domain: Scope) -> Result<Commitment, Error> {
         let custody: Vec<_> = self
             .custody_scopes(now()?)?
@@ -175,7 +157,6 @@ impl<A: RowApplication> Inner<A> {
             ))?,
         ))
     }
-    /// The blockers of `domain`, derived once per change of what they read.
     pub(super) async fn readiness(&self, domain: Scope) -> Result<Arc<DomainReadiness>, Error> {
         let context = self.readiness_context(domain)?;
         if let Some(readiness) = self.readiness.get(domain, context) {
@@ -186,9 +167,6 @@ impl<A: RowApplication> Inner<A> {
         self.readiness.put(domain, mark, context, readiness.clone());
         Ok(readiness)
     }
-    /// An import outside a seal and a base that must move to a seal of the
-    /// followed path hold back their own scope; a lost compaction holds
-    /// back the whole domain.
     async fn derive_readiness(&self, domain: Scope) -> Result<DomainReadiness, Error> {
         let mut readiness = DomainReadiness::default();
         if self.graphs.contains_key(&domain) {
@@ -240,21 +218,15 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(readiness)
     }
-    /// Every readiness blocker of `domain`, for diagnostics.
     pub(super) async fn workspace_blockers(&self, domain: Scope) -> Result<Vec<Blocker>, Error> {
         Ok(self.readiness(domain).await?.all())
     }
-    /// What holds back every scope of `domain`.
     pub(super) async fn domain_blockers(&self, domain: Scope) -> Result<Vec<Blocker>, Error> {
         Ok(self.readiness(domain).await?.domain.clone())
     }
-    /// What holds back authoring in `scope`: its domain's blockers and its own.
     pub(super) async fn scope_blockers(&self, scope: ResourceScope) -> Result<Vec<Blocker>, Error> {
         Ok(self.readiness(scope.domain).await?.of(scope))
     }
-    /// What holds back reading `scope`: as for authoring, except that a
-    /// scope that waits for a rebootstrap reads the verified pages of a
-    /// direct import.
     pub(super) async fn readable_blockers(
         &self,
         scope: ResourceScope,
@@ -262,7 +234,6 @@ impl<A: RowApplication> Inner<A> {
         let readiness = self.readiness(scope.domain).await?;
         self.readable_in(&readiness, scope).await
     }
-    /// `readable_blockers` from `scope`'s domain readiness.
     pub(super) async fn readable_in(
         &self,
         readiness: &DomainReadiness,
@@ -278,8 +249,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(blockers)
     }
-    /// Frames of a dropped tip on the followed tip's ancestry that are not
-    /// back yet: authoring waits for them.
     pub(super) async fn dropped_tip_blockers(&self) -> Result<Vec<Blocker>, Error> {
         let graph = self
             .graphs
@@ -318,9 +287,6 @@ impl<A: RowApplication> Inner<A> {
             ClearsBy::AnyPeer,
         )])
     }
-    /// A device that may write authors with a node of its identity for the
-    /// followed line; until one is registered, or while its chain no longer
-    /// verifies, as after a revocation, nothing is written.
     pub(super) fn line_node_blockers(&self) -> Result<Vec<Blocker>, Error> {
         let time = now()?;
         let clears_by = match &self.node_author {
@@ -354,8 +320,6 @@ impl<A: RowApplication> Inner<A> {
             Vec::new()
         })
     }
-    /// Pending log heads after `after`, at most `limit` of them, folded into
-    /// `pending`; the last head read, or `None` once every head is read.
     async fn pending_heads(
         &self,
         pending: &mut PendingCounts,
@@ -424,7 +388,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(last.filter(|_| full))
     }
-    /// Imports in progress and eviction guards, scope by scope.
     async fn scope_state_blockers(&self) -> Result<Vec<Blocker>, Error> {
         let mut blockers = Vec::new();
         let mut staged = BTreeSet::new();
@@ -504,8 +467,6 @@ impl<A: RowApplication> Inner<A> {
 struct PendingCounts {
     counts: BTreeMap<(String, WaitReason), u64>,
     quarantined: BTreeMap<(String, String), u64>,
-    /// Frames of a log whose head waits for this clock, by scope and author
-    /// node, with the most seconds a head is ahead.
     ahead: BTreeMap<(String, String), (u64, u64)>,
 }
 impl PendingCounts {
@@ -551,13 +512,8 @@ impl PendingCounts {
     }
 }
 
-/// Pending log heads per acquisition of the stepped blocker listing.
 const PENDING_HEADS: usize = if cfg!(test) { 1 } else { 64 };
-/// Passes a listing restarts after a blocker source changed under it.
 const BLOCKER_PASSES: usize = 4;
-/// Tables a blocker listing's steps read besides pending frames. A change
-/// between steps restarts the listing; pending counts may move between
-/// pages, as they do between listings.
 const LISTING_TABLES: &[&str] = &[
     "secure_dropped_tip_frames",
     "secure_quarantine",
@@ -608,11 +564,6 @@ impl BlockerSource {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Every reason a scope or domain of this replica waits now, derived
-    /// from stored state. The gates that refuse reads, writes and imports
-    /// answer from the same predicates. Lists one domain, one component or
-    /// one page of pending log heads per acquisition, and restarts when
-    /// what it read changed meanwhile.
     pub async fn blockers(&self) -> Result<Vec<Blocker>, Error> {
         for _ in 0..BLOCKER_PASSES {
             match self.blocker_pass().await {

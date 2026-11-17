@@ -1,6 +1,3 @@
-//! What a seal decided for a replayed scope's transactions. A base at a
-//! seal carries it, so a replica that takes the base and loses the frames
-//! still knows how its own covered transactions ended.
 use super::*;
 use crate::replica::checkpoint::{
     CheckpointStatement, MAX_SEALED_OUTCOMES, MAX_SEALED_VIOLATION, SealedOutcome, SealedOutcomes,
@@ -9,8 +6,6 @@ use crate::replica::checkpoint::{
 
 #[cfg(test)]
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Records `outcomes` for every member of `scope` this node authored,
-    /// as an import of a base that covers them does.
     pub(crate) async fn cover_for_test(
         &self,
         scope: ResourceScope,
@@ -37,10 +32,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Whether the seal at `depth` covers a member of scope `id`, or of a
-    /// scope linked to it, that it leaves open: one awaiting another
-    /// member's outcome record. The scope's rows there are undecided, so
-    /// no rows are taken and no base is written at that seal.
     pub(in crate::replica) async fn leaves_open(&self, id: i64, depth: i64) -> Result<bool, Error> {
         let mut scopes = self.linked_scopes(id).await?;
         scopes.push(id);
@@ -62,9 +53,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(false)
     }
 
-    /// Scope `id`'s drops at a seal, just finalized, which leaves none of
-    /// its covered members open: the current base's and every drop sealed
-    /// since.
     pub(in crate::replica) async fn sealed_outcomes(
         &self,
         id: i64,
@@ -136,10 +124,6 @@ impl<A: RowApplication> Inner<A> {
         })
     }
 
-    /// Records how base `outcomes` says this node's member `hash` of scope
-    /// `id`, whose frame the base covers, ended. A listed drop or an
-    /// unlisted member is final; one past the list's horizon reads as
-    /// unknown. Records never overwrite it.
     pub(in crate::replica) async fn keep_covered(
         &self,
         id: i64,
@@ -216,10 +200,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    /// Decides this node's provisional kept members of scope `id` that the
-    /// seal of an installed base covers, as `keep_covered` does for held
-    /// frames: their frames are gone, as after an eviction, so no record
-    /// would make them final.
     pub(in crate::replica) async fn cover_kept(
         &self,
         scope: ResourceScope,
@@ -287,8 +267,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    /// A base's decision as kept columns `dropped`, `sealed`, `violated`;
-    /// a final one notifies the author.
     fn based_outcome(
         &self,
         listed: Option<Option<&SealedOutcome>>,
@@ -310,11 +288,29 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-/// `violation` within the listed bound, cut at a character boundary.
 fn bounded(violation: &str) -> String {
     let mut end = violation.len().min(MAX_SEALED_VIOLATION);
     while !violation.is_char_boundary(end) {
         end -= 1;
     }
     violation[..end].to_owned()
+}
+
+#[cfg(test)]
+mod violation_tests {
+    use super::*;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_listed_violation_is_cut_to_its_bound_at_a_character_boundary() {
+        let short = "fk_task_owner";
+        assert_eq!(bounded(short), short);
+        let wide = "é".repeat(MAX_SEALED_VIOLATION);
+        let cut = bounded(&wide);
+        assert_eq!(cut.len(), MAX_SEALED_VIOLATION);
+        assert!(wide.starts_with(&cut));
+        let odd = format!("a{wide}");
+        let cut = bounded(&odd);
+        assert_eq!(cut.len(), MAX_SEALED_VIOLATION - 1);
+        assert!(odd.starts_with(&cut));
+    }
 }

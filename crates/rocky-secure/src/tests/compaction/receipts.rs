@@ -1,4 +1,3 @@
-//! Local admission evidence survives row reclamation and fresh-node adoption.
 use super::*;
 use crate::storage::rows;
 
@@ -58,8 +57,6 @@ async fn a_revoked_fresh_restore_config_does_not_rebind_the_backup() {
     restored.audit(lineage.scope("items")).await.unwrap();
 }
 
-/// A value's logical size: eight bytes for numbers, the encoded length for
-/// blobs and text.
 fn logical_size(value: &SqlValue) -> usize {
     match value {
         SqlValue::Integer(_) | SqlValue::Real(_) => 8,

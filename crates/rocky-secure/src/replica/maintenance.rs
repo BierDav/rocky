@@ -1,8 +1,5 @@
-//! Incremental cleanup; deleting a pulled header first makes its payload unreachable.
 use super::*;
 
-/// One stored record per cleanup acquisition. Cost calibration is still part
-/// of phase 2 qualification.
 const CLEANUP_ROWS: usize = 1;
 const PAYLOADS: [(&str, &str); 3] = [
     ("secure_pulled_rows", "row"),
@@ -28,8 +25,6 @@ pub(super) struct Pass {
     pub(super) commit: u64,
 }
 impl<A: RowApplication> Inner<A> {
-    /// One independently valid cleanup step. Cursors need no persisted shape:
-    /// missing headers and orphan payloads reconstruct the remaining work.
     pub(super) async fn forget_stale_step(&mut self) -> Result<bool, Error> {
         let mut pass = std::mem::take(&mut self.maintenance);
         let result = self.cleanup_step(&mut pass).await;
@@ -204,6 +199,6 @@ impl<A: RowApplication> Inner<A> {
 impl<A: RowApplication> EncryptedReplica<A> {
     pub(crate) async fn maintenance_step_for_test(&self) -> Result<bool, Error> {
         let mut inner = self.inner.lock(Class::Background).await;
-        transaction!(@commit inner, |inner| inner.forget_stale_step().await)
+        transaction!(@without_wal_checkpoint inner, |inner| inner.forget_stale_step().await)
     }
 }

@@ -184,9 +184,6 @@ fn requests(scope: ResourceScope) -> Vec<Message> {
     ]
 }
 
-/// Before a reader server the member even knows the tuple, yet lacks the
-/// reader key. Keyless custody accepts the tuple as proof, which a link
-/// offers at open, so before custody the member must not know it.
 fn member_knows_the_tuple(custody: bool) -> bool {
     !custody
 }
@@ -550,10 +547,6 @@ async fn frontier_acknowledgments_require_proved_custody() {
     );
 }
 
-/// A no-frames base of a concrete partition moves to a custodian that
-/// proves its tuple, while an unproved reader's offers of it get the
-/// common refusal; a partitioned table's own scope signs none. The server
-/// reads the partition without its key and holds no history.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_no_frames_partition_base_moves_by_its_tuple_and_stays_hidden() {
     let root = rocky_platform::fs::Scratch::new().await;

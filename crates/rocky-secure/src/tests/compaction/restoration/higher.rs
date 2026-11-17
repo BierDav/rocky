@@ -1,12 +1,8 @@
-//! Privileged higher-log fixtures must still bridge the exact guarded hash.
 use super::*;
 use crate::storage::bindings;
 
 type SignedHeader = p2panda_core::Header<crate::wire::Extensions>;
 
-/// Stores `higher` as a retained operation and log head beside `original`.
-/// Ordinary intake refuses unknown own frames above the guard, so only a
-/// privileged write can place it.
 async fn inject_higher_record(
     f: &HeldPrefix,
     scope: ResourceScope,
@@ -23,8 +19,6 @@ async fn inject_higher_record(
     ).await.unwrap();
 }
 
-/// Removes what [`inject_higher_record`] stored, so the ordinary audit sees
-/// the store as intake left it.
 async fn remove_higher_record(f: &HeldPrefix, higher: &SignedHeader) {
     f.replica
         .inner
@@ -50,7 +44,6 @@ async fn remove_higher_record(f: &HeldPrefix, higher: &SignedHeader) {
         .unwrap();
 }
 
-/// A clock skew past every fixture grant's expiry.
 const PAST_GRANT_EXPIRY: u64 = 301 * rocky_credentials::DAY;
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

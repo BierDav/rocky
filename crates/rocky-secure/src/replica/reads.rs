@@ -1,8 +1,6 @@
 use super::*;
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// The whole scope, within `MAX_SNAPSHOT_ROWS` and `MAX_SNAPSHOT_BYTES`.
-    /// Larger scopes are read with `snapshot_page`.
     pub async fn snapshot(&self, scope: ResourceScope) -> Result<SecureSnapshot, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let page = inner
@@ -20,9 +18,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             complete: page.complete,
         })
     }
-    /// Reads live rows after `after` in row order: at most `max_rows` rows and
-    /// `MAX_SNAPSHOT_BYTES`, with `next` set when more remain. Every page checks
-    /// read authority and reports its own revision.
     pub async fn snapshot_page(
         &self,
         scope: ResourceScope,
@@ -52,10 +47,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .companion(scope, row)
             .await
     }
-    /// Forward original bytes only. Restart a pass after subscription changes or new insertions.
-    /// The frames leave the device, so every commit they may include is
-    /// flushed first, without the replica lock so local statements do not
-    /// wait for it.
     pub async fn transfer_page(
         &self,
         peer: PublicKey,
@@ -173,7 +164,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }) {
             return Err(denied("acknowledgment right denied"));
         }
-        transaction!(@cache_neutral inner, |inner| {
+        transaction!(@keeping_frontier_cache inner, |inner| {
             inner.conn.execute("INSERT INTO secure_ack VALUES(?,?,?) ON CONFLICT(peer,hash) DO UPDATE SET applied=MAX(applied,excluded.applied)", bindings(vec![SqlValue::Blob(rocky_credentials::PeerId::of(peer).as_bytes().to_vec()), SqlValue::Blob(id.as_bytes().to_vec()), SqlValue::Integer(i64::from(applied))])).await?;
             Ok(())
         })?;
@@ -182,9 +173,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Reports `Deleted` only for a settled tombstone: an evicting scope is
-    /// unavailable, never deleted, and pending or importing rows never prove
-    /// a deletion.
     pub(super) async fn companion(
         &self,
         scope: ResourceScope,
@@ -206,7 +194,6 @@ impl<A: RowApplication> Inner<A> {
             _ => Ok(Companion::Unavailable),
         }
     }
-    /// Checks whole-row read authority; returns whether the scope's key is installed.
     pub(super) fn readable(&self, scope: ResourceScope) -> Result<bool, Error> {
         if !self.can_read_key(scope, &self.local_grants(now()?)?) {
             return Err(denied("whole-row read denied"));
@@ -223,10 +210,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(pending.next().await?.is_some())
     }
-    /// Whether a pending frame of `scope` may apply before this clock
-    /// moves on. Frames waiting for this clock are as if not arrived yet:
-    /// what waits behind them is stamped later still, so a log whose head
-    /// waits for it waits whole.
     pub(super) async fn pending_now(&self, scope: ResourceScope) -> Result<bool, Error> {
         let heads = collect_rows(
             self.conn
@@ -327,8 +310,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// A transfer page with the voids its frames continue after, its
-    /// frames marked offered before they leave.
     async fn offered_page(
         &mut self,
         frames: Vec<EncryptedFrame>,
@@ -339,7 +320,7 @@ impl<A: RowApplication> Inner<A> {
             .iter()
             .map(EncryptedFrame::id)
             .collect::<Result<Vec<_>, _>>()?;
-        self.offer(&hashes).await?;
+        self.record_offered_before_sending(&hashes).await?;
         Ok(CiphertextPage {
             voids: self.voids_before(&frames).await?,
             frames,

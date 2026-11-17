@@ -1,9 +1,5 @@
-//! The constraint fixtures carried from the prototype. Every fixture is a
-//! setup every receiver starts from and units of concurrent history, and
-//! every delivery schedule of them equals the from-scratch canonical replay.
 use super::*;
 
-/// What every schedule delivers; phase 6's equivalence runs over the same.
 pub(super) struct History {
     pub(super) c: Constrained,
     pub(super) setup: Vec<EncryptedFrame>,
@@ -32,9 +28,6 @@ fn permutations(n: usize) -> Vec<Vec<usize>> {
     all
 }
 
-/// Every order of `units`, one packet each; with `splits`, split into
-/// consecutive packets by a pattern that rotates through every split across
-/// the orders.
 fn schedules(units: &[Vec<EncryptedFrame>], splits: bool) -> Vec<Vec<Vec<EncryptedFrame>>> {
     let every = 1usize << (units.len() - 1);
     let mut all = Vec::new();
@@ -55,7 +48,6 @@ fn schedules(units: &[Vec<EncryptedFrame>], splits: bool) -> Vec<Vec<Vec<Encrypt
     all
 }
 
-/// Runs every schedule on a fresh receiver, spread over threads.
 pub(super) fn deliver_all(history: &History, splits: bool, expected: &Canonical) {
     let schedules = schedules(&history.units, splits);
     let root = tempfile::tempdir().unwrap();
@@ -103,9 +95,6 @@ fn replayed(name: &str, columns: serde_json::Value, rest: serde_json::Value) -> 
     table
 }
 
-/// Teams and people of one tenant, joined by `memberships` through composite
-/// deferred keys. A person's nickname is unique ignoring case and a team has
-/// one active owner.
 fn graph() -> Constrained {
     let tenant = serde_json::json!({"name": "tenant", "type": "integer", "not_null": true});
     let partitioned = |extra: serde_json::Value| {
@@ -168,7 +157,6 @@ fn graph() -> Constrained {
     Constrained::build(definition, Some(1), |_| {})
 }
 
-/// Commits `statements` on `device`, returning the frames as one unit.
 pub(super) async fn unit(
     c: &Constrained,
     device: &mut Device,
@@ -178,9 +166,6 @@ pub(super) async fn unit(
     device.fresh().await
 }
 
-/// Six transactions of four authors. The owner's membership needs the team
-/// and person of the first, so it arrives before them in half the orders.
-/// Three lose where they replay, and the note beside the fourth goes with it.
 async fn graph_history(root: &Path) -> History {
     let c = graph();
     let (mut d, ids, setup) = devices(
@@ -280,9 +265,6 @@ fn composite_many_to_many_graph_converges_in_all_720_orders() {
     deliver_all(&history, false, &expected);
 }
 
-/// An order's values are checked together: its discount within its price,
-/// its generated net bounded and a posted order's reference. `line_cap` bounds its
-/// lines, as the prototype's trigger did, for updates and deletes too.
 fn checked_orders() -> Constrained {
     let integer =
         |name: &str| serde_json::json!({"name": name, "type": "integer", "not_null": true});
@@ -326,10 +308,6 @@ fn checked_orders() -> Constrained {
     Constrained::with(definition, |_| {})
 }
 
-/// Five authors change one order, each seeing only the setup. Every
-/// transaction holds where it was written; the discount makes a lower price
-/// fail, the quantity and price make the third's net too large, and the
-/// fifth's line passes the cap, taking its reference with it.
 async fn checks_history(root: &Path) -> History {
     let c = checked_orders();
     let (mut d, ids, setup) = devices(
@@ -378,8 +356,6 @@ fn complex_checks_converge_in_all_120_orders() {
     deliver_all(&history, false, &expected);
 }
 
-/// `handle` is unique ignoring case and a team has one active lead. The
-/// third frees the name and the lead seat the first two contend for.
 fn indexed_seats() -> Constrained {
     let definition = serde_json::json!({
         "format": 6,
@@ -402,9 +378,6 @@ fn indexed_seats() -> Constrained {
     Constrained::with(definition, |_| {})
 }
 
-/// Ada leads team 1. A concurrent `ADA` clashes with her whenever it
-/// replays; `ada`, ordered after she renames and steps down, takes both her
-/// name and her seat, while a spare seat of the team never clashes.
 async fn indexes_history(root: &Path) -> History {
     let c = indexed_seats();
     let (mut d, _, setup) = devices(&c, root, 3, &[]).await;
@@ -439,8 +412,6 @@ fn expression_and_partial_unique_indexes_converge_in_every_order() {
     deliver_all(&history, true, &expected);
 }
 
-/// A delete that cascades drops with the raise beside it, so green and its
-/// member stay and the later member of green applies.
 async fn cascades_history(root: &Path) -> History {
     let c = Constrained::new();
     let (mut d, ids, setup) = devices(
@@ -519,9 +490,6 @@ fn cascades_roll_back_with_their_transaction_in_every_order() {
     deliver_all(&history, true, &expected);
 }
 
-/// Red holds one member. The first author adds and removes one; the second
-/// and third each add one: the second fits only after the removal, and the
-/// third never does.
 async fn caps_history(root: &Path) -> History {
     let c = Constrained::new();
     let (mut d, ids, setup) = devices(

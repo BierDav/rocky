@@ -1,4 +1,3 @@
-//! Global keyless records remain in the batch's domain even when omitted.
 use super::*;
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

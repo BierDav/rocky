@@ -1,14 +1,9 @@
-//! Reads and writes need only the scopes they touch; finality needs the
-//! whole domain. A missing scope is refused, never read as empty.
 use super::*;
 use crate::MAX_SNAPSHOT_ROWS;
 
-/// More tags than one checkpoint page of at most 256 rows holds.
 const MORE_TAGS_THAN_ONE_PAGE: usize = 300;
-/// Tag inserts per transaction, within the 256 statements one may hold.
 const TAGS_PER_TRANSACTION: usize = 150;
 
-/// `a` holds two items and three tags, sealed and compacted.
 async fn source(lineage: &Lineage, dir: &Scratch, key: &PrivateKey) -> Replica {
     let a = open(lineage, dir, "a", key).await;
     follow_main(lineage, &a).await;
@@ -41,7 +36,6 @@ async fn source(lineage: &Lineage, dir: &Scratch, key: &PrivateKey) -> Replica {
     );
     a
 }
-/// A joiner of `a` that imported its items base only.
 async fn items_only(lineage: &Lineage, dir: &Scratch, a: &Replica, key: &PrivateKey) -> Replica {
     let j = open(lineage, dir, "j", key).await;
     crate::tests::exchange_graphs(a, &j, lineage.domain).await;
@@ -56,7 +50,6 @@ async fn read(replica: &Replica, sql: &str) -> Result<Vec<Vec<SqlValue>>, Error>
         .await
         .map(|rows| rows.rows)
 }
-/// Persistent readiness state and the stored and in-memory revisions.
 async fn state(replica: &Replica) -> (Vec<Vec<SqlValue>>, (u64, u64)) {
     let rows = crate::storage::rows(
         &replica.inner.lock(crate::replica::Class::Background).await.conn,
@@ -66,7 +59,6 @@ async fn state(replica: &Replica) -> (Vec<Vec<SqlValue>>, (u64, u64)) {
     .unwrap();
     (rows, replica.stored_and_memory_revision().await)
 }
-/// Authoring in the waiting `tags` scope is refused.
 async fn author_refused(replica: &Replica) {
     let error = identity_insert(
         &session(replica).await,
@@ -80,7 +72,6 @@ async fn author_refused(replica: &Replica) {
         "{error}"
     );
 }
-/// What a joiner with verified items and unverified tags may and may not do.
 async fn scoped(lineage: &Lineage, j: &Replica) {
     let before = state(j).await;
     assert_eq!(
@@ -132,7 +123,6 @@ async fn a_verified_scope_reads_and_writes_while_an_unbegun_one_waits() {
     assert_eq!(titles(&j).await.len(), 3);
 }
 
-/// A direct import in progress: its verified pages show, incomplete.
 async fn partial(a: &Replica, j: &Replica) {
     let shown = read(j, "SELECT key FROM tags").await.unwrap().len();
     assert!(shown >= 1);

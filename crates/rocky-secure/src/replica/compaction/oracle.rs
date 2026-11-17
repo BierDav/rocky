@@ -1,4 +1,3 @@
-//! Independent full-rebuild comparisons for tests and explicit audits.
 use super::*;
 
 impl<A: RowApplication> Inner<A> {
@@ -143,7 +142,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(snapshot)
     }
 
-    /// The explicit audit retains the full restoration as an independent oracle.
     pub(in crate::replica) async fn audit_rebuilt_projection(
         &self,
         scope: ResourceScope,

@@ -1,13 +1,9 @@
-//! Node author credentials and transaction-local identity reservations.
 use super::*;
 
 pub(super) mod receipts;
 
-/// A re-admission that needs a waiting scope's replay ledger.
 pub(super) const LEDGER_WAITS: &str = "the scope waits for its base before this frame reapplies";
 
-/// Stored state a replay ledger reads besides visibility, and whether an
-/// update to it counts.
 const LEDGER_SOURCES: [(&str, bool); 8] = [
     ("secure_applied", true),
     ("secure_operations", true),
@@ -18,14 +14,9 @@ const LEDGER_SOURCES: [(&str, bool); 8] = [
     ("secure_rebuild_scopes", false),
     ("secure_scope_state", false),
 ];
-/// What a domain's replay ledgers were seeded under: its visibility, none
-/// without a graph, and the version of their other stored sources.
 type LedgerBasis = (Option<tips::LedgerView>, u64);
-/// The basis per domain during one tip statement admission.
 pub(super) type SeededLedgers = BTreeMap<rocky_core::Scope, LedgerBasis>;
 
-/// `key` is a 16-byte digest of the business key, keyed by the interned
-/// scope id; lookups confirm the full key from the row.
 const ROW_KEYS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_row_keys(scope INTEGER NOT NULL,row BLOB NOT NULL,key BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID";
 pub(super) const SCHEMA: &[&str] = &[
     receipts::SCHEMA[0],
@@ -51,9 +42,7 @@ pub(super) const SCHEMA: &[&str] = &[
 pub(super) struct NodeAuthor {
     pub(super) key: PrivateKey,
     pub(super) credentials: CredentialChain,
-    /// `credentials` with the digest this author's frames name.
     pub(super) chain: Chain,
-    /// The writer identity: `key`'s public key.
     pub(super) writer: WriterId,
 }
 
@@ -68,8 +57,6 @@ pub(crate) enum Raise {
     Statement { own: u64 },
 }
 
-/// The identity marks one replay has passed: seeded from exactly the state
-/// it starts over, raised by eligible own births, never by carries or live maxima.
 #[derive(Clone, Debug, Default)]
 pub(super) struct IdentityLedger(BTreeMap<WriterId, checkpoint::IdentityMark>);
 
@@ -88,7 +75,6 @@ impl IdentityLedger {
         }
         Ok(ledger)
     }
-    /// Raises `mark.author`'s mark; a writer is its own signer.
     pub(super) fn merge(&mut self, mark: checkpoint::IdentityMark) -> Result<(), Error> {
         match self.0.get_mut(&mark.author) {
             Some(held) if held.signer != mark.signer => {
@@ -122,16 +108,13 @@ impl NodeAuthor {
         })
     }
 }
-/// The writer of a node credential chain: its node key, never a number.
 pub(super) fn node_writer(chain: &CredentialChain, key: &PublicKey) -> Result<WriterId, Error> {
     check_node_chain(chain)?;
     Ok(writer(key))
 }
-/// The stored row of an identity's incarnation.
 pub(super) fn incarnation(identity: rocky_core::RowIdentity) -> Commitment {
     rocky_core::commitment("rocky.row-incarnation.v3", &identity.to_bytes())
 }
-/// Refuses a chain that does not end at a node certificate.
 pub(super) fn check_node_chain(chain: &CredentialChain) -> Result<(), Error> {
     match chain.0.last() {
         Some(leaf) if leaf.capability.kind == rocky_core::PrincipalKind::Node => Ok(()),
@@ -141,7 +124,6 @@ pub(super) fn check_node_chain(chain: &CredentialChain) -> Result<(), Error> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Registers the local node key for credential-bound control signatures.
     pub async fn register_credential_signer(&self, key: PrivateKey) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner
@@ -158,8 +140,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 impl<A: RowApplication> Inner<A> {
-    /// The same status and visibility predicate used by replay and L.
-    /// Persisted L always describes the selected workspace.
     pub(super) fn replay_eligible(
         &self,
         status: &str,
@@ -242,8 +222,6 @@ impl<A: RowApplication> Inner<A> {
             }
         }
     }
-    /// Indexes `record` stored at `row`; a known `old` avoids rewriting
-    /// unchanged move and natural-key entries.
     pub(super) async fn index_row_key(
         &self,
         scope: &[u8],
@@ -279,7 +257,6 @@ impl<A: RowApplication> Inner<A> {
         ).await?;
         Ok(())
     }
-    /// Backfills the derived index after open or a bulk restore, in bounded pages.
     pub(super) async fn index_row_keys(&self) -> Result<(), Error> {
         let mut after = (0, Vec::new());
         loop {
@@ -306,9 +283,6 @@ impl<A: RowApplication> Inner<A> {
             }
         }
     }
-    /// The allocation scope the installed schema derives for `scope`: a
-    /// partitioned table's template scope, else the scope itself. None when
-    /// a typed schema no longer describes it.
     fn derived_allocation(&self, scope: ResourceScope) -> Option<ResourceScope> {
         let Some(typed) = self.workspace.typed.as_ref() else {
             return Some(scope);
@@ -326,12 +300,9 @@ impl<A: RowApplication> Inner<A> {
             },
         )
     }
-    /// The scope whose permanent marks local allocation reads for `scope`.
     pub(super) fn identity_allocation_scope(&self, scope: ResourceScope) -> ResourceScope {
         self.derived_allocation(scope).unwrap_or(scope)
     }
-    /// The stored, immutable allocation binding of `scope`, checked against
-    /// what the installed schema derives.
     pub(super) async fn allocation_binding(
         &self,
         scope: ResourceScope,
@@ -361,7 +332,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(Some((*id, allocation)))
     }
-    /// The bound allocation of `scope`, which admission evidence needs.
     pub(super) async fn bound_allocation(
         &self,
         scope: ResourceScope,
@@ -370,9 +340,6 @@ impl<A: RowApplication> Inner<A> {
             .await?
             .ok_or_else(|| Error::Corrupt("an identity allocation binding is missing".into()))
     }
-    /// Inside a write transaction: the allocation id and scope `scope`'s
-    /// identities share, binding them once from the installed schema. Table
-    /// removal, eviction or a new base never change a binding.
     pub(super) async fn allocation_of(
         &self,
         scope: ResourceScope,
@@ -469,10 +436,6 @@ impl<A: RowApplication> Inner<A> {
             })
             .collect()
     }
-    /// Raises the permanent mark of `mark.author` at the concrete and the
-    /// allocation scope, and the own/summary floors according to its source. A signer
-    /// other than the one either scope holds for that author is refused
-    /// before anything is written. Marks are never lowered or deleted.
     pub(crate) async fn put_identity_mark(
         &self,
         scope: ResourceScope,
@@ -517,7 +480,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Raises scope `scope`'s replay ledger with `mark`.
     pub(super) async fn fold_ledger(
         &self,
         scope: ResourceScope,
@@ -537,9 +499,6 @@ impl<A: RowApplication> Inner<A> {
         ).await?;
         Ok(())
     }
-    /// The replay ledger a re-admission compares with. A scope waiting for
-    /// its seal has none, and the decision waits instead of reading it as
-    /// empty.
     pub(super) async fn ledger_entry(
         &self,
         scope: ResourceScope,
@@ -549,8 +508,6 @@ impl<A: RowApplication> Inner<A> {
         }
         self.ledger_marks(scope).await
     }
-    /// Whether `scope` waits for a base at a seal of the path: pruned
-    /// history and no installed base there, so no replay ledger.
     pub(super) async fn ledger_waits(&self, scope: ResourceScope) -> Result<bool, Error> {
         if matches!(
             self.holding(scope).await?,
@@ -568,8 +525,6 @@ impl<A: RowApplication> Inner<A> {
         };
         Ok(self.base_seal(id).await?.is_none() || self.base_off_path(scope, id).await?)
     }
-    /// Reconstructs only the current workspace's eligible suffix over its
-    /// exact installed base. A waiting scope has no usable ledger.
     pub(super) async fn recomputed_ledger(
         &self,
         scope: ResourceScope,
@@ -648,8 +603,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Without the scope's keys its suffix cannot be read: L is dropped and
-    /// the scope queued, so it waits until a keyed open or rebuild reseeds it.
     pub(super) async fn reseed_ledger(&self, scope: ResourceScope, id: i64) -> Result<(), Error> {
         if !self.ledger_readable(scope) {
             self.replace_ledger(scope, IdentityLedger::default())
@@ -680,9 +633,6 @@ impl<A: RowApplication> Inner<A> {
         .await?
         .is_empty())
     }
-    /// Includes removed-table and off-custody scopes that readiness omits.
-    /// During an admission, a domain whose basis is unchanged since its
-    /// ledgers were seeded keeps them.
     pub(super) async fn reseed_domain_ledgers(
         &self,
         domain: rocky_core::Scope,
@@ -728,9 +678,6 @@ impl<A: RowApplication> Inner<A> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-    /// Tracks ledger bases for one admission: each domain's ledgers are
-    /// seeded under `graphs` at `tip`, following `followed`, and the
-    /// stored state as it is now. Nothing is tracked when that is unknown.
     pub(super) fn track_seeded_ledgers(
         &self,
         graphs: &BTreeMap<rocky_core::Scope, Arc<rocky_credentials::TipGraph>>,
@@ -749,8 +696,6 @@ impl<A: RowApplication> Inner<A> {
     pub(super) fn untrack_seeded_ledgers(&self) {
         *self.seeded_ledgers() = None;
     }
-    /// `domain`'s ledger basis, or none when it cannot be read: such a
-    /// domain is always reseeded.
     fn ledger_basis(
         &self,
         graphs: &BTreeMap<rocky_core::Scope, Arc<rocky_credentials::TipGraph>>,
@@ -764,7 +709,6 @@ impl<A: RowApplication> Inner<A> {
         };
         Some((view, self.ledger_sources().ok()?))
     }
-    /// The version of `LEDGER_SOURCES`; it grows with every write to them.
     fn ledger_sources(&self) -> Result<u64, Error> {
         let names = self.conn.names();
         let tables: Vec<(String, bool)> = LEDGER_SOURCES
@@ -824,14 +768,12 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// The persisted replay ledger L of `scope`.
     pub(super) async fn ledger_marks(
         &self,
         scope: ResourceScope,
     ) -> Result<Vec<checkpoint::IdentityMark>, Error> {
         self.marks_in("secure_identity_ledger", scope).await
     }
-    /// The summary floor S of `scope`, per author.
     pub(super) async fn summary_marks(
         &self,
         scope: ResourceScope,
@@ -870,10 +812,6 @@ impl<A: RowApplication> Inner<A> {
             })
             .collect()
     }
-    /// The identities `frame` creates: each write without a before image
-    /// that names a row identity, signed by its carried proof's stamp author
-    /// or else the frame author. Writes are read through the installed
-    /// schema's fields, whatever schema signed them.
     pub(super) fn birth_marks(&self, frame: &EncryptedFrame) -> Result<Vec<BirthMark>, Error> {
         let payload = self.row_payload(frame)?;
         self.payload_birth_marks(frame, &payload)
@@ -917,10 +855,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(marks)
     }
-    /// The identity marks a checkpoint at `frontier` signs: `previous` merged
-    /// with the births of the scope's applied or consumed operations the
-    /// frontier covers, never the live maxima of later writes. None when a
-    /// covered operation is no longer retained.
     pub(super) async fn covered_identity_marks(
         &self,
         id: i64,
@@ -1019,11 +953,6 @@ impl<A: RowApplication> Inner<A> {
             None => Ok(Vec::new()),
         }
     }
-    /// The identity marks of scope `id`'s state through applied position
-    /// `through`, as a kept seal's replay starts from: a verified signed
-    /// base at or before it, else nothing with complete history, then every
-    /// retained applied birth up to it, retired and consumed ones included.
-    /// None when that prefix is no longer retained.
     pub(super) async fn prefix_identity_ledger(
         &self,
         scope: ResourceScope,
@@ -1090,8 +1019,6 @@ impl<A: RowApplication> Inner<A> {
             }
         }
     }
-    /// Refuses to sign rows whose identity no covered mark reaches: the
-    /// importer's check, run before signing.
     pub(super) async fn check_covered_identities(
         &self,
         rows: &str,
@@ -1135,8 +1062,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Test access: the `(author, sequence)` marks a replay of kept `seal`
-    /// starts from, or None when that prefix is unavailable.
     #[cfg(test)]
     pub(crate) async fn kept_prefix_marks(
         &self,
@@ -1160,7 +1085,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
-/// The lookup digest `secure_row_keys` holds for a business key.
 pub(super) fn key_digest(key: &[u8]) -> Vec<u8> {
     key[..key.len().min(16)].to_vec()
 }

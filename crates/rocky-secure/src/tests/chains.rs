@@ -1,5 +1,3 @@
-//! Credential chains by reference: the frame header's digest, the session's
-//! chain table and stored chains.
 use super::*;
 use crate::network::NativeSession;
 use crate::replica::checkpoint::{STEP_OPERATIONS, Stage};
@@ -8,8 +6,6 @@ use rocky_core::FieldSelection;
 
 type Replica = EncryptedReplica<Employees>;
 
-/// `base` and grants for other tables, `count` in all: of the same shape,
-/// or `narrow` ones that only read.
 fn widened(base: Vec<ResourceGrant>, count: usize, narrow: bool) -> Vec<ResourceGrant> {
     let mut grants = base.clone();
     for mesh in 0..count.saturating_sub(base.len()) {
@@ -55,7 +51,6 @@ async fn count(replica: &Replica, sql: &str) -> usize {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     crate::storage::rows(&inner.conn, sql).await.unwrap().len()
 }
-/// `client` dials `server` with the chains the replicas were opened with.
 async fn sessions(
     (server_key, server, server_chain): (&PrivateKey, &Replica, &Chain),
     (client_key, client, client_chain): (&PrivateKey, &Replica, &Chain),
@@ -316,12 +311,8 @@ async fn a_chain_goes_with_the_last_operation_that_names_it() {
     assert_eq!(b.audit(f.public).await.unwrap().operations, 3);
 }
 
-/// Alice's operations Bob holds beside three of his own: more than one
-/// pruning batch of [`STEP_OPERATIONS`].
 const ALICE_OPERATIONS_BOB_HOLDS: u16 = 12;
 
-/// A private row the source authored and checkpointed, for the target to
-/// bootstrap.
 struct Checkpointed {
     f: Fixture,
     _dir: Scratch,

@@ -1,11 +1,7 @@
-//! Late transactions continue in the successor tip: two devices that
-//! exchanged transactions while the owner sealed without them replay them
-//! after the seal's members, with their original identity and stamp.
 use super::*;
 use crate::CrashPoint;
 use rocky_credentials::{BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, SignedBookmarkMove};
 
-/// Creates `main` at the genesis tip on the owner's device and follows it.
 async fn follow_main(f: &Fixture, replica: &EncryptedReplica<TypedRows>) {
     let created = TipStatement::Bookmark(
         SignedBookmarkMove::sign(
@@ -31,7 +27,6 @@ fn raise(by: i64) -> (&'static str, Vec<SqlValue>) {
     )
 }
 
-/// Intent frames of `frames`, as delivered to the owner.
 fn intents(f: &Fixture, frames: &[EncryptedFrame]) -> usize {
     frames
         .iter()
@@ -39,21 +34,14 @@ fn intents(f: &Fixture, frames: &[EncryptedFrame]) -> usize {
         .count()
 }
 
-/// The owner and two devices that exchanged transactions offline while
-/// the owner sealed `main` without them.
 struct Offline {
     owner: Author,
     a: Author,
     b: Author,
-    /// The owner's transactions, which its seal covers.
     sealed: Vec<EncryptedFrame>,
-    /// A's raise, then B's raise and B's create of `k`.
     offline: Vec<Vec<EncryptedFrame>>,
 }
 
-/// The owner creates `x`. Offline from it, A raises `x` by 1; B, having
-/// seen that, raises it by 10 and creates `k`; A receives B's. The owner
-/// meanwhile doubles `x`, creates its own `k`, seals and finalizes.
 async fn offline_history(f: &Fixture, root: &Path) -> Offline {
     let mut owner = Author::open(f, root, 1).await;
     let mut a = Author::open(f, root, 2).await;
@@ -112,12 +100,10 @@ impl Offline {
         self.offline.iter().flatten().cloned().collect()
     }
 
-    /// The reference: the seal's members, then the rest in stamp order.
     fn expected(&self, f: &Fixture) -> Canonical {
         canonical_sealed(f, &[&self.sealed, &self.offline()], 1)
     }
 
-    /// A follows the successor and receives the owner's transactions.
     async fn reconnect_a(&self, f: &Fixture) {
         exchange_graphs(&self.owner.replica, &self.a.replica, f.domain).await;
         self.a.receive(&self.sealed).await;
@@ -205,9 +191,6 @@ async fn offline_peers_transactions_replay_after_the_seal_in_its_successor() {
     );
 }
 
-/// Every order of the owner's and the offline transactions converges once
-/// the receiver finalizes the seal. The successor is learned before, between
-/// or after them, at a position that rotates across the orders.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn every_order_around_the_successor_converges_to_the_sealed_replay() {
     let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
@@ -244,9 +227,6 @@ async fn every_order_around_the_successor_converges_to_the_sealed_replay() {
     }
 }
 
-/// A, killed at `point` while it finalizes the seal it reconnects to,
-/// reopens with nothing of the finalization done and converges once it
-/// receives the seal's members again.
 async fn finalization_crash(point: CrashPoint) {
     let f = Fixture::build_class(false, PrivateKey::new(), "replayed");
     let root = rocky_platform::fs::Scratch::new().await;
@@ -317,9 +297,6 @@ async fn a_crash_while_a_seal_redoes_its_late_transactions_reopens_and_converges
     finalization_crash(CrashPoint::Redo).await;
 }
 
-/// Compaction signs a replayed partition's rows at the seal as its base;
-/// with every frame still retained, a member joining after it replays
-/// them instead of installing the base.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn compaction_signs_a_replayed_base_and_a_later_member_replays_the_frames() {
     let f = Fixture::build_class(false, PrivateKey::new(), "replayed");

@@ -1,4 +1,3 @@
-//! Graph receipt persists a schema switch intent without installing unrelated schemas.
 use super::compaction::{bookmark, follow_main, insert, sign_seal};
 use super::generations::{Lineage, session};
 use super::*;
@@ -320,11 +319,8 @@ async fn an_additive_switch_preserves_rows_observers_cursors_and_existing_sessio
     assert_eq!(reopened.followed_tip().await, target);
 }
 
-/// A transaction holds at most 256 intent statements.
 const ROWS_PER_TRANSACTION_UNDER_THE_INTENT_LIMIT: usize = 200;
 
-/// Storage changes an additive switch of `rows` stored rows makes, counted
-/// by SQLite over the switch alone, with the switch's observer events.
 async fn additive_switch_changes(rows: usize) -> (i64, usize) {
     let lineage = Lineage::new();
     let dir = Scratch::new().await;
@@ -441,9 +437,6 @@ async fn an_additive_switch_changes_the_same_storage_for_ten_or_a_thousand_rows(
     assert_eq!((small_events, large_events), (0, 0));
 }
 
-/// A trusted node's staged statements take a branch of their own: the
-/// live chain goes on while the stage waits, and once it is withdrawn the
-/// statements signed meanwhile are accepted elsewhere.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_withdrawn_stage_leaves_the_live_chain_signed_meanwhile_accepted_elsewhere() {
     use rocky_credentials::{BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, SignedBookmarkMove};

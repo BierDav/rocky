@@ -1,12 +1,8 @@
-//! Authoring writes to replayed tables: each statement is split per held
-//! partition on the snapshot it executes on, and the transaction publishes
-//! the copies as intents instead of row images.
 use super::*;
 use rocky_core::TableClass;
 use rocky_core::replay::{BaseMark, IntentStatement};
 use rocky_storage::partition_sql::{IntentRefusal, SplitError, split_intent_within, written_table};
 
-/// One partition's copy of a statement the transaction ran.
 #[derive(Clone, Debug)]
 pub(crate) struct Recorded {
     pub scope: ResourceScope,
@@ -14,10 +10,6 @@ pub(crate) struct Recorded {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// The copies of a write to a replayed table, one per held partition it
-    /// reaches, split before it executes. `None` when it writes no replayed
-    /// table; empty when it reaches no held partition. A statement reaches
-    /// at most `limit` partitions.
     pub(super) async fn intent_copies(
         &self,
         sql: &str,
@@ -133,12 +125,6 @@ impl<A: RowApplication> Inner<A> {
             .map(Some)
     }
 
-    /// Signs and stores one frame of a replayed table's log for `scope`
-    /// that changes no rows itself: an intent, whose rows the author's
-    /// execution already wrote, or an outcome record. The frame follows
-    /// every author's last applied frame in the scope; `payload` gets its
-    /// sequence and that base. `tip` is the author's own log tip there.
-    /// The caller refuses what blocks authoring in the scope.
     pub(super) async fn author_log_frame(
         &self,
         (scope, tip): (ResourceScope, Option<checkpoint::Log>),
@@ -293,7 +279,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(frame)
     }
 
-    /// Refuses authoring an intent in `scope` while something blocks it.
     pub(super) async fn refuse_intent_blockers(&self, scope: ResourceScope) -> Result<(), Error> {
         let mut blocked = self.scope_blockers(scope).await?;
         blocked.extend(self.dropped_tip_blockers().await?);
@@ -301,8 +286,6 @@ impl<A: RowApplication> Inner<A> {
         blockers::refuse(blocked)
     }
 
-    /// Per author, the last applied frame of the scope's log that the
-    /// workspace sees: frames of other lines are no base for this one.
     async fn applied_heads(
         &self,
         scope: ResourceScope,
@@ -377,8 +360,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-/// The transaction's statements grouped per partition scope, in the order
-/// they ran.
 pub(super) fn grouped(
     recorded: &[Recorded],
 ) -> Result<BTreeMap<ResourceScope, Vec<IntentStatement>>, Error> {

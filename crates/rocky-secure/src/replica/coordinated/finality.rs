@@ -1,52 +1,23 @@
-//! Final seals on a trusted node: it acknowledges the terminal entry that
-//! ended a tip's log with a seal it holds, and publishes the seal's
-//! finality record once the coordinator keeps enough acknowledgments.
 use super::*;
 use crate::TipStatement;
 use rocky_core::{CoordinatorIdentity, LogHead, LogTerminal, TipId};
 use rocky_credentials::{SealFinality, TERMINAL_ACK_FORMAT, TerminalAck, TerminalAckStatement};
 
-/// Ended tips before the followed one a node acknowledges: the
-/// coordinator's retained ended logs.
 const FINALIZED_TIPS: usize = 8;
 
-/// Why a trusted node's finality pass left a seal of its domain unfinal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FinalityStall {
-    /// The coordinator dropped ended logs of the domain and `tip`'s log
-    /// reads as never ended, with nothing proving it was not dropped: its
-    /// seal's finality comes from a peer that acknowledged it, or the owner
-    /// recovers the tip.
     LogDropped { tip: TipId },
-    /// The coordinator did not take the graph's seal that ends `tip`'s
-    /// log: why.
     EndRefused { tip: TipId, error: String },
-    /// A received seal waits for the seal leading into its tip to end
-    /// `tip`'s log, and no node of that line ended it.
     EntryPending { tip: TipId },
 }
-/// What a finality pass did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Finalization {
-    /// Finality records it admitted.
     pub admitted: usize,
-    /// Why a seal stays unfinal, until a later pass clears it.
     pub stalled: Option<FinalityStall>,
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Acknowledges, as a node of a trusted identity, the terminal entries
-    /// that ended the logs of the followed path after its newest final seal
-    /// with a seal of the graph not yet final, first ending such a log the
-    /// graph's seal entered without, and admits a finality record for each
-    /// seal enough distinct trusted nodes acknowledged. It walks oldest
-    /// first and stops at the first log that did not end with the seal the
-    /// path continues through: what follows it is a losing branch, never
-    /// ended. A log that reads as never ended is ended only when nothing was
-    /// dropped or its parent's log proves it was not. Without a composed
-    /// log, or beside one of another coordinator than the settings name, it
-    /// does nothing; a coordinator it cannot reach leaves the seal to a
-    /// later call.
     pub async fn finalize_seals(&self, scope: Scope) -> Result<Finalization, Error> {
         let (graph, path, publisher, revocations, node, chain) = {
             let inner = self.inner.lock(crate::replica::Class::Background).await;
@@ -161,9 +132,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(Finalization { admitted, stalled })
     }
-    /// Whether `parent`'s log ended with `entered`, the seal leading into
-    /// its child: the coordinator kept the parent's log, so it kept the
-    /// child's, which ended after it, too.
     async fn parent_ended_into(
         &self,
         coordinator: &dyn DomainLog,
@@ -179,10 +147,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await
             .is_ok_and(|head| head.terminal.is_some_and(|ended| ended.digest == entered))
     }
-    /// The tip of a log a journaled received seal waits on: the nearest
-    /// unended log up its line that should have ended, being a line's
-    /// first or entered by a seal that won its parent's log, which no node
-    /// of that line ends here. A seal of a losing branch waits for nothing.
     async fn entry_pending(
         &self,
         scope: Scope,
@@ -242,10 +206,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(None)
     }
-    /// The finality record of the seal `terminal` ended `log` with, this
-    /// node's acknowledgment included when it `acknowledges`, once enough
-    /// distinct trusted nodes acknowledged it; None for a seal the graph
-    /// does not hold, already final or revoked.
     async fn acknowledged(
         &self,
         graph: &rocky_credentials::TipGraph,
@@ -311,8 +271,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
-/// What a trusted node acknowledges of `coordinator`'s head of `log`, ended
-/// by `terminal`.
 fn ack_statement(
     coordinator: CoordinatorIdentity,
     log: TipLog,
@@ -331,8 +289,6 @@ fn ack_statement(
         confirms: terminal.confirms,
     }
 }
-/// The seal that leads into `tip`: the one it continues, or the one its
-/// opening opens on. None at genesis.
 pub(super) fn entered_by(
     graph: &rocky_credentials::TipGraph,
     tip: rocky_core::TipId,
@@ -350,9 +306,6 @@ pub(super) fn entered_by(
     Ok(None)
 }
 
-/// The terminal entry that ends `tip`'s log with the graph's winning
-/// ordinary seal of it, one that entered the graph while no node ended the
-/// log; None without such a seal, or when it is final already.
 fn unended_terminal(
     graph: &rocky_credentials::TipGraph,
     tip: TipId,
@@ -372,8 +325,6 @@ fn unended_terminal(
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Inspects a pending recovery without activating it. Only the exact
-    /// committed terminal is acknowledged, under the line's signed minimum.
     pub(super) async fn terminal_finality(
         &self,
         seal: &rocky_credentials::SignedSeal,
@@ -479,9 +430,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Signs `statement` as `node`'s next acknowledgment, saved as its
-    /// chain's head before it leaves; the one it signed last when that
-    /// names the same entry, so a retry neither forks nor gaps the chain.
     async fn sign_ack(
         &self,
         scope: Scope,
@@ -536,7 +484,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })?;
         Ok(ack)
     }
-    /// The node and writer used to acknowledge the composed log.
     pub async fn terminal_author(&self) -> Result<(PublicKey, WriterId), Error> {
         let coordinator = self.domain_log().ok_or_else(|| denied("no composed log"))?;
         let inner = self.inner.lock(crate::replica::Class::Background).await;
@@ -556,8 +503,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             identity::node_writer(&inner.config.credentials, &node)?,
         ))
     }
-    /// Installs an owner-direct trusted acknowledgment chain for an owned
-    /// node. Its row-authoring chain is independent of this authority.
     pub async fn install_terminal_credentials(&self, chain: CredentialChain) -> Result<(), Error> {
         let node = chain
             .0

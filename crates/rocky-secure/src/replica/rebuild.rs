@@ -1,13 +1,8 @@
 use super::*;
 
-/// Serves the pending check of every read and the replay scan.
 const OPERATION_SCOPE_STATUS_INDEX: &str = "CREATE INDEX IF NOT EXISTS secure_operation_scope_status ON secure_operations(scope,status,hash)";
-/// Covers header scans such as the frontier: reading `status` from the
-/// table walks each frame's body overflow pages.
 const OPERATION_HEADERS_INDEX: &str = "CREATE INDEX IF NOT EXISTS secure_operation_headers ON secure_operations(scope,status,hash,header)";
-/// A complete header scan need not carry the encoded scope in each index entry.
 const OPERATION_SCAN_HEADERS_INDEX: &str = "CREATE INDEX IF NOT EXISTS secure_operation_scan_headers ON secure_operations(status,hash,header)";
-/// An author's latest frame of one status, such as its newest held write.
 const OPERATION_AUTHOR_STATUS_INDEX: &str = "CREATE INDEX IF NOT EXISTS secure_operation_author_status ON secure_operations(author,scope,status,sequence)";
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS secure_operation_scope_hash ON secure_operations(scope,hash)",
@@ -18,13 +13,9 @@ pub(super) const SCHEMA: &[&str] = &[
     OPERATION_AUTHOR_STATUS_INDEX,
 ];
 
-/// Deletes the rows a finalized seal dropped from the base.
 const DELETE_ROWS_DROPPED_BY_FINALIZED_SEAL: &str = "DELETE FROM secure_row_records WHERE scope=? AND row IN (SELECT row FROM secure_checkpoint_scratch WHERE scope=? AND fields=X'')";
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Rebuilds one local row projection from the verified checkpoint and the
-    /// original signed bytes after it. This does not migrate application
-    /// generations.
     pub async fn rebuild_projection(&self, scope: ResourceScope) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if !inner.can_read_key(scope, &inner.local_grants(now()?)?) {
@@ -50,9 +41,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Replaces a scope's stored rows, inside the caller's transaction, with
-    /// its verified checkpoint rows and a replay of the operations after
-    /// them, in application order. Nothing but one batch is held in memory.
     pub(super) async fn rebuild_rows(&self, scope: ResourceScope) -> Result<(), Error> {
         if self.replayed_scope(scope) {
             self.replay_from_frames(now()?).await?;
@@ -68,10 +56,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Replaces a scope's stored rows with its replay base and the applied
-    /// operations through position `through`, applying what each finalized
-    /// seal changed on the way, and stores their counts and digest. The
-    /// typed projection is the caller's to refresh.
     pub(super) async fn restore_rows(
         &self,
         scope: ResourceScope,

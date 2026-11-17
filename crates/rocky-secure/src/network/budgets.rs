@@ -1,4 +1,3 @@
-//! Encoded limits, including worst-width integers and the signed envelope.
 use super::*;
 use rocky_core::{
     AppId, DomainId, FieldSelection, MeshId, PrincipalKind, ResourceGrant, Right, RowSelection,
@@ -74,7 +73,6 @@ fn ack(credentials: CredentialChain) -> Result<TerminalAck, rocky_credentials::E
         longest_chain_link(),
     )
 }
-/// The longest link: the most digits and a predecessor.
 fn longest_chain_link() -> rocky_credentials::ChainLink {
     rocky_credentials::ChainLink {
         lane: PrivateKey::from_bytes(&[7; 32]).public_key(),
@@ -83,7 +81,7 @@ fn longest_chain_link() -> rocky_credentials::ChainLink {
         stage: None,
     }
 }
-fn fits(message: Message) {
+pub(super) fn fits_one_frame(message: Message) {
     let key = PrivateKey::from_bytes(&[7; 32]);
     let bytes = encode(&message).unwrap();
     assert!(
@@ -125,14 +123,14 @@ fn tip_pages_and_candidates_fit_with_the_largest_permitted_eight_link_acknowledg
     assert!(pages.len() > 1);
     assert_eq!(pages.iter().map(Vec::len).sum::<usize>(), input.len());
     for page in pages {
-        fits(
+        fits_one_frame(
             tips::TipMessage::Statements {
                 statements: page.clone(),
                 last: false,
             }
             .into(),
         );
-        fits(
+        fits_one_frame(
             tips::TipMessage::Push {
                 statements: page,
                 last: false,
@@ -143,7 +141,7 @@ fn tip_pages_and_candidates_fit_with_the_largest_permitted_eight_link_acknowledg
     let candidates = tips::candidate_pages(vec![input]).unwrap();
     assert_eq!(candidates.iter().filter(|(_, last)| *last).count(), 1);
     for (statements, last) in candidates {
-        fits(tips::TipMessage::CandidatePush { statements, last }.into());
+        fits_one_frame(tips::TipMessage::CandidatePush { statements, last }.into());
     }
     let mut oversized = statement;
     let crate::TipStatement::Finality(ref mut finality) = oversized else {
@@ -204,8 +202,8 @@ fn maximal_frontier_batches_are_split_in_both_directions() {
             .collect();
         states.truncate(page_len(&states, MAX_FRONTIER_SCOPES).unwrap());
         let returned = states.len();
-        fits(query.into());
-        fits(frontiers::FrontierMessage::Frontiers { states }.into());
+        fits_one_frame(query.into());
+        fits_one_frame(frontiers::FrontierMessage::Frontiers { states }.into());
         assert!(returned > 0 && returned <= count);
         remaining = &remaining[returned..];
         sent += 1;
@@ -254,7 +252,7 @@ fn holdings_proofs_fit_with_maximal_tuples_and_four_epochs() {
             unreachable!()
         };
         count += scopes.len();
-        fits(message.into());
+        fits_one_frame(message.into());
     }
     assert_eq!(count, scopes.len());
 }

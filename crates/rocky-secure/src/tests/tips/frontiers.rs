@@ -1,4 +1,3 @@
-//! Frontier caches contain committed state and survive only audited bookkeeping.
 use super::*;
 mod headers;
 

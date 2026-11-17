@@ -1,6 +1,3 @@
-//! Staged publications: one local SQL transaction of any size whose writes
-//! leave as consecutive ordinary bundles. A migration of replayed tables
-//! publishes its program instead; see [`intents`].
 use super::*;
 mod intents;
 #[cfg(feature = "qualification")]
@@ -8,29 +5,21 @@ pub use intents::CHUNK_PAGES;
 pub use intents::PUBLICATION_CHUNK_BUNDLES;
 pub(super) use intents::SCHEMA as INTENT_SCHEMA;
 
-/// `published` counts the leading bundles some peer holds.
 const PUBLICATIONS_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_publications(publication BLOB PRIMARY KEY,bundles INTEGER NOT NULL,published INTEGER NOT NULL) WITHOUT ROWID";
-/// Retained frames of publications, outside the retained-history bound
-/// until they are pruned.
 const PUBLICATION_FRAMES_TABLE: &str = "CREATE TABLE IF NOT EXISTS secure_publication_frames(hash BLOB PRIMARY KEY,bytes INTEGER NOT NULL) WITHOUT ROWID";
 pub(super) const SCHEMA: &[&str] = &[PUBLICATIONS_TABLE, PUBLICATION_FRAMES_TABLE];
 
-/// How far a staged publication has left this replica.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Publication {
     pub id: Commitment,
-    /// Bundles the transaction committed.
     pub bundles: u64,
-    /// Leading bundles every frame of which a peer reported holding.
     pub published: u64,
 }
 
-/// The handle of a publication's bundle at `position`.
 #[cfg(test)]
 pub(crate) fn handle(publication: &Commitment, position: u64) -> Commitment {
     bundle_handle(publication, position)
 }
-/// The handle of a publication's bundle at `position`.
 pub(super) fn bundle_handle(publication: &Commitment, position: u64) -> Commitment {
     rocky_core::commitment(
         "rocky.secure-publication.v1",
@@ -60,7 +49,6 @@ impl<A: RowApplication> Inner<A> {
             Some(_) => Err(Error::Corrupt("publication record".into())),
         }
     }
-    /// The frames a publication committed, in bundle order.
     async fn publication_frames(
         &self,
         publication: &Commitment,
@@ -77,7 +65,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(frames)
     }
-    /// Each member of the bundle under `handle`; None once pruned.
     pub(crate) async fn bundle_frames(
         &self,
         handle: &Commitment,
@@ -102,9 +89,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(frames)
     }
-    /// Records `publication`, whose transaction changed no replayed row,
-    /// inside the caller's open engine transaction. A recorded publication
-    /// returns its frames again; the caller rolls back.
     pub(super) async fn stage_publication(
         &mut self,
         publication: Commitment,
@@ -117,8 +101,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok((Vec::new(), false))
     }
-    /// Records the authored `bundles` of `publication`, its migration
-    /// intent for a migration stage, and commits its schema stage.
     async fn record_publication(
         &self,
         publication: Commitment,
@@ -148,7 +130,6 @@ impl<A: RowApplication> Inner<A> {
         }
         self.commit_schema_stage(publication).await
     }
-    /// Whether some peer reported holding every member of the bundle.
     async fn bundle_published(&self, handle: &Commitment) -> Result<bool, Error> {
         for frame in self.bundle_frames(handle).await? {
             let Some(frame) = frame else { continue };
@@ -165,8 +146,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Whether this publisher listed its closing base. Graph records remain
-    /// the completion journal after bases advance or new scopes are held.
     pub async fn migration_checkpoint_listed(
         &self,
         publication: Commitment,
@@ -215,11 +194,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Ok(false)
     }
 
-    /// Every staged publication this replica committed, with how many of
-    /// its leading bundles a peer reported holding. Reads one publication,
-    /// or checks one bundle, per acquisition, and records a publication's
-    /// progress in one transaction once its checks end. The count only
-    /// grows, so a check made against older state never lowers it.
     pub async fn publications(&self) -> Result<Vec<Publication>, Error> {
         let mut publications = Vec::new();
         let mut after = Vec::new();

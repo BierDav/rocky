@@ -1,4 +1,3 @@
-//! Additive physical changes that preserve every stored and projected row.
 use super::typed::{Typed, quoted};
 use super::*;
 use rocky_core::{ColumnClass, LogicalColumn, LogicalSchema, TableClass};
@@ -78,8 +77,6 @@ pub(super) fn qualifies(before: &LogicalSchema, after: &LogicalSchema) -> bool {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Caller owns the follow transaction. This performs DDL and replaces
-    /// descriptor metadata; it neither scans rows nor emits an event.
     pub(super) async fn switch_in_place(
         &mut self,
         schema: LogicalSchema,

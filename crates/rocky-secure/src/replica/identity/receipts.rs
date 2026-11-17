@@ -1,5 +1,3 @@
-//! Admission evidence: this file's signed record of the births it admitted,
-//! consumed, withheld or saw carried, and the claims derived from it.
 use super::*;
 use crate::replica::checkpoint::row_of;
 use p2panda_core::Signature;
@@ -27,8 +25,6 @@ const ENTRY: &str = "rocky.admission-entry.v1";
 const CHAIN: &str = "rocky.admission-chain.v1";
 const VERSION: u8 = 2;
 
-/// Who admits into this file and the finite cuts of predecessor evidence
-/// it inherited by restore, oldest first.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::replica) struct AdmissionContext {
@@ -51,7 +47,6 @@ pub(in crate::replica) struct PredecessorCut {
     revision: u64,
     head_signature: Signature,
 }
-/// The signed count and chain of every entry, pinned to a revision.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::replica) struct AdmissionHead {
@@ -83,7 +78,6 @@ pub(in crate::replica) enum ReceiptAllocation {
     Unresolved,
     Bound(ResourceScope),
 }
-/// What admitting one birth-bearing frame decided, per original ordinal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::replica) struct FrameReceipt {
@@ -97,10 +91,7 @@ pub(in crate::replica) struct FrameReceipt {
     pub(in crate::replica) tip: TipId,
     #[serde(with = "serde_bytes")]
     pub(in crate::replica) schema: Commitment,
-    /// The workspace tip, when the path withheld the frame's births.
     pub(in crate::replica) target: Option<TipId>,
-    /// With `target`: O(scope, author) at the frame's own first admission
-    /// (0 without a mark or an author).
     pub(in crate::replica) floor: Option<u64>,
     pub(in crate::replica) writes: u8,
     pub(in crate::replica) births: Vec<Birth>,
@@ -130,8 +121,6 @@ pub(in crate::replica) enum Disposition {
         signer: PublicKey,
     },
 }
-/// A withheld birth restored later at `target`: a new grant referring to
-/// the receipt, which never changes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::replica) struct Restoration {
@@ -159,8 +148,6 @@ pub(in crate::replica) struct CarryObservation {
     pub target: TipId,
 }
 
-/// A claim on a normalized table identity: its one original assignment or
-/// a carried observation of its provenance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::replica) struct Claim {
     pub(in crate::replica) kind: u8,
@@ -170,21 +157,17 @@ pub(in crate::replica) struct Claim {
 }
 
 impl Claim {
-    /// The one original assignment of an identity.
     pub(in crate::replica) const ORIGINAL: u8 = 0;
-    /// A carried observation; it may repeat.
     pub(in crate::replica) const OBSERVATION: u8 = 1;
 }
 
 type DerivedClaim = (i64, rocky_core::RowIdentity, u8, Commitment, u64, u8);
 
-/// Verified entries shared only by the births of one frame in one transaction.
 #[derive(Default)]
 pub(in crate::replica) struct FrameClaims {
     entries: BTreeMap<u64, Vec<DerivedClaim>>,
 }
 
-/// Entry marks stay immutable while the frame's claims are checked.
 pub(in crate::replica) struct BirthSnapshot {
     pub permanent: Vec<checkpoint::IdentityMark>,
     pub allocation: Vec<checkpoint::IdentityMark>,
@@ -219,8 +202,6 @@ pub(in crate::replica) struct BirthInput {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Checks the complete ordinal mapping while the signed payload exists.
-    /// Old negative decisions remain tied to their original target.
     pub(in crate::replica) async fn check_frame_receipt(
         &self,
         receipt: &FrameReceipt,
@@ -316,8 +297,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Grants only the exact recorded origin; negative decisions never
-    /// become grants merely because a replacement lowered the live ledger.
     pub(in crate::replica) async fn classify_birth(
         &self,
         (allocation, allocation_scope): (i64, ResourceScope),
@@ -548,7 +527,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-/// Decodes `bytes` and requires them to be its one canonical encoding.
 fn canonical<T: Serialize + for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, Error> {
     let value: T = decode(bytes).map_err(|_| Error::Corrupt("admission evidence".into()))?;
     if encode(&value)? != bytes {
@@ -593,7 +571,6 @@ fn verify<T: Serialize>(
 }
 
 impl AdmissionContext {
-    /// The lineage and node whose signature covers entry `index`.
     fn signer_of(&self, index: u64) -> (Commitment, PublicKey) {
         let mut low = 0;
         for cut in &self.cuts {
@@ -610,8 +587,6 @@ impl AdmissionContext {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// In the transaction that creates the file: a fresh lineage, an empty
-    /// signed journal.
     pub(in crate::replica) async fn create_admission_context(&self) -> Result<(), Error> {
         let lineage: Commitment = rocky_platform::entropy::random();
         let context = AdmissionContext {
@@ -630,7 +605,6 @@ impl<A: RowApplication> Inner<A> {
         };
         self.write_context(&context, &head, true).await
     }
-    /// Pins journal changes to the revision that this transaction commits.
     pub(crate) async fn finish_admission_revision(&self) -> Result<(), Error> {
         if self.conn.connection().total_changes()? > self.changes {
             self.conn
@@ -667,8 +641,6 @@ impl<A: RowApplication> Inner<A> {
         self.conn.execute(sql, values).await?;
         Ok(())
     }
-    /// The verified context and head: canonical, signed by this file's
-    /// node and bound to its lineage and committed revision.
     pub(in crate::replica) async fn admission_context(
         &self,
     ) -> Result<(AdmissionContext, AdmissionHead), Error> {
@@ -702,9 +674,6 @@ impl<A: RowApplication> Inner<A> {
         verify(context.node, HEAD, &head, &signature_of(head_signature)?)?;
         Ok((context, head))
     }
-    /// Open's check: the head covers exactly the stored entries, each cut
-    /// matches the predecessors and its stored chain, and the head is no
-    /// newer than the committed revision.
     pub(in crate::replica) async fn verify_admission_head(&self) -> Result<(), Error> {
         let (context, head) = self.admission_context().await?;
         let predecessors = rows(
@@ -760,8 +729,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    /// Appends `kind` signed by this node, with its derived claims, and
-    /// re-signs the head, inside the caller's transaction. Returns its index.
     pub(in crate::replica) async fn append_admission(&self, kind: EntryKind) -> Result<u64, Error> {
         match &kind {
             EntryKind::Frame(receipt) => {
@@ -866,8 +833,6 @@ impl<A: RowApplication> Inner<A> {
         self.write_context(&context, &head, false).await?;
         Ok(index)
     }
-    /// The claims an entry derives: an original assignment per created or
-    /// restored birth, an observation per carried one.
     async fn entry_claims(&self, entry: &AdmissionEntry) -> Result<Vec<DerivedClaim>, Error> {
         let mut claims = Vec::new();
         match &entry.kind {
@@ -1088,9 +1053,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Entry `index`, verified in full before any decision uses it: its
-    /// signature under the lineage and node of its range, canonical bytes,
-    /// its link to the previous entry and its derived columns.
     pub(in crate::replica) async fn verified_entry(
         &self,
         index: u64,
@@ -1110,7 +1072,6 @@ impl<A: RowApplication> Inner<A> {
             }
         }
     }
-    /// The verified receipt of `frame`, with its index, if this file admitted it.
     pub(in crate::replica) async fn receipt_of(
         &self,
         frame: Hash,
@@ -1131,8 +1092,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(Some((index, receipt)))
     }
-    /// Every claim on `identity` of allocation `allocation`, each verified
-    /// against the entry it names.
     pub(in crate::replica) async fn claims_on(
         &self,
         allocation: i64,
@@ -1194,9 +1153,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(claims)
     }
-    /// The full audit: every signature and link, contiguous indices, the
-    /// claim index re-derived exactly, and every claim and consumed
-    /// identity dominated by the permanent marks.
     pub(in crate::replica) async fn audit_admission(&self) -> Result<(), Error> {
         self.verify_admission_head().await?;
         let (context, head) = self.admission_context().await?;
@@ -1359,8 +1315,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// A receipt's identities stay below the permanent marks, a filtered
-    /// one carries its floor, and its derived allocation binding holds.
     async fn audit_receipt(&self, receipt: &FrameReceipt) -> Result<(), Error> {
         if receipt.floor.is_some() != receipt.target.is_some() {
             return Err(corrupt("floor and target disagree"));
@@ -1451,7 +1405,6 @@ fn check_receipt_shape(receipt: &FrameReceipt) -> Result<(), Error> {
     Ok(())
 }
 
-/// The derived columns of an entry: its scope, frame and kind.
 async fn entry_columns(
     conn: &ScopedConnection,
     entry: &AdmissionEntry,
@@ -1502,8 +1455,6 @@ async fn rows_with(
     collect_rows(conn.query(sql, bindings(values)).await?).await
 }
 
-/// Called only inside the raw restore-adoption transaction, before rebinding
-/// metadata or adding the predecessor. Old evidence gets a finite signed cut.
 pub(in crate::replica) async fn adopt_admission(
     conn: &ScopedConnection,
     publisher: PublicKey,
@@ -1675,7 +1626,6 @@ async fn verify_entry_with(
 mod tests {
     use super::*;
 
-    /// The superseded receipt shape with a per-allocation floor vector.
     #[derive(Serialize)]
     struct VectorFloor {
         concrete: u32,

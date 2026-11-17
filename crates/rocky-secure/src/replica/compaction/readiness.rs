@@ -1,4 +1,3 @@
-//! Readiness includes authorized scopes before they have materialized history.
 use super::*;
 
 impl<A: RowApplication> Inner<A> {
@@ -61,7 +60,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(scopes)
     }
-    /// Materialized history only; observing a scope never creates its state.
     pub(in crate::replica) async fn domain_scopes(
         &self,
         domain: Scope,

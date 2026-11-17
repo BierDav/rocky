@@ -1,4 +1,3 @@
-//! Bounded native request channels inheriting the authenticated link admission.
 use super::*;
 use std::{
     collections::BTreeMap,
@@ -8,12 +7,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
 const FRAGMENT: usize = IO_CHUNK;
 const QUEUE: usize = 64;
-/// Reassembled bytes one channel holds for its reader, beside the count bound.
 const QUEUE_BYTES: usize = 4 * MAX_SECURE_FRAME;
-/// A reassembled message keeps its share of the channel's byte budget until read.
 type Queued = (Vec<u8>, OwnedSemaphorePermit);
 
-/// Bounded qualification counters; keys are fixed protocol families, never payloads.
 #[cfg(any(test, feature = "qualification"))]
 #[derive(Clone, Debug, Default)]
 pub struct Traffic {
@@ -27,9 +23,7 @@ pub struct Traffic {
     pub repair_scopes: usize,
     pub repair_all: usize,
     pub repair_reasons: BTreeMap<crate::network::PublicationRepairReason, usize>,
-    /// Most open request channels this side held at once.
     pub peak_channels: usize,
-    /// Most reassembled bytes one channel held for its reader.
     pub peak_queued_bytes: usize,
 }
 
@@ -48,8 +42,6 @@ pub enum Packet {
         bytes: Vec<u8>,
         last: bool,
     },
-    /// Ends a channel's generation, possibly mid-message when its sender
-    /// was cancelled: only that channel fails.
     End {
         generation: u64,
     },
@@ -99,7 +91,6 @@ struct Slot {
     ended: bool,
     finished: bool,
     progress: u64,
-    /// Our End waits for the writer; the slot stays until it is written.
     deferred: bool,
 }
 impl Slot {
@@ -137,12 +128,9 @@ struct State {
     remote_reconcile: u64,
     flushed_reconcile: Option<u64>,
     slots: BTreeMap<(bool, u16), Slot>,
-    /// Ends and reconcile finishes a full queue refused, in order. Bounded by
-    /// slots and reconcile leases; the writer sends them once the queue drains.
     deferred: Vec<Frame>,
 }
 impl State {
-    /// A slot leaves once both sides ended it and our End was written.
     fn release(&mut self, key: (bool, u16)) -> bool {
         if self
             .slots
@@ -229,7 +217,6 @@ impl Channels {
         self.handle.events.send_replace(());
         Ok(())
     }
-    /// Dispatches a data frame without awaiting a slow request handler.
     pub fn accept(&self, frame: Frame) -> Result<Option<NativeSession>, Error> {
         frame.validate()?;
         let Message::Channel(packet) = frame.message else {
@@ -407,8 +394,6 @@ impl Channels {
 pub struct Reconcile {
     handle: Handle,
     generation: u64,
-    /// Set once the finish is queued; the lease itself lasts until the
-    /// writer sends that finish.
     closed: bool,
 }
 impl Reconcile {
@@ -494,8 +479,6 @@ impl Handle {
             .traffic
             .clone()
     }
-    /// Queues `frame` without waiting; a full queue defers it to the writer,
-    /// which checks for deferrals under the same lock, so none is stranded.
     fn queue(&self, frame: Frame) -> bool {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let Err(mpsc::error::TrySendError::Full(frame)) = self.send.try_send(frame) else {
@@ -512,8 +495,6 @@ impl Handle {
         state.deferred.push(frame);
         false
     }
-    /// Writes a frame taken from the outgoing queue, then deferred frames
-    /// once every frame queued before them was written.
     pub async fn write(
         &self,
         writer: &mut Writer,
@@ -540,8 +521,6 @@ impl Handle {
         }
         Ok(())
     }
-    /// Deferred frames leave in order once the writer emptied the queue; their
-    /// slots and leases end with them.
     fn take_deferred(&self, outgoing: &mpsc::Receiver<Frame>) -> Vec<Frame> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if !outgoing.is_empty() {
@@ -589,7 +568,6 @@ impl Handle {
                 .unwrap_or_else(PoisonError::into_inner)
                 .closed
     }
-    /// Ends channel ownership even when the transport still owns its outgoing queue.
     pub fn close(&self) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.closed = true;
@@ -597,7 +575,6 @@ impl Handle {
         state.reconciling.clear();
         self.events.send_replace(());
     }
-    /// Called only after the link writer flushes the final reconcile marker.
     pub fn flushed_reconcile(&self, generation: u64) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.flushed_reconcile = Some(generation);
@@ -640,7 +617,6 @@ impl Handle {
         Ok(lease)
     }
 
-    /// Waits for both request directions to finish before ending a short link.
     pub async fn drain(&self) -> Result<(), Error> {
         let mut events = self.events.subscribe();
         timeout(TIMEOUT, async {
@@ -812,7 +788,6 @@ impl Handle {
         .map_err(|_| denied("link ended"))
     }
 }
-/// Progress is emitted independently of the response builder's session borrow.
 #[derive(Clone)]
 pub(crate) struct Progress {
     handle: Handle,
@@ -1264,8 +1239,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// Working traffic and full fragments cannot extend the absolute
-    /// publication lifetime.
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn publication_lifetime_starts_at_open_before_handler_dispatch() {
@@ -1303,7 +1276,6 @@ pub(crate) mod tests {
         assert_eq!(slot.total, 0);
         assert!(slot.bytes.is_empty());
     }
-    /// What the link writer sends: the queue in order, then deferred frames.
     fn drain(channels: &mut Channels) -> Vec<Frame> {
         let mut written = Vec::new();
         while let Ok(frame) = channels.outgoing.try_recv() {

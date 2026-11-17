@@ -1,7 +1,5 @@
-//! Validated accounting over bounded input pages, including support history.
 use super::*;
 
-/// Input records per acquisition.
 const STORAGE_RECORDS: usize = if cfg!(test) { 1 } else { 32 };
 const TABLES: [&str; 3] = [
     "secure_migration_publications",
@@ -84,7 +82,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Ok(records)
     }
 
-    /// Storage charged to authenticated migration history, separate from ordinary history.
     pub async fn migration_storage(&self) -> Result<MigrationStorage, Error> {
         let source = {
             let inner = self.inner.lock(Class::Background).await;

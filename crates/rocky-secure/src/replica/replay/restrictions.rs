@@ -1,13 +1,6 @@
-//! Schema restrictions: transition checks on each row a transaction
-//! updated or deleted, judged on the row as it stood before the
-//! transaction. Author commit and every replay run them on the same
-//! images, so replicas decide alike. Rows Rocky writes itself (undo,
-//! checkpoints, rebuilds) never pass through here.
 use super::*;
 use rocky_core::{Affinity, Collation, LogicalSchema, LogicalTable, Right};
 
-/// The first restriction of `logical` that refuses `right` on a row whose
-/// image before the transaction, in column order, is `before`.
 pub(in crate::replica) fn restricted(
     conn: &sqlite::Connection,
     schema: &LogicalSchema,
@@ -34,9 +27,6 @@ pub(in crate::replica) fn restricted(
     Ok(None)
 }
 
-/// Whether `before` satisfies the restriction's `when`. The row is bound as
-/// a one-row subquery whose columns carry the table's affinities and
-/// collations, so the rule compares as it would against the table.
 fn matches(
     conn: &sqlite::Connection,
     logical: &LogicalTable,

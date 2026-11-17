@@ -1,4 +1,3 @@
-//! Checkpoint summaries and the maintenance step after a write.
 use super::*;
 
 pub(super) fn chain(label: &str, items: &[Vec<SqlValue>]) -> Result<SetSummary, Error> {
@@ -21,7 +20,6 @@ pub(super) fn chain(label: &str, items: &[Vec<SqlValue>]) -> Result<SetSummary, 
     })
 }
 
-/// Covered custody of a state with no frames: nothing at all.
 pub(super) fn no_custody() -> Result<CustodySummary, Error> {
     Ok(CustodySummary {
         superseded: 0,
@@ -30,8 +28,6 @@ pub(super) fn no_custody() -> Result<CustodySummary, Error> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// The scope's verified replay base. A base sits only at a seal:
-    /// `compact` forms it, an import installs one.
     pub async fn checkpoint(&self, scope: ResourceScope) -> Result<SignedCheckpoint, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         if let Some(id) = inner.find_scope_id(scope).await?
@@ -77,10 +73,6 @@ impl<A: RowApplication> Inner<A> {
             sole: chain("rocky.checkpoint-sole-copies.v1", &sole)?,
         })
     }
-    /// One bounded step of automatic maintenance for the scopes a group
-    /// wrote: forget stale pulled states and quarantine records, then
-    /// finalize at most one seal of their domains. The group is already
-    /// committed, so a failure is kept for the status and backs off.
     pub(crate) async fn maintain(&mut self, scope: ResourceScope) -> bool {
         let Ok(time) = now() else { return false };
         if self

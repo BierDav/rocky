@@ -1,5 +1,3 @@
-//! Compaction borrows immutable seal rows instead of copying them at publication.
-//! The cursor and digest commit together; cleanup never touches a selected base.
 use super::*;
 
 pub(super) const BASE_ROWS: usize = 64;
@@ -51,8 +49,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Hashes at most BASE_ROWS immutable rows. A missing snapshot uses the
-    /// existing path; it is not claimed as bounded by this mechanism.
     pub(super) async fn prepare_base_step(
         &mut self,
         scope: ResourceScope,
@@ -187,8 +183,6 @@ impl<A: RowApplication> Inner<A> {
         }
     }
 
-    /// In the same transaction as the signed checkpoint. No application rows
-    /// change and no redo can run twice after a crash.
     pub(super) async fn publish_prepared_base(
         &self,
         id: i64,
@@ -217,8 +211,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    /// At most BASE_ROWS retired records across all tables, including headers.
-    /// The queue and base selector are durable roots; no recovery replay is needed.
     pub(in crate::replica) async fn base_cleanup_step(&mut self) -> Result<bool, Error> {
         let queue = rows(
             &self.conn,
@@ -257,8 +249,6 @@ impl<A: RowApplication> Inner<A> {
                             SqlValue::Integer(*version),
                         ])
                     };
-                    /// Runs before the snapshot's rows are deleted, so no reader
-                    /// mistakes a partially retired snapshot for a full one.
                     const RETIRE_SNAPSHOT_HEADER: &str =
                         "DELETE FROM secure_replayed_seals WHERE scope=? AND seal=? AND version=?";
                     let headers =

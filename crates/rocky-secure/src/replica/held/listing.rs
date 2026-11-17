@@ -1,7 +1,5 @@
-//! A held listing reads one live row at a time, then validates the source.
 use super::*;
 
-/// One header or current row per acquisition; provisional until phone sizing.
 const LISTING_ROWS: usize = 1;
 
 struct Source {

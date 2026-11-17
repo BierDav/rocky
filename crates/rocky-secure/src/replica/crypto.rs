@@ -1,4 +1,3 @@
-//! Bounded caches of immutable crypto results, never of current admission.
 use super::*;
 
 type PayloadEntries = BTreeMap<Hash, ([u8; 32], Arc<crate::wire::Opened>)>;
@@ -57,7 +56,6 @@ pub(super) struct Cache {
     #[cfg(test)]
     pub(super) verifications: AtomicU64,
 }
-/// Immutable signature validation only; authority is checked at import/apply.
 pub(in crate::replica) struct CreationHeader {
     bytes: Vec<u8>,
     signed: p2panda_core::Header<Extensions>,
@@ -235,9 +233,6 @@ impl Cache {
     }
 }
 impl<A: RowApplication> Inner<A> {
-    /// The opened body of `frame`. Its sealed tuple must be the one this
-    /// replica registered under the frame's keyed scope: an author that
-    /// signs one partition's scope over another's tuple is refused.
     pub(super) fn open_payload(
         &self,
         frame: &EncryptedFrame,
@@ -255,8 +250,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(opened)
     }
 }
-/// Verifies and caches each frame's immutable signature before replica state
-/// is touched.
 fn verify_signatures(frames: &[EncryptedFrame]) {
     for frame in frames {
         let _ = frame.operation_ref();

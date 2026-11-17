@@ -1,5 +1,3 @@
-//! Finite history preparation. Only mutations of the captured prefix invalidate
-//! it; successful writes beyond that cut do not create catch-up work.
 use super::*;
 use rocky_core::CommitmentBuilder;
 
@@ -196,8 +194,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    /// Disposable summaries restart after process death; the durable row cursor
-    /// is independent. No application operation executes in either scan.
     pub(super) async fn base_history_step(
         &self,
         id: i64,

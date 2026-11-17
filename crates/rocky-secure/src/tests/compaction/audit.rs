@@ -1,4 +1,3 @@
-//! Guarded multi-scope audits use the production single-scope checks.
 use super::*;
 use crate::storage::rows;
 mod fixture;

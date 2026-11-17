@@ -1,20 +1,12 @@
-//! Frames whose application failed for a reason that is neither retryable
-//! nor a semantic refusal. A quarantined frame is rolled back alone and its
-//! log waits behind it; other logs go on. It is tried again when keys,
-//! grants, schemas or the tip graph change, and otherwise after a backoff.
-//! Quarantine never admits or deletes a frame.
 use super::*;
 
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_quarantine(hash BLOB PRIMARY KEY,reason TEXT NOT NULL,attempts INTEGER NOT NULL,first_seen INTEGER NOT NULL,last_seen INTEGER NOT NULL,context INTEGER NOT NULL) WITHOUT ROWID",
 ];
 
-/// The longest wait between two attempts while nothing changes.
 const MAX_BACKOFF: u64 = 3600;
-/// The reason of a frame that does not decrypt under the key its header names.
 pub(super) const UNDECRYPTABLE: &str = "undecryptable";
 
-/// One quarantined frame's attempts.
 #[derive(Clone, Copy)]
 pub(super) struct Quarantine {
     attempts: i64,
@@ -22,7 +14,6 @@ pub(super) struct Quarantine {
     context: i64,
 }
 impl Quarantine {
-    /// Whether another attempt is due at `time` under `context`.
     pub(super) fn due(&self, time: u64, context: i64) -> bool {
         let wait = 1u64 << self.attempts.clamp(0, 12);
         context != self.context
@@ -30,8 +21,6 @@ impl Quarantine {
     }
 }
 
-/// Whether `error` is the frame's own failure rather than the storage's,
-/// which ends the pass instead.
 pub(super) fn quarantines(error: &Error) -> bool {
     !retryable(error)
         && !identity::receipts::semantic_refusal(error)
@@ -55,8 +44,6 @@ fn injected(_: &Error) -> bool {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// What a quarantined frame's retry depends on: keys, grants, schemas
-    /// and the tip graph. A change makes every quarantined frame due.
     pub(super) fn quarantine_context(&self) -> i64 {
         let mut bytes = self.authority.to_le_bytes().to_vec();
         bytes.extend_from_slice(&self.workspace.tip.0);
@@ -111,7 +98,6 @@ impl<A: RowApplication> Inner<A> {
             _ => Err(Error::Corrupt("quarantined frame".into())),
         }
     }
-    /// Inside the caller's transaction, records another failed attempt.
     pub(super) async fn quarantine(
         &self,
         hash: Hash,
@@ -134,8 +120,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Inside the caller's transaction: the frame applied, was rejected or
-    /// waits for a known reason now.
     pub(super) async fn release_quarantine(&self, hash: Hash) -> Result<(), Error> {
         self.conn
             .execute(
@@ -144,5 +128,24 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn quarantine_backoff_doubles_up_to_an_hour_and_a_new_context_is_due_at_once() {
+        let at = |attempts| Quarantine {
+            attempts,
+            last_seen: 1_000,
+            context: 7,
+        };
+        assert!(!at(3).due(1_007, 7));
+        assert!(at(3).due(1_008, 7));
+        assert!(!at(12).due(1_000 + MAX_BACKOFF - 1, 7));
+        assert!(at(40).due(1_000 + MAX_BACKOFF, 7));
+        assert!(at(40).due(1_000, 8));
     }
 }

@@ -1,22 +1,11 @@
-//! Held operation and void headers of one domain, read in validated pages.
-//!
-//! Each page is its own background acquisition. A scan is valid only while
-//! the source it started from is unchanged: the header tables, the
-//! authority, the followed tip and the domain's graph. The context epoch is
-//! not part of it: every SQL session bumps it, even after a plain commit. A caller acts on the
-//! result only in an acquisition that checked the source.
 use super::*;
 use rocky_core::Scope;
 use rocky_credentials::TipGraph;
 
-/// Header rows read per acquisition.
 pub(crate) const HEADER_ROWS: usize = if cfg!(test) { 2 } else { 256 };
-/// Refused paged passes before a scan runs in one acquisition.
 pub(super) const SCAN_PASSES: usize = 3;
 const TABLES: [&str; 3] = ["secure_operations", "secure_voids", "secure_held_frames"];
 
-/// A scanned header's extensions with its table author, resolved from
-/// the signing key the extensions do not repeat.
 pub(super) struct ScannedHeader {
     pub(super) author: Option<WriterId>,
     extensions: Extensions,
@@ -36,12 +25,9 @@ impl std::ops::Deref for ScannedHeader {
     }
 }
 
-/// Where a scanned header came from.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum HeaderSource {
-    /// A held operation or void.
     Retained,
-    /// A frame held back from application.
     HeldFrame,
 }
 
@@ -53,7 +39,6 @@ pub(super) struct HeaderScan {
     authority: u64,
     tip: TipId,
     graph: [usize; 6],
-    /// The table being read, then the last hash read in it.
     table: usize,
     after: Vec<u8>,
 }
@@ -72,7 +57,6 @@ fn graph_shape(graph: Option<&TipGraph>) -> [usize; 6] {
 }
 
 impl HeaderScan {
-    /// Scans held operations and voids, then held frames with `frames`.
     pub(super) fn start<A: RowApplication>(
         inner: &Inner<A>,
         domain: Scope,
@@ -108,7 +92,6 @@ impl HeaderScan {
             after: Vec::new(),
         })
     }
-    /// Refuses a scan whose source changed since it started.
     pub(super) fn check<A: RowApplication>(&self, inner: &Inner<A>) -> Result<(), Error> {
         if self.authority != inner.authority
             || self.tip != inner.workspace.tip
@@ -123,8 +106,6 @@ impl HeaderScan {
         }
         Ok(())
     }
-    /// The next page of the domain's headers after checking the source;
-    /// `None` once both tables are read.
     pub(super) async fn page<A: RowApplication>(
         &mut self,
         inner: &Inner<A>,
@@ -185,9 +166,6 @@ impl HeaderScan {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Folds every held header of `domain` into the state `begin` makes
-    /// a page at a time, then finishes in an acquisition that checked the
-    /// source. `begin` runs in the acquisition the scan starts in.
     pub(super) async fn fold_headers<S, T>(
         &self,
         domain: Scope,
@@ -205,12 +183,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         )
         .await
     }
-    /// `fold_headers` that also visits held frames when `frames` is set.
-    ///
-    /// A pass whose source changes restarts. After `SCAN_PASSES` refused
-    /// passes, the scan runs once in a single background acquisition, so it
-    /// completes under steady writes; like a transition, that step starts
-    /// only when no interactive write waits.
     pub(super) async fn fold_scan<S, T>(
         &self,
         domain: Scope,

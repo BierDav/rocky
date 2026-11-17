@@ -1,5 +1,3 @@
-//! The frame rule under a learned revocation set, and the statements a
-//! handshake exchanges.
 use super::*;
 use crate::network::link::Link;
 
@@ -98,7 +96,6 @@ async fn a_learned_revocation_refuses_the_revoked_author_and_admits_every_other(
     );
 }
 
-/// `right` dials `left` over an in-memory pipe; returns both sides' results.
 pub(crate) async fn hello(
     (left_key, left): (&PrivateKey, &EncryptedReplica<Employees>),
     (right_key, right): (&PrivateKey, &EncryptedReplica<Employees>),
@@ -163,11 +160,6 @@ async fn statements_travel_inside_the_handshake_and_both_sides_end_with_the_unio
     );
 }
 
-/// Carol read Alice's frame and names it as a head; Alice is revoked.
-/// Revoked frames are never served, so Dave, who never received Alice's
-/// frame, names the head his pending frame waits on, and Carol answers with
-/// its signed header and chain. Dave then decides as Carol does, once his
-/// own revocation set ends that chain.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_revoked_head_resolves_by_evidence_from_a_peer_that_holds_it() {
     ended_head_resolves(false).await;

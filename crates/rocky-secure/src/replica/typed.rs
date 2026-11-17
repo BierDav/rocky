@@ -1,6 +1,3 @@
-//! Typed tables of a secure replica: the generated SQL storage that
-//! authorized secure rows project into, in the same transaction as every
-//! row change.
 use super::*;
 use crate::{capture::Plan, scoped_connection::Names};
 use rocky_core::{LogicalSchema, Scope, TableClass, TypedRows, TypedTable};
@@ -10,18 +7,15 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_typed(id INTEGER PRIMARY KEY CHECK(id=1),descriptor BLOB NOT NULL,domain BLOB NOT NULL,readers BLOB NOT NULL)",
 ];
 
-/// One typed table and the resource scope its rows belong to.
 #[derive(Clone)]
 pub(super) struct Projected {
     pub(super) table: TypedTable,
     pub(super) scope: ResourceScope,
 }
-/// The installed typed tables of a replica.
 pub(super) struct Typed {
     pub(super) rows: TypedRows,
     pub(super) domain: Scope,
     pub(super) tables: Vec<Projected>,
-    /// Full signed declarations, including tables with no physical projection.
     pub(super) declarations: Vec<Projected>,
     pub(super) names: Names,
     pub(super) families: rocky_credentials::GrantFamilies,
@@ -96,7 +90,6 @@ impl Typed {
         statements.extend(schema.delete_triggers(|name| self.installs(name)));
         statements
     }
-    /// Whether this projection installs table `name`.
     pub(super) fn installs(&self, name: &str) -> bool {
         self.rows.schema().table(name).is_some_and(|table| {
             table.class == TableClass::LocalOnly || self.by_name(&table.sql_name).is_some()
@@ -108,7 +101,6 @@ impl Typed {
             .table(&table.table.sql_name)
             .is_some_and(|logical| !logical.partition_by.is_empty())
     }
-    /// The scope of a row: its table's, or its registered partition's.
     pub(super) fn row_scope(
         &self,
         table: &Projected,
@@ -147,8 +139,6 @@ impl Typed {
                     && table.scope.table == scope.table)
         })
     }
-    /// The tables a session may name: every local table and the replayed
-    /// tables of `scopes`.
     pub(super) fn plan(&self, scopes: &BTreeSet<ResourceScope>) -> Result<Plan, Error> {
         let schema = self.rows.schema();
         let named = |table: &rocky_core::LogicalTable| match self.by_name(&table.sql_name) {
@@ -187,8 +177,6 @@ pub(super) fn statements(schema: &LogicalSchema) -> Vec<String> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Installs only tables covered by local read grants or partition selectors.
-    /// The complete descriptor still has to match the signed manifest.
     pub async fn install_readable_tables(
         &self,
         schema: LogicalSchema,
@@ -218,12 +206,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         self.install_tables(schema, domain, readers).await
     }
-    /// Installs typed tables for `schema` in `domain`; `readers` names the
-    /// encryption scope of every replayed table. The schema's manifest must
-    /// be the replica's signed manifest. Existing rows project at once;
-    /// reopening keeps the installation. Another schema of the same signed
-    /// definition, such as new indexes, replaces it through a projection
-    /// plan that switches in one transaction. Changes the definition does not allow are refused.
     pub async fn install_tables(
         &self,
         schema: LogicalSchema,
@@ -382,7 +364,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Loads the installed typed tables at open.
     pub(super) async fn load_typed(&mut self) -> Result<(), Error> {
         let stored = rows(
             &self.conn,
@@ -413,9 +394,6 @@ impl<A: RowApplication> Inner<A> {
         self.start_events();
         Ok(())
     }
-    /// Empties a scope's typed table, as its rows are evicted.
-    /// Replaces the `SET NULL` triggers with `typed`'s: a rebuilt parent
-    /// drops its own.
     pub(super) async fn install_delete_triggers(&self, typed: &Typed) -> Result<(), Error> {
         for record in rows(
             &self.conn,
@@ -448,8 +426,6 @@ impl<A: RowApplication> Inner<A> {
         }
         self.require_declared(scope, "eviction")
     }
-    /// Reindexes a scope's stored rows after a bulk change of
-    /// `secure_row_records`. A replayed table's rows are its only copy.
     pub(super) async fn reproject(&self, scope: ResourceScope) -> Result<(), Error> {
         if self.replayed_scope(scope) {
             return Ok(());
@@ -458,8 +434,6 @@ impl<A: RowApplication> Inner<A> {
         self.reindex_move_scope(scope).await?;
         self.require_declared(scope, "rebuild")
     }
-    /// Typed tables are replayed: a stored-row scope of a typed schema is
-    /// one whose table this replica may not read.
     fn require_declared(&self, scope: ResourceScope, purpose: &str) -> Result<(), Error> {
         if self
             .workspace

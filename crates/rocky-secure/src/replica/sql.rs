@@ -1,6 +1,3 @@
-//! SQL sessions on a secure replica's typed tables. A transaction holds the
-//! replica; its commit admits the changed rows as one bundle in the same
-//! engine transaction.
 use super::*;
 use crate::{
     CommitClass,
@@ -14,30 +11,23 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::OwnedMutexGuard;
 use web_time::Instant;
 
-/// SQLite's result code for a violated constraint.
 const SQLITE_CONSTRAINT: i32 = 19;
 
-/// A statement's whole result. The committing call carries `committed`.
 #[derive(Clone, Debug)]
 pub struct SecureRows {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<SqlValue>>,
-    /// Rows the session's last writing statement changed.
     pub changes: u64,
     pub last_insert_rowid: i64,
     pub state: SqlState,
     pub committed: Option<SecureCommit>,
 }
-/// What a commit published: one bundle, or nothing when no replicated row changed.
 #[derive(Clone, Debug)]
 pub struct SecureCommit {
     pub handle: Commitment,
     pub frames: Vec<EncryptedFrame>,
 }
 
-/// The replica held for one transaction. Dropping it rolls back whatever
-/// the engine still has open, so a cancelled call cannot leave a
-/// transaction behind. The flag keeps the pending pass after a plain commit.
 struct Held<A: RowApplication>(Guard<OwnedMutexGuard<Inner<A>>>, bool);
 impl<A: RowApplication> Drop for Held<A> {
     fn drop(&mut self) {
@@ -61,44 +51,29 @@ struct Lease<A: RowApplication> {
     plan: Arc<Plan>,
     writable: BTreeSet<usize>,
     held: Option<Held<A>>,
-    /// Caller names of open savepoints, their capture marks, reservations
-    /// and recorded intents.
     savepoints: Vec<(String, usize, Reserved, usize)>,
-    /// A `SAVEPOINT` began the transaction; releasing it commits.
     implicit: bool,
     aborted: Option<AbortReason>,
-    /// Counts transactions, so a timeout ends only its own.
     turn: u64,
     deadline: Instant,
     observed: sqlite::Observed,
     identities: Reserved,
-    /// Partition copies of the transaction's replayed writes, in order.
     intents: Vec<super::intents::Recorded>,
 }
 
-/// Each table scope's author and the last sequence a transaction reserved.
 type Reserved = BTreeMap<ResourceScope, (WriterId, u64)>;
 
-/// A SQL connection of a `SecureSession`. It may read the typed tables of
-/// the session's readable scopes and every local table, and write the
-/// replayed tables of its writable scopes. Each statement checks the
-/// session's authority; the commit admits every changed row and field.
 pub struct SecureSql<A: RowApplication> {
     pub(super) session: SecureSession<A>,
     pub(super) reads: Arc<queries::ReadAccess>,
     pub(super) plan: Arc<Plan>,
-    /// Plan tables a statement may change.
     pub(super) writable: BTreeSet<usize>,
     pub(super) options: SqlOptions,
     lease: Arc<tokio::sync::Mutex<Lease<A>>>,
     cancelled: Arc<AtomicBool>,
-    /// Open snapshot cursors of this session.
     pub(super) cursors: Arc<std::sync::atomic::AtomicUsize>,
-    /// The kept seal its reads see instead of the live tables.
     pub(super) seal: Option<Arc<super::SealViews>>,
     parents: BTreeMap<String, String>,
-    /// A migration session splits each statement over every partition it
-    /// reaches; each partition's copy replays as its own transaction.
     migration: bool,
 }
 impl<A: RowApplication> Drop for SecureSql<A> {
@@ -109,17 +84,13 @@ impl<A: RowApplication> Drop for SecureSql<A> {
     }
 }
 
-/// What a commit publishes the transaction as.
 #[derive(Clone)]
 enum Target {
-    /// One bundle, under the caller's handle or a random one.
     Bundle(Option<Commitment>),
-    /// The consecutive bundles of a staged publication.
     Publication(Commitment),
 }
 enum Sealed {
     Commit(SecureCommit),
-    /// The handle committed these frames before; this transaction rolls back.
     Replayed(SecureCommit),
 }
 fn refused(message: impl Into<String>) -> Error {
@@ -133,7 +104,6 @@ fn engine(error: sqlite::Error) -> Error {
 }
 
 impl<A: RowApplication> SecureSession<A> {
-    /// A local migration session can read only its journaled frozen parents.
     pub async fn migration_sql(
         &self,
         publication: Commitment,
@@ -171,7 +141,6 @@ impl<A: RowApplication> SecureSession<A> {
         }
         Ok(sql)
     }
-    /// A SQL connection over the replica's installed typed tables.
     pub async fn sql(&self, options: SqlOptions) -> Result<SecureSql<A>, Error> {
         options.validate()?;
         let inner = self
@@ -234,16 +203,12 @@ impl<A: RowApplication> SecureSession<A> {
 }
 
 impl<A: RowApplication> SecureSql<A> {
-    /// The SQL session's bindings, checked as interactive work.
     pub async fn status(&self) -> Result<SessionStatus, Error> {
         self.session
             .status_with(crate::replica::Class::Interactive)
             .await
     }
 
-    /// Reserves a row id in an active transaction, before inserting it.
-    /// Rollback releases reservations; a committed insert must use the next
-    /// sequence of the table author's creation log.
     pub async fn next_id(&self, table: &str) -> Result<rocky_core::RowIdentity, Error> {
         self.reserve_id(table, None).await
     }
@@ -402,29 +367,17 @@ impl<A: RowApplication> SecureSql<A> {
             .insert(allocation, (number, identity.sequence()));
         Ok(identity)
     }
-    /// Runs one statement. Transaction control is interpreted here, as in
-    /// a trusted `SqlSession`.
     pub async fn run(&self, sql: &str, params: Vec<SqlValue>) -> Result<SecureRows, Error> {
         self.call(sql, params, Target::Bundle(None)).await
     }
-    /// Commits the open transaction under `handle`. The same handle and
-    /// changed rows return the committed frames again; other rows conflict.
     pub async fn commit(&self, handle: Commitment) -> Result<SecureRows, Error> {
         self.call("COMMIT", Vec::new(), Target::Bundle(Some(handle)))
             .await
     }
-    /// Commits the open transaction, of any size, as the consecutive
-    /// bundles of `publication`, each within the bundle bounds, parents
-    /// first. Each bundle's handle derives from `publication` and its
-    /// position; the record of the publication commits in the same
-    /// transaction. A recorded publication returns its frames again and
-    /// this transaction rolls back. See [`EncryptedReplica::publications`].
     pub async fn commit_publication(&self, publication: Commitment) -> Result<SecureRows, Error> {
         self.call("COMMIT", Vec::new(), Target::Publication(publication))
             .await
     }
-    /// Rolls the open transaction back; later statements report
-    /// `Aborted(Cancelled)` until the caller sends `ROLLBACK`.
     pub async fn cancel(&self) {
         let mut lease = self.lease.lock().await;
         if lease.held.take().is_some() {
@@ -591,8 +544,6 @@ impl<A: RowApplication> SecureSql<A> {
             }
         }
     }
-    /// A statement outside a transaction: one that writes nothing runs at
-    /// once; a writing one commits by itself.
     async fn autocommit(
         &self,
         lease: &mut Lease<A>,
@@ -737,8 +688,6 @@ impl<A: RowApplication> SecureSql<A> {
         let held = lease.held.as_ref().ok_or(Error::Closed)?;
         held.0.conn.connection().run_now(sql).map_err(engine)
     }
-    /// One statement inside the transaction. A refused or uncapturable
-    /// statement ends the transaction; later statements report it.
     fn statement(
         &self,
         lease: &mut Lease<A>,
@@ -836,7 +785,6 @@ impl<A: RowApplication> SecureSql<A> {
             }
         }
     }
-    /// Steps one statement under the session's gate and bounds.
     fn step(
         &self,
         inner: &Inner<A>,
@@ -930,7 +878,6 @@ impl<A: RowApplication> SecureSql<A> {
             Err(error) => Err(Error::Sql(SqlError::engine(&error))),
         }
     }
-    /// Seals and commits the transaction, or rolls it back on any failure.
     async fn finish(
         &self,
         lease: &mut Lease<A>,
@@ -981,15 +928,13 @@ impl<A: RowApplication> SecureSql<A> {
         inner.deferred_maintenance.extend(scopes);
         inner.publish_revision().await?;
         if flushed {
-            let (flusher, committed_at) = (inner.flusher.clone(), inner.commit);
+            let (flusher, committed_at) = (inner.flusher.clone(), inner.locked_commit());
             drop(held);
             flusher.run(committed_at).await?;
         }
         rows.committed = Some(committed);
         Ok(rows)
     }
-    /// Turns the captured rows into writes and authors them as one bundle
-    /// inside the open engine transaction.
     async fn seal(
         &self,
         inner: &mut Inner<A>,
@@ -1228,8 +1173,6 @@ impl<A: RowApplication> SecureSql<A> {
 }
 
 impl<A: RowApplication> SecureSql<A> {
-    /// The partition copies of a write to a replayed table, split on the
-    /// open transaction's snapshot before the statement runs.
     async fn intent_copies(
         &self,
         lease: &Lease<A>,
@@ -1252,10 +1195,6 @@ impl<A: RowApplication> SecureSql<A> {
     }
 }
 
-/// Each partition's statements with the prior images of the rows they
-/// changed there: the author's execution rewinds like a replay of it. Rows
-/// a delete action changed in a scope without statements undo with the
-/// first member: a rewind undoes every member of a transaction.
 fn with_undo(
     intents: BTreeMap<ResourceScope, Vec<rocky_core::replay::IntentStatement>>,
     mut undo: BTreeMap<ResourceScope, Vec<super::replay::Undo>>,
@@ -1270,7 +1209,6 @@ fn with_undo(
     intents
 }
 
-/// A statement or commit runs only under the session's current authority.
 fn admit<A: RowApplication>(inner: &Inner<A>, session: &SecureSession<A>) -> Result<(), Error> {
     inner.check_authority(Some(session.authority))?;
     inner.local_grants(now()?)?;

@@ -1,4 +1,3 @@
-//! Schema fixtures and local projection plans. Replicated changes use seals.
 use super::*;
 use crate::sql::SqlOptions;
 use crate::storage::rows;
@@ -76,28 +75,20 @@ pub(super) fn text(value: &str) -> SqlValue {
     SqlValue::Text(value.into())
 }
 
-/// Generation 1 has `items(id,title)`; 2 adds a nullable `note` and a
-/// `tags` table; 3 adds a nullable `rank`; 4 removes `note` and `tags`;
-/// 5 adds `note` again.
 pub(super) struct Lineage {
     publisher: PrivateKey,
     pub(super) domain: Scope,
-    /// `tags` is partitioned by `label`.
     pub(super) partitioned: bool,
-    /// `tags` references `items` twice: `item` cascades, `also` nulls.
     pub(super) linked: bool,
+    pub(super) children_first: bool,
 }
 impl Lineage {
-    /// The domain root a replica's tip graph starts from.
     pub(super) async fn root(&self, replica: &EncryptedReplica<TypedRows>) -> Result<u32, Error> {
         let root = replica.tip_graph(self.domain).await?.genesis_schema;
         (1..=5)
             .find(|version| self.definition(*version).hash() == root)
             .ok_or_else(|| Error::Incompatible("fixture root".into()))
     }
-    /// Has the owner seal `replica`'s followed tip with `continue` to
-    /// `version`'s schema and move `main` on, creating and following `main`
-    /// first. Returns the graph statements peers receive.
     pub(super) async fn publish(
         &self,
         replica: &EncryptedReplica<TypedRows>,
@@ -133,8 +124,6 @@ impl Lineage {
             .await?;
         Ok(crate::tests::all_tip_statements(replica).await)
     }
-    /// Admits `statements`, follows `main` and switches to the schema of
-    /// `version` its target has, with `config` under the domain root.
     pub(super) async fn follow(
         &self,
         replica: &EncryptedReplica<TypedRows>,
@@ -165,8 +154,6 @@ impl Lineage {
             )
             .await
     }
-    /// Installs every schema the replica requires that the fixture knows:
-    /// those between the oldest retained tip and the target.
     pub(super) async fn install_required(&self, replica: &EncryptedReplica<TypedRows>) {
         for (tip, manifest) in replica.required_schemas().await.unwrap() {
             if let Some(known) = (1..=5).find(|known| self.definition(*known).hash() == manifest)
@@ -183,7 +170,6 @@ impl Lineage {
             }
         }
     }
-    /// [`Self::publish`] and [`Self::follow`] on one replica.
     pub(super) async fn advance(
         &self,
         replica: &EncryptedReplica<TypedRows>,
@@ -193,7 +179,6 @@ impl Lineage {
         let statements = self.publish(replica, version).await?;
         self.follow(replica, config, version, &statements).await
     }
-    /// Reopens a replica whose domain root is `root` at `version`'s schema.
     pub(super) async fn reopen(
         &self,
         path: &std::path::Path,
@@ -205,7 +190,6 @@ impl Lineage {
         config.manifest = self.manifest(root);
         EncryptedReplica::open(path, self.app(version), config).await
     }
-    /// The publisher key, which also owns the domain.
     pub(super) fn publisher(&self) -> &PrivateKey {
         &self.publisher
     }
@@ -229,6 +213,7 @@ impl Lineage {
             domain,
             partitioned: false,
             linked: false,
+            children_first: false,
         }
     }
     fn schema(&self, generation: u32) -> LogicalSchema {
@@ -245,7 +230,7 @@ impl Lineage {
         let mut tables = vec![table("items", items)];
         if matches!(generation, 2 | 3) {
             tables.push(table(
-                "tags",
+                self.child_table(),
                 vec![
                     column("key", Affinity::Text, true),
                     column("label", Affinity::Text, true),
@@ -254,7 +239,7 @@ impl Lineage {
         }
         for tags in tables
             .iter_mut()
-            .filter(|table| self.linked && table.sql_name == "tags")
+            .filter(|table| self.linked && table.sql_name == self.child_table())
         {
             let mut clauses = Vec::new();
             for (name, action) in [("item", "CASCADE"), ("also", "SET NULL")] {
@@ -293,6 +278,15 @@ impl Lineage {
             tags.indexes[0].create_sql =
                 "CREATE UNIQUE INDEX tags_identity ON tags(label,id)".into();
         }
+        for items in tables
+            .iter_mut()
+            .filter(|table| self.children_first && table.sql_name == "items")
+        {
+            items.create_sql = items
+                .create_sql
+                .replace("id BLOB NOT NULL", "id BLOB NOT NULL UNIQUE");
+        }
+        tables.sort_by(|a, b| a.sql_name.cmp(&b.sql_name));
         LogicalSchema {
             format: LOGICAL_SCHEMA_FORMAT,
             publisher: *self.publisher.public_key().as_bytes(),
@@ -308,8 +302,6 @@ impl Lineage {
             restrictions: Vec::new(),
         }
     }
-    /// Generation 1 with a local `drafts` table indexed on `body`: a local
-    /// change.
     fn indexed(&self) -> LogicalSchema {
         let mut schema = self.schema(1);
         let mut drafts = table(
@@ -351,6 +343,13 @@ impl Lineage {
         )
         .unwrap()
     }
+    fn child_table(&self) -> &'static str {
+        if self.children_first {
+            "badges"
+        } else {
+            "tags"
+        }
+    }
     pub(super) fn scope(&self, name: &str) -> ResourceScope {
         let schema = self.schema(3);
         ResourceScope {
@@ -359,7 +358,6 @@ impl Lineage {
             table: schema.table_id(schema.table(name).unwrap()),
         }
     }
-    /// The scope of the `tags` partition `label`.
     pub(super) fn tag_partition(&self, label: &str) -> (ResourceScope, rocky_core::PartitionTuple) {
         let schema = self.schema(3);
         let tags = schema.table("tags").unwrap();
@@ -398,7 +396,6 @@ impl Lineage {
             })
             .collect()
     }
-    /// The grants of `generation`, only for `tables` when named.
     fn grants_of(&self, generation: u32, tables: Option<&[&str]>) -> Vec<ResourceGrant> {
         let schema = self.schema(generation);
         schema
@@ -426,7 +423,6 @@ impl Lineage {
             })
             .collect()
     }
-    /// Every partition of each partitioned table of `generation`.
     fn partition_grants_of(&self, generation: u32) -> Vec<rocky_credentials::PartitionGrant> {
         let schema = self.schema(generation);
         schema
@@ -462,12 +458,10 @@ impl Lineage {
             })
             .collect()
     }
-    /// A chain under one user per node, so every generation keeps its principal.
     pub(super) fn credentials(&self, generation: u32, node: &PrivateKey) -> CredentialChain {
         let user = rocky_core::commitment("lineage.user", node.public_key().as_bytes());
         self.certified(generation, &PrivateKey::from_bytes(&user), node)
     }
-    /// `credentials` of a node `user`'s identity certified.
     pub(super) fn certified(
         &self,
         generation: u32,
@@ -476,7 +470,6 @@ impl Lineage {
     ) -> CredentialChain {
         self.certified_as(generation, user, node, None)
     }
-    /// `certified` under an owner-direct trusted grant for the domain.
     pub(super) fn trusted(
         &self,
         generation: u32,
@@ -494,7 +487,6 @@ impl Lineage {
     ) -> CredentialChain {
         self.certified_for(generation, user, node, trusted, None)
     }
-    /// `certified_as`, granting only `tables` when named.
     fn certified_for(
         &self,
         generation: u32,
@@ -547,7 +539,7 @@ impl Lineage {
         ])
     }
     pub(super) fn config(&self, generation: u32, node: &PrivateKey) -> SecureConfig {
-        let keys = ["items", "tags"]
+        let keys = ["items", self.child_table()]
             .iter()
             .take(if matches!(generation, 2 | 3) && !self.partitioned {
                 2
@@ -586,7 +578,6 @@ impl Lineage {
         self.open_with(path, self.config(generation, node), generation, upgrade)
             .await
     }
-    /// `open` for a node `identity` certified, which enrolls line nodes.
     pub(super) async fn open_certified(
         &self,
         path: &std::path::Path,
@@ -598,7 +589,6 @@ impl Lineage {
         config.credentials = self.certified(generation, identity, node);
         self.open_with(path, config, generation, upgrade).await
     }
-    /// `open_certified` as a node of a trusted identity.
     pub(super) async fn open_trusted(
         &self,
         path: &std::path::Path,
@@ -610,8 +600,6 @@ impl Lineage {
         config.credentials = self.trusted(generation, identity, node);
         self.open_with(path, config, generation, upgrade).await
     }
-    /// A node of its own identity, trusted when `trusted`, granted and
-    /// keyed only for `tables` of generation 3.
     pub(super) async fn open_scoped(
         &self,
         path: &std::path::Path,
@@ -751,7 +739,6 @@ async fn insert(replica: &EncryptedReplica<TypedRows>, ids: std::ops::Range<usiz
         .await
         .unwrap();
 }
-/// Every frame `target` may receive from `source`, page by page.
 async fn frames(
     source: &EncryptedReplica<TypedRows>,
     target: &EncryptedReplica<TypedRows>,
@@ -771,7 +758,6 @@ async fn frames(
         .unwrap();
     frames_as(source, node, &credentials, scope).await
 }
-/// Every frame a node presenting `credentials` may receive from `source`.
 async fn frames_as(
     source: &EncryptedReplica<TypedRows>,
     node: PublicKey,
@@ -982,8 +968,6 @@ async fn a_backup_copy_opens_only_under_a_fresh_identity_and_keeps_its_history()
     );
 }
 
-/// Catches `target` up on `scope` from `source` by range pages, voids
-/// first, as a session does.
 async fn sync(
     source: &EncryptedReplica<TypedRows>,
     target: &EncryptedReplica<TypedRows>,

@@ -1,4 +1,3 @@
-//! Contact hints and discovery secrets, available only inside admitted sessions.
 use super::*;
 use rocky_core::NodeId;
 use rocky_credentials::DiscoverySecret;
@@ -59,7 +58,6 @@ enum Payload {
 pub(super) struct ContactMessage(#[serde(with = "serde_bytes")] Vec<u8>);
 pub type ContactFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ContactResponse, Error>> + Send + 'a>>;
-/// Local contact and secret storage, independent of the replica and transport.
 pub trait ContactHandler: Send + Sync {
     fn answer(&self, peer: PublicKey, request: ContactRequest) -> ContactFuture<'_>;
 }
@@ -157,7 +155,6 @@ impl NativeSession {
         }
         Ok(response)
     }
-    /// Answers one contact request inside an admitted session.
     pub(super) async fn answer_contact<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -179,7 +176,6 @@ impl NativeSession {
         replica.admit_chain(self.peer, &self.credentials).await?;
         self.send_contact(Payload::Response(response)).await
     }
-    /// Serves the SDK mesh metadata alongside rows.
     pub async fn serve_with_contacts<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,

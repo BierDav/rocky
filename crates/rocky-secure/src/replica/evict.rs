@@ -1,21 +1,15 @@
-//! Explicit scope eviction on a partial replica, in bounded resumable steps.
 use super::checkpoint::{STEP_OPERATIONS, STEP_ROWS};
 use super::roles::{Holding, ReplicaRole};
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvictReport {
-    /// Stored rows and checkpoint rows dropped.
     pub rows: u64,
-    /// Retained operations dropped.
     pub operations: u64,
-    /// Opaque archived checkpoints dropped.
     pub checkpoints: u64,
-    /// No eligible remote durable copy is confirmed; the dropped data may be lost.
     pub recovery_unconfirmed: bool,
 }
 
-/// Tables of an evicted scope's local state, keyed by its local id.
 const EVICTED_SCOPE_STATE: &[&str] = &[
     "secure_seal_anchors",
     "secure_applied",
@@ -29,11 +23,7 @@ const EVICTED_SCOPE_STATE: &[&str] = &[
     "secure_checkpoint_stubs",
     "secure_compaction_live_creations",
 ];
-/// Seal bounds and drops of an evicted scope: held again, it verifies its
-/// seals afresh, as one never held, so its bounds place no members.
 const EVICTED_SEAL_BOUNDS: &[&str] = &["secure_seal_bounds", "secure_seal_drops"];
-/// The replayed bases a rebuild starts a scope from: an evicted one has no
-/// rows to start from.
 const EVICTED_REPLAYED_BASES: &[&str] = &[
     "secure_replayed_seals",
     "secure_replayed_seal_rows",
@@ -44,9 +34,6 @@ const EVICTED_REPLAYED_BASES: &[&str] = &[
     "secure_base_cleanup",
     "secure_replayed_staged",
 ];
-/// The replay ledger of an evicted scope, keyed by the encoded scope. Only
-/// it goes: permanent marks, the summary and admission evidence stay, so
-/// returning frames this file admitted apply again and reuse stays refused.
 const EVICTED_REPLAY_LEDGER: &[&str] = &[
     "secure_retention",
     "secure_peer_frontiers",
@@ -56,9 +43,6 @@ const EVICTED_REPLAY_LEDGER: &[&str] = &[
 ];
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Explicitly drops a scope's rows, ciphertext and checkpoints after its
-    /// partition custody prerequisite. An interrupted eviction resumes on the
-    /// next call; the scope remains unavailable until it finishes.
     pub async fn evict(&self, scope: ResourceScope) -> Result<EvictReport, Error> {
         let recovery_unconfirmed = {
             let mut inner = self.inner.lock(crate::replica::Class::Background).await;
@@ -128,7 +112,6 @@ impl<A: RowApplication> Inner<A> {
         })?;
         self.publish_revision().await
     }
-    /// Deletes one bounded batch; true once the scope is evicted.
     async fn eviction_step(
         &mut self,
         scope: ResourceScope,
@@ -232,7 +215,7 @@ impl<A: RowApplication> Inner<A> {
                             .await?;
                     }
                     inner
-                        .store_scope_state(id, 0, 0, &checkpoint::Lt::new(), 0)
+                        .store_scope_state(id, 0, 0, &checkpoint::LtHash16::new(), 0)
                         .await?;
                 }
                 for table in EVICTED_REPLAY_LEDGER {

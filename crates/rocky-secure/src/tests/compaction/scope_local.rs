@@ -1,5 +1,3 @@
-//! A scope that waits for a seal rebootstrap holds back only itself; a lost
-//! compaction holds back its whole domain.
 use super::super::blockers::{assert_named, refused};
 use super::super::generations::{identity_insert, select, session};
 use super::*;
@@ -85,8 +83,6 @@ async fn a_scope_awaiting_a_seal_rebootstrap_holds_back_only_itself() {
     b.audit(tags).await.unwrap();
 }
 
-/// The finalized seals and the identity ledger they fold are the domain's:
-/// a compaction that lost refuses every scope until each rebootstraps.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_lost_compaction_holds_back_every_scope_of_its_domain() {
     let lineage = Lineage::new();
@@ -118,9 +114,6 @@ async fn a_lost_compaction_holds_back_every_scope_of_its_domain() {
     replica.audit(tags).await.unwrap();
 }
 
-/// A recovery pass with nothing to finalize changes nothing: a scope that
-/// never verifies (here `tags`, with no base at the seal) does not count
-/// as finalized work, so no revision is published.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_idle_finalization_pass_publishes_nothing() {
     let lineage = Lineage::new();

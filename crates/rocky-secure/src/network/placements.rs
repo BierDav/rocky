@@ -1,5 +1,3 @@
-//! Signed header placements: positions of a seal's frontier in scopes the
-//! requester cannot hold, shown by their author-signed headers alone.
 use super::*;
 use crate::replica::{PlacementPage, PlacementRequest};
 
@@ -10,8 +8,6 @@ pub(super) enum PlacementMessage {
 }
 
 impl NativeSession {
-    /// Asks the peer to place what this replica wants placed. Returns how
-    /// many placements it stored.
     pub async fn pull_placements<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -22,7 +18,7 @@ impl NativeSession {
             return Ok(stored);
         }
         for request in requests {
-            if self.low(MAX_SECURE_FRAME) {
+            if self.budget_low(MAX_SECURE_FRAME) {
                 break;
             }
             self.send(PlacementMessage::Request(request)).await?;

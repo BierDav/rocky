@@ -1,4 +1,3 @@
-//! Seals, openings and bookmarks the terminal tests publish.
 use super::*;
 use crate::TipStatement;
 use rocky_core::TipId;
@@ -30,7 +29,6 @@ pub(super) fn bookmark(
         .unwrap(),
     )
 }
-/// A `continue` seal of `tip` at the frontier of `tip`'s frames `node` holds.
 pub(super) async fn seal(lineage: &Lineage, node: &Replica, tip: TipId) -> SignedSeal {
     let mut authors = BTreeMap::<rocky_core::WriterId, u64>::new();
     for frame in stored_frames(node, "SELECT header,body FROM secure_operations").await {
@@ -61,13 +59,10 @@ pub(super) async fn seal(lineage: &Lineage, node: &Replica, tip: TipId) -> Signe
     )
     .unwrap()
 }
-/// Composes `node` with the mesh's log, which it relays seals to.
 pub(super) fn compose(fixture: &Fixture, node: &Node) {
     node.1
         .set_domain_log(Some(Arc::new(fixture.mesh.client(&node.0))));
 }
-/// Composes alice and bob, creates `main` on the genesis tip and has both
-/// follow it.
 pub(super) async fn follow_main(fixture: &Fixture) {
     let (alice, bob) = (&fixture.alice, &fixture.bob);
     let main = bookmark(
@@ -103,8 +98,6 @@ pub(super) async fn follow_main(fixture: &Fixture) {
             .unwrap();
     }
 }
-/// A trusted node `node` that joins later, learns the graph from alice and
-/// follows `main`.
 pub(super) async fn join_main(fixture: &Fixture, node: &Node) {
     compose(fixture, node);
     share(&fixture.alice.1, &node.1).await;
@@ -113,7 +106,6 @@ pub(super) async fn join_main(fixture: &Fixture, node: &Node) {
         .await
         .unwrap();
 }
-/// Hands every graph statement `from` holds to `to`; returns those admitted.
 pub(super) async fn share(from: &Replica, to: &Replica) -> usize {
     to.receive_tip_statements(&from.tip_statements(None, 32).await.unwrap())
         .await

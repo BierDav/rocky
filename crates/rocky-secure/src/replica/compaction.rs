@@ -1,8 +1,3 @@
-//! Lazy compaction at seals, in a domain with a tip graph. Every device
-//! finalizes the state at each seal of its followed path once it holds every
-//! frame through the seal's frontier: rows dead there stay dead. Compacting
-//! moves the replay base to a finalized seal and releases the evidence
-//! behind it.
 use super::checkpoint::{
     CHECKPOINT_FORMAT, CheckpointStatement, LogPosition, Overlay, PruneBlock, STEP_OPERATIONS,
     STEP_ROWS, SetSummary, Sets,
@@ -24,8 +19,6 @@ mod readiness;
 mod rebootstrap;
 pub use rebootstrap::{FrameReplay, SealRebootstrap};
 
-/// Seals `finalize_arrived` finalizes in one recovery or sync pass, so
-/// that a pass under the background lock stays bounded.
 pub const ARRIVED_SEALS_PER_PASS: usize = 4;
 
 pub(super) const SCHEMA: &[&str] = &[
@@ -35,28 +28,17 @@ pub(super) const SCHEMA: &[&str] = &[
     SEAL_DROPS,
     COMPACTION_LOST,
 ];
-/// Seals of the followed path this replica finalized, oldest first. The last
-/// compacted one is its scopes' replay base.
 const FINALIZED: &str = "CREATE TABLE IF NOT EXISTS secure_finalized(domain BLOB NOT NULL,depth INTEGER NOT NULL,seal BLOB NOT NULL,compacted INTEGER NOT NULL,PRIMARY KEY(domain,depth)) WITHOUT ROWID";
-/// Per scope and uncompacted finalized seal: the last applied position it
-/// includes. Applied positions it excludes follow every included one.
 const SEAL_BOUNDS: &str = "CREATE TABLE IF NOT EXISTS secure_seal_bounds(scope INTEGER NOT NULL,depth INTEGER NOT NULL,position INTEGER NOT NULL,PRIMARY KEY(scope,depth)) WITHOUT ROWID";
-/// What finalizing at a bound's seal changed: a row without fields is dropped.
 const SEAL_DROPS: &str = "CREATE TABLE IF NOT EXISTS secure_seal_drops(scope INTEGER NOT NULL,depth INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB,PRIMARY KEY(scope,depth,row)) WITHOUT ROWID";
-/// Domains whose compacted seal lost a race: their base must be rebuilt at
-/// the winner.
 const COMPACTION_LOST: &str = "CREATE TABLE IF NOT EXISTS secure_compaction_lost(domain BLOB PRIMARY KEY,seal BLOB NOT NULL) WITHOUT ROWID";
 
 impl checkpoint::CheckpointStatement {
-    /// Whether this is an empty partition's base off `seal`. Such a base
-    /// follows the seal even with unchanged rows: a newly granted reader may
-    /// never have held the other scopes' frames.
     fn empty_partition_off(&self, seal: Commitment) -> bool {
         self.partition.is_some() && self.frontier.is_empty() && self.seal != Some(seal)
     }
 }
 
-/// One finalized seal of a domain's followed path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Finalized {
     depth: i64,
@@ -64,39 +46,25 @@ struct Finalized {
     compacted: bool,
 }
 
-/// What a `compact` call finalized, compacted and released.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CompactReport {
-    /// The newest seal whose state this replica finalized.
     pub finalized: Option<Commitment>,
-    /// The seal the domain's replay base sits at.
     pub compacted: Option<Commitment>,
-    /// Retained operations released behind it.
     pub pruned: u64,
-    /// Why the next seal of the followed path is not finalized yet.
     pub waiting: Option<String>,
-    /// What stopped releasing a scope's operations.
     pub blocked: Vec<(ResourceScope, PruneBlock)>,
 }
 
-/// Where a domain's compaction stands.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CompactionStatus {
     pub finalized: Option<Commitment>,
     pub compacted: Option<Commitment>,
-    /// Finalized seals whose evidence is still retained, oldest first.
     pub uncompacted: Vec<Commitment>,
-    /// Why the next seal of the followed path is not finalized yet.
     pub waiting: Option<String>,
-    /// The compacted seal lost a race; the base must be rebuilt at the
-    /// winning seal from a checkpoint or replayed frames.
     pub rebootstrap: Option<Commitment>,
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// The seals the followed tip's state passes through, oldest first: the
-    /// canonical seal leaving each tip of its ancestry, through openings,
-    /// then the followed tip's own once sealed.
     pub(super) fn path_seals(&self, domain: Scope) -> Result<Vec<SignedSeal>, Error> {
         let Some(graph) = self.graphs.get(&domain) else {
             return Ok(Vec::new());
@@ -116,7 +84,6 @@ impl<A: RowApplication> Inner<A> {
         cache.paths.insert(key, path.clone());
         Ok(path)
     }
-    /// Where `seal` lies on the followed path; none off it.
     pub(super) fn path_index(
         &self,
         domain: Scope,
@@ -153,7 +120,6 @@ impl<A: RowApplication> Inner<A> {
             })
             .collect()
     }
-    /// The depth `seal` was finalized at, while it is recorded.
     pub(super) async fn finalized_depth(
         &self,
         domain: Scope,
@@ -166,8 +132,6 @@ impl<A: RowApplication> Inner<A> {
             .find(|known| known.seal == seal)
             .map(|known| known.depth))
     }
-    /// Per uncompacted finalized seal of scope `id`, in order: its depth and
-    /// the last applied position it includes.
     async fn seal_bounds(&self, id: i64) -> Result<Vec<(i64, i64)>, Error> {
         let records = collect_rows(
             self.conn
@@ -186,8 +150,6 @@ impl<A: RowApplication> Inner<A> {
             })
             .collect()
     }
-    /// Inside the caller's transaction, forgets scope `id`'s seal bounds
-    /// through `position` and their drops.
     pub(super) async fn drop_seal_bounds(&self, id: i64, position: i64) -> Result<(), Error> {
         self.conn
             .execute(
@@ -203,8 +165,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Whether a scope's state passed a seal: some rows may be absent
-    /// because they were dead there.
     pub(super) async fn seal_finalized(&self, scope: ResourceScope) -> Result<bool, Error> {
         if !self.graphs.contains_key(&scope.domain) {
             return Ok(false);
@@ -221,12 +181,9 @@ impl<A: RowApplication> Inner<A> {
             .and_then(|record| record.signed)
             .is_some_and(|signed| signed.statement.seal.is_some()))
     }
-    /// A tip rebuild that keeps no seal base replays from nothing.
     pub(super) fn ignores_base(&self) -> bool {
         self.rebuilding_tip && !self.tip_base
     }
-    /// `replay`, applying what finalizing a seal changed once the replay
-    /// passes the last position the seal includes.
     pub(super) async fn replay_sealed(
         &self,
         request: checkpoint::ReplayRequest,
@@ -305,8 +262,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// The position the replay of scope `id` has passed the last finalized
-    /// seal at: its bound, else its base's.
     async fn last_bound(&self, id: i64) -> Result<i64, Error> {
         if let Some((_, position)) = self.seal_bounds(id).await?.last() {
             return Ok(*position);
@@ -322,8 +277,6 @@ impl<A: RowApplication> Inner<A> {
             })
             .map_or(0, |record| record.position))
     }
-    /// The positions `blocking_gaps` checks, over `scopes` (open) of
-    /// `domain`; a placement counts unless it lies in a held scope checked.
     #[cfg(test)]
     pub(super) async fn scan_held_positions(
         &self,
@@ -383,9 +336,6 @@ impl<A: RowApplication> Inner<A> {
         self.seal_waits(seal.statement.scope, seal, None, scopes)
             .await
     }
-    /// Why `seal` cannot be finalized yet, after `previous` on the path: a
-    /// held scope misses a frame through the frontier, or its state cannot
-    /// be rebuilt there.
     pub(in crate::replica) async fn seal_waits(
         &self,
         domain: Scope,
@@ -401,7 +351,6 @@ impl<A: RowApplication> Inner<A> {
         self.seal_coverage_waits(domain, seal, previous, scopes)
             .await
     }
-    /// Checks retained history independently of an owner's future import intent.
     pub(in crate::replica) async fn seal_coverage_waits(
         &self,
         domain: Scope,
@@ -469,8 +418,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(None)
     }
-    /// What finalizing drops from a scope's stored rows: its tombstones.
-    /// A replayed scope keeps no row records; its replay records its drops.
     async fn seal_drops(
         &self,
         scope: ResourceScope,
@@ -515,9 +462,6 @@ impl<A: RowApplication> Inner<A> {
             }
         }
     }
-    /// Per held scope: its applied positions after its last bound that
-    /// `seal` excludes and the last one it includes. Pending drops and
-    /// constraint dependencies also make a scope participate.
     async fn seal_changes(
         &self,
         domain: Scope,
@@ -594,21 +538,15 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-/// How a seal changes one held scope.
 struct SealChange {
     scope: ResourceScope,
     id: i64,
-    /// The last position this seal includes.
     through: i64,
-    /// Positions after `bound` it excludes, in order, with their hashes.
     excluded: Vec<(i64, Vec<u8>)>,
     changed: bool,
-    /// A replayed scope keeps no row records: replay orders its rows.
     replayed: bool,
 }
 
-/// Where the finalized seals start on the path: only the latest compacted
-/// one is kept of those before. None when the oldest left the path.
 fn offset(path: &[SignedSeal], finalized: &[Finalized]) -> Option<usize> {
     match finalized.first() {
         None => Some(0),
@@ -618,17 +556,11 @@ fn offset(path: &[SignedSeal], finalized: &[Finalized]) -> Option<usize> {
     }
 }
 
-/// The highest position in `from..=to` that `positions` lacks.
-/// Positions of every node's frames, voids and placements a replica holds:
-/// per node, and per open scope's last frame.
 #[cfg(test)]
 type Positions = (
     BTreeMap<WriterId, BTreeSet<u64>>,
     BTreeMap<(ResourceScope, WriterId), u64>,
 );
-/// Up to `limit` positions of `seal`'s frontier at each author's start that keep it
-/// from being finalized: missing from `held`, and at or after some open
-/// scope's last frame of the node, so they may be that scope's.
 pub(super) fn blocking_gaps(
     seal: &SignedSeal,
     starts: &BTreeMap<WriterId, u64>,
@@ -708,10 +640,6 @@ fn highest_missing(positions: Option<&positions::Runs>, from: u64, to: u64) -> O
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Finalizes the domain's state at `seal`, inside the caller's
-    /// transaction. Excluded operations move after included ones; frontier
-    /// drops are recorded before replaying the tail. Tests also run the
-    /// full scope rebuild through this transaction boundary.
     async fn finalize_seal_impl(
         &mut self,
         domain: Scope,
@@ -1003,16 +931,12 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Finalizes the followed path's seals in order while this replica
-    /// holds every frame through the next one. Returns how many it
-    /// finalized and why the next waits.
     pub(super) async fn finalize_ready(
         &mut self,
         domain: Scope,
     ) -> Result<(usize, Option<String>), Error> {
         self.finalize_at_most(domain, usize::MAX).await
     }
-    /// Like `finalize_ready`, but finalizes at most `limit` seals.
     pub(super) async fn finalize_at_most(
         &mut self,
         domain: Scope,
@@ -1035,9 +959,6 @@ impl<A: RowApplication> Inner<A> {
         crate::network::trace::outcome(&span, &result);
         result
     }
-    /// Finalizes ready seals of `domain`, at most `limit`. Rows a clear left
-    /// waiting are derived again first: a seal finalized over them would
-    /// decide members against incomplete rows and make those outcomes final.
     async fn finalize_ready_inner(
         &mut self,
         domain: Scope,
@@ -1118,11 +1039,6 @@ impl<A: RowApplication> Inner<A> {
             count += 1;
         }
     }
-    /// The checkpoints of `scope` the graph lists at seals of the followed
-    /// path from the next one to finalize, newest first, signed by another
-    /// node, when that seal's coverage waits on this scope: history it
-    /// never holds, such as a revoked author's frames or an epoch it is not
-    /// given, comes with one of them.
     pub(super) async fn listed_replacements(
         &self,
         scope: ResourceScope,
@@ -1166,7 +1082,6 @@ impl<A: RowApplication> Inner<A> {
             .collect::<Result<Vec<_>, _>>()?;
         self.listed_at(graph, scope, &seals)
     }
-    /// Whether a frame of `scope` waits for a key epoch this replica lacks.
     async fn waits_for_key(&self, scope: ResourceScope) -> Result<bool, Error> {
         let blob = encode(&scope)?;
         for (hash, reason) in &self.waits {
@@ -1187,7 +1102,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(false)
     }
-    /// Why the next seal of the followed path is not finalized yet.
     pub(super) async fn finalization_waits(&self, domain: Scope) -> Result<Option<String>, Error> {
         if let Some(waits) = self.rederive_waits(domain).await? {
             return Ok(Some(waits));
@@ -1256,13 +1170,6 @@ impl<A: RowApplication> Inner<A> {
             _ => Err(Error::Corrupt("lost compaction".into())),
         }
     }
-    /// Inside the caller's transaction, forgets the finalized seals no
-    /// longer on the followed path after a race resolved again or the
-    /// bookmark moved, and with `restore` rebuilds the scopes they changed.
-    /// Returns whether replayed members reopened; without `restore` the
-    /// caller replays them.
-    /// A compacted seal that left the path cannot be undone: the domain
-    /// waits for a rebootstrap.
     pub(super) async fn revalidate_finalized(
         &mut self,
         domain: Scope,
@@ -1358,8 +1265,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(reopened)
     }
-    /// The newest finalized seal that is final, or has at least `keep`
-    /// seals after it on the path, with every uncompacted one before it so.
     async fn compaction_target(
         &self,
         domain: Scope,
@@ -1414,7 +1319,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(target)
     }
-    /// The compacted seal of the followed path, where the replay base sits.
     async fn compacted_target(
         &self,
         domain: Scope,
@@ -1435,8 +1339,6 @@ impl<A: RowApplication> Inner<A> {
             .cloned()
             .map(|seal| (known, seal)))
     }
-    /// `compact_scope` for a replayed scope: its rows at the seal, taken
-    /// when the seal was finalized, become its signed replay base.
     async fn compact_replayed(
         &mut self,
         scope: ResourceScope,
@@ -1638,8 +1540,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(true)
     }
-    /// The operations a base through applied position `through` covers,
-    /// on top of `base`: its frontier per log, and their count.
     pub(super) async fn covered_frontier(
         &self,
         id: i64,
@@ -1686,7 +1586,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok((frontier, operations))
     }
-    /// Keeps only the replay base's seal of the compacted ones.
     async fn mark_compacted(&self, domain: Scope, depth: i64) -> Result<(), Error> {
         for sql in [
             "UPDATE secure_finalized SET compacted=1 WHERE domain=? AND depth=?",
@@ -1826,7 +1725,7 @@ impl<A: RowApplication> Inner<A> {
             self.conn.execute(sql, [id]).await?;
         }
         sets.creations = 0;
-        sets.creation_digest = checkpoint::Lt::new();
+        sets.creation_digest = checkpoint::LtHash16::new();
         let base_creations = self
             .index_page_headers(id, &checkpoint::Served::Base)
             .await?;
@@ -1993,8 +1892,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Whether a held scope needs a served replay base, including empty
-    /// concrete partitions learned after the newest seal was finalized.
     pub async fn unserved_bases(&self, domain: Scope) -> Result<bool, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.graph_for(domain)?;
@@ -2005,7 +1902,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(false)
     }
-    /// See `Inner::listed_replacements`.
     pub async fn listed_replacements(
         &self,
         scope: ResourceScope,
@@ -2016,12 +1912,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .listed_replacements(scope)
             .await
     }
-    /// Finalizes every seal of the followed path whose frames this replica
-    /// holds, then makes the newest finalized seal that is final, or has at
-    /// least `keep` seals after it on the path, the replay base, and
-    /// releases the operations behind it as far as retention allows. A
-    /// seal that loses after compaction needs a rebootstrap; `keep` trades
-    /// storage against that chance.
     pub async fn compact(&self, domain: Scope, keep: usize) -> Result<CompactReport, Error> {
         let span = tracing::debug_span!(
             "compact",
@@ -2037,11 +1927,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         crate::network::trace::outcome(&span, &result);
         result
     }
-    /// Compacts `domain` to `target`. Every scope is prepared before any is
-    /// published, so linked bases are never exposed to a competing tip
-    /// between scope publications. Preparation runs in unlocked steps from a
-    /// fixed seal: it never blocks or refuses application writes, and
-    /// arrivals do not extend it.
     async fn compact_to<'a>(
         &'a self,
         mut inner: Guard<tokio::sync::MutexGuard<'a, Inner<A>>>,
@@ -2210,8 +2095,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.publish_revision().await?;
         Ok(report)
     }
-    /// Finalizes every seal of the followed path whose frames this replica
-    /// holds, as maintenance does, and keeps those the configuration names.
     pub async fn finalize_path(&self, domain: Scope) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.graph_for(domain)?;
@@ -2219,13 +2102,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner = flush_guard(inner, &self.inner).await?;
         inner.publish_revision().await
     }
-    /// Finalizes the followed path's seals whose frames this replica holds
-    /// and publishes a revision only when one finalized: a member's drops
-    /// turn final as seals arrive, not only after its next local write
-    /// queues maintenance. At most `ARRIVED_SEALS_PER_PASS` finalize per
-    /// call; later passes take the rest. Rows a clear left waiting are
-    /// derived again first, which counts as one. Returns how many
-    /// finalized.
     pub async fn finalize_arrived(&self, domain: Scope) -> Result<usize, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.graph_for(domain)?;
@@ -2238,7 +2114,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(finalized)
     }
-    /// Whether any held scope still needs a replay base at `seal`.
     pub async fn needs_base_at(&self, domain: Scope, seal: Commitment) -> Result<bool, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         for (_, id) in inner.domain_scopes(domain).await? {
@@ -2274,8 +2149,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Re-finalizing a seal can replace its snapshot while preparation runs
-    /// unlocked; a base prepared before that would publish a mixed digest.
     async fn snapshot_replaced_while_preparing(
         &self,
         id: i64,
@@ -2284,9 +2157,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(self.seal_outcomes(id, seal).await?.is_some()
             && self.prepared_base(id, seal).await?.is_none())
     }
-    /// Publishes the prepared bases. Replayed scopes' bases are linked: they
-    /// publish in one transaction, so they stay one state even across
-    /// process death. Other scopes keep the generic per-scope publication.
     async fn publish_compaction(
         &mut self,
         domain: Scope,
@@ -2342,14 +2212,12 @@ impl<A: RowApplication> Inner<A> {
 
 #[cfg(test)]
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// The followed path's seals, walked afresh.
     pub(crate) async fn walk_path_seals(&self, domain: Scope) -> Vec<SignedSeal> {
         let inner = self.inner.lock(Class::Background).await;
         tip_path_seals(inner.graph_for(domain).unwrap(), inner.workspace.tip).unwrap()
     }
 }
 
-/// The seals `tip`'s state passes through, oldest first, as `path_seals`.
 pub(super) fn tip_path_seals(
     graph: &rocky_credentials::TipGraph,
     tip: TipId,

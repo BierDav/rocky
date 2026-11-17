@@ -1,4 +1,3 @@
-//! Privileged retained-store mutations test fresh reconstruction, never admissible ingress.
 use super::*;
 use crate::replica::Inner;
 use crate::storage::rows;
@@ -46,7 +45,6 @@ pub(super) async fn restore(inner: &Inner<TypedRows>) {
         .await
         .unwrap();
 }
-/// Stored state; the read epoch advances at any committed change.
 pub(super) async fn snapshot(inner: &Inner<TypedRows>) -> Vec<(String, Vec<Vec<SqlValue>>)> {
     let mut state = Vec::new();
     for table in rows(&inner.conn, "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT IN ('secure_checkpoint_scratch','secure_read_epoch') AND name NOT LIKE 'sqlite_%' ORDER BY name").await.unwrap() {

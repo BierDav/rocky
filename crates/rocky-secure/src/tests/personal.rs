@@ -102,14 +102,12 @@ async fn personal_custody_requires_the_owner_vouched_naming_escrow() {
     assert!(custody.snapshot(f.public).await.is_err());
 }
 
-/// The owner of a personal database and the authority its devices share.
 struct Owner {
     owner: PrivateKey,
     grant: CredentialChain,
     context: PersonalContext,
 }
 impl Owner {
-    /// The owner and its personal database.
     fn new() -> (Self, Fixture) {
         let owner = PrivateKey::new();
         let namespace =
@@ -118,7 +116,6 @@ impl Owner {
         let owner = Self::trusted(&f, owner);
         (owner, f)
     }
-    /// `owner` with the root's trusted grant in `f`, whatever its mode.
     fn trusted(f: &Fixture, owner: PrivateKey) -> Self {
         let scope = f.public.domain;
         let grant = CredentialChain(vec![
@@ -141,8 +138,6 @@ impl Owner {
             context,
         }
     }
-    /// A device the owner certified on its own: the root's grant, what its
-    /// node holds of the owner's authority and its independent certificate.
     fn device(&self, f: &Fixture, node: &PrivateKey) -> CredentialChain {
         let certified = self
             .grant

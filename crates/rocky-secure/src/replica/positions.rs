@@ -1,4 +1,3 @@
-//! Transactional position indexes. Triggers cover bulk status and deletion writers too.
 use super::*;
 use rocky_core::Scope;
 use rocky_credentials::SignedSeal;
@@ -12,7 +11,6 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE secure_log_ranges(scope BLOB NOT NULL,author BLOB NOT NULL,tip BLOB NOT NULL,applied INTEGER NOT NULL,domain_author BLOB NOT NULL,delta INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,CHECK(start<=end),PRIMARY KEY(scope,author,tip,applied,domain_author,delta,start)) WITHOUT ROWID",
 ];
 
-/// These triggers are the only status/delete writers, including bulk SQL and cascades.
 pub(super) fn triggers() -> Vec<String> {
     let mut statements = Vec::new();
     for event in ["INSERT", "DELETE", "UPDATE"] {
@@ -157,8 +155,6 @@ fn range_write(log: bool, remove: bool) -> String {
     )
 }
 
-/// `ON CONFLICT DO NOTHING`, because `OR IGNORE` would also suppress a
-/// trigger's range merge on conflict.
 const INSERT_POSITION_SOURCE: &str = "INSERT INTO secure_position_sources VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(hash,kind) DO NOTHING";
 
 pub(crate) async fn insert(
@@ -195,7 +191,6 @@ pub(crate) async fn insert(
     Ok(())
 }
 
-/// Sorted, disjoint, maximal inclusive intervals.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct Runs(pub(super) BTreeMap<u64, u64>);
 impl Runs {
@@ -392,8 +387,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-/// The last of `start..=end` that `admits` accepts, given `start` is admitted
-/// and admission is a prefix in domain coordinates.
 fn last_admitted(
     start: u64,
     end: u64,
@@ -420,7 +413,6 @@ fn interval(start: i64, end: i64) -> Result<(u64, u64), Error> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Rebuilds the index independently from retained signed headers, never from indexes.
     pub(super) async fn audit_positions(&self) -> Result<(), Error> {
         check_schema(&self.conn).await?;
         #[cfg(test)]
@@ -574,9 +566,8 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-/// Reads the crate's sources from disk.
 #[cfg(all(test, not(target_family = "wasm")))]
-mod tests {
+mod source_scan_tests {
     #[test]
     fn position_tables_have_one_writer_module() {
         fn check(dir: &std::path::Path) {
@@ -622,5 +613,88 @@ mod tests {
             }
         }
         check(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::last_admitted;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn last_admitted_finds_the_end_of_an_admitted_prefix_probing_only_inside_the_range() {
+        for end in 3..12u64 {
+            for last in 3..=end {
+                let found = last_admitted(3, end, |position| {
+                    assert!(
+                        (3..=end).contains(&position),
+                        "probe {position} outside 3..={end}"
+                    );
+                    Ok(position <= last)
+                })
+                .unwrap();
+                assert_eq!(found, last, "admitted prefix 3..={last} of 3..={end}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod conflict_tests {
+    use super::{INSERT_POSITION_SOURCE, SCHEMA, triggers};
+
+    fn ranges_after_two_adjacent_positions(insert: &str) -> Vec<(i64, i64)> {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        let source_triggers = triggers()
+            .into_iter()
+            .filter(|sql| sql.contains(" ON secure_position_sources "));
+        for statement in SCHEMA
+            .iter()
+            .map(|sql| (*sql).to_owned())
+            .chain(source_triggers)
+        {
+            db.execute_batch(&statement).unwrap();
+        }
+        for sequence in [0i64, 1] {
+            db.execute(
+                insert,
+                rusqlite::params![
+                    vec![sequence as u8; 32],
+                    0,
+                    vec![1u8],
+                    vec![2u8; 32],
+                    sequence,
+                    vec![2u8; 32],
+                    vec![3u8; 32],
+                    sequence,
+                    0,
+                    1
+                ],
+            )
+            .unwrap();
+        }
+        let mut ranges = db
+            .prepare("SELECT start,end FROM secure_position_ranges ORDER BY start")
+            .unwrap();
+        ranges
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn an_upsert_that_does_nothing_on_conflict_still_runs_the_range_merge_trigger() {
+        assert_eq!(
+            ranges_after_two_adjacent_positions(INSERT_POSITION_SOURCE),
+            [(0, 1)]
+        );
+        let or_ignore = INSERT_POSITION_SOURCE
+            .replace("INSERT INTO", "INSERT OR IGNORE INTO")
+            .replace(" ON CONFLICT(hash,kind) DO NOTHING", "");
+        assert_ne!(
+            ranges_after_two_adjacent_positions(&or_ignore),
+            [(0, 1)],
+            "OR IGNORE overrides the trigger's INSERT OR REPLACE and leaves the ranges unmerged"
+        );
     }
 }

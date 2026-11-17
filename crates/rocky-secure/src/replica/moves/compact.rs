@@ -1,4 +1,3 @@
-//! Carried witnesses share their original signed headers and binding chains.
 use super::*;
 
 pub(crate) struct ProofParts {

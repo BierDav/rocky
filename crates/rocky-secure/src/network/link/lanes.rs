@@ -1,4 +1,3 @@
-//! Independent lane workers and reconciliation delivery barriers.
 use super::*;
 
 pub struct Reader {
@@ -13,10 +12,7 @@ struct LaneReader {
     tasks: Vec<rocky_platform::task::JoinHandle<()>>,
     received: Vec<u64>,
     pending: std::collections::VecDeque<Frame>,
-    /// Lanes whose stream finished. FINs on independent streams may overtake
-    /// the signed Close and final request data, so the others still drain.
     ended: std::collections::BTreeSet<usize>,
-    /// The deadline that bounds draining once a lane has ended.
     ending: Option<rocky_platform::time::Instant>,
 }
 impl Drop for LaneReader {
@@ -53,8 +49,6 @@ fn lane_binding(binding: Commitment, index: usize) -> Result<Commitment, Error> 
     ))
 }
 impl Link {
-    /// Binds transport lanes to this authenticated link. Generic byte-stream
-    /// transports keep their single ordered stream.
     pub fn attach_lanes(&mut self, lanes: Vec<Box<dyn SessionStream>>) -> Result<(), Error> {
         if lanes.is_empty() {
             return Ok(());

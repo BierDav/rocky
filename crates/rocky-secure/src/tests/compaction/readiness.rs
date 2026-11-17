@@ -1,10 +1,7 @@
-//! Unknown payloads never become empty state by inspecting or compacting them.
 use super::super::generations::{identity_insert, session};
 use super::*;
 use crate::KeptSeals;
 
-/// Puts `keys` back in `replica`'s config without applying the payload they
-/// unlock: crypto state installed, its pending payload not yet applied.
 async fn install_keys_without_applying_pending(replica: &Replica, keys: Vec<crate::KeyMaterial>) {
     replica
         .inner

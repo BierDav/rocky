@@ -1,12 +1,8 @@
-//! Received stamps are bounded: one above `MAX_CLOCK` is refused alike
-//! everywhere, and one more than `MAX_CLOCK_AHEAD` ahead of this clock
-//! waits, with its log behind it, until this clock is near it.
 use super::*;
 use rocky_core::{MAX_CLOCK, MAX_CLOCK_AHEAD};
 
 const RED: &str = "INSERT INTO teams(name,cap,id) VALUES('red',1,#id)";
 
-/// The stored status of `frame` at `device`.
 async fn status(device: &Device, frame: &EncryptedFrame) -> String {
     let inner = device
         .replica
@@ -33,7 +29,6 @@ async fn status(device: &Device, frame: &EncryptedFrame) -> String {
         other => panic!("{other:?}"),
     }
 }
-/// `frame` re-signed by its author with another stamp.
 fn restamped(frame: &EncryptedFrame, node: &PrivateKey, clock: u64) -> EncryptedFrame {
     let mut header = frame.operation_ref().unwrap().header.clone();
     header.timestamp = clock;
@@ -117,9 +112,6 @@ async fn a_stamp_beyond_the_clock_bound_is_refused_and_authoring_stops_before_it
     );
 }
 
-/// A peer's clock an hour ahead: its frames wait, shown as a clock blocker,
-/// its next frame waits behind them, and once this clock is near both
-/// apply and every replica agrees with the canonical replay.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn frames_from_a_clock_ahead_wait_until_this_clock_is_near_them() {
     let c = Constrained::new();
@@ -220,9 +212,6 @@ async fn frames_within_the_bound_ahead_apply_at_once() {
     assert_eq!(devices[1].replica.clock_wait().await.unwrap(), None);
 }
 
-/// Canonical order puts a transaction after everything it read, of any
-/// scope: a row it references replays before it even when that row's clock
-/// is ahead of this wall clock.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_authored_transaction_is_stamped_after_every_replayed_one() {
     let c = Constrained::new();

@@ -41,7 +41,6 @@ async fn failed_flush_keeps_sql_maintenance_queued_until_retry() {
     assert!(!replica.maintenance_queued(t.items).await);
 }
 
-/// Native only: it pauses work on a blocking thread, which a Worker runs in place.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn commit_during_flush_keeps_current_state_out_of_maintenance() {
@@ -83,7 +82,6 @@ async fn commit_during_flush_keeps_current_state_out_of_maintenance() {
     );
 }
 
-/// Stands in for a first sync that learns keys or credentials mid-flush.
 #[cfg(not(target_family = "wasm"))]
 async fn learn_keys_or_credentials_while_the_writer_is_released(
     replica: &EncryptedReplica<TypedRows>,
@@ -95,7 +93,6 @@ async fn learn_keys_or_credentials_while_the_writer_is_released(
         .authority += 1;
 }
 
-/// Native only: it pauses work on a blocking thread, which a Worker runs in place.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn authority_change_during_flush_leaves_held_listing_current() {
@@ -125,7 +122,6 @@ async fn authority_change_during_flush_leaves_held_listing_current() {
     assert!(listing.await.unwrap().is_empty());
 }
 
-/// The backup reads nothing authority-dependent before its flush.
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn authority_change_during_flush_leaves_backup_current() {
@@ -255,7 +251,7 @@ async fn orphaned_pulled_payload_cleanup_is_bounded_and_resumes_after_reopen() {
     let mut replica = t.open(&path, &node, t.full(), &[t.items]).await;
     {
         let mut inner = replica.inner.lock(crate::replica::Class::Background).await;
-        transaction!(@commit inner, |inner| {
+        transaction!(@without_wal_checkpoint inner, |inner| {
             for key in 1..=9u8 {
                 inner.conn.execute("INSERT INTO secure_pulled_rows VALUES(999,?,?)", [vec![key; 32], vec![]]).await?;
                 inner.conn.execute("INSERT INTO secure_pulled_stubs VALUES(999,?,0)", [vec![key; 32]]).await?;

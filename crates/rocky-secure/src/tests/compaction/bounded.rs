@@ -1,7 +1,6 @@
 use super::*;
 use crate::replica::CrashPoint;
 
-/// Writes during one unlocked step, more than the lock's starvation bound.
 const WRITES_PAST_STARVATION_YIELDS: usize = crate::replica::lock::STARVATION_YIELDS as usize + 4;
 
 async fn populate(replica: &Replica, count: usize) {
@@ -393,8 +392,6 @@ async fn an_old_cleanup_depth_preserves_current_uncompacted_snapshots() {
     replica.audit(lineage.scope("items")).await.unwrap();
 }
 
-/// Switching to an imported replayed base reads its staged rows a page at
-/// a time, never the whole scope at once.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_imported_replayed_base_switches_a_page_of_rows_at_a_time() {
     let lineage = Lineage::new();
@@ -460,8 +457,6 @@ async fn an_imported_replayed_base_switches_a_page_of_rows_at_a_time() {
     b.audit(items).await.unwrap();
 }
 
-/// Without compaction a replayed scope keeps the rows of its newest
-/// finalized seals only, however many it finalizes; those still compact.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn uncompacted_seals_keep_a_bounded_number_of_row_snapshots() {
     let lineage = Lineage::new();
@@ -502,8 +497,6 @@ async fn uncompacted_seals_keep_a_bounded_number_of_row_snapshots() {
     assert_eq!(titles(&replica).await.len(), 8);
 }
 
-/// Finalizing a seal takes the table's rows and the open members' undo a
-/// page at a time, and the rows taken are those at the seal.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn finalizing_takes_rows_and_open_undo_a_page_at_a_time() {
     use crate::replica::checkpoint::{STEP_OPERATIONS, STEP_ROWS};

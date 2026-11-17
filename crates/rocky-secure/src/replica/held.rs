@@ -1,19 +1,10 @@
-//! Held changes: this device's bundles, never offered to a peer, that a
-//! newer generation's removal would split. Adopting the generation holds
-//! them whole, voids their frames with a signed record so their author logs
-//! continue, and rolls their effects back; the application re-authors or
-//! drops them.
 mod late;
 mod listing;
 use super::checkpoint::hash_of;
 use super::*;
 use p2panda_core::{Header, Signature, validate_header};
 
-/// Frames this device authored and never offered to a peer: their writes as
-/// signed, the storage row of each, and their bundle.
 const UNOFFERED: &str = "CREATE TABLE IF NOT EXISTS secure_unoffered(hash BLOB PRIMARY KEY,bundle BLOB NOT NULL,members INTEGER NOT NULL,writes BLOB NOT NULL) WITHOUT ROWID";
-/// Log positions a void record consumed, with the voided header. This
-/// device's own record is NULL until the log's key is registered.
 const VOIDS: &str = "CREATE TABLE IF NOT EXISTS secure_voids(scope BLOB NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,header BLOB NOT NULL,record BLOB,PRIMARY KEY(scope,author,sequence)) WITHOUT ROWID";
 pub(super) const SCHEMA: &[&str] = &[
     UNOFFERED,
@@ -24,18 +15,13 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS secure_held_frames_scope ON secure_held_frames(scope,hash)",
     "CREATE TABLE IF NOT EXISTS secure_held_resolved(id BLOB PRIMARY KEY,authority BLOB NOT NULL) WITHOUT ROWID",
 ];
-/// Headers one void record covers.
 const MAX_VOID_HEADERS: usize = 64;
 const VOID_LABEL: &str = "rocky.void.v1";
 type VoidedHeader = (Hash, Header<Extensions>, Vec<u8>);
 type UnsignedLogs = BTreeMap<(Vec<u8>, Vec<u8>), Vec<(i64, Vec<u8>)>>;
 
-/// The author's signed statement that frames of one log were never offered
-/// and are cancelled: receivers treat their positions as consumed.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SignedVoid {
-    /// The voided frames' signed headers, of one author and scope, in
-    /// increasing sequence order.
     headers: Vec<serde_bytes::ByteBuf>,
     signature: Signature,
 }
@@ -52,8 +38,6 @@ impl SignedVoid {
         let signature = key.sign(&encode(&(VOID_LABEL, &headers))?);
         Ok(Self { headers, signature })
     }
-    /// The voided headers with their hashes, once the record and every
-    /// header verify under one author key and one scope.
     pub(crate) fn verify(&self) -> Result<Vec<VoidedHeader>, Error> {
         if self.headers.is_empty() || self.headers.len() > MAX_VOID_HEADERS {
             return Err(denied("void record size"));
@@ -92,7 +76,6 @@ impl SignedVoid {
             .ok_or_else(|| denied("void record size"))?;
         Ok(decode::<Header<Extensions>>(bytes)?.extensions.scope)
     }
-    /// Bytes a page counts for the record.
     pub fn weight(&self) -> usize {
         self.headers
             .iter()
@@ -105,12 +88,9 @@ impl SignedVoid {
     }
 }
 
-/// A local change held because a newer generation removed what it writes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeldChange {
-    /// The bundle's transaction, or its only frame.
     pub id: Commitment,
-    /// When it was made: its stamp in microseconds.
     pub time: u64,
     pub rows: Vec<HeldRow>,
 }
@@ -120,45 +100,31 @@ pub enum HeldKind {
     Update,
     Delete,
 }
-/// One row a held change writes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeldRow {
     pub scope: ResourceScope,
-    /// The table's name in the generation the change was made under.
     pub table: String,
-    /// A later generation removed the table.
     pub removed: bool,
-    /// The stored row.
     pub row: Commitment,
     pub kind: HeldKind,
-    /// The row as the change left it, or as it was before a delete.
     pub fields: Vec<HeldField>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeldField {
     pub field: Commitment,
     pub name: String,
-    /// The encoded value.
     pub value: Vec<u8>,
-    /// The change wrote this field.
     pub written: bool,
-    /// A later generation removed the field.
     pub removed: bool,
-    /// What re-authoring a written, kept field replaces: the stored value
-    /// and its last change. None when the row is not stored now.
     pub current: Option<CurrentValue>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentValue {
-    /// None when the stored row lacks the field.
     pub value: Option<Vec<u8>>,
-    /// The stamp of its last change, in microseconds.
     pub time: u64,
-    /// The key that signed it: a node.
     pub author: PublicKey,
 }
 
-/// A held change as stored: its rows with names, without current values.
 #[derive(Serialize, Deserialize)]
 struct Stored {
     time: u64,
@@ -172,7 +138,6 @@ struct StoredRow {
     kind: HeldKind,
     fields: Vec<(Commitment, String, serde_bytes::ByteBuf, bool)>,
 }
-/// An unoffered frame as the hold reads it.
 struct Unoffered {
     hash: Hash,
     bundle: Vec<u8>,
@@ -183,7 +148,6 @@ struct Unoffered {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Records a frame this device just authored as never offered.
     pub(super) async fn record_unoffered(
         &self,
         hash: Hash,
@@ -202,7 +166,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Names the bundle `frames` were authored as.
     pub(super) async fn record_bundle(
         &self,
         transaction: Commitment,
@@ -222,9 +185,10 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Marks `hashes` offered in a durable transaction before they leave
-    /// the device; a push that fails midway still counts as sent.
-    pub(crate) async fn offer(&mut self, hashes: &[Hash]) -> Result<(), Error> {
+    pub(crate) async fn record_offered_before_sending(
+        &mut self,
+        hashes: &[Hash],
+    ) -> Result<(), Error> {
         for hash in hashes {
             let mut found = self
                 .conn
@@ -253,7 +217,7 @@ impl<A: RowApplication> Inner<A> {
         if unoffered.is_empty() {
             return Ok(());
         }
-        transaction!(@cache_neutral self, |inner| {
+        transaction!(@keeping_frontier_cache self, |inner| {
             for hash in &unoffered {
                 inner
                     .conn
@@ -264,8 +228,6 @@ impl<A: RowApplication> Inner<A> {
         })?;
         Ok(())
     }
-    /// Marks this device's frames of `scope` up to each log position
-    /// offered, as a served checkpoint covers them.
     pub(super) async fn offer_covered(
         &mut self,
         scope: ResourceScope,
@@ -293,15 +255,8 @@ impl<A: RowApplication> Inner<A> {
                 hashes.push(hash_of(hash)?);
             }
         }
-        self.offer(&hashes).await
+        self.record_offered_before_sending(&hashes).await
     }
-    /// Holds every bundle of this device never offered to a peer with a
-    /// frame `target` sees that touches a table, or writes a field to other
-    /// than its default, missing from some tip between the frame's and
-    /// `target`, and every unoffered bundle that depends on one. A frame
-    /// `target` does not see stays unsent on its own line. Inside the
-    /// activation transaction: their frames are voided and deleted, and
-    /// their scopes rebuilt after the switch. Returns how many bundles it held.
     pub(super) async fn hold_removed(
         &self,
         scope: rocky_core::Scope,
@@ -400,10 +355,6 @@ impl<A: RowApplication> Inner<A> {
             .collect();
         self.void_closure(&frames, &bundles, held, true).await
     }
-    /// Voids `seeds` and every unoffered bundle that depends on one: their
-    /// frames are deleted, void records signed and their kept scopes
-    /// queued for rebuild. Dependants, and seeds when `hold_seeds`, are
-    /// stored as held changes. Returns how many bundles are held.
     async fn void_closure(
         &self,
         frames: &[Unoffered],
@@ -536,8 +487,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(frames)
     }
-    /// The private key of a log this device writes: its node key or a
-    /// node.
     fn log_key(&self, author: PublicKey) -> Result<&PrivateKey, Error> {
         if self.config.node.public_key() == author {
             return Ok(&self.config.node);
@@ -548,8 +497,6 @@ impl<A: RowApplication> Inner<A> {
             .find(|key| key.public_key() == author)
             .ok_or_else(|| denied("a held frame's log key is not registered"))
     }
-    /// Table and field names of the installed typed tables and of every
-    /// manifest this replica holds.
     async fn item_names(&self) -> Result<BTreeMap<Commitment, String>, Error> {
         let mut names = BTreeMap::new();
         let manifests: Vec<_> = std::iter::once(&self.definition)
@@ -574,8 +521,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(names)
     }
-    /// The encoded default of each of `fields` the installed typed tables
-    /// declare one for; NULL otherwise.
     async fn defaults(
         &self,
         fields: &HashSet<Commitment>,
@@ -598,8 +543,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(defaults)
     }
 
-    /// Signs void records for this device's voided positions whose log key
-    /// is registered, at most `MAX_VOID_HEADERS` positions each.
     pub(super) async fn sign_voids(&self) -> Result<(), Error> {
         let mut logs = UnsignedLogs::new();
         for record in rows(
@@ -654,8 +597,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Deletes a held frame as pruning does. Its handle stays: committing
-    /// it again is refused like a pruned one, and it is forgotten later.
     async fn delete_voided(&self, hash: Hash) -> Result<(), Error> {
         let scope = self
             .frame(hash)
@@ -697,8 +638,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Author counters include voids and held frames of the log even when a
-    /// checkpoint replaced the applied tip.
     pub(super) async fn author_tip(
         &self,
         scope: ResourceScope,
@@ -764,7 +703,6 @@ impl<A: RowApplication> Inner<A> {
             pruned_prefix: tip.map_or(-1, |tip| tip.pruned_prefix),
         }))
     }
-    /// The last consumed position, independent of an imported checkpoint's frontier.
     async fn voided_tip(
         &self,
         scope: ResourceScope,
@@ -779,7 +717,6 @@ impl<A: RowApplication> Inner<A> {
             None => Ok(None),
         }
     }
-    /// The voided header of `hash`, if a void consumed it.
     async fn voided_header(&self, hash: Hash) -> Result<Option<Header<Extensions>>, Error> {
         let mut found = self
             .conn
@@ -793,9 +730,6 @@ impl<A: RowApplication> Inner<A> {
             None => Ok(None),
         }
     }
-    /// Whether `header`'s dependency `id` is a voided frame, and if so
-    /// whether it is consumed: every frame of its log before it is applied,
-    /// pruned or voided. None when no void names it.
     pub(super) async fn voided_dependency(
         &self,
         header: &Header<Extensions>,
@@ -828,8 +762,6 @@ impl<A: RowApplication> Inner<A> {
             return Ok(Some(self.pruned_log_position(&current, previous).await?));
         }
     }
-    /// Whether the voided position of `header` is the next one at a log
-    /// whose frames up to `previous` are pruned.
     async fn pruned_log_position(
         &self,
         header: &Header<Extensions>,
@@ -845,8 +777,6 @@ impl<A: RowApplication> Inner<A> {
         Ok((predecessor == log.sequence && log.hash == previous)
             || predecessor <= log.pruned_prefix)
     }
-    /// The void records a reader of `frames` needs: those consuming each
-    /// frame's voided backlinks, oldest last.
     pub(super) async fn voids_before(
         &self,
         frames: &[EncryptedFrame],
@@ -883,9 +813,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(records)
     }
-    /// Admits one void record inside the caller's transaction. A record
-    /// covering a frame this replica holds, a forked position or one its
-    /// log already passed is refused whole.
     pub(super) async fn admit_void(
         &self,
         record: &SignedVoid,
@@ -970,7 +897,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(ReceiveStatus::Applied)
     }
-    /// Whether a void consumed this log position.
     pub(super) async fn voided_position(
         &self,
         scope: ResourceScope,
@@ -990,8 +916,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(found.next().await?.is_some())
     }
-    /// The void record consuming each position of `scope`'s log by
-    /// `author` from `start`, by position, at most `limit`.
     pub(super) async fn voids_from(
         &self,
         scope: ResourceScope,
@@ -1031,8 +955,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(voids)
     }
-    /// Removes a held change inside the caller's transaction; fails when
-    /// it is not held.
     pub(super) async fn resolve_held(&self, id: Commitment) -> Result<(), Error> {
         let mut found = self
             .conn
@@ -1090,8 +1012,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-/// Unoffered frames by bundle, keeping only bundles whose every member is
-/// unoffered.
 fn whole_bundles(frames: &[Unoffered]) -> BTreeMap<Vec<u8>, Vec<usize>> {
     let mut bundles: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
     for (index, frame) in frames.iter().enumerate() {
@@ -1141,20 +1061,15 @@ fn stored_row(
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Local changes held because a newer generation removed what they
-    /// write, each with the current values of the fields it writes.
     pub async fn held_changes(&self) -> Result<Vec<HeldChange>, Error> {
         self.refresh_closed_held(None).await?;
         self.list_held_changes().await
     }
-    /// Drops a held change; fails when it is not held.
     pub async fn drop_held(&self, id: Commitment) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         transaction!(inner, |inner| inner.resolve_held(id).await)?;
         inner.publish_revision().await
     }
-    /// Admits void records that arrived together, then applies the frames
-    /// that waited for them. Each record is admitted or refused whole.
     pub async fn receive_voids(&self, records: &[SignedVoid]) -> Vec<Result<ReceiveStatus, Error>> {
         if records.is_empty() {
             return Vec::new();

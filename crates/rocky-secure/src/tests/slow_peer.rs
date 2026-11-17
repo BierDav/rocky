@@ -1,6 +1,3 @@
-//! A device's backlog reaching a peer whose storage stays busy for longer
-//! than one read deadline at a time, as a browser replica applying a large
-//! batch does.
 use super::*;
 use crate::network::link::{Link, testing};
 use crate::replica::Class;
@@ -8,9 +5,7 @@ use std::time::Duration;
 
 type Replica = EncryptedReplica<Employees>;
 
-/// Longer than any single read deadline the link keeps.
 const BUSY: Duration = Duration::from_secs(11);
-/// Frames each device authored before going online, per scope.
 const BACKLOG: u16 = 150;
 const QUOTA: usize = MAX_SECURE_FRAME / 2;
 
@@ -46,7 +41,6 @@ async fn author(replica: &Replica, f: &Fixture, scope: ResourceScope, row: u16) 
         .await
         .unwrap();
 }
-/// Frames of `scope` that `replica` holds, applied or not.
 async fn held(replica: &Replica, scope: ResourceScope) -> u64 {
     replica
         .frontier(scope)
@@ -57,8 +51,6 @@ async fn held(replica: &Replica, scope: ResourceScope) -> u64 {
         .map(|log| log.held)
         .sum()
 }
-/// Holds `replica`'s storage in stretches of `BUSY` until `stop` is set,
-/// releasing it only for the waiter queued meanwhile.
 async fn keep_busy(replica: Replica, stop: tokio::sync::watch::Receiver<bool>) {
     while !*stop.borrow() {
         let held = replica.inner.lock(Class::Background).await;
@@ -67,8 +59,6 @@ async fn keep_busy(replica: Replica, stop: tokio::sync::watch::Receiver<bool>) {
         tokio::task::yield_now().await;
     }
 }
-/// Dials `server` until a link is admitted, at most `attempts` times; the
-/// failures in between, in order.
 async fn admitted(
     (client, client_key): (&Replica, &PrivateKey),
     (server, server_key): (&Replica, &PrivateKey),

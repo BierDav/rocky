@@ -1,4 +1,3 @@
-//! Explicit removal of an unfollowed workspace's retained frames.
 use super::*;
 
 pub(super) const SCHEMA: &[&str] = &[
@@ -6,9 +5,6 @@ pub(super) const SCHEMA: &[&str] = &[
 ];
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Drops an unfollowed tip's local frames. Its graph, signed evidence,
-    /// idempotency handles and node reservations remain. Local writes need
-    /// acknowledged custody; retained dependencies and checkpoints prevent removal.
     pub async fn drop_tip(&self, tip: TipId) -> Result<u64, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let graph = inner
@@ -206,10 +202,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Whether scope `id`'s compacted history may hold frames of `tip`:
-    /// `author`'s log there lost a pruned prefix, or a checkpoint sits at a
-    /// seal whose state includes `tip`. A tip's frames come from its own
-    /// line's author logs, and a seal's state holds only its ancestry.
     async fn history_covers_tip(
         &self,
         graph: &rocky_credentials::TipGraph,

@@ -1,5 +1,3 @@
-//! Full and partial replicas: subscriptions, range sync, eviction, custody,
-//! remote reads and interrupted transfers over the native transport.
 use super::*;
 use network::NativeSession;
 use std::collections::{BTreeMap, BTreeSet};
@@ -8,7 +6,6 @@ use std::path::Path;
 type Replica = EncryptedReplica<Employees>;
 const QUOTA: usize = MAX_SECURE_FRAME / 2;
 
-/// Department scopes of one domain: same table, separate reader sets.
 fn department(f: &Fixture, index: u8) -> ResourceScope {
     ResourceScope {
         encryption: rocky_core::commitment("roles.department.v1", &[index]),
@@ -83,7 +80,6 @@ fn insert_handle(node: &Node, scope: ResourceScope, start: u32) -> [u8; 32] {
     bytes.extend(node.key.public_key().as_bytes());
     rocky_core::commitment("roles.insert.v1", &bytes)
 }
-/// Inserts rows `range` into `scope`, `per` rows per operation.
 async fn insert(
     f: &Fixture,
     node: &Node,
@@ -181,7 +177,6 @@ async fn connect(
 ) -> (NativeSession, rocky_platform::task::JoinHandle<()>) {
     connect_with(node, server, MAX_SECURE_BYTES).await
 }
-/// Exchanges tip graphs as a link does before rows move.
 async fn exchange_tips_before_rows_move(node: &Node, server: &Node) {
     let domain = *server
         .replica
@@ -195,8 +190,6 @@ async fn exchange_tips_before_rows_move(node: &Node, server: &Node) {
     exchange_graphs(&node.replica, &server.replica, domain).await;
 }
 
-/// A client session with its own byte budget; `server` answers it until the
-/// client ends the channel.
 async fn connect_with(
     node: &Node,
     server: &Node,
@@ -843,7 +836,6 @@ async fn a_remote_read_states_its_source_and_is_never_local_state() {
     server.await.unwrap();
 }
 
-/// A peer's range position past what the logs can store is refused.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn range_positions_past_the_stored_range_are_refused() {
     let f = Fixture::new();

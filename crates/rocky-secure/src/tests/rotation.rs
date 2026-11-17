@@ -1,6 +1,3 @@
-//! Key epochs: a rotation seals later writes under a fresh key, earlier
-//! ciphertext stays readable to those who hold its key, and an interrupted
-//! rotation completes at the next open.
 use super::*;
 
 const OLD: [u8; 32] = [11; 32];
@@ -12,7 +9,6 @@ fn key(scope: ResourceScope, generation: u64, key: [u8; 32]) -> KeyMaterial {
 fn reader(f: &Fixture) -> Vec<ResourceGrant> {
     vec![grant(f.public, &[Right::Read, Right::Custody], &[])]
 }
-/// A device's chain: publisher, user, node.
 fn chain(f: &Fixture, node: &PrivateKey, grants: Vec<ResourceGrant>) -> CredentialChain {
     let user = PrivateKey::new();
     let (not_before, expires) = crate::tests::lifetime();
@@ -52,7 +48,6 @@ fn chain(f: &Fixture, node: &PrivateKey, grants: Vec<ResourceGrant>) -> Credenti
             .unwrap(),
     ])
 }
-/// A statement revoking `revoked` as nodes and users.
 fn revoking(f: &Fixture, revoked: &[PublicKey]) -> RevocationSet {
     crate::tests::revoking(&f.publisher, f.app().definition().app, revoked, &[])
 }

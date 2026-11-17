@@ -1,10 +1,8 @@
-//! Replica roles, scope subscriptions, per-log frontiers and range transfer.
 use super::checkpoint::{MAX_CHECKPOINT_LOGS, key_of};
 use super::*;
 use rocky_credentials::PeerId;
 mod restoration;
 
-/// The peers covering one log's operation, asked per prune candidate.
 const PEER_FRONTIERS_LOG_INDEX: &str = "CREATE INDEX IF NOT EXISTS secure_peer_frontiers_log ON secure_peer_frontiers(scope,author,held)";
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_roles(id INTEGER PRIMARY KEY CHECK(id=1),config BLOB NOT NULL)",
@@ -15,34 +13,24 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS secure_operations_scope ON secure_operations(scope,author,sequence)",
 ];
 
-/// Frames in one range page.
 pub(crate) const RANGE_FRAMES: usize = 32;
 
-/// What this replica holds. Local configuration, never taken from a peer.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ReplicaRole {
-    /// Holds every scope it is authorized for and receives; never evicts.
     #[default]
     Full,
-    /// Holds only subscribed scopes and may evict them.
     Partial,
 }
-/// Local holding behavior. Custody prerequisites belong to each partition.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RoleConfig {
     pub role: ReplicaRole,
 }
-/// Whether a scope is held, and where an eviction stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Holding {
-    /// Subscribed, or any received scope of a full replica.
     Held,
-    /// Unsubscribed: rows stay but no longer follow the peers.
     Left,
-    /// An eviction is in progress; reads are unavailable.
     Evicting,
-    /// Rows and history are gone; resubscribe to hold the scope again.
     Evicted,
 }
 impl Holding {
@@ -64,19 +52,15 @@ impl Holding {
         })
     }
 }
-/// One author's log in a scope: the next sequence not held, received or
-/// covered by a checkpoint, and the next sequence not applied.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FrontierLog {
     pub author: PublicKey,
     pub held: u64,
     pub applied: u64,
 }
-/// The contiguous prefix of every log of a scope a replica holds.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScopeFrontier {
     pub scope: ResourceScope,
-    /// Ordered by author, at most `MAX_CHECKPOINT_LOGS`.
     pub logs: Vec<FrontierLog>,
 }
 impl ScopeFrontier {
@@ -86,7 +70,6 @@ impl ScopeFrontier {
     fn held(&self, author: PublicKey) -> u64 {
         self.log(author).map_or(0, |log| log.held)
     }
-    /// Applied operations `other` has and this frontier lacks.
     pub fn lag_behind(&self, other: &Self) -> u64 {
         other
             .logs
@@ -118,17 +101,11 @@ pub(crate) const MAX_FRONTIER_SCOPES: usize = 64;
 #[derive(Serialize, Deserialize)]
 pub(crate) struct FrontierState {
     pub(crate) frontier: ScopeFrontier,
-    /// The replying replica imports the scope from a checkpoint and takes
-    /// no history for it meanwhile.
     pub(crate) importing: bool,
 }
-/// One member's answer in a frontier batch, in request order.
 #[derive(Serialize, Deserialize)]
 pub(crate) enum FrontierReply {
     Held(FrontierState),
-    /// The asking peer may not hold the whole scope here, including a
-    /// partition whose tuple this replica has not learned. Only this member
-    /// is skipped; the session goes on.
     Refused(ResourceScope),
 }
 impl FrontierReply {
@@ -140,8 +117,6 @@ impl FrontierReply {
     }
 }
 
-/// Whether `grants` let their holder keep the whole scope, by read or custody.
-/// A partition's selector grants resolve only against a learned tuple.
 pub(crate) fn holds_whole(grants: &[rocky_core::ResourceGrant], scope: ResourceScope) -> bool {
     grants.iter().any(|grant| {
         grant.scope == scope
@@ -165,7 +140,6 @@ pub(crate) fn validate_frontiers(frontiers: &[ScopeFrontier]) -> Result<(), Erro
     Ok(())
 }
 
-/// A transferable replay base at a seal of the followed path.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StateAdvice {
     pub seal: Commitment,
@@ -174,29 +148,20 @@ pub struct StateAdvice {
     pub rows: u64,
 }
 
-/// Frames a peer lacks, in author and sequence order.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RangePage {
     pub state: Option<StateAdvice>,
     pub scope: ResourceScope,
     pub frames: Vec<EncryptedFrame>,
-    /// Continue after this log position; `None` ends the pass.
     pub next: Option<(PublicKey, u64)>,
-    /// The peer is behind this replica's pruned_prefix and must rebootstrap; no
-    /// frames are sent.
     pub behind: bool,
-    /// The sender's own frontier, for lag reporting.
     pub frontier: ScopeFrontier,
-    /// Void records consuming positions of the logs the page continues.
     pub voids: Vec<SignedVoid>,
 }
-/// Lag between this replica and one peer in one scope, by applied operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeerLag {
     pub peer: PeerId,
-    /// Operations this replica applied that the peer last reported lacking.
     pub behind: u64,
-    /// Operations the peer last reported applied that this replica lacks.
     pub ahead: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -204,15 +169,10 @@ pub struct ScopeStatus {
     pub scope: ResourceScope,
     pub holding: Holding,
     pub rows: u64,
-    /// Retained operations at or before the verified checkpoint.
     pub covered: u64,
-    /// Retained applied operations after it.
     pub uncovered: u64,
-    /// Logs with pruned history.
     pub pruned_logs: usize,
-    /// Operations this node authored in the scope.
     pub local_operations: u64,
-    /// Per eligible custodian: local operations covered by a durable receipt.
     pub custody: Vec<(PeerId, u64)>,
     pub peers: Vec<PeerLag>,
 }
@@ -259,7 +219,6 @@ impl<A: RowApplication> Inner<A> {
         });
         Ok(holding)
     }
-    /// Scopes whose payload custody current grants authorize, even without keys.
     pub(super) fn custody_scopes(&self, time: u64) -> Result<BTreeSet<ResourceScope>, Error> {
         let grants = self.local_grants(time)?;
         Ok(grants
@@ -268,8 +227,6 @@ impl<A: RowApplication> Inner<A> {
             .map(|grant| grant.scope)
             .collect())
     }
-    /// Whether rows of the scope follow the peers here: subscribed, or any
-    /// scope of a full replica that is not being evicted.
     pub(crate) async fn holds(&self, scope: ResourceScope) -> Result<bool, Error> {
         Ok(match self.holding(scope).await? {
             Some(Holding::Held) => true,
@@ -289,10 +246,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// The own log endpoint `(G, H)` whose frames must return before this
-    /// node authors in the scope again: after an eviction, a reset replay or
-    /// a base replacement that left its pruned own positions uncovered.
-    /// `G` is -1, with no hash, when no own log was known.
     async fn eviction_guard(
         &self,
         scope: ResourceScope,
@@ -317,10 +270,6 @@ impl<A: RowApplication> Inner<A> {
             _ => Err(Error::Corrupt("restoration guard".into())),
         }
     }
-    /// Refuses frames of a scope this replica does not hold. A frame of the
-    /// local signing identity is accepted only as a copy of what a recorded
-    /// restoration obligation dropped: at or below its endpoint, and the
-    /// endpoint frame itself only with its recorded hash.
     pub(crate) async fn admit_scope(
         &self,
         header: &p2panda_core::Header<Extensions>,
@@ -343,8 +292,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// The exact original-node prefix must be applied or authentically disposed.
-    /// Neither a held endpoint nor a higher imported log alone completes it.
     async fn restoration_complete(
         &self,
         scope: ResourceScope,
@@ -371,10 +318,6 @@ impl<A: RowApplication> Inner<A> {
         self.restoration_dispositions(scope, id, sequence, hash, log)
             .await
     }
-    /// While a restoration obligation stands, a frame of this node's own key
-    /// in the scope applies only on top of its own log: its backlink is the
-    /// log tip, or a member of the same `bundle`; the first frame of an
-    /// absent log has none. Anything else waits for its predecessors.
     pub(super) async fn own_chain_ready(
         &self,
         header: &p2panda_core::Header<Extensions>,
@@ -399,7 +342,6 @@ impl<A: RowApplication> Inner<A> {
             _ => false,
         })
     }
-    /// Authoring needs a held scope whose own log is complete again.
     pub(crate) async fn admit_author(
         &self,
         scope: ResourceScope,
@@ -423,9 +365,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Records a restoration obligation for the scope, keeping the higher
-    /// endpoint: a lower one never replaces it, and two hashes at one
-    /// sequence are corruption.
     pub(super) async fn merge_restoration_guard(
         &self,
         scope: ResourceScope,
@@ -454,8 +393,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Records the own log tip an eviction drops, -1 without one. The scope
-    /// reads as unavailable until a catch-up restores it.
     pub(super) async fn save_eviction_guard(&self, scope: ResourceScope) -> Result<(), Error> {
         let log = match self.find_scope_id(scope).await? {
             Some(id) => self.log(id, self.config.node.public_key()).await?,
@@ -467,8 +404,6 @@ impl<A: RowApplication> Inner<A> {
         )
         .await
     }
-    /// Whether a resubscribed scope still waits for the catch-up that
-    /// restores what its eviction dropped.
     pub(crate) async fn restoring(&self, scope: ResourceScope) -> Result<bool, Error> {
         Ok(self.eviction_guard(scope).await?.is_some())
     }
@@ -487,12 +422,10 @@ impl<A: RowApplication> Inner<A> {
         )
         .await
     }
-    /// The contiguous held and applied prefix of every log of a scope.
     pub(crate) async fn frontier(&self, scope: ResourceScope) -> Result<ScopeFrontier, Error> {
         self.tip_frontier(scope).await
     }
 
-    /// The grants a peer's credentials give it now.
     fn peer_grants(
         &self,
         peer: PublicKey,
@@ -500,8 +433,6 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         self.verify_chain(credentials, peer, now()?)
     }
-    /// Records what a peer reported holding and applying. Application
-    /// counts only from a peer that may read the whole scope.
     pub(crate) async fn record_frontier(
         &mut self,
         peer: PublicKey,
@@ -530,8 +461,6 @@ impl<A: RowApplication> Inner<A> {
         let grants = self.verify_chain_scopes(credentials, peer, now()?, &scopes)?;
         self.store_frontiers(peer, &grants, frontiers).await
     }
-    /// Records frontiers under already verified `grants`; each member needs
-    /// whole-scope read or custody.
     async fn store_frontiers(
         &mut self,
         peer: PublicKey,
@@ -556,7 +485,7 @@ impl<A: RowApplication> Inner<A> {
         self.touch_peer(peer);
         let first = reports.iter().any(|(_, logs, _)| !logs.is_empty())
             && self.unrecorded_peer(peer).await?;
-        transaction!(@cache_neutral self, |inner| {
+        transaction!(@keeping_frontier_cache self, |inner| {
             for (scope, logs, reads) in &reports {
                 for log in logs {
                     inner.conn.execute(
@@ -582,7 +511,6 @@ impl<A: RowApplication> Inner<A> {
         })?;
         Ok(())
     }
-    /// Peers whose frontier covers one operation: held, and applied.
     pub(crate) async fn covering_peers(
         &self,
         scope: &[u8],
@@ -617,8 +545,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok((held, applied))
     }
-    /// One page of frames `request` lacks, after `after`. A requester behind
-    /// this replica's pruned_prefix gets the signal and no frames.
     pub(crate) async fn range(
         &mut self,
         peer: PublicKey,
@@ -655,7 +581,7 @@ impl<A: RowApplication> Inner<A> {
             .iter()
             .map(EncryptedFrame::id)
             .collect::<Result<Vec<_>, _>>()?;
-        self.offer(&hashes).await?;
+        self.record_offered_before_sending(&hashes).await?;
         Ok(page)
     }
     async fn lacking_base_frames(
@@ -840,7 +766,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Declares this replica's local holding behavior.
     pub async fn set_role(&self, config: RoleConfig) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let evicting = rows(
@@ -879,8 +804,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .role()
             .await
     }
-    /// The scope's recorded holding; `None` until it was subscribed, left
-    /// or evicted.
     pub async fn subscription(&self, scope: ResourceScope) -> Result<Option<Holding>, Error> {
         self.inner
             .lock(crate::replica::Class::Background)
@@ -888,8 +811,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .holding(scope)
             .await
     }
-    /// Holds the scope from now on; an evicted scope comes back empty and
-    /// fills by sync or rebootstrap.
     pub async fn subscribe(&self, scope: ResourceScope) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if !inner.local_grants(now()?)?.iter().any(|grant| {
@@ -904,8 +825,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         transaction!(inner, |inner| inner.set_holding(scope, Holding::Held).await)
     }
-    /// Stops following the scope while retaining its rows. A partial writer
-    /// first satisfies this partition's custody prerequisite.
     pub async fn unsubscribe(&self, scope: ResourceScope) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         match inner.holding(scope).await? {
@@ -934,7 +853,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         }
     }
-    /// Test access: merges a restoration endpoint and returns the stored one.
     #[cfg(test)]
     pub(crate) async fn merge_restoration_for_test(
         &self,
@@ -945,8 +863,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.merge_restoration_guard(scope, endpoint).await?;
         inner.eviction_guard(scope).await
     }
-    /// Ends the restoration of a resubscribed or replayed scope after a
-    /// complete catch-up from a peer, once the own log it dropped is back.
     pub(crate) async fn restored(&self, scope: ResourceScope) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if !inner.holds(scope).await? {
@@ -981,7 +897,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         inner.publish_revision().await
     }
-    /// Scopes with a recorded subscription state, in scope order.
     pub async fn subscriptions(&self) -> Result<Vec<(ResourceScope, Holding)>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut scopes = Vec::new();
@@ -999,7 +914,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scopes.sort_by_key(|(scope, _)| *scope);
         Ok(scopes)
     }
-    /// Scopes held here that `peer` may hold too, after `after`, at most 64.
     pub async fn held_scopes(
         &self,
         peer: PublicKey,
@@ -1053,7 +967,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok((held, None))
     }
-    /// The contiguous prefix of every log of `scope` this replica holds.
     pub async fn frontier(&self, scope: ResourceScope) -> Result<ScopeFrontier, Error> {
         self.inner
             .lock(crate::replica::Class::Background)
@@ -1061,10 +974,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .frontier(scope)
             .await
     }
-    /// Frames `request` lacks, at most 32 and `byte_quota` bytes, after
-    /// `after`; or the signal that the peer must rebootstrap. The frames
-    /// leave the device, so every commit they may include is flushed before
-    /// they are returned, outside the lock so local writes continue meanwhile.
     pub async fn range_page(
         &self,
         peer: PublicKey,
@@ -1078,13 +987,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let page = inner
                 .range(peer, credentials, request, after, byte_quota)
                 .await?;
-            (page, inner.commit, inner.flusher.clone())
+            (page, inner.locked_commit(), inner.flusher.clone())
         };
         flusher.run(commit).await?;
         Ok(page)
     }
-    /// Records a peer's frontier as acknowledgment of everything below it.
-    /// Its applied part counts as custody only from a whole-scope reader.
     pub async fn acknowledge_frontier(
         &self,
         peer: PublicKey,
@@ -1097,7 +1004,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .record_frontier(peer, credentials, frontier)
             .await
     }
-    /// Fails unless `peer` may hold the whole scope.
     pub(crate) async fn authorize_scope_peer(
         &self,
         peer: PublicKey,
@@ -1109,9 +1015,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await
             .authorize_peer(peer, credentials, scope)
     }
-    /// Role, holding, retained window, custody coverage and peer lag of
-    /// every known scope.
-    /// Reads one scope per acquisition; each entry is consistent in itself.
     pub async fn replica_status(&self) -> Result<ReplicaStatus, Error> {
         let (role, scopes) = {
             let inner = self.inner.lock(crate::replica::Class::Background).await;
@@ -1279,8 +1182,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(replies)
     }
-    /// Whether this replica evicts or evicted `scope`: no checkpoint
-    /// installs there until it holds the scope again.
     pub(crate) async fn evicted(&self, scope: ResourceScope) -> Result<bool, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         Ok(matches!(
@@ -1288,7 +1189,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Some(Holding::Evicting | Holding::Evicted)
         ))
     }
-    /// The members of `scopes` this replica holds, in order.
     pub(crate) async fn held_of(
         &self,
         scopes: &[ResourceScope],
@@ -1302,9 +1202,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(held)
     }
-    /// The members of `scopes` that `peer` may hold whole, in order, so a
-    /// client discloses no frontier to a peer outside a scope. A chain this
-    /// replica cannot verify, as of a newer generation, is not filtered.
     pub(crate) async fn peer_holds(
         &self,
         peer: PublicKey,
@@ -1331,11 +1228,71 @@ pub(super) fn peer_id(bytes: &[u8]) -> Result<PeerId, Error> {
         .map_err(|_| Error::Corrupt("peer reference".into()))
 }
 
-/// A base must cover every named log, including a log whose held prefix is zero.
 fn base_covers(request: &ScopeFrontier, base: &[super::checkpoint::LogPosition]) -> bool {
     request.logs.iter().all(|log| {
         base.iter().any(|covered| {
             covered.author == log.author && log.held <= covered.sequence.saturating_add(1)
         })
     })
+}
+
+#[cfg(test)]
+mod frontier_tests {
+    use super::*;
+    use crate::replica::checkpoint::LogPosition;
+
+    fn log(author: PublicKey, held: u64, applied: u64) -> FrontierLog {
+        FrontierLog {
+            author,
+            held,
+            applied,
+        }
+    }
+    fn frontier(logs: Vec<FrontierLog>) -> ScopeFrontier {
+        let scope = rocky_core::Scope {
+            mesh: rocky_core::MeshId([1; 16]),
+            app: rocky_core::AppId([2; 16]),
+            domain: rocky_core::DomainId([3; 16]),
+        };
+        ScopeFrontier {
+            scope: ResourceScope {
+                domain: scope,
+                encryption: [4; 32],
+                table: [5; 32],
+            },
+            logs,
+        }
+    }
+    fn position(author: PublicKey, sequence: u64) -> LogPosition {
+        LogPosition {
+            author,
+            sequence,
+            hash: Hash::from_bytes([6; 32]),
+            clock: 1,
+        }
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_base_must_cover_every_named_log_even_one_with_nothing_held() {
+        let (a, b) = (
+            PrivateKey::new().public_key(),
+            PrivateKey::new().public_key(),
+        );
+        let request = frontier(vec![log(a, 4, 4), log(b, 0, 0)]);
+        assert!(!base_covers(&request, &[position(a, 9)]));
+        assert!(base_covers(&request, &[position(a, 3), position(b, 0)]));
+        assert!(!base_covers(&request, &[position(a, 2), position(b, 0)]));
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn lag_counts_only_the_applied_operations_the_other_frontier_is_ahead_by() {
+        let (a, b) = (
+            PrivateKey::new().public_key(),
+            PrivateKey::new().public_key(),
+        );
+        let own = frontier(vec![log(a, 9, 5)]);
+        let other = frontier(vec![log(a, 9, 3), log(b, 7, 2)]);
+        assert_eq!(own.lag_behind(&other), 2);
+        assert_eq!(other.lag_behind(&own), 2);
+    }
 }

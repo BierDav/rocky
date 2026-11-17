@@ -1,6 +1,3 @@
-//! Terminal entries of tips' coordinated logs: seals end them, trusted nodes
-//! acknowledge them into finality records, private closes are relayed and
-//! the owner's recovery ends a log no ordinary seal can.
 use super::generations::Lineage;
 use super::*;
 use rocky_coordinator::coordinated::{MemoryLog, MemoryLogClient};
@@ -18,7 +15,6 @@ mod seals;
 
 type Replica = EncryptedReplica<TypedRows>;
 
-/// The log of the tip the fixtures' replicas follow: generation 3's.
 fn tip_log(lineage: &Lineage) -> TipLog {
     TipLog {
         scope: lineage.domain,
@@ -26,7 +22,6 @@ fn tip_log(lineage: &Lineage) -> TipLog {
     }
 }
 
-/// The coordinator the fixtures' trusted nodes share.
 struct Mesh {
     log: MemoryLog,
 }
@@ -41,7 +36,6 @@ impl Mesh {
     }
 }
 
-/// Two trusted nodes, alice and bob.
 struct Fixture {
     lineage: Lineage,
     dir: Scratch,
@@ -65,7 +59,6 @@ impl Fixture {
             bob: (bob_key, bob),
         }
     }
-    /// Crashes alice: every handle is dropped, then the file reopens.
     async fn restart_alice(self) -> Self {
         let Self {
             lineage,
@@ -139,8 +132,6 @@ async fn a_seal_ends_its_log_once_and_a_retry_answers_the_same_position() {
     assert_eq!(fixture.mesh.log.head(log).unwrap().terminal, Some(terminal));
 }
 
-/// Received batches that settling refuses leave the journal, so refused
-/// batches never hold the received quota.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn refused_received_batches_leave_the_journal() {
     use rocky_credentials::{AuthorMark, SignedSeal};

@@ -1,4 +1,3 @@
-//! Bounded group frontier exchange; data and checkpoint repair retain their scope APIs.
 use super::*;
 
 use crate::replica::roles::{FrontierReply, MAX_FRONTIER_SCOPES, validate_frontiers};
@@ -7,7 +6,6 @@ use crate::replica::roles::{FrontierReply, MAX_FRONTIER_SCOPES, validate_frontie
 pub(super) enum FrontierMessage {
     FrontiersQuery {
         frontiers: Vec<ScopeFrontier>,
-        /// Tuples offered to a keyless custody peer.
         partitions: Vec<crate::replica::PartitionOffer>,
         proofs: Vec<(ResourceScope, Vec<holdings::HoldingProof>)>,
     },
@@ -16,26 +14,14 @@ pub(super) enum FrontierMessage {
     },
 }
 
-/// The outcome of one frontier exchange, each list in input order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FrontierExchange {
-    /// Scopes needing ordinary pull/push or checkpoint repair.
     pub changed: Vec<ResourceScope>,
-    /// Scopes skipped this session: this replica's view of the peer's
-    /// credentials, or the peer's view of this replica's, grants no whole-scope
-    /// read or custody, or either replica does not hold the scope. A peer that
-    /// has not learned a partition refuses it.
     pub refused: Vec<ResourceScope>,
-    /// Scopes the peer imports from a checkpoint: no rows move this round,
-    /// so history does not crowd out the import.
     pub importing: Vec<ResourceScope>,
 }
 
 impl NativeSession {
-    /// Exchanges all selected member frontiers of each group partition together.
-    /// Equal, fully applied frontiers need no row transfer
-    /// this round. A refused member is skipped alone; the session goes on.
-    /// A frontier is metadata, so a peer outside a scope never sees it.
     pub async fn changed_scopes<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -144,8 +130,6 @@ impl NativeSession {
             importing: order(&importing),
         })
     }
-    /// Answers a frontier request; even an entirely unproved batch verifies
-    /// the peer's current credentials.
     pub(super) async fn answer_frontiers<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,

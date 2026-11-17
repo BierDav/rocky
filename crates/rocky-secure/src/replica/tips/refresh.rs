@@ -1,4 +1,3 @@
-//! Graph facts borrowed for one closed-held refresh, never SQL or reach results.
 use super::*;
 
 const MAX_QUERIES: usize = 1024;
@@ -50,8 +49,6 @@ impl<'a> RefreshGraphContext<'a> {
             .map(Arc::as_ref)
             .ok_or_else(|| denied("unknown tip graph"))
     }
-    /// Admits an entry of `bytes`, which include estimated B-tree overhead
-    /// as well as owned frontier capacities.
     fn retain(&mut self, bytes: usize) -> bool {
         if self.entries >= MAX_QUERIES || self.bytes.saturating_add(bytes) > MAX_BYTES {
             return false;

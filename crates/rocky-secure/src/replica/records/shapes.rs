@@ -1,4 +1,3 @@
-//! File-local field sets let seals find implicit SQL defaults by index.
 use super::*;
 
 pub(in crate::replica) const SCHEMA: &[&str] = &[

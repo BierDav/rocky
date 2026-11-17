@@ -1,5 +1,3 @@
-//! Snapshot cursors, session catalogs, availability and committed table
-//! events of a secure replica's typed tables.
 use super::*;
 use crate::{
     cursor::{CursorHost, CursorLimits, CursorPlan, SnapshotCursor, SnapshotRows},
@@ -7,19 +5,14 @@ use crate::{
     sql::{SqlError, Unavailable},
 };
 
-/// Typed tables changed inside the open write transaction, and why.
 #[derive(Default)]
 pub(crate) struct Touched {
     tables: BTreeSet<String>,
     causes: BTreeSet<Cause>,
-    /// Replayed transactions the open write transaction records as dropped,
-    /// and own ones whose outcome it may make final.
     outcomes: crate::observe::Outcomes,
 }
-/// Query state shared by a replica's handles.
 pub(crate) struct Queries {
     pub(super) cursors: Arc<CursorHost>,
-    /// Mirrors `Inner::authority` for cursor threads.
     pub(super) authority: Arc<AtomicU64>,
     pub(super) events: Option<Arc<TableEvents>>,
     pub(super) touched: std::sync::Mutex<Touched>,
@@ -186,7 +179,6 @@ impl Drop for Queries {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Starts the table events of the installed typed tables.
     pub(super) fn start_events(&mut self) {
         if let Some(typed) = &self.workspace.typed {
             let tables = typed
@@ -201,8 +193,6 @@ impl<A: RowApplication> Inner<A> {
             });
         }
     }
-    /// Policy, credentials or keys changed: earlier sessions and cursors are
-    /// refused, and every observer is told readability may differ.
     pub(super) fn bump_authority(&mut self) {
         self.authority += 1;
         self.authority_events.send_replace(self.authority);
@@ -214,31 +204,26 @@ impl<A: RowApplication> Inner<A> {
             events.publish(None, self.revision, &[Cause::Authority]);
         }
     }
-    /// A typed table changes inside the open write transaction.
     pub(super) fn touch(&self, table: &str) {
         if let Ok(mut touched) = self.workspace.queries.touched.lock() {
             touched.tables.insert(table.to_ascii_lowercase());
         }
     }
-    /// The open write transaction records `transaction` as dropped.
     pub(super) fn touch_dropped(&self, transaction: Commitment) {
         if let Ok(mut touched) = self.workspace.queries.touched.lock() {
             touched.outcomes.dropped.insert(transaction);
         }
     }
-    /// The open write transaction may make own `transaction` final.
     pub(super) fn touch_sealed(&self, transaction: Commitment) {
         if let Ok(mut touched) = self.workspace.queries.touched.lock() {
             touched.outcomes.sealed.insert(transaction);
         }
     }
-    /// Why the open write transaction changes typed tables.
     pub(crate) fn cause(&self, cause: Cause) {
         if let Ok(mut touched) = self.workspace.queries.touched.lock() {
             touched.causes.insert(cause);
         }
     }
-    /// Forgets what a transaction that did not commit recorded.
     pub(crate) fn untouch(&self) {
         if let Ok(mut touched) = self.workspace.queries.touched.lock() {
             *touched = Touched::default();
@@ -251,7 +236,6 @@ impl<A: RowApplication> Inner<A> {
             .lock()
             .is_ok_and(|touched| !touched.tables.is_empty())
     }
-    /// Announces what the committed transaction changed, at `self.revision`.
     pub(super) fn announce(&self) {
         let Ok(mut touched) = self.workspace.queries.touched.lock() else {
             return;
@@ -274,9 +258,6 @@ impl<A: RowApplication> Inner<A> {
         let causes: Vec<_> = causes.into_iter().collect();
         events.publish(Some(&tables), self.revision, &causes);
     }
-    /// Refuses a statement that names a typed table whose rows are not
-    /// locally available to `status`. A held, complete scope with no
-    /// matching row is ordinary absence, never unavailability.
     pub(super) async fn availability(
         &self,
         tables: &BTreeSet<String>,
@@ -325,9 +306,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Observes committed changes of typed tables by name; None is every
-    /// table. Register before reading the initial snapshot. Authority and
-    /// readiness changes wake every observer with `Cause::Authority`.
     pub async fn observe_tables(&self, tables: Option<&[&str]>) -> Result<TableObserver, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let events = inner
@@ -349,35 +327,23 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
-/// Commits one read may race before it reports the conflict.
 const READ_ATTEMPTS: usize = 16;
 
 impl<A: RowApplication> SecureSql<A> {
-    /// The tables this session may name: typed tables of its readable
-    /// scopes and local tables, with what it may write.
     pub fn catalog(&self) -> Vec<crate::capture::CatalogTable> {
         self.plan.catalog(
             |table| Some(table.name.to_ascii_lowercase()),
             |index| self.writable.contains(&index),
         )
     }
-    /// Binds this session's reads to kept `seal`: cursors and snapshots
-    /// read its rows through temporary views with the live tables' names
-    /// and shape, and every other statement is refused. Reads fail with
-    /// `Unavailable::Released` once the seal is no longer kept.
     pub async fn bind_seal(&mut self, seal: Commitment) -> Result<(), Error> {
         let views = self.session.replica.seal_views(seal).await?;
         self.seal = Some(Arc::new(views));
         Ok(())
     }
-    /// The kept seal this session's reads see, if bound.
     pub fn bound_seal(&self) -> Option<Commitment> {
         self.seal.as_ref().map(|views| views.seal)
     }
-    /// Opens a cursor over the latest committed snapshot. It needs every
-    /// named typed table available, holds no replica lease while it runs
-    /// and ends with `Unavailable::Revoked` once the session's authority
-    /// changes or its credentials expire; undelivered rows are discarded.
     pub async fn cursor(
         &self,
         sql: &str,
@@ -393,9 +359,6 @@ impl<A: RowApplication> SecureSql<A> {
         };
         self.current_read(open).await
     }
-    /// Runs `open` until it plans against the committed read state. A commit
-    /// advances the epoch before its lock holder refreshes readers, so a
-    /// plan can lag it; once the lock is free the refresh has run.
     async fn current_read(
         &self,
         mut open: impl AsyncFnMut() -> Result<SnapshotCursor, Error>,
@@ -416,9 +379,6 @@ impl<A: RowApplication> SecureSql<A> {
         }
         open().await
     }
-    /// Opens a snapshot for a read transaction of several statements. It
-    /// steps nothing itself; `snapshot_rows` reads each statement's whole
-    /// result from it. Its bounds and revocation are a cursor's.
     pub async fn snapshot(&self, limits: CursorLimits) -> Result<SnapshotCursor, Error> {
         self.current_read(async || {
             self.open_cursor("SELECT 1".into(), Vec::new(), &BTreeSet::new(), limits)
@@ -426,8 +386,6 @@ impl<A: RowApplication> SecureSql<A> {
         })
         .await
     }
-    /// Reads one statement's whole result, at most `result_bytes`, from
-    /// `snapshot`. Availability is checked as for a cursor.
     pub async fn snapshot_rows(
         &self,
         snapshot: &mut SnapshotCursor,
@@ -516,7 +474,6 @@ impl<A: RowApplication> SecureSql<A> {
     }
 }
 
-/// A schema pragma an ORM reads to validate its tables.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Describe {
     TableInfo,
@@ -526,7 +483,6 @@ pub enum Describe {
     ForeignKeyList,
 }
 impl Describe {
-    /// The pragma's name and result columns, as SQLite reports them.
     fn shape(self) -> (&'static str, &'static [&'static str]) {
         match self {
             Self::TableInfo => (
@@ -563,10 +519,6 @@ impl Describe {
 }
 
 impl<A: RowApplication> SecureSql<A> {
-    /// Answers `pragma` about a table or index of the session's catalog from
-    /// the file itself, so a tool sees the real keys and indexes. Another
-    /// name is an empty result, as SQLite answers an unknown one; indexes
-    /// the catalog does not list are left out.
     pub async fn describe(&self, pragma: Describe, name: &str) -> Result<SnapshotRows, Error> {
         let (verb, columns) = pragma.shape();
         let catalog = self.catalog();
@@ -641,9 +593,6 @@ impl<A: RowApplication> SecureSql<A> {
             rows: shaped(pragma, rows, &actions, &listed),
         })
     }
-    /// Answers `pragma` about `table`, or one of its indexes, as a file
-    /// installed with that definition would: what an application declaring
-    /// another generation's schema validates.
     pub async fn describe_declared(
         &self,
         pragma: Describe,
@@ -713,8 +662,6 @@ impl<A: RowApplication> SecureSql<A> {
         })
     }
 }
-/// Pragma rows as an ORM should see them: indexes outside `listed` are
-/// Rocky's own and left out, and foreign keys report their declared action.
 fn shaped(
     pragma: Describe,
     rows: Vec<Vec<SqlValue>>,
@@ -757,7 +704,6 @@ fn shaped(
     }
     result
 }
-/// A foreign key of one table, case-insensitively by parent and column set.
 fn foreign_key_name(table: &str, columns: &[String]) -> (String, BTreeSet<String>) {
     (
         table.to_ascii_lowercase(),

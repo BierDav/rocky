@@ -1,7 +1,3 @@
-//! History tables of the live workspace. A change to a live row writes its
-//! previous version to the table's history, in the same transaction, while
-//! a kept seal still needs it; a kept seal's state is the live rows unchanged
-//! since its mark plus the history rows valid at it.
 use super::typed::{Typed, quoted};
 use super::*;
 use rocky_core::Scope;
@@ -9,15 +5,8 @@ use rocky_core::Scope;
 mod rewind;
 pub(super) use rewind::{KeptBound, Rewind};
 
-/// The live tables' change counter. A change made at `version` records the
-/// version it replaces with that number; `paused` while a bulk rebuild
-/// records its difference itself, `rows_paused` for stored rows.
 const KEPT_CLOCK: &str = "CREATE TABLE IF NOT EXISTS secure_kept_clock(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL,paused INTEGER NOT NULL,rows_paused INTEGER NOT NULL DEFAULT 0)";
-/// Kept seals: the counter's value while the live tables held each one,
-/// the schema then and each scope's last applied position the seal includes.
 const KEPT_MARKS: &str = "CREATE TABLE IF NOT EXISTS secure_kept_marks(seal BLOB PRIMARY KEY,mark INTEGER NOT NULL UNIQUE,manifest BLOB NOT NULL,bounds BLOB NOT NULL) WITHOUT ROWID";
-/// Each kept seal's tables as they were: their columns, and the frozen copy
-/// a later removal or migration left in their place.
 const KEPT_TABLES: &str = "CREATE TABLE IF NOT EXISTS secure_kept_tables(seal BLOB NOT NULL,tab TEXT NOT NULL,columns BLOB NOT NULL,frozen TEXT,PRIMARY KEY(seal,tab)) WITHOUT ROWID";
 pub(super) const SCHEMA: &[&str] = &[
     KEPT_CLOCK,
@@ -31,34 +20,22 @@ pub(super) const SCHEMA: &[&str] = &[
     rewind::ROWS_INSERT,
 ];
 
-/// The seals a node keeps, among those of the tips it follows. A seal is
-/// kept only once this node finalized it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeptSeals {
-    /// The seal each bookmarked tip starts from, or a closed tip's own.
     pub bookmarked: bool,
-    /// The latest this many kept seals.
     pub latest: u32,
-    /// Every seal.
     pub every: bool,
 }
 
-/// Why this node holds a seal's state: it may open a branch there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HeldSeal {
-    /// History tables keep its state.
     Kept,
-    /// Every held scope's replay base sits there, or its state there was
-    /// pulled from a node that keeps it.
     Checkpoint,
-    /// The live tables hold its state now.
     Live,
 }
 
-/// The counter's current value, as triggers read it.
 const CLOCK: &str = "COALESCE((SELECT version FROM secure_kept_clock WHERE id=1),1)";
-/// Triggers record only while a seal is kept and no bulk rebuild runs.
 const ACTIVE: &str = "EXISTS(SELECT 1 FROM secure_kept_marks) AND COALESCE((SELECT paused FROM secure_kept_clock WHERE id=1),0)=0";
 
 pub(super) fn history_name(table: &str) -> String {
@@ -72,20 +49,14 @@ pub(super) fn migration_parent_name(publication: Commitment, index: usize) -> St
     format!("secure_frozen_migration_{hex}_{index}")
 }
 
-/// One live table and its history table.
 pub(super) struct History {
     pub(super) live: String,
     pub(super) history: String,
     before: String,
-    /// Quoted column names, in declaration order.
     pub(super) columns: Vec<String>,
-    /// Quoted primary key columns.
     key: Vec<String>,
-    /// What each unique index compares.
     uniques: Vec<Unique>,
 }
-/// One unique index: its quoted columns, then its expressions and predicate
-/// as rules over logical column names.
 struct Unique {
     columns: Vec<String>,
     expressions: Vec<String>,
@@ -93,12 +64,9 @@ struct Unique {
 }
 
 impl Unique {
-    /// `rule` over `image`'s columns. Installed rules always bind.
     fn bound(rule: &str, image: &str) -> Option<String> {
         rocky_core::bind_rule(rule, |name| Some(format!("{image}.{}", quoted(name))))
     }
-    /// Whether rows `a` and `b` clash on this index. An unbound rule widens
-    /// it, and recording a row that did not clash is harmless.
     fn clash(&self, a: &str, b: &str) -> String {
         let mut terms: Vec<String> = self
             .columns
@@ -175,8 +143,6 @@ impl History {
             .collect::<Vec<_>>()
             .join(" OR ")
     }
-    /// Whether a kept seal may still see the version at `image`'s key: one
-    /// is marked since that key last changed, as far as history shows.
     fn needed(&self, image: &str) -> String {
         format!(
             "EXISTS(SELECT 1 FROM secure_kept_marks WHERE mark>=COALESCE((SELECT MAX(p.rocky_version) FROM {} AS p WHERE {}),-1))",
@@ -187,7 +153,6 @@ impl History {
     fn columns(&self) -> String {
         self.columns.join(",")
     }
-    /// Records `image`, a trigger's `OLD`, as replaced now.
     fn record_image(&self, image: &str) -> String {
         format!(
             "INSERT OR IGNORE INTO {}({},rocky_version,rocky_absent) SELECT {},{CLOCK},0 WHERE {};",
@@ -197,7 +162,6 @@ impl History {
             self.needed(image)
         )
     }
-    /// Records the live rows `filter` selects as replaced now.
     fn record_rows(&self, filter: &str) -> String {
         format!(
             "INSERT OR IGNORE INTO {}({},rocky_version,rocky_absent) SELECT {},{CLOCK},0 FROM {} AS r WHERE ({filter}) AND {};",
@@ -208,7 +172,6 @@ impl History {
             self.needed("r")
         )
     }
-    /// Records that no row was at `image`'s key until now.
     fn record_absent(&self, image: &str) -> String {
         format!(
             "INSERT OR IGNORE INTO {}({},rocky_version,rocky_absent) SELECT {},{CLOCK},1 WHERE NOT EXISTS(SELECT 1 FROM {} AS r WHERE {}) AND {};",
@@ -220,8 +183,6 @@ impl History {
             self.needed(image)
         )
     }
-    /// The live rows a write of `image` would replace through a unique
-    /// index, other than the row at `own`'s key.
     fn conflicts(&self, image: &str, own: &str) -> Vec<String> {
         self.uniques
             .iter()
@@ -285,7 +246,6 @@ impl History {
         ));
         statements
     }
-    /// Deletes the versions no kept seal needs any more.
     fn prune(&self) -> String {
         format!(
             "DELETE FROM {h} WHERE rowid IN (SELECT h.rowid FROM {h} AS h WHERE NOT EXISTS(SELECT 1 FROM secure_kept_marks AS k WHERE k.mark<h.rocky_version AND k.mark>=COALESCE((SELECT MAX(p.rocky_version) FROM {h} AS p WHERE {} AND p.rocky_version<h.rocky_version),-1)))",
@@ -293,7 +253,6 @@ impl History {
             h = self.history,
         )
     }
-    /// Whether `version` is the version at `mark` of the key `image` names.
     fn at_mark(&self, version: &str, image: &str, mark: i64) -> String {
         format!(
             "{version}.rocky_version=(SELECT MIN(p.rocky_version) FROM main.{h} AS p WHERE {} AND p.rocky_version>{mark})",
@@ -301,8 +260,6 @@ impl History {
             h = self.history,
         )
     }
-    /// Deletes the live rows that changed since `mark` and differ from
-    /// their version then.
     fn rewind_deletes(&self, mark: i64) -> String {
         format!(
             "DELETE FROM main.{live} WHERE EXISTS(SELECT 1 FROM main.{h} AS r WHERE {} AND {} AND (r.rocky_absent=1 OR {}))",
@@ -313,7 +270,6 @@ impl History {
             h = self.history,
         )
     }
-    /// Inserts the versions at `mark` of the keys no live row holds.
     fn rewind_inserts(&self, mark: i64) -> String {
         format!(
             "INSERT INTO main.{live}({}) SELECT {} FROM main.{h} AS r WHERE r.rocky_absent=0 AND {} AND NOT EXISTS(SELECT 1 FROM main.{live} AS l WHERE {})",
@@ -325,11 +281,9 @@ impl History {
             h = self.history,
         )
     }
-    /// The table's SQL name.
     pub(super) fn name(&self) -> String {
         unquoted(&self.live)
     }
-    /// This table's rows at `mark`, showing `columns`.
     fn select(&self, mark: i64, columns: &[String]) -> String {
         format!(
             "SELECT {} FROM main.{live} AS l WHERE NOT EXISTS(SELECT 1 FROM main.{h} AS p WHERE {} AND p.rocky_version>{mark}) UNION ALL SELECT {} FROM main.{h} AS r WHERE r.rocky_absent=0 AND r.rocky_version=(SELECT MIN(p.rocky_version) FROM main.{h} AS p WHERE {} AND p.rocky_version>{mark})",
@@ -343,11 +297,8 @@ impl History {
     }
 }
 
-/// Whether a schema switch rebuilds the live tables.
 #[derive(Default)]
 pub(crate) struct Bulk {
-    /// A schema switch records its own difference: a rebuild inside it
-    /// records nothing, since the new tables' history is not installed yet.
     switching: std::sync::atomic::AtomicBool,
 }
 
@@ -403,15 +354,12 @@ impl<A: RowApplication> Inner<A> {
             .map(History::of)
             .unwrap_or_default()
     }
-    /// Creates the history table and triggers of every live table, inside
-    /// the caller's transaction.
     pub(super) async fn install_history(&self) -> Result<(), Error> {
         match self.workspace.typed.clone() {
             Some(typed) => self.install_history_for(&typed).await,
             None => Ok(()),
         }
     }
-    /// `install_history` for the live tables of `typed`.
     pub(super) async fn install_history_for(&self, typed: &Typed) -> Result<(), Error> {
         for history in History::of(typed) {
             let known: BTreeSet<String> = collect_rows(
@@ -447,7 +395,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Refreshes capture after additive DDL without copying any history rows.
     pub(super) async fn refresh_history_for(&self, typed: &Typed) -> Result<(), Error> {
         for history in History::of(typed) {
             for event in ["insert", "update", "delete"] {
@@ -489,7 +436,6 @@ impl<A: RowApplication> Inner<A> {
             _ => Err(Error::Corrupt("kept seal configuration".into())),
         }
     }
-    /// Kept seals with their marks, oldest first.
     pub(super) async fn kept_marks(&self) -> Result<Vec<(Commitment, i64)>, Error> {
         rows(
             &self.conn,
@@ -508,8 +454,6 @@ impl<A: RowApplication> Inner<A> {
         })
         .collect()
     }
-    /// The seals bookmarks show: a sealed tip's own seal, else the seal its
-    /// tip starts from.
     pub(super) fn bookmarked_seals(&self, domain: Scope) -> Result<BTreeSet<Commitment>, Error> {
         let Some(graph) = self.graphs.get(&domain) else {
             return Ok(BTreeSet::new());
@@ -530,9 +474,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(seals)
     }
-    /// Inside the caller's transaction, records that the live tables hold
-    /// `seal`'s state now, which includes each scope's applied positions
-    /// through its bound.
     pub(super) async fn mark_seal(
         &self,
         seal: Commitment,
@@ -568,8 +509,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Whether the configuration keeps `seal`, about to be finalized as the
-    /// newest seal of the followed path.
     pub(super) async fn keeps_finalized(
         &self,
         domain: Scope,
@@ -581,9 +520,6 @@ impl<A: RowApplication> Inner<A> {
                 || config.latest > 0
                 || (config.bookmarked && self.bookmarked_seals(domain)?.contains(&seal))))
     }
-    /// Inside the caller's transaction, releases the kept seals the
-    /// configuration no longer names, deleting the versions only they
-    /// needed, and keeps a newly named one the live tables hold now.
     pub(super) async fn retain_kept(&self, domain: Scope) -> Result<(), Error> {
         let config = self.kept_config().await?;
         let bookmarked = if config.bookmarked {
@@ -613,11 +549,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Inside the caller's transaction, returns every replayed table to
-    /// its rows at kept `seal`, marked `mark`, writing only rows changed
-    /// since; a table a switch froze since refills from its copy. Deletes
-    /// go first, until a cascade leaves nothing to delete, so every insert
-    /// meets the rows the mark saw.
     pub(super) async fn rewind_live(&self, (seal, mark): (Commitment, i64)) -> Result<(), Error> {
         let Some(typed) = self.workspace.typed.as_deref() else {
             return Ok(());
@@ -683,8 +614,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Deletes the versions of live tables and stored rows that no kept
-    /// seal needs.
     async fn prune_history(&self) -> Result<(), Error> {
         for history in self.histories() {
             self.conn.execute(history.prune(), ()).await?;
@@ -692,8 +621,6 @@ impl<A: RowApplication> Inner<A> {
         self.conn.execute(rewind::PRUNE_ROWS, ()).await?;
         Ok(())
     }
-    /// Forgets kept `seal` and drops its frozen copies; the caller prunes
-    /// the history it alone needed.
     pub(super) async fn release_seal(&self, seal: Commitment) -> Result<(), Error> {
         for table in self.kept_tables(seal).await? {
             if let Some(frozen) = table.frozen {
@@ -711,7 +638,6 @@ impl<A: RowApplication> Inner<A> {
         self.drop_served(seal).await?;
         Ok(())
     }
-    /// The tables kept `seal` shows, as they were there.
     async fn kept_tables(&self, seal: Commitment) -> Result<Vec<KeptTable>, Error> {
         collect_rows(
             self.conn
@@ -736,9 +662,6 @@ impl<A: RowApplication> Inner<A> {
         })
         .collect()
     }
-    /// Selects every row table `name` showed at kept `seal`, marked
-    /// `mark`, its columns in declared order; none when the seal kept it
-    /// under other columns.
     pub(super) async fn kept_scan(
         &self,
         (seal, mark): (Commitment, i64),
@@ -762,8 +685,6 @@ impl<A: RowApplication> Inner<A> {
             .and_then(|table| Self::kept_select(&histories, mark, &table))
             .map(|(select, _)| select))
     }
-    /// The rows `table` showed at the kept seal marked `mark`, and the
-    /// tables that holds them.
     fn kept_select(
         histories: &[History],
         mark: i64,
@@ -781,12 +702,9 @@ impl<A: RowApplication> Inner<A> {
                 .map(|history| (history.select(mark, &columns), unquoted(&history.history))),
         }
     }
-    /// Whether the live tables hold `seal`'s state: it is finalized on the
-    /// followed path and no held scope applied anything it excludes.
     pub(super) async fn live_at(&self, domain: Scope, seal: Commitment) -> Result<bool, Error> {
         Ok(self.live_bounds(domain, seal).await?.is_some())
     }
-    /// `live_at`, with each held scope's last position the seal includes.
     async fn live_bounds(
         &self,
         domain: Scope,
@@ -843,7 +761,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(Some(bounds))
     }
-    /// How this node holds `seal`'s state, if it does.
     pub(super) async fn held_seal(
         &self,
         domain: Scope,
@@ -880,9 +797,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(true)
     }
-    /// The statements that bind a read-only connection to kept `seal`:
-    /// temporary views with the live tables' names and shape, and the
-    /// application's views over them.
     pub(super) async fn seal_views(&self, seal: Commitment) -> Result<SealViews, Error> {
         let domain = self
             .graphs
@@ -945,19 +859,14 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-/// Live tables a projection switch replaces, by name with the columns
-/// they had, copied to record what the switch changes in them.
 pub(super) struct Switching {
     copied: Vec<(String, Vec<String>)>,
 }
 
-/// A table as a kept seal shows it.
 #[derive(Clone)]
 struct KeptTable {
     table: String,
-    /// Its columns there, unquoted.
     columns: Vec<String>,
-    /// The copy holding its rows since a removal or migration replaced it.
     frozen: Option<String>,
 }
 
@@ -969,7 +878,6 @@ fn unquoted(name: &str) -> String {
 }
 
 impl SealViews {
-    /// Returns a row inside a snapshot while every needed seal is kept.
     pub(super) fn requires(&self) -> String {
         let seals: Vec<String> = self
             .needs
@@ -992,9 +900,6 @@ impl SealViews {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Views for the tables a statement names as `table@seal`, with the
-    /// seal in hex, or `table@bookmark`: the kept seal's rows of `table`.
-    /// None when it names no history.
     pub(super) async fn history_snapshot(&self) -> Result<HistorySnapshot, Error> {
         let marks = self.kept_marks().await?;
         let mut kept = BTreeMap::new();
@@ -1114,8 +1019,6 @@ fn decode_hex(text: &str) -> Option<Commitment> {
         .ok()
 }
 
-/// Makes an application's `CREATE VIEW` temporary, so its names resolve to
-/// the seal's views first.
 fn temporary(sql: &str) -> String {
     let trimmed = sql.trim_start();
     match trimmed.get(..12) {
@@ -1126,8 +1029,6 @@ fn temporary(sql: &str) -> String {
     }
 }
 
-/// The seal a tip's bookmark shows: the tip's own seal once sealed, else
-/// the seal it starts from.
 pub(super) fn bookmark_seal(
     graph: &rocky_credentials::TipGraph,
     tip: TipId,
@@ -1148,22 +1049,15 @@ pub(super) fn bookmark_seal(
     Ok(None)
 }
 
-/// What binds a read-only connection to a kept seal.
 #[derive(Clone, Debug)]
 pub struct SealViews {
     pub seal: Commitment,
-    /// Every kept seal the views read.
     pub needs: Vec<Commitment>,
-    /// Run on the connection before its first read.
     pub statements: Vec<String>,
-    /// History tables the views read.
     pub readable: Vec<String>,
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Names the seals this node keeps from now on. Seals it no longer names
-    /// are released at once; a newly named one is kept only if its state is
-    /// still at hand: the live tables hold it.
     pub async fn keep_seals(&self, config: KeptSeals) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let domain = inner.workspace.followed.as_ref().map(|(scope, _)| *scope);
@@ -1211,7 +1105,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .kept_config()
             .await
     }
-    /// The seals this node keeps, oldest first.
     pub async fn kept_seals(&self) -> Result<Vec<Commitment>, Error> {
         Ok(self
             .inner
@@ -1223,7 +1116,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .map(|(seal, _)| seal)
             .collect())
     }
-    /// How this node holds `seal`'s state; none when it is shallow here.
     pub async fn held_seal(
         &self,
         domain: Scope,
@@ -1233,8 +1125,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.graph_for(domain)?;
         inner.held_seal(domain, seal).await
     }
-    /// The seal `bookmark` shows: its tip's own seal once sealed, else the
-    /// seal its tip starts from.
     pub async fn bookmark_seal(&self, domain: Scope, bookmark: &str) -> Result<Commitment, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let graph = inner.graph_for(domain)?;
@@ -1244,7 +1134,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .ok_or_else(|| denied("no such bookmark"))?;
         bookmark_seal(graph, tip)?.ok_or_else(|| denied("the bookmark's tip starts from no seal"))
     }
-    /// What binds a read-only connection to kept `seal`.
     pub async fn seal_views(&self, seal: Commitment) -> Result<SealViews, Error> {
         self.inner
             .lock(crate::replica::Class::Background)
@@ -1255,7 +1144,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Without a followed bookmark there is no seal to keep.
     async fn retain_kept_without_graph(&self) -> Result<(), Error> {
         if self.kept().await? {
             for (seal, _) in self.kept_marks().await? {
@@ -1265,10 +1153,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Inside a projection switch's transaction, before the live tables of
-    /// `old` make way for those of `new`: each kept seal keeps a frozen
-    /// copy of a table the switch removes or narrows, whose history goes;
-    /// the other tables are copied to record what the switch changes.
     pub(super) async fn begin_switch_history(
         &self,
         old: &Typed,
@@ -1341,13 +1225,9 @@ impl<A: RowApplication> Inner<A> {
         self.workspace.bulk.switching.store(true, Ordering::SeqCst);
         Ok(Some(Switching { copied }))
     }
-    /// Ends a switch that failed before `end_switch_history`; its
-    /// transaction rolls the copies back.
     pub(super) fn abandon_switch_history(&self) {
         self.workspace.bulk.switching.store(false, Ordering::SeqCst);
     }
-    /// After the switch installed `new`'s live tables and their history:
-    /// records, over the columns they kept, what the switch changed.
     pub(super) async fn end_switch_history(
         &self,
         new: &Typed,
@@ -1380,7 +1260,6 @@ impl<A: RowApplication> Inner<A> {
         self.workspace.bulk.switching.store(false, Ordering::SeqCst);
         Ok(())
     }
-    /// Copies `history`'s live rows before a bulk change.
     async fn copy_before(&self, history: &History) -> Result<(), Error> {
         self.conn
             .execute(format!("DROP TABLE IF EXISTS temp.{}", history.before), ())
@@ -1409,8 +1288,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Records, from `history`'s copy, the versions a bulk change replaced
-    /// in `columns` and the keys it added.
     async fn record_difference(&self, history: &History, columns: &[String]) -> Result<(), Error> {
         let mut identical = vec![History::same(&history.key, "a", "b")];
         identical.extend(
@@ -1461,5 +1338,24 @@ mod unique_tests {
             unique.clash("r", "NEW"),
             "r.\"team\" IS NEW.\"team\" AND (lower(r.\"handle\")) IS (lower(NEW.\"handle\")) AND (r.\"lead\" = 1) AND (NEW.\"lead\" = 1)"
         );
+    }
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::temporary;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn only_an_application_create_view_turns_temporary_so_seal_views_resolve_first() {
+        assert_eq!(
+            temporary("  create view open_tasks AS SELECT 1"),
+            "CREATE TEMP VIEW open_tasks AS SELECT 1"
+        );
+        assert_eq!(
+            temporary("CREATE TEMP VIEW t AS SELECT 1"),
+            "CREATE TEMP VIEW t AS SELECT 1"
+        );
+        assert_eq!(temporary("  SELECT 1"), "SELECT 1");
+        assert_eq!(temporary("CREATE"), "CREATE");
     }
 }

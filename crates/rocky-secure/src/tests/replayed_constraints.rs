@@ -1,8 +1,3 @@
-//! Replayed tables keep their SQL constraints. A transaction that violates a
-//! `CHECK`, unique index, foreign key or assertion where it replays drops
-//! with reason `Constraint` everywhere; at its author it is a commit error
-//! and publishes nothing. Every test compares replicas with a from-scratch
-//! replay of the canonical order in plain SQLite.
 use super::*;
 use crate::sql::{SqlError, SqlOptions};
 use rocky_core::replay::{DropReason, IntentStatement, TransactionOutcome};
@@ -15,14 +10,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 mod clock;
-/// Native only: exhaustive delivery schedules run across threads.
 #[cfg(not(target_family = "wasm"))]
 mod convergence;
 mod restrictions;
 
-/// `teams` own `members` (cascade, immediate) and `orders` own `lines`
-/// (cascade, deferred). `team_cap` bounds a team's members by its `cap`;
-/// `order_total` keeps an order's total equal to its lines.
 fn definition() -> serde_json::Value {
     serde_json::json!({
         "format": 6,
@@ -68,14 +59,11 @@ fn definition() -> serde_json::Value {
     })
 }
 
-/// A schema of replayed tables, each its own reader scope, every one held
-/// by every device.
 struct Constrained {
     publisher: PrivateKey,
     schema: LogicalSchema,
     manifest: SignedManifest,
     domain: Scope,
-    /// The one partition of a schema of tables partitioned by `tenant`.
     tenant: Option<i64>,
 }
 
@@ -83,7 +71,6 @@ impl Constrained {
     fn new() -> Self {
         Self::with(definition(), |_| {})
     }
-    /// Builds `json`, then lets `edit` change the descriptor.
     fn with(json: serde_json::Value, edit: impl FnOnce(&mut LogicalSchema)) -> Self {
         Self::build(json, None, edit)
     }
@@ -134,7 +121,6 @@ impl Constrained {
             .map(|table| table.sql_name.as_str())
             .collect()
     }
-    /// The tenant column of table `name` and the tenant's value in it.
     fn tenant_of(&self, name: &str, tenant: i64) -> (Commitment, PartitionValue) {
         let table = self.schema.table(name).unwrap();
         (
@@ -354,13 +340,11 @@ impl Constrained {
         .payload;
         crate::wire::RowPayload::decode_test(&plaintext, frame, &self.app()).unwrap()
     }
-    /// The transaction a frame of a commit belongs to.
     fn transaction(&self, frames: &[EncryptedFrame]) -> Commitment {
         self.payload(&frames[0]).membership().unwrap().transaction
     }
 }
 
-/// A device holding every table.
 struct Device {
     replica: EncryptedReplica<TypedRows>,
     node: PrivateKey,
@@ -377,9 +361,6 @@ impl Device {
             .await
             .unwrap()
     }
-    /// Runs `statements` as one transaction. `#id` in an INSERT takes a
-    /// fresh identity of its table; they are returned in order.
-    /// `#next(table)` reserves the identity `table`'s next `#id` takes.
     async fn commit(&self, c: &Constrained, statements: &[&str]) -> Result<Vec<Id>, Error> {
         let session = self.session(c).await;
         let next_id = async |table: &str| match c.tenant {
@@ -423,8 +404,6 @@ impl Device {
         session.run("COMMIT", vec![]).await?;
         Ok(ids)
     }
-    /// Every frame this device authored since the last call: intents and
-    /// the outcome records its commits and rewinds published.
     async fn fresh(&mut self) -> Vec<EncryptedFrame> {
         let author = self
             .node
@@ -450,7 +429,6 @@ impl Device {
             assert_ne!(status.unwrap(), ReceiveStatus::Rejected);
         }
     }
-    /// Every table's rows, ordered by `id`.
     async fn rows(&self, c: &Constrained) -> BTreeMap<String, Vec<Vec<SqlValue>>> {
         let session = self.session(c).await;
         let filter = c
@@ -491,7 +469,6 @@ impl Device {
     }
 }
 
-/// Rows and drop map of a from-scratch replay in canonical order.
 #[derive(Debug, PartialEq)]
 struct Canonical {
     rows: BTreeMap<String, Vec<Vec<SqlValue>>>,
@@ -518,9 +495,6 @@ fn sql_value(value: &SqlValue) -> rusqlite::types::Value {
     }
 }
 
-/// Replays every intent in `frames` in plain SQLite: transactions in stamp
-/// order, each in a savepoint with its keys deferred when it has several
-/// members; a statement, foreign key or assertion that fails drops it.
 fn canonical(c: &Constrained, frames: &[EncryptedFrame]) -> Canonical {
     let mut members = Vec::new();
     for frame in frames {
@@ -656,9 +630,6 @@ fn canonical(c: &Constrained, frames: &[EncryptedFrame]) -> Canonical {
     Canonical { rows, outcomes }
 }
 
-/// The schema's restrictions as plain SQLite triggers, for the reference
-/// replay: they judge each statement's old row, which equals the row before
-/// the transaction in fixtures that change a row once per transaction.
 fn reference_restrictions(schema: &LogicalSchema) -> Vec<String> {
     let mut triggers = Vec::new();
     for restriction in &schema.restrictions {
@@ -691,7 +662,6 @@ fn reference_restrictions(schema: &LogicalSchema) -> Vec<String> {
     triggers
 }
 
-/// Frames ordered latest stamp first, so a receiver rewinds at every step.
 fn latest_first(frames: &[EncryptedFrame]) -> Vec<EncryptedFrame> {
     let mut frames = frames.to_vec();
     frames.sort_by_key(|frame| {
@@ -712,7 +682,6 @@ fn constraint_error(error: Error) -> String {
     }
 }
 
-/// A row identity in test SQL text: it formats as its blob literal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Id(rocky_core::RowIdentity);
 impl std::fmt::Display for Id {
@@ -725,7 +694,6 @@ impl From<Id> for SqlValue {
         id.0.sql()
     }
 }
-/// Opens `count` devices that all hold `setup`'s rows.
 async fn devices(
     c: &Constrained,
     root: &Path,
@@ -748,9 +716,6 @@ async fn devices(
     (devices, ids, frames)
 }
 
-/// Has every device receive the whole history until none publishes
-/// anything new, then `receiver` receive it latest first; all must agree
-/// with the canonical replay.
 async fn exchange(
     c: &Constrained,
     devices: &mut [Device],
@@ -846,7 +811,49 @@ async fn unique_and_check_violations_drop_the_later_transaction_everywhere() {
     assert!(devices[0].fresh().await.is_empty());
 }
 
-/// A NULL operand makes the range check pass.
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_rewound_parent_update_is_restored_in_place_without_running_its_delete_actions() {
+    let c = Constrained::new();
+    let root = rocky_platform::fs::Scratch::new().await;
+    let (mut devices, ids, mut history) = devices(
+        &c,
+        root.path(),
+        3,
+        &["INSERT INTO teams(name,cap,id) VALUES('red',3,#id)"],
+    )
+    .await;
+    let red = ids[0];
+    devices[0]
+        .commit(
+            &c,
+            &[&format!(
+                "INSERT INTO members(team,email,id) VALUES({red},'m@example',#id)"
+            )],
+        )
+        .await
+        .unwrap();
+    history.extend(devices[0].fresh().await);
+    for device in &devices {
+        device.receive(&history).await;
+    }
+    let receiver = devices.pop().unwrap();
+    devices[0]
+        .commit(&c, &["INSERT INTO teams(name,cap,id) VALUES('blue',1,#id)"])
+        .await
+        .unwrap();
+    devices[1]
+        .commit(&c, &[&format!("UPDATE teams SET cap=2 WHERE id={red}")])
+        .await
+        .unwrap();
+    let expected = exchange(&c, &mut devices, &receiver, &mut history).await;
+    assert_eq!(expected.dropped(), 0, "{expected:?}");
+    assert_eq!(
+        expected.rows["members"].len(),
+        1,
+        "undoing the later update of red, to replay the earlier insert of blue first, keeps red's member"
+    );
+}
+
 const INSERT_RANGE_PASSING_ITS_CHECK_WITH_NULL: &str =
     "INSERT INTO ranges(lo,hi,width,id) VALUES(1,2,NULL,#id)";
 
@@ -897,7 +904,6 @@ async fn checks_pass_null_and_hold_after_every_statement() {
     );
 }
 
-/// Precedes its order in the transaction, which only a deferred key allows.
 const INSERT_LINE_BEFORE_ITS_ORDER_UNDER_A_DEFERRED_KEY: &str =
     "INSERT INTO lines(parent,amount,id) VALUES(#next(orders),5,#id)";
 
@@ -1037,10 +1043,6 @@ async fn foreign_keys_drop_orphans_and_cascades_rewind_with_their_transaction() 
     );
 }
 
-/// A write passes the clock of every row it references, not only of those
-/// it changes: a member added to a team stamped by a clock a minute ahead
-/// replays after the team, so the projection and a rebuild from frames
-/// both keep it.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_child_replays_after_a_parent_stamped_ahead_of_its_wall_clock() {
     let c = Constrained::new();
@@ -1200,8 +1202,6 @@ async fn assertions_refuse_local_commits_and_drop_replays_until_a_rewind_release
     assert_eq!(expected.rows["members"].len(), 1);
 }
 
-/// Statements one replayed single-row insert costs its receiver, by what
-/// it must check. Printed for the phase evidence; not a budget.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn statements_per_assertion_are_recorded() {
     let c = Constrained::new();

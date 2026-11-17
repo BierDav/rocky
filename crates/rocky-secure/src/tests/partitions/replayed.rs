@@ -1,13 +1,9 @@
-//! Replayed transactions across partitions: a replica holding only some
-//! members follows the outcome records of replicas that hold the rest.
 use super::*;
 use rocky_core::replay::{DropReason, TransactionOutcome};
 
-/// Native only: exhaustive delivery schedules run across threads.
 #[cfg(not(target_family = "wasm"))]
 mod convergence;
 
-/// Deletes every outcome record `replica` published, as if they were lost.
 async fn lose_outcome_records(replica: &EncryptedReplica<TypedRows>) {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     for table in ["secure_outcomes", "secure_outcome_members"] {
@@ -42,7 +38,6 @@ async fn keys(
         .rows
 }
 
-/// Frames `replica` authored in `name`'s partition that carry no intent.
 async fn records(
     f: &Fixture,
     replica: &EncryptedReplica<TypedRows>,

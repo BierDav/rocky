@@ -1,20 +1,10 @@
-//! Admission of a session peer by its chain, and the bound on what
-//! unconfigured peers leave behind.
 use super::*;
 use rocky_credentials::PeerId;
 
-/// Unconfigured peers whose frontiers a replica
-/// keeps; the least recently served beyond it lose theirs.
 pub const MAX_UNCONFIGURED_PEERS: usize = 256;
-/// Session peers whose declared tip a replica remembers; the least
-/// recently served beyond it count as running this replica's generation.
 const MAX_PEER_TIPS: usize = 4 * MAX_UNCONFIGURED_PEERS;
 
 impl<A: RowApplication> Inner<A> {
-    /// The chain check of a session peer, before any revocation: an
-    /// unexpired node chain under the publisher granting only this
-    /// application. A chain names no generation; peers of every
-    /// generation present the same one.
     pub(super) fn admit_chain(
         &self,
         node: PublicKey,
@@ -54,7 +44,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Records the tip `peer` declared when its session opened.
     fn record_peer_tip(&mut self, peer: PublicKey, tip: TipId) {
         self.peer_tips.insert(PeerId::of(peer), tip);
         if self.peer_tips.len() > MAX_PEER_TIPS
@@ -67,9 +56,6 @@ impl<A: RowApplication> Inner<A> {
             self.peer_tips.remove(&oldest);
         }
     }
-    /// The declared session tip. While no graph knows a tip beyond genesis,
-    /// direct callers use genesis; once tips exist a missing or evicted
-    /// declaration fails closed.
     pub(crate) fn peer_tip(&self, peer: PublicKey) -> Option<TipId> {
         self.peer_tips.get(&PeerId::of(peer)).copied().or_else(|| {
             self.graphs
@@ -78,13 +64,11 @@ impl<A: RowApplication> Inner<A> {
                 .then_some(self.workspace.tip)
         })
     }
-    /// Marks `peer` served now.
     pub(super) fn touch_peer(&mut self, peer: PublicKey) {
         self.served.0 += 1;
         let at = self.served.0;
         self.served.1.insert(PeerId::of(peer), at);
     }
-    /// Whether `peer` has no row in either bounded table yet.
     pub(super) async fn unrecorded_peer(&self, peer: PublicKey) -> Result<bool, Error> {
         let key = PeerId::of(peer).as_bytes().to_vec();
         let mut found = self
@@ -96,10 +80,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(found.next().await?.is_none())
     }
-    /// Inside the open transaction, after a peer's first row: removes the
-    /// rows of the least recently served unconfigured peers beyond the
-    /// bound. Configured peers and full nodes are never removed. A lost
-    /// frontier only delays pruning, lost credentials a pruned_prefix deadline.
     pub(super) async fn bound_peers(&mut self) -> Result<(), Error> {
         let full = self.custody_peers().await?;
         let configured: BTreeSet<_> = self.configured.iter().copied().map(PeerId::of).collect();
@@ -139,8 +119,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Fails unless `chain` admits `node` to a session with this replica,
-    /// revocations aside; nothing is written.
     pub(crate) async fn admit_chain(
         &self,
         node: PublicKey,
@@ -151,8 +129,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await
             .admit_chain(node, chain, now()?)
     }
-    /// `admit_chain` for a session that opens, remembering the tip
-    /// `manifest` the peer declared, which decides what it is sent.
     pub(crate) async fn admit_peer(
         &self,
         node: PublicKey,
@@ -164,15 +140,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.record_peer_tip(node, tip);
         Ok(())
     }
-    /// The peers whose frontiers stay whatever the bound on
-    /// unconfigured peers: the contacts this device keeps.
     pub async fn configure_peers(&self, peers: impl IntoIterator<Item = PublicKey>) {
         self.inner
             .lock(crate::replica::Class::Background)
             .await
             .configured = peers.into_iter().collect();
     }
-    /// Distinct peers with retained frontiers.
     #[cfg(test)]
     pub(crate) async fn recorded_peers(&self) -> usize {
         let inner = self.inner.lock(crate::replica::Class::Background).await;

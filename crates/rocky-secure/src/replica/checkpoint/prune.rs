@@ -1,23 +1,17 @@
-//! Pruning of operations a verified checkpoint covers, in bounded batches.
 use super::*;
 
-/// Why covered operations are still retained.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PruneBlock {
-    /// The scope has no verified checkpoint.
     NoCheckpoint,
-    /// No retention policy names the peers that must hold copies.
     NoPolicy,
-    /// The covering checkpoint still needs a flush before history may go.
     Durability,
-    /// A required peer has not acknowledged this operation.
     Unacknowledged {
         peer: rocky_credentials::PeerId,
         operation: Hash,
     },
-    /// Too few other nodes acknowledged this operation: it is a sole copy.
-    SoleCopy { operation: Hash },
-    /// Too few eligible peers have durable ciphertext coverage.
+    SoleCopy {
+        operation: Hash,
+    },
     Custody {
         operation: Hash,
         durable: usize,
@@ -27,7 +21,6 @@ pub enum PruneBlock {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PruneReport {
     pub pruned: u64,
-    /// What stopped pruning before the retained window was reached.
     pub blocked: Option<PruneBlock>,
 }
 pub(in crate::replica) struct PruneStep {
@@ -46,10 +39,6 @@ impl PruneStep {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Deletes operations, acknowledgments and outbox entries the scope's
-    /// verified, flushed checkpoint covers, oldest first, while the retention
-    /// policy's acknowledgments exist. Repeating it is safe; a failed call
-    /// leaves whole batches pruned and the rest retained.
     pub async fn prune(&self, scope: ResourceScope) -> Result<PruneReport, Error> {
         let mut report = PruneReport {
             pruned: 0,
@@ -72,8 +61,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// The scope's own policy; a partition without one follows its
-    /// collection's, the policy of the unpartitioned scope of its table.
     pub(crate) async fn retention_policy(
         &self,
         scope: ResourceScope,

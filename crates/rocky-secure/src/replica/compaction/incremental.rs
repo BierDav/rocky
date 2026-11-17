@@ -1,8 +1,6 @@
-//! Restore affected rows and replay the excluded tail.
 use super::*;
 
 impl<A: RowApplication> Inner<A> {
-    /// Replaces one authoritative row and its digest contribution together.
     pub(super) async fn replace_seal_row(
         &self,
         scope: ResourceScope,
@@ -53,7 +51,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    /// Replays only selected rows, starting at their checkpoint records.
     pub(super) async fn restore_seal_rows(
         &self,
         scope: ResourceScope,
@@ -120,7 +117,6 @@ impl<A: RowApplication> Inner<A> {
         }
         let mut bounds = self.seal_bounds(id).await?;
         bounds.retain(|(_, bound)| *bound >= cursor && *bound <= through);
-        /// Depth of the segment ending at `through`, replayed even without earlier seal bounds.
         const FINAL_SEGMENT: i64 = i64::MAX;
         bounds.push((FINAL_SEGMENT, through));
         for (depth, end) in bounds {
@@ -193,7 +189,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 impl<A: RowApplication> Inner<A> {
-    /// The sealed records are already installed; only excluded operations follow.
     pub(super) async fn replay_seal_tail(
         &self,
         scope: ResourceScope,

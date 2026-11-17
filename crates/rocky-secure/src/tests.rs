@@ -1,6 +1,5 @@
 pub(crate) mod live_publication;
 use super::*;
-/// The naming secret test partitions share; scopes still key over the tuple.
 pub(crate) const PARTITION_NAME: rocky_core::PartitionName = [0x5a; 32];
 use employees_app::Employees;
 use rocky_core::{
@@ -18,7 +17,6 @@ pub(crate) struct Fixture {
     pub(crate) private: ResourceScope,
 }
 
-/// Warms the committed cache, checks a hit, then compares independent replay.
 pub(crate) async fn check_frontier_cache<A: rocky_core::RowApplication>(
     replica: &EncryptedReplica<A>,
     scope: ResourceScope,
@@ -30,11 +28,6 @@ pub(crate) async fn check_frontier_cache<A: rocky_core::RowApplication>(
     assert_eq!(inner.frontier_cache_stats(), before);
     assert_eq!(inner.compute_tip_frontier(scope).await.unwrap(), first);
 }
-/// From a day ago for 300 days: a fixture chain's validity, within the
-/// longest a chain may live. Read once per process, so a link issued after a
-/// second boundary never outlives its parent.
-/// The retained operations `sql` selects as header and body, each with the
-/// stored chain its header names.
 pub(crate) async fn stored_frames<A: rocky_core::RowApplication>(
     replica: &EncryptedReplica<A>,
     sql: &str,
@@ -58,10 +51,6 @@ pub(crate) async fn stored_frames<A: rocky_core::RowApplication>(
     }
     frames
 }
-/// Creates and follows `main` on the genesis tip on first use, has `owner`
-/// seal the followed tip at everything `replica` holds and move `main` on.
-/// Returns the statements peers receive, through [`exchange_graphs`], before
-/// frames of the next tip.
 pub(crate) async fn seal_main<A: rocky_core::RowApplication>(
     replica: &EncryptedReplica<A>,
     owner: &PrivateKey,
@@ -121,7 +110,6 @@ pub(crate) async fn seal_main<A: rocky_core::RowApplication>(
     statements.extend(advanced);
     statements
 }
-/// Bases form only at seals: [`seal_main`], then compacts there.
 pub(crate) async fn seal_and_compact<A: rocky_core::RowApplication>(
     replica: &EncryptedReplica<A>,
     owner: &PrivateKey,
@@ -135,7 +123,6 @@ pub(crate) async fn seal_and_compact<A: rocky_core::RowApplication>(
     }
     statements
 }
-/// [`seal_and_compact`], then `scope`'s base at the seal.
 pub(crate) async fn compacted_base<A: rocky_core::RowApplication>(
     replica: &EncryptedReplica<A>,
     owner: &PrivateKey,
@@ -144,9 +131,6 @@ pub(crate) async fn compacted_base<A: rocky_core::RowApplication>(
     seal_and_compact(replica, owner, scope.domain).await;
     replica.checkpoint(scope).await.unwrap()
 }
-/// Imports from `source` the verified base of every scope `target`, whose
-/// node key is `key`, still needs at a seal of its path, and returns the
-/// signed records for the caller to check. Nothing remains needed after.
 pub(crate) async fn import_needed_bases<A: rocky_core::RowApplication>(
     source: &EncryptedReplica<A>,
     target: &EncryptedReplica<A>,
@@ -206,8 +190,6 @@ pub(crate) async fn import_needed_bases<A: rocky_core::RowApplication>(
     assert!(target.seal_rebootstraps(domain).await.unwrap().is_empty());
     imported
 }
-/// A signed record of empty state at a seal: no operations, rows,
-/// tombstones or creations.
 pub(crate) fn assert_signed_empty(signed: &crate::SignedCheckpoint) {
     signed.verify_signature().unwrap();
     let statement = &signed.statement;
@@ -222,8 +204,6 @@ pub(crate) fn assert_signed_empty(signed: &crate::SignedCheckpoint) {
         (0, 0, 0, 0)
     );
 }
-/// Exchanges tip graphs between `a` and `b` as a link does; each follows
-/// `main` once it exists.
 pub(crate) async fn exchange_graphs<A: rocky_core::RowApplication>(
     a: &EncryptedReplica<A>,
     b: &EncryptedReplica<A>,
@@ -247,8 +227,6 @@ pub(crate) async fn exchange_graphs<A: rocky_core::RowApplication>(
         }
     }
 }
-/// [`exchange_graphs`], then tells each side which tip the other follows,
-/// as a link's tip exchange does.
 pub(crate) async fn link_up<A: rocky_core::RowApplication>(
     a: &EncryptedReplica<A>,
     b: &EncryptedReplica<A>,
@@ -269,7 +247,6 @@ pub(crate) async fn link_up<A: rocky_core::RowApplication>(
             .unwrap();
     }
 }
-/// Every released statement of `replica`'s tip graphs, page by page.
 pub(crate) async fn all_tip_statements<A: rocky_core::RowApplication>(
     replica: &EncryptedReplica<A>,
 ) -> Vec<TipStatement> {
@@ -294,7 +271,6 @@ pub(crate) fn lifetime() -> (u64, u64) {
         )
     })
 }
-/// Issuance terms for a fixture: from now for 300 days.
 pub(crate) fn validity() -> rocky_credentials::Validity {
     rocky_credentials::Validity {
         issued_at: now().unwrap(),
@@ -302,11 +278,9 @@ pub(crate) fn validity() -> rocky_credentials::Validity {
         clock_skew: std::time::Duration::from_secs(rocky_credentials::DAY),
     }
 }
-/// The digest of an empty revocation set.
 pub(crate) fn unrevoked() -> Commitment {
     RevocationSet::new().digest(0).unwrap()
 }
-/// A one-statement set that revokes `users` and `capabilities`.
 pub(crate) fn revoking(
     publisher: &PrivateKey,
     app: rocky_core::AppId,
@@ -370,8 +344,6 @@ impl Fixture {
             publisher,
         }
     }
-    /// The personal database of `owner` in `namespace`, at the mesh and
-    /// domain the namespace locates.
     pub(crate) fn personal(
         owner: PublicKey,
         namespace: rocky_credentials::PersonalNamespace,
@@ -408,7 +380,6 @@ impl Fixture {
     ) -> CredentialChain {
         self.chain(node, grants, &self.publisher, lifetime())
     }
-    /// A node chain whose root `root` signs, valid from `not_before` to `expires`.
     fn chain(
         &self,
         node: &PrivateKey,
@@ -418,7 +389,6 @@ impl Fixture {
     ) -> CredentialChain {
         self.chain_under(node, grants, root, &PrivateKey::new(), lifetime)
     }
-    /// A node chain under the identity `user`, which `root` signs first.
     fn chain_under(
         &self,
         node: &PrivateKey,
@@ -1365,13 +1335,9 @@ async fn concurrent_field_updates_converge_and_no_remote_operation_is_reauthored
     );
 }
 
-/// Exit status of a crashed test child: it ends without dropping the
-/// connection or file owner.
 #[cfg(not(target_family = "wasm"))]
 const CRASH_EXIT_CODE: i32 = 77;
 
-/// Commits a row, then exits mid-process for
-/// [`committed_ciphertext_survives_process_exit`].
 #[cfg(not(target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 #[ignore = "invoked by committed_ciphertext_survives_process_exit"]

@@ -1,4 +1,3 @@
-//! Writes to replayed tables commit as intent frames.
 use super::*;
 
 fn opened(
@@ -208,11 +207,8 @@ async fn a_single_row_intent_authors_within_its_statement_budget() {
     );
 }
 
-/// Statement budget of one authored replayed transaction, including the one
-/// that finds the newest replayed clock the stamp passes.
 const REPLAYED_AUTHOR_TRANSACTION_STATEMENTS: usize = 44;
 
-/// One update of `ann`'s amount, committed alone.
 async fn raise(session: &SecureSql<TypedRows>, by: i64) -> EncryptedFrame {
     let [frame] = session
         .run(
@@ -240,7 +236,6 @@ async fn amounts(
     .await
 }
 
-/// Each replayed member's partition order and drop reason, in that order.
 async fn outcomes(replica: &EncryptedReplica<TypedRows>) -> Vec<Option<String>> {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     collect_rows(
@@ -318,7 +313,6 @@ async fn concurrent_increments_replay_in_order_and_both_apply() {
     }
 }
 
-/// Before-images kept for unsealed applied members.
 async fn undo_records(replica: &EncryptedReplica<TypedRows>) -> i64 {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let rows = collect_rows(
@@ -339,7 +333,6 @@ async fn undo_records(replica: &EncryptedReplica<TypedRows>) -> i64 {
     }
 }
 
-/// Row records `replica` stores for the identities of its rows.
 async fn row_records(replica: &EncryptedReplica<TypedRows>) -> i64 {
     let inner = replica.inner.lock(crate::replica::Class::Background).await;
     let rows = collect_rows(
@@ -357,7 +350,6 @@ async fn row_records(replica: &EncryptedReplica<TypedRows>) -> i64 {
     }
 }
 
-/// Inserts `ann` with `amount`, committed alone.
 async fn create(
     replica: &EncryptedReplica<TypedRows>,
     both: &[ResourceScope],
@@ -637,8 +629,6 @@ async fn replayed_effects_outside_the_authors_grants_drop_as_admission() {
     );
 }
 
-/// Lets `replica` commit replayed effects without checking them against its
-/// grants, as a modified author could.
 async fn skip_the_authors_replayed_admission_check(replica: &EncryptedReplica<TypedRows>) {
     replica
         .inner
@@ -647,8 +637,6 @@ async fn skip_the_authors_replayed_admission_check(replica: &EncryptedReplica<Ty
         .unchecked_replayed_admission = true;
 }
 
-/// A replay installs the session's SQL change counters on the write
-/// connection; every later commit still counts toward the durable watermark.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn commits_after_a_replay_still_reach_the_flusher() {
     let t = Typed::new();
@@ -674,8 +662,6 @@ async fn commits_after_a_replay_still_reach_the_flusher() {
     }
 }
 
-/// A replay whose capture refuses what it did, here a changed id the
-/// author never saw, drops instead of committing unadmitted effects.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_replay_its_capture_refuses_drops() {
     let t = Typed::new();
@@ -778,9 +764,6 @@ async fn a_single_row_intent_receives_within_its_statement_budget() {
     assert!(replayed.1 <= 45, "{replayed:?} statements");
 }
 
-/// Receiving a transaction that changed 32 rows costs at most 6.5
-/// statements per row (the features_11 result was 6.40625), whether the
-/// author wrote each row in its own statement or all in one.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_thirty_two_row_intent_receives_within_its_statements_per_row() {
     const ROWS: usize = 32;

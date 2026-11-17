@@ -1,4 +1,3 @@
-//! Transferable migration capacity never comes from a caller's quota claim.
 use super::compaction::{bookmark, follow_main};
 use super::generations::Lineage;
 use super::*;

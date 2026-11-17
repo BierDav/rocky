@@ -1,4 +1,3 @@
-//! Ciphertext custody does not claim an applied state or a kept empty view.
 use super::*;
 use crate::KeptSeals;
 

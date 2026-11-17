@@ -1,15 +1,6 @@
-//! Recovery that needs no peer. The SDK drives it at open, after the tip
-//! graph or a commit changes and on a timer while local work remains; it is
-//! never called inside a network call or a peer session's transaction.
 use super::*;
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Applies pending frames, rebuilds scopes whose rebootstrap replays the
-    /// frames they hold, ends restorations whose own log is back, derives
-    /// rows a scope's clear left waiting again, forgets
-    /// dropped tip frames a listed base covers and ends a seal rebootstrap
-    /// no scope waits for. One scope's failure does not stop the others;
-    /// the first is returned once all ran.
     pub async fn recover_locally(&self) -> Result<(), Error> {
         let mut first = None;
         let mut keep = |result: Result<(), Error>| {
@@ -37,8 +28,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         keep(self.forget_covered_drops().await);
         first.map_or(Ok(()), Err)
     }
-    /// Resume durable base retirement after an orderly reopen. The in-memory
-    /// maintenance queue is rebuilt one bounded cleanup transaction at a time.
     async fn recover_base_cleanup(&self) -> Result<(), Error> {
         loop {
             let mut inner = self.inner.lock(crate::replica::Class::Background).await;
@@ -50,8 +39,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             rocky_platform::task::yield_now().await;
         }
     }
-    /// Derives the replayed rows again where a scope's clear left them
-    /// waiting and nothing it needs waits any more.
     pub async fn rederive(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         if let Some(domain) = inner.workspace.typed.as_ref().map(|typed| typed.domain) {
@@ -59,8 +46,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(())
     }
-    /// Whether `scope` applied a frame whose author is revoked now: its
-    /// rows are restored from a checkpoint, never kept from frames.
     pub async fn holds_revoked_frames(&self, scope: ResourceScope) -> Result<bool, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         if !inner.config.revocations.has_revocations() {
@@ -92,7 +77,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(false)
     }
-    /// Scopes whose eviction guard waits for this node's own log.
     async fn restoring(&self) -> Result<Vec<ResourceScope>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         rows(&inner.conn, "SELECT scope FROM secure_evicted_logs")
@@ -104,9 +88,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             })
             .collect()
     }
-    /// Forgets dropped tip frames that came back, or whose scope's
-    /// verified base, listed in the graph at a seal of the followed path,
-    /// holds their tip's state.
     async fn forget_covered_drops(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut forget = Vec::new();
@@ -150,9 +131,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Whether `scope`'s verified base sits at a seal of the followed path
-    /// the graph lists a checkpoint of it at, and that seal's state holds
-    /// `tip`: the tip is the sealed one or one of its ancestors.
     async fn base_covers(&self, scope: ResourceScope, tip: TipId) -> Result<bool, Error> {
         let Some(id) = self.find_scope_id(scope).await? else {
             return Ok(false);

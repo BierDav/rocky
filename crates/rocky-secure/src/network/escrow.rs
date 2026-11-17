@@ -1,44 +1,28 @@
-//! Root escrow records travel with the data they recover: before a page,
-//! the session carries the records of each key epoch its frames were
-//! sealed under, once per session, as the key holders that sealed them
-//! vouched for them. The peer keeps those of the frames it receives that a
-//! key holder vouched for, so every holder of a scope, keyless custody
-//! too, holds them, and a forged record never displaces a genuine one.
-//! A record is opaque and names nothing; it reaches only a peer that
-//! receives the frames anyway.
 use super::*;
 use rocky_core::KeyEpoch;
 use rocky_credentials::{CarriedEscrow, VouchedEscrow};
 use std::collections::{BTreeMap, BTreeSet};
 
 type Slot = (ResourceScope, KeyEpoch);
-/// Credential bytes one session may copy into reconstructed vouches: each
-/// carried record clones its whole referenced chain.
 const RECONSTRUCTED_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 pub(super) enum EscrowMessage {
-    /// Records of the key epochs the next page's frames name. It has no answer.
     Carry {
         records: Vec<CarriedEscrow>,
         metadata: Option<Box<rocky_credentials::MetadataEscrow>>,
     },
 }
 
-/// Lives one session, like the chain table.
 #[derive(Default)]
 pub(super) struct EscrowTable {
     sent: BTreeSet<Slot>,
     metadata_sent: bool,
-    /// Boxed so the large record does not enlarge every session future.
     metadata: Option<Box<rocky_credentials::MetadataEscrow>>,
     received: BTreeMap<Slot, Vec<VouchedEscrow>>,
-    /// Carried records seen, by digest: a repeat is neither stored nor charged.
     seen: BTreeSet<Commitment>,
-    /// Encoded length of each referenced chain, measured once.
     chain_bytes: BTreeMap<Commitment, usize>,
     reconstructed: usize,
-    /// Records sent ahead of the genuine ones, as a forging peer would.
     #[cfg(test)]
     forged: Vec<VouchedEscrow>,
 }
@@ -51,8 +35,6 @@ fn slots(frames: &[EncryptedFrame]) -> Result<BTreeSet<Slot>, Error> {
 }
 
 impl NativeSession {
-    /// Sends the records of the key epochs `frames` name that this session
-    /// has not carried yet.
     pub(super) async fn carry_escrow<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -103,9 +85,6 @@ impl NativeSession {
         }
         Ok(())
     }
-    /// Holds carried records until frames of their epoch arrive; the
-    /// session's byte budget and the reconstruction quota bound them, and
-    /// none is judged first-come.
     pub(super) fn learn_escrow(&mut self, message: EscrowMessage) -> Result<(), Error> {
         let EscrowMessage::Carry { records, metadata } = message;
         if let Some(record) = metadata {
@@ -148,8 +127,6 @@ impl NativeSession {
         }
         Ok(())
     }
-    /// Judges and stores the carried records of the key epochs of
-    /// `frames`, which this node receives.
     pub(super) async fn keep_escrow<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,

@@ -1,6 +1,3 @@
-//! Seal states pulled from a node that keeps them. A verified checkpoint at
-//! a seal this replica does not hold is kept aside; following a tip whose
-//! path passes the seal installs it as the scope's replay base.
 use super::*;
 use rocky_core::Scope;
 
@@ -11,15 +8,12 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_pulled_pages(scope INTEGER NOT NULL,after BLOB NOT NULL,next BLOB,signature BLOB NOT NULL,PRIMARY KEY(scope,after)) WITHOUT ROWID",
     WANTED_SEALS,
 ];
-/// Seals whose state the next sessions pull from peers.
 const WANTED_SEALS: &str = "CREATE TABLE IF NOT EXISTS secure_wanted_seals(domain BLOB NOT NULL,seal BLOB NOT NULL,PRIMARY KEY(domain,seal))";
-/// The staging tables and the pulled tables that keep their contents.
 const KEPT: [(&str, &str); 3] = [
     ("secure_rebootstrap_rows", "secure_pulled_rows"),
     ("secure_rebootstrap_stubs", "secure_pulled_stubs"),
     ("secure_rebootstrap_pages", "secure_pulled_pages"),
 ];
-/// `KEPT` for a scope; a replayed scope stages row images instead.
 fn kept(replayed: bool) -> [(&'static str, &'static str); 3] {
     let mut kept = KEPT;
     if replayed {
@@ -29,8 +23,6 @@ fn kept(replayed: bool) -> [(&'static str, &'static str); 3] {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Asks the next sync sessions to pull `seal`'s state from peers that
-    /// keep it, until this node holds it.
     pub async fn want_seal(&self, domain: Scope, seal: Commitment) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner
@@ -49,8 +41,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })?;
         flush_guard(inner, &self.inner).await.map(|_| ())
     }
-    /// The seals still to pull, oldest request first; those now held are
-    /// no longer wanted.
     pub async fn wanted_seals(&self, domain: Scope) -> Result<Vec<Commitment>, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut wanted = Vec::new();
@@ -94,8 +84,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         wanted.retain(|seal| !held.contains(seal));
         Ok(wanted)
     }
-    /// The held scopes of `domain` whose state at `seal` a pull still
-    /// needs: neither their replay base nor a pulled state sits there.
     pub async fn seal_pull_scopes(
         &self,
         domain: Scope,
@@ -112,9 +100,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(scopes)
     }
-    /// Starts pulling `signed`, a peer's checkpoint at a seal, to hold that
-    /// seal's state: its pages stage as for an import, and
-    /// `finish_seal_pull` keeps them aside. The scope's rows do not change.
     pub async fn begin_seal_pull(&self, signed: SignedCheckpoint) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         signed.verify_authority(&inner, now()?)?;
@@ -167,8 +152,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })?;
         inner.load_direct().await
     }
-    /// Verifies the staged pages against the pulled checkpoint and keeps
-    /// them aside as this replica's state at its seal, which it returns.
     pub async fn finish_seal_pull(&self, scope: ResourceScope) -> Result<Commitment, Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         let id = inner
@@ -243,7 +226,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// The seal of the state pulled for scope `id`, if any.
     pub(in crate::replica) async fn pulled_seal(
         &self,
         id: i64,
@@ -270,9 +252,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// The state pulled for scope `id`, checked for integrity only: decoded,
-    /// bound to its row's scope and seal, signed and canonical, and for a
-    /// no-frames state stored as empty. Any failure is corruption.
     pub(in crate::replica) async fn pulled_record(
         &self,
         id: i64,
@@ -322,8 +301,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(Some(PulledRecord { signed, sets }))
     }
-    /// The checks a pulled statement passes now: those of any import, and
-    /// its seal names its tip.
     async fn verify_pulled_statement(&self, signed: &SignedCheckpoint) -> Result<(), Error> {
         self.verify_import_statement(signed).await?;
         let statement = &signed.statement;
@@ -340,10 +317,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// The seal of scope `id`'s pulled state when it passes the import
-    /// checks now: what a pull or a held start may count on. It writes
-    /// nothing; corruption is an error. It never stands in for live
-    /// coverage, which only an installed base gives.
     pub(in crate::replica) async fn available_pulled_seal(
         &self,
         id: i64,
@@ -357,8 +330,6 @@ impl<A: RowApplication> Inner<A> {
             Err(error) => Err(error),
         }
     }
-    /// Whether the pulled state is refused or already held by the replay base.
-    /// Corruption remains an error.
     pub(in crate::replica) async fn stale_pulled(&self, id: i64) -> Result<bool, Error> {
         let Some(pulled) = self.pulled_record(id).await? else {
             return Ok(false);
@@ -369,7 +340,6 @@ impl<A: RowApplication> Inner<A> {
             Err(error) => Err(error),
         }
     }
-    /// Whole-state revalidation inside a tip transition.
     pub(in crate::replica) async fn revalidate_pulled(&self) -> Result<(), Error> {
         for record in rows(&self.conn, "SELECT scope FROM secure_pulled").await? {
             let [SqlValue::Integer(id)] = record.as_slice() else {
@@ -386,11 +356,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Inside the caller's transaction, makes the state pulled for `scope`
-    /// its replay base, as a finished import does; its operations apply
-    /// again on top. A state that no longer passes the import checks is
-    /// dropped instead and `Refused`; the caller's commit keeps the drop
-    /// and the scope keeps waiting. Corruption is an error.
     pub(in crate::replica) async fn install_pulled(
         &mut self,
         scope: ResourceScope,
@@ -437,22 +402,16 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-/// A pulled state that passed its integrity checks.
 pub(in crate::replica) struct PulledRecord {
     signed: SignedCheckpoint,
     sets: Sets,
 }
-/// What installing a pulled state did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::replica) enum PulledInstall {
     Installed,
-    /// It no longer passes the import checks and was dropped.
     Refused,
-    /// Another import is staged for the scope; the pulled state stays.
     Deferred,
 }
-/// Whether `error` refuses a statement, rather than reporting corruption
-/// or a failure to read it.
 fn refusal(error: &Error) -> bool {
     matches!(
         error,

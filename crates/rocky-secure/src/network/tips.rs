@@ -1,4 +1,3 @@
-//! Reconcile sorted statement digests before transferring missing metadata.
 use super::*;
 use crate::TipStatement;
 
@@ -44,13 +43,11 @@ pub(super) enum TipMessage {
 }
 
 impl NativeSession {
-    /// Whether this admitted peer follows the local workspace's tip.
     pub async fn follows_same_tip<A: RowApplication>(&self, replica: &EncryptedReplica<A>) -> bool {
         let inner = replica.inner.lock(crate::replica::Class::Background).await;
         inner.peer_tip(self.peer) == Some(inner.workspace.tip)
     }
 
-    /// Refreshes the graph on a request session of an already admitted link.
     pub async fn sync_tip_graph<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -159,8 +156,6 @@ impl NativeSession {
         }
     }
 
-    /// Exchanges tips, then admits the peer at its followed tip, which a
-    /// received move may have changed since the signed hello.
     pub(super) async fn exchange_tips<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,

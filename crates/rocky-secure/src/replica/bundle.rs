@@ -1,22 +1,16 @@
-//! Transaction bundles: one local transaction over several resource scopes
-//! and frames, applied atomically by each reader of the partitions it holds.
 use super::incoming::Outcome;
 use super::*;
 use rocky_core::replay::IntentStatement;
 
-/// Frames of one bundle. Each frame holds at most `ROWS_PER_FRAME` rows of
-/// one scope, which bounds a bundle's rows.
 pub const MAX_BUNDLE_FRAMES: usize = 64;
 pub const ROWS_PER_FRAME: usize = 32;
 pub const MAX_BUNDLE_ROWS: usize = MAX_BUNDLE_FRAMES * ROWS_PER_FRAME;
-/// Encoded writes of one bundle.
 pub const MAX_BUNDLE_BYTES: usize = 4 * 1024 * 1024;
 
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_bundle_handles(handle BLOB NOT NULL,member INTEGER NOT NULL,hash BLOB NOT NULL,PRIMARY KEY(handle,member))",
 ];
 
-/// What a sealed member entry reveals to a holder of its scope key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Opening {
     scope: ResourceScope,
@@ -39,8 +33,6 @@ fn member_aad(
     ))
 }
 
-/// What a bundle handle commits to: a retry with the same handle must
-/// repeat exactly this input.
 pub(super) fn input_bytes(
     writes: &[RowWrite],
     dependencies: &[Hash],
@@ -49,7 +41,6 @@ pub(super) fn input_bytes(
     encode(&(writes, dependencies, intents))
 }
 
-/// The durable identity of the transaction a node commits under `handle`.
 pub(super) fn transaction_id(node: PublicKey, handle: &Commitment) -> Commitment {
     rocky_core::commitment(
         "rocky.secure-bundle.v1",
@@ -57,8 +48,6 @@ pub(super) fn transaction_id(node: PublicKey, handle: &Commitment) -> Commitment
     )
 }
 
-/// Splits writes into frames: per scope in scope order, at most
-/// `ROWS_PER_FRAME` rows each. A row appears once per bundle.
 fn partition<A: RowApplication>(writes: &[RowWrite], app: &A) -> Result<Vec<Vec<RowWrite>>, Error> {
     if writes.is_empty() {
         return Err(denied("empty mutation"));
@@ -105,29 +94,21 @@ fn partition<A: RowApplication>(writes: &[RowWrite], app: &A) -> Result<Vec<Vec<
     Ok(frames)
 }
 
-/// One bundle member as the author plans it.
 enum Frame {
     Rows(Vec<RowWrite>),
     Intent(Vec<IntentStatement>, Vec<super::replay::Undo>),
 }
 
-/// A SQL transaction's statements per partition its replayed writes
-/// reached, with the prior images of the rows they changed there.
 pub(super) type Intents = BTreeMap<ResourceScope, (Vec<IntentStatement>, Vec<super::replay::Undo>)>;
 
-/// A required member as this replica holds it.
 enum Member {
-    /// Not received yet.
     Missing,
-    /// Applied; None once pruned or covered by a checkpoint.
     Settled(Option<EncryptedFrame>),
     Rejected,
     Pending(EncryptedFrame),
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Authors every frame of a bundle inside the caller's savepoint. All
-    /// frames commit or none do; the handle returns all of them.
     pub(super) async fn author_bundle(
         &mut self,
         handle: Commitment,
@@ -145,7 +126,6 @@ impl<A: RowApplication> Inner<A> {
         ))
         .await
     }
-    /// The bundle is named by its handle and the commitment to its input.
     pub(super) async fn author_bundle_carried(
         &mut self,
         (handle, input): (Commitment, Commitment),
@@ -163,8 +143,6 @@ impl<A: RowApplication> Inner<A> {
         ))
         .await
     }
-    /// A SQL transaction's bundle: one intent frame per partition its
-    /// replayed writes reached.
     pub(super) async fn author_sql_bundle(
         &mut self,
         (handle, input): (Commitment, Commitment),
@@ -408,7 +386,6 @@ impl<A: RowApplication> Inner<A> {
         self.injected_commit_fault()?;
         Ok(authored)
     }
-    /// Each dependency belongs to exactly one scope of the bundle.
     async fn route_dependencies(
         &self,
         dependencies: &[Hash],
@@ -445,8 +422,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(routed)
     }
-    /// The frames a bundle handle committed, or the first member's id once
-    /// any member is pruned.
     pub(super) async fn lookup_bundle(
         &self,
         handle: Commitment,
@@ -484,7 +459,6 @@ impl<A: RowApplication> Inner<A> {
         Ok(Some(Ok(frames)))
     }
 
-    /// Every member of the bundle `first` belongs to, by its own openings.
     pub(super) async fn members_of(
         &self,
         first: &EncryptedFrame,
@@ -524,11 +498,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(Ok(frames))
     }
-    /// Applies a bundle when every member this replica must hold is present
-    /// and ready: the members it can open with a key it may read and whose
-    /// scope it holds. Members of other partitions do not block it. Applies
-    /// them in one savepoint, or rejects every pending one when any of them
-    /// is invalid.
     pub(super) async fn apply_bundle(
         &self,
         trigger: &p2panda_core::Operation<Extensions>,
@@ -667,8 +636,6 @@ impl<A: RowApplication> Inner<A> {
             }
         }
     }
-    /// Replays a bundle's intent members in their partitions' canonical
-    /// order and keeps them as applied log entries, whatever their outcome.
     async fn replay_members(
         &self,
         members: &[BundleMember],
@@ -747,13 +714,6 @@ impl<A: RowApplication> Inner<A> {
         self.hold_members(&members, time, reseeds).await?;
         Ok(Outcome::Applied)
     }
-    /// Member entries this replica opens with a readable key of a held scope,
-    /// in scope and sequence order.
-    /// The members to hold, found by trying the held keys on each sealed
-    /// opening. Only one key opens a member, so the order of trial only
-    /// saves time: the trigger's `scope` first, then the scopes with its
-    /// partition values, as the other tables of a partition group, which a
-    /// bundle usually spans, then every other key.
     async fn required_members(
         &self,
         membership: &Membership,
@@ -823,9 +783,6 @@ impl<A: RowApplication> Inner<A> {
             .collect())
     }
 
-    /// Whether a member of `frame`'s transaction writes a table the
-    /// installed schema removed: the transaction no longer compiles, though
-    /// no replica holds that member to replay it.
     pub(super) fn names_removed_table(&self, frame: &EncryptedFrame) -> Result<bool, Error> {
         let Some(typed) = self.workspace.typed.as_ref() else {
             return Ok(false);
@@ -884,9 +841,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(Member::Missing)
     }
-    /// Verifies one pending member against the trigger's membership: its
-    /// credentials, its own membership and dependencies outside the bundle.
-    /// None while a dependency is not applied yet.
     async fn open_member(
         &self,
         frame: &EncryptedFrame,
@@ -917,15 +871,12 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(Ok((frame.clone(), payload, grants)))
     }
-    /// Whether this replica holds the key that sealed a member; a held
-    /// member waits for it, as a single frame does.
     fn member_opens(&self, frame: &EncryptedFrame) -> Result<bool, Error> {
         let extension = &frame.operation_ref()?.header.extensions;
         Ok(self
             .opening_key(extension.scope, extension.generation)
             .is_some())
     }
-    /// Decrypts a member and checks it carries `expected` at `index`.
     fn membership_of(
         &self,
         frame: &EncryptedFrame,
@@ -944,7 +895,6 @@ impl<A: RowApplication> Inner<A> {
             _ => Err(denied("bundle members disagree")),
         }
     }
-    /// The key epoch that sealed a member frame.
     fn member_key(&self, extension: &Extensions) -> Result<&KeyMaterial, Error> {
         self.opening_key(extension.scope, extension.generation)
             .ok_or_else(|| denied("bundle member key unavailable"))

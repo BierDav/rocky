@@ -1,14 +1,9 @@
-//! A validly signed delegation that widens any dimension is refused by
-//! every boundary that admits a chain, not only where it was issued.
 use super::*;
 use crate::wire::{Extensions, author};
 use rocky_core::FieldSelection;
 
-/// Changes one dimension of a link.
 type Widen = dyn Fn(&mut Capability, &Fixture);
 
-/// Publisher, user, a deployment `widen` changed, node: every link signed
-/// by its parent's subject.
 fn delegated(
     f: &Fixture,
     node: &PrivateKey,

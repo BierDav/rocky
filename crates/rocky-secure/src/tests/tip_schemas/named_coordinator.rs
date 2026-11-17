@@ -1,6 +1,3 @@
-//! A schema stage in a database whose settings name a coordinator: never
-//! made without that coordinator's log, and one made before the settings
-//! arrived is never released without finality after they do.
 use super::*;
 use rocky_coordinator::coordinated::MemoryLog;
 use rocky_credentials::{
@@ -16,8 +13,6 @@ fn refusal_code(error: &Error) -> Option<&'static str> {
     }
 }
 
-/// A source with a committed schema stage of `dev` from its root, made
-/// through `log` when given, and the public statements it published first.
 struct Staged {
     lineage: Lineage,
     dir: Scratch,
@@ -171,7 +166,6 @@ async fn committed_stage(seed: u8, log: Option<&MemoryLog>) -> Staged {
         public,
     }
 }
-/// The owner's settings naming `log` as the database's coordinator.
 fn named(lineage: &Lineage, log: &MemoryLog) -> TipStatement {
     TipStatement::Settings(
         SignedDatabaseSettings::sign(
@@ -279,10 +273,6 @@ async fn a_node_without_the_named_log_stages_no_schema() {
     }
 }
 
-/// A stage committed through a log the settings later do not name is
-/// released only by finality at the coordinator they name: a relay's proof
-/// from the other log leaves its close unfinal, which a seal through the
-/// named coordinator would beat.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_staged_close_final_only_at_another_coordinator_is_never_released() {
     let other = MemoryLog::new();

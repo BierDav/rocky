@@ -1,8 +1,3 @@
-//! The coordinator retains `ENDED_LOGS` ended logs per domain and reads a
-//! dropped one as never ended: a finality pass starts after the newest
-//! final seal of its path, ends a log that reads as never ended only when
-//! nothing was dropped or its parent's log proves it was not, and reports a
-//! stall otherwise; it never ends a dropped log a second time.
 use super::declared::{coordinated_by, follow_main_uncomposed, receive_each};
 use super::seals::{bookmark, seal, share};
 use super::*;
@@ -11,8 +6,6 @@ use rocky_coordinator::coordinated::ENDED_LOGS;
 use rocky_core::{LogTerminal, TipId};
 use rocky_credentials::{AuthorMark, SignedSeal};
 
-/// Ends `ENDED_LOGS` logs of tips no graph holds, as the domain's other
-/// lines do, so the coordinator drops every earlier ended log.
 async fn end_other_lines(fixture: &Fixture) {
     let client = fixture.mesh.client(&fixture.alice.0);
     for line in 0..ENDED_LOGS {
@@ -33,8 +26,6 @@ async fn end_other_lines(fixture: &Fixture) {
             .unwrap();
     }
 }
-/// `node`'s seal of `tip`, with a frontier mark at `mark` of a writer no
-/// frame names when it is not zero, so two seals of one tip differ.
 pub(super) async fn seal_marked(
     fixture: &Fixture,
     node: &Replica,
@@ -51,7 +42,6 @@ pub(super) async fn seal_marked(
     }
     SignedSeal::sign(statement, fixture.lineage.publisher()).unwrap()
 }
-/// Publishes `sealed` and moves `main` onto its continuation.
 pub(super) async fn publish_moving_main(
     fixture: &Fixture,
     node: &Replica,
@@ -78,8 +68,6 @@ fn log(fixture: &Fixture, tip: TipId) -> TipLog {
     }
 }
 
-/// Alice's line's first logs were dropped after their seals became final:
-/// her next seal still becomes final.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_seal_becomes_final_after_the_coordinator_dropped_its_lines_earlier_logs() {
     let fixture = Fixture::new(1).await;
@@ -128,11 +116,6 @@ async fn a_seal_becomes_final_after_the_coordinator_dropped_its_lines_earlier_lo
     );
 }
 
-/// Bob sealed genesis before the database was coordinated; alice ended
-/// genesis's log with her seal, which became final. Bob learns her seal but
-/// not its finality, and prefers his own by digest. Once the coordinator
-/// dropped genesis's log, bob's pass reports the stall instead of ending
-/// that log again with his seal, and her finality settles it.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_lagging_node_never_ends_a_dropped_log_again_with_a_losing_seal() {
     let fixture = Fixture::new(1).await;
@@ -198,11 +181,6 @@ async fn a_lagging_node_never_ends_a_dropped_log_again_with_a_losing_seal() {
     );
 }
 
-/// Bob sealed three tips of his line without a log before the database
-/// was coordinated; alice holds those seals but follows genesis, so no
-/// node of bob's line ends their logs. Once composed, alice ends genesis's
-/// log; a fourth seal of bob's then waits on the log of the line's next
-/// tip, and alice's pass reports that tip instead of leaving it silent.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_received_seal_no_node_of_its_line_can_confirm_raises_a_stall() {
     let fixture = Fixture::new(1).await;

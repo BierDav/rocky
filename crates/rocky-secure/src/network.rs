@@ -1,11 +1,3 @@
-//! Mutually authenticated sessions with per-frame and per-session byte
-//! limits. The [live link](link) handshake runs over any reliable ordered
-//! byte stream; every request runs on one of its channels. A peer is admitted
-//! by its credential chain and the revocation set, which the handshake
-//! exchanges.
-//!
-//! Each message family has its module, with its requests, the client calls
-//! that send them and the answers that serve them.
 use super::*;
 use p2panda_core::Signature;
 use rocky_core::{Commitment, ResourceScope, RowApplication};
@@ -51,26 +43,15 @@ use rows::RowMessage;
 pub use rows::{CatchUp, Pushed, ScopeSync};
 use tips::TipMessage;
 
-/// The stream a session runs over. The transport adds no security the
-/// session relies on.
 pub use rocky_core::net::SessionStream;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const WORKING_INTERVAL: Duration = Duration::from_secs(4);
 const REQUEST_LIMIT: Duration = Duration::from_secs(120);
 const IO_CHUNK: usize = 8 * 1024;
-/// The refusal of a peer the merged revocation set revokes.
-/// The most frame bytes one range page may ask for, and so the largest
-/// frame a replica can pull.
 pub(crate) const MAX_PAGE_BYTES: usize = MAX_SECURE_FRAME / 2;
 pub const PEER_REVOKED: &str = "the peer is revoked";
-/// The refusal of a side the merged revocation set revokes: it ends the
-/// session. See `Revoked`.
 pub const REVOKED: &str = "this device is revoked";
-/// The handshake's end on a side a statement revokes, carried by
-/// `Error::Application`: the statement, which the peer sent or the replica
-/// held. The replica does not keep a statement that revokes itself; its
-/// owner records it.
 #[derive(Debug)]
 pub struct Revoked(pub Box<SignedRevocation>);
 impl std::fmt::Display for Revoked {
@@ -79,31 +60,21 @@ impl std::fmt::Display for Revoked {
     }
 }
 impl std::error::Error for Revoked {}
-/// Every failed proof of the peer's key, another handshake version included.
 const AUTHENTICATION_FAILED: &str = "link authentication failed";
-/// The version of a pinned contact reference's proof.
 
 #[derive(Serialize, Deserialize)]
 struct Hello {
     version: u32,
     node: PublicKey,
     challenge: [u8; 32],
-    /// The tip the sender follows; its chain names none.
     tip: rocky_core::TipId,
     credentials: CredentialChain,
     exchange: [u8; 32],
-    /// The sender's wall clock in microseconds, so each side learns the
-    /// other's offset.
     clock: u64,
 }
-/// The label both sides sign the two hellos under. It carries the version,
-/// so every other session is refused.
 fn session_label(version: u32) -> String {
     format!("rocky.link.v{version}")
 }
-/// What a session signs of each message: its binding, which holds both
-/// hellos with their credential chains, the sequence and the message, each
-/// by digest. The signature hashes 32 bytes however large the message.
 fn frame_signing_bytes(
     binding: &Commitment,
     sequence: u64,
@@ -119,7 +90,6 @@ fn frame_signing_bytes(
         ),
     )
 }
-/// The session binding as each message's signature names it.
 fn frame_binding(binding: &[u8]) -> Commitment {
     rocky_core::commitment("rocky.native-frame-binding.v2", binding)
 }
@@ -130,7 +100,6 @@ struct SignedMessage {
     bytes: Vec<u8>,
     signature: Signature,
 }
-/// A request failed; the authenticated link remains usable.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RequestRefusal {
     NotPermitted,
@@ -174,7 +143,6 @@ impl RequestRefusal {
         }
     }
 }
-/// Every message of the session, by family.
 #[derive(Serialize, Deserialize)]
 enum Message {
     Refused { reason: RequestRefusal },
@@ -195,7 +163,6 @@ enum Message {
     Publication(PublicationMessage),
 }
 impl Message {
-    /// The family's name in diagnostics.
     fn family(&self) -> &'static str {
         match self {
             Self::Refused { .. } => "refusal",
@@ -250,17 +217,12 @@ families!(
     Placements(PlacementMessage),
 );
 
-/// Which side of the handshake this is: the dialer sends its hello first.
-/// The acceptor answers only once the initiator's chain verified, so an
-/// outsider is shown no chain.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Side {
     Initiator,
     Acceptor,
 }
 
-/// Session signatures bind fresh mutual challenges, credentials and frame sequence.
-/// Confidentiality is provided by encrypted payloads; routing and credentials are visible.
 enum SessionIo {
     Native(Box<dyn SessionStream>),
     Channel(Box<link::channels::Io>),
@@ -282,11 +244,9 @@ pub struct NativeSession {
     local: PrivateKey,
     peer: PublicKey,
     credentials: CredentialChain,
-    /// `credentials` with its digest, as the replica records it.
     peer_chain: crate::wire::Chain,
     chains: ChainTable,
     escrow: EscrowTable,
-    /// The encoded start of every message's signed bytes.
     signing: Commitment,
     binding: Commitment,
     proved: std::collections::BTreeSet<ResourceScope>,
@@ -299,19 +259,11 @@ pub struct NativeSession {
     sent: u64,
     received: u64,
     remaining: usize,
-    /// The session's span; each request it makes is a child.
     span: tracing::Span,
-    /// The request awaiting its answer.
     request: Option<trace::Request>,
-    /// Set while this side answers a request.
     serving: bool,
 }
 impl NativeSession {
-    /// The initiator's hello, then the acceptor's once it verified the
-    /// initiator's chain, then both signatures; the initiator then verifies
-    /// the acceptor's chain. Both exchange the revocation statements the
-    /// other lacks and check the merged set last. Returns the session and
-    /// the peer's wall clock less this device's, in microseconds.
     async fn handshake<A: RowApplication>(
         mut stream: Box<dyn SessionStream>,
         replica: &EncryptedReplica<A>,
@@ -440,8 +392,6 @@ impl NativeSession {
     pub fn peer(&self) -> PublicKey {
         self.peer
     }
-    /// Serves until the peer ends the channel, then ends this side too, so
-    /// a peer awaiting `close` returns.
     #[cfg(test)]
     pub(crate) async fn serve_to_end<A: RowApplication>(
         &mut self,
@@ -453,14 +403,11 @@ impl NativeSession {
         }
         served
     }
-    /// The same session with a smaller byte budget.
     #[cfg(test)]
     pub(crate) fn with_budget(mut self, bytes: usize) -> Self {
         self.remaining = self.remaining.min(bytes);
         self
     }
-    /// Ends the session: the peer reads the end of the stream after the
-    /// last message. Transports that reset unfinished streams need this.
     pub async fn close(mut self) -> Result<(), Error> {
         match &mut self.stream {
             SessionIo::Channel(channel) => channel.close().await,
@@ -623,7 +570,6 @@ impl NativeSession {
         }
         Ok(message)
     }
-    /// The peer's answer; the chains it carries first join the table.
     async fn answered(&mut self) -> Result<Message, Error> {
         let deadline = self.request.as_ref().map_or_else(
             || rocky_platform::time::Instant::now() + REQUEST_LIMIT,
@@ -642,8 +588,6 @@ impl NativeSession {
             }
         }
     }
-    /// The next request; the requester may be applying its previous answer
-    /// before asking again.
     async fn answered_request(&mut self) -> Result<Message, Error> {
         self.answered_with_idle(true).await
     }
@@ -667,20 +611,16 @@ impl NativeSession {
             }
         }
     }
-    /// The next message, which must belong to family `T`.
     async fn reply<T: TryFrom<Message, Error = Error>>(&mut self) -> Result<T, Error> {
         self.answered().await?.try_into()
     }
-    /// Fails with `refusal` unless the peer acknowledges.
     async fn acknowledged(&mut self, refusal: &str) -> Result<(), Error> {
         match self.answered().await? {
             Message::Acknowledged => Ok(()),
             _ => Err(denied(refusal)),
         }
     }
-    /// Whether the budget may not cover another exchange of `quota` bytes
-    /// each way. Both peers spend what crosses the session.
-    fn low(&self, quota: usize) -> bool {
+    fn budget_low(&self, quota: usize) -> bool {
         self.remaining < 2 * quota.min(MAX_SECURE_FRAME) + 64 * 1024
     }
     fn spend(&mut self, bytes: usize) -> Result<(), Error> {
@@ -690,8 +630,6 @@ impl NativeSession {
             .ok_or_else(|| denied("native session byte budget exhausted"))?;
         Ok(())
     }
-    /// Serves requests until the peer ends the session. A peer that closes
-    /// the stream between requests ends it cleanly.
     pub async fn serve<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -708,8 +646,6 @@ impl NativeSession {
             }
         }
     }
-    /// Serve one authenticated pull or acknowledgment; callers own accept-loop shutdown.
-    /// Chains a push carries first are not a request of their own.
     pub async fn serve_once<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -798,8 +734,6 @@ impl NativeSession {
         }
     }
 }
-/// A full chunk earns another deadline; single-byte trickles cannot hold a
-/// frame open.
 async fn read_progress(
     stream: &mut (impl AsyncRead + Unpin),
     bytes: &mut [u8],
@@ -813,10 +747,6 @@ async fn read_progress(
     }
     Ok(())
 }
-/// The offset of the peer's clock. A hello's clock is read before it is
-/// sent, the other's on receipt: the offset is off by the handshake's transit
-/// and waits, bounded by its timeouts and negligible against
-/// `MAX_CLOCK_AHEAD`.
 fn clock_offset(peer_clock: u64, received: u64) -> Result<i64, Error> {
     i64::try_from(i128::from(peer_clock) - i128::from(received))
         .map_err(|_| denied("link peer clock"))
@@ -846,10 +776,6 @@ async fn write_frame(stream: &mut impl SessionStream, bytes: &[u8]) -> Result<()
         .map_err(|_| expired())?
         .map_err(Error::Io)
 }
-/// The peer's next admission frame. The peer may be working before it
-/// answers, as a browser replica busy with storage is, so the wait for a
-/// frame's first byte has no deadline of its own: `ADMISSION_LIMIT` bounds
-/// the whole admission. A started frame must keep making chunk progress.
 async fn read_frame(stream: &mut impl SessionStream) -> Result<Vec<u8>, Error> {
     let expired = || link::timed_out("native read timeout");
     let mut header = [0; 4];

@@ -1,11 +1,9 @@
-//! Keyless custody of sealed finalized checkpoint pages.
 use super::*;
 
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_archive(scope BLOB NOT NULL,checkpoint BLOB NOT NULL,sequence INTEGER NOT NULL,signed BLOB NOT NULL,cursor BLOB,complete INTEGER NOT NULL,PRIMARY KEY(scope,checkpoint)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_archive_pages(scope BLOB NOT NULL,checkpoint BLOB NOT NULL,cursor BLOB NOT NULL,page BLOB NOT NULL,vouch BLOB NOT NULL,PRIMARY KEY(scope,checkpoint,cursor)) WITHOUT ROWID",
 ];
-/// An authorized reader authenticates opaque pages for keyless storage.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct CheckpointVouch {
     signer: PublicKey,

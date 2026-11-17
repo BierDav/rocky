@@ -1,9 +1,6 @@
-//! Checkpoint offers and paged imports: bootstrap and rebootstrap of a scope.
 use super::*;
 use rows::{CatchUp, ScopeSync};
 
-/// Bytes of one checkpoint page: the largest a frame holds, leaving room
-/// for the framing.
 pub(super) const CHECKPOINT_PAGE: usize = MAX_SECURE_FRAME - 8192;
 
 #[derive(Serialize, Deserialize)]
@@ -29,7 +26,6 @@ pub(super) enum CheckpointMessage {
     CheckpointOffer {
         scope: ResourceScope,
     },
-    /// The peer's checkpoint of a scope at a seal it keeps.
     SealOffer {
         scope: ResourceScope,
         seal: Commitment,
@@ -50,14 +46,10 @@ pub(super) enum CheckpointMessage {
     },
 }
 
-/// How pulling a seal's state from one peer ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SealPull {
-    /// This node holds the seal's state now.
     Held,
-    /// The peer keeps no state there for some scope.
     Unavailable,
-    /// The session's byte budget ran low; staged pages remain.
     Exhausted,
 }
 
@@ -98,7 +90,7 @@ impl NativeSession {
             return Ok(());
         }
         loop {
-            if self.low(MAX_SECURE_FRAME) {
+            if self.budget_low(MAX_SECURE_FRAME) {
                 return Ok(());
             }
             let page = replica
@@ -125,11 +117,6 @@ impl NativeSession {
             }
         }
     }
-    /// Pulls `seal`'s state from the peer for every held scope of the
-    /// followed domain that lacks it: the peer's base there, or a
-    /// checkpoint it signs of the seal it keeps. Scopes the peer cannot
-    /// serve are left to another peer. Nothing changes in the rows;
-    /// following a tip whose path passes the seal installs it.
     pub async fn pull_seal<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -206,15 +193,12 @@ impl NativeSession {
             SealPull::Held
         })
     }
-    /// Pulls from the peer every seal this replica wants. Returns false
-    /// once the session's budget runs low.
     pub async fn pull_wanted_seals<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
     ) -> Result<bool, Error> {
         self.pull_wanted_seals_for_scopes(replica, &[]).await
     }
-    /// Pulls wanted checkpoint state only for the selected request scopes.
     pub async fn pull_wanted_seals_for_scopes<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -231,8 +215,6 @@ impl NativeSession {
         replica.finish_seal_rebootstrap(domain).await?;
         Ok(true)
     }
-    /// Imports the peer's checkpoint of a scope and switches to it. An
-    /// interrupted import of the same checkpoint continues where it stopped.
     pub async fn rebootstrap<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -245,8 +227,6 @@ impl NativeSession {
                 denied("native session byte budget exhausted; continue on a new session")
             })
     }
-    /// Like `rebootstrap`, but returns `None` once the session's budget runs
-    /// low; the staged pages remain and a new session continues.
     async fn rebootstrap_within<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -260,22 +240,12 @@ impl NativeSession {
             .ok_or_else(|| denied("the peer offers no checkpoint"))?;
         self.import_within(replica, signed, quota).await
     }
-    /// Moves every held scope of the followed domain whose replay base left
-    /// the followed path, or was pruned at another cut, to a seal of the
-    /// path: it imports the peer's checkpoint when the graph lists it
-    /// there, else replays frames, from the peer when it pruned them and the
-    /// peer pruned none. A scope neither can rebuild waits. Returns false
-    /// once the session's budget runs low.
     pub async fn rebootstrap_at_seals<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
     ) -> Result<bool, Error> {
         self.rebootstrap_scopes_at_seals(replica, &[]).await
     }
-    /// Limits recovery to the selected scopes; an empty selection means every
-    /// scope. Placements may show positions a scope seemed to miss. A peer on
-    /// another tip or outside a scope leaves its recovery to another peer, and
-    /// a failing scope leaves the others to recover.
     pub async fn rebootstrap_scopes_at_seals<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -324,8 +294,6 @@ impl NativeSession {
         replica.finish_seal_rebootstrap(domain).await?;
         first_failure.map_or(Ok(true), Err)
     }
-    /// One scope of `rebootstrap_scopes_at_seals`; false once the session's
-    /// budget runs low.
     async fn rebootstrap_need<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -355,12 +323,6 @@ impl NativeSession {
         }
         Ok(true)
     }
-    /// Imports the peer's checkpoint of `scope` when the graph lists it at
-    /// a seal of the followed path that the scope cannot finalize from the
-    /// history it caught up: a revoked author's rows, for one, come only so.
-    /// Positions of other scopes come first as placements, because an import
-    /// would discard records that frames could still finalize. Returns false
-    /// once the session's budget runs low.
     pub async fn replace_with_listed<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -385,7 +347,6 @@ impl NativeSession {
             .await?
             .is_some())
     }
-    /// Whether the peer pruned no frame of `scope`.
     async fn retains_history<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -403,10 +364,6 @@ impl NativeSession {
         }
         Ok(page.logs.is_empty())
     }
-    /// The checkpoint the peer offers for each scope, in order, with its
-    /// stored rows; `None` where it offers none this replica may import,
-    /// including for an evicted scope until it is held again: what a
-    /// bootstrap plans with before it imports anything.
     pub async fn offered_rows<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -431,7 +388,6 @@ impl NativeSession {
         }
         Ok(offered)
     }
-    /// The peer's current checkpoint of `scope`, if it offers one.
     async fn checkpoint_offer(
         &mut self,
         scope: ResourceScope,
@@ -440,7 +396,6 @@ impl NativeSession {
             .await?;
         self.offered(scope).await
     }
-    /// The answer to an offer of `scope`.
     async fn offered(
         &mut self,
         scope: ResourceScope,
@@ -481,8 +436,6 @@ impl NativeSession {
         let report = replica.finish_rebootstrap(scope).await?;
         Ok(Some(report))
     }
-    /// Stages the pages of `checkpoint` after `after` until it is
-    /// complete. Returns false once the session's budget runs low.
     async fn fetch_pages<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -546,13 +499,11 @@ impl NativeSession {
         Ok(true)
     }
     fn checkpoint_window(&self, quota: usize) -> u8 {
-        if self.low(quota) {
+        if self.budget_low(quota) {
             return 0;
         }
         ((self.remaining.saturating_sub(64 * 1024) / (quota + 8192)).min(4)) as u8
     }
-    /// Serves until the session ends or an answer fails; returns how many
-    /// checkpoint pages the peer asked for.
     #[cfg(test)]
     pub(crate) async fn serve_counting_pages<A: RowApplication>(
         &mut self,
@@ -570,10 +521,6 @@ impl NativeSession {
         }
         pages
     }
-    /// Starts from a verified checkpoint even when the peer has retained history,
-    /// then catches up. Exhausted sessions leave durable import progress.
-    /// `None` when the peer offers no checkpoint, as a peer without
-    /// whole-scope read does not.
     pub async fn bootstrap_scope<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -584,7 +531,6 @@ impl NativeSession {
             .await
     }
 
-    /// Imports only the exact advised offer; a replaced offer is retried later.
     pub async fn bootstrap_advised_scope<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -592,7 +538,7 @@ impl NativeSession {
         quota: usize,
         advice: Option<&crate::StateAdvice>,
     ) -> Result<Option<ScopeSync>, Error> {
-        if self.low(MAX_SECURE_FRAME) {
+        if self.budget_low(MAX_SECURE_FRAME) {
             return Ok(Some(ScopeSync {
                 rebootstrap: None,
                 catch_up: CatchUp {
@@ -642,8 +588,6 @@ impl NativeSession {
             catch_up,
         }))
     }
-    /// Rebootstraps `scope` from the peer if this replica is behind its
-    /// pruned_prefix, then catches up.
     pub async fn sync_scope<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -658,7 +602,7 @@ impl NativeSession {
         let mut catch_up = self.catch_up(replica, scope, quota).await?;
         catch_up.exhausted |= held_exhausted;
         let mut rebootstrap = None;
-        if catch_up.behind && self.low(MAX_SECURE_FRAME) {
+        if catch_up.behind && self.budget_low(MAX_SECURE_FRAME) {
             catch_up.exhausted = true;
         } else if catch_up.behind {
             rebootstrap = self
@@ -751,7 +695,7 @@ impl NativeSession {
                         )
                         .await?;
                     after = page.next;
-                    let last = after.is_none() || index + 1 == window || self.low(quota);
+                    let last = after.is_none() || index + 1 == window || self.budget_low(quota);
                     self.send(CheckpointMessage::CheckpointRows {
                         page: Box::new(page),
                         last,
@@ -768,7 +712,6 @@ impl NativeSession {
     }
 }
 
-/// Where a just-begun import stands: a no-frames checkpoint stages complete.
 async fn staged_progress<A: RowApplication>(
     replica: &EncryptedReplica<A>,
     scope: ResourceScope,

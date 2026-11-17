@@ -1,21 +1,15 @@
-//! What this replica observes of its tips: the frontier a seal of the
-//! followed tip would name, progress since the last seal and peers' last
-//! reported frontiers. Peer holdings are unknown unless a peer reports them.
 use super::*;
 use rocky_core::Scope;
 use rocky_credentials::{AuthorMark, PeerId, TipGraph};
 
-/// One resource scope's per-author frontier, as a peer last reported it.
 #[derive(Clone, Debug)]
 pub struct PeerScopeFrontier {
     pub scope: ResourceScope,
     pub logs: Vec<FrontierLog>,
 }
-/// A peer of the domain: the tip its open link claims and its frontiers.
 #[derive(Clone, Debug)]
 pub struct TipDevice {
     pub node: PeerId,
-    /// Unknown without an open link.
     pub tip: Option<TipId>,
     pub frontiers: Vec<PeerScopeFrontier>,
 }
@@ -23,12 +17,9 @@ pub struct TipDevice {
 pub struct TipObservation {
     pub bookmark: Option<String>,
     pub tip: TipId,
-    /// Locally held operations visible in the followed tip beyond the seal
-    /// it continues from, or beyond its own seal once sealed.
     pub operations_since_seal: u64,
     pub devices: Vec<TipDevice>,
 }
-/// Which tips and seals a node follows or keeps; `None` is unknown.
 #[derive(Clone, Debug)]
 pub struct TipNodeObservation {
     pub node: PeerId,
@@ -37,28 +28,20 @@ pub struct TipNodeObservation {
     pub kept_seals: Option<Vec<Commitment>>,
 }
 
-/// Where a signer's writes of an earlier key epoch stand for members.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EarlierEpochWrites {
-    /// A seal and a served base at it cover each.
     Covered,
-    /// One lies past the followed tip's seal: a seal must follow.
     Unsealed,
-    /// One is sealed, but past the base its scope serves: a base at a
-    /// later seal must replace it.
     Unbased,
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Every locally held operation and void header of the domain. A scan
-    /// of headers, never of rows; explicit developer calls only.
     pub(super) async fn domain_headers(
         &self,
         scope: Scope,
     ) -> Result<Vec<headers::ScannedHeader>, Error> {
         self.domain_headers_from(scope, true).await
     }
-    /// `domain_headers`, without operations still pending unless `pending`.
     async fn domain_headers_from(
         &self,
         scope: Scope,
@@ -103,9 +86,6 @@ impl<A: RowApplication> Inner<A> {
             self.workspace.tip,
         )
     }
-    /// The seal frontier from one unpaged header scan, for the transitions
-    /// that act on it in the same acquisition: partition creation and tip
-    /// statement admission.
     pub(crate) async fn seal_frontier(
         &self,
         scope: Scope,
@@ -122,7 +102,6 @@ impl<A: RowApplication> Inner<A> {
         self.fold_marks(&graph, &mut marks, headers)?;
         Ok(into_marks(marks))
     }
-    /// A close seal needs retained history: pruned logs have no author frontier.
     async fn refuse_pruned_close(&self, scope: Scope) -> Result<(), Error> {
         for record in rows(&self.conn, "SELECT id,scope FROM secure_scope_state").await? {
             let [SqlValue::Integer(id), SqlValue::Blob(bytes)] = record.as_slice() else {
@@ -172,7 +151,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// The frontier a seal of the followed tip names now.
     fn sealed_baseline(&self, graph: &TipGraph) -> Result<Vec<AuthorMark>, Error> {
         Ok(match graph.seal(self.workspace.tip).map_err(credential)? {
             Some(seal) => seal.statement.frontier.clone(),
@@ -252,11 +230,6 @@ fn covers(frontier: &[AuthorMark], header: &Extensions, author: WriterId) -> boo
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// The global author marks of every locally held write visible in the
-    /// followed tip, at least its parent seal's. Pruned writes have no
-    /// known position and are left out: like writes the sealer never held,
-    /// they walk a `continue` seal as late frames. A `close` would hold
-    /// them where others applied them, so it refuses pruned history.
     pub async fn seal_frontier(&self, scope: Scope, close: bool) -> Result<Vec<AuthorMark>, Error> {
         {
             let inner = self.inner.lock(crate::replica::Class::Background).await;
@@ -280,11 +253,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         )
         .await
     }
-    /// Where writes visible in the followed tip, under an earlier key epoch
-    /// than their scope's current one, stand: members given only the
-    /// current epoch get their rows with a checkpoint at a later seal, never
-    /// by opening the frame. Scans only after such a frame applied or the
-    /// followed tip moved, and again until they are covered.
     pub async fn earlier_epoch_writes(&self, scope: Scope) -> Result<EarlierEpochWrites, Error> {
         if !self.earlier_epoch_due().await {
             return Ok(EarlierEpochWrites::Covered);
@@ -319,7 +287,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await?;
         Ok(found)
     }
-    /// Whether `unsealed_earlier_epochs` would scan.
     pub async fn earlier_epoch_due(&self) -> bool {
         self.inner
             .lock(crate::replica::Class::Background)
@@ -338,7 +305,6 @@ impl<A: RowApplication> Inner<A> {
 struct EpochScan {
     graph: Arc<TipGraph>,
     sealed: Vec<AuthorMark>,
-    /// The frontier of the seal each served base sits at.
     bases: BTreeMap<ResourceScope, Option<Vec<AuthorMark>>>,
     found: EarlierEpochWrites,
 }
@@ -428,8 +394,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         )
         .await
     }
-    /// This node's holdings, with the seals it keeps, and the tips peers'
-    /// open links claim; peers report no holdings.
     pub async fn tip_nodes(&self, scope: Scope) -> Result<Vec<TipNodeObservation>, Error> {
         self.fold_headers(
             scope,
@@ -471,8 +435,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         )
         .await
     }
-    /// Whether the followed bookmark's line lacks a registered node, so
-    /// writes wait for `register_line_node`.
     pub async fn line_node_needed(&self) -> bool {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.workspace.followed.is_some() && inner.node_author.is_none()

@@ -1,4 +1,3 @@
-//! Page origins share manifests and binding digests without changing their commitments.
 use super::*;
 use serde_bytes::{ByteArray, ByteBuf};
 

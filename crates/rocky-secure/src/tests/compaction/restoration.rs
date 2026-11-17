@@ -1,4 +1,3 @@
-//! Restoration uses exact original frames, independently of target projection.
 use super::*;
 use crate::storage::rows;
 mod fixture;

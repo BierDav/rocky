@@ -1,27 +1,16 @@
-//! Replayed tables keep no row records: their frames are their history, so
-//! a rebuild empties them and replays every visible member again.
 use super::*;
 use rocky_credentials::SignedSeal;
 
-/// Own outcomes kept after their records left, newest first; older ones
-/// read as unknown.
 pub(in crate::replica) const KEPT_OUTCOMES: i64 = 4096;
 
-/// What `rederive_replayed` did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::replica) enum Rederived {
-    /// No clear left rows to derive again.
     Unmarked,
-    /// The domain's replayed rows were derived again.
     Done,
-    /// A marked scope still needs something first.
     Waiting(&'static str),
-    /// A rebuild of the same inputs left a foreign key violated; it is not
-    /// tried again until they change.
     Stuck(String),
 }
 impl Rederived {
-    /// Why seal finalization and compaction wait, if they do.
     pub(in crate::replica) fn waits(&self) -> Option<String> {
         match self {
             Self::Unmarked | Self::Done => None,
@@ -37,7 +26,6 @@ impl Rederived {
 
 #[cfg(test)]
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Marks `scope` as a clear that reached other scopes does.
     pub(crate) async fn mark_rederive_for_test(&self, scope: ResourceScope) -> Result<(), Error> {
         let mut inner = self.inner.lock(Class::Background).await;
         let id = inner.find_scope_id(scope).await?.ok_or(Error::Closed)?;
@@ -51,21 +39,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Forgets replayed scope `scope`'s replay, inside the caller's
-    /// transaction: its rows (its partition's, or the whole unpartitioned
-    /// table) and where its members stood. Outcomes of members this node
-    /// authored stay readable, with the finality they had.
-    ///
-    /// SQLite runs delete actions inside the transaction and cannot switch
-    /// foreign keys off there, so clearing a parent can change rows of other
-    /// scopes. Putting them back as they stood would not match a replica
-    /// that never cleared: the parent's refill may delete, recreate or rekey
-    /// it, and an evicted parent leaves its children as a replica that never
-    /// held it replays them. When the clear changed any row outside the
-    /// scope, the scope is marked: once nothing it needs waits,
-    /// `rederive_replayed` rebuilds the domain's replayed rows from bases and
-    /// frames in canonical order, as a fresh replica holding the same scopes
-    /// computes them. Seals do not finalize meanwhile.
     pub(in crate::replica) async fn clear_replayed(
         &mut self,
         scope: ResourceScope,
@@ -107,7 +80,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// A reset can retain canonical seal images without applied frames or a base.
     pub(in crate::replica) async fn holds_replayed_rows(
         &self,
         scope: ResourceScope,
@@ -136,9 +108,6 @@ impl<A: RowApplication> Inner<A> {
             _ => Err(Error::Corrupt("replayed row count".into())),
         }
     }
-    /// Moves the records of scope `id`'s members this node authored to
-    /// `secure_kept_outcomes`, keeping what a base decided for a member,
-    /// and keeps only the newest `KEPT_OUTCOMES`.
     async fn keep_outcomes(&self, id: i64) -> Result<(), Error> {
         let Some(author) = self.node_author.as_ref().map(|author| author.writer) else {
             return Ok(());
@@ -151,7 +120,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         self.prune_kept_outcomes(KEPT_OUTCOMES).await
     }
-    /// Keeps the newest `limit` kept outcomes.
     pub(crate) async fn prune_kept_outcomes(&self, limit: i64) -> Result<(), Error> {
         self.conn
             .execute(
@@ -161,8 +129,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// The scope's replayed table and the condition selecting its rows;
-    /// none for a partition whose tuple this replica never learned.
     fn scope_rows(
         &self,
         scope: ResourceScope,
@@ -189,18 +155,6 @@ impl<A: RowApplication> Inner<A> {
         let values = super::super::partition::partition_values(schema, logical, tuple)?;
         Ok(Some((logical.sql_name.clone(), condition, values)))
     }
-    /// Inside the caller's transaction, rebuilds the replayed rows of the
-    /// followed domain from bases and frames once no scope a clear marked
-    /// still waits: none needs a seal rebootstrap, holds pending frames or
-    /// is being evicted, and no direct import other than `importing` fills
-    /// one.
-    ///
-    /// The rebuild is everything canonical replay derives from what this
-    /// device holds, so it equals a fresh replica holding the same scopes:
-    /// a member that references a row of a scope not held drops, as there.
-    /// Only a restored base row whose parent the rebuild lacks can leave a
-    /// foreign key violated, a state no fresh replica commits either; then
-    /// the rebuild rolls back and is stuck until its inputs change.
     pub(in crate::replica) async fn rederive_replayed(
         &self,
         importing: Option<ResourceScope>,
@@ -328,11 +282,6 @@ impl<A: RowApplication> Inner<A> {
             }
         }
     }
-    /// Derives the domain's replayed rows again if a clear left them
-    /// waiting, in a transaction of its own. Callers hold the replica as
-    /// background work, so like a rewind it starts only when no interactive
-    /// waiter is registered. Returns whether it rebuilt, and why seal
-    /// finalization and compaction of `domain` wait, if they do.
     pub(in crate::replica) async fn retry_rederive(
         &mut self,
         domain: rocky_core::Scope,
@@ -373,8 +322,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok((result == Rederived::Done, result.waits()))
     }
-    /// Why seal finalization of `domain` waits for rows to be derived
-    /// again, without trying: a diagnostic for status reads.
     pub(in crate::replica) async fn rederive_waits(
         &self,
         domain: rocky_core::Scope,
@@ -398,9 +345,6 @@ impl<A: RowApplication> Inner<A> {
         }
         .waits())
     }
-    /// What a rebuild derives from: applied and pending frames, bases,
-    /// finalized seals, holdings and the followed tip. A stuck rebuild is
-    /// tried again only once one of them changed.
     async fn rederive_inputs(&self) -> Result<Vec<u8>, Error> {
         let mut bytes = values_blob(
             rows(
@@ -414,8 +358,6 @@ impl<A: RowApplication> Inner<A> {
         bytes.extend_from_slice(&self.workspace.tip.0);
         Ok(rocky_core::commitment("rocky.rederive.inputs.v1", &bytes).to_vec())
     }
-    /// A foreign key of the replayed tables that does not hold, named by
-    /// child and parent table.
     async fn replayed_violation_any(&self) -> Result<Option<String>, Error> {
         let Some(typed) = self.workspace.typed.as_ref() else {
             return Ok(None);
@@ -445,8 +387,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(None)
     }
-    /// Deletes kept outcomes whose member has a live record again, of scope
-    /// `id` or of every scope.
     pub(in crate::replica) async fn prune_shadowed_outcomes(
         &self,
         id: Option<i64>,
@@ -464,22 +404,10 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    /// Rebuilds every replayed table from its frames inside the caller's
-    /// transaction: the tables empty and each visible applied intent member
-    /// replays again in `(era, stamp)` order, admitted as it was recorded.
-    /// A member's era is one below the first finalized seal whose bound
-    /// covers it, else the open era; members those bounds cover end sealed
-    /// again.
     pub(in crate::replica) async fn replay_from_frames(&self, time: u64) -> Result<(), Error> {
         self.replay_from(time, None).await
     }
 
-    /// `replay_from_frames`, each scope starting from the newest rows the
-    /// followed path passes that it holds, so that no member a seal covers
-    /// replays under a later schema: kept seal `kept`'s rows when given,
-    /// which every table returns to, else the rows taken at a finalized
-    /// seal, else its replay base. Members the start covers keep their
-    /// record; the rest replay.
     pub(in crate::replica) async fn replay_from(
         &self,
         time: u64,
@@ -650,13 +578,9 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    /// The newest rows on `path` scope `id` holds: rows taken at a
-    /// finalized seal, or its replay base, else none.
     async fn replay_start(&self, id: i64, path: &[SignedSeal]) -> Result<Start, Error> {
         self.start_before(id, path, path.len()).await
     }
-    /// The start after `start` fails: the next older one, and after the
-    /// base every frame, which a pruned scope no longer holds.
     async fn older_start(
         &self,
         id: i64,
@@ -676,8 +600,6 @@ impl<A: RowApplication> Inner<A> {
             )),
         }
     }
-    /// Scope `id`'s replay base when its seal is on `path`: its index there
-    /// and the signed checkpoint, with the base's applied position.
     async fn path_base(
         &self,
         id: i64,
@@ -692,7 +614,6 @@ impl<A: RowApplication> Inner<A> {
             Some(((index, record.position), signed))
         }))
     }
-    /// The newest start at a seal of `path` before index `end`.
     async fn start_before(&self, id: i64, path: &[SignedSeal], end: usize) -> Result<Start, Error> {
         let base = self
             .path_base(id, path)
@@ -733,8 +654,6 @@ impl<A: RowApplication> Inner<A> {
             None => Start::default(),
         })
     }
-    /// Resets scope `id`'s replay ledger to where its replay starts: the
-    /// `based` marks and the births of the members it keeps.
     pub(in crate::replica) async fn reset_replay_ledger(
         &self,
         id: i64,
@@ -772,9 +691,6 @@ impl<A: RowApplication> Inner<A> {
         };
         self.replace_ledger(scope, ledger).await
     }
-    /// The members of scope `id` after `start` that the path shows, in
-    /// replay order, and those the start's seal covers; none when a
-    /// covered member has no record.
     async fn scan_members(
         &self,
         id: i64,
@@ -844,7 +760,6 @@ impl<A: RowApplication> Inner<A> {
     }
 }
 
-/// A member to replay: its order, scope, transaction and `(frame, index)`.
 type Member = (Order, i64, Commitment, (Hash, u16));
 
 struct ScannedMembers {
@@ -852,19 +767,13 @@ struct ScannedMembers {
     kept: BTreeSet<Hash>,
 }
 
-/// Where a replayed scope's rebuild starts: rows at a seal of the path and
-/// the last applied position below which nothing replays.
-/// Rows by row id with their images.
 type Images = Vec<(Commitment, Vec<u8>)>;
 
 #[derive(Default)]
 struct Start {
     floor: i64,
-    /// The seal the rows were taken at, when not the replay base's.
     seal: Option<(Commitment, SignedSeal)>,
     rows: Option<(TipId, Images)>,
-    /// The identity marks the replay base on the path signs.
     based: Vec<checkpoint::CoveredMark>,
-    /// The rows are the replay base: no older start exists.
     base: bool,
 }

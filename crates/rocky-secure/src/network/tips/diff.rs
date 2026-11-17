@@ -1,11 +1,6 @@
-//! Binary range digests identify the statements missing on either side.
 use super::*;
 
 impl NativeSession {
-    /// Fixed binary ranges give both sides the same subdivision even when
-    /// their sets differ. Dependencies can be in a later hash range, so the
-    /// whole outgoing diff is pushed and the final empty push admits the
-    /// union.
     pub(super) async fn reconcile_graph<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,

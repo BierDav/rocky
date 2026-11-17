@@ -1,4 +1,3 @@
-//! One owned successful parse, bound to the complete freshly selected blob.
 use super::*;
 
 const RAW_BYTES: usize = 32 * 1024;
@@ -90,8 +89,6 @@ impl<A: RowApplication> Inner<A> {
             memo.last.as_ref().map_or(0, |e| e.bytes.len()),
         )
     }
-    /// Keeps the memo's digest but changes its retained bytes, so the next
-    /// lookup must miss.
     #[cfg(test)]
     pub(crate) fn migration_syntax_mismatch(&self) {
         let mut memo = self

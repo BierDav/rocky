@@ -1,4 +1,3 @@
-//! Indexed seal cuts and projection differences.
 use super::*;
 
 pub(in crate::replica) async fn check_schema(conn: &ScopedConnection) -> Result<(), Error> {
@@ -45,7 +44,6 @@ pub(in crate::replica) async fn check_schema(conn: &ScopedConnection) -> Result<
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Clips affine log runs against the seal before looking up applied positions.
     pub(super) async fn indexed_seal_cut(
         &self,
         scope: ResourceScope,
@@ -138,7 +136,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Whether the scope stored as `id` holds a tombstone to drop.
     pub(super) async fn has_indexed_seal_drops(&self, id: i64) -> Result<bool, Error> {
         Ok(!collect_rows(
             self.conn

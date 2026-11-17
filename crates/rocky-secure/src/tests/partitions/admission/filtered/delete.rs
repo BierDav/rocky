@@ -1,4 +1,3 @@
-//! Deleting a business key stays within its concrete partition after an additive switch.
 use super::*;
 use crate::sql::SqlOptions;
 use rocky_core::{Affinity, Collation, ColumnClass, LogicalColumn, RowApplication};

@@ -1,9 +1,3 @@
-//! Which losing continuation's rows carry forward as late writes once the
-//! owner's settings name a coordinator: only those of a seal that lost its
-//! tip at that coordinator's log, where the log decided between seals no
-//! graph held yet. A loss graphs decided before the settings, which the log
-//! only confirmed afterwards, keeps its rows held on every replica, so a
-//! re-authored row is never duplicated.
 use super::declared::{coordinated_by, follow_main_uncomposed, receive_each};
 use super::dropped::{publish_moving_main, seal_marked};
 use super::*;
@@ -11,7 +5,6 @@ use crate::tests::compaction::sync;
 use crate::tests::generations::{identity_insert, select, session};
 use rocky_core::TipId;
 
-/// Inserts the item `key` titled `title` on `node`'s followed tip.
 async fn add(node: &Replica, key: &str, title: &str) {
     identity_insert(
         &session(node).await,
@@ -21,8 +14,6 @@ async fn add(node: &Replica, key: &str, title: &str) {
     .await
     .unwrap();
 }
-/// Frames `node` holds out of its view, and the held frames it keeps for
-/// them: the application sees neither as rows.
 async fn held(node: &Replica) -> (Vec<Vec<SqlValue>>, Vec<Vec<SqlValue>>) {
     let inner = node.inner.lock(crate::replica::Class::Background).await;
     (
@@ -43,7 +34,6 @@ fn counts(operations: i64, frames: i64) -> (Vec<Vec<SqlValue>>, Vec<Vec<SqlValue
         vec![vec![SqlValue::Integer(frames)]],
     )
 }
-/// Every key of `items` on `node`, in order.
 async fn keys(node: &Replica) -> Vec<Vec<SqlValue>> {
     select(node, "SELECT key FROM items ORDER BY key").await
 }
@@ -52,8 +42,6 @@ fn text(keys: &[&str]) -> Vec<Vec<SqlValue>> {
         .map(|key| vec![SqlValue::Text((*key).into())])
         .collect()
 }
-/// Shares tip statements and `items` frames both ways, and hands each
-/// device every frame the other authored, those it holds too.
 async fn exchange(fixture: &Fixture) {
     let (alice, bob) = (&fixture.alice, &fixture.bob);
     sync(&fixture.lineage, &alice.1, &bob.1, &bob.0).await;
@@ -69,8 +57,6 @@ async fn exchange(fixture: &Fixture) {
     }
 }
 
-/// A device that joins now: alice's statements and frames, then every
-/// frame bob authored.
 async fn joined_after(fixture: &Fixture, name: &str) -> Replica {
     let key = PrivateKey::new();
     let node = super::open(&fixture.lineage, &fixture.dir, name, &key).await;
@@ -92,12 +78,6 @@ async fn joined_after(fixture: &Fixture, name: &str) -> Replica {
     node
 }
 
-/// Before the database was coordinated, bob's seal of genesis lost to
-/// alice's by digest on both devices, and the row bob wrote after his seal
-/// is held on both. The owner then names a coordinator and alice's finality
-/// pass ends genesis's log with her seal, which every graph held first: the
-/// row stays held and out of every view, so re-authoring it duplicates
-/// nothing.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_loss_graphs_decided_before_the_settings_keeps_its_rows_held_after_them() {
     let fixture = Fixture::new(1).await;
@@ -162,21 +142,12 @@ async fn a_loss_graphs_decided_before_the_settings_keeps_its_rows_held_after_the
     }
 }
 
-/// What bob does between his losing seal and the row he writes after it.
 #[derive(Clone, Copy, PartialEq)]
 enum Between {
     Nothing,
-    /// Bob compacts at his losing seal, listing it as his base.
     Compacts,
-    /// A new key epoch of `items` reaches both devices: bob's row is
-    /// written under it.
     RotatesTheKey,
 }
-/// Bob seals genesis without a log before the settings name the
-/// coordinator and writes after it; alice's seal then ends genesis's log
-/// there, deciding the tip before any graph held either. Returns the
-/// fixture, bob's losing continuation and alice's winning seal, both
-/// devices having exchanged everything.
 async fn decided_loss(between: Between) -> (Fixture, TipId, rocky_credentials::SignedSeal) {
     let fixture = Fixture::new(1).await;
     follow_main_uncomposed(&fixture).await;
@@ -236,10 +207,6 @@ async fn decided_loss(between: Between) -> (Fixture, TipId, rocky_credentials::S
     (fixture, lost, winning)
 }
 
-/// Bob's row after his losing seal is a late write of genesis on both
-/// devices and held on neither, also after a later seal and on a device
-/// that joins after it. A revoked losing seal would carry nothing: the
-/// owner's revocation, not the coordinator's log, ended it.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_loss_the_named_coordinators_log_decided_carries_its_rows_to_the_winning_line() {
     let (fixture, lost, winning) = decided_loss(Between::Nothing).await;
@@ -286,10 +253,6 @@ async fn a_loss_the_named_coordinators_log_decided_carries_its_rows_to_the_winni
     }
 }
 
-/// Bob compacted at his losing seal before the coordinator decided
-/// genesis: his row still reaches alice as a late write. Bob's base left
-/// the path, so he waits for the rebootstrap any permitted peer serves,
-/// keeping every frame meanwhile.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_loss_decided_after_the_loser_compacted_at_it_still_carries_its_rows() {
     let (fixture, lost, _) = decided_loss(Between::Compacts).await;
@@ -326,8 +289,6 @@ async fn a_loss_decided_after_the_loser_compacted_at_it_still_carries_its_rows()
     );
 }
 
-/// A key epoch rotated between bob's losing seal and his row: the row,
-/// written under the new epoch, is carried like any other.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_loss_decided_across_a_key_rotation_carries_rows_of_the_new_epoch() {
     let (fixture, _, _) = decided_loss(Between::RotatesTheKey).await;

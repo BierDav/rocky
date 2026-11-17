@@ -1,13 +1,7 @@
-//! A seal whose frontier covers a member a replica still holds open: a
-//! transaction of several members whose other members' outcome records
-//! have not reached it. A base at that seal must still lead every importer
-//! to the rows replicas that replayed the frames reach at later seals.
 use super::super::generations::{identity_insert, session};
 use super::*;
 use crate::tests::exchange_graphs;
 
-/// Every frame `source` holds of `scope` that `target`, whose node key is
-/// `key`, lacks, in log order.
 async fn frames_of(
     lineage: &Lineage,
     source: &Replica,
@@ -45,7 +39,6 @@ async fn stored(replica: &Replica, sql: &str) -> Vec<Vec<SqlValue>> {
     crate::storage::rows(&inner.conn, sql).await.unwrap()
 }
 
-/// Makes `replica` a partial replica of `full` holding only `scope`.
 async fn partial(replica: &Replica, full: &Replica, scope: ResourceScope) {
     let (node, credentials) = {
         let inner = full.inner.lock(crate::replica::Class::Background).await;
@@ -67,13 +60,6 @@ async fn partial(replica: &Replica, full: &Replica, scope: ResourceScope) {
         .unwrap();
 }
 
-/// A commits `x` in `items` and `t` in `tags` as one transaction and the
-/// owner seals through both members, before A's outcome record. P holds
-/// only `items`, so `x` stays open there through the seal: its rows at the
-/// seal are undecided, so it writes no base there (one without `x` let an
-/// importer lose it for good). Q takes A's base, F replays every frame. At
-/// the next seal, which covers the record, P writes a base and R takes it;
-/// all hold the same items and drops.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_base_at_a_seal_that_left_a_member_open_converges_at_the_next_seal() {
     let lineage = Lineage::new();
@@ -203,7 +189,6 @@ async fn a_base_at_a_seal_that_left_a_member_open_converges_at_the_next_seal() {
     }
 }
 
-/// `source`'s replay base of `scope` as it offers it to `target`.
 async fn offer(
     lineage: &Lineage,
     source: &Replica,
@@ -222,7 +207,6 @@ async fn offer(
         .unwrap()
 }
 
-/// Sends `source`'s graph and its frames of `scope` that `target` lacks.
 async fn sync(
     lineage: &Lineage,
     source: &Replica,

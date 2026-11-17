@@ -1,14 +1,11 @@
 use super::*;
 
-/// The signing keys of a row's stamp writers.
 pub(super) type Authors = BTreeMap<WriterId, PublicKey>;
 
 impl<A: RowApplication> Inner<A> {
-    /// The signer of a stamp's writer: the writer is its node's key.
     pub(super) fn stamp_author(&self, author: WriterId) -> Result<PublicKey, Error> {
         writer_key(author)
     }
-    /// Refuses a stamp whose writer is not its signer.
     pub(super) fn keep_stamp_author(
         &self,
         author: WriterId,

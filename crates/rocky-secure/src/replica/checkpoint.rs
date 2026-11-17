@@ -1,4 +1,3 @@
-//! Signed checkpoints, pruning and rebootstrap of one encryption scope.
 mod archive;
 pub(crate) use archive::CheckpointVouch;
 #[cfg(test)]
@@ -28,7 +27,6 @@ pub(super) enum ReplayMode {
     Rows,
 }
 
-/// One bounded replay page, into a caller-owned fold and identity ledger.
 pub(super) struct ReplayRequest {
     pub scope: ResourceScope,
     pub id: i64,
@@ -81,42 +79,29 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS secure_ack_hash ON secure_ack(hash)",
 ];
 
-/// Shares the base rows of scope `?1` that equal their stored rows again,
-/// after a bulk rewrite of the stored rows copied them out.
 pub(super) const SHARE_BASE: &str = "UPDATE secure_checkpoint_base SET fields=NULL WHERE scope=?1 AND fields=(SELECT fields FROM secure_rows r WHERE r.scope=?1 AND r.row=secure_checkpoint_base.row)";
 
-/// The replay base. `fields` is NULL while the stored row holds the same
-/// record: a base row is kept once, and the stored row's change or removal
-/// first copies it here. Read and insert through `secure_checkpoint_rows`.
 const CHECKPOINT_BASE: &str = "CREATE TABLE IF NOT EXISTS secure_checkpoint_base(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB,PRIMARY KEY(scope,row)) WITHOUT ROWID";
 
-/// Walks applied positions before testing row membership, so LIMIT bounds the work.
 pub(crate) const ROW_REPLAY_SQL: &str = "SELECT a.position,o.header,o.body,o.status FROM secure_applied a LEFT JOIN secure_operations o ON o.hash=a.hash WHERE a.scope=?1 AND a.position>?2 AND a.position<=?3 AND EXISTS(SELECT 1 FROM secure_row_positions p JOIN secure_finalization_rows r ON r.scope=p.scope AND r.row=p.row WHERE p.position=a.position AND p.scope=a.scope) ORDER BY a.position LIMIT ?4";
 
-/// Applied operations replayed, or pruned, per bounded step.
 #[cfg(not(test))]
 pub(super) const STEP_OPERATIONS: usize = 64;
-/// Checkpoint rows installed, staged or streamed per bounded step.
 #[cfg(not(test))]
 pub(super) const STEP_ROWS: usize = 256;
-/// Small steps let tests cross every step boundary with little data.
 #[cfg(test)]
 pub(crate) const STEP_OPERATIONS: usize = 8;
-/// Small steps let tests cross every step boundary with little data.
 #[cfg(test)]
 pub(crate) const STEP_ROWS: usize = 16;
-/// Logs of one scope a checkpoint frontier may name.
 pub const MAX_CHECKPOINT_LOGS: usize = 256;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IdentityMark {
-    /// The creating writer; `signer` is its key.
     pub author: WriterId,
     pub signer: PublicKey,
     pub sequence: u64,
 }
 
-/// Covered maxima over all births and over the author's own births only.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CoveredMark {
@@ -142,7 +127,6 @@ impl CoveredMark {
     }
 }
 
-/// The applied tip of one author's log in a scope.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LogPosition {
     pub author: PublicKey,
@@ -151,45 +135,33 @@ pub struct LogPosition {
     #[serde(deserialize_with = "rocky_core::bounded_clock")]
     pub clock: u64,
 }
-/// A set bound by its size and an order-independent digest.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SetSummary {
     pub count: u64,
     pub digest: Commitment,
 }
 impl SetSummary {
-    /// The summary of no members.
     pub(super) const EMPTY: Self = Self {
         count: 0,
         digest: [0; 32],
     };
 }
-/// The moves of a replayed base: replayed rows never move.
 pub(super) const REPLAYED_MOVES: SetSummary = SetSummary::EMPTY;
-/// Recovery copies of the covered operations when the checkpoint was sealed.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CustodySummary {
-    /// Retained covered operations another node acknowledged holding.
     pub superseded: u64,
-    /// Retained covered operations nobody acknowledged: sole copies.
     pub sole: SetSummary,
 }
-/// Transactions `SealedOutcomes` lists at most: the newest by stamp.
 pub const MAX_SEALED_OUTCOMES: usize = 512;
-/// Bytes a listed violation name may have.
 pub const MAX_SEALED_VIOLATION: usize = 256;
-/// How a transaction a seal reached ended there.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum SealedOutcome {
-    /// Final at the seal, with the constraint, assertion or restriction it
-    /// violated, if any.
     Dropped {
         reason: rocky_core::replay::DropReason,
         violation: Option<String>,
     },
 }
-/// One listed transaction, by the stamp of its member in the scope.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SealedTransaction {
@@ -197,23 +169,13 @@ pub struct SealedTransaction {
     pub transaction: Commitment,
     pub outcome: SealedOutcome,
 }
-/// What the seal decided for the replayed scope's transactions, for a
-/// replica that takes its rows as a base without their frames. Every
-/// transaction it covers that is not listed applied, unless its stamp is at
-/// or before `horizon`. Replicas at one seal state the same list. Only a
-/// replica that decided every covered transaction of the scope and its
-/// linked scopes writes a base at a seal.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SealedOutcomes {
-    /// Every drop through the seal, the newest `MAX_SEALED_OUTCOMES` by
-    /// stamp, in stamp order.
     pub listed: Vec<SealedTransaction>,
-    /// The newest stamp left out to keep the bound.
     pub horizon: Option<Stamp>,
 }
 impl SealedOutcomes {
-    /// Refuses a list no replica produces.
     pub(super) fn check(&self) -> Result<(), &'static str> {
         if self.listed.len() > MAX_SEALED_OUTCOMES
             || self
@@ -244,8 +206,6 @@ impl SealedOutcomes {
         }
         Ok(())
     }
-    /// How a covered transaction of stamp `stamp` ended: `None` when the
-    /// list cannot tell.
     pub(in crate::replica) fn of(
         &self,
         stamp: &Stamp,
@@ -271,51 +231,35 @@ impl SealedOutcomes {
         }
     }
 }
-/// The current checkpoint statement format; every other one is refused.
 pub(crate) const CHECKPOINT_FORMAT: u32 = 20;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckpointStatement {
     pub format: u32,
-    /// The seal whose finalized state this is, in a domain with a tip graph;
-    /// its frontier bounds the covered frames. None for another cut.
     pub seal: Option<Commitment>,
     pub partition: Option<rocky_core::PartitionTuple>,
     pub identities: Vec<CoveredMark>,
-    /// Opaque move links, also committed by the corresponding materialized rows.
     pub moves: SetSummary,
     pub tip: rocky_core::TipId,
     pub schema: u32,
-    /// The digest of the revocations the signer held.
     pub revocations: Commitment,
     pub scope: ResourceScope,
     pub state: CheckpointState,
-    /// Length of the checkpoint chain of this scope, starting at 1.
     pub sequence: u64,
     pub previous: Option<Commitment>,
-    /// Applied tip of every log, ordered by author.
     pub frontier: Vec<LogPosition>,
     #[serde(deserialize_with = "rocky_core::bounded_clock")]
     pub clock: u64,
     pub operations: u64,
-    /// Stored rows, tombstones and creation identities included.
     pub rows: SetSummary,
     pub tombstones: u64,
-    /// Creation operations of the stored rows with their clocks.
     pub creations: SetSummary,
-    /// Mutation handles the signer retains.
     pub handles: SetSummary,
     pub custody: CustodySummary,
-    /// A replayed scope's drops and open transactions at the seal; empty
-    /// for other scopes.
     pub outcomes: SealedOutcomes,
 }
-/// How a checkpoint's state is held.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CheckpointState {
-    /// Rows sealed under this key epoch, transferred in pages.
     Keyed { key_epoch: rocky_core::KeyEpoch },
-    /// The scope's state at the seal holds no frame history at all,
-    /// inherited history included: no rows, pages or key epoch.
     NoFrames,
 }
 impl CheckpointStatement {
@@ -328,8 +272,6 @@ impl CheckpointStatement {
     pub fn no_frames(&self) -> bool {
         self.state == CheckpointState::NoFrames
     }
-    /// A no-frames statement's only shape: at a seal, with empty history,
-    /// identities, rows, moves and custody.
     fn canonical_no_frames(&self) -> Result<bool, Error> {
         let empty = Sets::new();
         Ok(self.seal.is_some()
@@ -432,7 +374,6 @@ impl SignedCheckpoint {
             &self.to_bytes()?,
         ))
     }
-    /// The signature and the frontier's canonical order.
     pub(crate) fn verify_signature(&self) -> Result<(), Error> {
         let statement = &self.statement;
         if statement.format != CHECKPOINT_FORMAT {
@@ -464,8 +405,6 @@ impl SignedCheckpoint {
         }
         Ok(())
     }
-    /// Bootstrap state needs a current whole-scope reader with a write grant,
-    /// under the held revocations.
     pub(super) fn verify_authority<A: RowApplication>(
         &self,
         inner: &Inner<A>,
@@ -511,26 +450,17 @@ impl SignedCheckpoint {
     }
 }
 
-/// When covered operations of a scope may be pruned. Local configuration.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RetentionPolicy {
-    /// Peers that must have acknowledged an operation before it is pruned.
     pub required: BTreeSet<rocky_credentials::PeerId>,
-    /// Peers declared behind the pruned_prefix: not waited for; they rebootstrap.
     pub behind: BTreeSet<rocky_credentials::PeerId>,
-    /// Other nodes that must hold a copy; at least one is always required.
     pub copies: usize,
-    /// Newest covered operations kept for peers that catch up without a checkpoint.
     pub window: usize,
 }
-/// Replica-wide bounds on retained operations. Not persisted.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetentionLimits {
-    /// Retained bytes at which authoring and receiving report backpressure.
     pub hard_bytes: usize,
-    /// Most recent mutation handles kept for retries after their operations
-    /// are pruned. An older handle is forgotten; its retry authors again.
     pub handles: usize,
 }
 impl Default for RetentionLimits {
@@ -543,23 +473,15 @@ impl Default for RetentionLimits {
 }
 #[derive(Clone, Debug)]
 pub struct CheckpointStatus {
-    /// The latest verified checkpoint.
     pub checkpoint: Option<SignedCheckpoint>,
-    /// Applied operations after the verified checkpoint.
     pub uncovered: u64,
-    /// Retained operations at or before it.
     pub covered: u64,
-    /// Admitted operations of the scope that are not applied.
     pub pending: u64,
-    /// Logs with pruned history and the last pruned sequence of each.
     pub pruned_prefix: Vec<(PublicKey, u64)>,
-    /// Retained header and body bytes of the whole replica.
     pub retained_bytes: u64,
-    /// The last failure of automatic maintenance.
     pub maintenance_error: Option<String>,
 }
 
-/// Fault points of the bounded maintenance steps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stage {
     Custody,
@@ -574,16 +496,13 @@ pub(crate) enum Stage {
     Import,
     Switch,
     Evict,
-    /// After a seal rebootstrap installed or refused pulled states.
     Settle,
 }
 
 const LANES: usize = 1024;
-/// LtHash16: an order-independent digest that elements can be added to and
-/// removed from. Each element expands to 1,024 lanes added modulo 2^16.
 #[derive(Clone, PartialEq, Eq)]
-pub(super) struct Lt(Vec<u16>);
-impl Lt {
+pub(super) struct LtHash16(Vec<u16>);
+impl LtHash16 {
     pub(super) fn new() -> Self {
         Self(vec![0; LANES])
     }
@@ -629,7 +548,6 @@ impl Lt {
     pub(super) fn digest(&self) -> Commitment {
         rocky_core::commitment("rocky.checkpoint-set.v1", &self.to_bytes())
     }
-    /// Adds every element of `other`: the digest of the union of disjoint sets.
     pub(super) fn merge(&mut self, other: &Self) {
         for (lane, value) in self.0.iter_mut().zip(&other.0) {
             *lane = lane.wrapping_add(*value);
@@ -640,23 +558,22 @@ pub(super) const ROW_LABEL: &str = "rocky.checkpoint-row.v2";
 pub(super) const CREATION_LABEL: &str = "rocky.checkpoint-creation.v1";
 pub(super) const HANDLE_LABEL: &str = "rocky.checkpoint-handle.v1";
 
-/// Stored rows of a scope and the creation operations behind them.
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct Sets {
     pub rows: u64,
     pub tombstones: u64,
-    pub digest: Lt,
+    pub digest: LtHash16,
     pub creations: u64,
-    pub creation_digest: Lt,
+    pub creation_digest: LtHash16,
 }
 impl Sets {
     pub(super) fn new() -> Self {
         Self {
             rows: 0,
             tombstones: 0,
-            digest: Lt::new(),
+            digest: LtHash16::new(),
             creations: 0,
-            creation_digest: Lt::new(),
+            creation_digest: LtHash16::new(),
         }
     }
     pub(super) fn to_bytes(&self) -> Vec<u8> {
@@ -681,11 +598,10 @@ impl Sets {
             rows: count(0),
             tombstones: count(1),
             creations: count(2),
-            digest: Lt::from_bytes(&bytes[24..24 + 2 * LANES])?,
-            creation_digest: Lt::from_bytes(&bytes[24 + 2 * LANES..])?,
+            digest: LtHash16::from_bytes(&bytes[24..24 + 2 * LANES])?,
+            creation_digest: LtHash16::from_bytes(&bytes[24 + 2 * LANES..])?,
         })
     }
-    /// Replaces one stored row record by another.
     pub(super) fn replace(
         &mut self,
         row: &Commitment,
@@ -698,7 +614,6 @@ impl Sets {
         self.replace_encoded(row, old, (new, decode::<Materialized>(new)?.deleted));
         Ok(())
     }
-    /// Canonical records and their already decoded tombstone flags.
     pub(super) fn replace_encoded(
         &mut self,
         row: &Commitment,
@@ -733,7 +648,6 @@ impl Sets {
         );
         Ok(())
     }
-    /// Removes one stored row record.
     pub(super) fn remove(&mut self, row: &Commitment, old: &[u8]) -> Result<(), Error> {
         self.digest
             .remove(ROW_LABEL, &[row.as_slice(), old].concat());
@@ -741,7 +655,6 @@ impl Sets {
         self.tombstones -= u64::from(decode::<Materialized>(old)?.deleted);
         Ok(())
     }
-    /// Adds the rows of `delta`, stored rows disjoint from these.
     pub(super) fn merge_rows(&mut self, delta: &Self) {
         self.rows += delta.rows;
         self.tombstones += delta.tombstones;
@@ -772,27 +685,22 @@ pub(super) fn handle_item(handle: &[u8], input: &[u8], hash: &[u8]) -> Vec<u8> {
     [handle, input, hash].concat()
 }
 
-/// A scope's replay base: through which applied position, its set state
-/// and statement.
 #[derive(Clone)]
 pub(super) struct Record {
     pub position: i64,
     pub sets: Sets,
     pub signed: Option<SignedCheckpoint>,
 }
-/// One author's log in a scope: its applied tip and pruned prefix.
 pub(super) struct Log {
     pub sequence: i64,
     pub hash: Hash,
     pub clock: u64,
     pub pruned_prefix: i64,
 }
-/// Which replay overlay a caller uses over the checkpoint rows.
 #[derive(Clone, Copy)]
 pub(super) enum Overlay {
     Build,
     Scratch,
-    /// The scratch rows over the stored rows, not the checkpoint rows.
     Rewind,
 }
 impl Overlay {
@@ -815,8 +723,6 @@ impl Overlay {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Filters the replay's view of a verified base, leaving its signed
-    /// bytes and summaries untouched. Unchanged schemas require no row scan.
     pub(super) async fn prime_path_base(
         &self,
         scope: ResourceScope,
@@ -964,7 +870,6 @@ impl<A: RowApplication> Inner<A> {
         self.cache_scope_id(blob, id);
         Ok(Some(id))
     }
-    /// The scope's number, assigned inside the caller's write transaction.
     pub(super) async fn scope_id(&self, scope: ResourceScope) -> Result<i64, Error> {
         if let Some(id) = self.find_scope_id(scope).await? {
             return Ok(id);
@@ -972,15 +877,14 @@ impl<A: RowApplication> Inner<A> {
         self.conn
             .execute(
                 "INSERT INTO secure_scope_state(scope,rows,tombstones,digest,applied) VALUES(?,0,0,?,0)",
-                [encode(&scope)?, Lt::new().to_bytes()],
+                [encode(&scope)?, LtHash16::new().to_bytes()],
             )
             .await?;
         self.find_scope_id(scope)
             .await?
             .ok_or_else(|| Error::Corrupt("scope state".into()))
     }
-    /// Live rows, tombstones and digest of a scope, and its applied operations.
-    pub(super) async fn scope_state(&self, id: i64) -> Result<(u64, u64, Lt, u64), Error> {
+    pub(super) async fn scope_state(&self, id: i64) -> Result<(u64, u64, LtHash16, u64), Error> {
         let mut result = self
             .conn
             .query(
@@ -995,7 +899,7 @@ impl<A: RowApplication> Inner<A> {
         Ok((
             row.get::<i64>(0)? as u64,
             row.get::<i64>(1)? as u64,
-            Lt::from_bytes(&row.get::<Vec<u8>>(2)?)?,
+            LtHash16::from_bytes(&row.get::<Vec<u8>>(2)?)?,
             row.get::<i64>(3)? as u64,
         ))
     }
@@ -1004,7 +908,7 @@ impl<A: RowApplication> Inner<A> {
         id: i64,
         rows: u64,
         tombstones: u64,
-        digest: &Lt,
+        digest: &LtHash16,
         applied: u64,
     ) -> Result<(), Error> {
         self.conn
@@ -1042,7 +946,6 @@ impl<A: RowApplication> Inner<A> {
             pruned_prefix: row.get::<i64>(3)?,
         }))
     }
-    /// Every log of a scope in author order; `pruned` keeps only logs with a pruned_prefix.
     pub(super) async fn logs(
         &self,
         scope: i64,
@@ -1099,7 +1002,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(result.next().await?.is_some())
     }
-    /// A pruned operation still known as applied: its scope and clock.
     pub(super) async fn stub(&self, hash: Hash) -> Result<Option<(i64, u64)>, Error> {
         let mut result = self
             .conn
@@ -1113,8 +1015,6 @@ impl<A: RowApplication> Inner<A> {
             None => None,
         })
     }
-    /// The clock of a stored row's creation: its stub once pruned, else
-    /// its retained operation's.
     pub(super) async fn creation_clock(&self, hash: Hash) -> Result<Option<u64>, Error> {
         if let Some((_, clock)) = self.stub(hash).await? {
             return Ok(Some(clock));
@@ -1158,7 +1058,6 @@ impl<A: RowApplication> Inner<A> {
         self.note_settled(hash);
         Ok(())
     }
-    /// Records an applied operation: its position and its log's new tip.
     pub(super) async fn note_applied(
         &self,
         scope: i64,
@@ -1187,7 +1086,6 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Retained operations and their header and body bytes.
     pub(super) async fn retained(&self) -> Result<(u64, u64), Error> {
         let record = rows(&self.conn, "SELECT records,bytes FROM secure_retained").await?;
         match record.first().map(Vec::as_slice) {
@@ -1197,7 +1095,7 @@ impl<A: RowApplication> Inner<A> {
             _ => Err(Error::Corrupt("retained history counters".into())),
         }
     }
-    pub(super) async fn handle_set(&self) -> Result<(u64, Lt), Error> {
+    pub(super) async fn handle_set(&self) -> Result<(u64, LtHash16), Error> {
         let mut result = self
             .conn
             .query("SELECT handles,handle_digest FROM secure_retained", ())
@@ -1208,10 +1106,9 @@ impl<A: RowApplication> Inner<A> {
             .ok_or_else(|| Error::Corrupt("retained history counters".into()))?;
         Ok((
             row.get::<i64>(0)? as u64,
-            Lt::from_bytes(&row.get::<Vec<u8>>(1)?)?,
+            LtHash16::from_bytes(&row.get::<Vec<u8>>(1)?)?,
         ))
     }
-    /// Stores a mutation handle and adds it to the retained handle set.
     pub(crate) async fn put_handle(
         &self,
         handle: &[u8],
@@ -1237,8 +1134,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Forgets up to `limit` of the oldest handles beyond `limits.handles`
-    /// whose operations are pruned. Handles of retained operations stay.
     pub(super) async fn forget_handles(&self, limit: usize) -> Result<(), Error> {
         let (count, mut digest) = self.handle_set().await?;
         let excess = count.saturating_sub(self.limits.handles as u64);
@@ -1288,7 +1183,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// The newest checkpoint record of a scope, or its newest verified one.
     pub(super) async fn checkpoint_record(
         &self,
         scope: i64,
@@ -1320,7 +1214,6 @@ impl<A: RowApplication> Inner<A> {
         });
         Ok(record)
     }
-    /// Decodes a stored statement once; maintenance reads it in every step.
     fn decoded_checkpoint(
         &self,
         scope: (i64, bool),
@@ -1339,8 +1232,6 @@ impl<A: RowApplication> Inner<A> {
         cache.insert(scope, (bytes, signed.clone()));
         Ok(signed)
     }
-    /// A stored checkpoint is used only while it still verifies: signature,
-    /// installed definition, scope and the row sets it was sealed over.
     pub(super) fn verify_record(
         &self,
         scope: ResourceScope,
@@ -1370,7 +1261,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(signed)
     }
-    /// The key of a scope this node may read in whole.
     pub(super) fn scope_key(
         &self,
         scope: ResourceScope,
@@ -1385,9 +1275,6 @@ impl<A: RowApplication> Inner<A> {
             .map(|key| (key.generation, key.key))
             .ok_or_else(|| denied("checkpoint needs the scope key"))
     }
-    /// One stored row record from an overlay, else from the checkpoint rows,
-    /// or the stored rows for a rewind. An empty overlay record marks a row
-    /// a finalized seal dropped or a kept seal did not have.
     pub(super) async fn replay_row(
         &self,
         overlay: Overlay,
@@ -1416,10 +1303,6 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(None)
     }
-    /// Replays applied operations with positions in `(after, through]` in
-    /// application order into `overlay`, at most `limit`, and folds every row
-    /// change into `sets`. Each operation opens with the key epoch that
-    /// sealed it. Returns the last position replayed.
     pub(super) async fn replay(
         &self,
         request: ReplayRequest,
@@ -1824,8 +1707,6 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Sets when covered operations of a scope may be pruned. Without a
-    /// policy nothing is pruned.
     pub async fn set_retention_policy(
         &self,
         scope: ResourceScope,
@@ -1860,7 +1741,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ok(())
         })
     }
-    /// The persisted pruning policy, if one was configured.
     pub async fn retention_policy(
         &self,
         scope: ResourceScope,
@@ -1871,14 +1751,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .retention_policy(scope)
             .await
     }
-    /// The retained-history bounds of this open replica.
     pub async fn retention_limits(&self) -> RetentionLimits {
         self.inner
             .lock(crate::replica::Class::Background)
             .await
             .limits
     }
-    /// Replaces the retained-history bounds of this open replica.
     pub async fn set_retention_limits(&self, limits: RetentionLimits) -> Result<(), Error> {
         if limits.hard_bytes == 0 {
             return Err(denied("invalid retention limits"));
@@ -1943,8 +1821,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .collect();
         Ok(status)
     }
-    /// The operation a mutation handle committed, also after it was pruned,
-    /// while the handle is inside `RetentionLimits::handles`.
     pub async fn lookup_mutation(&self, handle: Commitment) -> Result<Option<Hash>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let mut result = inner
@@ -1983,7 +1859,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await
             .stage_fault = Some((stage, skip));
     }
-    /// Exits the process inside the step's transaction instead of failing it.
     #[cfg(test)]
     #[cfg_attr(
         target_family = "wasm",
@@ -1999,4 +1874,102 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
-impl<A: RowApplication> Inner<A> {}
+#[cfg(test)]
+mod sealed_outcome_tests {
+    use super::*;
+    use rocky_core::replay::DropReason;
+
+    fn stamp(clock: u64) -> Stamp {
+        Stamp {
+            clock,
+            author: WriterId::from_bytes([1; 32]),
+            sequence: clock,
+        }
+    }
+    fn dropped(clock: u64, reason: DropReason, violation: Option<&str>) -> SealedTransaction {
+        SealedTransaction {
+            stamp: stamp(clock),
+            transaction: [clock as u8; 32],
+            outcome: SealedOutcome::Dropped {
+                reason,
+                violation: violation.map(str::to_owned),
+            },
+        }
+    }
+    fn full(from: u64) -> Vec<SealedTransaction> {
+        (from..from + MAX_SEALED_OUTCOMES as u64)
+            .map(|clock| dropped(clock, DropReason::Admission, None))
+            .collect()
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn sealed_outcomes_refuse_a_list_no_replica_produces() {
+        let valid = SealedOutcomes {
+            listed: vec![
+                dropped(1, DropReason::Constraint, Some("fk_owner")),
+                dropped(2, DropReason::Admission, None),
+            ],
+            horizon: None,
+        };
+        assert!(valid.check().is_ok());
+        let unordered = SealedOutcomes {
+            listed: vec![
+                dropped(2, DropReason::Admission, None),
+                dropped(1, DropReason::Admission, None),
+            ],
+            horizon: None,
+        };
+        assert!(unordered.check().is_err());
+        let horizon_below_the_bound = SealedOutcomes {
+            listed: vec![dropped(5, DropReason::Admission, None)],
+            horizon: Some(stamp(1)),
+        };
+        assert!(horizon_below_the_bound.check().is_err());
+        let full_with_horizon = SealedOutcomes {
+            listed: full(10),
+            horizon: Some(stamp(9)),
+        };
+        assert!(full_with_horizon.check().is_ok());
+        let horizon_past_the_list = SealedOutcomes {
+            listed: full(10),
+            horizon: Some(stamp(10)),
+        };
+        assert!(horizon_past_the_list.check().is_err());
+        let violation_without_a_constraint = SealedOutcomes {
+            listed: vec![dropped(1, DropReason::Admission, Some("fk_owner"))],
+            horizon: None,
+        };
+        assert!(violation_without_a_constraint.check().is_err());
+        let long_violation = SealedOutcomes {
+            listed: vec![dropped(
+                1,
+                DropReason::Restricted,
+                Some(&"v".repeat(MAX_SEALED_VIOLATION + 1)),
+            )],
+            horizon: None,
+        };
+        assert!(long_violation.check().is_err());
+        let too_many = SealedOutcomes {
+            listed: [full(10), vec![dropped(10_000, DropReason::Admission, None)]].concat(),
+            horizon: None,
+        };
+        assert!(too_many.check().is_err());
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn an_unlisted_covered_transaction_applied_unless_at_or_before_the_horizon() {
+        let outcomes = SealedOutcomes {
+            listed: full(10),
+            horizon: Some(stamp(5)),
+        };
+        let listed = &outcomes.listed[0];
+        assert_eq!(
+            outcomes.of(&listed.stamp, &listed.transaction),
+            Some(Some(&listed.outcome))
+        );
+        assert_eq!(outcomes.of(&listed.stamp, &[0; 32]), None);
+        assert_eq!(outcomes.of(&stamp(5), &[5; 32]), None);
+        assert_eq!(outcomes.of(&stamp(6), &[6; 32]), Some(None));
+        assert_eq!(outcomes.of(&stamp(10_000), &[0; 32]), Some(None));
+    }
+}

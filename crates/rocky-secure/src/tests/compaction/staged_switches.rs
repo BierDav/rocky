@@ -1,7 +1,5 @@
-//! A durable switch changes the audit transform, never whether history is audited.
 use super::*;
 
-/// `version`'s configuration under the domain root of generation 3.
 fn rooted(lineage: &Lineage, version: u32, key: &PrivateKey) -> crate::SecureConfig {
     let mut config = lineage.config(version, key);
     config.manifest = lineage.config(3, key).manifest;
@@ -259,7 +257,6 @@ async fn a_sideways_switch_audits_with_the_stored_target_definition() {
     );
 }
 
-/// Rows of the staged switch intent.
 async fn intents(a: &Replica) -> usize {
     crate::storage::rows(
         &a.inner.lock(crate::replica::Class::Background).await.conn,
@@ -277,7 +274,6 @@ async fn changes(a: &Replica) -> Vec<Vec<SqlValue>> {
     .await
     .unwrap()
 }
-/// Switches `a` to `tip` with `version`'s schema.
 async fn switch(
     lineage: &Lineage,
     a: &Replica,
@@ -296,9 +292,6 @@ async fn switch(
     )
     .await
 }
-/// A v3 replica with an item and a tag whose switch to the v4 target,
-/// which removes `tags`, stopped before its final transaction. Returns
-/// the replica, the source tip and the staged target.
 async fn interrupted(
     lineage: &Lineage,
     dir: &Scratch,
@@ -306,8 +299,6 @@ async fn interrupted(
 ) -> (Replica, TipId, TipId) {
     interrupted_offering(lineage, dir, key, true).await
 }
-/// [`interrupted`]; with `offered`, a peer was served both writes before
-/// the switch, so no unsent bundle is held.
 async fn interrupted_offering(
     lineage: &Lineage,
     dir: &Scratch,
@@ -339,7 +330,6 @@ async fn interrupted_offering(
     let target = a.pending_schema().await.unwrap().unwrap().tip;
     (a, source, target)
 }
-/// Serves `a`'s item and tag writes to a peer: they are no longer unsent.
 async fn offer(lineage: &Lineage, a: &Replica) {
     let peer = PrivateKey::new();
     let credentials = lineage.credentials(3, &peer);
@@ -363,7 +353,6 @@ async fn offer(lineage: &Lineage, a: &Replica) {
         assert_eq!(page.frames.len(), 1);
     }
 }
-/// The owner's `continue` seal of `tip` to `version`'s schema.
 fn continued(lineage: &Lineage, tip: TipId, version: u32) -> SignedSeal {
     SignedSeal::sign(
         SealStatement {
@@ -380,8 +369,6 @@ fn continued(lineage: &Lineage, tip: TipId, version: u32) -> SignedSeal {
     )
     .unwrap()
 }
-/// The source is installed again, its removed rows are back and nothing
-/// of the switch remains.
 async fn withdrawn(a: &Replica) {
     assert_eq!(intents(a).await, 0);
     assert!(a.projection_plan().await.unwrap().is_none());
@@ -552,7 +539,6 @@ async fn a_deleted_bookmark_withdraws_the_staged_switch_and_stays_at_the_source(
     a.audit(lineage.scope("tags")).await.unwrap();
 }
 
-/// The owner deletes `main`, which pointed at `target`.
 async fn delete_main(lineage: &Lineage, a: &Replica, target: TipId) {
     let deleted = TipStatement::Bookmark(
         SignedBookmarkMove::sign(

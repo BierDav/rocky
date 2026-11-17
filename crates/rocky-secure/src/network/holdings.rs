@@ -1,4 +1,3 @@
-//! Session-bound partition proofs and their wire contract.
 use super::*;
 use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit};
 use std::collections::BTreeSet;
@@ -143,8 +142,6 @@ impl NativeSession {
         Ok(())
     }
 
-    /// Proves named partitions before scope enumeration or a custom transfer.
-    /// Ordinary scoped client calls and frontier batches do this automatically.
     pub async fn prove_scopes<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
@@ -175,9 +172,6 @@ impl NativeSession {
         Ok(())
     }
 
-    /// A peer without a partition's key can refuse its proof without ending
-    /// recovery of other scopes. Holding metadata is disclosed only to a
-    /// server granted each scope.
     pub(super) async fn try_scoped_holding<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,

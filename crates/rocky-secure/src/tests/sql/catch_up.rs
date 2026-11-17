@@ -1,9 +1,7 @@
-//! A SQL writer beside a replica that receives a long catch-up.
 use super::*;
 use crate::network::link::Link;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Creates `rows` items, one SQL transaction each.
 async fn create(replica: &EncryptedReplica<TypedRows>, both: &[ResourceScope], rows: usize) {
     let session = sql(replica, both).await;
     for key in 1..=rows {
@@ -16,7 +14,6 @@ async fn create(replica: &EncryptedReplica<TypedRows>, both: &[ResourceScope], r
         .unwrap();
     }
 }
-/// Ticks every item, one SQL transaction each.
 async fn tick(replica: &EncryptedReplica<TypedRows>, both: &[ResourceScope], rows: usize) {
     let session = sql(replica, both).await;
     for key in 1..=rows {
@@ -30,8 +27,6 @@ async fn tick(replica: &EncryptedReplica<TypedRows>, both: &[ResourceScope], row
         assert_eq!(ticked.changes, 1);
     }
 }
-/// `source` serves one scope's catch-up to `target` over loopback TCP, on
-/// its own thread and runtime as a remote peer would.
 async fn pull(
     source: &EncryptedReplica<TypedRows>,
     target: &EncryptedReplica<TypedRows>,
@@ -133,12 +128,6 @@ async fn source_node_key(replica: &EncryptedReplica<TypedRows>) -> PublicKey {
         .public_key()
 }
 
-/// A creator authors `operations / 2` rows and an updater ticks each of
-/// them, so each update depends on another log's frame. The updater's log
-/// sorts first and arrives first: its frames wait until the creations they
-/// name arrive, the shape of a device catching up on two others' edits.
-/// The reader receives every operation while a SQL writer commits one row
-/// per transaction.
 async fn catch_up_beside_a_writer(operations: usize) -> usize {
     let t = Typed::new();
     let dir = Scratch::new().await;
@@ -219,12 +208,8 @@ async fn catch_up_beside_a_writer(operations: usize) -> usize {
     writes
 }
 
-/// Receive pages hold at most 32 frames; a write is queued directly after every
-/// second receipt, including while a pending apply runs.
 const RECEIPTS_PER_QUEUED_WRITE: usize = 2;
 
-/// Six receive pages of operations, enough to retain concurrent writes and
-/// cross-log dependencies.
 const SIX_RECEIVE_PAGES_OF_OPERATIONS: usize = 6 * 32;
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -232,14 +217,10 @@ async fn a_writer_commits_during_a_catch_up() {
     assert!(catch_up_beside_a_writer(SIX_RECEIVE_PAGES_OF_OPERATIONS).await > 0);
 }
 
-/// Lets each later receipt or open commit at most `transactions` apply
-/// transactions before the injected fault; `None` lifts the limit.
 fn limit_apply_transactions(transactions: Option<usize>) {
     crate::APPLY_BUDGET.with(|budget| budget.set(transactions));
 }
 
-/// A catch-up interrupted between two apply transactions, at any of them,
-/// resumes when the replica opens again; every operation applies once.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_interrupted_catch_up_resumes_and_applies_every_operation_once() {
     interrupted_catch_up(false).await;
@@ -372,8 +353,6 @@ async fn interrupted_catch_up(retry_receipt: bool) {
         "the eight operations take separate application transactions: {interruptions} interruptions"
     );
 }
-/// Regression: a SQL commit between every settle step restarted the pending
-/// pass, so a receive waiting for it never returned while writes continued.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn sql_commits_between_pending_steps_do_not_restart_the_pass() {
     let t = Typed::new();

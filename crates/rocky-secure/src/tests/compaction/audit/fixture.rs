@@ -58,8 +58,6 @@ pub(super) async fn singles(
     }
     reports
 }
-/// Every authoritative SQL table; scratch, SQLite allocation counters and
-/// the read epoch, which any committed change advances, are not evidence.
 pub(in crate::tests) async fn snapshot<A: rocky_core::RowApplication>(
     replica: &EncryptedReplica<A>,
 ) -> Vec<(String, Vec<Vec<SqlValue>>)> {

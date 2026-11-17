@@ -1,4 +1,3 @@
-//! Paged domain header scans: bounded per acquisition, restarted on change.
 use super::compaction::{follow_main, insert};
 use super::generations::Lineage;
 use super::*;

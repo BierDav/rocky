@@ -1,34 +1,23 @@
-//! The session's chain table. A frame header names its author's credential
-//! chain by digest; the session carries each distinct chain once, in a
-//! message of its own before the first page whose frames name it, and no
-//! later page repeats it. The table shares bytes, never authority: every
-//! frame's chain is verified as the frame is received.
 use super::*;
 use crate::wire::Chain;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Encoded chain bytes in one message; a single larger chain goes alone.
 const CARRIED_BYTES: usize = MAX_SECURE_FRAME / 2;
 
 #[derive(Serialize, Deserialize)]
 pub(super) enum ChainMessage {
-    /// Chains the frames of the next page name. It has no answer.
     Carry { chains: Vec<Chain> },
 }
 
-/// Lives one session: nothing of it is stored or offered to another.
 #[derive(Default)]
 pub(super) struct ChainTable {
     sent: BTreeSet<Commitment>,
     pub(super) received: BTreeMap<Commitment, Chain>,
-    /// Marks chains sent without sending them, as a faulty peer would.
     #[cfg(test)]
     pub(super) withhold: bool,
 }
 
 impl NativeSession {
-    /// Sends the chains of `frames` this session has not carried yet and
-    /// leaves the frames without them.
     pub(super) async fn carry_chains(
         &mut self,
         frames: &mut [EncryptedFrame],
@@ -69,17 +58,12 @@ impl NativeSession {
         }
         Ok(())
     }
-    /// Keeps the chains the peer carried; the session's byte budget bounds them.
     pub(super) fn learn_chains(&mut self, message: ChainMessage) {
         let ChainMessage::Carry { chains } = message;
         for chain in chains {
             self.chains.received.insert(chain.digest(), chain);
         }
     }
-    /// The frames whose chain this session carried, with it, and the number
-    /// of the others. Only the table supplies a chain; one sent inside a page
-    /// is ignored. The others are incomplete: they are neither received nor
-    /// acknowledged, so a later pass on another session sends them again.
     pub(super) fn complete_frames(
         &self,
         frames: Vec<EncryptedFrame>,
@@ -95,7 +79,6 @@ impl NativeSession {
         }
         Ok((complete, incomplete))
     }
-    /// Encoded bytes of the chains the peer carried on this session.
     pub fn carried_chain_bytes(&self) -> usize {
         self.chains
             .received

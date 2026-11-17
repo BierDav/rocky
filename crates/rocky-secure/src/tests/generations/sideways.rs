@@ -1,6 +1,3 @@
-//! Following another bookmark leaves each line's state and writes on it,
-//! whatever the two schemas; the target's state comes from its own path. A
-//! moved bookmark holds only what its new target does not see.
 use super::super::compaction::{bookmark, follow_main, scalar, seal, sync};
 use super::super::kept::at_seal;
 use super::*;
@@ -11,19 +8,13 @@ use rocky_credentials::{
     SignedTipOpening, TIP_OPENING_FORMAT, TipOpeningStatement,
 };
 
-/// How the switch back to `main` rebuilds the workspace.
 #[derive(Clone, Copy, Debug)]
 enum Rebuild {
-    /// From the seal the node keeps.
     Rewind,
-    /// From a replay base at the seal.
     Base,
-    /// From every frame.
     Replay,
 }
 
-/// Follows `name` and, when its target has another schema, switches to
-/// `version`'s.
 async fn follow(
     lineage: &Lineage,
     replica: &EncryptedReplica<TypedRows>,
@@ -60,7 +51,6 @@ async fn follow(
     assert!(replica.pending_schema().await.unwrap().is_none());
 }
 
-/// The owner opens `dev` with `version`'s schema on `seal`.
 fn open_dev(lineage: &Lineage, seal: Commitment, version: u32) -> Vec<TipStatement> {
     let opening = SignedTipOpening::sign(
         TipOpeningStatement {
@@ -110,7 +100,6 @@ async fn prepare(replica: &EncryptedReplica<TypedRows>, rebuild: Rebuild) {
         }
     }
 }
-/// Scopes switches rebuilt from kept rows so far.
 async fn rewound(replica: &EncryptedReplica<TypedRows>) -> usize {
     replica
         .inner
@@ -128,10 +117,6 @@ fn note_rows(rows: &[(&str, &str, Option<&str>)]) -> Vec<Vec<SqlValue>> {
         .collect()
 }
 
-/// `main` holds `note = 'old'` at a seal; `dev` opens there with
-/// `dev_version`'s schema. Alice's unsent `main` write, a late write on
-/// the common ancestor and her `dev` writes each stay on their own line
-/// across `main -> dev -> main`, and nothing is held or voided.
 async fn there_and_back(rebuild: Rebuild, dev_version: u32) {
     let lineage = Lineage::new();
     let dir = Scratch::new().await;
@@ -281,9 +266,6 @@ async fn following_a_branch_of_the_same_schema_and_back_behaves_the_same() {
     }
 }
 
-/// The owner moves `main` back from B, which removed `note`, to A: A's
-/// note returns, and Alice's unsent write at B, which A does not see, is
-/// withdrawn with the line.
 async fn rolled_back(rebuild: Rebuild, removing: bool) {
     let lineage = Lineage::new();
     let dir = Scratch::new().await;
@@ -380,8 +362,6 @@ async fn an_owner_rollback_within_one_schema_withdraws_the_same_writes() {
     }
 }
 
-/// A -> B (no `note`) -> C, whose schema is A's exactly: neither a kept
-/// seal at A nor any rebuild of C brings back a note written at A.
 async fn identical_revert(rebuild: Rebuild) {
     let lineage = Lineage::new();
     let dir = Scratch::new().await;
@@ -458,3 +438,130 @@ async fn a_schema_identical_to_one_before_a_removal_never_restores_its_values() 
 }
 
 mod admission;
+
+fn linked_children_first() -> Lineage {
+    let mut lineage = Lineage::new();
+    lineage.linked = true;
+    lineage.children_first = true;
+    lineage
+}
+async fn item_id(replica: &EncryptedReplica<TypedRows>, key: &str) -> SqlValue {
+    select(replica, &format!("SELECT id FROM items WHERE key='{key}'"))
+        .await
+        .remove(0)
+        .remove(0)
+}
+async fn tag_parents(replica: &EncryptedReplica<TypedRows>) -> Vec<Vec<SqlValue>> {
+    select(
+        replica,
+        "SELECT t.key,i.key,a.key FROM badges t LEFT JOIN items i ON i.id=t.item LEFT JOIN items a ON a.id=t.also ORDER BY t.key",
+    )
+    .await
+}
+async fn tagged_pair(
+    lineage: &Lineage,
+    dir: &Scratch,
+    rebuild: Rebuild,
+    badged: bool,
+) -> (
+    EncryptedReplica<TypedRows>,
+    (PrivateKey, PrivateKey),
+    Commitment,
+) {
+    let (identity, key) = (PrivateKey::new(), PrivateKey::new());
+    let replica = lineage
+        .open_certified(&dir.path().join("alice.db"), (&identity, &key), 3, None)
+        .await
+        .unwrap();
+    prepare(&replica, rebuild).await;
+    follow_main(lineage, &replica).await;
+    for key in ["0001", "0002"] {
+        identity_insert(
+            &session(&replica).await,
+            &format!("INSERT INTO items VALUES('{key}','title',NULL,NULL)"),
+            vec![],
+        )
+        .await
+        .unwrap();
+    }
+    if badged {
+        let (kept, nulled) = (
+            item_id(&replica, "0001").await,
+            item_id(&replica, "0002").await,
+        );
+        identity_insert(
+            &session(&replica).await,
+            "INSERT INTO badges(key,label,item,also) VALUES('t','l',?,?)",
+            vec![kept, nulled],
+        )
+        .await
+        .unwrap();
+    }
+    let first = seal(lineage, &replica).await.id().unwrap();
+    (replica, (identity, key), first)
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_rebuild_renames_every_old_table_before_creating_a_new_one_so_a_child_declared_first_keeps_its_new_parent()
+ {
+    let lineage = linked_children_first();
+    let dir = Scratch::new().await;
+    let (alice, (identity, key), first) = tagged_pair(&lineage, &dir, Rebuild::Base, false).await;
+    alice
+        .publish_tip_statements(&open_dev(&lineage, first, 2))
+        .await
+        .unwrap();
+    follow(&lineage, &alice, (&identity, &key), "dev", 2).await;
+    let parents = crate::storage::rows(
+        &alice
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .conn,
+        "SELECT \"table\" FROM pragma_foreign_key_list('badges')",
+    )
+    .await
+    .unwrap();
+    assert_eq!(parents, vec![vec![text("items")]; 2]);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_rewind_deletes_until_no_cascade_changes_a_row_so_a_child_set_null_earlier_is_restored() {
+    let lineage = linked_children_first();
+    let dir = Scratch::new().await;
+    let (alice, (identity, key), first) = tagged_pair(&lineage, &dir, Rebuild::Rewind, true).await;
+    alice
+        .publish_tip_statements(&open_dev(&lineage, first, 3))
+        .await
+        .unwrap();
+    follow(&lineage, &alice, (&identity, &key), "dev", 3).await;
+    let branch_node = PrivateKey::new();
+    alice
+        .register_line_node(crate::LineNode {
+            credentials: lineage.certified(3, &identity, &branch_node),
+            key: branch_node,
+        })
+        .await
+        .unwrap();
+    write(&alice, "UPDATE items SET title='dev' WHERE key='0002'").await;
+    alice.finalize_path(lineage.domain).await.unwrap();
+    assert_eq!(alice.kept_seals().await.unwrap(), [first]);
+    let before = rewound(&alice).await;
+    follow(&lineage, &alice, (&identity, &key), "main", 3).await;
+    assert!(
+        rewound(&alice).await > before,
+        "main restores from the kept seal"
+    );
+    assert_eq!(
+        tag_parents(&alice).await,
+        vec![vec![text("t"), text("0001"), text("0002")]],
+        "the badge whose also-column the rewound parent set to NULL is restored too"
+    );
+    assert_eq!(
+        select(&alice, TITLES).await,
+        vec![
+            vec![text("0001"), text("title")],
+            vec![text("0002"), text("title")]
+        ]
+    );
+}

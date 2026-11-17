@@ -153,7 +153,12 @@ mod archive {
             created,
             publisher: settings.publisher,
             scope,
-            manifest: HEXLOWER.encode(&settings.manifest()?.verify(settings.publisher)?.hash()),
+            manifest: HEXLOWER.encode(
+                &settings
+                    .manifest()?
+                    .verify_historic(settings.publisher)?
+                    .hash(),
+            ),
             node: node.public_key(),
             revision,
             files,
@@ -230,13 +235,13 @@ mod archive {
             return Err(Unsupported("backup identity version").into());
         }
         let identity: Settings = serde_json::from_value(record)?;
-        let manifest = identity.manifest()?.verify(inventory.publisher)?;
+        let manifest = identity.manifest()?.verify_historic(inventory.publisher)?;
         if identity.publisher != inventory.publisher
             || HEXLOWER.encode(&manifest.hash()) != inventory.manifest
         {
             return Err("the backup identity differs from its inventory".into());
         }
-        identity.credentials.provenance_with_families(
+        identity.credentials.historic_provenance_with_families(
             inventory.publisher,
             inventory.node,
             &identity.domain()?.families,

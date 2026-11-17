@@ -1,5 +1,3 @@
-//! Issuance: raw grants, the grant profiles built on them and what an
-//! identity with issuer authority signs.
 use crate::{
     Capability, CredentialChain, Endorsement, Error, Extended, Extension, IdentityProvider,
     MAX_CHAIN_LIFETIME, MAX_CREDENTIAL_DEPTH, PartitionGrant, PeerId, PrivateKey, PublicKey,
@@ -12,36 +10,26 @@ use rocky_core::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// One reader scope an issuer can grant: its name, scope and columns.
 #[derive(Clone, Debug)]
 pub struct Resource {
     pub name: String,
     pub scope: ResourceScope,
-    /// Each column's name and field commitment.
     pub columns: BTreeMap<String, Commitment>,
 }
 
-/// Most grants one capability holds.
 pub const MAX_GRANTS: usize = 64;
-/// The expiry of a root-signed trusted grant: none.
 pub const NEVER: u64 = u64::MAX;
 
-/// A raw grant: rights over one named reader scope, optionally limited to
-/// some of its columns. Any set is issuable, `Custody` included; the
-/// profiles below are functions producing these.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Grant {
     pub scope: String,
     #[serde(with = "named_rights")]
     pub rights: BTreeSet<Right>,
-    /// The columns the rights cover; every column when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub columns: Option<BTreeSet<String>>,
 }
 impl Grant {
-    /// The signed grant this names over `resources`. `PublishSchema` is no
-    /// collection right.
     pub fn resolve(&self, resources: &[Resource]) -> Result<ResourceGrant, Error> {
         let resource = resources
             .iter()
@@ -77,7 +65,6 @@ impl Grant {
             fields,
         })
     }
-    /// Resolves a profile before compaction; signed capabilities enforce the quota.
     pub fn resolve_all(
         grants: &[Grant],
         resources: &[Resource],
@@ -99,7 +86,6 @@ impl Grant {
             })
             .collect()
     }
-    /// The raw grant a signed one amounts to over `resources`, if any.
     pub fn describe(grant: &ResourceGrant, resources: &[Resource]) -> Option<Self> {
         let resource = resources
             .iter()
@@ -126,7 +112,6 @@ impl Grant {
         (described.resolve(std::slice::from_ref(resource)).ok()? == *grant).then_some(described)
     }
 }
-/// Rights by their lowercase names, as JSON and the call contract spell them.
 mod named_rights {
     use rocky_core::Right;
     use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
@@ -161,26 +146,15 @@ mod named_rights {
     }
 }
 
-/// What an enrollment grants. There is no default: an issuer names one.
-/// Reader, writer and issuer are the optional starter layer: functions
-/// producing raw grants. A writer edits its scopes; issuers enroll and
-/// renew devices. No profile holds `PublishSchema`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", from = "ProfileRecord")]
 pub enum Profile {
-    /// Holds ciphertext of the named scopes without reader or issuing keys.
     Custody { scopes: BTreeSet<String> },
-    /// Reads the named reader scopes and holds their ciphertext.
     Reader { scopes: BTreeSet<String> },
-    /// Reads and writes the named reader scopes.
     Writer { scopes: BTreeSet<String> },
-    /// A writer of every reader scope with issuer authority: it enrolls,
-    /// renews and revokes identities and signs the domain's statements.
     Issuer,
-    /// Exactly these raw grants.
     Grants { grants: Vec<Grant> },
 }
-/// How a profile is read: a unit variant would accept unknown fields.
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum ProfileRecord {
@@ -210,11 +184,9 @@ const WRITE: [Right; 5] = [
     Right::Custody,
 ];
 impl Profile {
-    /// Whether the profile holds issuer authority.
     pub fn issues(&self) -> bool {
         matches!(self, Self::Issuer)
     }
-    /// Whether the profile reads, and so holds the keys of, scope `name`.
     pub fn reads(&self, name: &str) -> bool {
         match self {
             Self::Reader { scopes } | Self::Writer { scopes } => scopes.contains(name),
@@ -225,8 +197,6 @@ impl Profile {
                 .any(|grant| grant.scope == name && grant.rights.contains(&Right::Read)),
         }
     }
-    /// The raw grants this profile stands for over `resources`. A name
-    /// that is no resource, or a profile that names none, is refused.
     pub fn raw(&self, resources: &[Resource]) -> Result<Vec<Grant>, Error> {
         let (names, rights): (Option<&BTreeSet<String>>, &[Right]) = match self {
             Self::Custody { scopes } => (Some(scopes), &[Right::Custody]),
@@ -255,13 +225,9 @@ impl Profile {
             })
             .collect())
     }
-    /// The whole-row grants of this profile over `resources`.
     pub fn grants(&self, resources: &[Resource]) -> Result<Vec<ResourceGrant>, Error> {
         Grant::resolve_all(&self.raw(resources)?, resources)
     }
-    /// What signed `grants` amount to, for display and for renewal into
-    /// another definition: a reader, writer or custody when they are exactly one,
-    /// otherwise the raw grants. Grants no raw grant names are dropped.
     pub fn of(grants: &[ResourceGrant], resources: &[Resource]) -> Self {
         let named = |right: Right| -> BTreeSet<String> {
             resources
@@ -307,21 +273,12 @@ fn same_set(left: &[ResourceGrant], right: &[ResourceGrant]) -> bool {
         && right.iter().all(|grant| left.contains(grant))
 }
 
-/// What an identity with issuer authority signs: the root's, whose key is
-/// the publisher key, or an issuer's, signed by one of its nodes through
-/// the identity's chain of issuer links from the root's trusted grant. No
-/// issuer identity key signs here. What it signs holds in every generation
-/// of the domain.
 pub struct Authority<'a> {
     database: Option<crate::DatabaseContext>,
     pub signer: Signer<'a>,
-    /// The issuer links from the publisher to the signing identity; empty
-    /// for the owner.
     pub chain: CredentialChain,
 }
 impl<'a> Authority<'a> {
-    /// The root: its key is the publisher key. It is offline and signs only
-    /// the domain's genesis, trusted grants and their revocations.
     pub fn owner(root: &'a dyn IdentityProvider) -> Self {
         Self {
             signer: Signer::Key(root),
@@ -329,7 +286,6 @@ impl<'a> Authority<'a> {
             chain: CredentialChain::default(),
         }
     }
-    /// A root issuing authority within one database namespace.
     pub fn owner_in(
         root: &'a dyn IdentityProvider,
         database: crate::DatabaseContext,
@@ -342,8 +298,6 @@ impl<'a> Authority<'a> {
             ..Self::owner(root)
         })
     }
-    /// An issuer's node `node`, whose chain `credentials` ends at its
-    /// certificate under the identity's issuer links.
     pub fn issuer(node: &'a PrivateKey, credentials: &CredentialChain) -> Result<Self, Error> {
         let database = credentials.database_context(
             credentials
@@ -359,23 +313,17 @@ impl<'a> Authority<'a> {
             chain: credentials.capabilities(),
         })
     }
-    /// The links a capability this authority signs follows.
     pub fn prefix(&self) -> &CredentialChain {
         &self.chain
     }
-    /// The identity this authority signs for.
     pub fn identity(&self) -> Result<PublicKey, Error> {
         self.signer.principal()
     }
-    /// A capability this authority signed, with the links it follows.
     pub fn chain_of(&self, capability: SignedCapability) -> CredentialChain {
         let mut chain = self.chain.clone();
         chain.0.push(capability);
         chain
     }
-    /// An identity capability for `subject`, valid from `skew` seconds
-    /// before `time` for `ttl` seconds. Its subject certifies only its own
-    /// nodes.
     pub fn issue(
         &self,
         subject: PublicKey,
@@ -384,8 +332,6 @@ impl<'a> Authority<'a> {
     ) -> Result<SignedCapability, Error> {
         self.issue_delegable(subject, grants, 1, validity)
     }
-    /// As `issue`, with `delegations` links allowed below it: 1 reaches
-    /// the subject's own node certificates, 2 one further delegate.
     pub fn issue_delegable(
         &self,
         subject: PublicKey,
@@ -400,7 +346,6 @@ impl<'a> Authority<'a> {
             validity,
         )
     }
-    /// As `issue_delegable`, with the delegation terms.
     pub fn issue_terms(
         &self,
         subject: PublicKey,
@@ -419,7 +364,6 @@ impl<'a> Authority<'a> {
             validity,
         )
     }
-    /// Issuer authority for `subject`, one level below this authority.
     pub fn issue_issuer(
         &self,
         subject: PublicKey,
@@ -442,10 +386,6 @@ impl<'a> Authority<'a> {
             validity,
         )
     }
-    /// The root's trusted grant: whole-domain tip and bookmark control
-    /// with issuer authority, valid from `time` and never
-    /// expiring; only a root-signed revocation ends it. Only the root signs
-    /// one, and no trusted grant is delegated.
     pub fn issue_trusted(
         &self,
         subject: PublicKey,
@@ -476,10 +416,6 @@ impl<'a> Authority<'a> {
             self.signer.clone(),
         )
     }
-    /// The grants and partitions this authority's identity holds itself,
-    /// signed by its node: an issuer identity's link names authority, not
-    /// grants, so its nodes read and write by this one. Under a trusted
-    /// grant it never expires; otherwise it lives inside its parent.
     pub fn hold(
         &self,
         grants: Vec<ResourceGrant>,
@@ -550,9 +486,6 @@ impl<'a> Authority<'a> {
             self.signer.clone(),
         )
     }
-    /// The trusted identity a link this authority signs descends from: its
-    /// own when it holds a trusted grant, else the one its links name.
-    /// The root's links descend from none.
     pub fn origin(&self) -> Result<Option<crate::Origin>, Error> {
         let Some(last) = self.chain.0.last() else {
             return Ok(None);
@@ -566,16 +499,12 @@ impl<'a> Authority<'a> {
             None => extended.origin,
         })
     }
-    /// The delegations this authority's identity holds.
     fn delegations(&self) -> Result<u8, Error> {
         match self.chain.0.last() {
             None => Ok(MAX_CREDENTIAL_DEPTH as u8),
             Some(last) => Ok(last.capability.delegations),
         }
     }
-    /// Signs one link below this authority's identity. Ranges between
-    /// issuers are not checked here: like those between the owner and its
-    /// issuers, they are an allocation discipline.
     pub(crate) fn sign_link(
         &self,
         subject: PublicKey,
@@ -667,10 +596,6 @@ impl<'a> Authority<'a> {
         )?;
         Ok(signed)
     }
-    /// The capability `prior` renewed: the same subject, grants,
-    /// delegations and authority, never more. A subject
-    /// `revocations` revokes is refused, as is one this authority sits
-    /// below: it is renewed by an issuer above it.
     pub fn renew(
         &self,
         prior: &Capability,
@@ -708,7 +633,6 @@ impl<'a> Authority<'a> {
             validity,
         )
     }
-    /// Signs `statement`, which names this authority's identity as issuer.
     pub fn revoke(&self, statement: Revocation) -> Result<SignedRevocation, Error> {
         SignedRevocation::sign(statement, self.signer.clone(), &self.chain)
     }
@@ -719,7 +643,6 @@ impl<'a> Authority<'a> {
     ) -> Result<SignedRevocation, Error> {
         SignedRevocation::sign_in(statement, self.signer.clone(), &self.chain, database)
     }
-    /// Endorses a domain statement under `label`.
     pub fn endorse<T: serde::Serialize>(
         &self,
         label: &str,
@@ -729,8 +652,6 @@ impl<'a> Authority<'a> {
     }
 }
 
-/// A node's chain under its identity capability: the identity certifies
-/// its node key.
 pub fn device_chain(
     root: SignedCapability,
     identity: &dyn IdentityProvider,
@@ -740,21 +661,12 @@ pub fn device_chain(
 }
 
 impl CredentialChain {
-    /// Completes a chain that ends at `holder` with a certificate for its
-    /// node key: the same grants and validity, delegating nothing further.
     pub fn complete(self, holder: &dyn IdentityProvider, node: PublicKey) -> Result<Self, Error> {
         self.certify(holder, node)
     }
-    /// The identity `holder` signs a certificate for `node`, whose key is
-    /// its writer identity. It holds no grants and never expires:
-    /// the node acts with whatever its identity's link grants, while it
-    /// does. A renewal of that link needs no new certificate.
     pub fn certify(self, holder: &dyn IdentityProvider, node: PublicKey) -> Result<Self, Error> {
         self.certify_member(holder, node, 0, None)
     }
-    /// Signs a node certificate at an explicit identity membership sequence.
-    /// Sequence zero has no predecessor; later links must name the previous
-    /// certificate ID so concurrent links can be detected as a fork.
     pub fn certify_member(
         mut self,
         holder: &dyn IdentityProvider,
@@ -790,7 +702,6 @@ impl CredentialChain {
         self.0.push(SignedCapability::sign(leaf, holder)?);
         Ok(self)
     }
-    /// Signs an identity-owned unlink for one of its node certificates.
     pub fn unlink(
         &self,
         holder: &dyn IdentityProvider,
@@ -821,10 +732,6 @@ impl CredentialChain {
             &self.capabilities().with_certificate(certificate.clone()),
         )
     }
-    /// Delegates from the last link, which `holder` holds, to `subject`:
-    /// a user or deployment link with `delegations` fewer than the
-    /// holder's, `grants` it holds and validity inside its own. Widening any of them is refused here and by every
-    /// verifier. An issuer grants through its `Authority` instead.
     pub fn delegate<'s>(
         &self,
         holder: impl Into<Signer<'s>>,
@@ -832,8 +739,6 @@ impl CredentialChain {
     ) -> Result<Self, Error> {
         self.delegate_with_families(holder, request, &crate::GrantFamilies::default())
     }
-    /// Delegates resolved authority, including selector grants, under an
-    /// authenticated schema. Both issuance and receipt check attenuation.
     pub fn delegate_with_families<'s>(
         &self,
         holder: impl Into<Signer<'s>>,
@@ -906,7 +811,6 @@ impl CredentialChain {
         chain.links_with_families(chain.0[0].issuer, None, families)?;
         Ok(chain)
     }
-    /// The last link, which `holder` must hold and which may delegate.
     pub(crate) fn holder(&self, holder: &dyn IdentityProvider) -> Result<&Capability, Error> {
         self.holder_key(holder.public_key()?)
     }
@@ -924,7 +828,6 @@ impl CredentialChain {
             )),
         }
     }
-    /// The chain without its node leaf: what its holder delegates from.
     pub fn delegable(&self) -> Self {
         let mut prefix = self.clone();
         if prefix
@@ -936,8 +839,6 @@ impl CredentialChain {
         }
         prefix
     }
-    /// The link a node certificate leaf names, or the leaf itself: what
-    /// the chain grants.
     pub fn held(&self) -> Option<&Capability> {
         let index = match self.certificate() {
             Some(_) => self.0.len().checked_sub(2)?,
@@ -945,11 +846,9 @@ impl CredentialChain {
         };
         Some(&self.0[index].capability)
     }
-    /// The grants of the identity link: what the chain's node may do.
     pub fn grants(&self) -> &[ResourceGrant] {
         self.held().map_or(&[], |held| held.grants.as_slice())
     }
-    /// The partition grants of the identity link.
     pub fn partitions(&self) -> Result<Vec<PartitionGrant>, Error> {
         Ok(match self.held() {
             Some(held) => held.extended()?.partitions,

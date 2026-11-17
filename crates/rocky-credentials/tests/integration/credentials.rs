@@ -1,5 +1,3 @@
-//! Credentials verify, issue, enroll and renew with no database and no
-//! endpoint: everything here is keys and bytes.
 use rocky_core::{
     AppId, ApplicationManifest, AuthorLogScope, DefinitionItem, DomainId, DomainRule,
     FieldSelection, MeshId, PrincipalKind, ResourceGrant, ResourceScope, Right, RowSelection,
@@ -80,7 +78,6 @@ impl Domain {
     fn policy(&self) -> RevocationSet {
         RevocationSet::new()
     }
-    /// A set whose one statement revokes `subjects` as identities.
     fn revoking(&self, subjects: &[PublicKey]) -> RevocationSet {
         let statement = Revocation {
             app: self.manifest.app,
@@ -99,7 +96,6 @@ impl Domain {
     fn names(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
     }
-    /// A device enrolled with `profile`: its user and node keys and chain.
     fn device(&self, profile: &Profile) -> (PrivateKey, PrivateKey, CredentialChain) {
         let (user, node) = (PrivateKey::new(), PrivateKey::new());
         let root = self
@@ -285,7 +281,7 @@ fn a_login_principal_alone_grants_nothing() {
     );
     assert!(
         chain
-            .provenance(domain.publisher.public_key(), node.public_key())
+            .historic_provenance(domain.publisher.public_key(), node.public_key())
             .is_err()
     );
     let principal = Identity(user.public_key());
@@ -968,4 +964,26 @@ fn delegations_narrow_and_unknown_extension_versions_are_refused() {
         message.contains("unsupported credential extension version"),
         "a later extension version is refused with a clear error: {message}"
     );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_profile_refuses_fields_its_kind_does_not_have() {
+    let parse = |value: serde_json::Value| serde_json::from_value::<Profile>(value);
+    assert_eq!(
+        parse(serde_json::json!({ "kind": "issuer" })).expect("issuer"),
+        Profile::Issuer
+    );
+    assert_eq!(
+        parse(serde_json::json!({ "kind": "reader", "scopes": ["notes"] })).expect("reader"),
+        Profile::Reader {
+            scopes: Domain::names(&["notes"])
+        }
+    );
+    for refused in [
+        serde_json::json!({ "kind": "issuer", "scopes": ["notes"] }),
+        serde_json::json!({ "kind": "reader", "scopes": ["notes"], "issues": true }),
+        serde_json::json!({ "kind": "custody" }),
+    ] {
+        assert!(parse(refused.clone()).is_err(), "{refused} is refused");
+    }
 }

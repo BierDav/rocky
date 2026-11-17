@@ -148,7 +148,13 @@ impl<A: RowApplication> Inner<A> {
                     self.grant_families(),
                 )
                 .map_err(credential)?
-                .partition_author(signing_key.public_key(), scope, tuple, time)
+                .partition_author(
+                    signing_key.public_key(),
+                    scope,
+                    tuple,
+                    &self.config.revocations,
+                    time,
+                )
                 .map_err(credential)?,
             None => signer
                 .credentials
@@ -159,7 +165,12 @@ impl<A: RowApplication> Inner<A> {
                     self.grant_families(),
                 )
                 .map_err(credential)?
-                .author(signing_key.public_key(), scope.table, time)
+                .author(
+                    signing_key.public_key(),
+                    scope.table,
+                    &self.config.revocations,
+                    time,
+                )
                 .map_err(credential)?,
         };
         let key = self

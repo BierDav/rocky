@@ -1,4 +1,3 @@
-//! The credential suites, one test binary.
 mod credentials;
 mod database_membership;
 mod identities;

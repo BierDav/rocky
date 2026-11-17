@@ -189,7 +189,11 @@ impl Settings {
                 &self.revocations,
                 crate::enrollment::now()?,
             )?
-            .selectors(key.public_key(), crate::enrollment::now()?)?;
+            .selectors(
+                key.public_key(),
+                &self.revocations,
+                crate::enrollment::now()?,
+            )?;
         Ok(chain)
     }
 }

@@ -110,6 +110,7 @@ impl<A: RowApplication> Inner<A> {
                     partition
                         .as_ref()
                         .ok_or_else(|| denied("missing partition tuple"))?,
+                    &self.config.revocations,
                     time,
                 )
                 .map_err(credential)?,
@@ -121,7 +122,12 @@ impl<A: RowApplication> Inner<A> {
                     self.grant_families(),
                 )
                 .map_err(credential)?
-                .author(signing_key.public_key(), scope.table, time)
+                .author(
+                    signing_key.public_key(),
+                    scope.table,
+                    &self.config.revocations,
+                    time,
+                )
                 .map_err(credential)?,
             None => self.local_grants(time)?.to_vec(),
         };

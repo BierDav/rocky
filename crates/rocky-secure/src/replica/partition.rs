@@ -35,7 +35,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         let (mut grants, selectors) = self
             .verified_chain(chain, policy, time)?
-            .selectors(key, time)
+            .selectors(key, policy, time)
             .map_err(credential)?;
         for (scope, tuple) in &self.partitions {
             for selector in &selectors {
@@ -56,7 +56,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         let (mut grants, selectors) = self
             .verified_chain(chain, policy, time)?
-            .selectors(key, time)
+            .selectors(key, policy, time)
             .map_err(credential)?;
         grants.retain(|grant| scopes.contains(&grant.scope));
         for scope in scopes {
@@ -308,7 +308,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.grant_families(),
             )
             .map_err(credential)?
-            .partition_author(author.key.public_key(), scope, &tuple, now()?)
+            .partition_author(
+                author.key.public_key(),
+                scope,
+                &tuple,
+                &inner.config.revocations,
+                now()?,
+            )
             .map_err(credential)?;
         if !grants
             .iter()
@@ -427,7 +433,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.grant_families(),
             )
             .map_err(credential)?
-            .partition(inner.config.node.public_key(), scope, &tuple, now()?)
+            .partition(
+                inner.config.node.public_key(),
+                scope,
+                &tuple,
+                &inner.config.revocations,
+                now()?,
+            )
             .map_err(credential)?;
         if inner.partitions.get(&scope) == Some(&tuple) {
             return Ok(());
@@ -720,7 +732,7 @@ impl<A: RowApplication> Inner<A> {
                 self.grant_families(),
             )
             .map_err(credential)?
-            .partition(key, scope, tuple, now()?)
+            .partition(key, scope, tuple, &self.config.revocations, now()?)
             .map_err(credential)
     }
 }
@@ -741,7 +753,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.grant_families(),
             )
             .map_err(credential)?
-            .selectors(peer, now()?)
+            .selectors(peer, &inner.config.revocations, now()?)
         else {
             return Ok(Vec::new());
         };

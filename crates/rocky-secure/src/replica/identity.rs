@@ -129,7 +129,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner
             .config
             .credentials
-            .provenance_with_families(
+            .historic_provenance_with_families(
                 inner.config.publisher,
                 key.public_key(),
                 inner.grant_families(),

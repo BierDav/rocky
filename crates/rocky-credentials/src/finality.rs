@@ -1,6 +1,3 @@
-//! Final seals: trusted nodes acknowledge the terminal entry a tip's
-//! coordinated log committed, and a record carrying enough of them makes
-//! that seal final for every member, without a coordinator call.
 use crate::{
     ChainLink, CredentialChain, Error, PrivateKey, PublicKey, RevocationSet, Signature,
     decode_bounded, denied, encode, signing_bytes,
@@ -11,20 +8,14 @@ use std::collections::BTreeSet;
 
 pub const TERMINAL_ACK_FORMAT: u32 = 4;
 pub const SEAL_FINALITY_FORMAT: u32 = 2;
-/// The coordinator's in-sync cap: no record needs more acknowledgments.
 pub const MAX_FINALITY_ACKS: usize = 15;
-/// Largest encoded acknowledgment, its node chain included.
 pub const MAX_TERMINAL_ACK_BYTES: usize = 16 * 1024;
-/// Largest encoded finality record.
 pub const MAX_FINALITY_BYTES: usize = MAX_FINALITY_ACKS * MAX_TERMINAL_ACK_BYTES + 1024;
 
-/// The format field of a versioned record, read without the rest of its
-/// shape, which another release's record need not have.
 #[derive(Deserialize)]
 pub struct NamedFormat {
     pub format: u32,
 }
-/// An acknowledgment's statement format, read the same way.
 #[derive(Deserialize)]
 struct NamedAckFormat {
     statement: NamedFormat,
@@ -36,7 +27,6 @@ fn unsupported_ack(format: u32) -> Error {
         supported: TERMINAL_ACK_FORMAT,
     }
 }
-/// The refusal of a finality record of `format`, another release's.
 pub fn unsupported_finality(format: u32) -> Error {
     Error::UnsupportedFormat {
         record: "seal finality record",
@@ -45,14 +35,9 @@ pub fn unsupported_finality(format: u32) -> Error {
     }
 }
 
-/// What a trusted node read from `coordinator`'s head of `(scope, tip)`'s
-/// ended log: the terminal entry's position and running hash, the seal it
-/// committed and that seal's continuation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalAckStatement {
     pub format: u32,
-    /// The coordination service whose log ended: a record counts only for
-    /// the coordinator the database's settings name.
     pub coordinator: CoordinatorIdentity,
     pub scope: Scope,
     pub tip: TipId,
@@ -60,24 +45,19 @@ pub struct TerminalAckStatement {
     pub running: Commitment,
     pub seal: Commitment,
     pub continuation: Option<TipId>,
-    /// The terminal entry confirms a seal tip graphs held before it, as
-    /// `rocky_core::LogTerminal::confirms` says.
     pub confirms: bool,
 }
 
-/// A terminal acknowledgment signed by a trusted node under its chain.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalAck {
     pub statement: TerminalAckStatement,
     pub signer: PublicKey,
     pub credentials: CredentialChain,
-    /// Its place in the signing node's chain of acknowledgments.
     pub link: ChainLink,
     signature: Signature,
 }
 const TERMINAL_ACK: &str = "rocky.terminal-ack.v4";
 impl TerminalAck {
-    /// `node` acknowledges at `link` of its own chain.
     pub fn sign(
         statement: TerminalAckStatement,
         node: &PrivateKey,
@@ -102,8 +82,6 @@ impl TerminalAck {
         ack.to_bytes()?;
         Ok(ack)
     }
-    /// Checks the signature and that the signer is a node of an identity
-    /// holding the domain's trusted grant; returns that identity.
     pub fn verify(
         &self,
         publisher: PublicKey,
@@ -117,7 +95,7 @@ impl TerminalAck {
         }
         self.link.validate()?;
         let current_unless_cut = current.filter(|(revocations, _)| {
-            self.identity()
+            self.claimed_identity()
                 .is_none_or(|identity| revocations.cut(&identity, &self.signer).is_none())
         });
         let identity = self.credentials.trusted_node(
@@ -134,14 +112,12 @@ impl TerminalAck {
         }
         Ok(identity)
     }
-    /// The trusted identity the node's chain starts at, as named, unverified.
-    pub fn identity(&self) -> Option<PublicKey> {
+    pub fn claimed_identity(&self) -> Option<PublicKey> {
         self.credentials
             .0
             .first()
             .map(|link| link.capability.subject)
     }
-    /// Its hash: what the next acknowledgment of its node names.
     pub fn id(&self) -> Result<Commitment, Error> {
         Ok(rocky_core::commitment(
             "rocky.terminal-ack.id.v1",
@@ -155,8 +131,6 @@ impl TerminalAck {
         }
         Ok(bytes)
     }
-    /// Decodes an acknowledgment, refusing one of another format by the
-    /// format it names, whether or not its shape is this release's.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         let ack: Self = decode_bounded(bytes, MAX_TERMINAL_ACK_BYTES).map_err(|error| {
             match p2panda_core::cbor::decode_cbor::<NamedAckFormat, _>(bytes) {
@@ -173,8 +147,6 @@ impl TerminalAck {
     }
 }
 
-/// A seal's finality: acknowledgments of the terminal entry that committed
-/// it, by distinct trusted nodes. It needs no signature of its own.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SealFinality {
     pub format: u32,
@@ -183,8 +155,6 @@ pub struct SealFinality {
     pub acknowledgments: Vec<TerminalAck>,
 }
 impl SealFinality {
-    /// Orders the acknowledgments by signer, so every publisher of the same
-    /// set produces the same record.
     pub fn new(scope: Scope, seal: Commitment, mut acknowledgments: Vec<TerminalAck>) -> Self {
         acknowledgments.sort_by_key(|ack| *ack.signer.as_bytes());
         acknowledgments.dedup_by_key(|ack| *ack.signer.as_bytes());
@@ -226,28 +196,21 @@ impl SealFinality {
         }
         Ok(())
     }
-    /// The coordination service every acknowledgment names.
     pub fn coordinator(&self) -> Option<CoordinatorIdentity> {
         self.acknowledgments
             .first()
             .map(|ack| ack.statement.coordinator)
     }
-    /// Whether the coordinator's log decided the seal: its terminal entry
-    /// ended the log with a seal no graph held yet, instead of confirming a
-    /// choice graphs had made.
     pub fn decided(&self) -> bool {
         self.acknowledgments
             .first()
             .is_some_and(|ack| !ack.statement.confirms)
     }
-    /// The tip and continuation every acknowledgment names.
     pub fn terminal(&self) -> Option<(TipId, Option<TipId>)> {
         self.acknowledgments
             .first()
             .map(|ack| (ack.statement.tip, ack.statement.continuation))
     }
-    /// Distinct nodes whose acknowledgments verify, optionally under a
-    /// revocation set at a time.
     pub fn verified_nodes(
         &self,
         publisher: PublicKey,
@@ -276,8 +239,6 @@ impl SealFinality {
         }
         Ok(bytes)
     }
-    /// Decodes a record, refusing one of another format by the format it
-    /// names, whether or not its shape is this release's.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         let record: Self = decode_bounded(bytes, MAX_FINALITY_BYTES).map_err(|error| {
             match p2panda_core::cbor::decode_cbor::<NamedFormat, _>(bytes) {
@@ -293,9 +254,6 @@ impl SealFinality {
 }
 
 impl CredentialChain {
-    /// The identity whose trusted grant for `scope` certifies the node
-    /// `node`: exactly the owner-direct trusted link and its node
-    /// certificate.
     pub fn trusted_node(
         &self,
         publisher: PublicKey,

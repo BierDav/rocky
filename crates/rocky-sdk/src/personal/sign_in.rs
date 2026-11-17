@@ -615,7 +615,7 @@ fn witness(
         record.generation,
         record.engine,
     )?;
-    metadata.responder.provenance_with_families(
+    metadata.responder.historic_provenance_with_families(
         locator.publisher,
         candidate.challenge.responder,
         &domain.families,

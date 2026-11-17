@@ -122,7 +122,10 @@ impl TipStatement {
             Self::Settings(s) => (s.link, &s.endorsement().chain),
             Self::Finality(_) => return None,
         };
-        Some((rocky_credentials::Endorsement::signer_of(chain)?, link?))
+        Some((
+            rocky_credentials::Endorsement::claimed_signer_of(chain)?,
+            link?,
+        ))
     }
     pub fn append(&self, graph: &mut TipGraph) {
         match self {
@@ -148,12 +151,12 @@ impl TipStatement {
             (Self::GenesisLine(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
             (Self::Checkpoint(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
             (Self::Settings(s), Some((r, t))) => s.verify_current(publisher, graph, r, t),
-            (Self::Seal(s), None) => s.verify(publisher, graph),
-            (Self::Opening(s), None) => s.verify(publisher, graph),
-            (Self::Bookmark(s), None) => s.verify(publisher, graph),
-            (Self::GenesisLine(s), None) => s.verify(publisher, graph),
-            (Self::Checkpoint(s), None) => s.verify(publisher, graph),
-            (Self::Settings(s), None) => s.verify(publisher, graph),
+            (Self::Seal(s), None) => s.verify_historic(publisher, graph),
+            (Self::Opening(s), None) => s.verify_historic(publisher, graph),
+            (Self::Bookmark(s), None) => s.verify_historic(publisher, graph),
+            (Self::GenesisLine(s), None) => s.verify_historic(publisher, graph),
+            (Self::Checkpoint(s), None) => s.verify_historic(publisher, graph),
+            (Self::Settings(s), None) => s.verify_historic(publisher, graph),
             (Self::Finality(s), current) => graph.verify_finality(s, publisher, current),
         }
         .map_err(credential)
@@ -715,7 +718,7 @@ impl<A: RowApplication> Inner<A> {
                 != self
                     .config
                     .manifest
-                    .verify(self.config.publisher)
+                    .verify_historic(self.config.publisher)
                     .map_err(credential)?
                     .hash()
             {
@@ -765,7 +768,7 @@ impl<A: RowApplication> Inner<A> {
         let root = self
             .config
             .manifest
-            .verify(self.config.publisher)
+            .verify_historic(self.config.publisher)
             .map_err(credential)?
             .hash();
         self.workspace.tip = rocky_credentials::genesis_tip(root);
@@ -957,7 +960,7 @@ impl<A: RowApplication> Inner<A> {
         scope: Scope,
         ack: &TerminalAck,
     ) -> Result<(), Error> {
-        let Some(identity) = ack.identity() else {
+        let Some(identity) = ack.claimed_identity() else {
             return Ok(());
         };
         self.record_past(

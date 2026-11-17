@@ -59,7 +59,6 @@ fn grant(
 fn policy() -> RevocationSet {
     RevocationSet::new()
 }
-/// A set whose one statement revokes `key`.
 fn revoking(publisher: &PrivateKey, key: PublicKey) -> RevocationSet {
     let statement = Revocation {
         app: AppId([2; 16]),
@@ -161,7 +160,7 @@ fn selector_chain_checks_attenuation_and_concrete_scope_without_a_key() {
     } = selector_fixture();
     assert!(
         chain
-            .provenance(publisher.public_key(), node.public_key())
+            .historic_provenance(publisher.public_key(), node.public_key())
             .is_ok()
     );
     let grants = chain

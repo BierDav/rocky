@@ -111,7 +111,7 @@ pub(crate) struct Bootstrap {
 impl Bootstrap {
     pub fn verify(&self, settings: &Settings) -> Result<(), Failure> {
         let genesis = settings.manifest()?;
-        let root = genesis.verify(settings.publisher)?;
+        let root = genesis.verify_historic(settings.publisher)?;
         if !genesis.endorsement().chain.0.is_empty()
             || self.graph.genesis_schema != root.hash()
             || self.graph.scope != settings.domain()?.scope
@@ -119,26 +119,26 @@ impl Bootstrap {
             return Err("enrollment graph differs from the domain root".into());
         }
         for seal in &self.graph.seals {
-            seal.verify(settings.publisher, &self.graph)?;
+            seal.verify_historic(settings.publisher, &self.graph)?;
         }
         for opening in &self.graph.openings {
-            opening.verify(settings.publisher, &self.graph)?;
+            opening.verify_historic(settings.publisher, &self.graph)?;
         }
         for movement in &self.graph.moves {
-            movement.verify(settings.publisher, &self.graph)?;
+            movement.verify_historic(settings.publisher, &self.graph)?;
         }
         for minimum in &self.graph.genesis_lines {
-            minimum.verify(settings.publisher, &self.graph)?;
+            minimum.verify_historic(settings.publisher, &self.graph)?;
         }
         for finality in &self.graph.finalities {
             self.graph
                 .verify_finality(finality, settings.publisher, None)?;
         }
         for checkpoint in &self.graph.checkpoints {
-            checkpoint.verify(settings.publisher, &self.graph)?;
+            checkpoint.verify_historic(settings.publisher, &self.graph)?;
         }
         for signed in &self.graph.settings {
-            signed.verify(settings.publisher, &self.graph)?;
+            signed.verify_historic(settings.publisher, &self.graph)?;
         }
         let mut graph = self.graph.clone();
         graph.exclude_revoked(&settings.revocations)?;
@@ -156,7 +156,7 @@ impl Bootstrap {
 }
 impl Settings {
     pub(crate) fn verify_schema(&self) -> Result<(), Failure> {
-        let root = self.manifest()?.verify(self.publisher)?;
+        let root = self.manifest()?.verify_historic(self.publisher)?;
         let _personal_genesis_still_locates_this_database = self.kind()?;
         let domain = self.domain()?;
         if root.app != domain.manifest().app || self.generation == 0 {
@@ -170,7 +170,7 @@ impl Settings {
     pub(crate) fn schema_bootstrap(&self) -> Result<Bootstrap, Failure> {
         match &self.bootstrap {
             Some(bootstrap) => Ok(bootstrap.clone()),
-            None if self.manifest()?.verify(self.publisher)?.hash()
+            None if self.manifest()?.verify_historic(self.publisher)?.hash()
                 == self.domain()?.manifest().hash() =>
             {
                 Ok(Bootstrap {

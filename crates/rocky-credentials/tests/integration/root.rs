@@ -1,6 +1,3 @@
-//! The offline root's authority: trusted grants that never expire, issued
-//! identities that remember the trusted identity that first enrolled them,
-//! and signed root revocation modes controlling cascades by that origin.
 use rocky_core::{AppId, DomainId, MeshId, Scope};
 use rocky_credentials::{
     Authority, CredentialChain, DAY, IdentityKey, MAX_CHAIN_LIFETIME, NEVER, Origin, PrivateKey,
@@ -15,11 +12,9 @@ const SCOPE: Scope = Scope {
     domain: DomainId([2; 16]),
 };
 
-/// A trusted identity: its key and its root-signed grant.
 fn trusted(root: &RootKey) -> (PrivateKey, CredentialChain) {
     trusted_at(root, NOW)
 }
-/// A trusted identity the root granted at `time`.
 fn trusted_at(root: &RootKey, time: u64) -> (PrivateKey, CredentialChain) {
     let key = PrivateKey::new();
     let grant = Authority::owner(root)
@@ -27,7 +22,6 @@ fn trusted_at(root: &RootKey, time: u64) -> (PrivateKey, CredentialChain) {
         .unwrap();
     (key, CredentialChain(vec![grant]))
 }
-/// A recovery's statement keeping the trusted identity `recovered`.
 fn recovery(root: &RootKey, recovered: &(PrivateKey, CredentialChain)) -> RevocationSet {
     let statement = Revocation {
         app: APP,
@@ -47,7 +41,6 @@ fn recovery(root: &RootKey, recovered: &(PrivateKey, CredentialChain)) -> Revoca
     };
     set(Authority::owner(root).revoke(statement).unwrap())
 }
-/// A trusted identity's node chain.
 fn node_of(trusted: &(PrivateKey, CredentialChain)) -> (PrivateKey, CredentialChain) {
     let node = PrivateKey::new();
     let chain = trusted
@@ -57,7 +50,6 @@ fn node_of(trusted: &(PrivateKey, CredentialChain)) -> (PrivateKey, CredentialCh
         .unwrap();
     (node, chain)
 }
-/// An issuer identity `parent` enrolls below it.
 fn issuer(parent: &(PrivateKey, CredentialChain)) -> (PrivateKey, CredentialChain) {
     let key = PrivateKey::new();
     let link = rocky_credentials::testing::authority(&parent.0, &parent.1)
@@ -74,7 +66,6 @@ fn issuer(parent: &(PrivateKey, CredentialChain)) -> (PrivateKey, CredentialChai
     chain.0.push(link);
     (key, chain)
 }
-/// A member identity `parent` enrolls, and its node's chain.
 fn member(parent: &(PrivateKey, CredentialChain)) -> (PrivateKey, PrivateKey, CredentialChain) {
     let (user, node) = (PrivateKey::new(), PrivateKey::new());
     let link = rocky_credentials::testing::authority(&parent.0, &parent.1)
@@ -334,10 +325,6 @@ fn revoking_a_trusted_identity_cascades_to_what_it_first_enrolled() {
     );
 }
 
-/// A recovery's statement ends every trusted grant valid before the
-/// recovered identity's, the ones its store never knew included, with
-/// what they first enrolled, renewed elsewhere or not. The recovered
-/// identity, and trust the root grants afterwards, stay.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_recovery_ends_every_earlier_trusted_grant_and_what_it_enrolled() {
     let root = RootKey::generate();
@@ -408,9 +395,6 @@ fn a_recovery_ends_every_earlier_trusted_grant_and_what_it_enrolled() {
     );
 }
 
-/// An origin carries its trusted grant's time, checked wherever the chain
-/// shows that grant, so a lost node cannot date what it enrolls past a
-/// recovery.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn an_origin_states_its_trusted_grants_time() {
     let root = RootKey::generate();
@@ -456,9 +440,6 @@ fn an_origin_states_its_trusted_grants_time() {
         .unwrap();
 }
 
-/// Of two recoveries the later keeps its identity and ends the earlier,
-/// whichever statement a store learns first; the earlier's statement ends
-/// nothing the later holds.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn the_later_of_two_recoveries_ends_the_earlier() {
     let root = RootKey::generate();

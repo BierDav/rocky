@@ -1,6 +1,3 @@
-//! Envelope delivery: a payload sealed to one recipient's node key, which a
-//! mailbox holds without learning what it carries, and the recipient's
-//! signed receipt.
 use crate::{
     Error, PrivateKey, PublicKey, Signature, decode_bounded, denied, encode,
     enroll::SEAL_OVERHEAD,
@@ -15,14 +12,10 @@ const CONTEXT: &str = "rocky.envelope-delivery.context.v1";
 const WRAPPING: &str = "rocky.envelope-delivery.key.v1";
 const DIGEST: &str = "rocky.envelope-delivery.digest.v1";
 const RECEIPT: &str = "rocky.envelope-receipt.v1";
-/// Largest payload one delivery seals: it and its wrapping fit one session
-/// message.
 pub const MAX_DELIVERY_PAYLOAD: usize = 112 * 1024;
 const MAX_DELIVERY_BYTES: usize = MAX_DELIVERY_PAYLOAD + SEAL_OVERHEAD + 256;
 const RECEIPT_BYTES: usize = 256;
 
-/// A payload sealed to one recipient. Only the version, the recipient's node
-/// key and fresh ephemeral material are in the clear.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SealedDelivery {
@@ -39,8 +32,6 @@ struct Context<'a> {
     ephemeral: &'a [u8; 32],
 }
 impl SealedDelivery {
-    /// Seals `payload` to `recipient` with fresh ephemeral material, so two
-    /// sealings of one payload share nothing a mailbox could compare.
     pub fn seal(recipient: PublicKey, payload: &[u8]) -> Result<Self, Error> {
         if payload.is_empty() || payload.len() > MAX_DELIVERY_PAYLOAD {
             return Err(denied("delivery payload outside its bound"));
@@ -55,7 +46,6 @@ impl SealedDelivery {
         delivery.sealed = crate::enroll::seal(delivery.key(shared)?, &delivery.aad()?, payload)?;
         Ok(delivery)
     }
-    /// The payload, for the recipient's node key only.
     pub fn open(&self, recipient: &PrivateKey) -> Result<Vec<u8>, Error> {
         if recipient.public_key() != self.recipient {
             return Err(denied("the delivery names another recipient"));
@@ -85,12 +75,9 @@ impl SealedDelivery {
     pub fn recipient(&self) -> PublicKey {
         self.recipient
     }
-    /// The sealed payload's length, which a mailbox bounds.
     pub fn payload_len(&self) -> usize {
         self.sealed.len().saturating_sub(SEAL_OVERHEAD)
     }
-    /// What a receipt signs: the same bytes reach the recipient directly
-    /// and through every mailbox.
     pub fn digest(&self) -> Result<Commitment, Error> {
         Ok(commitment(DIGEST, &self.to_bytes()?))
     }
@@ -109,8 +96,6 @@ impl SealedDelivery {
     }
 }
 
-/// The recipient's acknowledgment of one delivery, signed by its node key
-/// over the delivery's digest. A mailbox keeps it in place of the delivery.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeliveryReceipt {
@@ -134,7 +119,6 @@ impl DeliveryReceipt {
         let signature = recipient.sign(&signing_bytes(RECEIPT, &body)?);
         Ok(Self { body, signature })
     }
-    /// Checks that `recipient` acknowledged the delivery of `digest`.
     pub fn verify(&self, recipient: PublicKey, digest: Commitment) -> Result<(), Error> {
         if self.body.version != VERSION
             || self.body.recipient != recipient
@@ -156,7 +140,6 @@ impl DeliveryReceipt {
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         encode(self)
     }
-    /// Decodes a receipt; `verify` checks it.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         decode_bounded(bytes, RECEIPT_BYTES)
     }

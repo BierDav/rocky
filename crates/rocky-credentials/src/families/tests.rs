@@ -233,33 +233,57 @@ fn compact_families_and_per_table_credentials_verify_without_changing_signed_byt
         for table in 0..2 {
             let (scope, tuple) = f.tuple(table, "A");
             let grants = verified
-                .partition_author(f.node.public_key(), scope, &tuple, TIME)
+                .partition_author(
+                    f.node.public_key(),
+                    scope,
+                    &tuple,
+                    &RevocationSet::new(),
+                    TIME,
+                )
                 .unwrap();
             assert_eq!(grants[0].rights, f.resources[table].rights);
             assert_eq!(grants[0].fields, FieldSelection::All);
             assert!(
                 verified
-                    .partition_author(PrivateKey::new().public_key(), scope, &tuple, TIME)
+                    .partition_author(
+                        PrivateKey::new().public_key(),
+                        scope,
+                        &tuple,
+                        &RevocationSet::new(),
+                        TIME
+                    )
                     .is_err(),
                 "another key never writes under this node's certificate"
             );
             let (scope, tuple) = f.tuple(table, "B");
             assert!(
                 verified
-                    .partition(f.node.public_key(), scope, &tuple, TIME)
+                    .partition(
+                        f.node.public_key(),
+                        scope,
+                        &tuple,
+                        &RevocationSet::new(),
+                        TIME
+                    )
                     .is_err()
             );
         }
         let (scope, tuple) = f.tuple(2, "A");
         assert!(
             verified
-                .partition(f.node.public_key(), scope, &tuple, TIME)
+                .partition(
+                    f.node.public_key(),
+                    scope,
+                    &tuple,
+                    &RevocationSet::new(),
+                    TIME
+                )
                 .is_err(),
             "partition group membership does not grant authority"
         );
         assert!(
             verified
-                .selectors(f.node.public_key(), TIME + 3600)
+                .selectors(f.node.public_key(), &RevocationSet::new(), TIME + 3600)
                 .is_err()
         );
         assert_eq!(crate::encode(&chain).unwrap(), bytes);
@@ -307,7 +331,13 @@ fn restricted_fields_rows_and_explicit_follower_rights_never_widen() {
     let (scope, tuple) = f.tuple(1, "A");
     assert_eq!(
         verified
-            .partition(f.node.public_key(), scope, &tuple, TIME)
+            .partition(
+                f.node.public_key(),
+                scope,
+                &tuple,
+                &RevocationSet::new(),
+                TIME
+            )
             .unwrap()[0]
             .rights,
         follower.rights
@@ -406,12 +436,22 @@ fn delegation_checks_resolved_authority_and_cannot_remove_follower_restrictions(
         )
         .unwrap();
     let grants = verified
-        .author(node.public_key(), f.resources[1].scope.table, TIME)
+        .author(
+            node.public_key(),
+            f.resources[1].scope.table,
+            &RevocationSet::new(),
+            TIME,
+        )
         .unwrap();
     assert_eq!(grants[0].rights, [Right::Read].into());
     assert!(
         verified
-            .author(node.public_key(), f.resources[0].scope.table, TIME)
+            .author(
+                node.public_key(),
+                f.resources[0].scope.table,
+                &RevocationSet::new(),
+                TIME
+            )
             .is_err()
     );
 }
@@ -487,7 +527,13 @@ fn old_sparse_grants_never_acquire_family_authority() {
     let (scope, tuple) = f.tuple(1, "A");
     assert!(
         verified
-            .partition(f.node.public_key(), scope, &tuple, TIME)
+            .partition(
+                f.node.public_key(),
+                scope,
+                &tuple,
+                &RevocationSet::new(),
+                TIME
+            )
             .is_err()
     );
     let bindings: Vec<_> = chain
@@ -538,4 +584,68 @@ fn old_sparse_grants_never_acquire_family_authority() {
             )
             .is_err()
     );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_verified_chain_is_refused_under_another_revocation_set() {
+    let f = Fixture::new();
+    let node = f.node.public_key();
+    let (scope, tuple) = f.tuple(0, "A");
+    let table = f.resources[0].scope.table;
+    let unpartitioned = f.chain(f.resources[..1].to_vec(), Vec::new());
+    let partitioned = f.chain(Vec::new(), f.partitions[..1].to_vec());
+    let verified_under = RevocationSet::new();
+    let verify = |chain: &CredentialChain| {
+        chain
+            .verified_with_families(f.root.public_key(), &verified_under, TIME, &f.families)
+            .unwrap()
+    };
+    let (unpartitioned, partitioned) = (verify(&unpartitioned), verify(&partitioned));
+    let uses = |revocations: &RevocationSet| {
+        [
+            unpartitioned
+                .author(node, table, revocations, TIME)
+                .map(drop),
+            unpartitioned.selectors(node, revocations, TIME).map(drop),
+            partitioned
+                .partition(node, scope, &tuple, revocations, TIME)
+                .map(drop),
+            partitioned
+                .partition_author(node, scope, &tuple, revocations, TIME)
+                .map(drop),
+            partitioned.unseen_partition_author(node, scope, revocations, TIME),
+        ]
+    };
+    for used in uses(&verified_under.clone()) {
+        used.unwrap();
+    }
+    let revoking = crate::SignedRevocation::sign(
+        crate::Revocation {
+            app: scope.domain.app,
+            issuer: f.root.public_key(),
+            time: TIME,
+            nodes: BTreeSet::new(),
+            identities: [f.identity.public_key()].into(),
+            capabilities: BTreeSet::new(),
+            cut: Default::default(),
+            mode: crate::RevocationMode::Lost,
+            recovery: None,
+        },
+        &f.root,
+        &CredentialChain::default(),
+    )
+    .unwrap();
+    let later = RevocationSet::try_from(vec![revoking]).unwrap();
+    assert!(
+        f.chain(f.resources[..1].to_vec(), Vec::new())
+            .verified_with_families(f.root.public_key(), &later, TIME, &f.families)
+            .is_err(),
+        "the later set revokes the identity the chain runs through"
+    );
+    for (use_index, used) in uses(&later).into_iter().enumerate() {
+        assert!(
+            used.is_err(),
+            "use {use_index} of a chain verified before its identity was revoked is refused"
+        );
+    }
 }

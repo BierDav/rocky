@@ -339,7 +339,13 @@ impl<A: RowApplication> SecureSql<A> {
                     inner.grant_families(),
                 )
                 .map_err(credential)?
-                .partition_author(author.key.public_key(), scope, tuple, now()?)
+                .partition_author(
+                    author.key.public_key(),
+                    scope,
+                    tuple,
+                    &inner.config.revocations,
+                    now()?,
+                )
                 .map_err(credential)?,
             None => author
                 .credentials
@@ -350,7 +356,12 @@ impl<A: RowApplication> SecureSql<A> {
                     inner.grant_families(),
                 )
                 .map_err(credential)?
-                .author(author.key.public_key(), table.scope.table, now()?)
+                .author(
+                    author.key.public_key(),
+                    table.scope.table,
+                    &inner.config.revocations,
+                    now()?,
+                )
                 .map_err(credential)?,
         };
         if !grants

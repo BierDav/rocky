@@ -6,7 +6,6 @@ use std::cell::Cell;
 thread_local! {
     static IDS: Cell<usize> = const { Cell::new(0) };
 }
-/// Counts a statement ID computed on this thread.
 pub(crate) fn count_id() {
     IDS.with(|ids| ids.set(ids.get() + 1));
 }
@@ -14,7 +13,6 @@ fn ids_computed() -> usize {
     IDS.with(Cell::get)
 }
 
-/// `count` chained moves of `signer`'s lane, each after the last.
 fn chain(
     graph: &mut TipGraph,
     owner: &PrivateKey,
@@ -70,7 +68,7 @@ fn pruning_judges_only_the_lanes_a_cut_names_and_what_arrived_since() {
         capabilities: Default::default(),
         cut: vec![Cut {
             identity: revoked.public_key(),
-            lane: cut[0].endorsement().node().unwrap(),
+            lane: cut[0].endorsement().claimed_node().unwrap(),
             statements: vec![Head {
                 sequence: 0,
                 id: cut[0].id().unwrap(),
@@ -353,8 +351,6 @@ fn implicit_empty_unlink_cut_matches_an_explicit_empty_lane() {
     }
 }
 
-/// Warm seal and finality lookups hash only the lists' last items to see
-/// the index still holds, however many statements precede the one found.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn seal_and_finality_lookups_use_the_index() {
     let scope = Scope {

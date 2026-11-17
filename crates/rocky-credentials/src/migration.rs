@@ -1,4 +1,3 @@
-//! Only the migration opening's identity may authorize its finite bulk run.
 use crate::{
     AuthorBinding, CredentialChain, Endorsement, Error, PeerId, PublicKey, RevocationSet, TipGraph,
     decode_bounded, denied, encode,
@@ -38,7 +37,6 @@ impl SignedMigrationPublication {
         signed.to_bytes()?;
         Ok(signed)
     }
-    /// Identity excludes the endorsement so a renewed valid certificate is idempotent.
     pub fn id(&self) -> Result<Commitment, Error> {
         Self::statement_id(&self.statement)
     }
@@ -83,7 +81,7 @@ impl SignedMigrationPublication {
             Some((revocations, time)) => {
                 opening.verify_current(publisher, graph, revocations, time)?
             }
-            None => opening.verify(publisher, graph)?,
+            None => opening.verify_historic(publisher, graph)?,
         }
         if !graph.migration_opening(opening, false)?
             || opening.tip()? != s.tip
@@ -94,8 +92,8 @@ impl SignedMigrationPublication {
         }
         self.endorsement
             .verify_tip_statement(publisher, s.scope, LABEL, s, current)?;
-        let identity = opening.endorsement().signer(publisher);
-        if self.endorsement.signer(publisher) != identity {
+        let identity = opening.endorsement().claimed_signer(publisher);
+        if self.endorsement.claimed_signer(publisher) != identity {
             return Err(denied("descriptor must be endorsed by the opening signer"));
         }
         let node = PublicKey::from_bytes(&s.writer).map_err(|_| denied("migration writer key"))?;

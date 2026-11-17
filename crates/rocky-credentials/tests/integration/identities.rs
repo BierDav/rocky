@@ -1,6 +1,3 @@
-//! Identities hold permissions; nodes sign under certificates their
-//! identity signed; the publisher key stays with the owner's identity and
-//! issuers sign through their chains. Keys and bytes only.
 use rocky_core::{
     AppId, ApplicationManifest, AuthorLogScope, DomainId, DomainRule, MeshId, ResourceGrant,
     ResourceScope, Right, RowSelection, Scope,
@@ -62,7 +59,6 @@ impl Domain {
             fields: rocky_core::FieldSelection::Only(BTreeSet::new()),
         }
     }
-    /// An issuer identity the owner appointed, with its issuer chain.
     async fn issuer(&self) -> (FileIdentity, CredentialChain) {
         let identity = FileIdentity::new().await;
         let link = Authority::owner_in(
@@ -102,7 +98,6 @@ impl Domain {
     }
 }
 
-/// An identity in its own file-backed provider.
 struct FileIdentity {
     _directory: rocky_platform::fs::Scratch,
     provider: FileIdentityProvider,
@@ -116,7 +111,6 @@ impl FileIdentity {
             provider,
         }
     }
-    /// The same identity opened again, as another node's process would.
     fn reopen(&self) -> FileIdentityProvider {
         FileIdentityProvider::open(self.provider.directory()).expect("identity")
     }
@@ -125,8 +119,6 @@ impl FileIdentity {
     }
 }
 
-/// A node of `identity` certified under `chain` after `previous`; its key
-/// is its writer identity.
 fn node(
     identity: &dyn IdentityProvider,
     chain: &CredentialChain,
@@ -322,7 +314,7 @@ async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_
     .expect("before revocation the issuer endorses a manifest through its chain");
     assert_ne!(issuer.key(), domain.publisher());
     assert_eq!(
-        earlier.endorsement().signer(domain.publisher()),
+        earlier.endorsement().claimed_signer(domain.publisher()),
         issuer.key()
     );
     earlier
@@ -342,7 +334,9 @@ async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_
     let revoked = domain.revoke(|statement| {
         statement.identities.insert(issuer.key());
     });
-    earlier.verify(domain.publisher()).expect("authentic");
+    earlier
+        .verify_historic(domain.publisher())
+        .expect("authentic");
     assert!(
         earlier
             .verify_current(domain.publisher(), &revoked, NOW)
@@ -504,4 +498,29 @@ async fn a_new_node_proves_its_identity_to_a_node_of_the_same_identity() {
     )
     .expect("request");
     assert!(answer.open(&request, &other).is_err());
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_confirmation_code_is_six_digits_both_nodes_derive_alike() {
+    let identity = FileIdentity::new().await;
+    let (node, answering) = (PrivateKey::new(), PrivateKey::new());
+    let domain = Domain::new();
+    let database = DatabaseContext {
+        publisher: domain.publisher(),
+        scope: domain.grant().scope.domain,
+    };
+    let (request, _) = IdentityRequest::sign(
+        &identity.provider,
+        &node,
+        answering.public_key(),
+        NOW,
+        database,
+    )
+    .expect("request");
+    let code = request.confirmation_code().expect("code");
+    assert_eq!(code.len(), 6);
+    assert!(code.bytes().all(|byte| byte.is_ascii_digit()), "{code}");
+    let received =
+        IdentityRequest::from_bytes(&request.to_bytes().expect("bytes")).expect("request");
+    assert_eq!(received.confirmation_code().expect("code"), code);
 }

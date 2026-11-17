@@ -21,7 +21,6 @@ fn scope(table: u8) -> ResourceScope {
     }
 }
 
-/// One owner database: its root and a trusted issuer identity.
 struct Owner {
     root: PrivateKey,
     identity: PrivateKey,
@@ -52,16 +51,13 @@ impl Owner {
             chain: CredentialChain(vec![link]),
         }
     }
-    /// A node of the owner identity: its key and full chain.
     fn node(&self) -> (PublicKey, CredentialChain) {
         let (key, chain) = self.device();
         (key.public_key(), chain)
     }
-    /// A node of the owner identity that signs itself.
     fn device(&self) -> (PrivateKey, CredentialChain) {
         crate::testing::node(&self.identity, &self.chain)
     }
-    /// `by` admits `node` after the resets `follows`.
     fn admit(
         &self,
         by: &PrivateKey,

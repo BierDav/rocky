@@ -1,4 +1,3 @@
-//! Schema-authenticated `granted_like` families. Signed grants keep their encoding.
 use crate::{Error, PartitionGrant, denied};
 use rocky_core::{
     ApplicationManifest, Commitment, FieldSelection, PartitionSelector, ResourceGrant,
@@ -26,10 +25,11 @@ struct Declaration {
     partition_by: Vec<String>,
 }
 impl GrantFamilies {
-    /// `manifest` and the table scopes must come from the installed, authenticated
-    /// schema. Partition scopes must never be supplied as table scopes.
-    pub fn new(manifest: &ApplicationManifest, scopes: &[ResourceScope]) -> Result<Self, Error> {
-        let tables: BTreeMap<_, _> = manifest
+    pub fn new(
+        authenticated_manifest: &ApplicationManifest,
+        table_scopes: &[ResourceScope],
+    ) -> Result<Self, Error> {
+        let tables: BTreeMap<_, _> = authenticated_manifest
             .entities
             .iter()
             .map(|table| (table.name.as_str(), table))
@@ -42,13 +42,13 @@ impl GrantFamilies {
                     .map(|declaration| (*name, declaration))
             })
             .collect();
-        let fields: BTreeMap<_, _> = manifest
+        let fields: BTreeMap<_, _> = authenticated_manifest
             .fields
             .iter()
             .map(|field| (field.name.as_str(), field.id))
             .collect();
         let mut by_table: BTreeMap<_, Vec<_>> = BTreeMap::new();
-        for scope in scopes {
+        for scope in table_scopes {
             by_table.entry(scope.table).or_default().push(scope);
         }
         let mut families = BTreeMap::new();
@@ -220,7 +220,6 @@ impl GrantFamilies {
         all
     }
 
-    /// Resolves just one table without expanding an entire wide schema.
     pub fn partitions_for(
         &self,
         grants: &[PartitionGrant],
@@ -244,8 +243,6 @@ impl GrantFamilies {
         })
     }
 
-    /// Removes a follower only when its complete grant set equals inheritance.
-    /// Explicit narrower rights, rows, fields or selectors always remain.
     pub fn compact_resources(&self, grants: &[ResourceGrant]) -> Vec<ResourceGrant> {
         let mut by_scope: BTreeMap<_, Vec<&ResourceGrant>> = BTreeMap::new();
         for grant in grants {

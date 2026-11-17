@@ -1,48 +1,33 @@
-//! The domain's root key: the publisher key, held offline. A passkey (its
-//! PRF output) or a 24-word phrase supplies its 32-byte secret; Rocky never
-//! stores it. It signs the genesis, trusted grants and their revocations,
-//! and opens the key escrow for recovery.
 use crate::{
     Error, IdentityKey, IdentityProvider, PrivateKey, PublicKey, Purpose, Signature,
     phrase_key::PhraseKey,
 };
 
-/// Derives the owner's identity key from the root secret.
-const IDENTITY_DERIVATION: &[u8] = b"rocky identity v1";
+const OWNER_IDENTITY_DERIVATION: &[u8] = b"rocky identity v1";
 
-/// The root's secret in memory, for one call. Implements `IdentityProvider`;
-/// an application with its own signer supplies that instead.
 pub struct RootKey(PhraseKey);
 impl RootKey {
-    /// A fresh root key.
     pub fn generate() -> Self {
         Self(PhraseKey::generate())
     }
-    /// The root key with this 32-byte secret, such as a passkey's PRF output.
     pub fn from_secret(secret: [u8; 32]) -> Self {
         Self(PhraseKey::from_secret(secret))
     }
-    /// The root key a 24-word English BIP 39 phrase names.
     pub fn from_phrase(phrase: &str) -> Result<Self, Error> {
         PhraseKey::from_phrase(phrase).map(Self)
     }
-    /// The 24 words that restore this key.
     pub fn phrase(&self) -> String {
         self.0.phrase()
     }
-    /// The 32-byte secret, for an application that keeps it elsewhere.
     pub fn secret(&self) -> [u8; 32] {
         self.0.secret()
     }
     pub fn public_key(&self) -> PublicKey {
         self.0.public_key()
     }
-    /// The owner's identity key, derived from the root secret (HKDF-SHA256,
-    /// `"rocky identity v1"`), so one phrase or passkey restores both. It
-    /// is a different key: nothing it signs verifies as the root's.
     pub fn identity(&self) -> IdentityKey {
         let secret = zeroize::Zeroizing::new(self.secret());
-        IdentityKey::from_secret(crate::group::hkdf(&[], &*secret, IDENTITY_DERIVATION))
+        IdentityKey::from_secret(crate::group::hkdf(&[], &*secret, OWNER_IDENTITY_DERIVATION))
     }
     pub(crate) fn private(&self) -> &PrivateKey {
         self.0.private()

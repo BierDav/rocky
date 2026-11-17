@@ -337,7 +337,7 @@ impl Node {
         current
             .identity_links()
             .with_certificate(certificate.clone())
-            .provenance_with_families(
+            .historic_provenance_with_families(
                 current.publisher,
                 certificate.capability.subject,
                 &self.domain().families,

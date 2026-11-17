@@ -101,7 +101,7 @@ pub async fn run() -> Result<(), Failure> {
         let encoded = source_config.manifest.to_bytes()?;
         assert_eq!(
             SignedManifest::from_bytes(&encoded)?
-                .verify(publisher.public_key())?
+                .verify_historic(publisher.public_key())?
                 .hash(),
             manifest.hash()
         );

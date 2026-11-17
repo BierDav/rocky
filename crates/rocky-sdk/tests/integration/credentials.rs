@@ -510,7 +510,7 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     )?;
     let statement = Revocation {
         app: manifest
-            .verify(serde_json::from_value(saved["publisher"].clone())?)?
+            .verify_historic(serde_json::from_value(saved["publisher"].clone())?)?
             .app,
         issuer: serde_json::from_value(saved["identity"].clone())?,
         time: std::time::SystemTime::now()

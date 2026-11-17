@@ -270,6 +270,23 @@ async fn a_trusted_node_claims_and_a_retry_returns_the_same_value() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn the_network_coordinator_meets_the_claim_contract() {
+    let service = Service::start().await;
+    rocky_credentials::testing::claim_contract(&service.client(&service.node), service.scope).await;
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn the_memory_log_meets_the_claim_contract() {
+    let client = crate::coordinated::MemoryLog::new().client(PrivateKey::new().public_key());
+    let scope = Scope {
+        mesh: MeshId([1; 16]),
+        app: AppId([2; 16]),
+        domain: DomainId([3; 16]),
+    };
+    rocky_credentials::testing::claim_contract(&client, scope).await;
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_claim_beyond_its_window_is_expired_and_takes_no_value() {
     let service = Service::start().await;
     let client = service.client(&service.node);

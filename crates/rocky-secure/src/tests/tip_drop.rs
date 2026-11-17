@@ -74,7 +74,11 @@ async fn dropping_branch_frames_preserves_main_and_requires_catchup_on_return() 
     let opening = SignedTipOpening::sign(
         TipOpeningStatement {
             format: TIP_OPENING_FORMAT,
-            schema: f.manifest.verify(f.publisher.public_key()).unwrap().hash(),
+            schema: f
+                .manifest
+                .verify_historic(f.publisher.public_key())
+                .unwrap()
+                .hash(),
             scope: f.public.domain,
             seal: seal.id().unwrap(),
             minimum_in_sync: 1,

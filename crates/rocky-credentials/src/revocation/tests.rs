@@ -8,7 +8,6 @@ const NOW: u64 = 2_000_000_000;
 thread_local! {
     static DERIVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
-/// Counts a value derived from a whole set on this thread.
 pub(super) fn count_derivation() {
     DERIVATIONS.with(|count| count.set(count.get() + 1));
 }
@@ -16,12 +15,9 @@ fn derivations() -> usize {
     DERIVATIONS.with(std::cell::Cell::get)
 }
 
-/// An issuer identity of `publisher`: its key and issuer chain, valid for
-/// the statement times these tests use.
 fn issuer(publisher: &PrivateKey) -> (PrivateKey, CredentialChain) {
     issuer_at(publisher, NOW)
 }
-/// An issuer whose chain is valid for 300 days around `time`.
 fn issuer_at(publisher: &PrivateKey, time: u64) -> (PrivateKey, CredentialChain) {
     let key = PrivateKey::new();
     let link = Authority::owner_in(
@@ -100,7 +96,6 @@ fn every_interleaving_of_merges_yields_one_digest() {
     }
     let mut digests = BTreeSet::new();
     let mut order: Vec<usize> = (0..statements.len()).collect();
-    /// Heap's algorithm: every order of single-statement merges.
     fn permutations(k: usize, order: &mut Vec<usize>, each: &mut dyn FnMut(&[usize])) {
         if k <= 1 {
             each(order);
@@ -388,8 +383,6 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
     );
 }
 
-/// Two identities the root signed for cannot revoke each other: only a
-/// root statement ends a root-signed link. Two issuers below one do.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn only_the_root_ends_its_links_and_issuers_below_revoke_each_other() {
     let publisher = PrivateKey::new();
@@ -478,8 +471,6 @@ fn signing_adds_a_bounded_overhead() {
     assert!(overhead <= SIGNATURE_OVERHEAD, "{overhead}");
 }
 
-/// A root statement never leaves the set: it may end a trusted grant,
-/// which never expires.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_root_statement_is_permanent() {
     let publisher = PrivateKey::new();
@@ -502,8 +493,6 @@ fn a_root_statement_is_permanent() {
     assert_eq!(set.pruned(u64::MAX - 1).len(), 1);
 }
 
-/// An identity's membership certificates of five nodes, then a sixth that
-/// forks its links at sequence 1, with the root that trusts the identity.
 fn forked_links() -> (PrivateKey, Vec<SignedCapability>) {
     let root = PrivateKey::new();
     let identity = PrivateKey::new();
@@ -541,8 +530,6 @@ fn forked_links() -> (PrivateKey, Vec<SignedCapability>) {
     (root, certificates)
 }
 
-/// Certificates linked one by one, merged as one batch or decoded hold the
-/// same evidence; a fork among them ends nodes in each.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn batched_links_hold_what_single_links_hold() {
     let (root, certificates) = forked_links();
@@ -566,8 +553,6 @@ fn batched_links_hold_what_single_links_hold() {
     );
 }
 
-/// Judging every certificate's node, or keying a cache by the set, derives
-/// the fork and the fingerprint once; a change derives them again.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn whole_set_derivations_are_computed_once_per_change() {
     let (_, certificates) = forked_links();
@@ -602,4 +587,44 @@ fn whole_set_derivations_are_computed_once_per_change() {
     );
     assert_ne!(set.fingerprint().unwrap(), fingerprint);
     assert_eq!(derivations() - before, 2);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn no_statement_revokes_the_publisher_or_recovers_to_it() {
+    let publisher = PrivateKey::new();
+    let anchor = publisher.public_key();
+    let by_root =
+        |body: Revocation| SignedRevocation::sign(body, &publisher, &CredentialChain::default());
+    by_root(statement(&publisher, NOW, PrivateKey::new().public_key()))
+        .unwrap()
+        .verify(anchor, APP)
+        .unwrap();
+    assert!(
+        by_root(statement(&publisher, NOW, anchor))
+            .unwrap()
+            .verify(anchor, APP)
+            .is_err(),
+        "not even the root revokes the publisher identity"
+    );
+    let issuer = issuer(&publisher);
+    assert!(
+        signed(statement(&issuer.0, NOW, anchor), &issuer)
+            .verify(anchor, APP)
+            .is_err()
+    );
+    let recovery = |keep: PublicKey| Revocation {
+        identities: BTreeSet::new(),
+        capabilities: BTreeSet::new(),
+        mode: RevocationMode::Compromised,
+        recovery: Some(RootDecision::Grants(RootRecovery { since: NOW, keep })),
+        ..statement(&publisher, NOW, anchor)
+    };
+    by_root(recovery(PrivateKey::new().public_key()))
+        .unwrap()
+        .verify(anchor, APP)
+        .unwrap();
+    assert!(
+        !by_root(recovery(anchor)).is_ok_and(|signed| signed.verify(anchor, APP).is_ok()),
+        "a recovery keeps a trusted identity, never the publisher"
+    );
 }

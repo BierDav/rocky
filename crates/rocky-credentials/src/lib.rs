@@ -1,8 +1,17 @@
-//! Credentials independent of a database or a network: signed manifests,
-//! capabilities and revocations, the identities they bind and the provider
-//! port that supplies them, key providers, issuance and the enrollment and
-//! renewal messages. A runtime enforces
-//! what these verify.
+macro_rules! never_implements {
+    ($type:ty: $($bound:tt)+) => {
+        const _: fn() = || {
+            trait AmbiguousWhenImplemented<Marker> {
+                fn check() {}
+            }
+            impl<T: ?Sized> AmbiguousWhenImplemented<()> for T {}
+            struct Implemented;
+            impl<T: ?Sized + $($bound)+> AmbiguousWhenImplemented<Implemented> for T {}
+            <$type as AmbiguousWhenImplemented<_>>::check();
+        };
+    };
+}
+
 mod author_binding;
 mod checkpoint_record;
 mod claims;
@@ -130,22 +139,15 @@ pub use tips::{
 
 use serde::{Serialize, de::DeserializeOwned};
 
-/// Longest delegation chain: publisher, issuer identities, identity, node.
 pub const MAX_CREDENTIAL_DEPTH: usize = 8;
-/// Largest signed credential structure.
 pub const MAX_CREDENTIAL_BYTES: usize = 256 * 1024;
 
-/// Why credentials were refused. `Denied` is final for the same input.
 #[derive(Debug)]
 pub enum Error {
     Denied(String),
     Protocol(rocky_core::ProtocolError),
-    /// The key provider failed or holds no such secret.
     Provider(ProviderError),
-    /// A personal database's mode, owner or device rules refused.
     Personal(PersonalError),
-    /// A record another release wrote: it names a format this release
-    /// never reads, and no reader for it exists.
     UnsupportedFormat {
         record: &'static str,
         format: u32,
@@ -180,11 +182,9 @@ pub(crate) fn denied(message: &str) -> Error {
     Error::Denied(message.into())
 }
 
-/// The pinned canonical CBOR encoding every signature covers.
 pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, Error> {
     p2panda_core::cbor::encode_cbor(value).map_err(|_| denied("invalid canonical encoding"))
 }
-/// Decodes at most `limit` bytes and refuses noncanonical or trailing input.
 pub fn decode_bounded<T: Serialize + DeserializeOwned>(
     bytes: &[u8],
     limit: usize,
@@ -199,12 +199,10 @@ pub fn decode_bounded<T: Serialize + DeserializeOwned>(
     }
     Ok(value)
 }
-/// The bytes a domain-separated signature covers.
 pub fn signing_bytes<T: Serialize>(label: &str, value: &T) -> Result<Vec<u8>, Error> {
     encode(&(label, value))
 }
 
-/// Test support for this and other crates' tests; not a supported API.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod testing {
@@ -213,7 +211,6 @@ pub mod testing {
         SignedCapability, Signer,
     };
 
-    /// A fresh node of `identity`, certified under `chain`, and its chain.
     pub fn node(
         identity: &dyn IdentityProvider,
         chain: &CredentialChain,
@@ -225,8 +222,6 @@ pub mod testing {
             .expect("a node certificate");
         (node, chain)
     }
-    /// The issuer authority of a fresh node of `identity` under `chain`.
-    /// The node key is leaked, so the authority lives for the test.
     pub fn authority(
         identity: &dyn IdentityProvider,
         chain: &CredentialChain,
@@ -235,10 +230,6 @@ pub mod testing {
         let node: &'static PrivateKey = Box::leak(Box::new(node));
         Authority::issuer(node, &chain).expect("an issuer node")
     }
-    /// Who signs for `identity` under its issuer links `chain`: its own key
-    /// when the chain is empty (the root), otherwise a fresh node of it, whose
-    /// key is leaked. A key the chain does not end at still certifies a node of
-    /// its own, for statements meant to be refused.
     pub fn signer<'a>(identity: &'a dyn IdentityProvider, chain: &CredentialChain) -> Signer<'a> {
         if chain.0.is_empty() {
             return Signer::Key(identity);
@@ -256,8 +247,6 @@ pub mod testing {
         static LANES: std::cell::RefCell<std::collections::BTreeMap<crate::PublicKey, (&'static PrivateKey, SignedCapability)>> =
             const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
     }
-    /// The one node of `identity` this thread signs tip statements with,
-    /// certified from time zero; its key is the lane.
     pub fn lane(identity: &dyn IdentityProvider) -> Signer<'static> {
         let public = identity.public_key().expect("a key");
         let (key, certificate) = LANES.with(|lanes| {
@@ -272,7 +261,6 @@ pub mod testing {
         });
         Signer::node(key, &CredentialChain(vec![certificate])).expect("a lane")
     }
-    /// The fixture lane, certified in the database the authority chain names.
     pub fn lane_for(identity: &dyn IdentityProvider, chain: &CredentialChain) -> Signer<'static> {
         let public = identity.public_key().expect("an identity");
         let database = chain
@@ -289,11 +277,9 @@ pub mod testing {
         });
         Signer::node(key, &CredentialChain(vec![linked])).expect("a lane")
     }
-    /// The lane `lane` signs on for `identity`.
     pub fn lane_of(identity: &dyn IdentityProvider) -> crate::PublicKey {
         lane(identity).signing_node().expect("a node")
     }
-    /// The lane of `identity` once `lane` made one, else the key itself.
     pub fn lane_key(identity: crate::PublicKey) -> crate::PublicKey {
         LANES.with(|lanes| {
             lanes
@@ -334,5 +320,88 @@ pub mod testing {
             identity,
         )
         .expect("a node certificate")
+    }
+
+    pub async fn claim_contract(coordinator: &dyn crate::Coordinator, scope: rocky_core::Scope) {
+        use crate::counters::{Claim, Lookup, Name};
+        let name = Name::new("rocky.claim-contract").expect("a counter name");
+        let claim = |claim| coordinator.claim(scope, name.clone(), claim);
+        let first = Claim::fresh().expect("a claim");
+        let taken = claim(first).await.expect("a first value");
+        assert_eq!(
+            claim(first).await,
+            Ok(taken),
+            "a retried claim returns its value"
+        );
+        let mut last = taken;
+        for _ in 0..2 {
+            let next = claim(Claim::fresh().expect("a claim"))
+                .await
+                .expect("a later value");
+            assert!(next > last, "a new claim takes a greater value");
+            last = next;
+        }
+        assert_eq!(
+            claim(first).await,
+            Ok(taken),
+            "a retry after later claims returns its value"
+        );
+        let expired = Claim {
+            id: rocky_core::commitment("rocky.claim-contract.expired", &[]),
+            issued: 0,
+        };
+        assert!(
+            claim(expired).await.is_err(),
+            "an expired claim takes no value"
+        );
+        let reading = coordinator
+            .counter(scope, name.clone(), Some(expired))
+            .await
+            .expect("a reading");
+        assert_eq!(reading.value, last, "an expired claim leaves the counter");
+        assert!(
+            !matches!(reading.claim, Some(Lookup::Claimed(_))),
+            "an expired claim holds no value"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn bounded_decoding_refuses_oversized_noncanonical_and_trailing_input() {
+        let value = (7u32, "rocky".to_owned());
+        let bytes = encode(&value).unwrap();
+        assert_eq!(
+            decode_bounded::<(u32, String)>(&bytes, bytes.len()).unwrap(),
+            value
+        );
+        assert!(
+            decode_bounded::<(u32, String)>(&bytes, bytes.len() - 1).is_err(),
+            "input over its limit is refused"
+        );
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(decode_bounded::<(u32, String)>(&trailing, 1024).is_err());
+        assert_eq!(bytes[..2], [0x82, 0x07], "a two-item array, then 7 inline");
+        let noncanonical = [&[0x82, 0x18, 0x07][..], &bytes[2..]].concat();
+        assert!(
+            decode_bounded::<(u32, String)>(&noncanonical, 1024).is_err(),
+            "7 in a needlessly long encoding is refused"
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn signing_bytes_are_the_canonical_encoding_of_the_label_and_value() {
+        let value = [9u8; 32];
+        let signed = signing_bytes("rocky.example.v1", &value).unwrap();
+        assert_eq!(signed, encode(&("rocky.example.v1", value)).unwrap());
+        assert_ne!(
+            signed,
+            signing_bytes("rocky.example.v2", &value).unwrap(),
+            "one value signs differently under every label"
+        );
     }
 }

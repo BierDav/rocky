@@ -132,7 +132,7 @@ impl<A: RowApplication> Inner<A> {
                 self.grant_families(),
             )
             .map_err(credential)?
-            .selectors(peer, time)
+            .selectors(peer, &self.config.revocations, time)
             .map_err(credential)?;
         if !grants.iter().any(|grant| grant.scope.domain == domain)
             && !selectors.iter().any(|grant| grant.domain == domain)

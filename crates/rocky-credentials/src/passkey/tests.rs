@@ -3,7 +3,6 @@ use super::*;
 fn namespace(purpose: &str) -> PersonalNamespace {
     PersonalNamespace::new("notes.example", purpose).unwrap()
 }
-/// A stand-in authenticator: one credential's PRF over the evaluation input.
 fn evaluate(credential: u8, namespace: &PersonalNamespace) -> VerifiedPasskeyPrf {
     let input = namespace.prf_input().unwrap();
     let output = crate::group::hkdf(&[credential; 32], input.as_bytes(), b"test authenticator");

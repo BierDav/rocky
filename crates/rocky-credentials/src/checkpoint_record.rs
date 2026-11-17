@@ -1,6 +1,3 @@
-//! Checkpoint records: graph statements listing a checkpoint of one scope at
-//! a seal, so every device learns where it may rebootstrap. The body moves
-//! only on request.
 use crate::{
     CredentialChain, Endorsement, Error, IdentityProvider, PublicKey, RevocationSet, TipGraph,
     decode_bounded, denied, encode,
@@ -10,20 +7,14 @@ use serde::{Deserialize, Serialize};
 
 pub const CHECKPOINT_RECORD_FORMAT: u32 = 2;
 
-/// A checkpoint of `table` holding the state of `seal`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointRecordStatement {
     pub format: u32,
-    /// The domain.
     pub scope: Scope,
     pub seal: Commitment,
-    /// The encryption scope the checkpoint holds.
     pub table: ResourceScope,
-    /// The checkpoint's digest.
     pub checkpoint: Commitment,
-    /// The node that signed the checkpoint.
     pub signer: PublicKey,
-    /// Its size: the stored rows it holds.
     pub rows: u64,
 }
 impl CheckpointRecordStatement {
@@ -47,8 +38,6 @@ crate::tips::signed_statement!(
 );
 
 impl SignedCheckpointRecord {
-    /// The owner, a trusted identity or an issuer lists a checkpoint of a
-    /// seal the graph holds.
     fn check_graph(&self, graph: &TipGraph, _trusted: bool) -> Result<(), Error> {
         graph.seal_by_id(self.statement.seal)?;
         Ok(())

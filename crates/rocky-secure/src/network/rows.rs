@@ -471,7 +471,7 @@ impl NativeSession {
                         inner.grant_families(),
                     )
                     .map_err(credential)?
-                    .selectors(self.peer, now()?)
+                    .selectors(self.peer, &inner.config.revocations, now()?)
                     .map_err(credential)?;
                 drop(inner);
                 let descriptor = replica

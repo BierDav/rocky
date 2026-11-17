@@ -1,4 +1,3 @@
-//! Revocation statements and the grow-only set a device holds of them.
 use crate::{
     Attestation, CredentialChain, Error, PublicKey, Purpose, SignedCapability, Signer,
     decode_bounded, denied, encode, signing_bytes,
@@ -9,71 +8,38 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 pub const DAY: u64 = 24 * 60 * 60;
-/// Longest a credential link may be valid. A statement outlives every
-/// chain it ends by this much.
 pub const MAX_CHAIN_LIFETIME: u64 = 366 * DAY;
-/// Clock difference and backdating allowed beyond the lifetime.
 pub const LIFETIME_SKEW: u64 = DAY;
-/// Live statements a new revocation may join; `revoke` fails at the bound.
 pub const MAX_LIVE_REVOCATIONS: usize = 1024;
-/// Largest encoded signed statement, its signer's issuer chain included.
 pub const MAX_REVOCATION_BYTES: usize = 8 * 1024;
-/// What the signature and the framing add to an encoded statement and
-/// its signer's chain, at most.
 pub const SIGNATURE_OVERHEAD: usize = 1024;
-/// Largest encoded set, a bound on what any merge accepts.
 pub const MAX_REVOCATION_SET_BYTES: usize = 4 * 1024 * 1024;
-/// The encoded resets one set holds together, within its bound: resets are
-/// permanent, so the rest of the set always stays for other statements.
 pub const MAX_RESET_SET_BYTES: usize = 1024 * 1024;
-/// The named refusal of a revocation beyond the live bound.
 pub const REVOCATION_SET_FULL: &str = "revocation set full: 1,024 live statements";
 
-/// How a root revocation treats identities first enrolled by its target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RevocationMode {
-    /// End only the named identity; its enrollees may renew elsewhere.
     Lost,
-    /// Also end every identity whose first trusted issuer was the target.
     Compromised,
 }
 
-/// One revocation: the identities, node certificates and capability IDs it
-/// ends, the identity that signed it and when. Its ID is its hash. Signed
-/// by the root it is permanent; otherwise it leaves the set once every
-/// chain it ends has expired.
-/// Naming an identity ends every chain through it, so all its nodes;
-/// naming a node ends only that node's certificate; naming a claim right's
-/// grant ends every link of that right.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Revocation {
-    /// The application, under its publisher, the statement belongs to.
     pub app: AppId,
-    /// The signing identity: the owner's or an issuer's.
     pub issuer: PublicKey,
     pub time: u64,
-    /// Signed policy for origin cascades. Only the root may cascade.
     pub mode: RevocationMode,
     pub nodes: BTreeSet<crate::PeerId>,
     pub identities: BTreeSet<PublicKey>,
     pub capabilities: BTreeSet<Commitment>,
-    /// In a root statement or identity-owned unlink, ordered by identity and node without
-    /// repeats: for each node (lane) of a trusted identity the statement
-    /// revokes, the heads of its chains that stay valid. A chain without
-    /// an entry keeps nothing once its signer is revoked.
     pub cut: Vec<Cut>,
-    /// Only in a root statement: the whole-database decision it makes.
     pub recovery: Option<RootDecision>,
 }
-/// A root statement's whole-database decision after devices were lost.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RootDecision {
-    /// Destructive recovery: ends trusted grants older than its own.
     Grants(RootRecovery),
-    /// Sign out everywhere else: ends every node it does not keep, and
-    /// keeps their operations only within its fence.
     Reset(Box<crate::Reset>),
 }
 impl RootDecision {
@@ -90,28 +56,17 @@ impl RootDecision {
         }
     }
 }
-/// A root recovery's statement: it ends every trusted grant valid before
-/// the recovered identity's own, with what those identities first
-/// enrolled, whether or not the recovering store knew them. Grants the
-/// root signs later stay. Ordered by time, then key: of two recoveries
-/// the later ends the earlier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RootRecovery {
-    /// The `not_before` of the recovered identity's trusted grant.
     pub since: u64,
-    /// The recovered identity.
     pub keep: PublicKey,
 }
 impl RootRecovery {
-    /// Whether it ends a trusted grant to `identity` valid from `since`.
     pub fn ends(&self, since: u64, identity: &PublicKey) -> bool {
         (since, *identity) < (self.since, self.keep)
     }
 }
-/// The heads a root statement keeps of one node's chains: the tip
-/// statements `identity` signed through `lane`, every branch's head in
-/// order, and the node's terminal acknowledgments. Empty keeps none.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Cut {
     pub identity: PublicKey,
@@ -119,15 +74,11 @@ pub struct Cut {
     pub statements: Vec<Head>,
     pub acknowledgments: Option<Head>,
 }
-/// A kept chain head and its place, so admission refuses a later
-/// statement without holding the head.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Head {
     pub sequence: u64,
     pub id: Commitment,
 }
-/// Chains a root statement may cut, and heads in all, bounded by the
-/// statement's size.
 pub const MAX_CUT_LANES: usize = 32;
 pub const MAX_CUT_HEADS: usize = 64;
 impl Revocation {
@@ -137,19 +88,14 @@ impl Revocation {
             &encode(self)?,
         ))
     }
-    /// The first day, counted from the Unix epoch, on which every chain
-    /// this statement ends has expired.
     pub fn expiry_day(&self) -> u64 {
         self.time
             .saturating_add(MAX_CHAIN_LIFETIME + LIFETIME_SKEW)
             .div_ceil(DAY)
     }
-    /// Whether the statement is still in the distributed set at `time`:
-    /// the day-rounded cutoff the digest uses.
     pub fn live(&self, time: u64) -> bool {
         time / DAY < self.expiry_day()
     }
-    /// Every key the statement revokes as a credential subject.
     pub fn subjects(&self) -> impl Iterator<Item = &PublicKey> {
         self.identities.iter()
     }
@@ -159,16 +105,12 @@ impl Revocation {
             && self.capabilities.is_empty()
             && self.recovery.is_none()
     }
-    /// The recovery's root-recovery grants decision, if any.
     pub fn grants(&self) -> Option<RootRecovery> {
         self.recovery.as_ref().and_then(RootDecision::grants)
     }
-    /// The owner reset this statement makes, if any.
     pub fn reset(&self) -> Option<&crate::Reset> {
         self.recovery.as_ref().and_then(RootDecision::reset)
     }
-    /// Recovery stays destructive. A reset is a root statement of its own:
-    /// it names nothing else and cascades no origin.
     fn valid_recovery(&self, root: bool) -> bool {
         match &self.recovery {
             None => true,
@@ -182,7 +124,6 @@ impl Revocation {
             }
         }
     }
-    /// The largest signed encoding this statement may have.
     fn max_bytes(&self) -> usize {
         if self.reset().is_some() {
             crate::MAX_RESET_BYTES
@@ -190,10 +131,6 @@ impl Revocation {
             MAX_REVOCATION_BYTES
         }
     }
-    /// A cut in a root statement or identity-owned unlink, ordered without repeats, naming
-    /// chains of identities or nodes the statement revokes; a recovery's
-    /// may name any identity but the one it keeps, since it ends grants
-    /// its signer never saw; a reset's, any lane it does not keep.
     fn valid_cut(&self, authorized: bool) -> bool {
         (authorized || self.cut.is_empty())
             && self.cut.len() <= MAX_CUT_LANES
@@ -221,12 +158,9 @@ impl Revocation {
     }
 }
 
-/// A statement signed by the owner's key, or by a node of an issuer
-/// identity whose chain it carries.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedRevocation {
     pub statement: Revocation,
-    /// The issuer links from the publisher to the signer; empty for the owner.
     pub chain: CredentialChain,
     attestation: Attestation,
     database: Option<crate::DatabaseContext>,
@@ -245,7 +179,6 @@ impl SignedRevocation {
         };
         Self::sign_scoped(statement, signer.into(), chain, database)
     }
-    /// Signs within a pinned database, including root-owned statements.
     pub fn sign_in<'s>(
         statement: Revocation,
         signer: impl Into<Signer<'s>>,
@@ -320,11 +253,6 @@ impl SignedRevocation {
     fn identity_unlink(&self) -> bool {
         self.attestation.certificate().is_none() && Self::unlink_shape(&self.statement, &self.chain)
     }
-    /// Checks the signature, that the owner's key or a node of an issuer
-    /// whose chain and certificate were valid at the statement's time
-    /// signed, and the application. The owner identity is never revoked.
-    /// Whether the issuer or its node is revoked later does not matter.
-    /// Returns the statement's ID.
     pub fn verify(&self, publisher: PublicKey, app: AppId) -> Result<Commitment, Error> {
         let statement = &self.statement;
         if let Some(database) = self.database {
@@ -399,16 +327,12 @@ impl SignedRevocation {
     pub fn id(&self) -> Result<Commitment, Error> {
         self.statement.id()
     }
-    /// Whether the root signed it.
     pub fn root(&self) -> bool {
         self.chain.0.is_empty()
     }
-    /// Whether it is still in the distributed set at `time`. A root
-    /// statement always is: it may end a trusted grant, which never expires.
     pub fn live(&self, time: u64) -> bool {
         self.root() || self.identity_unlink() || self.statement.live(time)
     }
-    /// The first day it is no longer live; `u64::MAX` for a root statement.
     pub fn expiry_day(&self) -> u64 {
         if self.root() || self.identity_unlink() {
             u64::MAX
@@ -416,13 +340,6 @@ impl SignedRevocation {
             self.statement.expiry_day()
         }
     }
-    /// Whether this statement ends a chain through `link`, a `protected`
-    /// one (see `CredentialChain::protected`) only when the root signed
-    /// it. A compromised root statement also ends every link that identity
-    /// first enrolled; a recovery's, every trusted grant before
-    /// its own and what those first enrolled; a reset's, every node link it
-    /// does not keep. Alone, it cannot tell that a later reset keeps the
-    /// node: [`RevocationSet::revoking`] can.
     pub fn ends_at(&self, link: &SignedCapability, protected: bool) -> Result<bool, Error> {
         if protected && !self.root() && !self.identity_unlink() {
             return Ok(false);
@@ -454,43 +371,28 @@ impl SignedRevocation {
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         encode(self)
     }
-    /// Decodes within the reset bound; verification applies the bound of
-    /// the statement's kind.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         decode_bounded(bytes, crate::MAX_RESET_BYTES)
     }
 }
 
-/// The statements a device verified. Merging is union; nothing is ever
-/// removed but statements past their expiry, which every holder drops by
-/// the same day-rounded cutoff. A digest identifies the live set.
-/// Conflicting modes remain in the union: Compromised dominates Lost,
-/// regardless of their timestamps or arrival order; revocation never weakens.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(into = "ReplicatedAuthority", try_from = "ReplicatedAuthority")]
 pub struct RevocationSet {
     database: Option<Box<crate::DatabaseContext>>,
     certificates: BTreeMap<Commitment, SignedCapability>,
-    /// Nodes admitted after the resets their admitter held.
     admissions: BTreeMap<Commitment, crate::SignedResetAdmission>,
     statements: BTreeMap<Commitment, SignedRevocation>,
     subjects: BTreeSet<PublicKey>,
     references: BTreeSet<crate::PeerId>,
     capabilities: BTreeSet<Commitment>,
-    /// What root statements name, which alone end protected links.
     root: Ended,
-    /// Origins ended by compromised root statements, independent of direct targets.
     compromised: BTreeSet<PublicKey>,
-    /// The heads root statements keep, by signing identity and lane.
     cuts: BTreeMap<(PublicKey, PublicKey), Heads>,
-    /// The latest recovery: it ends every trusted grant an earlier one does.
     recovery: Option<RootRecovery>,
     derived: Derived,
-    /// The genesis this holder pinned, which judges every node certificate.
     genesis: Pinned,
 }
-/// The holder's verified genesis: local, never compared, serialized or
-/// adopted from another set.
 #[derive(Clone, Debug, Default)]
 struct Pinned(Option<std::sync::Arc<crate::personal::Genesis>>);
 impl PartialEq for Pinned {
@@ -499,8 +401,6 @@ impl PartialEq for Pinned {
     }
 }
 impl Eq for Pinned {}
-/// What the whole set determines, computed once until it changes. Never
-/// compared or serialized.
 #[derive(Clone, Default)]
 struct Derived {
     fork_ended: OnceLock<BTreeSet<(PublicKey, crate::PeerId)>>,
@@ -519,7 +419,6 @@ impl std::fmt::Debug for Derived {
         f.write_str("Derived")
     }
 }
-/// Every head root statements keep of one node's two chains.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Heads {
     pub statements: BTreeSet<Head>,
@@ -531,7 +430,6 @@ struct Ended {
     references: BTreeSet<crate::PeerId>,
     capabilities: BTreeSet<Commitment>,
 }
-/// The current replicated authority encoding. Older statement-only sets are refused.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReplicatedAuthority {
@@ -615,7 +513,6 @@ impl RevocationSet {
             ..Self::default()
         }
     }
-    /// Atomic database ingress, including into an empty set.
     pub fn merge_in(
         &mut self,
         other: &Self,
@@ -630,7 +527,6 @@ impl RevocationSet {
         *self = next;
         Ok(added)
     }
-    /// Checks every item before the caller changes its local database.
     pub fn verify_in(&self, database: crate::DatabaseContext) -> Result<(), Error> {
         if self
             .database
@@ -674,10 +570,6 @@ impl RevocationSet {
         }
         Ok(())
     }
-    /// Judges held and later node certificates, and the chains verified
-    /// against this set, by the root's verified `genesis`: a shared database
-    /// refuses personal certificates, a personal one any but its owner's,
-    /// bound to it. A refusal changes nothing; another pin is refused.
     pub fn pin(
         &mut self,
         genesis: &crate::SignedManifest,
@@ -697,8 +589,6 @@ impl RevocationSet {
         self.genesis = Pinned(Some(std::sync::Arc::new(genesis)));
         Ok(())
     }
-    /// No evidence, judged by this set's pinned genesis: what a check that
-    /// ignores revocations verifies against.
     pub fn pinned_only(&self) -> Self {
         Self {
             genesis: self.genesis.clone(),
@@ -708,8 +598,6 @@ impl RevocationSet {
     pub(crate) fn genesis(&self) -> Option<&crate::personal::Genesis> {
         self.genesis.0.as_deref()
     }
-    /// Records identity-signed membership evidence; it grants no permissions.
-    /// A device certificate a tombstone ended is not kept.
     pub fn link(&mut self, certificate: SignedCapability) -> Result<bool, Error> {
         if crate::PersonalLink::of(&certificate)?
             .is_some_and(|link| self.tombstones(link.owner, link.node))
@@ -728,8 +616,6 @@ impl RevocationSet {
         }
         Ok(true)
     }
-    /// [`Self::link`] without the size check, which a batch makes once.
-    /// Changes nothing on error; returns the ID of a new certificate.
     fn add_link(&mut self, certificate: SignedCapability) -> Result<Option<Commitment>, Error> {
         certificate.certifies(
             certificate.capability.subject,
@@ -756,8 +642,6 @@ impl RevocationSet {
     pub fn certificates(&self) -> impl Iterator<Item = &SignedCapability> {
         self.certificates.values()
     }
-    /// Records a node's admission after the resets its signer held; the
-    /// held resets decide whether it counts.
     pub fn admit(&mut self, admission: crate::SignedResetAdmission) -> Result<bool, Error> {
         let database = self.database.clone();
         let Some(id) = self.add_admission(admission)? else {
@@ -771,8 +655,6 @@ impl RevocationSet {
         }
         Ok(true)
     }
-    /// [`Self::admit`] without the size check. Changes nothing on error;
-    /// returns the ID of a new admission.
     fn add_admission(
         &mut self,
         admission: crate::SignedResetAdmission,
@@ -797,13 +679,10 @@ impl RevocationSet {
         }
         Ok(membership)
     }
-    /// Whether a root statement names `node` or its key: permanent.
     pub(crate) fn root_names(&self, node: PublicKey) -> bool {
         self.root.subjects.contains(&node)
             || self.root.references.contains(&crate::PeerId::of(node))
     }
-    /// A tombstone replaces every personal certificate of its node but the
-    /// one a held statement carries, so holders converge in any order.
     fn prune_tombstoned(&mut self) {
         let carried: BTreeSet<Commitment> = self
             .statements
@@ -831,7 +710,6 @@ impl RevocationSet {
     fn fork_ends(&self, identity: PublicKey, node: crate::PeerId) -> bool {
         self.fork_ended().contains(&(identity, node))
     }
-    /// Every identity and node a fork of the identity's links ends.
     fn fork_ended(&self) -> &BTreeSet<(PublicKey, crate::PeerId)> {
         self.derived
             .fork_ended
@@ -868,8 +746,6 @@ impl RevocationSet {
             .map(|link| (link.identity, link.node))
             .collect()
     }
-    /// Adds `signed` and returns whether it was new; callers check the size
-    /// of what they insert.
     fn insert(&mut self, signed: SignedRevocation) -> Result<bool, Error> {
         self.bind(signed.database)?;
         let id = signed.id()?;
@@ -957,7 +833,6 @@ impl RevocationSet {
         }
         Ok(true)
     }
-    /// Verifies every statement and certificate against its signing authority.
     pub fn verify(&self, publisher: PublicKey, app: AppId) -> Result<(), Error> {
         for signed in self.statements.values() {
             signed.verify(publisher, app)?;
@@ -1001,10 +876,6 @@ impl RevocationSet {
         }
         Ok(())
     }
-    /// Adds the live statements of `other` this set lacks and drops its
-    /// own expired ones. A statement that fails verification, or a union
-    /// over the size limit, is refused and changes nothing. Returns the
-    /// statements added.
     pub fn merge(
         &mut self,
         other: &RevocationSet,
@@ -1041,7 +912,6 @@ impl RevocationSet {
         *self = next;
         Ok(added)
     }
-    /// This set without the statements expired at `time`.
     pub fn pruned(&self, time: u64) -> Self {
         let mut set = Self {
             database: self.database.clone(),
@@ -1057,7 +927,6 @@ impl RevocationSet {
         }
         set
     }
-    /// The statements in ID order.
     pub fn statements(&self) -> impl Iterator<Item = &SignedRevocation> {
         self.statements.values()
     }
@@ -1070,7 +939,6 @@ impl RevocationSet {
     pub fn is_empty(&self) -> bool {
         self.statements.is_empty() && self.certificates.is_empty() && self.admissions.is_empty()
     }
-    /// Whether evidence can end a chain; valid links alone do not.
     pub fn has_revocations(&self) -> bool {
         if !self.statements.is_empty() {
             return true;
@@ -1083,15 +951,12 @@ impl RevocationSet {
             ))
         })
     }
-    /// The statements still live at `time`.
     pub fn live(&self, time: u64) -> usize {
         self.statements
             .values()
             .filter(|signed| signed.live(time))
             .count()
     }
-    /// Identifies the live set at `time`: two holders of the same live
-    /// statements have the same digest, whatever order they learned them.
     pub fn digest(&self, time: u64) -> Result<Commitment, Error> {
         let live: Vec<&Commitment> = self
             .statements
@@ -1117,7 +982,6 @@ impl RevocationSet {
             ))?,
         ))
     }
-    /// The full replicated evidence, including still-valid membership links.
     pub fn exchange_digest(&self, time: u64) -> Result<Commitment, Error> {
         Ok(rocky_core::commitment(
             "rocky.authority-exchange.v3",
@@ -1128,9 +992,6 @@ impl RevocationSet {
             ))?,
         ))
     }
-    /// Identifies the whole held set, expired statements and links
-    /// included, for caches of what was judged against it. Computed once
-    /// until the set changes.
     pub fn fingerprint(&self) -> Result<Commitment, Error> {
         if let Some(fingerprint) = self.derived.fingerprint.get() {
             return Ok(*fingerprint);
@@ -1140,16 +1001,12 @@ impl RevocationSet {
         let fingerprint = rocky_core::commitment("rocky.revocation-set.held.v1", &encode(self)?);
         Ok(*self.derived.fingerprint.get_or_init(|| fingerprint))
     }
-    /// The heads root statements keep of what `identity` signed through
-    /// `lane`, when one cuts that chain.
     pub fn cut(&self, identity: &PublicKey, lane: &PublicKey) -> Option<&Heads> {
         self.cuts.get(&(*identity, *lane))
     }
-    /// Every chain a root statement cuts, by identity and lane.
     pub fn cut_lanes(&self) -> impl Iterator<Item = (&(PublicKey, PublicKey), &Heads)> {
         self.cuts.iter()
     }
-    /// Whether some statement revokes `key` as a credential subject.
     pub fn revokes_reference(&self, node: &crate::PeerId) -> bool {
         if self.references.contains(node) || self.reset_ends(node) {
             return true;
@@ -1168,40 +1025,28 @@ impl RevocationSet {
     pub fn revokes(&self, key: &PublicKey) -> bool {
         self.subjects.contains(key) || self.revokes_reference(&crate::PeerId::of(*key))
     }
-    /// Whether some statement names `id` among the capabilities it ends:
-    /// a link's ID or a claim right's grant.
     pub fn revokes_capability(&self, id: &Commitment) -> bool {
         self.capabilities.contains(id)
     }
-    /// Whether a root statement explicitly revoked `identity`, in either mode.
     pub fn revokes_trusted(&self, identity: &PublicKey) -> bool {
         self.root.subjects.contains(identity)
     }
-    /// Whether a compromised root statement ends what `origin` first enrolled.
     pub fn revokes_origin(&self, origin: &PublicKey) -> bool {
         self.compromised.contains(origin)
     }
-    /// Whether a root statement ends what `origin` first enrolled: it
-    /// marked the identity compromised, or a recovery ended its grant.
     pub fn ends_origin(&self, origin: &crate::Origin) -> bool {
         self.revokes_origin(&origin.identity) || self.recovery_ends(origin.since, &origin.identity)
     }
-    /// Whether a root statement ends the trusted grant `grant`.
     pub fn ends_trusted(&self, grant: &crate::Capability) -> bool {
         self.revokes_trusted(&grant.subject) || self.recovery_ends(grant.not_before, &grant.subject)
     }
-    /// Whether a recovery ends a trusted grant to `identity` valid from
-    /// `since`.
     pub fn recovery_ends(&self, since: u64, identity: &PublicKey) -> bool {
         self.recovery
             .is_some_and(|recovery| recovery.ends(since, identity))
     }
-    /// The latest recovery: of the recovered identities only its own
-    /// stays trusted.
     pub fn recovery(&self) -> Option<&RootRecovery> {
         self.recovery.as_ref()
     }
-    /// Every recovery the root signed, oldest first.
     pub fn recoveries(&self) -> Vec<RootRecovery> {
         let mut recoveries: Vec<RootRecovery> = self
             .statements
@@ -1213,9 +1058,6 @@ impl RevocationSet {
         recoveries.dedup();
         recoveries
     }
-    /// Whether some statement ends a chain through `link`: its subject,
-    /// node, capability ID, on a claim link its grant, or a root
-    /// statement its origin. A `protected` link only a root statement ends.
     pub fn ends_at(&self, link: &SignedCapability, protected: bool) -> Result<bool, Error> {
         let extended = link.capability.extended()?;
         let (subjects, references, capabilities) = if protected {
@@ -1241,8 +1083,6 @@ impl RevocationSet {
                 .is_some_and(|origin| self.ends_origin(&origin))
             || extended.node.is_some_and(|node| self.reset_ends(&node)))
     }
-    /// Whether some statement ends the node certificate of `node`: names
-    /// the node or its key. A `protected` one only a root statement ends.
     pub fn ends_node(&self, node: PublicKey, protected: bool) -> bool {
         let mut known = self
             .certificates
@@ -1265,7 +1105,6 @@ impl RevocationSet {
             || (known.peek().is_some()
                 && known.all(|certificate| self.ends_node_of(certificate.issuer, node, protected)))
     }
-    /// Whether the node is ended under one exact identity's authority.
     pub fn ends_node_of(&self, identity: PublicKey, node: PublicKey, protected: bool) -> bool {
         let (subjects, references) = if protected {
             (&self.root.subjects, &self.root.references)
@@ -1278,7 +1117,6 @@ impl RevocationSet {
             || self.identity_unlinks(identity, crate::PeerId::of(node))
             || self.fork_ends(identity, crate::PeerId::of(node))
     }
-    /// An identity ends only its own membership, independently of its grants.
     pub fn identity_unlinks(&self, identity: PublicKey, node: crate::PeerId) -> bool {
         self.statements.values().any(|signed| {
             signed.identity_unlink()
@@ -1286,9 +1124,6 @@ impl RevocationSet {
                 && signed.statement.nodes.contains(&node)
         })
     }
-    /// The first statement that revokes the holder of `chain`: its node
-    /// certificate or the identity that signed it. A statement ending an
-    /// issuer above them ends the chain too, yet another issuer renews it.
     pub fn revoking_holder(
         &self,
         chain: &CredentialChain,
@@ -1296,12 +1131,9 @@ impl RevocationSet {
         let start = chain.0.len().saturating_sub(2);
         self.first_ending(chain, start)
     }
-    /// The first statement that ends `chain`, if any.
     pub fn revoking(&self, chain: &CredentialChain) -> Result<Option<&SignedRevocation>, Error> {
         self.first_ending(chain, 0)
     }
-    /// Whether some statement ends a link of `chain`, each judged by its
-    /// position.
     pub fn ends_chain(&self, chain: &CredentialChain) -> Result<bool, Error> {
         for (index, link) in chain.0.iter().enumerate() {
             if self.ends_at(link, chain.protected(index)?)? {
@@ -1310,12 +1142,9 @@ impl RevocationSet {
         }
         Ok(false)
     }
-    /// Adds a statement a set already accepted once, which cannot be refused.
     fn reinsert(&mut self, signed: SignedRevocation) {
         let _ = self.insert(signed);
     }
-    /// Whether `signed` still ends `link`'s node: a reset ends a node only
-    /// while no later reset keeps it.
     fn reset_still_ends(
         &self,
         id: &Commitment,
@@ -1371,19 +1200,12 @@ impl RevocationSet {
             )
         })
     }
-    /// Whether a held owner reset ends `node`: one does not keep it and no
-    /// reset that follows that one does.
     pub fn reset_ends(&self, node: &crate::PeerId) -> bool {
         !self.resets().is_empty() && self.resets().ends(node)
     }
-    /// The held resets that end `node`, by statement ID.
     pub fn ending_resets(&self, node: &crate::PeerId) -> Vec<Commitment> {
         self.resets().ending(node).map(|(id, _)| *id).collect()
     }
-    /// How the held resets judge the operation at `position` of `writer`'s
-    /// log in `scope`. Every replica holding the same statements decides
-    /// alike: a writer some reset ends keeps only what every such reset's
-    /// fence keeps.
     pub fn reset_standing(
         &self,
         scope: &rocky_core::ResourceScope,
@@ -1392,17 +1214,12 @@ impl RevocationSet {
     ) -> crate::ResetStanding {
         self.resets().standing(scope, writer, position)
     }
-    /// The held resets no held reset follows; a new reset follows them.
     pub fn reset_heads(&self) -> BTreeSet<Commitment> {
         self.resets().heads()
     }
-    /// The nodes resets keep that no held reset ends.
     pub fn reset_kept(&self) -> BTreeSet<crate::PeerId> {
         self.resets().kept()
     }
-    /// This set without its resets: the authority a fence-covered operation
-    /// of an ended writer is judged by. Every other statement still applies,
-    /// so a Lost or Compromised revocation refuses what a fence keeps.
     pub fn unfenced(&self) -> &RevocationSet {
         if self.resets().is_empty() {
             return self;

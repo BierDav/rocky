@@ -88,7 +88,7 @@ impl<A: RowApplication> Inner<A> {
             .map_err(credential)?;
         record
             .chain()
-            .provenance_with_families(
+            .historic_provenance_with_families(
                 self.config.publisher,
                 record.signer(),
                 self.grant_families(),
@@ -457,7 +457,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         let manifest = SignedManifest::from_bytes(&row.get::<Vec<u8>>(0)?).map_err(credential)?;
         manifest
-            .verify(inner.config.publisher)
+            .verify_historic(inner.config.publisher)
             .map_err(credential)?;
         if manifest.descriptor().map_err(credential)?
             != inner.config.manifest.descriptor().map_err(credential)?

@@ -1,35 +1,29 @@
-//! An identity's own key, held like the root's: a 24-word phrase or a
-//! passkey's PRF output, in memory for one call and never stored by Rocky.
-use crate::{Error, IdentityProvider, PublicKey, Purpose, Signature, phrase_key::PhraseKey};
+use crate::{
+    Error, IdentityProvider, PublicKey, Purpose, RootKey, Signature, phrase_key::PhraseKey,
+};
 
-/// An identity's secret in memory, for one call. It shares the root key's
-/// phrase and passkey encodings but is its own type: no root-only call
-/// takes it, and it converts into no `RootKey`.
-///
-/// ```compile_fail
-/// let identity = rocky_credentials::IdentityKey::generate();
-/// let root: &rocky_credentials::RootKey = &identity;
-/// ```
 pub struct IdentityKey(PhraseKey);
+never_implements!(IdentityKey: std::ops::Deref<Target = RootKey>);
+never_implements!(IdentityKey: AsRef<RootKey>);
+never_implements!(IdentityKey: std::borrow::Borrow<RootKey>);
+never_implements!(IdentityKey: Into<RootKey>);
+never_implements!(RootKey: std::ops::Deref<Target = IdentityKey>);
+never_implements!(RootKey: AsRef<IdentityKey>);
+never_implements!(RootKey: std::borrow::Borrow<IdentityKey>);
+never_implements!(RootKey: Into<IdentityKey>);
 impl IdentityKey {
-    /// A fresh identity key.
     pub fn generate() -> Self {
         Self(PhraseKey::generate())
     }
-    /// The identity key with this 32-byte secret, such as a passkey's PRF
-    /// output.
     pub fn from_secret(secret: [u8; 32]) -> Self {
         Self(PhraseKey::from_secret(secret))
     }
-    /// The identity key a 24-word English BIP 39 phrase names.
     pub fn from_phrase(phrase: &str) -> Result<Self, Error> {
         PhraseKey::from_phrase(phrase).map(Self)
     }
-    /// The 24 words that restore this key.
     pub fn phrase(&self) -> String {
         self.0.phrase()
     }
-    /// The 32-byte secret, for an application that keeps it elsewhere.
     pub fn secret(&self) -> [u8; 32] {
         self.0.secret()
     }

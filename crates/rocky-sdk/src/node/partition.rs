@@ -141,7 +141,13 @@ impl Node {
         )?;
         for member in &partition.members {
             let grants = verified
-                .partition(node, member.scope, &member.tuple, time)
+                .partition(
+                    node,
+                    member.scope,
+                    &member.tuple,
+                    &settings.revocations,
+                    time,
+                )
                 .unwrap_or_default();
             if !grants.iter().any(|grant| {
                 grant.rows == rocky_core::RowSelection::All
@@ -347,7 +353,13 @@ impl Node {
                     time,
                 )?;
                 for member in &partition.members {
-                    let grants = verified.partition(signer, member.scope, &member.tuple, time)?;
+                    let grants = verified.partition(
+                        signer,
+                        member.scope,
+                        &member.tuple,
+                        &settings.revocations,
+                        time,
+                    )?;
                     if !grants.iter().any(|grant| {
                         grant.rows == rocky_core::RowSelection::All
                             && grant.rights.contains(&rocky_core::Right::Read)

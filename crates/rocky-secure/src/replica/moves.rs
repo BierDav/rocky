@@ -950,7 +950,7 @@ impl<A: RowApplication> Inner<A> {
                 self.grant_families(),
             )
             .map_err(credential)?
-            .partition_author(signer, destination, tuple, time);
+            .partition_author(signer, destination, tuple, &self.config.revocations, time);
         let Ok(grants) = grants else {
             return Ok(());
         };

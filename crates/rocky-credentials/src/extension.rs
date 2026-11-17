@@ -1,11 +1,9 @@
-//! The versioned capability extension.
 use crate::{Error, decode_bounded, denied, encode};
 use serde::{Deserialize, Serialize};
 
 const EXTENSION_VERSION: u32 = 13;
 const MAX_EXTENSION: usize = 64 * 1024;
 
-/// A capability's required, canonical versioned authority fields.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Extension(Vec<u8>);
@@ -26,61 +24,38 @@ struct Body {
     database: Option<DatabaseContext>,
     personal: Option<crate::PersonalBinding>,
 }
-/// Reads only the version, whatever else a later body holds.
 #[derive(Deserialize)]
 struct Versioned {
     version: u32,
 }
-/// What an extension carries.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Extended {
-    /// The node reference derived from the leaf subject key.
     pub node: Option<crate::PeerId>,
-    /// Selector grants (extension version 2).
     pub partitions: Vec<crate::PartitionGrant>,
-    /// Signed opt-in to the authenticated schema's `granted_like` families.
-    /// Absent in existing per-table credentials, whose authority stays exact.
     pub families: bool,
-    /// Issuer authority: the identity grants, renews, revokes and signs the
-    /// domain's statements through this link.
     pub issues: bool,
-    /// Owner-granted whole-domain tip and bookmark control; never delegated.
     pub trusted: Option<rocky_core::Scope>,
-    /// Counter claims on the domain's coordinator (extension version 7);
-    /// only on a short-lived link of its own.
     pub claims: Option<crate::ClaimRight>,
-    /// The trusted identity that first enrolled this identity, kept by every
-    /// renewal: a compromised root revocation of it ends this link too.
     pub origin: Option<Origin>,
-    /// Membership sequence of a node certificate. The first link is zero.
     pub sequence: Option<u64>,
-    /// The preceding membership certificate, or none for sequence zero.
     pub previous: Option<rocky_core::Commitment>,
-    /// Stable database authority and namespace, independent of its schema.
     pub database: Option<DatabaseContext>,
-    /// An independent owner device of a personal database, in place of a
-    /// membership sequence.
     pub personal: Option<crate::PersonalBinding>,
 }
 
-/// The pinned root and stable namespace of one database.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DatabaseContext {
     pub publisher: crate::PublicKey,
     pub scope: rocky_core::Scope,
 }
-/// A trusted identity and when its root grant became valid: a recovery
-/// ends every link whose origin's grant predates its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Origin {
     pub identity: crate::PublicKey,
-    /// The `not_before` of the origin's trusted grant.
     pub since: u64,
 }
 impl Extension {
-    /// Canonical metadata bytes, for allocation checks before decoding.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
@@ -104,7 +79,6 @@ impl Extension {
         extension.read()?;
         Ok(extension)
     }
-    /// The body, refusing a version this runtime does not know.
     pub fn read(&self) -> Result<Extended, Error> {
         if self.0.len() > MAX_EXTENSION {
             return Err(denied("credential extension quota"));

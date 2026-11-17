@@ -1,6 +1,3 @@
-//! Group secrets: one random secret per group partition and key epoch, the
-//! table keys derived from it, and its recipient-bound envelope, which also
-//! seals the partition's naming secret (`rocky_core::PartitionName`).
 use crate::{
     Error, PrivateKey, PublicKey, Signature, decode_bounded, denied, encode, enroll::SEAL_OVERHEAD,
     signing_bytes,
@@ -11,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use std::collections::BTreeSet;
 
-/// Length of a group secret and of every table key derived from it.
 pub const GROUP_SECRET_LEN: usize = 32;
 pub const MAX_GROUP_ENVELOPE_BYTES: usize = 128 * 1024;
 const SEALED_LEN: usize = 2 * GROUP_SECRET_LEN + SEAL_OVERHEAD;
@@ -38,14 +34,10 @@ fn hmac(key: &[u8], message: &[&[u8]]) -> [u8; 32] {
     outer.update(inner.finalize());
     outer.finalize().into()
 }
-/// HKDF-SHA256 (RFC 5869) with one 32-byte output block.
 pub(crate) fn hkdf(salt: &[u8], secret: &[u8], info: &[u8]) -> [u8; 32] {
     hmac(&hmac(salt, &[secret]), &[info, &[1]])
 }
 
-/// The key of one table in one group partition and epoch. HKDF binds the
-/// domain, group address, table identity and epoch; a derived key reveals
-/// neither the secret nor the key of a sibling table.
 pub fn derive_table_key(
     secret: &[u8; GROUP_SECRET_LEN],
     domain: Scope,
@@ -66,8 +58,6 @@ pub fn derive_table_key(
     Ok(hkdf(DERIVATION, secret, &info))
 }
 
-/// A fresh ephemeral X25519 public key and the secret it shares with the
-/// recipient's Ed25519 key, converted to X25519.
 pub(crate) fn agree(recipient: PublicKey) -> Result<([u8; 32], [u8; 32]), Error> {
     let point = CompressedEdwardsY(*recipient.as_bytes())
         .decompress()
@@ -80,7 +70,6 @@ pub(crate) fn agree(recipient: PublicKey) -> Result<([u8; 32], [u8; 32]), Error>
         point.mul_clamped(ephemeral).to_bytes(),
     ))
 }
-/// The secret `agree` shared, on the recipient's side.
 pub(crate) fn agreed(recipient: &PrivateKey, ephemeral: [u8; 32]) -> [u8; 32] {
     let digest = Sha512::digest(recipient.as_bytes());
     let mut scalar = [0; 32];
@@ -88,8 +77,6 @@ pub(crate) fn agreed(recipient: &PrivateKey, ephemeral: [u8; 32]) -> [u8; 32] {
     MontgomeryPoint(ephemeral).mul_clamped(scalar).to_bytes()
 }
 
-/// One group secret wrapped to one recipient, signed by the delivering
-/// signer. Possession establishes no credential right.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupSecretEnvelope {
@@ -157,7 +144,6 @@ impl Body {
         Ok(())
     }
 }
-/// The epoch and partition secrets delivered together by an envelope.
 #[derive(Clone)]
 pub struct GroupSecrets {
     pub group: Commitment,
@@ -167,7 +153,6 @@ pub struct GroupSecrets {
 }
 
 impl GroupSecretEnvelope {
-    /// Wraps one group epoch to each distinct recipient; refuses an empty set.
     pub fn seal_many(
         issuer: &PrivateKey,
         group: Commitment,
@@ -236,7 +221,6 @@ impl GroupSecretEnvelope {
         let signature = issuer.sign(&signing_bytes(SIGNED, &body)?);
         Ok(Self { body, signature })
     }
-    /// Verifies delivery metadata without possessing the recipient's secret.
     pub fn verify(
         &self,
         issuer: PublicKey,
@@ -255,7 +239,6 @@ impl GroupSecretEnvelope {
         }
         Ok(())
     }
-    /// The epoch's group secret and the partition's naming secret.
     pub fn open(
         &self,
         recipient: &PrivateKey,

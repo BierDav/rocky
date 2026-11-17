@@ -102,7 +102,7 @@ impl Node {
                 time,
                 &self.domain().families,
             )
-            .and_then(|verified| verified.selectors(node, time))
+            .and_then(|verified| verified.selectors(node, &settings.revocations, time))
             .is_ok_and(|(grants, partitions)| {
                 grants
                     .iter()

@@ -1,6 +1,3 @@
-//! The enrollment and renewal messages, free of any transport or storage:
-//! bytes in, bytes out. Enrollment is optional plumbing over issuance; a
-//! device may equally install credentials supplied another way.
 use crate::{
     Attestation, Authority, Capability, CredentialChain, Error, IdentityProvider,
     MAX_CREDENTIAL_BYTES, MAX_ENDORSEMENT_BYTES, MAX_REVOCATION_SET_BYTES, PrivateKey, Profile,
@@ -16,16 +13,16 @@ use p2panda_core::Signature;
 use rocky_core::{Commitment, commitment};
 use serde::{Deserialize, Serialize};
 
-/// Wrong tokens an invitation tolerates before it locks.
-const MAX_ATTEMPTS: u8 = 10;
+const WRONG_TOKENS_BEFORE_LOCK: u8 = 10;
 
 fn equal(left: &[u8], right: &[u8]) -> bool {
     left.len() == right.len() && left.iter().zip(right).fold(0, |all, (a, b)| all | (a ^ b)) == 0
 }
-/// Bytes `seal` adds to its plaintext: the nonce and the AEAD tag.
-pub(crate) const SEAL_OVERHEAD: usize = 12 + 16;
+const NONCE_BYTES: usize = 12;
+const AEAD_TAG_BYTES: usize = 16;
+pub(crate) const SEAL_OVERHEAD: usize = NONCE_BYTES + AEAD_TAG_BYTES;
 pub(crate) fn seal(key: Commitment, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, Error> {
-    let nonce: [u8; 12] = rocky_platform::entropy::random();
+    let nonce: [u8; NONCE_BYTES] = rocky_platform::entropy::random();
     let sealed = ChaCha20Poly1305::new(&key.into())
         .encrypt(
             &nonce.into(),
@@ -39,9 +36,9 @@ pub(crate) fn seal(key: Commitment, aad: &[u8], plaintext: &[u8]) -> Result<Vec<
 }
 pub(crate) fn open(key: Commitment, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>, Error> {
     let (nonce, sealed) = sealed
-        .split_at_checked(12)
+        .split_at_checked(NONCE_BYTES)
         .ok_or_else(|| denied("sealed message is truncated"))?;
-    let nonce: [u8; 12] = nonce
+    let nonce: [u8; NONCE_BYTES] = nonce
         .try_into()
         .map_err(|_| denied("sealed message is truncated"))?;
     ChaCha20Poly1305::new(&key.into())
@@ -49,32 +46,23 @@ pub(crate) fn open(key: Commitment, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>
         .map_err(|_| denied("the message was not sealed for this device"))
 }
 
-/// An issuer's record of one invitation. The token itself is a secret in
-/// the issuer's key provider and in the invitation it hands out.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Invitation {
     digest: Commitment,
     pub expires: u64,
     attempts: u8,
-    /// The pairing nonce that consumed it; that device may retry.
     consumed: Option<String>,
-    /// What the invited device is granted; `None` when an issuer admits
-    /// each requesting device with a profile of its choice.
     pub profile: Option<Profile>,
 }
-/// How a verified pairing request relates to its invitation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Admission {
-    /// The invitation's first use.
     First,
-    /// The consuming device asks again after a lost answer.
     Retry,
 }
 impl Invitation {
-    /// Whether this token can enroll a new device without changing the invitation.
     pub fn is_open(&self, token: &[u8; 32], time: u64) -> bool {
         self.consumed.is_none()
-            && self.attempts < MAX_ATTEMPTS
+            && self.attempts < WRONG_TOKENS_BEFORE_LOCK
             && time <= self.expires
             && commitment("rocky.credentials.invitation.v1", token) == self.digest
     }
@@ -88,9 +76,6 @@ impl Invitation {
             profile,
         }
     }
-    /// Checks a request against the invitation and the issuer's `token`.
-    /// A wrong proof is counted and locks the invitation after ten.
-    /// Nothing is consumed: call `claim` once the request is acceptable.
     pub fn admit(
         &mut self,
         token: &[u8; 32],
@@ -100,7 +85,7 @@ impl Invitation {
         if request.version != PairRequest::VERSION || request.nonce.len() != 64 {
             return Err(denied("invalid pairing request"));
         }
-        if self.expires < time || self.attempts >= MAX_ATTEMPTS {
+        if self.expires < time || self.attempts >= WRONG_TOKENS_BEFORE_LOCK {
             return Err(denied("invitation expired or locked"));
         }
         if commitment("rocky.credentials.invitation.v1", token) != self.digest
@@ -115,32 +100,20 @@ impl Invitation {
             Some(_) => Err(denied("invitation already used")),
         }
     }
-    /// Binds the invitation to the device of `request`; no other device
-    /// can use it afterwards.
     pub fn claim(&mut self, request: &PairRequest) {
         self.consumed = Some(request.nonce.clone());
     }
 }
 
-/// What a joining node sends: its node key, the identity the invitation
-/// grants to, its self-reported name, a retry nonce and proof that it holds
-/// the invitation token.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PairRequest {
     pub version: u32,
-    /// 64 hexadecimal digits, kept by the device across retries.
     pub nonce: String,
     pub node: PublicKey,
-    /// The identity the invitation grants to.
     pub user: PublicKey,
-    /// What the device calls itself, for the issuer that admits it. Not
-    /// verified by anyone.
     pub name: String,
     proof: Commitment,
-    /// What the device expects to join, such as its application schema.
     pub context: Commitment,
-    /// The joining device's own `(transport, address)` routes, so an issuer
-    /// that enrolls another issuer can reach it. Bound by the proof.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<(String, String)>,
 }
@@ -166,7 +139,6 @@ impl PairRequest {
         request.proof = request.expected(token);
         request
     }
-    /// The same request announcing the device's own routes.
     pub fn with_routes(mut self, token: &[u8; 32], routes: Vec<(String, String)>) -> Self {
         self.routes = routes;
         self.proof = self.expected(token);
@@ -213,8 +185,6 @@ impl PairRequest {
         decode_bounded(bytes, MAX_CREDENTIAL_BYTES)
     }
 }
-/// Seals an enrollment to the device of `request` under the invitation
-/// token, which only that device and the issuer hold.
 pub fn seal_enrollment(
     token: &[u8; 32],
     request: &PairRequest,
@@ -230,7 +200,6 @@ pub fn open_enrollment(
     open(request.key(token), &request.aad(), sealed)
 }
 
-/// The secret half of a one-time X25519 exchange.
 pub struct Exchange([u8; 32]);
 impl Exchange {
     pub fn new() -> (Self, [u8; 32]) {
@@ -249,12 +218,9 @@ impl Exchange {
     }
 }
 
-/// A device asks an issuer to renew its credentials. It presents the chain
-/// it was issued, current or not, and a one-time key for the answer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RenewRequest {
     version: u32,
-    /// The issuer's node key: a request is not replayable to another.
     audience: PublicKey,
     pub node: PublicKey,
     time: u64,
@@ -305,11 +271,6 @@ impl RenewRequest {
         request.signature = node.sign(&request.body()?);
         Ok((request, secret))
     }
-    /// Checks that the node signed this request for `audience` within
-    /// `skew` seconds of `time`, and that the owner or an issuer once
-    /// granted its identity. Returns the identity's capability to renew.
-    /// A delegated chain is renewed by its delegator, never here.
-    /// Revocation is checked by `Authority::renew`.
     pub fn verify(
         &self,
         audience: PublicKey,
@@ -339,7 +300,7 @@ impl RenewRequest {
         }
         let identity = self
             .chain
-            .provenance_with_families(publisher, self.node, families)?;
+            .historic_provenance_with_families(publisher, self.node, families)?;
         let capabilities = self.chain.capabilities();
         let follows_publisher_or_issuer = match capabilities.0.len().checked_sub(2) {
             None => true,
@@ -364,15 +325,9 @@ impl RenewRequest {
     }
 }
 
-/// An issuer's answer: a renewed identity capability with the issuer links
-/// it follows, the revocations the issuer holds and a payload sealed to the
-/// requesting node, such as its reader keys. The issuer's node signs the
-/// whole answer under its certificate; the root signs with its key.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Renewal {
     pub capability: SignedCapability,
-    /// The issuer links from the publisher to the answering identity;
-    /// empty when the owner answers.
     pub issuers: CredentialChain,
     pub revocations: RevocationSet,
     exchange: [u8; 32],
@@ -429,8 +384,6 @@ impl Renewal {
             ),
         )
     }
-    /// Renews the verified `request` and seals `payload` to its node. A
-    /// node or identity `revocations` revokes is refused.
     pub fn seal(
         authority: &Authority<'_>,
         request: &RenewRequest,
@@ -445,7 +398,6 @@ impl Renewal {
         let capability = authority.renew(prior, &revocations, validity)?;
         Self::seal_capability(authority, request, capability, revocations, payload)
     }
-    /// Seals epoch delivery under a currently verified chain without renewing it.
     pub fn seal_current(
         authority: &Authority<'_>,
         publisher: PublicKey,
@@ -476,7 +428,7 @@ impl Renewal {
         request
             .chain
             .verified_with_families(publisher, &revocations, time, families)?
-            .selectors(request.node, time)?;
+            .selectors(request.node, &revocations, time)?;
         let capability = request
             .chain
             .capabilities()
@@ -516,7 +468,6 @@ impl Renewal {
             attestation: authority.signer.attest(Purpose::Statement, &body)?,
         })
     }
-    /// The identity that answered: the owner or an issuer of `publisher`.
     pub fn signer(&self, publisher: PublicKey) -> Result<PublicKey, Error> {
         if self.issuers.0.is_empty() {
             Ok(publisher)
@@ -524,9 +475,6 @@ impl Renewal {
             self.issuers.issuer(publisher, None)
         }
     }
-    /// Checks that the owner's key or an issuer's node of the pinned
-    /// `publisher` answered exactly `request`, and opens the payload. The renewed chain is
-    /// `chain`; its receiver verifies it under its revocations.
     pub fn open(
         &self,
         publisher: PublicKey,
@@ -553,7 +501,6 @@ impl Renewal {
             &self.sealed,
         )
     }
-    /// The renewed identity's chain: the issuer links, then its capability.
     pub fn chain(&self) -> CredentialChain {
         let mut chain = self.issuers.clone();
         chain.0.push(self.capability.clone());
@@ -570,13 +517,9 @@ impl Renewal {
     }
 }
 
-/// A new node of an identity asks a node of the same identity for what the
-/// identity holds, without any issuer or invitation: it proves the node
-/// key and the identity, and brings a one-time key for the answer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IdentityRequest {
     version: u32,
-    /// The answering node's key: a request is not replayable to another.
     audience: PublicKey,
     database: crate::DatabaseContext,
     pub identity: PublicKey,
@@ -636,8 +579,6 @@ impl IdentityRequest {
         request.identity_signature = identity.sign(Purpose::Statement, &body)?;
         Ok((request, secret))
     }
-    /// Checks that the node and `identity` both signed this request for
-    /// `audience` within `skew` seconds of `time`.
     pub fn verify(
         &self,
         audience: PublicKey,
@@ -671,7 +612,6 @@ impl IdentityRequest {
             &[shared.as_slice(), &self.exchange, exchange, &self.id()?].concat(),
         ))
     }
-    /// Six digits bound to both nodes and this signed request's one-time nonce.
     pub fn confirmation_code(&self) -> Result<String, Error> {
         let digest = self.id()?;
         let number = u32::from_be_bytes(
@@ -681,7 +621,6 @@ impl IdentityRequest {
         );
         Ok(format!("{:06}", number % 1_000_000))
     }
-    /// Seals `payload` to the requesting node alone.
     pub fn answer(&self, payload: &[u8]) -> Result<IdentityAnswer, Error> {
         let (secret, exchange) = Exchange::new();
         let shared = secret.shared(&self.exchange)?;
@@ -701,7 +640,6 @@ impl IdentityRequest {
         decode_bounded(bytes, 1024)
     }
 }
-/// What a node of the identity sealed to the requesting node.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IdentityAnswer {
     exchange: [u8; 32],
@@ -724,8 +662,6 @@ impl IdentityAnswer {
     }
 }
 
-/// A signature the caller replaces once the signed body is known; signatures
-/// have no neutral value.
 fn placeholder_signature(node: &PrivateKey) -> Signature {
     node.sign(&[])
 }

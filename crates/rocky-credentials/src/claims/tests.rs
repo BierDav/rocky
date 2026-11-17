@@ -25,7 +25,6 @@ fn every() -> ClaimRight {
         grant: [7; 32],
     }
 }
-/// The owner's claim link for `holder` and the chain to `node`.
 fn holder_chain(
     owner: &PrivateKey,
     holder: &PrivateKey,

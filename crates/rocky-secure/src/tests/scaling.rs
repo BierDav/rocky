@@ -508,7 +508,7 @@ async fn wide_signed_definitions_are_cached_without_weakening_row_admission() {
     assert_eq!(
         SignedManifest::from_bytes(&bytes)
             .unwrap()
-            .verify(f.publisher.public_key())
+            .verify_historic(f.publisher.public_key())
             .unwrap()
             .hash(),
         manifest.hash()

@@ -1,13 +1,9 @@
-//! Identity membership links and their deterministic fork view. Shared
-//! links follow one sequence per identity; personal devices stand alone.
 use crate::{Error, PeerId, PersonalLink, PublicKey, SignedCapability, denied};
 use rocky_core::Commitment;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The largest number of simultaneously linked nodes an identity may hold.
 pub const MAX_MEMBERSHIP_NODES: usize = crate::MAX_CUT_LANES;
 
-/// The database a node certificate of either kind binds.
 pub(crate) fn node_database(
     certificate: &SignedCapability,
 ) -> Result<crate::DatabaseContext, Error> {
@@ -17,7 +13,6 @@ pub(crate) fn node_database(
     }
 }
 
-/// The membership metadata carried by one node certificate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MembershipLink {
     pub database: crate::DatabaseContext,
@@ -29,7 +24,6 @@ pub struct MembershipLink {
 }
 
 impl MembershipLink {
-    /// Extracts and validates a certificate's membership fields.
     pub fn from_certificate(certificate: &SignedCapability) -> Result<Self, Error> {
         let capability = &certificate.capability;
         let extended = capability.extended()?;
@@ -58,12 +52,10 @@ impl MembershipLink {
     }
 }
 
-/// A deterministic view of all membership links known to a node.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MembershipSet {
     database: Option<crate::DatabaseContext>,
     links: BTreeMap<(PublicKey, u64), Vec<MembershipLink>>,
-    /// Personal device certificates by owner and node key; they never fork.
     devices: BTreeMap<(PublicKey, PublicKey), BTreeSet<Commitment>>,
 }
 
@@ -72,14 +64,12 @@ impl MembershipSet {
         Self::default()
     }
 
-    /// Records a certificate of either kind.
     pub fn record(&mut self, certificate: &SignedCapability) -> Result<(), Error> {
         match PersonalLink::of(certificate)? {
             Some(link) => self.insert_personal(link),
             None => self.insert(certificate).map(drop),
         }
     }
-    /// Indexes an owner device by `(owner, node)`; duplicates by ID merge.
     pub fn insert_personal(&mut self, link: PersonalLink) -> Result<(), Error> {
         self.bind(link.database)?;
         self.devices
@@ -95,7 +85,6 @@ impl MembershipSet {
         self.database = Some(database);
         Ok(())
     }
-    /// The owner's device keys with a personal certificate here.
     pub fn devices(&self, owner: PublicKey) -> impl Iterator<Item = PublicKey> + '_ {
         self.devices
             .keys()
@@ -103,9 +92,6 @@ impl MembershipSet {
             .map(|(_, node)| *node)
     }
 
-    /// Inserts a certificate. A second certificate at one identity sequence
-    /// is retained as a fork so every holder reaches the same equivocation
-    /// result regardless of arrival order.
     pub fn insert(&mut self, certificate: &SignedCapability) -> Result<MembershipLink, Error> {
         let link = MembershipLink::from_certificate(certificate)?;
         self.bind(link.database)?;
@@ -142,9 +128,6 @@ impl MembershipSet {
         self.forks(identity).next().is_some()
     }
 
-    /// A certificate is usable only on the unambiguous predecessor chain.
-    /// A recovery link skips void fork sequences and names the last valid head.
-    /// A personal device certificate is always on its own valid chain.
     pub fn accepts(&self, certificate: Commitment) -> bool {
         self.devices.values().any(|ids| ids.contains(&certificate))
             || self
@@ -175,7 +158,6 @@ impl MembershipSet {
                 .all(|link| self.accepts(link.certificate))
     }
 
-    /// The last usable link, including when later links forked.
     pub fn head(&self, identity: PublicKey) -> Option<MembershipLink> {
         self.valid_links()
             .filter(|link| link.identity == identity)
@@ -183,7 +165,6 @@ impl MembershipSet {
             .copied()
     }
 
-    /// Historical sequences are never reused, including void forks and unlinks.
     pub fn next_sequence(&self, identity: PublicKey) -> Result<u64, Error> {
         self.links(identity)
             .map(|link| link.sequence)
@@ -195,8 +176,6 @@ impl MembershipSet {
             })
     }
 
-    /// Missing history is not evidence of equivocation. Only forks and links
-    /// through a known fork are void; linking still requires a complete head.
     pub(crate) fn void_certificates(&self) -> BTreeSet<Commitment> {
         let mut void: BTreeSet<_> = self
             .links
@@ -220,7 +199,6 @@ impl MembershipSet {
             }
         }
     }
-    /// The bound counts usable, still linked nodes, not historical certificates.
     pub fn can_link(&self, identity: PublicKey, unlinked: impl Fn(PeerId) -> bool) -> bool {
         let void = self.void_certificates();
         self.links(identity)

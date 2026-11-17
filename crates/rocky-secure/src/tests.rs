@@ -915,7 +915,7 @@ fn signatures_attenuation_expiry_revocation_and_cross_app_replay() {
     assert!(
         SignedManifest::from_bytes(&bytes)
             .unwrap()
-            .verify(PrivateKey::new().public_key())
+            .verify_historic(PrivateKey::new().public_key())
             .is_err()
     );
 }

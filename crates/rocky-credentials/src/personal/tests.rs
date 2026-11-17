@@ -76,7 +76,6 @@ impl Personal {
             context,
         }
     }
-    /// A device signed in against `snapshot`: its own certificate only.
     fn device(&self) -> (PrivateKey, CredentialChain) {
         let node = PrivateKey::new();
         let chain = self
@@ -102,7 +101,6 @@ impl Personal {
     fn verifies(&self, chain: &CredentialChain, set: &RevocationSet) -> bool {
         chain.verified(self.root.public_key(), set, NOW).is_ok()
     }
-    /// A second, differently dated certificate for the same node and binding.
     fn replay(&self, node: &PrivateKey) -> SignedCapability {
         let binding = PersonalBinding::sign(
             self.context.database,
@@ -233,7 +231,7 @@ fn the_genesis_pins_root_owner_namespace_and_mode() {
     mirror.kind = DatabaseKind::Shared;
     let swapped = SignedManifest::from_bytes(&encode(&mirror).unwrap()).unwrap();
     assert!(
-        swapped.verify(root).is_err(),
+        swapped.verify_historic(root).is_err(),
         "swapping the signed mode breaks the root's signature"
     );
 
@@ -573,4 +571,24 @@ fn devices_a_reset_signed_out_leave_the_device_limit() {
     p.merge(&mut set, &RevocationSet::try_from(vec![reset]).unwrap());
     assert!(set.personal_devices(owner).unwrap().is_empty());
     p.sign_in(&set);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_namespace_of_another_format_is_refused() {
+    let record = |version| NamespaceRecord {
+        version,
+        rp_id: "notes.example".into(),
+        purpose: "chats".into(),
+    };
+    let decode = |version| {
+        p2panda_core::cbor::decode_cbor::<PersonalNamespace, _>(
+            encode(&record(version)).unwrap().as_slice(),
+        )
+    };
+    assert_eq!(
+        decode(NAMESPACE_FORMAT).unwrap(),
+        PersonalNamespace::new("notes.example", "chats").unwrap()
+    );
+    assert!(decode(NAMESPACE_FORMAT + 1).is_err());
+    assert!(decode(NAMESPACE_FORMAT - 1).is_err());
 }

@@ -42,7 +42,11 @@ fn movement(
     )
 }
 fn seal(f: &Fixture, sequence: u64) -> SignedSeal {
-    let manifest = f.manifest.verify(f.publisher.public_key()).unwrap().hash();
+    let manifest = f
+        .manifest
+        .verify_historic(f.publisher.public_key())
+        .unwrap()
+        .hash();
     SignedSeal::sign(
         SealStatement {
             format: SEAL_FORMAT,
@@ -63,7 +67,11 @@ fn opening(f: &Fixture, seal: &SignedSeal, minimum: u32) -> SignedTipOpening {
     SignedTipOpening::sign(
         TipOpeningStatement {
             format: TIP_OPENING_FORMAT,
-            schema: f.manifest.verify(f.publisher.public_key()).unwrap().hash(),
+            schema: f
+                .manifest
+                .verify_historic(f.publisher.public_key())
+                .unwrap()
+                .hash(),
             scope: f.public.domain,
             seal: seal.id().unwrap(),
             minimum_in_sync: minimum,

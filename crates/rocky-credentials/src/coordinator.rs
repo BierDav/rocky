@@ -1,16 +1,10 @@
-//! Application-supplied coordination, independent of storage and networking.
 use crate::{CredentialChain, PrivateKey, RevocationSet, SignedCapability, counters};
 use rocky_core::{Commitment, CoordinationError, CoordinationFuture, DomainLog, Scope};
 use std::sync::Arc;
 
 pub type CoordinationObserver = Arc<dyn Fn(Result<(), &CoordinationError>) + Send + Sync>;
 
-/// The application owns the coordinator and its infrastructure. Calls run outside
-/// database transactions. Binding returns an independent client for one database node, including its
-/// certificate, claims and observer state.
 pub trait Coordinator: DomainLog {
-    /// The bundle that names this service in a database's settings: its
-    /// identity and the certified bootstrap its connector verifies.
     fn bundle(&self) -> Result<crate::CoordinatorBundle, CoordinationError>;
     fn bind(
         &self,
@@ -20,8 +14,6 @@ pub trait Coordinator: DomainLog {
     fn certify(&self, certificate: SignedCapability);
     fn observe(&self, observer: CoordinationObserver);
     fn present_claims(&self, claims: Option<CredentialChain>);
-    /// Retries of the same claim return its original value; new claims take
-    /// unique, strictly increasing values. Expired identities never claim again.
     fn claim(
         &self,
         scope: Scope,
@@ -41,9 +33,6 @@ pub trait Coordinator: DomainLog {
     ) -> CoordinationFuture<'_, Commitment>;
 }
 
-/// Reaches the coordination service a database's signed settings name. The
-/// application supplies one for every database; it verifies the bundle's
-/// certified bootstrap against its identity and owns the transport.
 pub trait CoordinatorConnector: Send + Sync {
     fn connect(
         &self,

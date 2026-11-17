@@ -1,11 +1,8 @@
-//! Named counter identities and readings shared with coordinator adapters.
 use rocky_core::{Commitment, CoordinationError};
 use serde::{Deserialize, Serialize};
 pub const MAX_NAME: usize = 64;
 pub const CLAIM_WINDOW: u64 = 7 * 86_400;
 pub const CLAIM_RECORDS: usize = 1024;
-/// An opaque counter name of 1 through `MAX_NAME` bytes, such as one per
-/// company and series.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "Vec<u8>", into = "Vec<u8>")]
 pub struct Name(Vec<u8>);
@@ -32,17 +29,12 @@ impl From<Name> for Vec<u8> {
         name.0
     }
 }
-/// A claim's stable identity. The application stores both fields before
-/// its first attempt and repeats them on every retry; `issued` bounds how
-/// long the value answers retries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Claim {
     pub id: Commitment,
-    /// Unix seconds when the application created the claim.
     pub issued: u64,
 }
 impl Claim {
-    /// A new claim with a random identity, issued now.
     pub fn fresh() -> Result<Self, CoordinationError> {
         Ok(Self {
             id: rocky_platform::entropy::random(),
@@ -53,20 +45,14 @@ impl Claim {
         })
     }
 }
-/// A counter's last claimed value, 0 before the first claim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reading {
     pub value: u64,
-    /// What the claim asked about was given, when one was.
     pub claim: Option<Lookup>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Lookup {
-    /// The claim took this value.
     Claimed(u64),
-    /// The claim took no value; claiming it now takes the next one.
     Unclaimed,
-    /// Outside the window: claiming it is refused with `Expired`, whether
-    /// or not it took a value.
     Expired,
 }

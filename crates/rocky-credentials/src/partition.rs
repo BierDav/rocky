@@ -1,4 +1,3 @@
-//! Partition grants; no runtime or storage. Keys travel as group envelopes.
 use crate::{Error, PublicKey, denied};
 use rocky_core::{
     Commitment, FieldSelection, PartitionSelector, PartitionTuple, ResourceGrant, ResourceScope,
@@ -7,7 +6,6 @@ use rocky_core::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// A raw grant whose row/field rights remain paired across selected partitions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PartitionGrant {
@@ -41,9 +39,6 @@ impl PartitionGrant {
             && other.rights.is_subset(&self.rights)
             && self.fields.includes(&other.fields)
     }
-    /// A concrete grant only when the selector matches the authenticated
-    /// tuple. `scope` is the tuple's keyed scope: only a holder of the
-    /// partition's naming secret can bind them, so the caller does.
     pub fn resolve(
         &self,
         scope: ResourceScope,
@@ -65,7 +60,6 @@ impl PartitionGrant {
     }
 }
 
-/// A partition tuple bound to its keyed resource scope by the caller.
 #[derive(Clone, Copy, Debug)]
 pub struct PartitionContext<'a> {
     pub scope: ResourceScope,
@@ -73,7 +67,6 @@ pub struct PartitionContext<'a> {
 }
 
 impl crate::CredentialChain {
-    /// Verifies a node without discarding its partition selectors.
     pub fn verify_selectors(
         &self,
         publisher: PublicKey,
@@ -88,7 +81,6 @@ impl crate::CredentialChain {
         Ok((held.grants.clone(), held.extended()?.partitions))
     }
 
-    /// Verifies a node chain and resolves its paired grants on this partition.
     pub fn verify_partition(
         &self,
         publisher: PublicKey,
@@ -104,7 +96,6 @@ impl crate::CredentialChain {
         }
         resolve_leaf(held, scope, tuple)
     }
-    /// Verifies a node writer's partition grant without a reader key.
     pub fn verify_partition_author(
         &self,
         publisher: PublicKey,
@@ -120,7 +111,6 @@ impl crate::CredentialChain {
         }
         resolve_leaf(held, scope, tuple)
     }
-    /// Delegates selected partitions, with the same attenuation checks as receipt.
     pub fn delegate_partitions<'s>(
         &self,
         holder: impl Into<crate::Signer<'s>>,
@@ -187,8 +177,6 @@ impl crate::CredentialChain {
         Ok(chain)
     }
 }
-/// The grants `held`, a node's identity link, gives on `tuple`; `scope`
-/// must be `tuple`'s keyed scope, which the caller bound.
 fn resolve_leaf(
     leaf: &crate::Capability,
     scope: ResourceScope,
@@ -211,7 +199,6 @@ fn resolve_leaf(
     Ok(grants)
 }
 impl crate::Authority<'_> {
-    /// Issues concrete and selector grants, retaining their separate row/field pairs.
     pub fn issue_partition_terms(
         &self,
         subject: PublicKey,
@@ -222,7 +209,6 @@ impl crate::Authority<'_> {
     ) -> Result<crate::SignedCapability, Error> {
         self.issue_table_terms(subject, grants, partitions, terms, validity, false)
     }
-    /// Issues grants that opt into schema-authenticated families.
     pub fn issue_family_terms(
         &self,
         subject: PublicKey,
@@ -266,20 +252,19 @@ impl crate::VerifiedChain {
         subject: PublicKey,
         scope: ResourceScope,
         tuple: &PartitionTuple,
+        revocations: &crate::RevocationSet,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
-        self.partition(subject, scope, tuple, time)
+        self.partition(subject, scope, tuple, revocations, time)
     }
-    /// Whether a node may write some partition of `scope`'s table, for a
-    /// verifier that cannot see which: a covered position's signed header
-    /// proves only where the position lies, never what it wrote.
     pub fn unseen_partition_author(
         &self,
         subject: PublicKey,
         scope: ResourceScope,
+        revocations: &crate::RevocationSet,
         time: u64,
     ) -> Result<(), Error> {
-        self.valid_node(subject, time)?;
+        self.valid_node(subject, revocations, time)?;
         let (grants, partitions) = self.grants_for(scope.table)?;
         let writes = |rights: &std::collections::BTreeSet<rocky_core::Right>| {
             [

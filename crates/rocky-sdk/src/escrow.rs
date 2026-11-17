@@ -166,9 +166,11 @@ fn judge_naming(
         return Err("the naming root escrow is vouched for in the future".into());
     }
     let signer = record.signer();
-    record
-        .chain()
-        .provenance_with_families(settings.publisher, signer, &domain.families)?;
+    record.chain().historic_provenance_with_families(
+        settings.publisher,
+        signer,
+        &domain.families,
+    )?;
     let link = record
         .chain()
         .certificate()

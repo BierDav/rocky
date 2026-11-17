@@ -1,88 +1,56 @@
-//! The distinct identities of a domain. Each is its own key or name; none
-//! implies another, and only a publisher-rooted capability chain grants
-//! anything. An `IdentityProvider` supplies the identity that holds
-//! permissions.
 use crate::{Error, PrivateKey, PublicKey, Signature};
 use rocky_core::ResourceScope;
 use rocky_platform::fs;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// The domain's trust anchor: signs its manifest, policies and root
-/// capabilities. Devices pin it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Publisher(pub PublicKey);
 
-/// Who holds permissions: the key of the link a node certificate names as
-/// its parent. Its nodes sign under certificates it signed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Identity(pub PublicKey);
 
-/// The node key that signs operations, session frames and renewal
-/// requests, certified by its identity. It owns the node's author logs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SigningDevice(pub PublicKey);
 
-/// The stable key of a device's network routes. It reaches a device and
-/// authorizes nothing: whoever answers must still prove a signing device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TransportEndpoint(pub [u8; 32]);
 
-/// A reader set: an encryption scope at one key epoch. Holding its key
-/// reveals every row encrypted under it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ReaderScope {
     pub scope: ResourceScope,
     pub epoch: u64,
 }
 
-/// The key that signs a tenant's coordinator control requests. It manages
-/// coordination metadata and reads or writes no rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CoordinatorControl(pub PublicKey);
 
-/// Who an external login provider says is asking. It is a name an issuer
-/// may consider when it decides to issue a capability. It carries no
-/// grant, no scope key and no executor eligibility.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalLogin {
     pub provider: String,
     pub subject: String,
 }
 
-/// An adapter for a login provider. No provider ships with Rocky.
 pub trait LoginProvider: Send + Sync {
-    /// Verifies a provider assertion at `time`.
     fn verify(&self, assertion: &[u8], time: u64) -> Result<ExternalLogin, Error>;
 }
 
-/// What an identity signs. A provider may show it to its user or refuse it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purpose {
-    /// A certificate for one of the identity's nodes; it adds no rights.
     NodeCertificate,
-    /// A capability the identity's authority grants another identity.
     Capability,
-    /// A revocation statement.
     Revocation,
-    /// Another statement its authority requires: a manifest, a tip statement,
-    /// a renewal answer or a request proving the identity.
     Statement,
 }
 
-/// Supplies an identity: its public key and signatures. It never returns
-/// the private key; how the key is stored or derived is the provider's.
 pub trait IdentityProvider: Send + Sync {
-    /// The owner signer a root can derive for creation.
     fn owner_identity(&self) -> Option<std::sync::Arc<dyn IdentityProvider>> {
         None
     }
     fn public_key(&self) -> Result<PublicKey, Error>;
-    /// Signs `message`, the domain-separated bytes of a statement.
     fn sign(&self, purpose: Purpose, message: &[u8]) -> Result<Signature, Error>;
 }
 
-/// A key held in memory signs as itself.
 impl IdentityProvider for PrivateKey {
     fn public_key(&self) -> Result<PublicKey, Error> {
         Ok(PrivateKey::public_key(self))
@@ -92,15 +60,11 @@ impl IdentityProvider for PrivateKey {
     }
 }
 
-/// An identity in one owner-only directory, for tests and servers: the
-/// key in `identity`. Several processes may share it. Plaintext at rest, like `FileKeyProvider`.
 pub struct FileIdentityProvider {
     directory: PathBuf,
     key: PrivateKey,
 }
 impl FileIdentityProvider {
-    /// Opens the identity in `directory`, creating a fresh key when it holds
-    /// none. Of concurrent creators, the first file written wins.
     pub fn open(directory: impl Into<PathBuf>) -> Result<Self, Error> {
         let directory = directory.into();
         let path = directory.join("identity");

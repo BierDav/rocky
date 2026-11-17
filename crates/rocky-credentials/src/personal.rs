@@ -1,6 +1,3 @@
-//! Personal databases: one owner identity pinned in the root-signed genesis.
-//! Owner devices hold independent certificates, indexed by owner and node
-//! key, so concurrent additions never fork each other.
 use crate::{
     CredentialChain, DatabaseContext, Error, PeerId, PrivateKey, PublicKey, RevocationSet,
     Signature, SignedCapability, encode, signing_bytes,
@@ -14,17 +11,12 @@ pub use bootstrap::{
     PersonalCustodyRenewal, PersonalHello, PersonalPublication,
 };
 
-/// The one current namespace format; others are refused.
 const NAMESPACE_FORMAT: u32 = 1;
 const MAX_RP_ID: usize = 253;
 const MAX_PURPOSE: usize = 64;
-/// Live owner devices one replica admits by itself. Independent offline
-/// additions can exceed it after merging; nothing is ever evicted for it.
 pub const MAX_PERSONAL_DEVICES: usize = crate::MAX_MEMBERSHIP_NODES;
 const POSSESSION: &str = "rocky.personal-device.possession.v1";
 
-/// Which personal database of an owner: the WebAuthn relying party and the
-/// application's account-root purpose. Changing either names another database.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "NamespaceRecord", into = "NamespaceRecord")]
 pub struct PersonalNamespace {
@@ -57,7 +49,6 @@ impl From<PersonalNamespace> for NamespaceRecord {
     }
 }
 impl PersonalNamespace {
-    /// `rp_id` is a lowercase DNS name; `purpose` is printable ASCII.
     pub fn new(rp_id: impl Into<String>, purpose: impl Into<String>) -> Result<Self, Error> {
         let (rp_id, purpose) = (rp_id.into(), purpose.into());
         let host =
@@ -83,7 +74,6 @@ impl PersonalNamespace {
     pub fn purpose(&self) -> &str {
         &self.purpose
     }
-    /// The one current canonical encoding, versioned.
     pub(crate) fn canonical(&self) -> Result<Vec<u8>, Error> {
         encode(&NamespaceRecord::from(self.clone()))
     }
@@ -96,17 +86,14 @@ impl PersonalNamespace {
         id.copy_from_slice(&digest[..16]);
         Ok(id)
     }
-    /// The mesh a fresh device that knows only `owner` and this namespace finds.
     pub fn mesh(&self, owner: PublicKey) -> Result<MeshId, Error> {
         self.locate("rocky.personal.mesh.v1", owner).map(MeshId)
     }
-    /// The domain of the owner's personal database in this namespace.
     pub fn domain(&self, owner: PublicKey) -> Result<DomainId, Error> {
         self.locate("rocky.personal.domain.v1", owner).map(DomainId)
     }
 }
 
-/// The database mode the root pins in its genesis; it never changes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 #[expect(
@@ -114,14 +101,10 @@ impl PersonalNamespace {
     reason = "one kind per genesis; boxing would only add an allocation"
 )]
 pub enum DatabaseKind {
-    /// Identities the root or its issuers admit; links need matching codes.
     Shared,
-    /// Only the owner's devices and explicitly granted custody principals.
     Personal {
         owner: PublicKey,
         namespace: PersonalNamespace,
-        /// Random per create: independent creates of one owner and
-        /// namespace never share a descriptor, so they conflict.
         creation: [u8; 16],
     },
 }
@@ -135,8 +118,6 @@ impl DatabaseKind {
     pub fn is_personal(&self) -> bool {
         matches!(self, Self::Personal { .. })
     }
-    /// A personal owner is never the root, and its manifest names only
-    /// the derived domain.
     pub(crate) fn validate(&self, manifest: &ApplicationManifest) -> Result<(), Error> {
         let Self::Personal {
             owner, namespace, ..
@@ -154,8 +135,6 @@ impl DatabaseKind {
     }
 }
 
-/// The verified genesis a holder judges node certificates and trusted
-/// grants by: its mode and descriptor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Genesis {
     kind: DatabaseKind,
@@ -169,9 +148,6 @@ impl Genesis {
             descriptor: genesis.descriptor()?,
         })
     }
-    /// A shared database holds no personal certificate. A personal one
-    /// trusts only its owner, whose nodes each hold a personal certificate
-    /// bound to this genesis; custody principals keep sequenced links.
     pub(crate) fn check_node(
         &self,
         issuer: PublicKey,
@@ -195,7 +171,6 @@ impl Genesis {
             (DatabaseKind::Personal { .. }, _) => Ok(()),
         }
     }
-    /// The root's trusted grant in a personal database goes to the owner.
     pub(crate) fn check_trusted(&self, subject: PublicKey) -> Result<(), Error> {
         match self.kind.owner() {
             Some(owner) if owner != subject => Err(PersonalError::OwnerOnly.into()),
@@ -204,32 +179,19 @@ impl Genesis {
     }
 }
 
-/// Why a personal database refused a mode, owner, device or admission.
-/// Nothing was stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PersonalError {
-    /// The genesis pins another mode than the caller requires.
     ModeMismatch,
-    /// The genesis is signed by another root.
     WrongPublisher,
-    /// The genesis or certificate names another owner.
     WrongOwner,
-    /// The genesis pins another namespace, or the database is not where
-    /// the namespace locates it.
     NamespaceMismatch,
-    /// A personal database admits no other readers, writers or issuers.
     OwnerOnly,
-    /// The certificate binds another database, grant or genesis.
     WrongBinding,
-    /// The node did not prove possession of its key.
     Possession,
-    /// A permanent statement ended this node; no certificate restores it.
     Tombstoned { node: PeerId },
-    /// The owner already has this many live devices here.
     DeviceLimit { limit: usize },
 }
 impl PersonalError {
-    /// The stable code of the call contract.
     pub fn code(&self) -> &'static str {
         match self {
             Self::ModeMismatch => "mode_mismatch",
@@ -272,9 +234,6 @@ impl From<PersonalError> for Error {
     }
 }
 
-/// What a personal device certificate binds besides its database: the
-/// root's trusted grant to the owner, the genesis descriptor and the node
-/// key's own signature over both.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersonalBinding {
@@ -306,7 +265,6 @@ impl PersonalBinding {
     }
 }
 
-/// A personal node certificate's key signed its own binding.
 pub(crate) fn check_possession(
     capability: &crate::Capability,
     owner: PublicKey,
@@ -324,8 +282,6 @@ pub(crate) fn check_possession(
     Ok(())
 }
 
-/// One owner device: a personal node certificate, checked for shape and
-/// possession. It carries no sequence and names no predecessor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PersonalLink {
     pub database: DatabaseContext,
@@ -336,7 +292,6 @@ pub struct PersonalLink {
     pub certificate: Commitment,
 }
 impl PersonalLink {
-    /// `None` for a certificate that is not a personal one.
     pub fn of(certificate: &SignedCapability) -> Result<Option<Self>, Error> {
         let extended = certificate.capability.extended()?;
         let Some(binding) = extended.personal else {
@@ -365,14 +320,11 @@ impl PersonalLink {
     }
 }
 
-/// What every device certificate of one personal database binds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PersonalContext {
     pub database: DatabaseContext,
     pub owner: PublicKey,
-    /// The root's trusted grant to the owner.
     pub grant: Commitment,
-    /// The genesis descriptor (`SignedManifest::descriptor`).
     pub descriptor: Commitment,
 }
 impl PersonalContext {
@@ -391,9 +343,6 @@ impl PersonalContext {
 }
 
 impl CredentialChain {
-    /// The pinned `owner`, which holds the root's trusted grant this chain
-    /// starts with, certifies `node` through `signer` independently of its
-    /// other devices; the node signs its possession of the key.
     pub fn certify_personal(
         mut self,
         signer: &dyn crate::IdentityProvider,
@@ -430,7 +379,6 @@ impl CredentialChain {
         self.0.push(SignedCapability::sign(leaf, signer)?);
         Ok(self)
     }
-    /// A personal leaf binds the root's grant this chain starts with.
     pub(crate) fn check_personal(&self, index: usize) -> Result<(), Error> {
         let Some(link) = PersonalLink::of(&self.0[index])? else {
             return Ok(());
@@ -451,15 +399,9 @@ impl CredentialChain {
 }
 
 impl RevocationSet {
-    /// Whether a permanent statement ends `node` of `owner`: the owner's
-    /// unlink or a root statement naming it. A tombstone dominates every
-    /// certificate, however often or freshly replayed.
     pub fn tombstones(&self, owner: PublicKey, node: PublicKey) -> bool {
         self.identity_unlinks(owner, PeerId::of(node)) || self.root_names(node)
     }
-    /// The owner's live devices: personal certificates no tombstone, reset
-    /// or other held statement ends. A device a reset signed out signs in
-    /// again as a new node.
     pub fn personal_devices(
         &self,
         owner: PublicKey,
@@ -476,9 +418,6 @@ impl RevocationSet {
         }
         Ok(devices)
     }
-    /// Admits one owner device after checking its binding, its tombstone
-    /// and the local device limit. Refusals change nothing; an existing
-    /// device is never removed. Returns whether the certificate is new.
     pub fn admit_personal(
         &mut self,
         certificate: SignedCapability,

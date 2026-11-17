@@ -902,7 +902,7 @@ fn check_config_with_families(
         .credentials
         .verified_with_families(config.publisher, &config.revocations, now()?, families)
         .map_err(credential)?
-        .selectors(config.node.public_key(), now()?)
+        .selectors(config.node.public_key(), &config.revocations, now()?)
         .map_err(credential)?;
     let mut seen_scopes = BTreeSet::new();
     let mut seen_keys = BTreeSet::new();
@@ -963,7 +963,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut config = config.security;
         let genesis = config
             .manifest
-            .verify(config.publisher)
+            .verify_historic(config.publisher)
             .map_err(credential)?;
         if genesis.publisher != manifest.publisher
             || genesis.app != manifest.app
@@ -1219,7 +1219,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         inner.grant_families(),
                     )
                     .map_err(credential)?
-                    .selectors(inner.config.node.public_key(), now()?)
+                    .selectors(
+                        inner.config.node.public_key(),
+                        &inner.config.revocations,
+                        now()?,
+                    )
                     .map_err(credential)?;
                 let scopes: BTreeSet<_> = grants
                     .iter()
@@ -1987,7 +1991,11 @@ impl<A: RowApplication> Inner<A> {
                 self.grant_families(),
             )
             .map_err(credential)?
-            .selectors(self.config.node.public_key(), time)
+            .selectors(
+                self.config.node.public_key(),
+                &self.config.revocations,
+                time,
+            )
             .map_err(credential)?;
         let selectors = Arc::new(selectors);
         *local = Some((key, selectors.clone()));
@@ -2120,8 +2128,9 @@ impl<A: RowApplication> Inner<A> {
         if !extension.authored {
             return Err(denied("node author missing"));
         }
-        self.verified_chain(credentials, self.header_revocations(header), time)?
-            .unseen_partition_author(header.public_key, extension.scope, time)
+        let revocations = self.header_revocations(header);
+        self.verified_chain(credentials, revocations, time)?
+            .unseen_partition_author(header.public_key, extension.scope, revocations, time)
             .map_err(credential)
     }
     fn check_header_table(&self, extension: &Extensions) -> Result<(), Error> {
@@ -2155,10 +2164,14 @@ impl<A: RowApplication> Inner<A> {
         }
         let verified = self.verified_chain(credentials, revocations, time)?;
         let grants = match partition {
-            Some(tuple) => {
-                verified.partition_author(header.public_key, extension.scope, tuple, time)
-            }
-            None => verified.author(header.public_key, extension.scope.table, time),
+            Some(tuple) => verified.partition_author(
+                header.public_key,
+                extension.scope,
+                tuple,
+                revocations,
+                time,
+            ),
+            None => verified.author(header.public_key, extension.scope.table, revocations, time),
         }
         .map_err(credential)?;
         if !grants.iter().any(|grant| {

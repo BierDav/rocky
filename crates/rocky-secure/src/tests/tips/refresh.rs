@@ -632,7 +632,10 @@ async fn identical_genesis_ids_still_query_each_domain_and_empty_refresh_is_lazy
     let empty = open(&f, &dir.path().join("empty.db"), &PrivateKey::new()).await;
     let mut malformed = TipGraph::new(
         other,
-        f.manifest.verify(f.publisher.public_key()).unwrap().hash(),
+        f.manifest
+            .verify_historic(f.publisher.public_key())
+            .unwrap()
+            .hash(),
     );
     let mut bad = close;
     bad.statement.format = 0;

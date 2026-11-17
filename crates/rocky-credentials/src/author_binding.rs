@@ -1,13 +1,10 @@
-//! Portable author provenance without partition selectors or extra signing keys.
 use crate::{Attestation, Capability, Error, PublicKey, Purpose, Signer, denied, signing_bytes};
 use rocky_core::{Commitment, PrincipalKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// The current author binding format; others are refused.
 const BINDING_VERSION: u8 = 4;
 
-/// A separately signed projection of assignment authority, revealing no tuples.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorBinding {
@@ -16,7 +13,6 @@ pub struct AuthorBinding {
     subject: PublicKey,
     kind: PrincipalKind,
     tables: BTreeSet<Commitment>,
-    /// Issuer authority: every table.
     issues: bool,
     attestation: Attestation,
 }
@@ -83,8 +79,6 @@ impl AuthorBinding {
             self.issues,
         )
     }
-    /// Certifies a node writer by one exact identity, without revealing
-    /// partition selectors. Row admission still checks live grants.
     pub fn verify_node_issuer(&self, issuer: PublicKey, node: PublicKey) -> Result<(), Error> {
         if self.version != BINDING_VERSION
             || self.issuer != issuer
@@ -98,8 +92,6 @@ impl AuthorBinding {
         }
         Ok(())
     }
-    /// Verifies historical writer provenance, independently of live grants:
-    /// the chain ends at the node `signer`, whose key is the writer.
     pub fn verify_chain(
         chain: &[Self],
         publisher: PublicKey,
@@ -151,5 +143,59 @@ impl AuthorBinding {
             return Err(denied("creation proof author does not own identity"));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PrivateKey;
+    use rocky_core::{ResourceGrant, ResourceScope};
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn an_author_binding_of_another_version_is_refused() {
+        let (publisher, user, node) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
+        let grant = ResourceGrant {
+            scope: ResourceScope {
+                domain: rocky_core::Scope {
+                    mesh: rocky_core::MeshId([1; 16]),
+                    app: rocky_core::AppId([2; 16]),
+                    domain: rocky_core::DomainId([3; 16]),
+                },
+                encryption: [4; 32],
+                table: [5; 32],
+            },
+            rows: rocky_core::RowSelection::All,
+            rights: [rocky_core::Right::Insert].into(),
+            fields: rocky_core::FieldSelection::All,
+        };
+        let identity = crate::Authority::owner(&publisher)
+            .issue(
+                user.public_key(),
+                vec![grant],
+                crate::Validity {
+                    issued_at: 100,
+                    lifetime: std::time::Duration::from_secs(1000),
+                    clock_skew: std::time::Duration::from_secs(0),
+                },
+            )
+            .unwrap();
+        let chain = crate::device_chain(identity, &user, node.public_key()).unwrap();
+        let binding = &chain.0[1].author_binding;
+        binding
+            .verify_node_issuer(user.public_key(), node.public_key())
+            .unwrap();
+        for version in [BINDING_VERSION - 1, BINDING_VERSION + 1] {
+            let other = AuthorBinding {
+                version,
+                ..binding.clone()
+            };
+            assert!(
+                other
+                    .verify_node_issuer(user.public_key(), node.public_key())
+                    .is_err(),
+                "version {version} is refused although its signature covers only the current one"
+            );
+        }
     }
 }

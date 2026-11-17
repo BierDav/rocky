@@ -321,7 +321,11 @@ impl<A: RowApplication> Inner<A> {
                 &typed.families,
             )
             .map_err(credential)?
-            .selectors(self.config.node.public_key(), now()?)
+            .selectors(
+                self.config.node.public_key(),
+                &self.config.revocations,
+                now()?,
+            )
             .map_err(credential)?;
         Ok(typed
             .tables

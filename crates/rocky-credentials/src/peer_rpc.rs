@@ -1,4 +1,3 @@
-//! The single peer RPC contract. Routes and endpoint identities grant no trust.
 use crate::{
     Error, IdentityRequest, PairRequest, PersonalAnswer, PersonalAuthorization, PersonalChallenge,
     PersonalHello, PersonalPublication, PrivateKey, PublicKey, RenewRequest, RevocationSet,
@@ -19,9 +18,6 @@ pub struct IdentityEnrollmentRequest {
     pub request: IdentityRequest,
     pub code: Option<String>,
 }
-/// One identity-enrollment branch. A shared link proves the identity and
-/// both matching codes; a personal one starts with an untrusted hello and
-/// then proves the root, the owner and the new node.
 #[derive(Serialize, Deserialize)]
 #[expect(
     clippy::large_enum_variant,
@@ -32,25 +28,20 @@ pub enum IdentityEnrollment {
     PersonalHello(PersonalHello),
     Personal(Box<PersonalAuthorization>),
 }
-/// A node certificate to persist: an identity's own link, or an owner
-/// device's independent certificate with its root authorization.
 #[derive(Serialize, Deserialize)]
 pub enum LinkEnrollment {
     Shared(Box<SignedCapability>),
     Personal(Box<PersonalPublication>),
-    /// A lapsed custodian's same custody grant, renewed under the owner.
     PersonalCustody(Box<crate::PersonalCustodyRenewal>),
 }
 
 const RESOLUTION_VERSION: u32 = 1;
-/// A fresh challenge for the node behind a pinned contact.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerResolutionRequest {
     version: u32,
     challenge: Commitment,
 }
-/// Proof of node-key possession, without exposing credentials.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerResolutionProof {
@@ -108,8 +99,6 @@ impl PeerResolutionProof {
         Ok(self.node)
     }
 }
-/// The responding node acknowledges this policy only after its local commit.
-/// Node possession suffices for a receipt, including on a revoked node.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UnlinkReply {
@@ -137,8 +126,6 @@ impl UnlinkReply {
             signature: node.sign(&bytes),
         })
     }
-    /// A replay still proves this peer accepted these permanent statements;
-    /// it makes no claim about newer policy or future retention.
     pub fn verify(
         &self,
         database: crate::DatabaseContext,
@@ -159,7 +146,6 @@ impl UnlinkReply {
     }
 }
 
-/// Only verified finality establishes the outcome of a private candidate.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum StagedCloseStatus {
     Pending,
@@ -193,7 +179,6 @@ pub enum PeerTrust {
     Invitation,
     Enrolled,
     Identity,
-    /// A personal authorization the root, its owner and the node signed.
     Root,
     Issuer,
 }
@@ -204,7 +189,6 @@ pub enum PeerAdmission {
     Metadata,
 }
 impl PeerRequest {
-    /// The handler verifies this proof; the class selects its inbound budget.
     pub fn requirements(&self) -> (PeerTrust, PeerAdmission) {
         match self {
             Self::Pair(_) => (PeerTrust::Invitation, PeerAdmission::Enrollment),
@@ -258,7 +242,6 @@ pub enum IdentityReply {
     ConfirmationRequired,
     Enrolled(#[serde(with = "serde_bytes")] Vec<u8>),
     PersonalChallenge(Box<PersonalChallenge>),
-    /// One bootstrap page, sealed to the authorized node.
     Personal(Box<PersonalAnswer>),
 }
 #[derive(Serialize, Deserialize)]

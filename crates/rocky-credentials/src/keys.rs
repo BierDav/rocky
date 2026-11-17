@@ -1,4 +1,3 @@
-//! Where an installation's secrets live.
 use crate::Error;
 use rocky_platform::fs;
 use std::{
@@ -8,20 +7,12 @@ use std::{
 
 pub type ProviderError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Where an installation keeps its signing, transport and reader keys.
-/// Platform implementations wrap a keychain or keystore. Names are unique
-/// per installation and use only `[a-z0-9._-]`. A provider never invents a
-/// secret: `load` of an absent name is `None`.
 pub trait KeyProvider: Send + Sync {
     fn load(&self, name: &str) -> Result<Option<Vec<u8>>, ProviderError>;
     fn store(&self, name: &str, secret: &[u8]) -> Result<(), ProviderError>;
     fn delete(&self, name: &str) -> Result<(), ProviderError>;
 }
 
-/// The fallback provider: owner-only files in one directory, plaintext at
-/// rest. They protect keys from other users of the machine, not from its
-/// owner, a backup or a copy of the disk. In a browser the files are in
-/// Rocky's OPFS pool, private to the origin (`rocky_platform::fs`).
 pub struct FileKeyProvider {
     directory: PathBuf,
 }
@@ -65,12 +56,10 @@ impl KeyProvider for FileKeyProvider {
     }
 }
 
-/// Replaces `path` atomically with owner-only `bytes`, durable on return.
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), ProviderError> {
     Ok(fs::write_private(path, bytes)?)
 }
 
-/// One installation's secrets, by role, as `rocky.<installation>.<role>`.
 #[derive(Clone)]
 pub struct Vault {
     provider: Arc<dyn KeyProvider>,
@@ -86,19 +75,16 @@ impl Vault {
     fn name(&self, role: &str) -> String {
         format!("rocky.{}.{role}", self.installation)
     }
-    /// Loads a bounded structured secret managed by the caller.
     pub fn load_bytes(&self, role: &str) -> Result<Option<Vec<u8>>, Error> {
         self.provider
             .load(&self.name(role))
             .map_err(Error::Provider)
     }
-    /// Stores a structured secret in the same provider as key material.
     pub fn store_bytes(&self, role: &str, bytes: &[u8]) -> Result<(), Error> {
         self.provider
             .store(&self.name(role), bytes)
             .map_err(Error::Provider)
     }
-    /// The secret of `role`, or `None` when the provider holds none.
     pub fn find(&self, role: &str) -> Result<Option<[u8; 32]>, Error> {
         match self
             .provider
@@ -112,8 +98,6 @@ impl Vault {
             None => Ok(None),
         }
     }
-    /// The secret of `role`. A missing secret is an error: nothing is
-    /// generated in its place.
     pub fn get(&self, role: &str) -> Result<[u8; 32], Error> {
         self.find(role)?.ok_or_else(|| {
             Error::Provider(
@@ -126,8 +110,6 @@ impl Vault {
             .store(&self.name(role), secret)
             .map_err(Error::Provider)
     }
-    /// A fresh random secret for a role that holds none. An existing
-    /// secret is never replaced.
     pub fn create(&self, role: &str) -> Result<[u8; 32], Error> {
         if self.find(role)?.is_some() {
             return Err(Error::Provider(
@@ -136,14 +118,11 @@ impl Vault {
         }
         self.replace(role)
     }
-    /// A fresh random secret that replaces whatever `role` held. Only for
-    /// secrets nothing else was sealed or signed under.
     pub fn replace(&self, role: &str) -> Result<[u8; 32], Error> {
         let secret: [u8; 32] = rocky_platform::entropy::random();
         self.put(role, &secret)?;
         Ok(secret)
     }
-    /// Deletes every role, continuing past failures; returns the first.
     pub fn forget(&self, roles: impl IntoIterator<Item = String>) -> Result<(), Error> {
         let mut first = None;
         for role in roles {

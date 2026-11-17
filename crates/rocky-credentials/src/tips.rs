@@ -1,4 +1,3 @@
-//! Domain-scoped seal, tip-opening and bookmark statements.
 use crate::revocation::{Cut, Head};
 use crate::{
     CredentialChain, Endorsement, Error, IdentityProvider, PublicKey, RevocationSet, SealFinality,
@@ -18,22 +17,14 @@ pub const BOOKMARK_MOVE_FORMAT: u32 = 2;
 pub const GENESIS_LINE_FORMAT: u32 = 2;
 pub const MAX_BOOKMARK_NAME: usize = 128;
 
-/// A node's place in its chain of signed tip statements, or of terminal
-/// acknowledgments: every one names the hash (ID) of the one before. A
-/// root revocation keeps a revoked node's chain up to the heads it names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ChainLink {
-    /// The signing node.
     pub lane: PublicKey,
     pub sequence: u64,
-    /// The ID of the lane's previous statement; `None` only at sequence 0.
     pub previous: Option<Commitment>,
-    /// A staged schema switch's own branch of the lane, which may never be
-    /// published; `None` on the live chain.
     pub stage: Option<Commitment>,
 }
 impl ChainLink {
-    /// The first link of `lane`.
     pub fn first(lane: PublicKey) -> Self {
         Self {
             lane,
@@ -42,8 +33,6 @@ impl ChainLink {
             stage: None,
         }
     }
-    /// The link after the statement `id`, which carried this one, on the
-    /// same branch.
     pub fn next(&self, id: Commitment) -> Self {
         Self {
             lane: self.lane,
@@ -52,16 +41,12 @@ impl ChainLink {
             stage: self.stage,
         }
     }
-    /// This link on the branch the staged schema seal `seal` opens, whose
-    /// first statement it is.
     pub fn branch(self, seal: &SealStatement) -> Result<Self, Error> {
         Ok(Self {
             stage: Some(Self::stage_of(seal)?),
             ..self
         })
     }
-    /// The stage tag of the branch `seal` opens: bound to the seal, so a
-    /// node cannot branch its chain without signing a schema seal there.
     pub fn stage_of(seal: &SealStatement) -> Result<Commitment, Error> {
         Ok(rocky_core::commitment(
             "rocky.stage-branch.v1",
@@ -75,10 +60,7 @@ impl ChainLink {
         Ok(())
     }
 }
-/// A statement kind that may open a stage branch of its signer's chain:
-/// only a seal does.
 pub trait OpensStage {
-    /// The stage tag of the branch this statement opens as its first link.
     fn opened_stage(&self) -> Result<Option<Commitment>, Error> {
         Ok(None)
     }
@@ -92,18 +74,13 @@ impl OpensStage for TipOpeningStatement {}
 impl OpensStage for BookmarkMoveStatement {}
 impl OpensStage for GenesisLineStatement {}
 
-/// Two statements of one node's chain at the same place: a signer whose
-/// key signed both, which no honest node does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Equivocation {
-    /// The trusted identity the chain belongs to.
     pub identity: PublicKey,
     pub lane: PublicKey,
     pub sequence: u64,
     pub acknowledgment: bool,
 }
-/// A statement a root revocation's cut left out: past the kept head of
-/// its chain, or off that branch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PastCut {
     pub id: Commitment,
@@ -112,9 +89,6 @@ pub struct PastCut {
     pub acknowledgment: bool,
 }
 
-/// A finality record a cut changed: its old ID, the record that replaced
-/// it, if any still meets its line's minimum, and the acknowledgments
-/// stripped from it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StrippedFinality {
     pub record: Commitment,
@@ -122,12 +96,10 @@ pub struct StrippedFinality {
     pub acknowledgments: Vec<TerminalAck>,
 }
 
-/// Genesis uses the current schema digest; its domain is the graph's scope.
 pub fn genesis_tip(schema: Commitment) -> TipId {
     TipId(rocky_core::commitment("rocky.genesis-tip.v1", &schema))
 }
 
-/// Last included sequence of one node's author log, ordered by its writer key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorMark {
     pub author: rocky_core::WriterId,
@@ -138,18 +110,13 @@ pub enum SealAction {
     Continue { schema: Commitment },
     Close,
 }
-/// A position of a tip's coordinated log and the running hash after it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogPoint {
     pub position: u64,
     pub running: Commitment,
 }
-/// What the owner's recovery seal of a stuck tip abandons: the committed
-/// entries of the tip's log after `retained` through `replaced`, the exact
-/// commit it ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Recovery {
-    /// The end of the prefix that stays: `retained ≤ replaced`.
     pub retained: LogPoint,
     pub replaced: LogPoint,
 }
@@ -164,7 +131,6 @@ impl Recovery {
         }
         Ok(())
     }
-    /// Whether the entry at `position` of the sealed tip's log is abandoned.
     pub fn abandons(&self, position: u64) -> bool {
         self.retained.position < position && position <= self.replaced.position
     }
@@ -176,7 +142,6 @@ pub struct SealStatement {
     pub tip: TipId,
     pub frontier: Vec<AuthorMark>,
     pub action: SealAction,
-    /// Only the owner's `continue` seal of a stuck tip carries one.
     pub recovery: Option<Recovery>,
 }
 impl SealStatement {
@@ -248,8 +213,6 @@ impl BookmarkMoveStatement {
     }
 }
 
-/// A trusted identity's minimum of distinct trusted nodes whose acknowledgments make
-/// a seal on the genesis line final. Several resolve to the largest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GenesisLineStatement {
     pub format: u32,
@@ -273,7 +236,6 @@ macro_rules! signed_statement {
         #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
         pub struct $signed {
             pub statement: $statement,
-            /// Present exactly when a trusted identity signs.
             pub link: Option<$crate::tips::ChainLink>,
             endorsement: Endorsement,
         }
@@ -284,7 +246,6 @@ macro_rules! signed_statement {
             ) -> Result<Self, Error> {
                 Self::endorse(statement, owner, &CredentialChain::default())
             }
-            /// The owner or an issuer's node signs; neither has a chain link.
             pub fn endorse<'s>(
                 statement: $statement,
                 signer: impl Into<$crate::Signer<'s>>,
@@ -292,8 +253,6 @@ macro_rules! signed_statement {
             ) -> Result<Self, Error> {
                 Self::endorse_linked(statement, signer, chain, None)
             }
-            /// A trusted identity's node signs at `link` of its own chain:
-            /// the lane is the signing node.
             pub fn endorse_linked<'s>(
                 statement: $statement,
                 signer: impl Into<$crate::Signer<'s>>,
@@ -316,7 +275,11 @@ macro_rules! signed_statement {
                 signed.to_bytes()?;
                 Ok(signed)
             }
-            pub fn verify(&self, publisher: PublicKey, graph: &TipGraph) -> Result<(), Error> {
+            pub fn verify_historic(
+                &self,
+                publisher: PublicKey,
+                graph: &TipGraph,
+            ) -> Result<(), Error> {
                 self.check(publisher, graph, None)
             }
             pub fn verify_current(
@@ -339,7 +302,7 @@ macro_rules! signed_statement {
                 if let Some(link) = &self.link {
                     link.validate()?;
                 }
-                let signer = self.endorsement.signer(publisher);
+                let signer = self.endorsement.claimed_signer(publisher);
                 let current_unless_cut = current.filter(|(revocations, _)| {
                     self.link
                         .is_none_or(|link| revocations.cut(&signer, &link.lane).is_none())
@@ -455,8 +418,6 @@ impl SignedSeal {
         }
         Ok(())
     }
-    /// The recovery of a seal `owner` signed directly: what a coordinator
-    /// checks before ending a stuck log. Devices verify it in the graph.
     pub fn verify_recovery(&self, owner: PublicKey) -> Result<&Recovery, Error> {
         self.statement.validate()?;
         let recovery = self
@@ -471,7 +432,7 @@ impl SignedSeal {
             return Err(denied("only the owner signs a recovery seal"));
         }
         self.endorsement
-            .verify(owner, "rocky.seal.v2", &(&self.statement, &self.link))?;
+            .verify_historic(owner, "rocky.seal.v2", &(&self.statement, &self.link))?;
         Ok(recovery)
     }
     pub fn successor(&self) -> Result<Option<TipId>, Error> {
@@ -525,8 +486,6 @@ impl SignedBookmarkMove {
     }
 }
 
-/// The IDs of `identity`'s chain through `lane` reachable from `heads`
-/// through predecessors: what a cut keeps of that chain.
 fn kept(
     chained: &[Chained<'_>],
     identity: &PublicKey,
@@ -552,18 +511,11 @@ fn kept(
     kept
 }
 
-/// A cut head's walk back through the held items, to judge many items
-/// against it without walking again.
 struct Walk {
     head: Head,
-    /// Each held item from the head back: the lowest sequence so far, and
-    /// its predecessor. Ends at the first item without one, or before the
-    /// first one not held.
     held: Vec<(u64, Option<Commitment>)>,
 }
 impl Walk {
-    /// Hash IDs cannot cycle; the walk stops after `links.len()` items
-    /// only to guard against a hang.
     fn new(links: &BTreeMap<Commitment, (PublicKey, ChainLink)>, head: &Head) -> Self {
         let mut held = Vec::new();
         let mut cursor = Some(head.id);
@@ -578,8 +530,6 @@ impl Walk {
         }
         Self { head: *head, held }
     }
-    /// Whether the walk, from the head, leads to `id` at `sequence` below
-    /// it, or stops at an item not held: undecided until it arrives.
     fn reaches(&self, sequence: u64, id: Commitment) -> bool {
         let next = sequence.saturating_add(1);
         let stop = self
@@ -598,9 +548,6 @@ fn walks(
     heads.iter().map(|head| Walk::new(links, head)).collect()
 }
 
-/// Whether a cut's head `walks` leave out the chain item `id` at `link`
-/// for good: at or after a head's place without being it, or before one
-/// and off the path the held items lead back along.
 fn beyond(walks: &[Walk], link: &ChainLink, id: Commitment) -> bool {
     for walk in walks {
         if walk.head.id == id {
@@ -614,37 +561,21 @@ fn beyond(walks: &[Walk], link: &ChainLink, id: Commitment) -> bool {
     true
 }
 
-/// Chained statements' identities and links by ID: built over the graph's lists as they grow, rebuilt when one
-/// changed otherwise. Never compared or serialized.
 #[derive(Default)]
 struct ChainIndex(Mutex<Places>);
+const INDEXED_LISTS: usize = 7;
 #[derive(Clone, Default)]
 struct Places {
-    /// Per list, finality records last: how many it indexed, and the last
-    /// one's ID.
-    built: [(usize, Option<Commitment>); 7],
-    /// Each chained statement's identity and link, by ID.
+    indexed_prefix: [(usize, Option<Commitment>); INDEXED_LISTS],
     links: BTreeMap<Commitment, (PublicKey, ChainLink)>,
-    /// Each acknowledgment's identity and link, by ID.
     acks: BTreeMap<Commitment, (PublicKey, ChainLink)>,
-    /// Each chained statement's ID, by identity and lane.
     lanes: BTreeMap<(PublicKey, PublicKey), BTreeSet<Commitment>>,
-    /// What each statement and finality record refers to: its
-    /// predecessor, sealed tip, opened seal, a bookmark's tips or a
-    /// record's seal.
     refs: BTreeMap<Commitment, Vec<Commitment>>,
-    /// The reverse of `refs`.
     referrers: BTreeMap<Commitment, BTreeSet<Commitment>>,
-    /// Each seal's first position in the seal list, by ID.
     seals: BTreeMap<Commitment, usize>,
-    /// The finality records naming each seal, by seal.
     finals: BTreeMap<Commitment, BTreeSet<Commitment>>,
-    /// The coordination service each finality record's acknowledgments name.
     final_coordinators: BTreeMap<Commitment, CoordinatorIdentity>,
-    /// The finality records whose log decided their seal.
     decided: BTreeSet<Commitment>,
-    /// Per scope, the coordinator the earliest coordinated settings revision
-    /// names, by revision and then the lower digest: the database's for good.
     founding: BTreeMap<Scope, ((u64, Commitment), CoordinatorIdentity)>,
 }
 impl Places {
@@ -654,7 +585,6 @@ impl Places {
         }
         self.refs.entry(id).or_default().extend(refs);
     }
-    /// What a statement refers to and, when chained, its place in its lane.
     fn chain(
         &mut self,
         id: Commitment,
@@ -664,7 +594,9 @@ impl Places {
     ) {
         refs.extend(link.and_then(|link| link.previous));
         self.refer(id, refs);
-        if let (Some(link), Some(signer)) = (link, Endorsement::signer_of(&endorsement.chain)) {
+        if let (Some(link), Some(signer)) =
+            (link, Endorsement::claimed_signer_of(&endorsement.chain))
+        {
             self.links.insert(id, (signer, link));
             self.lanes
                 .entry((signer, link.lane))
@@ -694,7 +626,6 @@ impl ChainIndex {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
-/// What a graph list's item, with ID `id` at `position`, adds to the chain index.
 trait Indexed {
     fn index(&self, id: Commitment, position: usize, places: &mut Places) -> Result<(), Error>;
 }
@@ -757,7 +688,7 @@ impl Indexed for SealFinality {
             places.decided.insert(id);
         }
         for ack in &self.acknowledgments {
-            if let Some(identity) = ack.identity() {
+            if let Some(identity) = ack.claimed_identity() {
                 places.acks.insert(ack.id()?, (identity, ack.link));
             }
         }
@@ -765,8 +696,6 @@ impl Indexed for SealFinality {
     }
 }
 
-/// Who signed a tip statement, in the order races resolve by: the owner,
-/// then a trusted identity, then an issuer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TipAuthority {
@@ -775,9 +704,6 @@ pub enum TipAuthority {
     Owner,
 }
 impl TipAuthority {
-    /// Reads the shape of an endorsement admission already verified: no
-    /// links is the owner, one owner-direct trusted grant for `scope` a
-    /// trusted identity, anything else an issuer.
     pub fn of(endorsement: &Endorsement, scope: Scope) -> Self {
         match endorsement.chain.0.as_slice() {
             [] => Self::Owner,
@@ -794,8 +720,6 @@ impl TipAuthority {
     }
 }
 
-/// Pure graph resolution over already verified statements. Durable admission
-/// verifies statements and their dependencies before adding them to this value.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipGraph {
     pub scope: Scope,
@@ -806,28 +730,18 @@ pub struct TipGraph {
     pub genesis_lines: Vec<SignedGenesisLine>,
     pub finalities: Vec<SealFinality>,
     pub checkpoints: Vec<SignedCheckpointRecord>,
-    /// The owner's signed settings of the database, every revision.
     pub settings: Vec<crate::SignedDatabaseSettings>,
-    /// Seals, moves and checkpoint records a revocation ended the signer of, and finality
-    /// records it left below their line's minimum: kept, inspectable, and
-    /// left out of resolution. See [`Self::exclude_revoked`].
     #[serde(skip)]
     pub revoked: BTreeSet<Commitment>,
-    /// Of `revoked`, the statements and acknowledgments a root
-    /// revocation's cut left out. See [`Self::exclude_revoked`].
     #[serde(skip)]
     pub past_cut: BTreeSet<PastCut>,
-    /// Places of a node's chain that hold two statements.
     #[serde(skip)]
     pub equivocations: BTreeSet<Equivocation>,
     #[serde(skip)]
     index: ChainIndex,
 }
-/// A chained statement or acknowledgment of a graph: its ID, signer and
-/// link, and the chain it was signed through.
 struct Chained<'a> {
     id: Commitment,
-    /// The trusted identity whose chain it is.
     identity: PublicKey,
     link: ChainLink,
     credentials: &'a CredentialChain,
@@ -855,12 +769,6 @@ impl TipGraph {
             index: ChainIndex::default(),
         }
     }
-    /// Refuses a chained statement whose predecessor in its lane, signed
-    /// by the same identity one place before, the graph lacks, or that
-    /// enters a stage branch other than by continuing it or by being the
-    /// seal `opens` names its tag. The predecessor may sit on any branch of
-    /// the lane: a stage branches off the live chain, which continues after a
-    /// published stage.
     pub(crate) fn check_predecessor(
         &self,
         signer: PublicKey,
@@ -896,12 +804,11 @@ impl TipGraph {
         }
         Ok(())
     }
-    /// The chain index, brought up to the graph's lists.
     fn indexed(&self) -> Result<MutexGuard<'_, Places>, Error> {
         let mut index = self.index.places();
         macro_rules! lists {
             ($($n:tt $list:ident),*) => {
-                let stale = false $(|| match index.built[$n] {
+                let stale = false $(|| match index.indexed_prefix[$n] {
                     (0, _) => false,
                     (count, last) => self.$list.get(count - 1).map(|signed| signed.id()).transpose()? != last,
                 })*;
@@ -909,11 +816,11 @@ impl TipGraph {
                     *index = Places::default();
                 }
                 $(
-                    let from = index.built[$n].0;
+                    let from = index.indexed_prefix[$n].0;
                     for (position, signed) in self.$list.iter().enumerate().skip(from) {
                         let id = signed.id()?;
                         signed.index(id, position, &mut index)?;
-                        index.built[$n] = (from.max(index.built[$n].0) + 1, Some(id));
+                        index.indexed_prefix[$n] = (from.max(index.indexed_prefix[$n].0) + 1, Some(id));
                     }
                 )*
             };
@@ -921,7 +828,6 @@ impl TipGraph {
         lists!(0 seals, 1 openings, 2 moves, 3 genesis_lines, 4 checkpoints, 5 finalities, 6 settings);
         Ok(index)
     }
-    /// Every signed statement: a lazy ID, its chain and its link.
     #[expect(
         clippy::type_complexity,
         reason = "lazy statement IDs borrow heterogeneous signed records"
@@ -952,12 +858,12 @@ impl TipGraph {
             .chain(of!(self.genesis_lines))
             .chain(of!(self.checkpoints))
     }
-    /// The chained statements, then the acknowledgments of every finality
-    /// record, each once.
     fn chained(&self) -> Result<(Vec<Chained<'_>>, Vec<Chained<'_>>), Error> {
         let mut statements = Vec::new();
         for (id, credentials, link) in self.signed() {
-            if let (Some(link), Some(identity)) = (link, Endorsement::signer_of(credentials)) {
+            if let (Some(link), Some(identity)) =
+                (link, Endorsement::claimed_signer_of(credentials))
+            {
                 statements.push(Chained {
                     id: id()?,
                     identity,
@@ -971,7 +877,7 @@ impl TipGraph {
         for record in &self.finalities {
             for ack in &record.acknowledgments {
                 let id = ack.id()?;
-                if let Some(identity) = ack.identity()
+                if let Some(identity) = ack.claimed_identity()
                     && seen.insert(id)
                 {
                     acknowledgments.push(Chained {
@@ -985,12 +891,6 @@ impl TipGraph {
         }
         Ok((statements, acknowledgments))
     }
-    /// Leaves out of resolution every seal, opening, move and checkpoint
-    /// record whose signer's chain `revocations` ends; the owner's never
-    /// are. A chain a root statement cuts keeps the statements up to the
-    /// heads it names and loses the rest; those are `past_cut`. Two
-    /// chained statements at one place are an `equivocation`. Returns
-    /// whether the left-out set changed, so callers resolve again.
     pub fn exclude_revoked(&mut self, revocations: &RevocationSet) -> Result<bool, Error> {
         let mut revoked = BTreeSet::new();
         let mut past_cut = BTreeSet::new();
@@ -1062,10 +962,6 @@ impl TipGraph {
         self.equivocations = equivocations;
         Ok(changed)
     }
-    /// Whether a root statement's cut leaves out, for good, the statement
-    /// `id` that `identity` signed at `link`: it is at or after a kept
-    /// head's place without being that head, or before one this graph
-    /// holds without leading to it. Admission refuses it and holders prune it.
     pub fn beyond_cut(
         &self,
         revocations: &RevocationSet,
@@ -1079,15 +975,13 @@ impl TipGraph {
         let index = self.indexed()?;
         Ok(beyond(&walks(&index.links, &heads.statements), link, id))
     }
-    /// Whether a root statement's cut leaves out `ack` for good, as
-    /// [`Self::beyond_cut`] judges statements against its acknowledgment head.
     pub fn ack_beyond_cut(
         &self,
         revocations: &RevocationSet,
         ack: &TerminalAck,
     ) -> Result<bool, Error> {
         let Some(heads) = ack
-            .identity()
+            .claimed_identity()
             .and_then(|identity| revocations.cut(&identity, &ack.link.lane))
         else {
             return Ok(false);
@@ -1099,8 +993,6 @@ impl TipGraph {
             ack.id()?,
         ))
     }
-    /// `record` without the acknowledgments a cut leaves out for good, and
-    /// those, in its order.
     pub fn strip_past_cut(
         &self,
         revocations: &RevocationSet,
@@ -1117,9 +1009,6 @@ impl TipGraph {
         }
         Ok((kept, stripped))
     }
-    /// Whether `record`, judged without verifying its acknowledgments, has
-    /// as many as its seal's line needs. A record whose seal or minimum
-    /// the graph lacks passes; verification judges it.
     pub fn meets_minimum(&self, record: &SealFinality) -> bool {
         !record.acknowledgments.is_empty()
             && self
@@ -1127,16 +1016,12 @@ impl TipGraph {
                 .ok()
                 .is_none_or(|minimum| record.acknowledgments.len() >= minimum)
     }
-    /// Strips every finality record of the acknowledgments a cut leaves
-    /// out for good, dropping a record left below its line's minimum or
-    /// equal to another. Returns, per changed record, its old ID, what
-    /// replaced it and the stripped acknowledgments.
     pub fn strip_finalities(
         &mut self,
         revocations: &RevocationSet,
     ) -> Result<Vec<StrippedFinality>, Error> {
         let cut = |ack: &TerminalAck| {
-            ack.identity()
+            ack.claimed_identity()
                 .is_some_and(|identity| revocations.cut(&identity, &ack.link.lane).is_some())
         };
         if !self
@@ -1177,11 +1062,6 @@ impl TipGraph {
         }
         Ok(changed)
     }
-    /// The statements a cut leaves out for good (see [`Self::beyond_cut`])
-    /// that no other statement this graph keeps refers to, whether as a
-    /// predecessor, a sealed tip, an opened seal, a bookmark's tip or a
-    /// finality record's seal, nor `pinned`, which the holder keeps state
-    /// for. A holder deletes them.
     pub fn prunable(
         &self,
         revocations: &RevocationSet,
@@ -1226,7 +1106,6 @@ impl TipGraph {
         }
         Ok(prunable)
     }
-    /// Deletes `ids` from the graph's statement lists.
     pub fn remove_statements(&mut self, ids: &BTreeSet<Commitment>) -> Result<(), Error> {
         macro_rules! remove {
             ($($list:ident),*) => {$(
@@ -1243,9 +1122,6 @@ impl TipGraph {
         *self.index.places() = Places::default();
         Ok(())
     }
-    /// The heads this graph holds of `identity`'s chains through `lane`,
-    /// for a root statement's cut: every statement no other one follows,
-    /// stage branches included, and the latest acknowledgment.
     pub fn heads(&self, identity: &PublicKey, lane: &PublicKey) -> Result<Cut, Error> {
         let (statements, acknowledgments) = self.chained()?;
         let ours: Vec<&Chained<'_>> = statements
@@ -1281,12 +1157,6 @@ impl TipGraph {
             acknowledgments: head(&acknowledgments),
         })
     }
-    /// The cut a root proposal keeps of `identity`'s chains through
-    /// `lanes`: every leaf of each, as [`Self::heads`]. Over
-    /// [`crate::MAX_CUT_HEADS`] it leaves out stage-branch leaves, oldest
-    /// first, and returns them; a stage the cut leaves out loses only what
-    /// it signed past the live chain. Refuses more chains than a cut names,
-    /// or more live leaves (forks) than fit.
     #[expect(
         clippy::type_complexity,
         reason = "returns retained cuts and omitted lane heads together"
@@ -1342,9 +1212,6 @@ impl TipGraph {
         }
         Ok((cut, dropped))
     }
-    /// The live link `signer` signs its next statement at through its node
-    /// `lane`: after the highest place this graph holds on any branch, so no
-    /// place repeats, or the first.
     pub fn next_link(&self, signer: &PublicKey, lane: &PublicKey) -> Result<ChainLink, Error> {
         let (statements, _) = self.chained()?;
         Ok(statements
@@ -1356,8 +1223,6 @@ impl TipGraph {
                 ..head.link.next(head.id)
             }))
     }
-    /// The link the node `lane` acknowledges at next, after the latest of
-    /// its acknowledgments this graph's finality records hold.
     pub fn next_ack_link(&self, lane: &PublicKey) -> Result<ChainLink, Error> {
         let (_, acknowledgments) = self.chained()?;
         Ok(acknowledgments
@@ -1366,9 +1231,6 @@ impl TipGraph {
             .min_by_key(|item| (Reverse(item.link.sequence), item.id))
             .map_or(ChainLink::first(*lane), |head| head.link.next(head.id)))
     }
-    /// The trusted identities whose chained statements or acknowledgments
-    /// the graph holds, each with the latest `not_before` of the root's
-    /// trusted grant its credentials carry.
     pub fn trusted_grants(&self) -> Result<BTreeMap<PublicKey, u64>, Error> {
         let (statements, acknowledgments) = self.chained()?;
         let mut grants = BTreeMap::new();
@@ -1383,7 +1245,6 @@ impl TipGraph {
         }
         Ok(grants)
     }
-    /// Every identity a chained statement or acknowledgment names.
     pub fn chain_identities(&self) -> Result<BTreeSet<PublicKey>, Error> {
         let (statements, acknowledgments) = self.chained()?;
         Ok(statements
@@ -1392,8 +1253,6 @@ impl TipGraph {
             .map(|item| item.identity)
             .collect())
     }
-    /// The lanes `identity` signed chained statements or acknowledgments
-    /// through.
     pub fn lanes_of(&self, identity: &PublicKey) -> Result<BTreeSet<PublicKey>, Error> {
         let (statements, acknowledgments) = self.chained()?;
         Ok(statements
@@ -1403,8 +1262,6 @@ impl TipGraph {
             .map(|item| item.link.lane)
             .collect())
     }
-    /// The order races resolve by: higher authority first, then the lower
-    /// digest. Smaller wins.
     fn precedence(
         &self,
         endorsement: &Endorsement,
@@ -1412,17 +1269,9 @@ impl TipGraph {
     ) -> (Reverse<TipAuthority>, Commitment) {
         (Reverse(TipAuthority::of(endorsement, self.scope)), id)
     }
-    /// Whether a finality record that revocation left whole names `seal`,
-    /// acknowledged at the coordinator the settings name when they name
-    /// one: another service's records never make a seal final, whenever
-    /// they arrived. Admission verified the record against its line's
-    /// minimum.
     pub fn is_final(&self, seal: Commitment) -> Result<bool, Error> {
         self.final_by(seal, false)
     }
-    /// Whether `record` counts toward finality here: acknowledged at the
-    /// coordinator the settings name, or at any while they name none.
-    /// A verified record that does not count proves nothing final.
     pub fn counts_finality(&self, record: &SealFinality) -> Result<bool, Error> {
         let named = self
             .indexed()?
@@ -1431,8 +1280,6 @@ impl TipGraph {
             .map(|(_, identity)| *identity);
         Ok(named.is_none_or(|named| record.coordinator() == Some(named)))
     }
-    /// The coordination services this scope's finality records that no
-    /// revocation ended name.
     pub fn finality_coordinators(&self) -> Result<BTreeSet<CoordinatorIdentity>, Error> {
         let mut named = BTreeSet::new();
         for record in &self.finalities {
@@ -1445,16 +1292,9 @@ impl TipGraph {
         }
         Ok(named)
     }
-    /// Whether finality lets `seal` be compacted: it is final at the
-    /// coordinator the settings name. Without settings any coordinator's
-    /// record counts as final, and settings arriving later could name
-    /// another and undo it, so compaction waits for them.
     pub fn compacts_final(&self, seal: Commitment) -> Result<bool, Error> {
         Ok(self.indexed()?.founding.contains_key(&self.scope) && self.is_final(seal)?)
     }
-    /// Whether `seal` is final through a finality record of the named
-    /// coordinator whose log decided it, and was not told of it by graphs
-    /// that held it first; false while the settings name none.
     pub fn decided_by_named(&self, seal: Commitment) -> Result<bool, Error> {
         Ok(self.indexed()?.founding.contains_key(&self.scope) && self.final_by(seal, true)?)
     }
@@ -1472,7 +1312,6 @@ impl TipGraph {
             })
         }))
     }
-    /// The checkpoints listed at `seal` that no revocation ended.
     pub fn checkpoints_at(&self, seal: Commitment) -> Result<Vec<&SignedCheckpointRecord>, Error> {
         let mut listed = Vec::new();
         for record in &self.checkpoints {
@@ -1482,19 +1321,9 @@ impl TipGraph {
         }
         Ok(listed)
     }
-    /// The owner's governing settings of the database. Once a revision
-    /// names a coordinator, the database's coordinator is that of its
-    /// earliest coordinated revision (the lower digest between two of one
-    /// revision) and the highest revision naming that coordinator governs;
-    /// revisions that uncoordinate it or name another are held and ignored.
-    /// Before, the highest revision governs. Every order of receipt
-    /// resolves alike.
     pub fn settings(&self) -> Result<Option<&crate::DatabaseSettingsStatement>, Error> {
         Ok(self.governing_settings()?.map(|signed| &signed.statement))
     }
-    /// The coordinator the governing settings name: once coordinated, a
-    /// database stays so, by one coordinator. Every seal of the database
-    /// then ends its tip's log there first.
     pub fn coordinator(&self) -> Result<Option<&crate::CoordinatorBundle>, Error> {
         Ok(self
             .governing_settings()?
@@ -1523,13 +1352,6 @@ impl TipGraph {
         }
         Ok(governing.map(|(_, signed)| signed))
     }
-    /// The owner's next settings revision with `coordination`; None when
-    /// the governing settings already say exactly that. Refuses a revision
-    /// that would uncoordinate a coordinated database or change its
-    /// coordinator, and a first coordinated one naming another coordinator
-    /// than this scope's finality records: the seals they made final would
-    /// stop being final, compacted ones too. The owner's devices check
-    /// before they sign, since the graph admits every signed revision.
     pub fn next_settings(
         &self,
         coordination: crate::Coordination,
@@ -1581,9 +1403,6 @@ impl TipGraph {
             coordination,
         }))
     }
-    /// The minimum of distinct trusted nodes a seal of `tip` needs to be
-    /// final: its line's opening's, or on the genesis line
-    /// [`Self::genesis_minimum`]'s.
     pub fn line_minimum(&self, tip: TipId) -> Result<Option<usize>, Error> {
         self.line_minimum_in(tip, &self.revoked)
     }
@@ -1603,10 +1422,6 @@ impl TipGraph {
         }
         Err(denied("unknown tip"))
     }
-    /// The genesis line's minimum, without `revoked` lines: the largest
-    /// the owner signed, so the root can lower a raise without revoking
-    /// anyone, or while it signed none the largest a trusted identity
-    /// signed, so no single trusted node lowers it; none without either.
     fn genesis_minimum(&self, revoked: &BTreeSet<Commitment>) -> Result<Option<usize>, Error> {
         let (mut owner, mut trusted) = (None, None);
         for line in &self.genesis_lines {
@@ -1623,9 +1438,6 @@ impl TipGraph {
         }
         Ok(owner.or(trusted))
     }
-    /// The finality records that fall below their minimum once revoked
-    /// acknowledgments stop counting and revoked genesis lines stop setting
-    /// the minimum.
     fn unfinal_records(
         &self,
         revoked: &BTreeSet<Commitment>,
@@ -1658,9 +1470,6 @@ impl TipGraph {
         self.line_minimum_in(seal.statement.tip, revoked)?
             .ok_or_else(|| denied("the genesis line has no signed minimum"))
     }
-    /// Verifies a finality record against the graph: it names a held seal,
-    /// its acknowledgments name that seal's tip and continuation, and
-    /// enough distinct trusted nodes signed them.
     pub fn verify_finality(
         &self,
         record: &SealFinality,
@@ -1699,9 +1508,6 @@ impl TipGraph {
         }
         Ok(())
     }
-    /// Concurrent seals have one winner, independent of receipt order: a
-    /// final seal, then the highest authority, then the lower digest.
-    /// Revoked seals never win.
     pub fn seal(&self, tip: TipId) -> Result<Option<&SignedSeal>, Error> {
         type Key = (Reverse<bool>, (Reverse<TipAuthority>, Commitment));
         let mut winner: Option<(Key, &SignedSeal)> = None;
@@ -1724,8 +1530,6 @@ impl TipGraph {
         }
         Ok(winner.map(|(_, seal)| seal))
     }
-    /// Whether the winning seal of `tip` is the owner's recovery and
-    /// abandons the entry at `position` of the tip's coordinated log.
     pub fn abandons(&self, tip: TipId, position: u64) -> Result<bool, Error> {
         Ok(self.seal(tip)?.is_some_and(|seal| {
             seal.statement
@@ -1733,7 +1537,6 @@ impl TipGraph {
                 .is_some_and(|recovery| recovery.abandons(position))
         }))
     }
-    /// The authority a statement was signed with.
     pub fn authority(&self, endorsement: &Endorsement) -> TipAuthority {
         TipAuthority::of(endorsement, self.scope)
     }
@@ -1744,17 +1547,12 @@ impl TipGraph {
             .filter(|seal| seal.statement.scope == self.scope)
             .ok_or_else(|| denied("unknown seal"))
     }
-    /// Each tip commits its schema. Losing seals
-    /// remain inspectable, but their continuations never become active.
     pub fn schema(&self, tip: TipId) -> Result<Commitment, Error> {
         self.schema_inner(tip, true)
     }
-    /// Structural lookup for retained statements whose seal later lost a race.
     pub fn schema_any(&self, tip: TipId) -> Result<Commitment, Error> {
         self.schema_inner(tip, false)
     }
-    /// This scope's first seal of each continuation, built once per walk:
-    /// looking up each ancestor's seal otherwise rehashes every earlier one.
     fn seals_by_continuation(&self) -> BTreeMap<TipId, &SignedSeal> {
         let mut continuations = BTreeMap::new();
         for seal in &self.seals {
@@ -1819,17 +1617,6 @@ impl TipGraph {
             cursor = parent.ok_or_else(|| denied("unknown tip"))?;
         }
     }
-    /// The tip a frame written on `tip` counts as written on: `tip` while
-    /// it is active. In a database whose settings name a coordinator, on the
-    /// continuations of a seal that lost its tip at that coordinator's log,
-    /// the nearest active tip they continue under one schema: that log
-    /// decided the tip for the winner, so writes made after the losing seal
-    /// are the tip's late writes and walk on to the winning line instead of
-    /// being lost with it. A loss the log only confirmed, because graphs
-    /// held the winner first, a loss before the settings, or one through a
-    /// revoked seal stays as it was: two seals of a tip are both real and a
-    /// losing continuation's writes are held for re-authoring. Graph state
-    /// alone decides, so every replica resolves a frame alike.
     pub fn late_anchor(&self, tip: TipId) -> Result<TipId, Error> {
         if !self.indexed()?.founding.contains_key(&self.scope) || self.schema(tip).is_ok() {
             return Ok(tip);
@@ -1862,7 +1649,6 @@ impl TipGraph {
         }
         Err(denied("cyclic tip graph"))
     }
-    /// Whether `to` follows one or more canonical continue seals from `from`.
     pub fn continues(&self, from: TipId, to: TipId) -> Result<bool, Error> {
         self.schema(from)?;
         self.schema(to)?;
@@ -1882,7 +1668,6 @@ impl TipGraph {
         }
         Err(denied("cyclic tip graph"))
     }
-    /// Structural forward reach also retains work signed before a seal lost.
     pub fn continues_any(&self, from: TipId, to: TipId) -> Result<bool, Error> {
         self.schema_any(from)?;
         self.schema_any(to)?;
@@ -1904,8 +1689,6 @@ impl TipGraph {
         }
         Err(denied("cyclic tip graph"))
     }
-    /// Whether an opening is a restricted schema migration, independent of
-    /// its signer's authority. Historical validation retains old minima.
     pub(crate) fn migration_opening(
         &self,
         opening: &SignedTipOpening,
@@ -1926,14 +1709,11 @@ impl TipGraph {
             line.statement.scope == self.scope && line.statement.minimum_in_sync as usize == minimum
         }))
     }
-    /// Forward schema successors along canonical ancestry. Migration edges
-    /// start new author lines; frame continuation still uses `continues`.
     pub fn succeeds(&self, from: TipId, to: TipId) -> Result<bool, Error> {
         self.schema(from)?;
         self.schema(to)?;
         self.succeeds_inner(from, to, true)
     }
-    /// Structural forward authorization, including retained losing migrations.
     pub fn succeeds_any(&self, from: TipId, to: TipId) -> Result<bool, Error> {
         self.schema_any(from)?;
         self.schema_any(to)?;
@@ -1969,7 +1749,6 @@ impl TipGraph {
         }
         Err(denied("cyclic tip graph"))
     }
-    /// A losing forward continuation resolves to the winner's continuation.
     pub fn canonical_tip(&self, tip: TipId) -> Result<TipId, Error> {
         let actively_valid = self.schema(tip).is_ok();
         if actively_valid {
@@ -2002,7 +1781,6 @@ impl TipGraph {
         }
         Ok(cursor)
     }
-    /// A line starts at genesis or at an explicit opening, not at a continue.
     pub fn line_root(&self, tip: TipId) -> Result<TipId, Error> {
         self.schema(tip)?;
         let mut cursor = tip;
@@ -2022,7 +1800,6 @@ impl TipGraph {
         }
         Err(denied("cyclic tip graph"))
     }
-    /// The tip a line starts at, through seals whatever their resolution.
     fn line_root_any(&self, tip: TipId) -> Result<TipId, Error> {
         self.schema_any(tip)?;
         let mut cursor = tip;
@@ -2042,33 +1819,21 @@ impl TipGraph {
         }
         Err(denied("cyclic tip graph"))
     }
-    /// Resolve conflicts per `(name, from)` by authority, then the lower
-    /// move digest, and walk from creation; a tip without a move that the
-    /// owner's recovery sealed continues on. A revisit ends the walk at the
-    /// revisited tip. Revoked moves never win.
     pub fn bookmark(&self, name: &str) -> Result<Option<TipId>, Error> {
         Ok(self.bookmark_walk(name)?.0)
     }
-    /// The moves of `name` that lost a race along its path, in path and
-    /// then resolution order: inspection's `main/1`, `main/2`. They stay
-    /// branches; revoked moves are not listed.
     pub fn losing_moves(&self, name: &str) -> Result<Vec<&SignedBookmarkMove>, Error> {
         Ok(self.bookmark_walk(name)?.1)
     }
-    /// The resolved edges a bookmark traverses, using the same authority,
-    /// revocation and ancestry rules as its final target.
     pub fn bookmark_path(&self, name: &str) -> Result<Vec<(TipId, TipId)>, Error> {
         Ok(self.bookmark_walk(name)?.2)
     }
-    /// The continuation the owner's recovery of `tip` carries its bookmarks
-    /// to, after any explicit move from `tip`.
     fn recovery_continuation(&self, tip: TipId) -> Result<Option<TipId>, Error> {
         match self.seal(tip)? {
             Some(seal) if seal.statement.recovery.is_some() => seal.successor(),
             _ => Ok(None),
         }
     }
-    /// The target, losing moves and resolved edges of a bookmark.
     fn bookmark_walk(&self, name: &str) -> Result<BookmarkWalk<'_>, Error> {
         let mut cursor = None;
         let mut losers = Vec::new();

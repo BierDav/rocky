@@ -76,7 +76,7 @@ fn genesis_and_statement_ids_roundtrip_and_refuse_other_formats() {
     assert_ne!(genesis_tip([5; 32]), graph.genesis());
     let signed = seal(&graph, graph.genesis(), 3, &owner);
     let decoded = SignedSeal::from_bytes(&signed.to_bytes().unwrap()).unwrap();
-    decoded.verify(owner.public_key(), &graph).unwrap();
+    decoded.verify_historic(owner.public_key(), &graph).unwrap();
     assert_eq!(decoded, signed);
     assert_eq!(
         signed.successor().unwrap(),
@@ -86,26 +86,26 @@ fn genesis_and_statement_ids_roundtrip_and_refuse_other_formats() {
     let opened = opening(&graph, &signed, &owner);
     SignedTipOpening::from_bytes(&opened.to_bytes().unwrap())
         .unwrap()
-        .verify(owner.public_key(), &graph)
+        .verify_historic(owner.public_key(), &graph)
         .unwrap();
     assert_eq!(opened.tip().unwrap(), TipId(opened.id().unwrap()));
     let moved = movement(&graph, "main", None, Some(graph.genesis()), &owner);
     SignedBookmarkMove::from_bytes(&moved.to_bytes().unwrap())
         .unwrap()
-        .verify(owner.public_key(), &graph)
+        .verify_historic(owner.public_key(), &graph)
         .unwrap();
     for format in [0, 1, 9, u32::MAX] {
         let mut other = signed.clone();
         other.statement.format = format;
-        assert!(other.verify(owner.public_key(), &graph).is_err());
+        assert!(other.verify_historic(owner.public_key(), &graph).is_err());
         assert!(SignedSeal::from_bytes(&other.to_bytes().unwrap()).is_err());
         let mut other = opened.clone();
         other.statement.format = format;
-        assert!(other.verify(owner.public_key(), &graph).is_err());
+        assert!(other.verify_historic(owner.public_key(), &graph).is_err());
         assert!(SignedTipOpening::from_bytes(&other.to_bytes().unwrap()).is_err());
         let mut other = moved.clone();
         other.statement.format = format;
-        assert!(other.verify(owner.public_key(), &graph).is_err());
+        assert!(other.verify_historic(owner.public_key(), &graph).is_err());
         assert!(SignedBookmarkMove::from_bytes(&other.to_bytes().unwrap()).is_err());
         #[derive(serde::Serialize)]
         struct Format {
@@ -125,10 +125,14 @@ fn genesis_and_statement_ids_roundtrip_and_refuse_other_formats() {
     }
     let mut tampered = signed.clone();
     tampered.statement.frontier[0].sequence += 1;
-    assert!(tampered.verify(owner.public_key(), &graph).is_err());
+    assert!(
+        tampered
+            .verify_historic(owner.public_key(), &graph)
+            .is_err()
+    );
     assert!(
         signed
-            .verify(PrivateKey::new().public_key(), &graph)
+            .verify_historic(PrivateKey::new().public_key(), &graph)
             .is_err()
     );
 }
@@ -194,7 +198,9 @@ fn two_issuers_seal_concurrently_and_lower_digest_wins_in_every_order() {
     );
     let losing_tip = losing.successor().unwrap().unwrap();
     let retained = seal(&graph, losing_tip, 8, &owner);
-    retained.verify(owner.public_key(), &graph).unwrap();
+    retained
+        .verify_historic(owner.public_key(), &graph)
+        .unwrap();
     graph.seals.push(retained.clone());
     assert_eq!(
         graph
@@ -215,7 +221,7 @@ fn two_issuers_seal_concurrently_and_lower_digest_wins_in_every_order() {
         Some(losing_tip),
         &owner,
     );
-    moved.verify(owner.public_key(), &graph).unwrap();
+    moved.verify_historic(owner.public_key(), &graph).unwrap();
     graph.moves = vec![created, moved];
     assert_eq!(graph.bookmark("main").unwrap(), winner.successor().unwrap());
     graph.seals.reverse();
@@ -337,7 +343,7 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
             link(&graph, &issuer, &issuer_chain)
         )
         .unwrap()
-        .verify(owner.public_key(), &graph)
+        .verify_historic(owner.public_key(), &graph)
         .is_err()
     );
     for (from, to, allowed) in [
@@ -386,7 +392,7 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
             link(&graph, &trusted, &forged_chain)
         )
         .unwrap()
-        .verify(owner.public_key(), &graph)
+        .verify_historic(owner.public_key(), &graph)
         .is_err()
     );
     let opened = SignedTipOpening::endorse_linked(
@@ -426,7 +432,7 @@ fn issuers_move_only_forward_and_owner_controlled_trust_opens_and_moves_sideways
         link(&graph, &trusted, &trusted_chain),
     )
     .unwrap();
-    assert!(wrong.verify(owner.public_key(), &other).is_err());
+    assert!(wrong.verify_historic(owner.public_key(), &other).is_err());
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -438,12 +444,12 @@ fn schema_changes_are_allowed_but_partial_and_node_authority_and_invalid_frontie
     statement.action = SealAction::Continue { schema: [8; 32] };
     SignedSeal::sign(statement.clone(), &owner)
         .unwrap()
-        .verify(owner.public_key(), &graph)
+        .verify_historic(owner.public_key(), &graph)
         .unwrap();
     statement.action = SealAction::Close;
     SignedSeal::sign(statement.clone(), &owner)
         .unwrap()
-        .verify(owner.public_key(), &graph)
+        .verify_historic(owner.public_key(), &graph)
         .unwrap();
     for frontier in [
         vec![AuthorMark {
@@ -501,7 +507,7 @@ fn schema_changes_are_allowed_but_partial_and_node_authority_and_invalid_frontie
             link(&graph, &user, &chain)
         )
         .unwrap()
-        .verify(owner.public_key(), &graph)
+        .verify_historic(owner.public_key(), &graph)
         .is_err()
     );
 }
@@ -554,12 +560,11 @@ fn node_signatures_never_inherit_trusted_identity_control() {
             link(&graph, &node, &chain)
         )
         .unwrap()
-        .verify(owner.public_key(), &graph)
+        .verify_historic(owner.public_key(), &graph)
         .is_err()
     );
 }
 
-/// An issuer's chain, issued by the owner.
 fn issuer_chain(owner: &PrivateKey, issuer: &PrivateKey) -> CredentialChain {
     CredentialChain(vec![
         Authority::owner_in(
@@ -603,7 +608,6 @@ fn trusted_chain(graph: &TipGraph, owner: &PrivateKey, trusted: &PrivateKey) -> 
         .unwrap(),
     ])
 }
-/// One seal of `tip` per signer, varied by `sequence` so their digests differ.
 fn endorsed(
     graph: &TipGraph,
     owner: &PrivateKey,
@@ -827,7 +831,6 @@ fn an_owners_backward_move_beats_an_issuers_forward_move_and_the_loser_is_listed
     );
 }
 
-/// A node of a fresh trusted identity, with its two-link chain.
 fn trusted_node(graph: &TipGraph, owner: &PrivateKey) -> (PrivateKey, CredentialChain) {
     let identity = PrivateKey::new();
     let node = PrivateKey::new();
@@ -939,7 +942,7 @@ fn a_final_seal_beats_the_owners_and_revoking_its_acknowledgers_resolves_again()
             link(&graph, &issuer, &issuer_chain(&owner, &issuer))
         )
         .unwrap()
-        .verify(owner.public_key(), &graph)
+        .verify_historic(owner.public_key(), &graph)
         .is_err(),
         "an issuer cannot sign the genesis line's minimum"
     );
@@ -1075,7 +1078,7 @@ fn only_the_owner_signs_a_recovery_and_its_winning_seal_abandons_the_listed_entr
         replaced: point(5, 2),
     };
     let signed = SignedSeal::sign(recovered(recovery), &owner).unwrap();
-    signed.verify(owner.public_key(), &graph).unwrap();
+    signed.verify_historic(owner.public_key(), &graph).unwrap();
     assert_eq!(
         signed.verify_recovery(owner.public_key()).unwrap(),
         &recovery
@@ -1098,7 +1101,7 @@ fn only_the_owner_signs_a_recovery_and_its_winning_seal_abandons_the_listed_entr
         )
         .unwrap();
         assert!(
-            other.verify(owner.public_key(), &graph).is_err(),
+            other.verify_historic(owner.public_key(), &graph).is_err(),
             "a trusted identity's or an issuer's recovery is refused"
         );
         assert!(other.verify_recovery(owner.public_key()).is_err());
@@ -1365,8 +1368,6 @@ fn a_control_only_trusted_identity_certifies_acknowledgers_without_row_authority
     assert!(grants.is_empty());
     assert!(partitions.is_empty());
 }
-/// The next chain link of `signer` in `graph` when `chain` is a trusted
-/// grant; an owner's or issuer's statement has none.
 fn link(
     graph: &TipGraph,
     signer: &PrivateKey,
@@ -1383,7 +1384,6 @@ fn link(
     })
 }
 
-/// A move of `name` to genesis, signed by the trusted `signer` at `link`.
 fn linked_move(
     graph: &TipGraph,
     name: &str,
@@ -1405,8 +1405,6 @@ fn linked_move(
     )
     .unwrap()
 }
-/// A root statement revoking `identity`, keeping its chain through its
-/// own key up to `head` when given.
 fn cutting(
     owner: &PrivateKey,
     identity: rocky_credentials::PublicKey,
@@ -1470,7 +1468,9 @@ fn a_forked_chain_is_flagged_and_a_cut_keeps_only_the_named_branch() {
     let kept = linked_move(&graph, "kept", &trusted, &chain, fork);
     let other = linked_move(&graph, "other", &trusted, &chain, fork);
     for statement in [&kept, &other] {
-        statement.verify(owner.public_key(), &graph).unwrap();
+        statement
+            .verify_historic(owner.public_key(), &graph)
+            .unwrap();
     }
     graph.moves.extend([kept.clone(), other.clone()]);
     let after = linked_move(
@@ -1480,7 +1480,7 @@ fn a_forked_chain_is_flagged_and_a_cut_keeps_only_the_named_branch() {
         &chain,
         fork.next(other.id().unwrap()),
     );
-    after.verify(owner.public_key(), &graph).unwrap();
+    after.verify_historic(owner.public_key(), &graph).unwrap();
     graph.moves.push(after.clone());
     graph.exclude_revoked(&RevocationSet::new()).unwrap();
     assert!(
@@ -1725,13 +1725,15 @@ fn a_chained_statement_needs_its_predecessor_and_the_trusted_link() {
         &chain,
         first.next(base.id().unwrap()),
     );
-    let missing = ahead.verify(owner.public_key(), &graph).unwrap_err();
+    let missing = ahead
+        .verify_historic(owner.public_key(), &graph)
+        .unwrap_err();
     assert!(
         missing.to_string().contains("predecessor"),
         "a later link whose predecessor the graph does not hold is refused: {missing}"
     );
     graph.moves.push(base.clone());
-    ahead.verify(owner.public_key(), &graph).unwrap();
+    ahead.verify_historic(owner.public_key(), &graph).unwrap();
     let wrong = linked_move(
         &graph,
         "wrong",
@@ -1744,7 +1746,7 @@ fn a_chained_statement_needs_its_predecessor_and_the_trusted_link() {
         },
     );
     assert!(
-        wrong.verify(owner.public_key(), &graph).is_err(),
+        wrong.verify_historic(owner.public_key(), &graph).is_err(),
         "a link naming another predecessor at that place is refused"
     );
     let unlinked = SignedBookmarkMove::endorse_linked(
@@ -1755,7 +1757,9 @@ fn a_chained_statement_needs_its_predecessor_and_the_trusted_link() {
     )
     .unwrap();
     assert!(
-        unlinked.verify(owner.public_key(), &graph).is_err(),
+        unlinked
+            .verify_historic(owner.public_key(), &graph)
+            .is_err(),
         "a trusted statement without a link is refused"
     );
     let issuer = PrivateKey::new();
@@ -1769,7 +1773,9 @@ fn a_chained_statement_needs_its_predecessor_and_the_trusted_link() {
     )
     .unwrap();
     assert!(
-        linked_issuer.verify(owner.public_key(), &graph).is_err(),
+        linked_issuer
+            .verify_historic(owner.public_key(), &graph)
+            .is_err(),
         "an issuer's statement with a link is refused"
     );
 }
@@ -1786,10 +1792,14 @@ fn a_stage_branches_off_the_live_chain_and_a_cut_keeps_the_branches_it_names() {
     let after = first.next(base.id().unwrap());
     let (stage_seal, staged) = stage(&graph, &trusted, &chain, after);
     let live = linked_move(&graph, "live", &trusted, &chain, after);
-    stage_seal.verify(owner.public_key(), &graph).unwrap();
+    stage_seal
+        .verify_historic(owner.public_key(), &graph)
+        .unwrap();
     graph.seals.push(stage_seal.clone());
     for statement in [&staged, &live] {
-        statement.verify(owner.public_key(), &graph).unwrap();
+        statement
+            .verify_historic(owner.public_key(), &graph)
+            .unwrap();
         graph.moves.push(statement.clone());
     }
     graph.exclude_revoked(&RevocationSet::new()).unwrap();
@@ -1868,8 +1878,6 @@ fn a_stage_branches_off_the_live_chain_and_a_cut_keeps_the_branches_it_names() {
     );
 }
 
-/// A schema seal of the genesis tip that `trusted` stages at `link`,
-/// opening its branch, and a move continuing that branch.
 fn stage(
     graph: &TipGraph,
     trusted: &PrivateKey,
@@ -1913,7 +1921,7 @@ fn a_stage_branch_opens_only_with_the_schema_seal_its_tag_names() {
     };
     let fork = linked_move(&graph, "fork", &trusted, &chain, forged);
     assert!(
-        fork.verify(owner.public_key(), &graph).is_err(),
+        fork.verify_historic(owner.public_key(), &graph).is_err(),
         "a move the fresh tag names no seal of is a fork"
     );
     let mut other = stage_seal.statement.clone();
@@ -1926,20 +1934,26 @@ fn a_stage_branch_opens_only_with_the_schema_seal_its_tag_names() {
     )
     .unwrap();
     assert!(
-        borrowed.verify(owner.public_key(), &graph).is_err(),
+        borrowed
+            .verify_historic(owner.public_key(), &graph)
+            .is_err(),
         "a seal cannot carry another seal's tag"
     );
     let opening_move = linked_move(&graph, "open", &trusted, &chain, stage_seal.link.unwrap());
     assert!(
-        opening_move.verify(owner.public_key(), &graph).is_err(),
+        opening_move
+            .verify_historic(owner.public_key(), &graph)
+            .is_err(),
         "a move cannot open a stage branch"
     );
-    stage_seal.verify(owner.public_key(), &graph).unwrap();
+    stage_seal
+        .verify_historic(owner.public_key(), &graph)
+        .unwrap();
     graph.seals.push(stage_seal.clone());
-    staged.verify(owner.public_key(), &graph).unwrap();
+    staged.verify_historic(owner.public_key(), &graph).unwrap();
     graph.moves.push(staged.clone());
     let twin = linked_move(&graph, "twin", &trusted, &chain, staged.link.unwrap());
-    twin.verify(owner.public_key(), &graph).unwrap();
+    twin.verify_historic(owner.public_key(), &graph).unwrap();
     graph.moves.push(twin);
     graph.exclude_revoked(&RevocationSet::new()).unwrap();
     assert_eq!(
@@ -2166,7 +2180,7 @@ fn the_roots_genesis_minimum_governs_and_a_revoked_nodes_raise_stops_counting() 
             link(graph, signer, &chain),
         )
         .unwrap();
-        signed.verify(owner.public_key(), graph).unwrap();
+        signed.verify_historic(owner.public_key(), graph).unwrap();
         signed
     };
     let genesis = graph.genesis();
@@ -2205,8 +2219,6 @@ fn the_roots_genesis_minimum_governs_and_a_revoked_nodes_raise_stops_counting() 
     );
 }
 
-/// What an earlier release wrote: a finality record of format 1 whose
-/// acknowledgments are of format 2, without this release's fields.
 #[derive(serde::Serialize)]
 struct EarlierFinality {
     format: u32,
@@ -2271,4 +2283,107 @@ fn records_another_release_wrote_are_refused_by_the_format_they_name() {
         ),
         "bytes naming no format stay an ordinary decoding refusal"
     );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_finality_record_is_the_same_whatever_order_or_repeats_its_acknowledgments_arrive_in() {
+    let owner = PrivateKey::new();
+    let graph = graph();
+    let committed = seal(&graph, graph.genesis(), 1, &owner);
+    let acks: Vec<_> = (0..3)
+        .map(|_| ack(&graph, &committed, &trusted_node(&graph, &owner)))
+        .collect();
+    let record = |acks: Vec<rocky_credentials::TerminalAck>| {
+        rocky_credentials::SealFinality::new(graph.scope, committed.id().unwrap(), acks)
+    };
+    let forward = record(acks.clone());
+    forward.validate().unwrap();
+    let reversed = record(acks.iter().rev().cloned().collect());
+    assert_eq!(reversed, forward);
+    assert_eq!(reversed.id().unwrap(), forward.id().unwrap());
+    let mut repeated = acks.clone();
+    repeated.push(acks[1].clone());
+    assert_eq!(
+        record(repeated),
+        forward,
+        "a node's repeated acknowledgment counts once"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn settings_resolve_alike_in_every_order_and_keep_the_founding_coordinator() {
+    use rocky_credentials::{
+        Coordination, CoordinatorBundle, DATABASE_SETTINGS_FORMAT, DatabaseSettingsStatement,
+        SignedDatabaseSettings,
+    };
+    let owner = PrivateKey::new();
+    let scope = graph().scope;
+    let bundle = |root: u8, url: Option<&str>| CoordinatorBundle {
+        identity: rocky_core::CoordinatorIdentity {
+            root: [root; 32],
+            mesh: MeshId([0; 16]),
+            genesis: [2; 32],
+        },
+        certified: vec![root],
+        url: url.map(str::to_owned),
+    };
+    let signed = |revision, coordination| {
+        SignedDatabaseSettings::sign(
+            DatabaseSettingsStatement {
+                format: DATABASE_SETTINGS_FORMAT,
+                scope,
+                revision,
+                coordination,
+            },
+            &owner,
+        )
+        .unwrap()
+    };
+    let founding = bundle(1, None);
+    let refreshed = bundle(1, Some("https://coordinator.example/bundle"));
+    let revisions = [
+        signed(1, Coordination::Coordinated { bundle: founding }),
+        signed(
+            2,
+            Coordination::Coordinated {
+                bundle: bundle(9, None),
+            },
+        ),
+        signed(3, Coordination::Uncoordinated),
+        signed(
+            2,
+            Coordination::Coordinated {
+                bundle: refreshed.clone(),
+            },
+        ),
+    ];
+    let orders = [[0, 1, 2, 3], [3, 2, 1, 0], [2, 0, 3, 1], [1, 3, 0, 2]];
+    for order in orders {
+        let mut graph = graph();
+        graph.settings = order
+            .iter()
+            .map(|index| revisions[*index].clone())
+            .collect();
+        assert_eq!(
+            graph.coordinator().unwrap(),
+            Some(&refreshed),
+            "the highest revision naming the founding coordinator governs in order {order:?}"
+        );
+        assert!(graph.next_settings(Coordination::Uncoordinated).is_err());
+        assert!(
+            graph
+                .next_settings(Coordination::Coordinated {
+                    bundle: bundle(9, None)
+                })
+                .is_err()
+        );
+        assert_eq!(
+            graph
+                .next_settings(Coordination::Coordinated {
+                    bundle: refreshed.clone()
+                })
+                .unwrap(),
+            None
+        );
+    }
 }

@@ -1,16 +1,3 @@
-//! Root escrow: a data key sealed to the domain's offline root, so the root
-//! alone recovers what its devices could read. Sealing needs only the
-//! root's public key, which every device pins as the publisher.
-//!
-//! The recipient key is the root's Ed25519 key mapped to X25519 (the
-//! birational map; its secret scalar is the clamped first half of
-//! SHA-512 of the root secret), as libsodium's `ed25519_*_to_curve25519`
-//! derive it. A record is an ECIES sealed box: a fresh X25519 ephemeral,
-//! a wrapping key hashed from the shared secret and the record's context,
-//! and ChaCha20-Poly1305 over the padded payload. Records carry no scope,
-//! partition or collection identifier: only the tag, a hash of the sealed
-//! secret that only its holders can compute, so a holder skips escrowing
-//! a key twice and nobody else can link a record to anything.
 use crate::{
     CredentialChain, Error, PrivateKey, PublicKey, RootKey, Signature, decode_bounded, denied,
     encode,
@@ -26,22 +13,16 @@ const WRAPPING: &str = "rocky.root-escrow.key.v1";
 const TAG: &str = "rocky.root-escrow.tag.v1";
 const VOUCH: &str = "rocky.root-escrow.vouch.v1";
 const METADATA_VOUCH: &str = "rocky.metadata-escrow.vouch.v1";
-/// The one current metadata escrow format; others are refused.
 const METADATA_VERSION: u32 = 1;
-/// A vouched record's bound: the record and its signer's chain.
 const MAX_VOUCHED_BYTES: usize = MAX_RECORD_BYTES + 64 * 1024;
-/// Payloads are padded to a multiple of this, hiding their exact length.
-const PADDING: usize = 256;
-/// The largest payload one record seals.
+const LENGTH_HIDING_BLOCK: usize = 256;
 pub const MAX_ESCROW_PAYLOAD: usize = 16 * 1024;
-const MAX_RECORD_BYTES: usize = MAX_ESCROW_PAYLOAD + 2 * PADDING;
+const MAX_RECORD_BYTES: usize = MAX_ESCROW_PAYLOAD + 2 * LENGTH_HIDING_BLOCK;
 
-/// The tag of the record that escrows `secret` to `root`.
 pub fn escrow_tag(root: PublicKey, secret: &[u8; 32]) -> Commitment {
     commitment(TAG, &[root.as_bytes().as_slice(), secret].concat())
 }
 
-/// One payload sealed to the root's public key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RootEscrow {
@@ -59,8 +40,6 @@ struct Context<'a> {
     ephemeral: &'a [u8; 32],
 }
 impl RootEscrow {
-    /// Seals `payload` to `root` under `tag`, the `escrow_tag` of the key
-    /// the payload carries.
     pub fn seal(root: PublicKey, tag: Commitment, payload: &[u8]) -> Result<Self, Error> {
         if payload.len() > MAX_ESCROW_PAYLOAD {
             return Err(denied("escrow payload quota"));
@@ -72,7 +51,7 @@ impl RootEscrow {
             ephemeral,
             sealed: Vec::new(),
         };
-        let padded = payload.len().div_ceil(PADDING).max(1) * PADDING;
+        let padded = payload.len().div_ceil(LENGTH_HIDING_BLOCK).max(1) * LENGTH_HIDING_BLOCK;
         let mut plaintext = Vec::with_capacity(4 + padded);
         plaintext.extend(
             u32::try_from(payload.len())
@@ -85,8 +64,6 @@ impl RootEscrow {
         record.sealed = crate::enroll::seal(key, &aad, &plaintext)?;
         Ok(record)
     }
-    /// The payload, for the root this record was sealed to; any other key
-    /// fails.
     pub fn open(&self, root: &RootKey) -> Result<Vec<u8>, Error> {
         self.validate()?;
         let shared = agreed(root.private(), self.ephemeral);
@@ -129,7 +106,7 @@ impl RootEscrow {
             return Err(denied("unsupported root escrow version"));
         }
         if self.sealed.len() > MAX_RECORD_BYTES
-            || self.sealed.len() < crate::enroll::SEAL_OVERHEAD + 4 + PADDING
+            || self.sealed.len() < crate::enroll::SEAL_OVERHEAD + 4 + LENGTH_HIDING_BLOCK
         {
             return Err(denied("invalid root escrow length"));
         }
@@ -148,10 +125,6 @@ impl RootEscrow {
     }
 }
 
-/// A record as the node that sealed it vouches for it: signed with the
-/// scope and key epoch whose frames carry it, at `signed_at`, under the
-/// chain that let it read them. Anyone can seal to the root, so a
-/// receiver keeps a record only when a key holder vouches for it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VouchedEscrow {
@@ -169,7 +142,6 @@ struct Vouch {
     chain: CredentialChain,
     record: RootEscrow,
 }
-/// Transient transfer of a signed escrow vouch through a session's chain table.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CarriedEscrow {
@@ -186,7 +158,6 @@ impl CarriedEscrow {
     pub fn chain_digest(&self) -> Commitment {
         self.chain
     }
-    /// Reconstructs the original vouch; its signature and authority still need checking.
     pub fn complete(self, chain: CredentialChain) -> Result<VouchedEscrow, Error> {
         if commitment("rocky.credential-chain.v1", &encode(&chain)?) != self.chain {
             return Err(denied("escrow chain digest mismatch"));
@@ -238,7 +209,6 @@ impl VouchedEscrow {
         let signature = node.sign(&signing_bytes(VOUCH, &body)?);
         Ok(Self { body, signature })
     }
-    /// Checks the signer's signature; the caller judges its chain.
     pub fn verify(&self) -> Result<(), Error> {
         if self.body.version != VERSION
             || !self
@@ -273,11 +243,6 @@ impl VouchedEscrow {
     }
 }
 
-/// A root escrow record of database metadata that no key epoch's frames
-/// carry, such as the partition naming root: vouched for by the node that
-/// sealed it, bound to the database and its genesis descriptor. Custodians
-/// keep and serve it but cannot open it; a receiver keeps it only when the
-/// signer's chain shows it held the metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataEscrow {
@@ -315,8 +280,6 @@ impl MetadataEscrow {
         let signature = node.sign(&signing_bytes(METADATA_VOUCH, &body)?);
         Ok(Self { body, signature })
     }
-    /// Checks the format, the binding to `database` and `descriptor` and
-    /// the signer's signature; the caller judges its chain.
     pub fn verify(
         &self,
         database: crate::DatabaseContext,

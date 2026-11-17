@@ -1,8 +1,3 @@
-//! Personal bootstrap: a device holding only the passkey proves the root,
-//! the owner identity and its new node key to any authorized sibling or
-//! custodian, which answers with the database's signed metadata and opaque
-//! root escrow. No step relies on the transport or on the topic; the
-//! responder never signs a grant or returns a plaintext key.
 use crate::{
     DatabaseContext, Error, Exchange, IdentityProvider, PersonalNamespace, PrivateKey, PublicKey,
     Purpose, Signature, SignedCapability, SignedManifest, denied, signing_bytes,
@@ -10,15 +5,12 @@ use crate::{
 use rocky_core::{ApplicationManifest, Commitment};
 use serde::{Deserialize, Serialize};
 
-/// The one current bootstrap format; others are refused.
 const VERSION: u32 = 1;
 const CHALLENGE: &str = "rocky.personal.challenge.v1";
 const AUTHORIZATION: &str = "rocky.personal.authorization.v1";
 const ANSWER: &[u8] = b"rocky.personal.bootstrap-answer.v1";
 const ANSWER_KEY: &str = "rocky.personal.bootstrap-key.v1";
 
-/// A fresh device's untrusted first message: a challenge the responder
-/// signs. It proves nothing and unlocks nothing private.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersonalHello {
@@ -34,8 +26,6 @@ impl PersonalHello {
     }
 }
 
-/// The responder's answer to a hello: the root-signed genesis it holds,
-/// a nonce the authorization must bind and its node's proof over both.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersonalChallenge {
@@ -65,8 +55,6 @@ impl PersonalChallenge {
             ),
         )
     }
-    /// `node` answers `hello` for `database` with `genesis` and a fresh
-    /// `nonce` it keeps to judge the authorization.
     pub fn answer(
         hello: &PersonalHello,
         database: DatabaseContext,
@@ -87,10 +75,6 @@ impl PersonalChallenge {
             signature: node.sign(&body),
         })
     }
-    /// The genesis this challenge carries, if it is the derived root's
-    /// personal genesis of `owner` in `namespace` at `database`, and the
-    /// responder signed it with the nonce over `hello`. The genesis is
-    /// checked before anything is signed over its descriptor.
     pub fn verify(
         &self,
         hello: &PersonalHello,
@@ -127,21 +111,19 @@ impl PersonalChallenge {
     }
 }
 
-/// What a personal authorization lets its responder do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum PersonalAct {
-    /// Release bootstrap page `page`, sealed to the requesting node.
-    Bootstrap { page: u32 },
-    /// Admit the owner certificate `certificate` of the requesting node,
-    /// published under `publication`. Retries repeat both.
+    Bootstrap {
+        page: u32,
+    },
     Publish {
         certificate: Commitment,
         publication: [u8; 16],
     },
-    /// Replace the responder's lapsed custody link with `capability`, the
-    /// same pinned custody grant signed anew under the owner's authority.
-    RenewCustody { capability: Commitment },
+    RenewCustody {
+        capability: Commitment,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,7 +131,6 @@ pub enum PersonalAct {
 struct Claim {
     version: u32,
     database: DatabaseContext,
-    /// The responder's node key: a claim is not replayable to another.
     audience: PublicKey,
     owner: PublicKey,
     node: PublicKey,
@@ -159,21 +140,14 @@ struct Claim {
     act: PersonalAct,
 }
 
-/// The responder-side facts an authorization must match: what its own
-/// pinned genesis says.
 #[derive(Clone, Copy, Debug)]
 pub struct PersonalAudience {
     pub database: DatabaseContext,
     pub owner: PublicKey,
     pub descriptor: Commitment,
-    /// This responder's node key.
     pub node: PublicKey,
 }
 
-/// A personal request's proof: the root, the owner identity and the new
-/// node each signed one claim bound to the database, the responder, the
-/// genesis descriptor, the responder's nonce and the act. It proves access
-/// to root material, so the shared identity-only path is no bypass.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersonalAuthorization {
@@ -186,8 +160,6 @@ impl PersonalAuthorization {
     fn body(claim: &Claim) -> Result<Vec<u8>, Error> {
         signing_bytes(AUTHORIZATION, claim)
     }
-    /// The root, its owner identity and `node` authorize `act` at the
-    /// responder `audience`, for the descriptor and nonce of its challenge.
     pub fn sign(
         (root, owner): (&dyn IdentityProvider, &dyn IdentityProvider),
         node: &PrivateKey,
@@ -221,8 +193,6 @@ impl PersonalAuthorization {
             secret,
         ))
     }
-    /// Checks the three signatures against what `audience`'s own genesis
-    /// pins. The nonce is the caller's to judge.
     pub fn verify(&self, audience: &PersonalAudience) -> Result<(), Error> {
         let claim = &self.claim;
         let body = Self::body(claim)?;
@@ -271,7 +241,6 @@ impl PersonalAuthorization {
             .concat(),
         ))
     }
-    /// Seals `payload` to the authorized node alone.
     pub fn answer(&self, payload: &[u8]) -> Result<PersonalAnswer, Error> {
         let (secret, exchange) = Exchange::new();
         let shared = secret.shared(&self.claim.exchange)?;
@@ -282,7 +251,6 @@ impl PersonalAuthorization {
     }
 }
 
-/// A bootstrap page sealed to the node one authorization named.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersonalAnswer {
@@ -305,8 +273,6 @@ impl PersonalAnswer {
     }
 }
 
-/// The publication of one owner device: its certificate and the
-/// authorization naming that certificate.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersonalPublication {
@@ -314,7 +280,6 @@ pub struct PersonalPublication {
     pub certificate: SignedCapability,
 }
 impl PersonalPublication {
-    /// The authorization's act names exactly this certificate of its node.
     pub fn check(&self) -> Result<[u8; 16], Error> {
         match self.authorization.act() {
             PersonalAct::Publish {
@@ -330,9 +295,6 @@ impl PersonalPublication {
     }
 }
 
-/// A custodian's custody link renewed by an owner device the passkey
-/// just certified: `chain` is that device's issuer links followed by the
-/// renewed link, and the authorization names the link.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersonalCustodyRenewal {
@@ -340,7 +302,6 @@ pub struct PersonalCustodyRenewal {
     pub chain: crate::CredentialChain,
 }
 impl PersonalCustodyRenewal {
-    /// The renewed link the authorization's act names, which `chain` ends at.
     pub fn renewed(&self) -> Result<&SignedCapability, Error> {
         let renewed = self
             .chain

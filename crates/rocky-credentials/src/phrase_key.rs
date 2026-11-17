@@ -1,6 +1,3 @@
-//! A key held in memory for one call, restored from a 24-word phrase or a
-//! passkey's 32-byte PRF output. `RootKey` and `IdentityKey` share it; each
-//! wraps it in its own type so neither stands in for the other.
 use crate::{Error, PrivateKey, PublicKey, denied};
 
 pub(crate) struct PhraseKey(PrivateKey);
@@ -8,13 +5,11 @@ impl PhraseKey {
     pub(crate) fn generate() -> Self {
         Self(PrivateKey::from_bytes(&rocky_platform::entropy::random()))
     }
-    /// The caller's copy of `secret` is erased.
     pub(crate) fn from_secret(mut secret: [u8; 32]) -> Self {
         let key = Self(PrivateKey::from_bytes(&secret));
         zeroize::Zeroize::zeroize(&mut secret);
         key
     }
-    /// The key a 24-word English BIP 39 phrase names; whitespace is free.
     pub(crate) fn from_phrase(phrase: &str) -> Result<Self, Error> {
         let words = phrase.split_whitespace().collect::<Vec<_>>().join(" ");
         let mnemonic = bip39::Mnemonic::parse_in_normalized(bip39::Language::English, &words)

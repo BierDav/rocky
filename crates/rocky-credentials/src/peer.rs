@@ -1,9 +1,7 @@
-//! Opaque peer references for durable receipts and local routing metadata.
 use crate::PublicKey;
 use rocky_core::{Commitment, commitment};
 use serde::{Deserialize, Serialize};
 
-/// A one-way reference to a node, never a signing or transport key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PeerId(Commitment);
 

@@ -1,7 +1,3 @@
-//! Claim rights: short-lived links that let an identity's nodes claim
-//! values of a domain's named counters on its coordinator, and nothing else.
-//! The coordinator verifies them from the publisher alone; it never holds
-//! the domain's data, keys or registry.
 use crate::{
     Authority, CredentialChain, Error, Extended, IdentityProvider, PublicKey, RevocationSet,
     SignedCapability, denied,
@@ -11,28 +7,16 @@ use rocky_core::{Commitment, PrincipalKind, Scope};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// Longest a claim link lives: a holder renews it with an issuer, so an
-/// identity no issuer renews stops claiming within this bound, whether or
-/// not its revocation reached the coordinator.
 pub const CLAIM_LIFETIME: u64 = crate::DAY;
-/// Backdating a claim link may add to its lifetime.
 pub const CLAIM_SKEW: u64 = 300;
-/// Counters one claim right names.
 pub const MAX_CLAIM_COUNTERS: usize = 64;
-/// Longest counter name, as the coordinator's.
 pub const MAX_CLAIM_COUNTER_NAME: usize = 64;
 
-/// Counters of `scope` whose values the holder may claim and read:
-/// every counter, or only `counters`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimRight {
     pub scope: Scope,
-    /// Exact counter names; every counter of the domain when absent.
     pub counters: Option<BTreeSet<Vec<u8>>>,
-    /// Names the grant across renewals: a revocation naming it ends every
-    /// link that carries it, whichever issuer signed it. A delegation
-    /// carries its own.
     pub grant: Commitment,
 }
 impl ClaimRight {
@@ -50,7 +34,6 @@ impl ClaimRight {
         }
         Ok(())
     }
-    /// Whether the right covers `counter` of `scope`.
     pub fn allows(&self, scope: Scope, counter: &[u8]) -> bool {
         self.scope == scope
             && self
@@ -58,7 +41,6 @@ impl ClaimRight {
                 .as_ref()
                 .is_none_or(|counters| counters.contains(counter))
     }
-    /// Whether `other` is within this right, whatever grant it names.
     pub fn includes(&self, other: &Self) -> bool {
         self.scope == other.scope
             && match (&self.counters, &other.counters) {
@@ -70,9 +52,6 @@ impl ClaimRight {
 }
 
 impl Authority<'_> {
-    /// A claim link for `subject` holding `right`, valid for `ttl` (at most
-    /// `CLAIM_LIFETIME`) from `time`. `delegations` above 1 lets the holder
-    /// delegate within it.
     pub fn issue_claims(
         &self,
         subject: PublicKey,
@@ -98,8 +77,6 @@ impl Authority<'_> {
 }
 
 impl CredentialChain {
-    /// Delegates from the claim link `holder` holds to `subject` a right
-    /// within its own, for at most its remaining validity.
     pub fn delegate_claims<'s>(
         &self,
         holder: impl Into<crate::Signer<'s>>,
@@ -143,9 +120,6 @@ impl CredentialChain {
         chain.links(chain.0[0].issuer, None)?;
         Ok(chain)
     }
-    /// Completes a chain that ends at `holder`'s claim link with a
-    /// certificate for its node key. The node's `author` number is its own;
-    /// it writes nothing under this chain.
     pub fn certify_claims(
         mut self,
         holder: &dyn IdentityProvider,
@@ -178,9 +152,6 @@ impl CredentialChain {
         self.0.push(SignedCapability::sign(leaf, holder)?);
         Ok(self)
     }
-    /// The right of the claim link this chain ends at, held by `holder`:
-    /// every link signed down from `publisher`, valid at `time` and ended
-    /// by no statement of `revocations`.
     pub fn claim_right(
         &self,
         publisher: PublicKey,
@@ -196,11 +167,6 @@ impl CredentialChain {
             .claims
             .ok_or_else(|| denied("the chain ends at no claim link"))
     }
-    /// The identity whose claim link certifies the node `node` to claim
-    /// `counter` of `scope` at `time`: every link signed down from
-    /// `publisher`, valid and ended by no statement of `revocations`, the
-    /// leaf a certificate of `node` under a claim link that covers the
-    /// counter.
     pub fn claimant(
         &self,
         publisher: PublicKey,

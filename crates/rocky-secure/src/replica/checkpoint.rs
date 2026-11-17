@@ -328,13 +328,13 @@ impl SignedCheckpoint {
                 .credentials
                 .verified_with_families(publisher, revocations, time, families)
                 .map_err(credential)?
-                .partition(self.node, self.statement.scope, tuple, time)
+                .partition(self.node, self.statement.scope, tuple, revocations, time)
                 .map_err(credential),
             None => self
                 .credentials
                 .verified_with_families(publisher, revocations, time, families)
                 .map_err(credential)?
-                .selectors(self.node, time)
+                .selectors(self.node, revocations, time)
                 .map(|(grants, _)| grants)
                 .map_err(credential),
         }

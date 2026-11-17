@@ -698,7 +698,7 @@ impl<A: RowApplication> Inner<A> {
             || config
                 .security
                 .manifest
-                .verify(config.security.publisher)
+                .verify_historic(config.security.publisher)
                 .map_err(credential)?
                 .hash()
                 != graph.genesis_schema
@@ -1342,7 +1342,7 @@ impl<A: RowApplication> Inner<A> {
             inner
                 .config
                 .manifest
-                .verify(inner.config.publisher)
+                .verify_historic(inner.config.publisher)
                 .map_err(credential)?
                 .hash(),
         );

@@ -262,3 +262,62 @@ fn a_publication_names_exactly_its_certificate() {
         "a bootstrap authorization publishes nothing"
     );
 }
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_hello_challenge_or_authorization_of_another_bootstrap_format_is_refused() {
+    let account = fixture(1, "account root");
+    let (responder, node) = (PrivateKey::new(), PrivateKey::new());
+    let hello = PersonalHello::fresh();
+    let other_hello = PersonalHello {
+        version: VERSION + 1,
+        ..hello.clone()
+    };
+    assert!(
+        PersonalChallenge::answer(
+            &other_hello,
+            account.database,
+            &account.genesis,
+            &responder,
+            [7; 32],
+        )
+        .is_err()
+    );
+    let challenge = PersonalChallenge::answer(
+        &hello,
+        account.database,
+        &account.genesis,
+        &responder,
+        [7; 32],
+    )
+    .unwrap();
+    let pinned = (account.owner.public_key(), &account.namespace);
+    challenge.verify(&hello, account.database, pinned).unwrap();
+    assert!(
+        challenge
+            .verify(&other_hello, account.database, pinned)
+            .is_err()
+    );
+    let other_challenge = PersonalChallenge {
+        version: VERSION + 1,
+        ..challenge
+    };
+    assert!(
+        other_challenge
+            .verify(&hello, account.database, pinned)
+            .is_err()
+    );
+    let (authorization, _) = account.authorize(
+        &node,
+        &responder,
+        [7; 32],
+        PersonalAct::Bootstrap { page: 0 },
+    );
+    authorization.verify(&account.audience(&responder)).unwrap();
+    let mut other_authorization = authorization;
+    other_authorization.claim.version = VERSION + 1;
+    assert!(
+        other_authorization
+            .verify(&account.audience(&responder))
+            .is_err()
+    );
+}

@@ -1,6 +1,3 @@
-//! Node-signed authority: a node certificate never expires and holds no
-//! grants; it lasts while its identity's capability does and until the
-//! identity or the node is revoked. Issuers sign with node keys.
 use rocky_core::{
     AppId, DomainId, MeshId, ResourceGrant, ResourceScope, Right, RowSelection, Scope,
 };
@@ -154,7 +151,7 @@ fn issuers_sign_with_node_keys_and_a_revoked_node_signs_nothing_new() {
         .unwrap();
     assert_eq!(link.issuer, issuer.public_key());
     assert_eq!(
-        link.attestation().certificate().unwrap().node(),
+        link.attestation().certificate().unwrap().claimed_node(),
         node.public_key()
     );
     let member_node = PrivateKey::new();

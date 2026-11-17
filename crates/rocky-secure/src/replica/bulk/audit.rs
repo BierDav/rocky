@@ -52,7 +52,7 @@ impl<A: RowApplication> Inner<A> {
                             .find(|o| o.id().ok() == Some(s.opening))
                             .ok_or_else(|| denied("migration opening missing"))?;
                         opening
-                            .verify(self.config.publisher, graph)
+                            .verify_historic(self.config.publisher, graph)
                             .map_err(credential)?;
                         let close = graph.seal_by_id(s.parent).map_err(credential)?;
                         if opening.tip().map_err(credential)? != s.tip
@@ -72,7 +72,7 @@ impl<A: RowApplication> Inner<A> {
                         let node = PublicKey::from_bytes(&s.writer)
                             .map_err(|_| denied("migration writer key"))?;
                         chain
-                            .provenance_with_families(
+                            .historic_provenance_with_families(
                                 self.config.publisher,
                                 node,
                                 self.grant_families(),
@@ -84,7 +84,7 @@ impl<A: RowApplication> Inner<A> {
                             || opening.statement.schema != s.schema
                             || identity::check_node_chain(&chain).is_err()
                             || chain.0.last().map(|c| c.issuer)
-                                != Some(opening.endorsement().signer(self.config.publisher))
+                                != Some(opening.endorsement().claimed_signer(self.config.publisher))
                         {
                             return Err(Error::Corrupt("migration intent provenance".into()));
                         }

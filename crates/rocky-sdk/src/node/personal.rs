@@ -373,7 +373,11 @@ impl Node {
             current.owner_grant(context.owner)?.clone(),
             certificate.clone(),
         ])
-        .provenance_with_families(current.publisher, node, &self.domain().families)?;
+        .historic_provenance_with_families(
+            current.publisher,
+            node,
+            &self.domain().families,
+        )?;
         let added = known.admit_personal(certificate, &context)?;
         if added {
             let mut draft = current.clone();

@@ -104,7 +104,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let root = inner
             .config
             .manifest
-            .verify(inner.config.publisher)
+            .verify_historic(inner.config.publisher)
             .map_err(credential)?
             .hash();
         inner

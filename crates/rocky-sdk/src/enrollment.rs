@@ -2589,7 +2589,7 @@ impl Settings {
         )?;
         let (grants, _) = domain
             .verified(&chain, self.publisher, &revocations, now()?)?
-            .selectors(node.public_key(), now()?)?;
+            .selectors(node.public_key(), &revocations, now()?)?;
         let mut keys = Vec::new();
         for (name, epoch, key) in &supplied.keys {
             let scope = domain
@@ -2646,7 +2646,7 @@ impl Settings {
         {
             domain
                 .verified(&chain, self.publisher, &credentials.revocations, now()?)?
-                .selectors(node, now()?)?;
+                .selectors(node, &credentials.revocations, now()?)?;
             chain.0.pop();
         }
         if chain
@@ -2920,7 +2920,12 @@ impl Settings {
             epoch_statements: BTreeMap::new(),
         };
         let domain = settings.domain()?;
-        if supplied.manifest.verify(credentials.publisher)?.hash() != domain.manifest().hash() {
+        if supplied
+            .manifest
+            .verify_historic(credentials.publisher)?
+            .hash()
+            != domain.manifest().hash()
+        {
             return Err("the domain's manifest differs from this application schema".into());
         }
         settings.credentials = crate::identities::with_identity(
@@ -2936,7 +2941,7 @@ impl Settings {
                 &settings.revocations,
                 now()?,
             )?
-            .selectors(node.public_key(), now()?)?;
+            .selectors(node.public_key(), &settings.revocations, now()?)?;
         settings.ttl = settings
             .credentials
             .expires()

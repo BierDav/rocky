@@ -1,4 +1,4 @@
-use rocky_sdk::{Engine, Network, transport::memory::Hub};
+use rocky_sdk::{Engine, Network, credentials::testing::MemoryKeys, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 use support::snapshot as snap;
@@ -160,8 +160,8 @@ async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let creator_port_kept_across_restart = free_port();
     let transport = || at(creator_port_kept_across_restart);
-    let a_keys = Arc::new(support::secrets::Keys::default());
-    let b_keys = Arc::new(support::secrets::Keys::default());
+    let a_keys = Arc::new(MemoryKeys::default());
+    let b_keys = Arc::new(MemoryKeys::default());
     let creator = Db::with_secrets(
         &root.path().join("a"),
         rocky_sdk::EngineMode::Create {

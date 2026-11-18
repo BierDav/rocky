@@ -59,23 +59,9 @@ fn spent_replay_state_is_bounded() {
 mod device_actions {
     use super::*;
     use crate::{PersonalAccount, PersonalNamespace, VerifiedPasskeyPrf};
+    use rocky_credentials::testing::MemoryKeys;
     use std::path::Path;
 
-    #[derive(Default)]
-    struct Store(std::sync::Mutex<BTreeMap<String, Vec<u8>>>);
-    impl crate::SecretStore for Store {
-        fn load(&self, name: &str) -> Result<Option<Vec<u8>>, rocky_credentials::ProviderError> {
-            Ok(self.0.lock().unwrap().get(name).cloned())
-        }
-        fn store(&self, name: &str, secret: &[u8]) -> Result<(), rocky_credentials::ProviderError> {
-            self.0.lock().unwrap().insert(name.into(), secret.to_vec());
-            Ok(())
-        }
-        fn delete(&self, name: &str) -> Result<(), rocky_credentials::ProviderError> {
-            self.0.lock().unwrap().remove(name);
-            Ok(())
-        }
-    }
     fn namespace() -> PersonalNamespace {
         PersonalNamespace::new("notes.example", "account root").unwrap()
     }
@@ -154,7 +140,7 @@ mod device_actions {
             Stage::Clearing,
         ] {
             let directory = tempfile::tempdir()?;
-            let memory = Arc::new(Store::default());
+            let memory = Arc::new(MemoryKeys::default());
             let store: Arc<dyn crate::SecretStore> = memory.clone();
             let node = personal(directory.path(), &store).await?;
             node.create_partition(&crate::PartitionTarget::Group {
@@ -256,7 +242,7 @@ mod device_actions {
             );
             reopened.database.close().await?;
             let account = PersonalAccount::derive(prf(), &namespace())?;
-            for secret in memory.0.lock().unwrap().values() {
+            for secret in memory.secrets().values() {
                 assert_ne!(
                     secret.as_slice(),
                     account.root().secret(),
@@ -276,7 +262,7 @@ mod device_actions {
     async fn a_retired_device_acknowledges_only_the_policy_it_kept_durably() -> Result<(), Failure>
     {
         let directory = tempfile::tempdir()?;
-        let store: Arc<dyn crate::SecretStore> = Arc::new(Store::default());
+        let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
         let node = personal(directory.path(), &store).await?;
         let own = rocky_credentials::PeerId::of(Settings::node_key(&node.vault)?.public_key());
         let receipt = node.revoke_personal_device(own, prf()).await?;
@@ -322,7 +308,7 @@ mod device_actions {
     async fn self_ending_unlinks_are_checked_against_the_pinned_personal_genesis()
     -> Result<(), Failure> {
         let directory = tempfile::tempdir()?;
-        let store: Arc<dyn crate::SecretStore> = Arc::new(Store::default());
+        let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
         let node = personal(directory.path(), &store).await?;
         let settings = node.settings.lock().await.clone();
         let account = PersonalAccount::derive(prf(), &namespace())?;
@@ -356,7 +342,7 @@ mod device_actions {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let directory = tempfile::tempdir()?;
-                let store: Arc<dyn crate::SecretStore> = Arc::new(Store::default());
+                let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
                 let node = Arc::new(personal(directory.path(), &store).await?);
                 let hub = Arc::new(Hub::default());
                 let connected = hub.connector("owner").start(true, [1; 32]).await?;
@@ -454,7 +440,7 @@ mod device_actions {
     async fn a_notice_uses_the_local_clock_and_renewed_certificates_keep_its_acknowledgement()
     -> Result<(), Failure> {
         let directory = tempfile::tempdir()?;
-        let store: Arc<dyn crate::SecretStore> = Arc::new(Store::default());
+        let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
         let node = personal(directory.path(), &store).await?;
         let other = PrivateKey::new();
         let cert = certificate(&**node.settings.lock().await, &other)?;

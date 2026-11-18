@@ -4,6 +4,7 @@ use crate::{
     delivery::{Mailbox, fault},
     transport::memory::Hub,
 };
+use rocky_credentials::testing::MemoryKeys;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -20,25 +21,7 @@ const SCHEMA: &str = r#"{"application":"delivery","version":1,"format":6,"tables
 const TABLES: [&str; 3] = ["notes", "parts", "labels"];
 const LIST: &str = "Weekend";
 
-#[derive(Default)]
-struct Keys(Mutex<HashMap<String, Vec<u8>>>);
-impl SecretStore for Keys {
-    fn load(&self, name: &str) -> Result<Option<Vec<u8>>, Failure> {
-        Ok(self.0.lock().map_err(|_| "poisoned")?.get(name).cloned())
-    }
-    fn store(&self, name: &str, secret: &[u8]) -> Result<(), Failure> {
-        self.0
-            .lock()
-            .map_err(|_| "poisoned")?
-            .insert(name.into(), secret.to_vec());
-        Ok(())
-    }
-    fn delete(&self, name: &str) -> Result<(), Failure> {
-        self.0.lock().map_err(|_| "poisoned")?.remove(name);
-        Ok(())
-    }
-}
-static KEYS: LazyLock<Mutex<HashMap<PathBuf, Arc<Keys>>>> = LazyLock::new(Default::default);
+static KEYS: LazyLock<Mutex<HashMap<PathBuf, Arc<MemoryKeys>>>> = LazyLock::new(Default::default);
 fn keys(directory: &Path) -> Arc<dyn SecretStore> {
     KEYS.lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())

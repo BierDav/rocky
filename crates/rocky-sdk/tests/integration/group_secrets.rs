@@ -1276,3 +1276,8 @@ async fn a_partition_granted_to_an_identity_reaches_a_node_it_links_later() {
         peer.database.close().await.unwrap();
     }
 }
+
+#[test]
+fn the_budgeted_store_meets_the_key_provider_contract() {
+    rocky_sdk::credentials::testing::key_provider_contract(&Store::default());
+}

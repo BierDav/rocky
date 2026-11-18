@@ -1,5 +1,5 @@
 use super::*;
-use rocky_credentials::PartitionGrant;
+use rocky_credentials::{PartitionGrant, testing::MemoryKeys};
 use serde_json::{Value, json};
 
 fn member_chain(
@@ -555,35 +555,11 @@ fn a_tombstoned_user_renews_at_no_issuer_also_after_its_statement_left_the_set()
     Ok(())
 }
 
-#[derive(Default)]
-struct EpochKeys(std::sync::Mutex<BTreeMap<String, Vec<u8>>>);
-impl crate::SecretStore for EpochKeys {
-    fn load(&self, name: &str) -> Result<Option<Vec<u8>>, Failure> {
-        Ok(self
-            .0
-            .lock()
-            .map_err(|_| "keys poisoned")?
-            .get(name)
-            .cloned())
-    }
-    fn store(&self, name: &str, bytes: &[u8]) -> Result<(), Failure> {
-        self.0
-            .lock()
-            .map_err(|_| "keys poisoned")?
-            .insert(name.into(), bytes.to_vec());
-        Ok(())
-    }
-    fn delete(&self, name: &str) -> Result<(), Failure> {
-        self.0.lock().map_err(|_| "keys poisoned")?.remove(name);
-        Ok(())
-    }
-}
-
 #[test]
 fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_stop_rotating()
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(EpochKeys::default());
+    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(MemoryKeys::default());
     let owner = rocky_credentials::RootKey::generate();
     let mut a = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL, None, &owner)?;
     let av = a.vault(&store);
@@ -834,7 +810,7 @@ fn saved_contacts_keep_routes_and_flags_without_foreign_node_keys() -> Result<()
 
 #[test]
 fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), Failure> {
-    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(EpochKeys::default());
+    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(MemoryKeys::default());
     let mut issuer = Settings::create(
         &Schema::parse(SCHEMA)?,
         &store,
@@ -895,7 +871,7 @@ fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), 
 
 #[test]
 fn a_tip_on_another_engine_leaves_the_same_schema_ahead() -> Result<(), Failure> {
-    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(EpochKeys::default());
+    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(MemoryKeys::default());
     let mut installed = Settings::create(
         &Schema::parse(SCHEMA)?,
         &store,
@@ -939,7 +915,7 @@ fn a_tip_on_another_engine_leaves_the_same_schema_ahead() -> Result<(), Failure>
 fn forged_tip_schema_records_are_refused_without_changing_the_installation() -> Result<(), Failure>
 {
     use crate::tip_schemas::Record;
-    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(EpochKeys::default());
+    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(MemoryKeys::default());
     let installed = Settings::create(
         &Schema::parse(SCHEMA)?,
         &store,
@@ -1015,7 +991,7 @@ fn an_enrollment_graph_carries_only_settings_its_owner_signed() -> Result<(), Fa
     use rocky_credentials::{
         Coordination, DATABASE_SETTINGS_FORMAT, DatabaseSettingsStatement, SignedDatabaseSettings,
     };
-    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(EpochKeys::default());
+    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(MemoryKeys::default());
     let root = rocky_credentials::RootKey::generate();
     let installed = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL, None, &root)?;
     let statement = DatabaseSettingsStatement {
@@ -1044,7 +1020,7 @@ fn an_enrollment_graph_carries_only_settings_its_owner_signed() -> Result<(), Fa
 
 #[test]
 fn an_issuer_without_the_key_of_a_known_partition_may_not_migrate() -> Result<(), Failure> {
-    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(EpochKeys::default());
+    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(MemoryKeys::default());
     let mut issuer = Settings::create(
         &Schema::parse(SCHEMA)?,
         &store,

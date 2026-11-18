@@ -508,3 +508,8 @@ async fn an_older_identity_format_is_refused() -> Result<(), Failure> {
     assert_eq!(files(&path)?, before);
     Ok(())
 }
+
+#[test]
+fn the_recording_store_meets_the_key_provider_contract() {
+    rocky_sdk::credentials::testing::key_provider_contract(&Recording::default());
+}

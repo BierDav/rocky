@@ -319,3 +319,8 @@ async fn a_create_and_a_sign_in_never_resume_each_others_intent() -> Result<(), 
         .await?;
     Ok(())
 }
+
+#[test]
+fn the_failing_store_meets_the_key_provider_contract() {
+    rocky_credentials::testing::key_provider_contract(&Store::default());
+}

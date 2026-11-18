@@ -3,10 +3,10 @@ use crate::{
     Database, Failure, Network, Open, SecretStore, Session, database::Install,
     enrollment::DEFAULT_TTL, node::Node, transport::memory::Hub,
 };
+use rocky_credentials::testing::MemoryKeys;
 use std::{
-    collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, PoisonError, Weak},
+    sync::{Arc, Weak},
 };
 
 fn text(value: &str) -> SqlValue {
@@ -14,33 +14,6 @@ fn text(value: &str) -> SqlValue {
 }
 
 pub(super) const SCHEMA: &str = r#"{"application":"simulation","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
-
-#[derive(Default)]
-pub(super) struct Keys(Mutex<BTreeMap<String, Vec<u8>>>);
-impl SecretStore for Keys {
-    fn load(&self, name: &str) -> Result<Option<Vec<u8>>, Failure> {
-        Ok(self
-            .0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(name)
-            .cloned())
-    }
-    fn store(&self, name: &str, secret: &[u8]) -> Result<(), Failure> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(name.into(), secret.to_vec());
-        Ok(())
-    }
-    fn delete(&self, name: &str) -> Result<(), Failure> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(name);
-        Ok(())
-    }
-}
 
 pub(super) struct Running {
     pub(super) database: Arc<Database>,
@@ -50,7 +23,7 @@ pub(super) struct Running {
 pub(super) struct Member {
     pub(super) name: String,
     pub(super) directory: PathBuf,
-    keys: Arc<Keys>,
+    keys: Arc<MemoryKeys>,
     pub(super) running: Option<Running>,
     pub(super) node_key: Option<String>,
     pub(super) revoked: bool,

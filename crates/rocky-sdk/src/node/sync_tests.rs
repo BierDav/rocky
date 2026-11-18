@@ -1,4 +1,5 @@
 use crate::test_snapshot as snap;
+use rocky_credentials::testing::MemoryKeys;
 mod coordination;
 mod state_advice;
 mod status;
@@ -103,32 +104,6 @@ async fn enrolled(
 ) -> Result<Arc<Node>, Failure> {
     enrolled_schema(root, hub, name, issuer, &Schema::parse(SCHEMA)?).await
 }
-#[derive(Default)]
-struct TestSecrets(std::sync::Mutex<BTreeMap<String, Vec<u8>>>);
-impl crate::SecretStore for TestSecrets {
-    fn load(&self, name: &str) -> Result<Option<Vec<u8>>, Failure> {
-        Ok(self
-            .0
-            .lock()
-            .map_err(|_| "secret store poisoned")?
-            .get(name)
-            .cloned())
-    }
-    fn store(&self, name: &str, bytes: &[u8]) -> Result<(), Failure> {
-        self.0
-            .lock()
-            .map_err(|_| "secret store poisoned")?
-            .insert(name.into(), bytes.to_vec());
-        Ok(())
-    }
-    fn delete(&self, name: &str) -> Result<(), Failure> {
-        self.0
-            .lock()
-            .map_err(|_| "secret store poisoned")?
-            .remove(name);
-        Ok(())
-    }
-}
 async fn enrolled_schema(
     root: &std::path::Path,
     hub: &Arc<Hub>,
@@ -137,7 +112,7 @@ async fn enrolled_schema(
     schema: &Schema,
 ) -> Result<Arc<Node>, Failure> {
     std::fs::create_dir_all(root)?;
-    let store: Arc<dyn crate::SecretStore> = Arc::new(TestSecrets::default());
+    let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
     let path = root.join("identity.json");
     if let Some((issuer, profile)) = issuer {
         let link = issuer.network.read().await;

@@ -798,3 +798,11 @@ async fn link_challenges_are_bounded_retryable_and_expire_before_bundle_release(
     );
     Ok(())
 }
+
+#[test]
+fn revocation_keys_and_their_copy_each_meet_the_key_provider_contract() -> Result<(), Failure> {
+    let keys = Keys::default();
+    rocky_credentials::testing::key_provider_contract(&keys);
+    rocky_credentials::testing::key_provider_contract(&keys.copy()?);
+    Ok(())
+}

@@ -613,6 +613,41 @@ mod coordinated {
         }
     }
 
+    fn gated(log: &MemoryLog, node: rocky_sdk::credentials::PublicKey) -> Gated {
+        Gated {
+            inner: Arc::new(log.client(node)),
+            armed: Arc::new(AtomicBool::new(false)),
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_gated_coordinator_meets_the_claim_contract() {
+        let log = MemoryLog::new();
+        rocky_sdk::credentials::testing::claim_contract(
+            &gated(&log, rocky_sdk::credentials::PrivateKey::new().public_key()),
+            crate::support::CONTRACT_SCOPE,
+            async |seconds| log.advance(seconds),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_gated_coordinator_meets_the_coordinator_contract() {
+        let trusted = rocky_sdk::credentials::PrivateKey::new();
+        rocky_sdk::credentials::testing::coordinator_contract(
+            &gated(&MemoryLog::new(), trusted.public_key()),
+            &trusted,
+            crate::support::contract_database(),
+            rocky_sdk::credentials::testing::CoordinatorBehaviour {
+                observes_calls: false,
+                denies_untrusted_claims: false,
+            },
+        )
+        .await;
+    }
+
     fn domain(device: &Device) -> rocky_core::Scope {
         device.database.scope()
     }
@@ -808,12 +843,7 @@ mod coordinated {
         introduce(&a, &b).await;
         let log = MemoryLog::new();
         log.configure(domain(&a), 1)?;
-        let gated = Arc::new(Gated {
-            inner: Arc::new(log.client(node_key(&a).await)),
-            armed: Arc::new(AtomicBool::new(false)),
-            entered: Arc::new(Notify::new()),
-            release: Arc::new(Notify::new()),
-        });
+        let gated = Arc::new(gated(&log, node_key(&a).await));
         a.database.coordinate(Some(gated.clone())).await?;
         b.database
             .coordinate(Some(Arc::new(log.client(node_key(&b).await))))

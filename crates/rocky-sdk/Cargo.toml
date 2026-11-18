@@ -37,6 +37,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "signal"] }
 
 [dev-dependencies]
 rocky-coordinator.workspace = true
+rocky-credentials = { workspace = true, features = ["test-support"] }
 # Browser fixtures supply their own transport as applications do.
 rocky-iroh.workspace = true
 p2panda-core = "=0.5.2"

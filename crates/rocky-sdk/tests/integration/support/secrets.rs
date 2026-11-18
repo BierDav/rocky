@@ -1,11 +1,11 @@
-use rocky_sdk::{SecretStore, credentials::ProviderError};
+use rocky_sdk::{SecretStore, credentials::testing::MemoryKeys};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, LazyLock, Mutex},
 };
 
-static STORES: LazyLock<Mutex<HashMap<PathBuf, Arc<Keys>>>> = LazyLock::new(Default::default);
+static STORES: LazyLock<Mutex<HashMap<PathBuf, Arc<MemoryKeys>>>> = LazyLock::new(Default::default);
 
 pub fn keys(directory: &Path) -> Arc<dyn SecretStore> {
     STORES
@@ -14,28 +14,4 @@ pub fn keys(directory: &Path) -> Arc<dyn SecretStore> {
         .entry(directory.to_path_buf())
         .or_default()
         .clone()
-}
-
-#[derive(Default)]
-pub struct Keys(Mutex<HashMap<String, Vec<u8>>>);
-impl SecretStore for Keys {
-    fn load(&self, name: &str) -> Result<Option<Vec<u8>>, ProviderError> {
-        Ok(self
-            .0
-            .lock()
-            .map_err(|_| "poisoned keys")?
-            .get(name)
-            .cloned())
-    }
-    fn store(&self, name: &str, secret: &[u8]) -> Result<(), ProviderError> {
-        self.0
-            .lock()
-            .map_err(|_| "poisoned keys")?
-            .insert(name.into(), secret.to_vec());
-        Ok(())
-    }
-    fn delete(&self, name: &str) -> Result<(), ProviderError> {
-        self.0.lock().map_err(|_| "poisoned keys")?.remove(name);
-        Ok(())
-    }
 }

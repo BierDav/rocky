@@ -1,7 +1,9 @@
 use super::{Device, Failure};
 use crate::common;
 use crate::support::snapshot as snap;
-use rocky_sdk::{Database, Network, Open, SecretStore, transport::memory::Hub};
+use rocky_sdk::{
+    Database, Network, Open, SecretStore, credentials::testing::MemoryKeys, transport::memory::Hub,
+};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -15,30 +17,7 @@ pub(crate) const SCHEMA: &str = r#"{"application":"revocation","version":1,"form
  {"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
  {"name":"labels","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
 
-#[derive(Default)]
-struct Keys(Mutex<HashMap<String, Vec<u8>>>);
-impl SecretStore for Keys {
-    fn load(&self, name: &str) -> Result<Option<Vec<u8>>, Failure> {
-        Ok(self
-            .0
-            .lock()
-            .map_err(|_| "poisoned keys")?
-            .get(name)
-            .cloned())
-    }
-    fn store(&self, name: &str, secret: &[u8]) -> Result<(), Failure> {
-        self.0
-            .lock()
-            .map_err(|_| "poisoned keys")?
-            .insert(name.into(), secret.to_vec());
-        Ok(())
-    }
-    fn delete(&self, name: &str) -> Result<(), Failure> {
-        self.0.lock().map_err(|_| "poisoned keys")?.remove(name);
-        Ok(())
-    }
-}
-static KEYS: LazyLock<Mutex<HashMap<PathBuf, Arc<Keys>>>> = LazyLock::new(Default::default);
+static KEYS: LazyLock<Mutex<HashMap<PathBuf, Arc<MemoryKeys>>>> = LazyLock::new(Default::default);
 
 pub(crate) fn keys(directory: &Path) -> Arc<dyn SecretStore> {
     KEYS.lock()

@@ -227,3 +227,32 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
     a.close().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn a_reachable_coordinator_meets_the_claim_contract() {
+    let log = MemoryLog::new();
+    let key = rocky_sdk::credentials::PrivateKey::new();
+    let (reach, _) = reach::Reach::new(Arc::new(log.client(key.public_key())));
+    rocky_sdk::credentials::testing::claim_contract(
+        &*reach,
+        crate::support::CONTRACT_SCOPE,
+        async |seconds| log.advance(seconds),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_reachable_coordinator_meets_the_coordinator_contract() {
+    let trusted = rocky_sdk::credentials::PrivateKey::new();
+    let (reach, _) = reach::Reach::new(Arc::new(MemoryLog::new().client(trusted.public_key())));
+    rocky_sdk::credentials::testing::coordinator_contract(
+        &*reach,
+        &trusted,
+        crate::support::contract_database(),
+        rocky_sdk::credentials::testing::CoordinatorBehaviour {
+            observes_calls: false,
+            denies_untrusted_claims: false,
+        },
+    )
+    .await;
+}

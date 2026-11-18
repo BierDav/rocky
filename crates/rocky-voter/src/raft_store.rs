@@ -1,4 +1,3 @@
-use fs2::FileExt;
 use openraft::{
     storage::{LogFlushed, RaftLogStorage, RaftStateMachine},
     *,
@@ -126,11 +125,30 @@ struct Inner {
     durable_mutations: Arc<Mutex<()>>,
     deadlines: tokio::sync::watch::Sender<()>,
     node: std::sync::OnceLock<u64>,
-    _lock: File,
+    _lock: StoreLock,
     #[cfg(test)]
     sync_gate: std::sync::Mutex<Option<SyncGate>>,
     #[cfg(test)]
     copied_entries: std::sync::atomic::AtomicUsize,
+}
+struct StoreLock(File);
+impl StoreLock {
+    fn acquire(root: &Path) -> Result<Self, CoordinationError> {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(root.join("LOCK"))
+            .map_err(|_| CoordinationError::Corrupt)?;
+        file.try_lock().map_err(|_| CoordinationError::Denied)?;
+        Ok(Self(file))
+    }
+}
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 fn io_error(error: impl std::error::Error + 'static) -> StorageError<u64> {
     StorageIOError::write_state_machine(&error).into()
@@ -331,15 +349,7 @@ impl Store {
     ) -> Result<Self, CoordinationError> {
         check_store_format(path, false)?;
         std::fs::create_dir_all(path).map_err(|_| CoordinationError::Corrupt)?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path.join("LOCK"))
-            .map_err(|_| CoordinationError::Corrupt)?;
-        lock.try_lock_exclusive()
-            .map_err(|_| CoordinationError::Denied)?;
+        let lock = StoreLock::acquire(path)?;
         let identity = genesis.id()?;
         let marker_path = path.join(PROVISIONED);
         let (logs_dir, snapshots_dir) = (path.join("log"), path.join("snapshots"));

@@ -45,11 +45,8 @@
 
 ## Version control
 
-- Use Jujutsu (`jj`) only, never the `git` CLI. Preserve unrelated changes and
-  leave edits in the current change. Push, rewrite shared history or create
-  bookmarks only when asked.
-- Use Conventional Commits, validated by `scripts/commitlint --jj`; push with
-  `jj push`.
+- Preserve unrelated changes. Push or rewrite shared history only when asked.
+- Use Conventional Commits, validated by `scripts/commitlint`.
 
 ## Verification
 

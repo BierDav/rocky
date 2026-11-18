@@ -7,7 +7,7 @@ use crate::{
 };
 use rocky_core::net::{BoxFuture, Failure, Stream};
 use rocky_credentials::{CoordinationGrant, CoordinatorControl, Publisher};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 const KIND: &str = "memory";
 
@@ -252,19 +252,11 @@ impl Service {
         }
     }
     fn client(&self, key: &PrivateKey) -> NetworkCoordinator {
-        let client = NetworkCoordinator::connect(
-            &self.bundle,
-            key.clone(),
-            Arc::new(Lane(self.voter.clone(), KIND)),
-        )
-        .unwrap();
-        client.certify(self_certificate_in(
-            key,
-            rocky_credentials::DatabaseContext {
-                publisher: self.publisher.public_key(),
-                scope: self.scope,
-            },
-        ));
+        self.client_on(key, Arc::new(Lane(self.voter.clone(), KIND)))
+    }
+    fn client_on(&self, key: &PrivateKey, transport: Arc<dyn Transport>) -> NetworkCoordinator {
+        let client = NetworkCoordinator::connect(&self.bundle, key.clone(), transport).unwrap();
+        client.certify(self_certificate_in(key, self.database()));
         client
     }
 }
@@ -691,5 +683,168 @@ fn a_connector_reaches_only_the_coordinator_its_bundle_certifies() {
     assert!(
         connector.connect(&renamed).is_err(),
         "a genesis other than the named one is refused"
+    );
+}
+
+struct CallerOwned {
+    lane: Lane,
+    refusing: AtomicBool,
+    closes: AtomicUsize,
+}
+impl CallerOwned {
+    fn new(lane: Lane) -> Arc<Self> {
+        Arc::new(Self {
+            lane,
+            refusing: AtomicBool::new(false),
+            closes: AtomicUsize::new(0),
+        })
+    }
+    fn refuse_connections(&self, refusing: bool) {
+        self.refusing.store(refusing, Ordering::SeqCst);
+    }
+    fn closes(&self) -> usize {
+        self.closes.load(Ordering::SeqCst)
+    }
+}
+impl Transport for CallerOwned {
+    fn kind(&self) -> &str {
+        self.lane.kind()
+    }
+    fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
+        self.lane.address()
+    }
+    fn connect<'a>(
+        &'a self,
+        address: &'a str,
+        protocol: Protocol,
+        scope: Option<Scope>,
+    ) -> BoxFuture<'a, Result<Stream, Failure>> {
+        if self.closes() > 0 {
+            return Box::pin(async { Err("the caller's transport was closed".into()) });
+        }
+        if self.refusing.load(Ordering::SeqCst) {
+            return Box::pin(async { Err("connection refused".into()) });
+        }
+        self.lane.connect(address, protocol, scope)
+    }
+    fn accept(&self) -> BoxFuture<'_, Option<rocky_core::net::Incoming>> {
+        self.lane.accept()
+    }
+    fn request<'a>(
+        &'a self,
+        addresses: &'a [String],
+        scope: Scope,
+        request: &'a [u8],
+    ) -> BoxFuture<'a, Result<Vec<u8>, Failure>> {
+        self.lane.request(addresses, scope, request)
+    }
+    fn session<'a>(
+        &'a self,
+        addresses: &'a [String],
+        scope: Scope,
+    ) -> BoxFuture<'a, Result<Stream, Failure>> {
+        self.lane.session(addresses, scope)
+    }
+    fn close(&self) -> BoxFuture<'_, ()> {
+        self.closes.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {})
+    }
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn connecting_never_closes_the_callers_transport() {
+    let service = Service::start().await;
+    let transport = CallerOwned::new(Lane(service.voter.clone(), KIND));
+    let invoices = Name::new("invoices").unwrap();
+    {
+        let client = service.client_on(&service.node, transport.clone());
+        assert_eq!(
+            client
+                .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
+                .await,
+            Ok(1)
+        );
+        let stranger = service.client_on(&PrivateKey::new(), transport.clone());
+        assert_eq!(
+            stranger
+                .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
+                .await,
+            Err(CoordinationError::Denied),
+            "the voter refuses the request"
+        );
+        transport.refuse_connections(true);
+        assert_eq!(
+            client
+                .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
+                .await,
+            Err(CoordinationError::Unavailable),
+            "every connection fails"
+        );
+        transport.refuse_connections(false);
+    }
+    let unserved = CallerOwned::new(Lane(service.voter.clone(), "other"));
+    assert!(matches!(
+        NetworkCoordinator::connect(&service.bundle, PrivateKey::new(), unserved.clone()),
+        Err(CoordinationError::Configuration)
+    ));
+    let reopened = service.client_on(&service.node, transport.clone());
+    assert_eq!(
+        reopened
+            .claim(service.scope, invoices, Claim::fresh().unwrap())
+            .await,
+        Ok(2),
+        "the caller's transport still carries a new client"
+    );
+    assert_eq!(
+        (transport.closes(), unserved.closes()),
+        (0, 0),
+        "a client never closes the transport its caller owns"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_connector_never_closes_the_callers_transport() {
+    use rocky_credentials::{Coordinator, CoordinatorConnector};
+    let service = Service::start().await;
+    let transport = CallerOwned::new(Lane(service.voter.clone(), KIND));
+    let bundle = service.owner.bundle().unwrap();
+    let invoices = Name::new("invoices").unwrap();
+    let bind = |coordinator: &dyn Coordinator| {
+        coordinator
+            .bind(
+                service.node.clone(),
+                self_certificate_in(&service.node, service.database()),
+            )
+            .unwrap()
+    };
+    {
+        let connector = crate::Connector::new(transport.clone());
+        let bound = bind(&*connector.connect(&bundle).unwrap());
+        assert_eq!(
+            bound
+                .claim(service.scope, invoices.clone(), Claim::fresh().unwrap())
+                .await,
+            Ok(1)
+        );
+        let mut renamed = bundle.clone();
+        renamed.identity.genesis = [9; 32];
+        assert!(connector.connect(&renamed).is_err());
+    }
+    let reconnected = bind(
+        &*crate::Connector::new(transport.clone())
+            .connect(&bundle)
+            .unwrap(),
+    );
+    assert_eq!(
+        reconnected
+            .claim(service.scope, invoices, Claim::fresh().unwrap())
+            .await,
+        Ok(2),
+        "the caller's transport still carries a new connection"
+    );
+    assert_eq!(
+        transport.closes(),
+        0,
+        "a connector never closes the transport its caller owns"
     );
 }

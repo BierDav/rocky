@@ -3,7 +3,6 @@
 Rocky provides local-first SQLite storage, encrypted peer replication,
 credentials, seal coordination and optional iroh networking.
 
-Current work follows the [personal database roadmap](docs/features_18.md).
 See [AGENTS.md](AGENTS.md) for contribution rules. Use Cargo manifests, module
 declarations and tests to navigate the implementation.
 

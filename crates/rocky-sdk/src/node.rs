@@ -1317,7 +1317,7 @@ impl Node {
         root: Arc<dyn rocky_credentials::IdentityProvider>,
         archived: &Settings,
     ) -> Result<Vec<PublicKey>, Failure> {
-        let root = Root(Some(root));
+        let root = Root::held(root);
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let own = self.settings.lock().await.identity;
         let lost: Vec<PublicKey> = registry
@@ -3602,10 +3602,16 @@ fn secure_handle(handle: &[u8; 32]) -> rocky_core::Commitment {
     commitment("rocky.sdk.mutation.v1", handle)
 }
 #[derive(Default)]
-pub(crate) struct Root(pub(crate) Option<Arc<dyn rocky_credentials::IdentityProvider>>);
+pub(crate) struct Root(Option<crate::identities::Loan>);
 impl Root {
+    pub(crate) fn lent(loan: Option<crate::identities::Loan>) -> Self {
+        Self(loan)
+    }
+    pub(crate) fn held(provider: Arc<dyn rocky_credentials::IdentityProvider>) -> Self {
+        Self(Some(crate::identities::Loan::untracked(provider)))
+    }
     pub(crate) fn signer(&self) -> Option<&dyn rocky_credentials::IdentityProvider> {
-        self.0.as_deref()
+        self.0.as_ref().and_then(crate::identities::Loan::signer)
     }
 }
 fn revoked_by(error: &Failure) -> Option<rocky_credentials::SignedRevocation> {

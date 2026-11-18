@@ -100,7 +100,7 @@ impl Node {
     ) -> Result<crate::ResetReceipt, Failure> {
         let account = self.personal_account(prf).await?;
         let (root, _) = account.into_parts();
-        self.sign_out_everywhere_else(&Root(Some(Arc::new(root))), keep)
+        self.sign_out_everywhere_else(&Root::held(Arc::new(root)), keep)
             .await
     }
     pub(super) async fn personal_device_notices(

@@ -138,8 +138,8 @@ impl Session {
         lifetime: u64,
         root: std::sync::Arc<dyn crate::IdentityProvider>,
     ) -> Result<crate::credentials::SignedCoordinationGrant, Failure> {
-        self.send(|reply| {
-            Request::SignCoordinationGrant(tenant, lifetime, crate::node::Root(Some(root)), reply)
+        self.send_rooted(Some(root), |root, reply| {
+            Request::SignCoordinationGrant(tenant, lifetime, root, reply)
         })
         .await
     }
@@ -267,7 +267,7 @@ impl Session {
         node: crate::PeerId,
         identity: std::sync::Arc<dyn crate::IdentityProvider>,
     ) -> Result<(), Failure> {
-        self.send(|reply| Request::Unlink(node, identity, reply))
+        self.send_signed(Some(identity), |reply| Request::Unlink(node, reply))
             .await
     }
     pub async fn invitation(&self) -> Result<Invitation, Failure> {

@@ -261,6 +261,160 @@ async fn routine_issuer_calls_need_no_identity_and_do_not_retain_a_supplied_one(
     Ok(())
 }
 
+const RELEASE_HANG_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
+struct GatedRelease {
+    signer: Arc<dyn IdentityProvider>,
+    dropping: Option<tokio::sync::oneshot::Sender<()>>,
+    gate: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    released: Arc<std::sync::atomic::AtomicBool>,
+}
+impl IdentityProvider for GatedRelease {
+    fn public_key(&self) -> Result<rocky_credentials::PublicKey, rocky_credentials::Error> {
+        self.signer.public_key()
+    }
+    fn sign(
+        &self,
+        purpose: rocky_credentials::Purpose,
+        message: &[u8],
+    ) -> Result<rocky_credentials::Signature, rocky_credentials::Error> {
+        self.signer.sign(purpose, message)
+    }
+}
+impl Drop for GatedRelease {
+    fn drop(&mut self) {
+        if let Some(dropping) = self.dropping.take() {
+            let _ = dropping.send(());
+        }
+        if let Ok(gate) = self.gate.get_mut() {
+            let _ = gate.recv_timeout(RELEASE_HANG_BOUND);
+        }
+        self.released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+async fn returns_only_after_release<F: std::future::Future>(
+    signer: Arc<dyn IdentityProvider>,
+    call: impl FnOnce(Arc<dyn IdentityProvider>) -> F,
+) -> Result<F::Output, Failure> {
+    let (dropping, dropping_started) = tokio::sync::oneshot::channel();
+    let (open_gate, gate) = std::sync::mpsc::channel();
+    let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let provider = Arc::new(GatedRelease {
+        signer,
+        dropping: Some(dropping),
+        gate: std::sync::Mutex::new(gate),
+        released: released.clone(),
+    });
+    let weak = Arc::downgrade(&provider);
+    let mut call = std::pin::pin!(call(provider));
+    tokio::select! {
+        biased;
+        started = dropping_started => started?,
+        _ = call.as_mut() => {
+            return Err("the call returned before the database began releasing its identity".into());
+        }
+    }
+    let still_pending = std::future::poll_fn(|context| {
+        std::task::Poll::Ready(call.as_mut().poll(context).is_pending())
+    })
+    .await;
+    assert!(
+        still_pending,
+        "the call returned while the database still held its identity"
+    );
+    open_gate.send(())?;
+    let output = call.await;
+    assert!(released.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(weak.upgrade().is_none());
+    Ok(output)
+}
+
+async fn reopened_without_identity(
+    root: &Path,
+    hub: &Arc<Hub>,
+) -> Result<(Arc<Database>, IdentityKey), Failure> {
+    let path = root.join("a");
+    let key = IdentityKey::generate();
+    let created = Database::create(
+        open(
+            &path,
+            hub,
+            "a",
+            Some(Arc::new(IdentityKey::from_secret(key.secret()))),
+        ),
+        None,
+    )?;
+    created.database.close().await?;
+    Ok((Database::open(open(&path, hub, "a", None))?.database, key))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_signed_call_returns_only_after_the_database_released_its_identity() -> Result<(), Failure>
+{
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let (database, key) = reopened_without_identity(root.path(), &hub).await?;
+    let session = database.session();
+    returns_only_after_release(Arc::new(key), |provider| {
+        session.sync_once_with_identity(provider)
+    })
+    .await??;
+    database.close().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_signed_call_returns_only_after_its_identity_was_dropped() -> Result<(), Failure>
+{
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let issuer = Device::create(
+        &root.path().join("issuer"),
+        Some(Network::Owned(hub.connector("issuer"))),
+    )?;
+    let member = Device::join(
+        &root.path().join("member"),
+        &issuer.invite().await,
+        Network::Owned(hub.connector("member")),
+    )?;
+    let session = member.database.session();
+    session.logout(false).await?;
+    let refused = returns_only_after_release(Arc::new(IdentityKey::generate()), |provider| {
+        session.sync_once_with_identity(provider)
+    })
+    .await?;
+    let refusal = refused.err().ok_or("a logged-out device synced")?;
+    assert!(refusal.to_string().contains("logged out"), "{refusal}");
+    session.close().await;
+    member.close().await;
+    issuer.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_root_signed_call_returns_only_after_the_database_released_its_root()
+-> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let root = Arc::new(rocky_sdk::RootKey::generate());
+    let database = Database::create_with_root(
+        open(&directory.path().join("owner"), &hub, "owner", None),
+        None,
+        root.clone(),
+    )?
+    .database;
+    let session = database.session();
+    let tenant = IdentityKey::generate().public_key();
+    returns_only_after_release(root, |root| {
+        session.sign_coordination_grant(tenant, 86_400, root)
+    })
+    .await??;
+    database.close().await?;
+    Ok(())
+}
+
 fn no_identity_secret(directory: &std::path::Path, secrets: &[[u8; 32]]) -> Result<(), Failure> {
     let settings = std::fs::read(directory.join("identity.json"))?;
     let value: Value = serde_json::from_slice(&settings)?;

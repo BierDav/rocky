@@ -5,7 +5,11 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -242,6 +246,59 @@ class WasmShards(unittest.TestCase):
             self.assertEqual(problem, "ran 3 and ignored 1 of 5 tests")
             *_, problem, _ = wasm.run({}, "binary", "/x.wasm", "rest", [], ["a", "b", "c", "d"])
             self.assertIsNone(problem)
+
+
+class CheckStatus(unittest.TestCase):
+    STEPS = ("clippy-native", "clippy-wasm", "wasm-tests", "test-tiers")
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        shutil.copy2(Path(__file__).with_name("check"), scripts / "check")
+        self.binary = self.root / "bin"
+        self.binary.mkdir()
+        stubs = {
+            scripts / "lint-rust": "",
+            scripts / "clippy": 'case "$*" in *wasm32*) step=clippy-wasm ;; *) step=clippy-native ;; esac\n'
+                                'echo "$step" >> "$CHECK_RAN"\n[ "$step" != "$CHECK_FAIL" ]\n',
+            scripts / "wasm-tests": 'echo wasm-tests >> "$CHECK_RAN"\n[ wasm-tests != "$CHECK_FAIL" ]\n',
+            scripts / "test-tiers": 'echo test-tiers >> "$CHECK_RAN"\n[ test-tiers != "$CHECK_FAIL" ]\n',
+            self.binary / "cargo": "",
+        }
+        for path, body in stubs.items():
+            path.write_text(f"#!/bin/sh\n{body}")
+            path.chmod(0o755)
+        self.ran = self.root / "ran"
+
+    def check(self, *arguments, failing=""):
+        self.ran.write_text("")
+        return subprocess.run(
+            [str(self.root / "scripts" / "check"), *arguments], cwd=self.root,
+            capture_output=True, text=True,
+            env=dict(os.environ, PATH=f"{self.binary}:{os.environ['PATH']}",
+                     CHECK_FAIL=failing, CHECK_RAN=str(self.ran),
+                     ROCKY_TEST_TMPDIR=str(self.root),
+                     CARGO_TARGET_DIR=str(self.root / "target")))
+
+    def test_every_failing_step_of_the_full_check_fails_it(self):
+        for failing in ("", *self.STEPS):
+            with self.subTest(failing=failing or "none"):
+                result = self.check(failing=failing)
+                self.assertEqual(result.returncode, 1 if failing else 0,
+                                 result.stdout + result.stderr)
+                skipped = {"wasm-tests"} if failing == "clippy-wasm" else set()
+                self.assertEqual(set(self.ran.read_text().split()), set(self.STEPS) - skipped)
+
+    def test_wasm_with_archives_is_refused_instead_of_silently_skipped(self):
+        for arguments in (("--wasm", "--from", "archives"), ("--unit", "--wasm", "--from", "archives"),
+                          ("--wasm", "--build", "archives")):
+            with self.subTest(arguments=arguments):
+                result = self.check(*arguments)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertEqual(self.ran.read_text(), "")
 
 
 ios_loader = importlib.machinery.SourceFileLoader("ios_results", str(Path(__file__).parent / "ci" / "ios-test-results"))

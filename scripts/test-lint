@@ -90,6 +90,17 @@ fn allow() {}
             self.assertIn('use #[expect(lint, reason = "...")] instead', result.stderr)
 
 
+    def test_options_are_refused_instead_of_read_as_paths(self):
+        for option in ('--fix', '-x'):
+            with self.subTest(option=option):
+                result = subprocess.run([str(SCRIPTS / 'lint-rust'), option],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(f'lint-rust: unknown option {option}', result.stderr)
+                self.assertIn('scripts/lint-rust PATH...', result.stderr)
+                self.assertNotIn('Traceback', result.stderr)
+
+
 class RustComments(unittest.TestCase):
     def test_every_comment_line_is_forbidden_including_documentation(self):
         comments = runpy.run_path(str(SCRIPTS / 'lint-rust'))['comments']

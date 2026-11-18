@@ -456,6 +456,7 @@ impl Store {
             ),
         };
         let mut logs = BTreeMap::new();
+        let mut next_index = purged.map_or(0, |p| p + 1);
         for (index, path) in numbered(logs_dir)? {
             let left_by_interrupted_purge = purged.is_some_and(|p| index <= p);
             if left_by_interrupted_purge {
@@ -463,23 +464,19 @@ impl Store {
                 continue;
             }
             let entry: Entry<Types> = unseal(LOG_LABEL, &read(&path)?)?;
-            if entry.log_id.index != index
-                || logs
-                    .last_key_value()
-                    .is_some_and(|(last, _): (&u64, _)| last + 1 != index)
-            {
+            if entry.log_id.index != index || index != next_index {
                 return Err(CoordinationError::Corrupt);
             }
+            next_index = index + 1;
             logs.insert(index, Arc::new(entry));
         }
         if let Some(committed) = hard.committed
             && applied.is_none_or(|id| id.index < committed.index)
+            && logs
+                .get(&committed.index)
+                .is_none_or(|entry| entry.log_id != committed)
         {
-            let first = applied.map_or(0, |id| id.index + 1);
-            let covered = logs.contains_key(&first) || (applied.is_none() && logs.contains_key(&1));
-            if !covered || !logs.contains_key(&committed.index) {
-                return Err(CoordinationError::Corrupt);
-            }
+            return Err(CoordinationError::Corrupt);
         }
         Ok((
             Image {
@@ -562,7 +559,7 @@ impl Store {
     fn purge_files(&self, image: &mut Image, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
         let mut hard = image.hard.clone();
         hard.purged = Some(log_id);
-        self.persist_hard(&hard, "purge")?;
+        self.persist_hard(&hard, "purge.state")?;
         image.hard = hard;
         image.purge_awaiting_durable_snapshot = None;
         let doomed: Vec<_> = image.logs.range(..=log_id.index).map(|(i, _)| *i).collect();
@@ -570,8 +567,11 @@ impl Store {
         for index in doomed {
             logs.remove(&index);
             std::fs::remove_file(self.logs_dir().join(file_name(index))).map_err(io_error)?;
+            crash(&format!("purge.log.removed.{index}"));
         }
-        sync_directory(&self.logs_dir()).map_err(io_error)
+        sync_directory(&self.logs_dir()).map_err(io_error)?;
+        crash("purge.log.after_sync");
+        Ok(())
     }
     #[expect(
         clippy::result_large_err,
@@ -932,8 +932,9 @@ impl RaftLogStorage<Types> for Store {
                     if data.len() > MAX_LOG_BYTES {
                         return Err(other("consensus entry capacity exhausted"));
                     }
-                    write_synced(&dir.join(file_name(entry.log_id.index)), &data, "log")
-                        .map_err(io_error)?;
+                    let index = entry.log_id.index;
+                    write_synced(&dir.join(file_name(index)), &data, "log").map_err(io_error)?;
+                    crash(&format!("log.renamed.{index}"));
                     written.push(entry);
                 }
                 sync_directory(&dir).map_err(io_error)?;
@@ -963,9 +964,12 @@ impl RaftLogStorage<Types> for Store {
                 .collect();
             for index in highest_first {
                 std::fs::remove_file(store.logs_dir().join(file_name(index))).map_err(io_error)?;
+                crash(&format!("truncate.log.removed.{index}"));
                 Arc::make_mut(&mut image.logs).remove(&index);
             }
-            sync_directory(&store.logs_dir()).map_err(io_error)
+            sync_directory(&store.logs_dir()).map_err(io_error)?;
+            crash("truncate.log.after_sync");
+            Ok(())
         })
         .await
     }

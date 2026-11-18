@@ -109,7 +109,7 @@ async fn missing_committed_prefix_cannot_reopen_at_genesis() {
     let directory = tempfile::tempdir().unwrap();
     let mut store =
         Store::open(directory.path(), genesis.clone(), true, Limits::default()).unwrap();
-    let entries: Vec<_> = (1..=2)
+    let entries: Vec<_> = (0..=1)
         .map(|index| Entry::<Types> {
             log_id: LogId::new(CommittedLeaderId::new(1, 1), index),
             payload: EntryPayload::Blank,
@@ -118,7 +118,7 @@ async fn missing_committed_prefix_cannot_reopen_at_genesis() {
     store.blocking_append(entries.clone()).await.unwrap();
     store.save_committed(Some(entries[1].log_id)).await.unwrap();
     drop(store);
-    std::fs::remove_file(directory.path().join("log").join(file_name(1))).unwrap();
+    std::fs::remove_file(directory.path().join("log").join(file_name(0))).unwrap();
     assert!(matches!(
         Store::open(directory.path(), genesis, false, Limits::default()),
         Err(CoordinationError::Corrupt)
@@ -209,7 +209,7 @@ async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
                 sequence: 1,
             },
         ),
-        1,
+        0,
         time,
     )
     .await
@@ -225,14 +225,14 @@ async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
             sequence: 2,
         },
     );
-    let assigned = write(&mut store, append.clone(), 2, time).await.unwrap();
+    let assigned = write(&mut store, append.clone(), 1, time).await.unwrap();
     let Outcome::Coordinated(LogResult::Assigned(pending)) = &assigned else {
         panic!("assignment")
     };
     let pending = pending.as_ref();
     drop(store);
     store = Store::open(dir.path(), genesis.clone(), false, Limits::default()).unwrap();
-    replay_committed_entries_as_openraft_does_on_startup(&mut store, 1..=2).await;
+    replay_committed_entries_as_openraft_does_on_startup(&mut store, 0..=1).await;
     assert_eq!(
         store
             .log_head(tip_log(scope))
@@ -242,7 +242,7 @@ async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
             .as_ref(),
         Some(pending)
     );
-    assert_eq!(write(&mut store, append, 3, time).await.unwrap(), assigned);
+    assert_eq!(write(&mut store, append, 2, time).await.unwrap(), assigned);
     let resolve = request(
         &voter,
         Action::Resolve {
@@ -255,7 +255,7 @@ async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
             )],
         },
     );
-    let committed = write(&mut store, resolve.clone(), 4, time).await.unwrap();
+    let committed = write(&mut store, resolve.clone(), 3, time).await.unwrap();
     assert!(matches!(
         committed,
         Outcome::Coordinated(LogResult::Committed { position: 1, .. })
@@ -265,7 +265,7 @@ async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
     store = Store::open(dir.path(), genesis, false, Limits::default()).unwrap();
     assert_eq!(store.log_head(tip_log(scope)).await.unwrap().commit, 1);
     assert_eq!(
-        write(&mut store, resolve, 5, time).await,
+        write(&mut store, resolve, 4, time).await,
         Err(CoordinationError::StaleHead)
     );
     assert_eq!(
@@ -331,14 +331,14 @@ async fn a_recovery_survives_log_replay_and_snapshot_and_retries_identically() {
     let recover = Action::Recover {
         seal: seal.to_bytes().unwrap(),
     };
-    let admitted = write(&mut store, request(&executor, recover.clone()), 1, time).await;
+    let admitted = write(&mut store, request(&executor, recover.clone()), 0, time).await;
     let Outcome::Coordinated(LogResult::Committed { position: 1, .. }) = admitted else {
         panic!("recovery {admitted:?}")
     };
     let after = store.log_head(tip_log(scope)).await.unwrap();
     drop(store);
     store = Store::open(dir.path(), genesis.clone(), false, Limits::default()).unwrap();
-    let entries = store.try_get_log_entries(1..=1).await.unwrap();
+    let entries = store.try_get_log_entries(0..=0).await.unwrap();
     store.apply(entries).await.unwrap();
     assert_eq!(store.log_head(tip_log(scope)).await.unwrap(), after);
     store.build_snapshot().await.unwrap();
@@ -348,7 +348,7 @@ async fn a_recovery_survives_log_replay_and_snapshot_and_retries_identically() {
     assert_eq!(head, after);
     assert_eq!(head.terminal.unwrap().digest, seal.id().unwrap());
     assert_eq!(
-        write(&mut store, request(&executor, recover), 2, time).await,
+        write(&mut store, request(&executor, recover), 1, time).await,
         admitted
     );
 }
@@ -398,7 +398,7 @@ async fn updates_share_log_entries_and_apply_metadata_in_place() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(dir.path(), genesis.clone(), true, Limits::default()).unwrap();
     let time = now().unwrap();
-    for index in 1..=16 {
+    for index in 0..16 {
         let request = self_certified(
             genesis.id().unwrap(),
             crate::transport::nonce(),
@@ -422,7 +422,7 @@ async fn updates_share_log_entries_and_apply_metadata_in_place() {
         ));
     }
     store.save_vote(&Vote::new(2, 1)).await.unwrap();
-    assert_eq!(store.try_get_log_entries(1..=16).await.unwrap().len(), 16);
+    assert_eq!(store.try_get_log_entries(0..16).await.unwrap().len(), 16);
     assert_eq!(
         store
             .0
@@ -610,7 +610,7 @@ async fn an_interrupted_restore_never_opens_unfenced_or_with_the_backup_leader_v
         let mut store = Store::open(&source, genesis.clone(), true, Limits::default()).unwrap();
         store.save_vote(&Vote::new_committed(2, 1)).await.unwrap();
         store
-            .blocking_append((1..=2).map(|index| Entry::<Types> {
+            .blocking_append((0..=1).map(|index| Entry::<Types> {
                 log_id: LogId::new(CommittedLeaderId::new(2, 1), index),
                 payload: EntryPayload::Blank,
             }))
@@ -702,4 +702,387 @@ fn a_dropped_store_unlocks_while_a_spawned_process_still_holds_its_lock_descript
         Ok(()),
         "a backup must not wait for a process that inherited the lock descriptor"
     );
+}
+
+const CUT_CRASH_DIR: &str = "ROCKY_VOTER_CUT_CRASH_DIR";
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+enum Cut {
+    Truncate(u64),
+    Purge(u64),
+    Append(u64, u64),
+}
+
+struct CutScenario {
+    name: &'static str,
+    last: Option<u64>,
+    committed: Option<u64>,
+    snapshot_at: Option<u64>,
+    purged: Option<u64>,
+    cut: Cut,
+}
+
+const CUT_SCENARIOS: [CutScenario; 5] = [
+    CutScenario {
+        name: "conflict truncation right after the purged prefix",
+        last: Some(6),
+        committed: Some(3),
+        snapshot_at: Some(3),
+        purged: Some(3),
+        cut: Cut::Truncate(4),
+    },
+    CutScenario {
+        name: "conflict truncation of a never purged log",
+        last: Some(3),
+        committed: None,
+        snapshot_at: None,
+        purged: None,
+        cut: Cut::Truncate(0),
+    },
+    CutScenario {
+        name: "purge below a committed but unapplied entry",
+        last: Some(6),
+        committed: Some(6),
+        snapshot_at: Some(5),
+        purged: None,
+        cut: Cut::Purge(3),
+    },
+    CutScenario {
+        name: "first append to a fresh log",
+        last: None,
+        committed: None,
+        snapshot_at: None,
+        purged: None,
+        cut: Cut::Append(0, 3),
+    },
+    CutScenario {
+        name: "append right after the purged prefix",
+        last: Some(3),
+        committed: Some(3),
+        snapshot_at: Some(3),
+        purged: Some(3),
+        cut: Cut::Append(4, 6),
+    },
+];
+
+fn term_one(index: u64) -> LogId<u64> {
+    LogId::new(CommittedLeaderId::new(1, 1), index)
+}
+
+fn blank(index: u64) -> Entry<Types> {
+    Entry {
+        log_id: term_one(index),
+        payload: EntryPayload::Blank,
+    }
+}
+
+impl Cut {
+    async fn run(self, store: &mut Store) {
+        use openraft::storage::RaftLogStorageExt;
+        match self {
+            Cut::Truncate(from) => store.truncate(term_one(from)).await.unwrap(),
+            Cut::Purge(upto) => store.purge(term_one(upto)).await.unwrap(),
+            Cut::Append(from, to) => store.blocking_append((from..=to).map(blank)).await.unwrap(),
+        }
+    }
+
+    fn crash_steps(self, logs: &BTreeSet<u64>) -> Vec<String> {
+        match self {
+            Cut::Truncate(from) => logs
+                .range(from..)
+                .rev()
+                .map(|index| format!("truncate.log.removed.{index}"))
+                .chain(["truncate.log.after_sync".to_string()])
+                .collect(),
+            Cut::Purge(upto) => [
+                "purge.state.before_sync",
+                "purge.state.before_rename",
+                "purge.state.after_sync",
+            ]
+            .map(String::from)
+            .into_iter()
+            .chain(
+                logs.range(..=upto)
+                    .map(|index| format!("purge.log.removed.{index}")),
+            )
+            .chain(["purge.log.after_sync".to_string()])
+            .collect(),
+            Cut::Append(from, to) => (from..=to)
+                .map(|index| format!("log.renamed.{index}"))
+                .chain(["log.after_sync".to_string()])
+                .collect(),
+        }
+    }
+
+    fn kept(self, logs: &BTreeSet<u64>) -> BTreeSet<u64> {
+        match self {
+            Cut::Truncate(from) => logs.range(..from).copied().collect(),
+            Cut::Purge(upto) => logs.range(upto + 1..).copied().collect(),
+            Cut::Append(from, to) => logs.iter().copied().chain(from..=to).collect(),
+        }
+    }
+}
+
+fn log_files(store: &Path) -> BTreeMap<u64, Vec<u8>> {
+    numbered(&store.join("log"))
+        .unwrap()
+        .into_iter()
+        .map(|(index, path)| (index, read(&path).unwrap()))
+        .collect()
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+fn first_retained_index(purged: Option<LogId<u64>>) -> u64 {
+    purged.map_or(0, |id| id.index + 1)
+}
+
+impl CutScenario {
+    async fn prepare(&self, path: &Path, genesis: &CertifiedGenesis) {
+        use openraft::storage::RaftLogStorageExt;
+        let mut store = Store::open(path, genesis.clone(), true, Limits::default()).unwrap();
+        if let Some(last) = self.last {
+            store.blocking_append((0..=last).map(blank)).await.unwrap();
+        }
+        store
+            .save_committed(self.committed.map(term_one))
+            .await
+            .unwrap();
+        if let Some(snapshot_at) = self.snapshot_at {
+            store.apply((0..=snapshot_at).map(blank)).await.unwrap();
+            store.build_snapshot().await.unwrap();
+        }
+        if let Some(purged) = self.purged {
+            store.purge(term_one(purged)).await.unwrap();
+        }
+    }
+
+    async fn check_reopened(
+        &self,
+        path: &Path,
+        genesis: &CertifiedGenesis,
+        before: &BTreeSet<u64>,
+        step: Option<&str>,
+        lost_changes: &[u64],
+    ) {
+        let context = format!(
+            "{} crashed at {step:?} and lost the changes to {lost_changes:?}",
+            self.name
+        );
+        let on_disk: Hard = unseal(STATE_LABEL, &read(&path.join("state.cbor")).unwrap()).unwrap();
+        let holed = log_files(path)
+            .into_keys()
+            .filter(|index| on_disk.purged.is_none_or(|purged| *index > purged.index))
+            .zip(first_retained_index(on_disk.purged)..)
+            .any(|(index, expected)| index != expected);
+        let mut store = match Store::open(path, genesis.clone(), false, Limits::default()) {
+            Ok(store) => store,
+            Err(error) => {
+                assert_eq!(error, CoordinationError::Corrupt, "{context}");
+                assert!(holed, "{context}: a store without a hole was refused");
+                assert!(
+                    !lost_changes.is_empty(),
+                    "{context}: a process crash must leave a store that opens"
+                );
+                return;
+            }
+        };
+        assert!(!holed, "{context}: a store with a hole in its log opened");
+        let (logs, hard, snapshot) = {
+            let image = store.0.image.lock().await;
+            (
+                image.logs.clone(),
+                image.hard.clone(),
+                image.snapshot.clone(),
+            )
+        };
+        assert_eq!(
+            hard.committed,
+            self.committed.map(term_one),
+            "{context}: the commit index moved"
+        );
+        let cut_purge = match self.cut {
+            Cut::Purge(upto) => Some(term_one(upto)),
+            Cut::Truncate(_) | Cut::Append(..) => None,
+        };
+        assert!(
+            hard.purged == self.purged.map(term_one) || hard.purged == cut_purge,
+            "{context}: purged {:?}",
+            hard.purged
+        );
+        assert!(
+            hard.purged.is_none_or(|purged| snapshot
+                .and_then(|meta| meta.last_log_id)
+                .is_some_and(|covered| covered.index >= purged.index)),
+            "{context}: the purged prefix is not covered by the snapshot"
+        );
+        let start = first_retained_index(hard.purged);
+        assert!(
+            logs.keys().copied().eq(start..start + logs.len() as u64),
+            "{context}: the reopened log {:?} has a hole after {:?}",
+            logs.keys().collect::<Vec<_>>(),
+            hard.purged
+        );
+        assert!(
+            logs.values()
+                .all(|entry| entry.log_id == term_one(entry.log_id.index)),
+            "{context}: a log entry changed identity"
+        );
+        assert!(
+            hard.committed.is_none_or(
+                |committed| (start..=committed.index).all(|index| logs.contains_key(&index))
+            ),
+            "{context}: a committed entry was lost"
+        );
+        if let Cut::Truncate(from) = self.cut {
+            assert!(
+                logs.range(from..).all(|(index, _)| hard
+                    .committed
+                    .is_none_or(|committed| *index > committed.index)),
+                "{context}: a truncated entry reappeared as committed"
+            );
+        }
+        assert!(
+            log_files(path)
+                .into_keys()
+                .all(|index| hard.purged.is_none_or(|purged| index > purged.index)),
+            "{context}: a purged log file survived the reopen"
+        );
+        let state = store.get_log_state().await.unwrap();
+        let visible = store.try_get_log_entries(..).await.unwrap();
+        assert_eq!(state.last_purged_log_id, hard.purged, "{context}");
+        assert_eq!(
+            state.last_log_id,
+            visible.last().map(|entry| entry.log_id).or(hard.purged),
+            "{context}"
+        );
+        assert_eq!(visible.len(), logs.len(), "{context}");
+        if step.is_none_or(|step| step.ends_with(".after_sync")) {
+            assert_eq!(
+                logs.keys().copied().collect::<BTreeSet<_>>(),
+                self.cut.kept(before),
+                "{context}: a cut whose directory sync completed was not durable"
+            );
+        }
+        self.cut.run(&mut store).await;
+        drop(store);
+        let store = Store::open(path, genesis.clone(), false, Limits::default())
+            .unwrap_or_else(|error| panic!("{context}: the retried cut left {error:?}"));
+        assert_eq!(
+            store
+                .0
+                .image
+                .lock()
+                .await
+                .logs
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            self.cut.kept(before),
+            "{context}: retrying the cut did not finish it"
+        );
+    }
+}
+
+#[tokio::test]
+async fn log_cut_crash_child() {
+    let Ok(dir) = std::env::var(CUT_CRASH_DIR) else {
+        return;
+    };
+    let dir = Path::new(&dir);
+    let genesis: CertifiedGenesis = decode(&read(&dir.join("genesis.cbor")).unwrap()).unwrap();
+    let cut: Cut = decode(&read(&dir.join("cut.cbor")).unwrap()).unwrap();
+    let mut store = Store::open(&dir.join("store"), genesis, false, Limits::default()).unwrap();
+    cut.run(&mut store).await;
+}
+
+#[tokio::test]
+async fn an_interrupted_append_truncation_or_purge_reopens_without_holes_or_lost_commits() {
+    use std::os::unix::process::ExitStatusExt;
+    let (genesis, ..) = certified();
+    for scenario in &CUT_SCENARIOS {
+        let template = tempfile::tempdir().unwrap();
+        let prepared = template.path().join("store");
+        scenario.prepare(&prepared, &genesis).await;
+        let files = log_files(&prepared);
+        let before: BTreeSet<u64> = files.keys().copied().collect();
+        let steps = scenario.cut.crash_steps(&before);
+        for step in steps.iter().map(|step| Some(step.as_str())).chain([None]) {
+            let directory = tempfile::tempdir().unwrap();
+            let crashed = directory.path().join("store");
+            copy_tree(&prepared, &crashed);
+            std::fs::write(
+                directory.path().join("genesis.cbor"),
+                encode(&genesis).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                directory.path().join("cut.cbor"),
+                encode(&scenario.cut).unwrap(),
+            )
+            .unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "raft_store::tests::log_cut_crash_child",
+                    "--exact",
+                    "--test-threads=1",
+                ])
+                .env(CUT_CRASH_DIR, directory.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            if let Some(step) = step {
+                child.env("ROCKY_COORDINATOR_CRASH", step);
+            }
+            let status = child.status().unwrap();
+            match step {
+                Some(step) => assert_eq!(
+                    status.signal(),
+                    Some(6),
+                    "{} must reach {step}: {status:?}",
+                    scenario.name
+                ),
+                None => assert!(status.success(), "{}: {status:?}", scenario.name),
+            }
+            let after: BTreeSet<u64> = log_files(&crashed).into_keys().collect();
+            let changed: Vec<u64> = before.symmetric_difference(&after).copied().collect();
+            let directory_synced = step.is_none_or(|step| step.ends_with(".after_sync"));
+            let unsynced = if directory_synced {
+                Vec::new()
+            } else {
+                changed
+            };
+            for lost in 0..1usize << unsynced.len() {
+                let lost_changes: Vec<u64> = unsynced
+                    .iter()
+                    .enumerate()
+                    .filter(|(bit, _)| lost >> bit & 1 == 1)
+                    .map(|(_, index)| *index)
+                    .collect();
+                let variant = directory.path().join(format!("lost-{lost}"));
+                copy_tree(&crashed, &variant);
+                for index in &lost_changes {
+                    let file = variant.join("log").join(file_name(*index));
+                    match files.get(index) {
+                        Some(data) => std::fs::write(file, data).unwrap(),
+                        None => std::fs::remove_file(file).unwrap(),
+                    }
+                }
+                scenario
+                    .check_reopened(&variant, &genesis, &before, step, &lost_changes)
+                    .await;
+            }
+        }
+    }
 }

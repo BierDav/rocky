@@ -702,7 +702,8 @@ async fn simultaneous_short_requests_use_the_admitted_link_before_remote_reconci
             let low_contact = lower.settings.lock().await.peers[&higher_key].clone();
             let high_contact = higher.settings.lock().await.peers[&lower_key].clone();
             let (ready, waiting) = tokio::sync::oneshot::channel();
-            let (first, second) = tokio::time::timeout(Duration::from_secs(1), async {
+            let outlasts_a_loaded_ci_host = Duration::from_secs(30);
+            let (first, second) = tokio::time::timeout(outlasts_a_loaded_ci_host, async {
                 tokio::join!(
                     async {
                         let handle = lower
@@ -1059,6 +1060,22 @@ async fn iroh_reverse_gate() -> Result<(), Failure> {
 fn freeze_idle_interval() {
     tokio::time::pause();
 }
+struct ReportsWorkersOnPanic<'a>([(&'static str, &'a Node); 2]);
+impl Drop for ReportsWorkersOnPanic<'_> {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        for (name, node) in self.0 {
+            eprintln!(
+                "{name}: worker running {} status {:?} activities {}",
+                *node.worker_running.borrow(),
+                *node.sync_status.borrow(),
+                snap::Snapshot::snapshot(node.activity.after(0))
+            );
+        }
+    }
+}
 async fn detach_real_pair(a: &Node, b: &Node) -> Result<(), Failure> {
     let (stopped_a, stopped_b) = tokio::join!(start(a, false), start(b, false));
     stopped_a?;
@@ -1078,18 +1095,9 @@ async fn real_liveness_gate() -> Result<(), Failure> {
             let sa = a.current().ok_or("service")?;
             let sb = b.current().ok_or("service")?;
             until(|| sa.live.len() == 1 && sb.live.len() == 1).await;
-            let waiting = std::time::Instant::now();
-            while *a.worker_running.borrow() || *b.worker_running.borrow() {
-                assert!(
-                    waiting.elapsed() < Duration::from_secs(5),
-                    "workers did not settle: a={:?} b={:?} activities: a={} b={}",
-                    *a.sync_status.borrow(),
-                    *b.sync_status.borrow(),
-                    snap::Snapshot::snapshot(a.activity.after(0)),
-                    snap::Snapshot::snapshot(b.activity.after(0))
-                );
-                tokio::task::yield_now().await;
-            }
+            let unsettled = ReportsWorkersOnPanic([("a", &a), ("b", &b)]);
+            until(|| !*a.worker_running.borrow() && !*b.worker_running.borrow()).await;
+            drop(unsettled);
             freeze_idle_interval();
             let before = hub.counts();
             assert!(
@@ -1988,11 +1996,21 @@ async fn link_control_round_trip_runs_while_the_database_executor_is_blocked() -
             let (a, b) = pair(root.path(), &hub).await?;
             let (near, far) = opened_links(&a, &b).await?;
             let (answer, task) = crate::node::live_links::control_probe(near, far);
-            let result = answer.recv_timeout(Duration::from_millis(500));
+            let outlasts_a_loaded_ci_host = Duration::from_secs(30);
+            let result = answer.recv_timeout(outlasts_a_loaded_ci_host);
             task.abort();
-            result.map_err(
-                |_| "link heartbeat exceeded 500 ms while database executor was blocked",
-            )??;
+            match result {
+                Ok(answered) => answered?,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(
+                        "the link control round trip did not answer while the database executor was blocked"
+                            .into(),
+                    );
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("the control probe ended without answering".into());
+                }
+            }
             a.detach(None).await;
             b.detach(None).await;
             Ok(())

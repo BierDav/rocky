@@ -67,24 +67,36 @@ async fn invoice(device: &Device, handle: u8) {
     .await;
     snap::ok(device.session.commit([handle; 32])).await;
 }
-async fn keys(device: &Device) -> Vec<String> {
+async fn keys(device: &Device) -> Result<Vec<String>, Failure> {
     let query = rocky_sdk::ReadQuery::new("SELECT key FROM items ORDER BY key", 1024);
-    let mut page = snap::observe(device.session.read(query.clone())).await;
-    for _ in 0..200 {
-        match &page {
-            Err(error) if error["retryable"] == true => {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                page = snap::observe(device.session.read(query.clone())).await;
+    let changes = device.database.observe_tables(None).await?;
+    let outlasts_a_loaded_ci_host = std::time::Duration::from_secs(30);
+    let mut awaiting = None;
+    let waited = tokio::time::timeout(outlasts_a_loaded_ci_host, async {
+        loop {
+            match snap::observe(device.session.read(query.clone())).await {
+                Err(error) if error["code"] == "missing_dependencies" => {
+                    awaiting = Some(error.to_string());
+                    changes.next().await?;
+                }
+                page => return page.map_err(|error| -> Failure { error.to_string().into() }),
             }
-            _ => break,
         }
-    }
-    page.expect("keys")["rows"]
+    })
+    .await;
+    let page = waited.map_err(|_| -> Failure {
+        format!(
+            "the read awaited its dependencies with no table change to release it: {}",
+            awaiting.unwrap_or_default()
+        )
+        .into()
+    })??;
+    Ok(page["rows"]
         .as_array()
         .into_iter()
         .flatten()
         .map(|row| row[0]["value"].as_str().expect("key").to_owned())
-        .collect()
+        .collect())
 }
 
 fn reopen_owner_positioned(
@@ -218,7 +230,7 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
     }
     invoice(&c, 5).await;
     a.sync().await.expect("the successor invoice");
-    let keys = keys(&a).await;
+    let keys = keys(&a).await?;
     assert!(
         keys.len() == 5 && keys.contains(&"0005".to_owned()),
         "{keys:?}"

@@ -69,6 +69,7 @@ pub struct Hub {
     transcripts: Mutex<HashMap<String, Tap>>,
     pub discovery: AtomicBool,
     announced: Mutex<BTreeMap<String, Announcement>>,
+    announcements: tokio::sync::watch::Sender<()>,
     seed: u64,
     faults: Mutex<HashMap<[String; 2], LinkFaults>>,
     down: Mutex<HashSet<[String; 2]>>,
@@ -106,6 +107,7 @@ impl Default for Hub {
             transcripts: Mutex::default(),
             discovery: AtomicBool::new(false),
             announced: Mutex::default(),
+            announcements: tokio::sync::watch::channel(()).0,
             seed: 0,
             faults: Mutex::default(),
             down: Mutex::default(),
@@ -242,6 +244,14 @@ impl Hub {
             .get(name)
             .map(|announcement| announcement.topics.clone())
             .unwrap_or_default()
+    }
+    pub async fn wait_announced(&self, ready: impl Fn(&Self) -> bool) {
+        let mut announcements = self.announcements.subscribe();
+        while !ready(self) {
+            if announcements.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
     }
     pub fn discoverable(&self, name: &str) -> Vec<String> {
         let announced = self
@@ -586,6 +596,7 @@ impl Discovery for Finder {
             }
             announced.remove(&self.name);
             if topics.is_empty() {
+                self.hub.announcements.send_replace(());
                 return Ok(());
             }
             let hint = |node, name: &str| Found {
@@ -608,6 +619,7 @@ impl Discovery for Finder {
                     found: self.sender.clone(),
                 },
             );
+            self.hub.announcements.send_replace(());
             Ok(())
         })
     }
@@ -872,6 +884,7 @@ impl Transport for Node {
             if let Ok(mut announced) = self.hub.announced.lock() {
                 announced.remove(&self.name);
             }
+            self.hub.announcements.send_replace(());
             self.inbound.lock().await.close();
         })
     }

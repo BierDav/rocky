@@ -599,8 +599,8 @@ impl Discovery for Finder {
                 self.hub.announcements.send_replace(());
                 return Ok(());
             }
-            let hint = |node, name: &str| Found {
-                node,
+            let hint = |claimed_node, name: &str| Found {
+                claimed_node,
                 address: name.to_owned(),
                 path: LOCAL_PATH.into(),
                 local: true,
@@ -640,7 +640,7 @@ impl Connector for Memory {
     fn start(
         &self,
         _accepts: bool,
-        _secret: [u8; 32],
+        _route_secret: [u8; 32],
     ) -> BoxFuture<'_, Result<Connected, Failure>> {
         Box::pin(async move {
             self.hub.starts.fetch_add(1, Ordering::SeqCst);

@@ -159,6 +159,58 @@ async fn foreign_expired_and_self_signed_chains_are_refused_before_anything_is_r
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn an_address_is_a_hint_never_a_grant() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let (alice, bob, mallory) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
+    let b = open(&f, &dir, "b.db", &bob).await;
+    let m = open(&f, &dir, "m.db", &mallory).await;
+    let (near, far) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
+    let (dialed_alices_address, answered) = tokio::join!(
+        Link::open(
+            near,
+            &b,
+            bob.clone(),
+            f.credentials(&bob, f.full()),
+            Some(alice.public_key()),
+        ),
+        Link::open(
+            far,
+            &m,
+            mallory.clone(),
+            f.credentials(&mallory, f.full()),
+            None
+        ),
+    );
+    match dialed_alices_address {
+        Err(Error::Rejected(message)) => assert_eq!(
+            message, "unexpected link peer",
+            "a credentialed member answering at the address held for alice is not alice"
+        ),
+        other => panic!("expected the peer refusal, got {:?}", other.err()),
+    }
+    assert!(answered.is_err());
+    assert_eq!(
+        b.admitted_tip(mallory.public_key()).await,
+        None,
+        "bob keeps no tip from a peer that answered at an address held for someone else"
+    );
+    let (near, far) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
+    let (dialed_mallory, accepted) = testing::links(
+        near,
+        far,
+        (&b, bob.clone(), f.credentials(&bob, f.full())),
+        (&m, mallory.clone(), f.credentials(&mallory, f.full())),
+    )
+    .await;
+    assert!(
+        dialed_mallory.is_ok() && accepted.is_ok(),
+        "the same stream admits mallory once bob dials for mallory"
+    );
+    assert!(b.admitted_tip(mallory.public_key()).await.is_some());
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_revoked_peer_learns_its_statement_and_both_sides_end_the_session() {
     let f = Fixture::new();
     let dir = Scratch::new().await;

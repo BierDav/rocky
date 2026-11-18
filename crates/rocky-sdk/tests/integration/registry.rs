@@ -564,10 +564,10 @@ impl Connector for Faulty {
     fn start(
         &self,
         accepts: bool,
-        secret: [u8; 32],
+        route_secret: [u8; 32],
     ) -> BoxFuture<'_, Result<rocky_sdk::transport::Connected, Failure>> {
         Box::pin(async move {
-            let inner = self.inner.start(accepts, secret).await?;
+            let inner = self.inner.start(accepts, route_secret).await?;
             Ok(rocky_sdk::transport::Connected {
                 discovery: inner.discovery,
                 changes: inner.changes,

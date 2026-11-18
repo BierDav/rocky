@@ -43,7 +43,7 @@ impl Node {
         self.announcing.store(announced, Ordering::SeqCst);
     }
     pub(super) async fn learn_found(&self, kind: &str, found: Found) -> Result<(), Failure> {
-        let node = PublicKey::from_bytes(&found.node)?;
+        let node = PublicKey::from_bytes(&found.claimed_node)?;
         {
             let settings = self.settings.lock().await;
             if !settings.would_learn(node, kind, &found.address, found.local) {

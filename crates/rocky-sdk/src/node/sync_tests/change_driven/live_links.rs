@@ -978,10 +978,10 @@ async fn real_pair(
     b.detach(None).await;
     let connector: Arc<dyn Connector> = Arc::new(rocky_iroh::Options::isolated("127.0.0.1:0"));
     let ta = connector
-        .start(true, Settings::transport_key(&a.vault)?)
+        .start(true, Settings::route_secret(&a.vault)?)
         .await?;
     let tb = connector
-        .start(true, Settings::transport_key(&b.vault)?)
+        .start(true, Settings::route_secret(&b.vault)?)
         .await?;
     let aa = ta.address().await?;
     let ab = tb.address().await?;

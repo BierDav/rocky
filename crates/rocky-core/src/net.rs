@@ -143,7 +143,7 @@ pub const TOPIC_PATH: &str = "topic";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
-    pub node: [u8; 32],
+    pub claimed_node: [u8; 32],
     pub address: String,
     pub path: String,
     pub local: bool,
@@ -168,7 +168,11 @@ pub trait Discovery: Send + Sync {
 }
 
 pub trait Connector: Send + Sync {
-    fn start(&self, accepts: bool, secret: [u8; 32]) -> BoxFuture<'_, Result<Connected, Failure>>;
+    fn start(
+        &self,
+        accepts: bool,
+        route_secret: [u8; 32],
+    ) -> BoxFuture<'_, Result<Connected, Failure>>;
 }
 
 #[derive(Clone)]

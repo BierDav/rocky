@@ -412,10 +412,10 @@ impl Finder {
             }
         }
     }
-    fn report(&self, node: [u8; 32], address: &EndpointAddr, path: &str, local: bool) {
+    fn report(&self, claimed_node: [u8; 32], address: &EndpointAddr, path: &str, local: bool) {
         if let Ok(address) = serde_json::to_string(address) {
             let _ = self.0.sender.try_send(Found {
-                node,
+                claimed_node,
                 address,
                 path: path.into(),
                 local,

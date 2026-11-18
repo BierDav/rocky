@@ -17,7 +17,7 @@ async fn found(transport: &Attachment, node: [u8; 32]) -> Result<Found, Failure>
     tokio::time::timeout(WAIT, async {
         loop {
             match discovery.found().await {
-                Some(found) if found.node == node => return Ok(found),
+                Some(found) if found.claimed_node == node => return Ok(found),
                 Some(_) => {}
                 None => return Err("discovery closed".into()),
             }
@@ -64,7 +64,7 @@ async fn members_of_a_topic_find_each_other_over_mdns_and_others_do_not() -> Res
         tokio::time::timeout(Duration::from_millis(10), discovery(&a)?.found()).await
     {
         assert_eq!(
-            heard.ok_or("closed")?.node,
+            heard.ok_or("closed")?.claimed_node,
             [12; 32],
             "members never hear of an endpoint of another topic"
         );

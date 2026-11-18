@@ -578,3 +578,100 @@ fn tip_log(scope: Scope) -> TipLog {
         tip: TipId([9; 32]),
     }
 }
+
+const RESTORE_CRASH_DIR: &str = "ROCKY_VOTER_RESTORE_CRASH_DIR";
+const RESTORE_STEPS: [&str; 6] = [
+    "restore.fence.before_sync",
+    "restore.fence.before_rename",
+    "restore.fence.after_sync",
+    "restore.state.before_sync",
+    "restore.state.before_rename",
+    "restore.state.after_sync",
+];
+
+#[test]
+fn restore_crash_child() {
+    let Ok(dir) = std::env::var(RESTORE_CRASH_DIR) else {
+        return;
+    };
+    let dir = Path::new(&dir);
+    let genesis: CertifiedGenesis = decode(&read(&dir.join("genesis.cbor")).unwrap()).unwrap();
+    let _ = Store::restore(&dir.join("backup"), &genesis, 1, &dir.join("restored"));
+}
+
+#[tokio::test]
+async fn an_interrupted_restore_never_opens_unfenced_or_with_the_backup_leader_vote() {
+    use openraft::storage::RaftLogStorageExt;
+    use std::os::unix::process::ExitStatusExt;
+    let (genesis, ..) = certified();
+    for step in RESTORE_STEPS.into_iter().map(Some).chain([None]) {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let mut store = Store::open(&source, genesis.clone(), true, Limits::default()).unwrap();
+        store.save_vote(&Vote::new_committed(2, 1)).await.unwrap();
+        store
+            .blocking_append((1..=2).map(|index| Entry::<Types> {
+                log_id: LogId::new(CommittedLeaderId::new(2, 1), index),
+                payload: EntryPayload::Blank,
+            }))
+            .await
+            .unwrap();
+        drop(store);
+        let backup = directory.path().join("backup");
+        let manifest = Store::backup(&source, genesis.clone(), 1, &backup).unwrap();
+        let restored = directory.path().join("restored");
+        match step {
+            Some(step) => {
+                std::fs::write(
+                    directory.path().join("genesis.cbor"),
+                    encode(&genesis).unwrap(),
+                )
+                .unwrap();
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "raft_store::tests::restore_crash_child",
+                        "--exact",
+                        "--test-threads=1",
+                    ])
+                    .env(RESTORE_CRASH_DIR, directory.path())
+                    .env("ROCKY_COORDINATOR_CRASH", step)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .unwrap();
+                assert_eq!(
+                    status.signal(),
+                    Some(6),
+                    "the restore must reach {step}: {status:?}"
+                );
+            }
+            None => assert_eq!(
+                Store::restore(&backup, &genesis, 1, &restored).unwrap(),
+                manifest
+            ),
+        }
+        for provision in [false, true] {
+            let Ok(store) = Store::open(&restored, genesis.clone(), provision, Limits::default())
+            else {
+                assert!(
+                    step.is_some_and(|step| step != "restore.state.after_sync"),
+                    "a restore whose state file is synced must open"
+                );
+                continue;
+            };
+            let image = store.0.image.lock().await;
+            assert_eq!(
+                image.fence,
+                Some(Fence {
+                    index: manifest.index,
+                    learner: false,
+                }),
+                "a restore interrupted at {step:?} opened without its fence"
+            );
+            assert!(
+                image.hard.vote.is_some_and(|vote| !vote.committed),
+                "a restore interrupted at {step:?} kept the backup's leader vote"
+            );
+        }
+    }
+}

@@ -16,15 +16,12 @@ struct Configuration {
     mesh: MeshId,
     node: u64,
     key: PrivateKey,
-    /// The client lane of a public service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client: Option<ClientLane>,
 }
-/// The voter's iroh endpoint: its secret and how it binds.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClientLane {
-    /// 64 hexadecimal digits; the endpoint ID certified in genesis.
     secret: String,
     #[serde(default)]
     relay: Option<String>,
@@ -140,7 +137,6 @@ async fn run(path: &Path, provision: bool) -> Result<(), Failure> {
     Ok(())
 }
 
-/// A voter is dialed at its address, so it announces under no topic.
 const ANNOUNCES_A_TOPIC: bool = false;
 
 async fn serve_clients(
@@ -190,8 +186,6 @@ fn write_private(path: &Path, text: &str) -> Result<(), Failure> {
         .map_err(|error| -> Failure { error.to_string().into() })
 }
 
-/// New independent voter secrets, written owner-only into `out`; prints
-/// the public half a provider certifies.
 fn keys(out: &Path, address: Option<&str>) -> Result<(), Failure> {
     println!(
         "{}",
@@ -217,12 +211,11 @@ fn voter_keys(out: &Path, address: Option<&str>) -> Result<serde_json::Value, Fa
     }))
 }
 
-/// A three-voter service on loopback for development: independent secrets
-/// per voter, an admin key, configurations and the certified bundle. The
-/// root key exists only in memory while certifying. Relays and discovery
-/// are off; voter TCP uses `port + 1..=3`, iroh `port + 11..=13`.
+const LOCAL_VOTERS: u16 = 3;
+const LOCAL_IROH_PORT_OFFSET: u16 = 10;
+
 fn local(out: &Path, port: u16) -> Result<(), Failure> {
-    port.checked_add(13)
+    port.checked_add(LOCAL_IROH_PORT_OFFSET + LOCAL_VOTERS)
         .ok_or("base port leaves no room for voter addresses")?;
     if std::fs::read_dir(out).is_ok_and(|mut entries| entries.next().is_some()) {
         return Err(format!("{} is not empty", out.display()).into());
@@ -238,9 +231,9 @@ fn local(out: &Path, port: u16) -> Result<(), Failure> {
             .ok_or("mesh")?,
     );
     let mut voters = Vec::new();
-    for id in 1..=3u16 {
+    for id in 1..=LOCAL_VOTERS {
         let dir = out.join(format!("voter-{id}"));
-        let udp = format!("127.0.0.1:{}", port + 10 + id);
+        let udp = format!("127.0.0.1:{}", port + LOCAL_IROH_PORT_OFFSET + id);
         let public = voter_keys(&dir, Some(&udp))?;
         voters.push(serde_json::json!({
             "id": id,
@@ -287,7 +280,6 @@ fn local(out: &Path, port: u16) -> Result<(), Failure> {
     Ok(())
 }
 
-/// What the membership authority uses to administer voters over provider TCP.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Admin {
@@ -299,8 +291,6 @@ struct Admin {
 fn voters(list: &str) -> Result<std::collections::BTreeSet<u64>, Failure> {
     list.split(',').map(|id| Ok(id.trim().parse()?)).collect()
 }
-/// A stable ID of a membership plan, so retrying the same plan never
-/// applies it twice.
 fn membership_plan_id(revision: &str, expected: &str, target: &str) -> rocky_core::Commitment {
     rocky_core::commitment(
         "rocky.voter-cli.membership.v1",
@@ -339,11 +329,9 @@ async fn admin(path: &Path, command: &[&str]) -> Result<(), Failure> {
     Ok(())
 }
 
-/// The provider's description of a service, certified offline by its root.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Plan {
-    /// 32 hexadecimal digits each.
     mesh: String,
     configuration: String,
     membership_authority: PublicKey,
@@ -361,10 +349,8 @@ struct Plan {
 #[serde(deny_unknown_fields)]
 struct PlannedVoter {
     id: u64,
-    /// Voter-to-voter TCP inside the provider network.
     address: String,
     key: PublicKey,
-    /// The iroh endpoint address `keys` printed.
     client: String,
 }
 fn certify(plan: &Path, root: &Path, out: &Path) -> Result<(), Failure> {
@@ -392,7 +378,7 @@ fn certify_plan(plan: &Plan, root: &PrivateKey, out: &Path) -> Result<(), Failur
                 .collect(),
             initial_voters: plan.voters.iter().map(|v| v.id).collect(),
             membership_authority: plan.membership_authority,
-            directory_definition: [0; 32],
+            directory_definition: NO_DIRECTORY_DEFINITION,
             directory: None,
             authorities: Vec::new(),
             max_control_lifetime: plan.max_control_lifetime,

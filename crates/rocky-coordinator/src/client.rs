@@ -15,38 +15,22 @@ use rocky_credentials::{
 };
 use rocky_platform::time::{Duration, sleep, timeout};
 use std::sync::{Arc, Mutex, PoisonError};
-/// A client of the coordination service. Natively it also reaches voters
-/// over their TCP addresses; a browser has no sockets and reaches a public
-/// service only through a transport (`connect`).
 pub struct NetworkCoordinator {
     genesis: CertifiedGenesis,
     key: PrivateKey,
-    /// The node certificate requests present, which a trusted identity
-    /// signed; replaced when it is renewed.
     certificate: Mutex<Option<SignedCapability>>,
-    /// The claim chain counter requests present, from the domain's
-    /// publisher to this node; replaced when it is renewed.
     claims: Mutex<Option<CredentialChain>>,
-    /// The client lane of a public service; voter TCP when absent.
-    route: Option<Arc<dyn Transport>>,
+    public_client_lane: Option<Arc<dyn Transport>>,
     preferred: Mutex<(Option<u64>, Option<u64>)>,
     observer: Mutex<Option<Observer>>,
-    /// The service the genesis certifies.
     identity: CoordinatorIdentity,
 }
-/// Sees how each call ended: `Ok` once the service answered it, or the
-/// refusal; `Unavailable` when no voter answered.
 pub use rocky_credentials::CoordinationObserver as Observer;
-/// A browser has no voter TCP. `connect`, its only constructor there,
-/// requires both a route and a public service, so a client lacking either is
-/// misconfigured.
 #[cfg(target_family = "wasm")]
 fn unrouted_browser_client() -> Result<Reply, CoordinationError> {
     Err(CoordinationError::Configuration)
 }
 impl NetworkCoordinator {
-    /// A client of the voters' TCP addresses, such as the membership
-    /// authority's.
     #[cfg(not(target_family = "wasm"))]
     pub fn open(
         genesis: CertifiedGenesis,
@@ -61,7 +45,7 @@ impl NetworkCoordinator {
         root: PublicKey,
         mesh: MeshId,
         key: PrivateKey,
-        route: Option<Arc<dyn Transport>>,
+        public_client_lane: Option<Arc<dyn Transport>>,
     ) -> Result<Self, CoordinationError> {
         genesis.verify(root, mesh)?;
         let identity = CoordinatorIdentity {
@@ -75,31 +59,23 @@ impl NetworkCoordinator {
             key,
             certificate: Mutex::new(None),
             claims: Mutex::new(None),
-            route,
+            public_client_lane,
             preferred: Mutex::new((None, None)),
             observer: Mutex::new(None),
         })
     }
-    /// Calls `observer` with the outcome of every later call.
     pub fn observe(&self, observer: Observer) {
         *self.observer.lock().unwrap_or_else(PoisonError::into_inner) = Some(observer);
     }
-    /// Presents `certificate`, this node's under a trusted identity, with
-    /// every later request.
     pub fn certify(&self, certificate: SignedCapability) {
         *self
             .certificate
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(certificate);
     }
-    /// Presents `claims`, this node's claim chain, with every later counter
-    /// claim and read; `None` presents none.
     pub fn present_claims(&self, claims: Option<CredentialChain>) {
         *self.claims.lock().unwrap_or_else(PoisonError::into_inner) = claims;
     }
-    /// A client of the public service `bundle` pins, reached through
-    /// `transport` at the certified client endpoints of its kind. Requests
-    /// are signed with `key`; the transport stays its owner's.
     pub fn connect(
         bundle: &TrustBundle,
         key: PrivateKey,
@@ -116,8 +92,10 @@ impl NetworkCoordinator {
         }
         Self::new(genesis, bundle.root, bundle.mesh, key, Some(transport))
     }
-    /// Tries the hinted leader and the last responsive voter before the rest.
-    async fn attempt(&self, request: &Request) -> Vec<Result<Reply, CoordinationError>> {
+    async fn attempt_leader_first(
+        &self,
+        request: &Request,
+    ) -> Vec<Result<Reply, CoordinationError>> {
         let genesis = match self.genesis.id() {
             Ok(id) => id,
             Err(error) => return vec![Err(error)],
@@ -148,7 +126,7 @@ impl NetworkCoordinator {
                 continue;
             };
             let message = || Message::Client(Box::new(request.clone()));
-            let reply = match (&self.route, &self.genesis.genesis.public) {
+            let reply = match (&self.public_client_lane, &self.genesis.genesis.public) {
                 (Some(transport), Some(public)) => {
                     let mut reply: Result<Reply, CoordinationError> =
                         Err(CoordinationError::Unavailable);
@@ -243,7 +221,7 @@ impl NetworkCoordinator {
         }
         timeout(Duration::from_secs(12), async {
             for _ in 0..3 {
-                for response in self.attempt(&request).await {
+                for response in self.attempt_leader_first(&request).await {
                     match response {
                         Ok(reply) if reply.result != Err(CoordinationError::Unavailable) => {
                             return reply.result;
@@ -258,7 +236,6 @@ impl NetworkCoordinator {
         .await
         .map_err(|_| CoordinationError::Unavailable)?
     }
-    /// Metadata-only log call. Join/append sequences must be durably increasing per log/node.
     pub async fn coordinated(
         &self,
         log: TipLog,
@@ -286,7 +263,6 @@ impl NetworkCoordinator {
         );
         result
     }
-    /// Commits a terminal entry: a seal, or the owner's recovery.
     fn terminal(
         &self,
         log: TipLog,
@@ -317,8 +293,6 @@ impl NetworkCoordinator {
             _ => Err(CoordinationError::Corrupt),
         }
     }
-    /// The authority's default minimum in-sync size for `scope`'s tips,
-    /// before any node joined one.
     pub async fn configure(
         &self,
         scope: Scope,
@@ -333,8 +307,6 @@ impl NetworkCoordinator {
             _ => Err(CoordinationError::Corrupt),
         }
     }
-    /// Registers the domain of `certificate` on a public service under this
-    /// client's key, which `grant` names as the application's tenant.
     pub async fn register(
         &self,
         grant: SignedCoordinationGrant,
@@ -357,8 +329,6 @@ impl NetworkCoordinator {
             _ => Err(CoordinationError::Corrupt),
         }
     }
-    /// A new control revision: trusted nodes or validity. A trusted node
-    /// still in the log's in-sync set cannot be removed.
     pub async fn control(
         &self,
         certificate: ControlCertificate,
@@ -369,10 +339,6 @@ impl NetworkCoordinator {
             _ => Err(CoordinationError::Corrupt),
         }
     }
-    /// The value `claim` takes from `scope`'s `counter`: the next one, or
-    /// the one it already took. Retry an uncertain result (`Unavailable`)
-    /// with the same claim; it never takes a second value. A value the
-    /// application abandons stays a gap.
     pub async fn claim(
         &self,
         scope: Scope,
@@ -394,8 +360,6 @@ impl NetworkCoordinator {
             _ => Err(CoordinationError::Corrupt),
         }
     }
-    /// `counter`'s last value and, for `claim`, what it took: a
-    /// linearizable read for reconciliation after a restart.
     pub async fn counter(
         &self,
         scope: Scope,
@@ -417,9 +381,6 @@ impl NetworkCoordinator {
             _ => Err(CoordinationError::Corrupt),
         }
     }
-    /// Pushes `revocations` of `scope`'s publisher: claim rights they end
-    /// are refused from the commit on. Returns the digest of the live
-    /// statements the coordinator holds for the domain.
     pub async fn revoke(
         &self,
         scope: Scope,
@@ -439,14 +400,12 @@ impl NetworkCoordinator {
             _ => Err(CoordinationError::Corrupt),
         }
     }
-    /// This tenant's use of its budgets.
     pub async fn usage(&self) -> Result<crate::service::Usage, CoordinationError> {
         match self.call(nonce(), Operation::Usage).await? {
             Outcome::Usage(usage) => Ok(usage),
             _ => Err(CoordinationError::Corrupt),
         }
     }
-    /// Owner-initiated closure of `scope`; a closed identity never reopens.
     pub async fn close_domain(
         &self,
         scope: Scope,
@@ -634,7 +593,7 @@ impl rocky_credentials::Coordinator for NetworkCoordinator {
             self.genesis.root,
             self.genesis.genesis.mesh,
             key,
-            self.route.clone(),
+            self.public_client_lane.clone(),
         )?;
         client.certify(certificate);
         Ok(Arc::new(client))

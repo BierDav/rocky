@@ -1,4 +1,3 @@
-//! Root-certified, bounded mesh authority. Root secrets are never needed by voters.
 use p2panda_core::{PrivateKey, PublicKey, Signature};
 use rocky_core::*;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -7,7 +6,6 @@ use std::collections::BTreeSet;
 pub const MAX_FRAME: usize = 256 * 1024;
 pub const MAX_RECORDS: usize = 65536;
 pub const MAX_STORE: usize = 1024 * 1024 * 1024;
-/// The one domain control format; a control signed under another is refused.
 const CONTROL_LABEL: &str = "rocky.control.v4";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,12 +24,7 @@ pub struct DomainControl {
     pub scope: Scope,
     pub configuration: Configuration,
     pub revision: u64,
-    /// The trusted identities whose nodes may join the domain's
-    /// coordinated log; a node presents its certificate.
     pub trusted: Vec<PublicKey>,
-    /// The domain's publisher: the root of the claim rights
-    /// (`rocky_credentials::ClaimRight`) that let other nodes claim its
-    /// counters. Without one only trusted nodes claim. Fixed for the domain.
     pub publisher: Option<Box<PublicKey>>,
     pub not_before: u64,
     pub expires: u64,
@@ -50,8 +43,6 @@ impl ControlCertificate {
             issuer: issuer.public_key(),
         })
     }
-    /// A root-bound control: its issuer is the genesis authority of its
-    /// scope in the certified mesh.
     pub fn verify(&self, genesis: &Genesis, time: u64) -> Result<(), CoordinationError> {
         if !genesis
             .authorities
@@ -61,10 +52,13 @@ impl ControlCertificate {
         {
             return Err(CoordinationError::Denied);
         }
-        self.check(genesis, time)
+        self.check_without_authority(genesis, time)
     }
-    /// Signature, bounds, configuration and lifetime, whoever the authority.
-    pub(crate) fn check(&self, genesis: &Genesis, time: u64) -> Result<(), CoordinationError> {
+    pub(crate) fn check_without_authority(
+        &self,
+        genesis: &Genesis,
+        time: u64,
+    ) -> Result<(), CoordinationError> {
         let c = &self.control;
         if c.configuration != genesis.configuration
             || c.revision == 0
@@ -86,33 +80,23 @@ impl ControlCertificate {
         Ok(commitment("rocky.control-reference.v1", &encode(self)?))
     }
 }
-/// Where clients reach one voter: an address of transport `kind`, such as
-/// an iroh endpoint address whose key the transport authenticates.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ClientEndpoint {
     pub voter: u64,
     pub kind: String,
     pub address: String,
 }
-/// The provider's terms for tenants registering their own domains. A
-/// genesis without it controls only its root-bound scopes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PublicService {
-    /// The only client endpoints; tenant requests never use voter TCP.
     pub endpoints: Vec<ClientEndpoint>,
-    /// Signs tenant admissions; `None` admits any tenant key.
     pub admission: Option<PublicKey>,
-    /// Retention and quota budgets every voter applies.
     pub limits: crate::Limits,
-    /// Tenants the service holds, each with the full tenant budgets.
     pub tenants: u32,
-    /// Registrations, including replacements, per tenant per day.
     pub registrations_per_day: u32,
-    /// Concurrent client requests per tenant at one voter.
     pub tenant_lanes: u32,
 }
-/// Most concurrent client requests one voter serves.
 pub const CLIENT_LANES: u32 = 64;
+pub const NO_DIRECTORY_DEFINITION: Commitment = [0; 32];
 impl PublicService {
     pub(crate) fn validate(&self, voters: &[Voter]) -> Result<(), CoordinationError> {
         self.limits.validate()?;
@@ -142,8 +126,6 @@ impl PublicService {
         }
         Ok(())
     }
-    /// Whether every tenant's full state and retry budget fit at once, so no
-    /// tenant can take another's.
     fn every_tenant_budget_fits(&self) -> bool {
         let tenants = self.tenants as usize;
         tenants.saturating_mul(self.limits.tenant_bytes) <= self.limits.total_bytes
@@ -159,15 +141,11 @@ pub struct Genesis {
     pub voters: Vec<Voter>,
     pub initial_voters: BTreeSet<u64>,
     pub membership_authority: PublicKey,
-    /// Zero without a Directory.
     pub directory_definition: Commitment,
-    /// Required unless the genesis is a public service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory: Option<ControlCertificate>,
-    /// Exact scope bindings: these authorize metadata control, never row access.
     pub authorities: Vec<Authority>,
     pub max_control_lifetime: u64,
-    /// Present for a service where tenants register their own domains.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public: Option<PublicService>,
 }
@@ -196,7 +174,7 @@ impl CertifiedGenesis {
             || g.initial_voters.len() < 3
             || (g.authorities.is_empty() && g.public.is_none())
             || g.authorities.len() > 64
-            || (g.directory_definition == [0; 32]) != g.directory.is_none()
+            || (g.directory_definition == NO_DIRECTORY_DEFINITION) != g.directory.is_none()
             || (g.directory.is_none() && g.public.is_none())
             || g.configuration == [0; 16]
             || g.max_control_lifetime == 0
@@ -233,7 +211,6 @@ impl CertifiedGenesis {
             None => Ok(()),
         }
     }
-    /// The retention budgets of this genesis: the public service's or the defaults.
     pub fn limits(&self) -> crate::Limits {
         self.genesis
             .public
@@ -283,16 +260,12 @@ pub fn now() -> Result<u64, CoordinationError> {
         .map_err(|_| CoordinationError::Corrupt)
 }
 
-/// What a client pins to use a coordination service: the operator's root
-/// key, the service's mesh and its certified genesis. A provider publishes
-/// one; a self-hosted service writes its own in the same format.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustBundle {
     pub format: u32,
     pub root: PublicKey,
     pub mesh: MeshId,
-    /// The certified genesis, as lowercase hexadecimal CBOR.
     pub genesis: String,
 }
 pub const BUNDLE_FORMAT: u32 = 2;
@@ -309,7 +282,6 @@ impl TrustBundle {
                 .collect(),
         })
     }
-    /// The verified genesis of a public service.
     pub fn genesis(&self) -> Result<CertifiedGenesis, CoordinationError> {
         if self.format != BUNDLE_FORMAT {
             return Err(CoordinationError::UnsupportedFormat);

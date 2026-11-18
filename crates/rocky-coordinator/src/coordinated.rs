@@ -1,5 +1,3 @@
-//! Metadata-only per-tip logs of a domain. Storage acknowledgments are
-//! signed by trusted nodes.
 use crate::{certified::encode, machine::Request};
 use p2panda_core::PublicKey;
 use rocky_core::{
@@ -11,13 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 pub const HASH_WINDOW: usize = 1024;
-/// Fixed admission caps of the current log machine, in addition to tenant Usage budgets.
 pub const TRUSTED_NODES: usize = 32;
 pub const APPENDS_PER_MINUTE: u32 = 60;
 pub const ACKNOWLEDGMENT_DEADLINE: u64 = 30;
-/// Open tip logs one domain holds.
 pub const TIP_LOGS: usize = 8;
-/// Ended tip logs one domain retains; the earliest ended is dropped beyond.
 pub const ENDED_LOGS: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -27,7 +22,6 @@ pub enum Action {
         position: u64,
         hash: Commitment,
     },
-    /// The minimum the tip's opening names; immutable after the first join.
     Configure {
         minimum: usize,
     },
@@ -43,36 +37,26 @@ pub enum Action {
         duration: u64,
         sequence: u64,
     },
-    /// Volatile leader knowledge. The node must have durably stored this exact entry.
     Acknowledge {
         pending: Pending,
     },
-    /// Voter-authored resolution with the original signed node acknowledgments.
     Resolve {
         pending: Pending,
         acknowledgments: Vec<Request>,
     },
-    /// The terminal entry: a seal of the tip or a bookmark move off it. Once
-    /// the log committed an entry, a node of its in-sync set submits it.
     Seal {
         terminal: LogTerminal,
     },
-    /// The owner's recovery seal of a stuck tip, an encoded
-    /// `rocky_credentials::SignedSeal`: the one terminal entry committed
-    /// without the in-sync set.
     Recover {
         #[serde(with = "bytes")]
         seal: Vec<u8>,
     },
-    /// A trusted node's signed `rocky_credentials::TerminalAck` of the
-    /// terminal entry, kept with it for devices to verify.
     AcknowledgeTerminal {
         #[serde(with = "bytes")]
         acknowledgment: Vec<u8>,
     },
 }
 impl Action {
-    /// The action's name in diagnostics.
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Head => "head",
@@ -99,7 +83,6 @@ pub struct Pending {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Member {
     pub key: PublicKey,
-    /// The identity that certified the node; its own key without one.
     pub identity: PublicKey,
     pub acknowledged: u64,
 }
@@ -115,14 +98,9 @@ pub struct Head {
     pub pending: Option<Pending>,
     #[serde(with = "hashes")]
     pub hashes: VecDeque<Commitment>,
-    /// The entry at `commit` that ended the log.
     pub terminal: Option<LogTerminal>,
-    /// Encoded terminal acknowledgments, one per node, in arrival order.
     pub acknowledgments: Vec<Acknowledgment>,
-    /// Set as read: the owner closed the domain, so the log takes no write.
     pub closed: bool,
-    /// Set as read: the domain dropped ended logs beyond `ENDED_LOGS`, so a
-    /// log at its genesis may be one that ended and was dropped.
     pub ended_dropped: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -187,7 +165,6 @@ impl Log {
             appends: 0,
         }
     }
-    /// Whether no terminal entry ended the log.
     pub fn open(&self) -> bool {
         self.head.terminal.is_none()
     }
@@ -198,7 +175,6 @@ impl Log {
             0
         }
     }
-    /// Conservative admission size, including encoded retry outcomes.
     pub fn bytes(&self) -> usize {
         let acknowledgments: usize = self
             .head
@@ -212,12 +188,6 @@ impl Log {
             1024 + 32 * (80 + 512) + HASH_WINDOW * 40 + acknowledgments
         }
     }
-    /// Commits `terminal` from `key` at `commit+1`, aborting the pending
-    /// entry. The in-sync set holds every committed entry, so only one of
-    /// its nodes ends a log that has any: a seal never leaves a committed
-    /// entry behind, and a stuck log ends only by the owner's recovery.
-    /// A retry of the same terminal answers the same commit, whoever sends
-    /// it; another one is `Sealed`.
     pub fn seal(
         &mut self,
         key: PublicKey,
@@ -231,9 +201,6 @@ impl Log {
         }
         self.end(terminal)
     }
-    /// Commits the owner's recovery seal of the exact head without the
-    /// in-sync set. `owner` is the domain's authority; the seal's retained
-    /// prefix must chain to the head where the window reaches.
     pub fn recover(
         &mut self,
         log: TipLog,
@@ -268,8 +235,6 @@ impl Log {
         }
         self.end(terminal)
     }
-    /// The same commit for a retry of the terminal that ended the log;
-    /// `Sealed` for another one.
     fn ended(
         &self,
         terminal: LogTerminal,
@@ -283,8 +248,6 @@ impl Log {
             Some(_) => Err(CoordinationError::Sealed),
         }
     }
-    /// Ends the log with `terminal` at `commit+1`: it keeps no in-sync set
-    /// and takes no other entry.
     fn end(&mut self, terminal: LogTerminal) -> std::result::Result<Result, CoordinationError> {
         let epoch = self
             .head
@@ -315,10 +278,6 @@ impl Log {
             running_hash,
         })
     }
-    /// Keeps `key`'s acknowledgment of the terminal entry: it names this
-    /// log, the terminal's position, running hash, seal and continuation,
-    /// and is signed by `key`. The signer's chain is the devices' to verify.
-    /// A retry of the kept record succeeds; a different one is refused.
     pub fn acknowledge_terminal(
         &mut self,
         log: TipLog,
@@ -355,9 +314,6 @@ impl Log {
         });
         Ok(Result::TerminalAcknowledged)
     }
-    /// Whether `retained` chains through the window to the commit: at the
-    /// genesis anchor, or at a position the window reaches. A prefix ending
-    /// before the window is endorsed by the owner's signature alone.
     fn endorses(&self, retained: LogPoint) -> bool {
         let head = &self.head;
         let first = head.commit + 1 - head.hashes.len() as u64;
@@ -570,17 +526,12 @@ impl Log {
     }
 }
 
-/// The tip logs of one domain and the minimum a new one starts with.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Logs {
     scope: Scope,
     configuration: Configuration,
-    /// Owner policy for tips whose opening names none; immutable after the
-    /// domain's first join.
     minimum: usize,
-    /// Oldest first.
     logs: Vec<(TipId, Log)>,
-    /// Whether `store` dropped an ended log.
     dropped: bool,
 }
 impl Logs {
@@ -612,8 +563,6 @@ impl Logs {
         };
         Log::new(log, self.configuration, self.minimum)
     }
-    /// The head of `tip`'s log; an unopened or dropped one is at its
-    /// genesis.
     pub fn head(&self, tip: TipId) -> Head {
         let mut head = self
             .get(tip)
@@ -621,7 +570,6 @@ impl Logs {
         head.ended_dropped = self.dropped;
         head
     }
-    /// Sets the domain's default minimum before any node joined a log.
     pub fn configure(&mut self, minimum: usize) -> std::result::Result<Result, CoordinationError> {
         if minimum == 0
             || minimum > TRUSTED_NODES
@@ -632,10 +580,6 @@ impl Logs {
         self.minimum = minimum;
         Ok(Result::Configured)
     }
-    /// A copy of `tip`'s log to apply `action` from `key` to; `store` keeps
-    /// it. Only a configuration, a join or a terminal entry opens a log, within
-    /// `TIP_LOGS` open ones. A node is in sync on one tip of its domain: a
-    /// join waits while the tip it leaves has a pending entry.
     pub fn working(
         &self,
         key: PublicKey,
@@ -670,8 +614,6 @@ impl Logs {
         }
         Ok(self.fresh(tip))
     }
-    /// Keeps `log` as `tip`'s. A log that just ended moves last, and the
-    /// earliest ended ones beyond `ENDED_LOGS` are dropped.
     pub fn store(&mut self, tip: TipId, log: Log) {
         let index = self.logs.iter().position(|(id, _)| *id == tip);
         match index {
@@ -689,8 +631,6 @@ impl Logs {
             }
         }
     }
-    /// After `key` joined `tip`, removes it from every other tip's in-sync
-    /// set and moves their epochs; `working` checked that none is pending.
     pub fn leave_others(&mut self, key: PublicKey, tip: TipId) {
         for (_, log) in self
             .logs
@@ -717,7 +657,6 @@ impl Logs {
             .iter()
             .filter_map(|(tip, log)| log.head.pending.as_ref().map(|p| (*tip, p)))
     }
-    /// Every in-sync node of every tip.
     pub fn members(&self) -> impl Iterator<Item = &Member> {
         self.logs.iter().flat_map(|(_, log)| &log.head.members)
     }
@@ -866,7 +805,6 @@ impl Head {
     }
 }
 
-/// Conversions between this log's types and the `rocky_core` port.
 impl Pending {
     pub fn port(&self) -> rocky_core::LogPending {
         rocky_core::LogPending {
@@ -921,18 +859,12 @@ impl Head {
     }
 }
 
-/// One process's coordinated logs without Raft or signatures: the same log
-/// machine, acknowledgments and deadline resolution, for tests and
-/// single-process composition. Deadlines resolve on the next call after
-/// them, as the service's leader timer does.
 #[derive(Clone)]
 pub struct MemoryLog {
     state: std::sync::Arc<std::sync::Mutex<MemoryLogs>>,
-    /// A fresh identity per log, so two logs are two services.
     identity: rocky_core::CoordinatorIdentity,
 }
-/// What a memory log's bundle certifies: its root key after this label.
-const MEMORY_BUNDLE: &[u8] = b"rocky.memory-log.v1";
+const MEMORY_BUNDLE_LABEL: &[u8] = b"rocky.memory-log.v1";
 impl Default for MemoryLog {
     fn default() -> Self {
         let root = *p2panda_core::PrivateKey::new().public_key().as_bytes();
@@ -950,10 +882,8 @@ type Acknowledged = std::collections::BTreeMap<TipId, Vec<PublicKey>>;
 #[derive(Default)]
 struct MemoryLogs {
     domains: std::collections::BTreeMap<Scope, (Logs, Acknowledged)>,
-    /// Each domain's control authority, which signs its recovery seals.
     owners: std::collections::BTreeMap<Scope, PublicKey>,
-    /// Seconds added to the system clock.
-    skew: u64,
+    clock_offset_seconds: u64,
     unavailable: bool,
     counters: std::collections::BTreeMap<Scope, crate::counters::Counters>,
     revocations: std::collections::BTreeMap<Scope, rocky_credentials::RevocationSet>,
@@ -962,9 +892,8 @@ impl MemoryLog {
     pub fn new() -> Self {
         Self::default()
     }
-    /// The bundle naming this log in a database's settings.
     pub fn bundle(&self) -> rocky_credentials::CoordinatorBundle {
-        let mut certified = MEMORY_BUNDLE.to_vec();
+        let mut certified = MEMORY_BUNDLE_LABEL.to_vec();
         certified.extend(self.identity.root);
         rocky_credentials::CoordinatorBundle {
             identity: self.identity,
@@ -972,14 +901,12 @@ impl MemoryLog {
             url: None,
         }
     }
-    /// A trusted node's client of these logs.
     pub fn client(&self, key: PublicKey) -> MemoryLogClient {
         MemoryLogClient {
             logs: self.clone(),
             key,
         }
     }
-    /// Sets the owner's default minimum before the domain's first join.
     pub fn configure(
         &self,
         scope: Scope,
@@ -987,16 +914,12 @@ impl MemoryLog {
     ) -> std::result::Result<(), CoordinationError> {
         self.domain(scope, |logs, _, _, _| logs.configure(minimum).map(|_| ()))
     }
-    /// Names `scope`'s control authority, the only signer of its recovery
-    /// seals.
     pub fn set_owner(&self, scope: Scope, owner: PublicKey) {
         self.lock().owners.insert(scope, owner);
     }
-    /// Moves this log's clock, so deadlines pass without sleeping.
     pub fn advance(&self, seconds: u64) {
-        self.lock().skew += seconds;
+        self.lock().clock_offset_seconds += seconds;
     }
-    /// Makes every call fail as an unreachable coordinator does.
     pub fn set_available(&self, available: bool) {
         self.lock().unavailable = !available;
     }
@@ -1008,7 +931,6 @@ impl MemoryLog {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-    /// Runs `f` on `scope`'s logs after resolving every passed deadline.
     fn domain<T>(
         &self,
         scope: Scope,
@@ -1027,7 +949,7 @@ impl MemoryLog {
             .duration_since(rocky_platform::time::UNIX_EPOCH)
             .map_err(|_| CoordinationError::Corrupt)?
             .as_secs()
-            + state.skew;
+            + state.clock_offset_seconds;
         let owner = state.owners.get(&scope).copied();
         let (logs, acknowledged) = state
             .domains
@@ -1046,7 +968,6 @@ impl MemoryLog {
         }
         f(logs, acknowledged, time, owner)
     }
-    /// Applies `action` from `key` to a working copy of `log` and keeps it.
     fn with<T>(
         &self,
         log: TipLog,
@@ -1252,7 +1173,6 @@ impl rocky_core::DomainLog for MemoryLogClient {
         })
     }
 }
-/// A terminal entry's commit, which drops the leader's acknowledgments.
 fn committed(
     result: Result,
     acknowledged: &mut Vec<PublicKey>,
@@ -1272,7 +1192,6 @@ fn committed(
     }
 }
 
-/// Connects only to this log, when a bundle names it exactly.
 impl rocky_credentials::CoordinatorConnector for MemoryLog {
     fn connect(
         &self,
@@ -1318,7 +1237,7 @@ impl rocky_credentials::Coordinator for MemoryLogClient {
             if state.unavailable {
                 return Err(CoordinationError::Unavailable);
             }
-            let time = crate::certified::now()?.saturating_add(state.skew);
+            let time = crate::certified::now()?.saturating_add(state.clock_offset_seconds);
             state
                 .counters
                 .entry(scope)
@@ -1337,7 +1256,7 @@ impl rocky_credentials::Coordinator for MemoryLogClient {
             if state.unavailable {
                 return Err(CoordinationError::Unavailable);
             }
-            let time = crate::certified::now()?.saturating_add(state.skew);
+            let time = crate::certified::now()?.saturating_add(state.clock_offset_seconds);
             state
                 .counters
                 .get(&scope)
@@ -1360,7 +1279,7 @@ impl rocky_credentials::Coordinator for MemoryLogClient {
                 .owners
                 .get(&scope)
                 .ok_or(CoordinationError::UnknownDomain)?;
-            let time = crate::certified::now()?.saturating_add(state.skew);
+            let time = crate::certified::now()?.saturating_add(state.clock_offset_seconds);
             let held = state.revocations.entry(scope).or_default();
             held.merge_in(
                 &revocations,

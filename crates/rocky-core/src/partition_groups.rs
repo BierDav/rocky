@@ -1,20 +1,16 @@
-//! Schema-level partition slots; table scopes remain independent.
 use crate::{
     Commitment, KeyColumn, LOGICAL_SCHEMA_FORMAT, LogicalSchema, LogicalTable, PartitionValue,
     SchemaError, Scope, SqlValue, commitment, identifier,
 };
 use std::collections::BTreeMap;
 
-/// A group name is unique, including the implicit group of an ungrouped table.
 #[derive(Clone, Debug)]
 pub struct PartitionGroup<'a> {
     pub name: &'a str,
     pub tables: Vec<&'a LogicalTable>,
-    /// In `partition_by` declaration order, independent of column names.
     pub slots: Vec<KeyColumn>,
 }
 
-/// The shared address of a group partition, distinct from its table scopes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GroupAddress {
     pub domain: Scope,
@@ -24,7 +20,6 @@ pub struct GroupAddress {
 }
 
 impl LogicalSchema {
-    /// Validates group declarations and exposes their positional slots and members.
     pub fn partition_groups(&self) -> Result<Vec<PartitionGroup<'_>>, SchemaError> {
         let mut groups: BTreeMap<&str, PartitionGroup<'_>> = BTreeMap::new();
         for table in &self.tables {
@@ -89,7 +84,6 @@ impl LogicalSchema {
         Ok(groups.into_values().collect())
     }
 
-    /// Maps a table's partition values to its group's slots by position.
     pub fn group_address(
         &self,
         domain: Scope,

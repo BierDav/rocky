@@ -1,5 +1,3 @@
-//! Tenant registration, isolation and quotas of a public service, driven
-//! deterministically at the state machine.
 use super::*;
 use crate::coordinated::Action;
 use crate::transport::nonce;
@@ -86,7 +84,6 @@ fn limits() -> Limits {
         ..Limits::default()
     }
 }
-/// Budgets with room for joined logs, whose retry records are accounted.
 fn log_limits() -> Limits {
     Limits {
         tenant_bytes: 128 * 1024,
@@ -114,7 +111,7 @@ impl Service {
                 configuration: [5; 16],
                 initial_voters: [1, 2, 3].into(),
                 membership_authority: PrivateKey::new().public_key(),
-                directory_definition: [0; 32],
+                directory_definition: NO_DIRECTORY_DEFINITION,
                 directory: None,
                 authorities: Vec::new(),
                 max_control_lifetime: 366 * DAY,

@@ -8,8 +8,6 @@ pub enum Delivery {
     Pending(Vec<OperationId>),
 }
 
-/// Pure applied-history helper, scoped to one domain. Durable pending storage and
-/// counter allocation remain runtime responsibilities.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppliedOperations {
     scope: Scope,
@@ -53,7 +51,6 @@ impl AppliedOperations {
             Delivery::Pending(missing)
         })
     }
-    /// Call only together with a successful application of this operation.
     pub fn record_applied(&mut self, envelope: &Envelope) -> Result<(), ProtocolError> {
         match self.classify(envelope)? {
             Delivery::Duplicate => return Ok(()),
@@ -64,7 +61,6 @@ impl AppliedOperations {
             .insert(envelope.id, (envelope.encode()?, envelope.lamport));
         Ok(())
     }
-    /// Undo `record_applied` for an operation whose transaction rolled back.
     pub fn forget(&mut self, id: OperationId) {
         self.operations.remove(&id);
     }

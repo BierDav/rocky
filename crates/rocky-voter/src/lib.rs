@@ -1,4 +1,3 @@
-//! Persistent Raft voters and their authenticated service.
 #![cfg(not(target_family = "wasm"))]
 mod raft_store;
 mod service;

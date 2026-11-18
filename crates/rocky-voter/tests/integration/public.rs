@@ -1,6 +1,3 @@
-//! A public coordination service: three voter processes with iroh client
-//! lanes, two independent application owners, quotas, fairness, outages
-//! and fenced restore.
 use crate::support;
 use rocky_coordinator::{
     Limits,
@@ -19,7 +16,6 @@ fn limits() -> Limits {
         ..Limits::default()
     }
 }
-/// The tenant's owner client and its executor, joined to `scope`'s log.
 async fn registered(
     cluster: &PublicCluster,
     tenant: &Tenant,
@@ -44,8 +40,6 @@ async fn registered(
     join(&executor, scope, 1).await;
     (owner, executor)
 }
-/// Appends and acknowledges `action` as the log's one member; the position
-/// it committed at.
 async fn commit(
     client: &NetworkCoordinator,
     scope: Scope,
@@ -240,7 +234,7 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
     }
     assert!(refused > 0, "A saturated its lanes");
     let admin = cluster.admin();
-    let leader = cluster.wait_leader(&admin).await;
+    let leader = cluster.wait_unfenced_leader(&admin).await;
     let status = admin.status(leader).await.unwrap();
     assert!(status.metrics.busy > 0);
     assert_eq!(status.tenants, 2);
@@ -284,9 +278,9 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
     let first = append(&exec, scope, 1, 2).await;
     commit(&exec, scope, first).await.unwrap();
 
-    let leader = cluster.wait_leader(&admin).await;
+    let leader = cluster.wait_unfenced_leader(&admin).await;
     cluster.stop(leader);
-    cluster.wait_leader(&admin).await;
+    cluster.wait_unfenced_leader(&admin).await;
     let second = append(&exec, scope, 2, 3).await;
     commit(&exec, scope, second)
         .await
@@ -296,7 +290,7 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
 
     let before = exec.coordinated_head(log(scope)).await.unwrap();
     let pending = append(&exec, scope, 3, 4).await;
-    let survivor = cluster.wait_leader(&admin).await;
+    let survivor = cluster.wait_unfenced_leader(&admin).await;
     let down: Vec<u64> = (1..=3).filter(|id| *id != survivor).collect();
     for id in &down {
         cluster.stop(*id);
@@ -318,7 +312,7 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
     for id in 1..=3 {
         cluster.wait_online(id, &admin).await;
     }
-    cluster.wait_leader(&admin).await;
+    cluster.wait_unfenced_leader(&admin).await;
     assert_eq!(
         exec.coordinated_head(log(scope)).await.unwrap().commit,
         before.commit,
@@ -343,7 +337,7 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
     commit(&exec, scope, fourth).await.unwrap();
     let latest = exec.coordinated_head(log(scope)).await.unwrap();
     let committed = admin
-        .status(cluster.wait_leader(&admin).await)
+        .status(cluster.wait_unfenced_leader(&admin).await)
         .await
         .unwrap()
         .applied
@@ -383,7 +377,7 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
         admin.status(3).await.unwrap().fenced,
         "a restored voter is fenced, so its older state cannot answer for the service"
     );
-    let leader = cluster.wait_leader(&admin).await;
+    let leader = cluster.wait_unfenced_leader(&admin).await;
     assert_ne!(leader, 3, "a fenced voter cannot be elected");
     let readmission = membership_after_election(
         &admin,
@@ -413,7 +407,7 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
         })
         .await;
     cluster.stop(1);
-    cluster.wait_leader(&admin).await;
+    cluster.wait_unfenced_leader(&admin).await;
     assert_eq!(
         exec.coordinated_head(log(scope)).await.unwrap(),
         latest,
@@ -423,8 +417,6 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
     commit(&exec, scope, fifth).await.unwrap();
 }
 
-/// Removes the stopped voter 3 before its log rolls back, so the live
-/// leader discards its replication progress before the same ID returns.
 async fn remove_before_rolling_back(admin: &NetworkCoordinator) {
     membership_after_election(
         admin,

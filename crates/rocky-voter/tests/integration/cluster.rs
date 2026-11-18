@@ -1,4 +1,3 @@
-//! Persistent voters: controls, logs, counter claims, crashes and restarts.
 use crate::support;
 use rocky_coordinator::{
     coordinated::{Action, Result as LogResult},
@@ -73,9 +72,9 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
             .unwrap(),
         Outcome::Coordinated(LogResult::Committed { position: 1, .. })
     ));
-    let leader = cluster.wait_leader(&admin).await;
+    let leader = cluster.wait_unfenced_leader(&admin).await;
     cluster.stop(leader);
-    let next = cluster.wait_leader(&admin).await;
+    let next = cluster.wait_unfenced_leader(&admin).await;
     assert_ne!(next, leader);
     let head = alternate
         .coordinated_head(log(cluster.scope))
@@ -135,7 +134,7 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
         Outcome::Membership(BTreeSet::from([1, 2])),
         "the retained plan answers as before without reapplying"
     );
-    let leader = cluster.wait_leader(&admin).await;
+    let leader = cluster.wait_unfenced_leader(&admin).await;
     assert_eq!(
         admin.status(leader).await.unwrap().voters,
         BTreeSet::from([1, 2, 3]),
@@ -149,7 +148,7 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
         cluster.spawn(id, false, None);
         cluster.wait_online(id, &admin).await;
     }
-    cluster.wait_leader(&admin).await;
+    cluster.wait_unfenced_leader(&admin).await;
     assert_eq!(
         alternate
             .coordinated_head(log(cluster.scope))
@@ -226,13 +225,13 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
     .into_iter()
     .enumerate()
     {
-        let leader = cluster.wait_leader(&admin).await;
+        let leader = cluster.wait_unfenced_leader(&admin).await;
         let before = alice.coordinated_head(log(cluster.scope)).await.unwrap();
         let action = append(&alice, cluster.scope, index as u8 + 1, index as u64 + 2).await;
         cluster.arm(leader, stage);
         let _ = alice.coordinated(log(cluster.scope), action.clone()).await;
         cluster.wait_exit(leader).await;
-        cluster.wait_leader(&admin).await;
+        cluster.wait_unfenced_leader(&admin).await;
         let Outcome::Coordinated(LogResult::Assigned(pending)) = alice
             .coordinated(log(cluster.scope), action.clone())
             .await
@@ -276,12 +275,12 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
         last = Some(action);
     }
     for stage in ["snapshot.before_rename", "snapshot.after_sync"] {
-        let leader = cluster.wait_leader(&admin).await;
+        let leader = cluster.wait_unfenced_leader(&admin).await;
         let before = alice.coordinated_head(log(cluster.scope)).await.unwrap();
         cluster.arm(leader, stage);
         let _ = admin.snapshot(leader).await;
         cluster.wait_exit(leader).await;
-        cluster.wait_leader(&admin).await;
+        cluster.wait_unfenced_leader(&admin).await;
         cluster.spawn(leader, false, None);
         cluster.wait_online(leader, &admin).await;
         assert_eq!(
@@ -289,7 +288,7 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
             before
         );
     }
-    let leader = cluster.wait_leader(&admin).await;
+    let leader = cluster.wait_unfenced_leader(&admin).await;
     let lagging = if leader == 1 { 2 } else { 1 };
     let lagging_applied = admin.status(lagging).await.unwrap().applied.unwrap();
     cluster.stop(lagging);
@@ -300,7 +299,7 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
             .await
             .unwrap();
     }
-    let leader = cluster.wait_leader(&admin).await;
+    let leader = cluster.wait_unfenced_leader(&admin).await;
     let applied = admin.status(leader).await.unwrap().applied.unwrap();
     admin.snapshot(leader).await.unwrap();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
@@ -349,8 +348,6 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
     );
 }
 
-/// Retries of a decided append add log entries, unlike reads, so this many
-/// leave a stopped voter needing a snapshot.
 const RETRIES_PAST_THE_LAGGING_LOG: usize = 80;
 
 fn claim(n: u8) -> Claim {
@@ -359,8 +356,6 @@ fn claim(n: u8) -> Claim {
         issued: timestamp(),
     }
 }
-/// Claims until the answer is definite: an uncertain result (a crashed or
-/// replaced leader) is retried with the same claim, as applications do.
 async fn claim_definitely(
     client: &NetworkCoordinator,
     scope: Scope,
@@ -437,7 +432,7 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
         );
     }
 
-    let leader = cluster.wait_leader(&admin).await;
+    let leader = cluster.wait_unfenced_leader(&admin).await;
     let crashed = claim(100);
     cluster.arm(leader, "reply.before_send");
     let _ = nodes[0].claim(scope, invoices.clone(), crashed).await;
@@ -454,9 +449,9 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
     cluster.spawn(leader, false, None);
     cluster.wait_online(leader, &admin).await;
 
-    let leader = cluster.wait_leader(&admin).await;
+    let leader = cluster.wait_unfenced_leader(&admin).await;
     cluster.stop(leader);
-    assert_ne!(cluster.wait_leader(&admin).await, leader);
+    assert_ne!(cluster.wait_unfenced_leader(&admin).await, leader);
     for (claim, value) in &taken {
         assert_eq!(
             claim_definitely(&nodes[1], scope, &invoices, *claim).await,
@@ -479,7 +474,7 @@ async fn voters_agree_on_claimed_values_across_crashes_leader_changes_and_snapsh
         cluster.spawn(id, false, None);
         cluster.wait_online(id, &admin).await;
     }
-    cluster.wait_leader(&admin).await;
+    cluster.wait_unfenced_leader(&admin).await;
     assert_eq!(
         claim_definitely(&nodes[0], scope, &invoices, crashed).await,
         Ok(25),

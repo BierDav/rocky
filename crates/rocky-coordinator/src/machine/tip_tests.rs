@@ -1,5 +1,3 @@
-//! Per-tip logs: each tip orders its own entries, its in-sync set is the
-//! trusted nodes that follow it, and the domain bounds how many it holds.
 use super::coordinated_tests::{Fixture, T};
 use super::*;
 use crate::coordinated::{Action, ENDED_LOGS, Result as LogResult, TIP_LOGS};
@@ -22,7 +20,6 @@ impl Fixture {
         let request = self.on(key, log, action, T);
         self.state.apply_at(T, &request)
     }
-    /// Trusts a third node, which follows no tip yet.
     fn trust(&mut self) -> PrivateKey {
         let node = PrivateKey::new();
         let mut control = self.state.controls[0].control.clone();

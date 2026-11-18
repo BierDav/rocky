@@ -1,8 +1,5 @@
-//! Canonical business keys. Byte equality of two encodings is SQLite's
-//! equality of the keys under the declared affinities and collations.
 use crate::{Affinity, Collation, Commitment, DomainId, SqlValue, ValueError};
 
-/// Longest encoded key, components only.
 pub const MAX_KEY_BYTES: usize = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -11,13 +8,10 @@ pub struct KeyColumn {
     pub collation: Collation,
 }
 
-/// The sign bit flipped, big-endian, so byte order is numeric order.
 fn ordered_integer_bytes(value: i64) -> Vec<u8> {
     ((value as u64) ^ (1 << 63)).to_be_bytes().to_vec()
 }
 
-/// The components of a key: a count, then per component its storage class,
-/// collation, `u32` length and bytes. `values` are in primary-key order.
 pub fn key_components(columns: &[KeyColumn], values: &[SqlValue]) -> Result<Vec<u8>, ValueError> {
     if columns.len() != values.len() || columns.is_empty() || columns.len() > usize::from(u8::MAX) {
         return Err(ValueError::Arity);
@@ -44,8 +38,6 @@ pub fn key_components(columns: &[KeyColumn], values: &[SqlValue]) -> Result<Vec<
     }
     Ok(bytes)
 }
-/// Values that compare equal to the key's under its columns' collations:
-/// folded text stands for every spelling the collation calls equal.
 pub fn key_values(components: &[u8]) -> Result<Vec<SqlValue>, ValueError> {
     let malformed = ValueError::Arity;
     let (count, mut rest) = components.split_first().ok_or(malformed)?;
@@ -72,8 +64,6 @@ pub fn key_values(components: &[u8]) -> Result<Vec<SqlValue>, ValueError> {
         Err(malformed)
     }
 }
-/// The row identity a key names: the components bound to their domain and
-/// table. Physical names and file positions are not part of it.
 pub fn bound_key(domain: DomainId, table: &Commitment, components: &[u8]) -> Vec<u8> {
     let mut bytes = b"rocky.key.v1".to_vec();
     bytes.extend(domain.0);

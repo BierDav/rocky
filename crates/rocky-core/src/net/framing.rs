@@ -1,4 +1,3 @@
-//! Bounded length-delimited frames shared by transport harnesses.
 use super::{Failure, SessionStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -34,7 +33,6 @@ pub async fn read_bounded(
     Ok(bytes)
 }
 
-/// Harness-side request delivery. The harness supplies its deadline and queue budget.
 pub async fn serve(
     mut stream: super::Stream,
     incoming: &tokio::sync::mpsc::Sender<super::Incoming>,

@@ -1,4 +1,3 @@
-//! Canonical partition addresses, independent of credentials and storage.
 use crate::{
     Affinity, Collation, Commitment, KeyColumn, ResourceScope, Scope, SqlValue, key_components,
     key_values,
@@ -7,16 +6,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Maximum encoded tuple size, including column identities.
 pub const MAX_PARTITION_BYTES: usize = 1024;
 
-/// A partition's naming secret. Every holder and custodian of the
-/// partition shares it and nobody else does; it keys the partition's scope
-/// identity, so only they can compute or recognize it. It never rotates:
-/// the scope identity names the partition's logs for its whole life.
 pub type PartitionName = [u8; 32];
 
-/// HMAC-SHA256 of `payload` under `key`, domain-separated by `prefix`.
 pub fn keyed_commitment(key: &[u8; 32], prefix: &str, payload: &[u8]) -> Commitment {
     let mut block = [0u8; 64];
     block[..32].copy_from_slice(key);
@@ -40,7 +33,6 @@ impl std::fmt::Display for PartitionError {
 }
 impl std::error::Error for PartitionError {}
 
-/// A SQL-equality-normalized, non-null component of a partition tuple.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PartitionValue(Vec<u8>);
@@ -97,7 +89,6 @@ impl PartitionValue {
     }
 }
 
-/// Stable column identities paired with their canonical values.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PartitionTuple(#[serde(with = "components")] BTreeMap<Commitment, PartitionValue>);
@@ -132,8 +123,6 @@ impl PartitionTuple {
         }
         Ok(())
     }
-    /// The encryption/log boundary of this tuple in one table and domain,
-    /// keyed by the partition's naming secret.
     pub fn scope(
         &self,
         domain: Scope,
@@ -160,7 +149,6 @@ impl PartitionTuple {
     }
 }
 
-/// A selector must name every partition column, even unrestricted ones.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PartitionSelection {
     Any,
@@ -230,8 +218,6 @@ impl PartitionSelector {
     }
 }
 
-/// Serializes partition columns as pairs, so they also cross JSON without
-/// map keys or lossy integer conversions.
 mod components {
     use super::*;
     use serde::{Deserializer, Serializer, de::Error};

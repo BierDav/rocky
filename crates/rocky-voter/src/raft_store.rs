@@ -1,6 +1,3 @@
-//! Durable Raft storage: a small hard-state file, one file per log entry and
-//! at most two snapshot files. The state machine is applied in memory and
-//! recovered from the newest snapshot plus committed log replay.
 use fs2::FileExt;
 use openraft::{
     storage::{LogFlushed, RaftLogStorage, RaftStateMachine},
@@ -19,18 +16,14 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-/// A Raft log entry: the leader-proposed authority time and a client request.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Proposal {
-    /// Authority time, read from the leader's clock when it proposes;
-    /// followers never read their clocks.
     pub time: u64,
     pub request: Request,
 }
 
 openraft::declare_raft_types!(pub Types: D = Proposal, R = Result<Outcome, CoordinationError>);
 pub type Consensus = Raft<Types>;
-/// The storage format this build reads; older images are refused.
 const FORMAT: u32 = 13;
 const RETAINED_SNAPSHOTS: usize = 2;
 const MAX_LOGS: usize = 2048;
@@ -40,7 +33,6 @@ const MAX_LOG_BYTES: usize = 64 * 1024;
 struct Hard {
     format: u32,
     identity: Commitment,
-    /// Budgets fixed at provisioning, so a replay without snapshot is identical.
     limits: rocky_coordinator::Limits,
     vote: Option<Vote<u64>>,
     committed: Option<LogId<u64>>,
@@ -53,7 +45,6 @@ struct SnapshotFile {
     meta: SnapshotMeta<u64, BasicNode>,
     metadata: Encoded,
 }
-/// CBOR byte strings avoid expanding nested encoded snapshots into integer arrays.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Encoded(#[serde(with = "encoded_bytes")] Vec<u8>);
 mod encoded_bytes {
@@ -81,9 +72,6 @@ mod encoded_bytes {
         deserializer.deserialize_byte_buf(Bytes)
     }
 }
-/// A restored voter neither votes nor campaigns until the membership
-/// authority has re-added it: first as a learner, at a log index beyond
-/// everything its backup held.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Fence {
     pub index: u64,
@@ -91,37 +79,28 @@ pub struct Fence {
 }
 const FENCE: &str = "RESTORED";
 const FENCE_LABEL: &str = "rocky.voter-fence.v1";
-/// What a voter backup holds, beside a stopped voter's files.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Backup {
     pub identity: Commitment,
     pub node: u64,
-    /// The last log index the copy holds, applied or not.
     pub index: u64,
 }
 const BACKUP: &str = "BACKUP";
-/// Written before the first state image, so it outlives a lost image and an
-/// interrupted provisioning fails closed.
 const PROVISIONED: &str = "PROVISIONED";
 const BACKUP_LABEL: &str = "rocky.voter-backup.v1";
-/// The durable Raft log state. An update drafts a shallow copy: entries
-/// are shared, and a changed log copies only the map's pointers.
 #[derive(Clone)]
 struct Image {
     hard: Hard,
     fence: Option<Fence>,
-    /// A purge Raft asked for before the snapshot covering it was durable.
-    pending_purge: Option<LogId<u64>>,
+    purge_awaiting_durable_snapshot: Option<LogId<u64>>,
     logs: Arc<BTreeMap<u64, Arc<Entry<Types>>>>,
     snapshot: Option<SnapshotMeta<u64, BasicNode>>,
 }
-/// The applied state machine, changed in place one entry at a time.
 struct Machine {
     applied: Option<LogId<u64>>,
     membership: StoredMembership<u64, BasicNode>,
     metadata: Metadata,
 }
-/// Retained consensus state, by count and on-disk bytes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Footprint {
     pub logs: usize,
@@ -129,7 +108,6 @@ pub struct Footprint {
     pub disk_bytes: u64,
     pub allocated_bytes: u64,
     pub state: rocky_coordinator::Retention,
-    /// Domain controls, logs and tenant records charged to the state budget.
     pub state_bytes: usize,
     pub retry_records: usize,
 }
@@ -142,22 +120,17 @@ struct SyncGate {
 }
 struct Inner {
     root: PathBuf,
-    /// The genesis ID requests are signed for.
-    identity: Commitment,
+    genesis_id: Commitment,
     image: Mutex<Image>,
-    /// Requests authorize under a shared guard, never the log image's lock.
     machine: tokio::sync::RwLock<Machine>,
-    /// Serializes durable mutations; metadata readers never acquire it.
-    io: Arc<Mutex<()>>,
+    durable_mutations: Arc<Mutex<()>>,
     deadlines: tokio::sync::watch::Sender<()>,
-    /// This voter's ID, for its fence.
     node: std::sync::OnceLock<u64>,
     _lock: File,
     #[cfg(test)]
     sync_gate: std::sync::Mutex<Option<SyncGate>>,
-    /// Log entries an update copied instead of sharing.
     #[cfg(test)]
-    copies: std::sync::atomic::AtomicUsize,
+    copied_entries: std::sync::atomic::AtomicUsize,
 }
 fn io_error(error: impl std::error::Error + 'static) -> StorageError<u64> {
     StorageIOError::write_state_machine(&error).into()
@@ -179,7 +152,6 @@ pub(crate) fn crash(stage: &str) {
 fn sync_directory(dir: &Path) -> std::io::Result<()> {
     File::open(dir)?.sync_all()
 }
-/// Syncs the directory containing `path`.
 fn sync_dir(path: &Path) -> std::io::Result<()> {
     sync_directory(
         path.parent()
@@ -187,7 +159,6 @@ fn sync_dir(path: &Path) -> std::io::Result<()> {
             .unwrap_or_else(|| Path::new(".")),
     )
 }
-/// Writes and syncs `data` beside `path`, then renames it into place.
 fn write_synced(path: &Path, data: &[u8], stage: &str) -> std::io::Result<()> {
     let mut name = path
         .file_name()
@@ -233,7 +204,6 @@ fn unseal<T: Serialize + DeserializeOwned>(
 fn read(path: &Path) -> Result<Vec<u8>, CoordinationError> {
     std::fs::read(path).map_err(|_| CoordinationError::Corrupt)
 }
-/// Numbered files of a directory in ascending order; interrupted writes are removed.
 fn numbered(dir: &Path) -> Result<Vec<(u64, PathBuf)>, CoordinationError> {
     let mut files = Vec::new();
     for entry in std::fs::read_dir(dir).map_err(|_| CoordinationError::Corrupt)? {
@@ -255,7 +225,6 @@ fn numbered(dir: &Path) -> Result<Vec<(u64, PathBuf)>, CoordinationError> {
     files.sort();
     Ok(files)
 }
-/// Copies a store's provisioning marker, hard state, logs and snapshots.
 fn copy_store(from: &Path, to: &Path) -> Result<(), CoordinationError> {
     let fail = |_| CoordinationError::Corrupt;
     for dir in ["", "log", "snapshots"] {
@@ -359,7 +328,7 @@ impl Store {
         path: &Path,
         genesis: CertifiedGenesis,
         provision: bool,
-        limits: rocky_coordinator::Limits,
+        provisioning_limits: rocky_coordinator::Limits,
     ) -> Result<Self, CoordinationError> {
         check_store_format(path, false)?;
         std::fs::create_dir_all(path).map_err(|_| CoordinationError::Corrupt)?;
@@ -405,20 +374,20 @@ impl Store {
             let hard = Hard {
                 format: FORMAT,
                 identity,
-                limits,
+                limits: provisioning_limits,
                 vote: None,
                 committed: None,
                 purged: None,
             };
             let machine = Machine {
-                metadata: Metadata::with_limits(genesis, limits)?,
+                metadata: Metadata::with_limits(genesis, provisioning_limits)?,
                 applied: None,
                 membership: StoredMembership::default(),
             };
             let image = Image {
                 fence: None,
                 hard,
-                pending_purge: None,
+                purge_awaiting_durable_snapshot: None,
                 logs: Arc::default(),
                 snapshot: None,
             };
@@ -433,17 +402,17 @@ impl Store {
         };
         Ok(Self(Arc::new(Inner {
             root: path.to_path_buf(),
-            identity,
+            genesis_id: identity,
             image: Mutex::new(image),
             machine: tokio::sync::RwLock::new(machine),
-            io: Arc::new(Mutex::new(())),
+            durable_mutations: Arc::new(Mutex::new(())),
             deadlines: tokio::sync::watch::channel(()).0,
             node: std::sync::OnceLock::new(),
             _lock: lock,
             #[cfg(test)]
             sync_gate: std::sync::Mutex::new(None),
             #[cfg(test)]
-            copies: Default::default(),
+            copied_entries: Default::default(),
         })))
     }
     fn load(
@@ -507,7 +476,7 @@ impl Store {
             Image {
                 hard,
                 fence: None,
-                pending_purge: None,
+                purge_awaiting_durable_snapshot: None,
                 logs: Arc::new(logs),
                 snapshot: meta,
             },
@@ -526,13 +495,11 @@ impl Store {
         let data = seal(STATE_LABEL, hard).map_err(io_error)?;
         atomic_write(&self.0.root.join("state.cbor"), &data, stage).map_err(io_error)
     }
-    /// A blocking worker owns each durable mutation through publication, even
-    /// if its async caller is canceled.
     async fn exclusive<T: Send + 'static>(
         &self,
         work: impl FnOnce(&Self) -> Result<T, StorageError<u64>> + Send + 'static,
     ) -> Result<T, StorageError<u64>> {
-        let io = self.0.io.clone().lock_owned().await;
+        let io = self.0.durable_mutations.clone().lock_owned().await;
         let store = self.clone();
         tokio::task::spawn_blocking(move || {
             let _io = io;
@@ -541,8 +508,6 @@ impl Store {
         .await
         .map_err(io_error)?
     }
-    /// Mutates a draft of the log image and publishes it once `mutate`
-    /// succeeds: readers retain the last durable image meanwhile.
     async fn update<T: Send + 'static>(
         &self,
         mutate: impl FnOnce(&Self, &mut Image) -> Result<T, StorageError<u64>> + Send + 'static,
@@ -569,7 +534,7 @@ impl Store {
                     .is_some_and(|held| !Arc::ptr_eq(held, entry))
             });
             self.0
-                .copies
+                .copied_entries
                 .fetch_add(copied.count(), std::sync::atomic::Ordering::Relaxed);
         }
         *published = image;
@@ -581,7 +546,6 @@ impl Store {
     fn snapshots_dir(&self) -> PathBuf {
         self.0.root.join("snapshots")
     }
-    /// Durably records the purge, then removes the purged entry files.
     #[expect(
         clippy::result_large_err,
         reason = "OpenRaft defines the storage error type."
@@ -591,7 +555,7 @@ impl Store {
         hard.purged = Some(log_id);
         self.persist_hard(&hard, "purge")?;
         image.hard = hard;
-        image.pending_purge = None;
+        image.purge_awaiting_durable_snapshot = None;
         let doomed: Vec<_> = image.logs.range(..=log_id.index).map(|(i, _)| *i).collect();
         let logs = Arc::make_mut(&mut image.logs);
         for index in doomed {
@@ -605,7 +569,7 @@ impl Store {
         reason = "OpenRaft defines the storage error type."
     )]
     fn finish_purge(&self, image: &mut Image) -> Result<(), StorageError<u64>> {
-        if let Some(purge) = image.pending_purge
+        if let Some(purge) = image.purge_awaiting_durable_snapshot
             && image
                 .snapshot
                 .as_ref()
@@ -616,7 +580,6 @@ impl Store {
         }
         Ok(())
     }
-    /// Durably writes a snapshot of `metadata`, keeping the newest two.
     #[expect(
         clippy::result_large_err,
         reason = "OpenRaft defines the storage error type."
@@ -646,16 +609,14 @@ impl Store {
     pub(crate) fn deadlines(&self) -> tokio::sync::watch::Receiver<()> {
         self.0.deadlines.subscribe()
     }
-    /// Signatures verify before any lock; state checks run under a shared
-    /// guard, which neither other requests nor Raft log storage wait for.
     pub async fn preflight(&self, request: &Request) -> Result<(), CoordinationError> {
-        request.authenticate(self.0.identity)?;
+        request.authenticate(self.0.genesis_id)?;
         request.fresh()?;
         let machine = self.0.machine.read().await;
-        machine.metadata.authorize(request)
+        machine.metadata.authorize_authenticated(request)
     }
     pub async fn read(&self, request: &Request) -> Result<Outcome, CoordinationError> {
-        request.authenticate(self.0.identity)?;
+        request.authenticate(self.0.genesis_id)?;
         let machine = self.0.machine.read().await;
         machine.metadata.read_authenticated(request)
     }
@@ -670,16 +631,14 @@ impl Store {
     ) -> Result<rocky_coordinator::coordinated::Head, CoordinationError> {
         self.0.machine.read().await.metadata.log_head(log)
     }
-    /// The committed authority time.
-    pub async fn time(&self) -> u64 {
+    pub async fn authority_time(&self) -> u64 {
         self.0.machine.read().await.metadata.time()
     }
-    /// Unauthorized requests share the unregistered lane, never the target's.
     pub async fn lane(&self, request: &Request) -> Option<p2panda_core::PublicKey> {
-        request.authenticate(self.0.identity).ok()?;
+        request.authenticate(self.0.genesis_id).ok()?;
         request.fresh().ok()?;
         let machine = self.0.machine.read().await;
-        machine.metadata.authorize(request).ok()?;
+        machine.metadata.authorize_authenticated(request).ok()?;
         machine.metadata.tenant_lane(request)
     }
     pub async fn tenants(&self) -> usize {
@@ -691,7 +650,6 @@ impl Store {
     pub async fn fence(&self) -> Option<Fence> {
         self.0.image.lock().await.fence
     }
-    /// Removes the fence of a re-added voter.
     pub async fn lift_fence(&self) -> Result<(), CoordinationError> {
         self.update(|store, image| {
             let path = store.0.root.join(FENCE);
@@ -705,7 +663,6 @@ impl Store {
         .await
         .map_err(|_| CoordinationError::Corrupt)
     }
-    /// Records that a membership beyond the fence names this voter a learner.
     #[expect(
         clippy::result_large_err,
         reason = "OpenRaft defines the storage error type."
@@ -732,8 +689,6 @@ impl Store {
         image.fence = Some(fence);
         Ok(())
     }
-    /// Copies the files of the stopped voter at `path` into the new
-    /// directory `out`. The store lock refuses a running voter.
     pub fn backup(
         path: &Path,
         genesis: CertifiedGenesis,
@@ -778,7 +733,6 @@ impl Store {
             .map_err(|_| CoordinationError::Corrupt)?;
         Ok(backup)
     }
-    /// Restores a backup of voter `node` into the empty `path`, fenced.
     pub fn restore(
         backup: &Path,
         genesis: &CertifiedGenesis,
@@ -813,7 +767,6 @@ impl Store {
     pub async fn desired_voters(&self) -> std::collections::BTreeSet<u64> {
         self.0.machine.read().await.metadata.desired_voters.clone()
     }
-    /// Retained state and the bytes it occupies on disk.
     pub async fn footprint(&self) -> Result<Footprint, CoordinationError> {
         self.exclusive(|store| {
             let logs = store.0.image.blocking_lock().logs.len();
@@ -863,7 +816,7 @@ impl RaftLogReader<Types> for Store {
         range: R,
     ) -> Result<Vec<Entry<Types>>, StorageError<u64>> {
         let image = self.0.image.lock().await;
-        let purged = image.pending_purge.or(image.hard.purged);
+        let purged = image.purge_awaiting_durable_snapshot.or(image.hard.purged);
         Ok(image
             .logs
             .range(range)
@@ -883,7 +836,7 @@ impl RaftLogStorage<Types> for Store {
     }
     async fn get_log_state(&mut self) -> Result<LogState<Types>, StorageError<u64>> {
         let image = self.0.image.lock().await;
-        let purged = image.pending_purge.or(image.hard.purged);
+        let purged = image.purge_awaiting_durable_snapshot.or(image.hard.purged);
         Ok(LogState {
             last_purged_log_id: purged,
             last_log_id: image
@@ -974,8 +927,6 @@ impl RaftLogStorage<Types> for Store {
             Err(error) => Err(error),
         }
     }
-    /// Removes entries highest first, so an interruption leaves a
-    /// contiguous prefix.
     async fn truncate(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
         self.update(move |store, image| {
             let highest_first: Vec<_> = image
@@ -992,8 +943,6 @@ impl RaftLogStorage<Types> for Store {
         })
         .await
     }
-    /// Raft can purge before installing its incoming snapshot, so recovery
-    /// entries stay until a durable snapshot covers them.
     async fn purge(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
         self.update(move |store, image| {
             let covered_by_durable_snapshot = image
@@ -1002,7 +951,7 @@ impl RaftLogStorage<Types> for Store {
                 .and_then(|meta| meta.last_log_id)
                 .is_some_and(|snapshot| snapshot.index >= log_id.index);
             if !covered_by_durable_snapshot {
-                image.pending_purge = Some(log_id);
+                image.purge_awaiting_durable_snapshot = Some(log_id);
                 return Ok(());
             }
             store.purge_files(image, log_id)
@@ -1022,9 +971,6 @@ impl RaftStateMachine<Types> for Store {
         let machine = self.0.machine.read().await;
         Ok((machine.applied, machine.membership.clone()))
     }
-    /// Applies each entry whole: its fallible file write and signature check
-    /// come before the state lock. Applied state is durable through
-    /// committed entries and snapshots, so applying writes nothing itself.
     async fn apply<I>(
         &mut self,
         entries: I,
@@ -1054,7 +1000,7 @@ impl RaftStateMachine<Types> for Store {
                     }
                     EntryPayload::Normal(proposal) => {
                         let request = &proposal.request;
-                        let authenticated = request.authenticate(store.0.identity);
+                        let authenticated = request.authenticate(store.0.genesis_id);
                         let mut machine = store.0.machine.blocking_write();
                         let reply = machine.metadata.apply_authenticated(
                             proposal.time,
@@ -1092,10 +1038,10 @@ impl RaftStateMachine<Types> for Store {
         self.exclusive(move |store| {
             let data = snapshot.into_inner();
             let metadata: Metadata = decode(&data).map_err(io_error)?;
-            if metadata.genesis.id().map_err(io_error)? != store.0.identity {
+            if metadata.genesis.id().map_err(io_error)? != store.0.genesis_id {
                 return Err(other("foreign snapshot"));
             }
-            store.write_snapshot(store.0.identity, &meta, data, "install_snapshot")?;
+            store.write_snapshot(store.0.genesis_id, &meta, data, "install_snapshot")?;
             store.publish(|store, image| {
                 image.snapshot = Some(meta.clone());
                 store.observe_membership(image, &meta.last_membership)?;
@@ -1139,8 +1085,6 @@ impl RaftStateMachine<Types> for Store {
     reason = "OpenRaft fixes the storage error type."
 )]
 impl RaftSnapshotBuilder<Types> for Store {
-    /// Encodes under the shared guard: only apply waits for it, and this
-    /// exclusive worker excludes apply anyway.
     async fn build_snapshot(&mut self) -> Result<Snapshot<Types>, StorageError<u64>> {
         self.exclusive(move |store| {
             let (data, meta) = {
@@ -1153,7 +1097,7 @@ impl RaftSnapshotBuilder<Types> for Store {
                 };
                 (data, meta)
             };
-            store.write_snapshot(store.0.identity, &meta, data.clone(), "snapshot")?;
+            store.write_snapshot(store.0.genesis_id, &meta, data.clone(), "snapshot")?;
             store.publish(|store, image| {
                 image.snapshot = Some(meta.clone());
                 store.finish_purge(image)
@@ -1167,7 +1111,6 @@ impl RaftSnapshotBuilder<Types> for Store {
     }
 }
 
-/// The newest readable snapshot that covers every purged entry.
 fn newest_snapshot_covering(
     snapshots_dir: &Path,
     hard: &Hard,
@@ -1187,8 +1130,6 @@ fn newest_snapshot_covering(
     Ok(None)
 }
 
-/// A backup's own leadership is stale: its log may lack entries it
-/// committed later, so it restarts as a follower of its last term.
 fn as_follower(vote: Vote<u64>) -> Vote<u64> {
     Vote {
         committed: false,

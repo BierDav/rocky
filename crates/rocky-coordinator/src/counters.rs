@@ -1,19 +1,11 @@
-//! Named counters of a domain. A claim takes the counter's next value
-//! through the replicated log, so values are unique and strictly increasing
-//! across every voter. Claims are pure coordination: the application uses a
-//! value in its own ordinary writes, and numbering policy stays its own.
 use rocky_core::{CoordinationError, MAX_COUNTER};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-/// Counters one domain holds.
 pub const MAX_COUNTERS: usize = 64;
-/// How far a claim's issue time may lead authority time, as request
-/// signing times may.
-pub const ISSUE_SKEW: u64 = 30;
-/// Accounted bytes of a counter beside its name and claims, and of a claim.
-const COUNTER_BYTES: usize = 128;
-const CLAIM_BYTES: usize = 64;
+pub const ISSUE_SKEW: u64 = crate::transport::MAX_CLOCK_SKEW_SECONDS;
+const ACCOUNTED_COUNTER_BYTES: usize = 128;
+const ACCOUNTED_CLAIM_BYTES: usize = 64;
 
 pub use rocky_credentials::counters::{
     CLAIM_RECORDS, CLAIM_WINDOW, Claim, Lookup, MAX_NAME, Name, Reading,
@@ -27,10 +19,7 @@ struct Record {
 struct Counter {
     name: Name,
     value: u64,
-    /// The latest issue time of an evicted claim: a claim issued no later
-    /// is not known to be new.
     floor: u64,
-    /// Claims within the window, oldest value first.
     records: VecDeque<Record>,
 }
 impl Counter {
@@ -43,7 +32,9 @@ impl Counter {
         }
     }
     fn bytes(&self) -> usize {
-        COUNTER_BYTES + self.name.as_bytes().len() + self.records.len() * CLAIM_BYTES
+        ACCOUNTED_COUNTER_BYTES
+            + self.name.as_bytes().len()
+            + self.records.len() * ACCOUNTED_CLAIM_BYTES
     }
     fn evict(&mut self, time: u64) {
         let floor = &mut self.floor;
@@ -77,7 +68,6 @@ impl Counter {
     }
 }
 
-/// The counters of one domain.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Counters {
     counters: Vec<Counter>,
@@ -86,8 +76,6 @@ impl Counters {
     pub fn bytes(&self) -> usize {
         self.counters.iter().map(Counter::bytes).sum()
     }
-    /// The value `claim` took from `name`, taking the next one if it took
-    /// none. A new claim may add at most `available` accounted bytes.
     pub fn claim(
         &mut self,
         name: &Name,
@@ -123,9 +111,9 @@ impl Counters {
             Lookup::Expired => return Err(CoordinationError::Expired),
             Lookup::Unclaimed => {}
         }
-        let mut growth = CLAIM_BYTES;
+        let mut growth = ACCOUNTED_CLAIM_BYTES;
         if counter.value == 0 {
-            growth += COUNTER_BYTES + counter.name.as_bytes().len();
+            growth += ACCOUNTED_COUNTER_BYTES + counter.name.as_bytes().len();
         } else if counter.records.len() >= CLAIM_RECORDS {
             growth = 0;
         }
@@ -146,7 +134,6 @@ impl Counters {
         counter.records.push_back(Record { claim, value });
         Ok(value)
     }
-    /// `name`'s last value and, for `claim`, what it took.
     pub fn read(
         &self,
         name: &Name,

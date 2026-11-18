@@ -1,10 +1,8 @@
-//! Budgets fixed in the coordinator's certified genesis.
 use rocky_core::*;
 use serde::{Deserialize, Serialize};
 
 pub const DAY: u64 = 86_400;
 
-/// Tenant storage and bounded metadata retry budgets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {

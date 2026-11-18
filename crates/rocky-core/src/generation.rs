@@ -1,18 +1,10 @@
-//! Generations of an application definition: whether a new schema changes
-//! what replicas agree on.
 use crate::{ColumnClass, LogicalSchema};
 use std::collections::BTreeSet;
 
-/// How a new schema relates to the installed one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SchemaChange {
-    /// The same installed schema.
     Unchanged,
-    /// Local tables or SQL spelling: replicas agree as before. Only the
-    /// local projection is rebuilt.
     Local,
-    /// Replicated tables changed: a signed transition and a migration
-    /// replay them in the new schema.
     Replicated,
 }
 impl SchemaChange {
@@ -21,17 +13,10 @@ impl SchemaChange {
     }
 }
 
-/// A change no transition can make: replicas holding data of the installed
-/// schema would no longer agree on it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unsupported {
-    /// Another publisher or application name.
     Application,
-    /// Type or collation of `table.field` changed: a field id names one
-    /// value domain in every stored image and replayed statement.
     ChangedField(String),
-    /// A required field of an existing table needs a default: rows written
-    /// before it hold no value for it.
     RequiredField(String),
 }
 impl std::fmt::Display for Unsupported {
@@ -48,12 +33,9 @@ impl std::fmt::Display for Unsupported {
 }
 impl std::error::Error for Unsupported {}
 
-/// Replicated tables and fields a new schema no longer has. Every device
-/// that adopts it drops their data.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Removed {
     pub tables: BTreeSet<String>,
-    /// `table.field` of tables that remain.
     pub fields: BTreeSet<String>,
 }
 impl Removed {
@@ -61,7 +43,6 @@ impl Removed {
         self.tables.is_empty() && self.fields.is_empty()
     }
 }
-/// What `new` removes of the installed `old`'s replicated data.
 pub fn removed(old: &LogicalSchema, new: &LogicalSchema) -> Removed {
     let mut removed = Removed::default();
     for before in old.typed() {
@@ -83,10 +64,6 @@ pub fn removed(old: &LogicalSchema, new: &LogicalSchema) -> Removed {
     removed
 }
 
-/// Classifies `new` against the installed `old`. Names are the identity of
-/// tables and fields: a rename is a removal and an addition, and a name
-/// keeps its type and collation. A field may become required only with a
-/// default, which rows holding none take.
 pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange, Unsupported> {
     if old.publisher != new.publisher || old.application != new.application {
         return Err(Unsupported::Application);
@@ -126,7 +103,6 @@ pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange
     Ok(SchemaChange::Replicated)
 }
 
-/// The schema generation of a definition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Generation {
     pub schema: u32,

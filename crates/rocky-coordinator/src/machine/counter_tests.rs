@@ -1,4 +1,3 @@
-//! Counter claims: values, retries, authorization, window and budgets.
 use super::coordinated_tests::{Fixture, T};
 use super::*;
 use crate::counters::{
@@ -53,7 +52,6 @@ impl Fixture {
         let key = self.nodes[node].clone();
         self.claim_as(&key, counter, claim, time)
     }
-    /// Reads through the linearizable read path, as a voter answers it.
     fn reading(&self, counter: &str, claim: Option<Claim>, time: u64) -> Reading {
         let request = self.certified(
             Operation::Counter {
@@ -226,7 +224,6 @@ fn only_trusted_nodes_claim_and_only_while_the_domain_is_open() {
     );
 }
 
-/// The window outlasts the fixture's control, so it runs on the counters alone.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn claims_outside_the_window_are_expired_never_given_a_second_value() {
     let mut counters = Counters::default();

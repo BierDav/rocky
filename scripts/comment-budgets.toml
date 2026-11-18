@@ -4,8 +4,4 @@
 # package at zero and deletes this file once none is left; never raise one.
 # A package missing here may hold no comments.
 
-rocky-coordinator = 323
-rocky-core = 673
 rocky-credentials = 1494
-rocky-peer = 3
-rocky-voter = 159

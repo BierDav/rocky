@@ -1,4 +1,3 @@
-//! Authority time, closure and tenant budgets of root-bound domains.
 use super::*;
 use crate::coordinated::Action;
 use p2panda_core::PrivateKey;
@@ -77,7 +76,6 @@ impl Mesh {
     ) -> Result<Outcome, CoordinationError> {
         self.apply_signed(metadata, key, operation, time, time)
     }
-    /// Applies a request signed at `signed` under leader-proposed `proposed` time.
     fn apply_signed(
         &self,
         metadata: &mut Metadata,

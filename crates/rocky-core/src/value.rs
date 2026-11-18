@@ -1,9 +1,5 @@
-//! Scalar values at the application/storage boundary: their byte codec and
-//! getter conversions.
 use crate::ProtocolError;
 
-/// A REAL in canonical form: never NaN, and negative zero is zero. SQLite
-/// stores NaN as NULL, so a NaN is not a REAL value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Real(u64);
 impl Real {
@@ -13,7 +9,6 @@ impl Real {
         }
         Some(Self(if value == 0.0 { 0 } else { value.to_bits() }))
     }
-    /// Rejects NaN and negative zero, which have no canonical form.
     pub fn from_bits(bits: u64) -> Option<Self> {
         Self::new(f64::from_bits(bits)).filter(|real| real.0 == bits)
     }
@@ -30,7 +25,6 @@ impl std::fmt::Debug for Real {
     }
 }
 
-/// Values at the compiled application/storage boundary; no engine dependency.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SqlValue {
     Null,
@@ -40,12 +34,9 @@ pub enum SqlValue {
     Blob(Vec<u8>),
 }
 impl SqlValue {
-    /// A REAL value, or None for NaN.
     pub fn real(value: f64) -> Option<Self> {
         Real::new(value).map(Self::Real)
     }
-    /// Canonical bytes: a tag, then a fixed-width little-endian number or a
-    /// `u32` length and the content.
     pub fn encode(&self, out: &mut Vec<u8>) {
         let content: &[u8] = match self {
             Self::Null => return out.push(0),
@@ -69,7 +60,6 @@ impl SqlValue {
         out.extend((content.len() as u32).to_le_bytes());
         out.extend(content);
     }
-    /// Reads one value from the front of `bytes`.
     pub fn decode(bytes: &mut &[u8]) -> Result<Self, ProtocolError> {
         let mut take = |length: usize| {
             let (head, tail) = bytes
@@ -103,8 +93,6 @@ impl SqlValue {
             _ => return Err(ProtocolError::InvalidValue),
         })
     }
-    /// `sqlite3_column_int64`: a REAL truncates toward zero and saturates;
-    /// text and blobs yield their longest leading integer, saturating.
     pub fn to_integer(&self) -> i64 {
         match self {
             Self::Null => 0,
@@ -114,8 +102,6 @@ impl SqlValue {
             Self::Blob(bytes) => leading_integer(bytes),
         }
     }
-    /// `sqlite3_column_double`: text and blobs yield their longest leading
-    /// decimal number, or zero.
     pub fn to_real(&self) -> f64 {
         match self {
             Self::Null => 0.0,
@@ -125,9 +111,6 @@ impl SqlValue {
             Self::Blob(bytes) => leading_real(bytes),
         }
     }
-    /// `sqlite3_column_text`: a REAL renders with 15 significant digits, or
-    /// 17 when 15 would read back as another double, and always a fraction
-    /// digit. Blob bytes that are not UTF-8 are replaced.
     pub fn to_text(&self) -> Option<String> {
         Some(match self {
             Self::Null => return None,
@@ -137,7 +120,6 @@ impl SqlValue {
             Self::Blob(bytes) => String::from_utf8_lossy(bytes).into_owned(),
         })
     }
-    /// `sqlite3_column_blob`: numbers yield the bytes of their text form.
     pub fn to_blob(&self) -> Option<Vec<u8>> {
         match self {
             Self::Blob(bytes) => Some(bytes.clone()),
@@ -153,8 +135,6 @@ fn skip_space(bytes: &[u8]) -> &[u8] {
         .unwrap_or(bytes.len());
     &bytes[start..]
 }
-/// SQLite's leading-integer parse, saturating. Digits accumulate negated
-/// because the negative range is one larger.
 fn leading_integer(bytes: &[u8]) -> i64 {
     let bytes = skip_space(bytes);
     let (negative, digits) = match bytes.first() {
@@ -210,10 +190,6 @@ fn leading_real(bytes: &[u8]) -> f64 {
         .and_then(|text| text.parse().ok())
         .unwrap_or(0.0)
 }
-/// SQLite's rendering of a REAL: 15 significant digits when they read back
-/// as the same double, otherwise 17, laid out as `%!.17g`. The 17 digits are
-/// correctly rounded here; the engine's last digit can differ by one, and
-/// it renders subnormals with 17 digits. Both read back as the same double.
 fn real_text(value: f64) -> String {
     if value.is_infinite() {
         return if value > 0.0 { "Inf" } else { "-Inf" }.into();

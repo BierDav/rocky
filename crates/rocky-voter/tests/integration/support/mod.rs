@@ -10,15 +10,12 @@ use std::{
 };
 use tempfile::TempDir;
 
-/// The log of the one tip these exercises coordinate in `scope`.
 pub fn log(scope: Scope) -> TipLog {
     TipLog {
         scope,
         tip: TipId([9; 32]),
     }
 }
-/// A node certificate its node signed itself: the node key is its own
-/// identity, which the controls these exercises sign trust.
 pub fn certificate(key: &PrivateKey) -> rocky_credentials::SignedCapability {
     use rocky_credentials::{Capability, Extended, Extension, PeerId};
     let capability = Capability {
@@ -63,8 +60,6 @@ pub struct Cluster {
     children: Vec<Option<Child>>,
 }
 impl Cluster {
-    /// The root certifies the genesis and is discarded: no root secret is
-    /// written or retained in the running cluster.
     pub async fn start() -> Self {
         let dir = TempDir::new().unwrap();
         let root = PrivateKey::new();
@@ -176,7 +171,7 @@ impl Cluster {
             cluster.wait_online(id, &admin).await;
         }
         admin.initialize(1).await.unwrap();
-        cluster.wait_leader(&admin).await;
+        cluster.wait_unfenced_leader(&admin).await;
         cluster
     }
     pub fn client(&self, key: &PrivateKey) -> NetworkCoordinator {
@@ -274,12 +269,13 @@ impl Cluster {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
-    pub async fn wait_leader(&self, admin: &NetworkCoordinator) -> u64 {
+    pub async fn wait_unfenced_leader(&self, admin: &NetworkCoordinator) -> u64 {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         loop {
             for id in 1..=3 {
                 if let Ok(status) = admin.status(id).await
                     && status.leader == Some(id)
+                    && !status.fenced
                 {
                     return id;
                 }
@@ -305,7 +301,6 @@ pub fn timestamp() -> u64 {
         .unwrap()
         .as_secs()
 }
-/// Joins `client` to `scope`'s log at its committed position.
 pub async fn join(client: &NetworkCoordinator, scope: Scope, sequence: u64) {
     let head = client.coordinated_head(log(scope)).await.unwrap();
     client
@@ -320,7 +315,6 @@ pub async fn join(client: &NetworkCoordinator, scope: Scope, sequence: u64) {
         .await
         .unwrap();
 }
-/// An append of `hash` at the log's current head.
 pub async fn append(
     client: &NetworkCoordinator,
     scope: Scope,
@@ -337,10 +331,6 @@ pub async fn append(
     }
 }
 
-/// Retries the same membership plan, since removing the leader can outlast
-/// one client call; a retained request must neither reapply nor reverse a
-/// later membership.
-/// Valid certificates have an explicit finite lifetime.
 fn with_finite_lifetime(mut control: DomainControl) -> DomainControl {
     control.not_before = timestamp() - 1;
     control.expires = timestamp() + 3600;

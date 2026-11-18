@@ -1,14 +1,5 @@
-//! Deterministic SQL of replayed tables: the function allowlist, the
-//! functions a table's expressions call and the tables an assertion reads.
-//! These are declaration checks; `rocky-storage` parses each assertion
-//! again before it runs and refuses what these scans miss.
 use crate::logical::{Token, keyword, tokenize};
 
-/// SQLite functions whose result depends only on their arguments and the
-/// engine build. Part of the engine identity a tip records. Functions that
-/// turn INTEGER values into REAL ones (`avg`, `total`, `round`, `mod`) are
-/// left out, so exact columns never pass through binary floating point;
-/// Rocky registers the `checked_*` arithmetic, which fails on `i64` overflow.
 pub const DETERMINISTIC_FUNCTIONS: &[&str] = &[
     "abs",
     "char",
@@ -94,10 +85,8 @@ pub const DETERMINISTIC_FUNCTIONS: &[&str] = &[
     "jsonb_set",
 ];
 
-/// Collations replayed statements may name; part of the engine identity.
 pub const DETERMINISTIC_COLLATIONS: &[&str] = &["binary", "nocase", "rtrim"];
 
-/// Keywords SQLite accepts directly before `(` that are not calls.
 const KEYWORDS: &[&str] = &[
     "all",
     "and",
@@ -133,11 +122,8 @@ const KEYWORDS: &[&str] = &[
     "when",
     "where",
 ];
-/// Keywords that read the clock.
 const CLOCK_KEYWORDS: &[&str] = &["current_date", "current_time", "current_timestamp"];
 
-/// The first function `tokens` call outside the allowlist, or a clock
-/// keyword they name.
 fn refused_call(tokens: &[Token]) -> Option<String> {
     for (index, token) in tokens.iter().enumerate() {
         let name = match token {
@@ -160,7 +146,6 @@ fn refused_call(tokens: &[Token]) -> Option<String> {
     None
 }
 
-/// The parenthesized body that opens at `tokens[open]`, without its parens.
 fn body(tokens: &[Token], open: usize) -> &[Token] {
     let mut depth = 0usize;
     for (index, token) in tokens.iter().enumerate().skip(open) {
@@ -178,9 +163,6 @@ fn body(tokens: &[Token], open: usize) -> &[Token] {
     &tokens[open + 1..]
 }
 
-/// The expressions of a `CREATE TABLE`'s `CHECK`s, generated columns and
-/// expression defaults, or of a `CREATE INDEX`'s terms and `WHERE`: SQLite
-/// evaluates them on every replica.
 fn expressions(tokens: &[Token]) -> Vec<&[Token]> {
     if tokens.iter().any(|token| keyword(token, "INDEX")) {
         return tokens
@@ -202,8 +184,6 @@ fn expressions(tokens: &[Token]) -> Vec<&[Token]> {
         .collect()
 }
 
-/// The first function outside the allowlist that a table's or index's
-/// expressions call, or a bare `DEFAULT CURRENT_TIMESTAMP`.
 pub(crate) fn refused_function(statement: &str) -> Option<String> {
     let Some(tokens) = tokenize(statement) else {
         return Some("unterminated quote".into());
@@ -219,16 +199,11 @@ pub(crate) fn refused_function(statement: &str) -> Option<String> {
         })
 }
 
-/// Keywords after which `-` or `+` signs a number.
 const SIGN_KEYWORDS: &[&str] = &[
     "AND", "BETWEEN", "CASE", "ELSE", "ESCAPE", "GLOB", "IN", "IS", "LIKE", "NOT", "OR", "THEN",
     "WHEN", "WHERE",
 ];
 
-/// The first `+`, `-`, `*` or `/` a table's or index's expressions apply.
-/// SQLite evaluates them as written and turns an INTEGER result outside
-/// `i64` into a REAL, so they must call the `checked_*` functions instead.
-/// A signed number, `count(*)` and the `->` JSON operators are not refused.
 pub(crate) fn refused_operator(statement: &str) -> Option<char> {
     let tokens = tokenize(statement)?;
     expressions(&tokens).into_iter().find_map(|tokens| {
@@ -254,19 +229,13 @@ pub(crate) fn refused_operator(statement: &str) -> Option<char> {
     })
 }
 
-/// Why an assertion is not one plain `SELECT` over named tables.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum AssertionShape {
-    /// The tables it reads, lowercase, in order of appearance.
     Reads(Vec<String>),
-    /// A function outside the allowlist, or a clock keyword.
     Function(String),
     Refused(String),
 }
 
-/// The tables an assertion's `SELECT` reads, including those named by the
-/// `FROM` lists of subqueries and nested joins. Refuses `WITH`, qualified
-/// names and table-valued functions rather than guessing at them.
 pub(crate) fn assertion_tables(select_sql: &str) -> AssertionShape {
     let refused = |reason: &str| AssertionShape::Refused(reason.into());
     let Some(tokens) = tokenize(select_sql) else {
@@ -441,6 +410,19 @@ mod tests {
             ("CREATE INDEX i ON t (a) WHERE a - 1 > 0", '-'),
         ] {
             assert_eq!(refused_operator(refused), Some(operator), "{refused}");
+        }
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn functions_that_turn_integers_into_reals_stay_off_the_allowlist() {
+        for integer_to_real in ["avg", "total", "round", "mod"] {
+            assert!(
+                !DETERMINISTIC_FUNCTIONS.contains(&integer_to_real),
+                "{integer_to_real} would pass exact columns through binary floating point"
+            );
+        }
+        for checked in ["checked_add", "checked_sub", "checked_mul", "checked_div"] {
+            assert!(DETERMINISTIC_FUNCTIONS.contains(&checked), "{checked}");
         }
     }
 

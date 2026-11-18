@@ -84,7 +84,7 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
             .acknowledged,
         pending.position
     );
-    let leader = cluster.wait_leader(&admin).await;
+    let leader = cluster.wait_unfenced_leader(&admin).await;
     cluster.arm(leader, "reply.before_send");
     let retry_of_the_assigned_append = Action::Append {
         expected: 0,
@@ -102,7 +102,7 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
         .coordinated(log(cluster.scope), retry_of_the_assigned_append)
         .await;
     cluster.wait_exit(leader).await;
-    cluster.wait_leader(&admin).await;
+    cluster.wait_unfenced_leader(&admin).await;
     let status = first
         .pending_status(log(cluster.scope), pending.position, pending.hash)
         .await
@@ -154,7 +154,7 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
     );
     cluster.spawn(leader, false, None);
     cluster.wait_online(leader, &admin).await;
-    let leader = cluster.wait_leader(&admin).await;
+    let leader = cluster.wait_unfenced_leader(&admin).await;
     let head = first.coordinated_head(log(cluster.scope)).await.unwrap();
     let before = admin.status(leader).await.unwrap();
     let assigned = first
@@ -237,7 +237,7 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
         cluster.spawn(id, false, None);
         cluster.wait_online(id, &admin).await;
     }
-    cluster.wait_leader(&admin).await;
+    cluster.wait_unfenced_leader(&admin).await;
     let head = first.coordinated_head(log(cluster.scope)).await.unwrap();
     assert_eq!(
         (head.commit, head.hashes.len()),

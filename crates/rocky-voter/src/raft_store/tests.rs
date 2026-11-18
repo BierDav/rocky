@@ -3,8 +3,6 @@ use p2panda_core::PrivateKey;
 use rocky_coordinator::{Limits, service::Operation};
 use rocky_core::*;
 use std::collections::BTreeSet;
-/// A genesis whose directory key also administers membership, and the
-/// trusted node of its one domain.
 fn certified() -> (CertifiedGenesis, PrivateKey, Scope, PrivateKey) {
     let root = PrivateKey::new();
     let directory = PrivateKey::new();
@@ -355,8 +353,7 @@ async fn a_recovery_survives_log_replay_and_snapshot_and_retries_identically() {
     );
 }
 
-/// Polls `future` once: whether it completes without waiting on a lock.
-fn ready<T>(future: impl std::future::Future<Output = T>) -> Option<T> {
+fn ready_without_waiting<T>(future: impl std::future::Future<Output = T>) -> Option<T> {
     let mut future = std::pin::pin!(future);
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     match future.as_mut().poll(&mut context) {
@@ -382,9 +379,9 @@ async fn requests_authorize_while_a_log_write_holds_the_image() {
     .unwrap();
     let held_as_by_a_publishing_append_or_vote = store.0.image.lock().await;
     let answers = (
-        ready(store.preflight(&request)),
-        ready(store.read(&request)).map(|read| format!("{read:?}")),
-        ready(store.lane(&request)),
+        ready_without_waiting(store.preflight(&request)),
+        ready_without_waiting(store.read(&request)).map(|read| format!("{read:?}")),
+        ready_without_waiting(store.lane(&request)),
     );
     drop(held_as_by_a_publishing_append_or_vote);
     let free = (
@@ -427,7 +424,10 @@ async fn updates_share_log_entries_and_apply_metadata_in_place() {
     store.save_vote(&Vote::new(2, 1)).await.unwrap();
     assert_eq!(store.try_get_log_entries(1..=16).await.unwrap().len(), 16);
     assert_eq!(
-        store.0.copies.load(std::sync::atomic::Ordering::Relaxed),
+        store
+            .0
+            .copied_entries
+            .load(std::sync::atomic::Ordering::Relaxed),
         0,
         "every update shares the entries it keeps and apply copies no metadata"
     );
@@ -507,7 +507,6 @@ async fn snapshots_larger_than_32_mib_can_be_saved_and_loaded() {
     assert_eq!(unsealed.metadata.0.len(), LARGE_SNAPSHOT_BYTES);
 }
 
-/// Larger than 32 MiB.
 const LARGE_SNAPSHOT_BYTES: usize = 33 * 1024 * 1024;
 
 async fn replay_committed_entries_as_openraft_does_on_startup(
@@ -556,7 +555,6 @@ pub(crate) fn self_certificate_in(
     };
     rocky_credentials::SignedCapability::sign(capability, key).expect("certificate")
 }
-/// A request of a node that presents its own certificate.
 #[cfg(test)]
 pub(crate) fn self_certified(
     genesis: Commitment,

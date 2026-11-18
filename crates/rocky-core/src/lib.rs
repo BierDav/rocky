@@ -1,4 +1,3 @@
-//! Canonical operation protocol and the application boundary for pure reducers.
 mod blocker;
 pub use blocker::*;
 mod capture;
@@ -43,7 +42,6 @@ pub use storage::{
 pub use types::*;
 pub use value::{Real, SqlValue};
 
-/// Authorization uses the installed current policy; historical replay bypasses it.
 #[derive(Clone, Copy, Debug)]
 pub struct AdmissionContext {
     pub scope: Scope,
@@ -51,8 +49,6 @@ pub struct AdmissionContext {
     pub policy_version: u64,
     pub boundary: AdmissionBoundary,
 }
-/// Applications own validation, admission, and projection meaning. The runtime
-/// checks readiness and commits history and projection together before publishing.
 pub trait Application {
     type State: Default;
     type Error: std::error::Error + Send + Sync + 'static;
@@ -63,9 +59,6 @@ pub trait Application {
     fn policy_version(&self, _policy: &Self::Policy) -> u64 {
         1
     }
-    /// Check the whole candidate transition, including paired row/field grants
-    /// on both before and after state. A runtime passes windows holding only
-    /// the rows the operation touches. Rejection discards all candidate changes.
     fn admit_candidate(
         &self,
         _before: &Self::State,
@@ -76,13 +69,9 @@ pub trait Application {
     ) -> Result<(), Self::Error> {
         self.admit(envelope, policy)
     }
-    /// Classifies an effect-free operation on an incarnation covered by a runtime pruned prefix.
-    /// Admission still runs; implementations must identify only absent/retired rows or insert conflicts.
     fn definite_drop(&self, _state: &Self::State, _envelope: &Envelope) -> bool {
         false
     }
-    /// Caller must first admit the operation and establish readiness with
-    /// `AppliedOperations::classify`. Local business checks run before mutation.
     fn apply_ready(
         &self,
         state: &mut Self::State,

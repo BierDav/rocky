@@ -2,16 +2,11 @@ use crate::{
     AppId, Commitment, DomainId, EngineIdentity, Envelope, OperationId, Scope, Versions, commitment,
 };
 
-/// Maximum encoded definition size, independent of operation payload limits.
 pub const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
-/// Maximum items in each definition group, including fields of wide applications.
 pub const MAX_MANIFEST_ITEMS: usize = 32_768;
-/// Maximum declared domains in one manifest.
 pub const MAX_MANIFEST_DOMAINS: usize = 4096;
-/// The one manifest body format; other bodies are refused.
 const MANIFEST_FORMAT: &[u8] = b"rocky.manifest.v3";
 
-/// Unsigned definition data. Installing this body never installs executable code.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplicationManifest {
     pub publisher: [u8; 32],
@@ -19,7 +14,6 @@ pub struct ApplicationManifest {
     pub app: AppId,
     pub schema: u32,
     pub projection: u32,
-    /// The engine every replica replaying this schema's tip runs.
     pub engine: EngineIdentity,
     pub entities: Vec<DefinitionItem>,
     pub fields: Vec<DefinitionItem>,
@@ -30,7 +24,6 @@ pub struct ApplicationManifest {
 pub struct DefinitionItem {
     pub id: Commitment,
     pub name: String,
-    /// Language-independent canonical shape/rule description.
     pub shape: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,7 +112,6 @@ impl ApplicationManifest {
         }
         Ok(())
     }
-    /// Little-endian counts/versions and length-prefixed UTF-8; IDs sorted by bytes.
     pub fn canonical_body(&self) -> Vec<u8> {
         let mut bytes = MANIFEST_FORMAT.to_vec();
         bytes.extend(self.publisher);
@@ -149,7 +141,6 @@ impl ApplicationManifest {
         }
         bytes
     }
-    /// Decode canonical definition data without resolving or loading handlers.
     pub fn from_body(bytes: &[u8]) -> Result<Self, crate::ProtocolError> {
         let invalid = || crate::ProtocolError::InvalidManifest;
         if bytes.len() > MAX_MANIFEST_BYTES {
@@ -226,7 +217,6 @@ impl ApplicationManifest {
             && self.domains.iter().any(|rule| rule.domain == scope.domain)
     }
 }
-/// Identity of a named definition item under its publisher and application.
 pub fn definition_item_id(publisher: [u8; 32], app: AppId, kind: &str, name: &str) -> Commitment {
     let mut bytes = publisher.to_vec();
     bytes.extend(app.0);

@@ -1,4 +1,3 @@
-//! The retired provider certificate must never be treated as a current bootstrap.
 use rocky_coordinator::certified::TrustBundle;
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]

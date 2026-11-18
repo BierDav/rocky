@@ -1,4 +1,3 @@
-//! Frozen with Python hashlib before enabling the target SHA-2 backend.
 use sha2::{Digest, Sha256, Sha512};
 
 fn hex(bytes: &[u8]) -> String {

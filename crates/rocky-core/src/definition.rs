@@ -1,5 +1,3 @@
-//! Portable schema definitions: the ORM-neutral way to construct a
-//! `LogicalSchema` from data a host language can write, without Room or Rust.
 use crate::{
     Affinity, Collation, ColumnClass, IndexColumn, LOGICAL_SCHEMA_FORMAT, LogicalAssertion,
     LogicalColumn, LogicalForeignKey, LogicalIndex, LogicalRestriction, LogicalSchema,
@@ -7,21 +5,14 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-/// The `SchemaSource::kind` of descriptors built from a definition.
 pub const DEFINITION_SOURCE: &str = "rocky.definition";
-/// Format 6: names are the identities of tables and fields, with no
-/// separate entry. It builds `LOGICAL_SCHEMA_FORMAT` descriptors.
 pub const DEFINITION_FORMAT: u32 = 6;
-/// Largest definition document `SchemaDefinition::parse` accepts.
 pub const MAX_DEFINITION_BYTES: usize = 1024 * 1024;
 
-/// What an application declares about its tables. `build` generates the
-/// statements and the canonical descriptor; nothing is written twice.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchemaDefinition {
     pub format: u32,
-    /// 64 hexadecimal digits.
     pub publisher: String,
     pub application: String,
     pub tables: Vec<TableDefinition>,
@@ -36,7 +27,6 @@ pub struct SchemaDefinition {
 #[serde(deny_unknown_fields)]
 pub struct TableDefinition {
     pub name: String,
-    /// The replayed table whose grants this table follows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granted_like: Option<String>,
     pub class: TableClass,
@@ -50,11 +40,9 @@ pub struct TableDefinition {
     pub partition_group: Option<String>,
     #[serde(default)]
     pub indexes: Vec<IndexDefinition>,
-    /// References to the identity of another replayed table.
     #[serde(default)]
     pub foreign_keys: Vec<ForeignKeyDefinition>,
 }
-/// What deleting a parent does to its children, inside the same transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeleteAction {
@@ -64,13 +52,9 @@ pub enum DeleteAction {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForeignKeyDefinition {
-    /// The child's columns, one per column of the parent's identity.
     pub columns: Vec<String>,
-    /// The parent table.
     pub table: String,
     pub on_delete: DeleteAction,
-    /// Checked when the transaction ends, as SQLite checks
-    /// a deferred key at `COMMIT`, instead of after each statement.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deferred: bool,
 }
@@ -82,13 +66,10 @@ pub struct ColumnDefinition {
     pub affinity: Affinity,
     #[serde(default)]
     pub not_null: bool,
-    /// A literal: string, number, boolean or null.
     #[serde(default)]
     pub default: Option<serde_json::Value>,
     #[serde(default = "binary")]
     pub collation: Collation,
-    /// An expression over the row's replicated columns: a stored SQLite
-    /// generated column.
     #[serde(default)]
     pub derived: Option<String>,
     #[serde(default)]
@@ -104,10 +85,8 @@ pub struct IndexDefinition {
     pub columns: Vec<IndexColumn>,
     #[serde(default)]
     pub unique: bool,
-    /// Terms indexed after `columns`, such as `lower(name)`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expressions: Vec<String>,
-    /// Indexes just the rows this expression holds for.
     #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
     pub predicate: Option<String>,
 }
@@ -130,7 +109,6 @@ fn publisher(hex: &str) -> Result<[u8; 32], SchemaError> {
     }
     Ok(bytes)
 }
-/// A JSON scalar as the SQL literal of a column default.
 fn literal(value: &serde_json::Value) -> Result<String, SchemaError> {
     use serde_json::Value;
     Ok(match value {
@@ -163,7 +141,6 @@ fn collation(collation: Collation) -> &'static str {
 }
 
 impl SchemaDefinition {
-    /// Parses a definition document and builds its descriptor.
     pub fn parse(json: &[u8]) -> Result<Self, SchemaError> {
         if json.len() > MAX_DEFINITION_BYTES {
             return invalid("definition quota");
@@ -179,9 +156,6 @@ impl SchemaDefinition {
         }
         serde_json::from_slice(json).map_err(|error| SchemaError::Invalid(error.to_string()))
     }
-    /// The canonical descriptor. It is structurally valid; whether a
-    /// profile can install it is `LogicalSchema::supported_on`. The same
-    /// definition always builds the same descriptor.
     pub fn build(&self) -> Result<LogicalSchema, SchemaError> {
         if self.format != DEFINITION_FORMAT {
             return invalid("unsupported schema definition format");
@@ -728,8 +702,6 @@ mod replayed_tests {
     use super::*;
     use crate::{Incompatibility, Profile};
 
-    /// `teams` and its `members` replay in partition group `org`; `notes`
-    /// is unpartitioned.
     fn definition(extra: serde_json::Value) -> SchemaDefinition {
         let mut json = serde_json::json!({
             "format": 6,

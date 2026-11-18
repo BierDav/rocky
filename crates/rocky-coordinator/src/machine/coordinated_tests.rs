@@ -605,7 +605,6 @@ fn log_roles_and_signed_proofs_cannot_bypass_domain_control() {
     );
 }
 
-/// `identity`'s certificate for the node `node`.
 fn certificate(
     identity: &PrivateKey,
     node: &PrivateKey,

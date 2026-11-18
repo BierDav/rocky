@@ -1,6 +1,3 @@
-//! The client against the authority state machine behind an in-memory
-//! transport, on every target: one test voter answers each stream as a
-//! voter's client lane does, signed with its key.
 use super::*;
 use crate::{
     counters::{CLAIM_WINDOW, Claim, Lookup, Name},
@@ -13,24 +10,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const KIND: &str = "memory";
 
-/// One voter of a public service, reached through `Transport::connect`.
 struct Memory {
     genesis: Commitment,
-    /// The key the voter answers with: the certified one, or an impostor's.
     key: PrivateKey,
     state: Arc<Mutex<Metadata>>,
     streams: AtomicUsize,
-    /// Seconds the voter's clock runs ahead of every request's: above zero
-    /// it refuses each one as skewed.
-    ahead: std::sync::atomic::AtomicU64,
+    clock_ahead_seconds: std::sync::atomic::AtomicU64,
 }
 impl Memory {
     fn answer(&self, request: &Request) -> Result<Outcome, CoordinationError> {
         request.authenticate(self.genesis)?;
-        let ahead = self.ahead.load(Ordering::Relaxed);
-        if ahead > 0 {
+        let clock_ahead_seconds = self.clock_ahead_seconds.load(Ordering::Relaxed);
+        if clock_ahead_seconds > 0 {
             return Err(CoordinationError::ClockSkew {
-                coordinator_time: now()? + ahead,
+                coordinator_time: now()? + clock_ahead_seconds,
             });
         }
         request.fresh()?;
@@ -64,7 +57,6 @@ impl Memory {
         let _ = served.await;
     }
 }
-/// The client's transport of kind `.1`: each stream reaches the test voter.
 struct Lane(Arc<Memory>, &'static str);
 impl Transport for Lane {
     fn request<'a>(
@@ -108,8 +100,6 @@ impl Transport for Lane {
     }
 }
 
-/// A public service whose voter 1, of `key`, the client lane reaches; the
-/// other two have no client endpoint.
 fn genesis(key: &PrivateKey) -> CertifiedGenesis {
     CertifiedGenesis::sign(
         Genesis {
@@ -128,7 +118,7 @@ fn genesis(key: &PrivateKey) -> CertifiedGenesis {
                 .collect(),
             initial_voters: [1, 2, 3].into(),
             membership_authority: PrivateKey::new().public_key(),
-            directory_definition: [0; 32],
+            directory_definition: NO_DIRECTORY_DEFINITION,
             directory: None,
             authorities: Vec::new(),
             max_control_lifetime: DAY,
@@ -150,8 +140,6 @@ fn genesis(key: &PrivateKey) -> CertifiedGenesis {
     .unwrap()
 }
 
-/// A public service, the tenant that registered a domain on
-/// it, the domain's publisher and its trusted node.
 struct Service {
     bundle: TrustBundle,
     voter: Arc<Memory>,
@@ -163,7 +151,6 @@ impl Service {
     async fn start() -> Self {
         Self::answered_by(None).await
     }
-    /// A service whose voter answers with `impostor` instead of its key.
     async fn answered_by(impostor: Option<PrivateKey>) -> Self {
         let voter = PrivateKey::new();
         let genesis = genesis(&voter);
@@ -174,7 +161,7 @@ impl Service {
                 Metadata::with_limits(genesis.clone(), genesis.limits()).unwrap(),
             )),
             streams: AtomicUsize::new(0),
-            ahead: Default::default(),
+            clock_ahead_seconds: Default::default(),
         });
         let publisher = PrivateKey::new();
         let tenant = PrivateKey::new();
@@ -221,7 +208,7 @@ impl Service {
                 key,
                 state: memory.state.clone(),
                 streams: AtomicUsize::new(0),
-                ahead: Default::default(),
+                clock_ahead_seconds: Default::default(),
             }),
         };
         Self {
@@ -232,7 +219,6 @@ impl Service {
             node,
         }
     }
-    /// A client of `key` presenting its own node certificate.
     fn client(&self, key: &PrivateKey) -> NetworkCoordinator {
         let client = NetworkCoordinator::connect(
             &self.bundle,
@@ -465,7 +451,10 @@ async fn an_observer_sees_every_answer_and_refusal() {
             .await,
         Ok(1)
     );
-    service.voter.ahead.store(3600, Ordering::Relaxed);
+    service
+        .voter
+        .clock_ahead_seconds
+        .store(3600, Ordering::Relaxed);
     assert!(matches!(
         client
             .claim(service.scope, invoices, Claim::fresh().unwrap())
@@ -488,7 +477,7 @@ fn a_client_needs_an_endpoint_of_its_transport_kind() {
         key: PrivateKey::new(),
         state: Arc::new(Mutex::new(Metadata::new(genesis.clone()).unwrap())),
         streams: AtomicUsize::new(0),
-        ahead: Default::default(),
+        clock_ahead_seconds: Default::default(),
     });
     let bundle = TrustBundle::new(&genesis).unwrap();
     assert!(matches!(
@@ -573,8 +562,6 @@ async fn application_client_bindings_keep_node_authority_and_observers_independe
     assert_eq!(stranger_calls.load(Ordering::SeqCst), 1);
 }
 
-/// The connector reaches the service a database's settings name only when
-/// the settings' certified genesis verifies against their identity.
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_connector_reaches_only_the_coordinator_its_bundle_certifies() {
     use rocky_credentials::{Coordinator, CoordinatorConnector};
@@ -584,7 +571,7 @@ fn a_connector_reaches_only_the_coordinator_its_bundle_certifies() {
         key: PrivateKey::new(),
         state: Arc::new(Mutex::new(Metadata::new(certified.clone()).unwrap())),
         streams: AtomicUsize::new(0),
-        ahead: Default::default(),
+        clock_ahead_seconds: Default::default(),
     });
     let lane = Arc::new(Lane(memory, KIND));
     let named = NetworkCoordinator::connect(

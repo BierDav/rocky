@@ -1,16 +1,8 @@
-//! Intents of replayed tables: what a transaction ran, not the rows it made.
-//!
-//! An intent carries one partition's statements of a transaction with their
-//! bound values and the base the author read; its frame carries the stamp.
-//! Replicas holding the partition replay intents in stamp order and drop a
-//! transaction whose replay fails, in every partition of its bundle.
 use crate::SqlValue;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Statements one intent may carry.
 pub const MAX_INTENT_STATEMENTS: usize = 256;
 
-/// One statement as the author ran it in its partition, parameters bound.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntentStatement {
     pub sql: String,
@@ -18,7 +10,6 @@ pub struct IntentStatement {
     pub params: Vec<SqlValue>,
 }
 
-/// Parameters in `SqlValue`'s canonical encoding, one byte string each.
 mod values {
     use super::*;
 
@@ -53,25 +44,19 @@ mod values {
     }
 }
 
-/// The last sequence of one author the intent's author had applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BaseMark {
     pub author: crate::WriterId,
     pub sequence: u64,
 }
 
-/// One partition's part of a transaction. It carries no row images; its
-/// frame's header names the stamp, tip and partition.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Intent {
-    /// The tip frontier the author read in the partition, by author.
     pub base: Vec<BaseMark>,
     pub statements: Vec<IntentStatement>,
 }
 
 impl Intent {
-    /// Refuses an intent no author produces: no statements, too many, or a
-    /// base that is not strictly ordered by author.
     pub fn check(&self) -> Result<(), &'static str> {
         if self.statements.is_empty() || self.statements.len() > MAX_INTENT_STATEMENTS {
             return Err("intent statement count");
@@ -87,35 +72,23 @@ impl Intent {
     }
 }
 
-/// Why replay dropped a transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DropReason {
-    /// A constraint failed on the replica's own replay.
     Constraint,
-    /// The replayed effects are outside the author's grants.
     Admission,
-    /// The transaction updated or deleted a row a schema restriction
-    /// protects as it stood before the transaction.
     Restricted,
-    /// A statement no longer compiles against the tip's schema.
     Schema,
-    /// The engine refused a statement for another reason.
     Engine,
 }
 
-/// What became of a transaction of replayed tables.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransactionOutcome {
-    /// `final` once a seal covers the transaction; until then a later
-    /// arrival ordered before it may still drop it.
     Applied {
         #[serde(rename = "final")]
         sealed: bool,
     },
-    /// `final` once a seal covers the transaction; until then a later
-    /// arrival ordered before it may still change the decision.
     Dropped {
         reason: DropReason,
         #[serde(rename = "final")]
@@ -123,31 +96,18 @@ pub enum TransactionOutcome {
     },
 }
 
-/// Members one outcome record may name.
 pub const MAX_OUTCOME_MEMBERS: usize = 64;
 
-/// A replica's signed statement of how it replayed the members of a
-/// transaction it holds. It travels in each of those members' logs, so a
-/// replica holding only some of them drops its members when it says so.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutcomeRecord {
-    /// The bundle's transaction id.
     pub transaction: crate::Commitment,
-    /// Each member the publisher replayed, by index, with what its
-    /// partition applied before it: the last sequence per author.
     pub replayed: Vec<(u16, Vec<BaseMark>)>,
-    /// A digest of what the partitions linked to the members by foreign keys
-    /// or assertions applied before them, which outcomes depend on too;
-    /// `None` without any. Bounded, as a link can reach every partition.
     pub linked: Option<crate::Commitment>,
-    /// `None` when applied.
     pub dropped: Option<DropReason>,
-    /// The replaying engine, reported when two records disagree.
     pub engine: String,
 }
 
 impl OutcomeRecord {
-    /// Refuses a record no replica produces.
     pub fn check(&self) -> Result<(), &'static str> {
         if self.replayed.is_empty()
             || self.replayed.len() > MAX_OUTCOME_MEMBERS

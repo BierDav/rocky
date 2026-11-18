@@ -1,4 +1,3 @@
-//! Voter RPCs over the shared signed wire.
 use openraft::raft::{AppendEntriesRequest, InstallSnapshotRequest, VoteRequest};
 use p2panda_core::PrivateKey;
 pub(crate) use rocky_coordinator::{

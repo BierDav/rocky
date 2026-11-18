@@ -1,5 +1,3 @@
-//! A public service of three voter processes with iroh client lanes on
-//! loopback, set up with the same `rocky-voter` commands an operator uses.
 #![expect(dead_code, reason = "Shared by independent multiprocess exercises.")]
 use super::timestamp;
 use p2panda_core::{PrivateKey, PublicKey};
@@ -28,7 +26,6 @@ pub struct PublicCluster {
     pub limits: rocky_coordinator::Limits,
     children: Vec<Option<Child>>,
 }
-/// One application owner: its tenant control key, its publisher and devices.
 pub struct Tenant {
     pub name: &'static str,
     pub key: PrivateKey,
@@ -36,8 +33,6 @@ pub struct Tenant {
     pub executor: PrivateKey,
     pub alternate: PrivateKey,
 }
-/// nextest sets the path at run time, remapped when tests run from an archive
-/// built elsewhere; `cargo test` has only the compile-time path.
 pub fn voter() -> PathBuf {
     std::env::var_os("CARGO_BIN_EXE_rocky-voter").map_or_else(
         || PathBuf::from(env!("CARGO_BIN_EXE_rocky-voter")),
@@ -54,8 +49,6 @@ fn run(arguments: &[&Path]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 impl PublicCluster {
-    /// Each voter generates its own secrets; the root certifies the plan
-    /// offline and is discarded before any voter starts.
     pub async fn start(limits: rocky_coordinator::Limits, tenants: u32) -> Self {
         let dir = TempDir::new().unwrap();
         let root = PrivateKey::new();
@@ -147,7 +140,7 @@ impl PublicCluster {
             cluster.wait_online(id, &admin).await;
         }
         admin.initialize(1).await.unwrap();
-        cluster.wait_leader(&admin).await;
+        cluster.wait_unfenced_leader(&admin).await;
         cluster
     }
     pub fn config(&self, id: u64) -> PathBuf {
@@ -181,7 +174,6 @@ impl PublicCluster {
     pub fn log(&self, id: u64) -> String {
         std::fs::read_to_string(self.dir.path().join(format!("voter-{id}.log"))).unwrap_or_default()
     }
-    /// The membership authority administers voters over provider TCP.
     pub fn admin(&self) -> NetworkCoordinator {
         NetworkCoordinator::open(
             self.genesis.clone(),
@@ -191,8 +183,6 @@ impl PublicCluster {
         )
         .unwrap()
     }
-    /// Waits until voter `id` has bound its released port, so no status
-    /// connection claims that ephemeral port as its source address first.
     async fn wait_bound(&self, id: u64) {
         self.wait(&format!("voter {id} listening"), async || {
             self.log(id).contains("serving voters at")
@@ -205,8 +195,7 @@ impl PublicCluster {
         })
         .await;
     }
-    /// The unfenced leader; a fenced voter may report its backup's leadership.
-    pub async fn wait_leader(&self, admin: &NetworkCoordinator) -> u64 {
+    pub async fn wait_unfenced_leader(&self, admin: &NetworkCoordinator) -> u64 {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         loop {
             for id in 1..=3 {
@@ -271,7 +260,6 @@ impl Drop for PublicCluster {
     }
 }
 
-/// A client endpoint the device owns: dial-only, relays and discovery off.
 pub async fn transport() -> Arc<dyn Transport> {
     let options = rocky_iroh::Options {
         relay: Some("disabled".into()),
@@ -297,7 +285,6 @@ impl Tenant {
     pub fn app(&self) -> AppId {
         ApplicationManifest::app_id(*self.publisher.public_key().as_bytes(), self.name)
     }
-    /// A domain as the SDK creates one: its own random mesh and domain.
     pub fn scope(&self, n: u8) -> Scope {
         Scope {
             mesh: MeshId([n; 16]),

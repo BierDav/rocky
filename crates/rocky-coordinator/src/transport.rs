@@ -1,13 +1,9 @@
-//! The signed coordination wire: framed envelopes and one request with its
-//! voter's answer, over any ordered stream on every target.
 use crate::certified::*;
 use p2panda_core::{PrivateKey, PublicKey, Signature};
 use rocky_core::*;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// Variants encode by name, so a client without the voters' Raft messages
-/// speaks the same format.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WireMessage<A, V, S> {
     Client(Box<crate::machine::Request>),
@@ -65,17 +61,18 @@ impl Envelope {
         }
         Ok(())
     }
-    /// A voter's check of a request's signing time.
     #[cfg(not(target_family = "wasm"))]
     pub fn verify(&self, genesis: Commitment) -> Result<(), CoordinationError> {
         self.authenticate(genesis)?;
         let coordinator_time = now()?;
-        if coordinator_time.abs_diff(self.time) > 30 {
+        if coordinator_time.abs_diff(self.time) > MAX_CLOCK_SKEW_SECONDS {
             return Err(CoordinationError::ClockSkew { coordinator_time });
         }
         Ok(())
     }
 }
+pub(crate) const MAX_CLOCK_SKEW_SECONDS: u64 = 30;
+
 pub fn nonce() -> Commitment {
     *PrivateKey::new().public_key().as_bytes()
 }
@@ -115,10 +112,6 @@ pub async fn write(
         .await
         .map_err(|_| CoordinationError::Unavailable)
 }
-/// One signed request and the signed answer of `voter` on `stream`.
-///
-/// The fresh request nonce binds the answer to this call even when the
-/// device's clock is wrong, so a reply may still report clock skew.
 pub async fn converse<T: Serialize + DeserializeOwned>(
     stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
     voter: PublicKey,
@@ -136,7 +129,6 @@ pub async fn converse<T: Serialize + DeserializeOwned>(
     decode(&response.body)
 }
 
-/// Clients never construct or decode Raft RPCs.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NoRaft {}
 pub(crate) type Message = WireMessage<NoRaft, NoRaft, NoRaft>;
@@ -156,4 +148,59 @@ pub async fn exchange<T: Serialize + DeserializeOwned>(
     })
     .await
     .map_err(|_| CoordinationError::Unavailable)?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn wire_variants_encode_by_name_so_a_client_without_raft_types_speaks_the_voter_format()
+    -> Result<(), CoordinationError> {
+        let status = encode(&Message::Status)?;
+        assert!(
+            status
+                .windows(b"Status".len())
+                .any(|name| name == b"Status")
+        );
+        let at_voter: WireMessage<u8, u8, u8> = decode(&status)?;
+        assert!(matches!(at_voter, WireMessage::Status));
+        let at_client: Message = decode(&encode(&WireMessage::<u8, u8, u8>::Initialize)?)?;
+        assert!(matches!(at_client, WireMessage::Initialize));
+        assert!(
+            decode::<Message>(&encode(&WireMessage::<u8, u8, u8>::Append(7))?).is_err(),
+            "a client never decodes a Raft RPC"
+        );
+        Ok(())
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn an_answer_bound_to_another_request_nonce_is_refused() -> Result<(), CoordinationError>
+    {
+        let genesis = [6; 32];
+        let (client, voter) = (PrivateKey::new(), PrivateKey::new());
+        for answer_to_this_call in [true, false] {
+            let (mut near, mut far) = tokio::io::duplex(4096);
+            let answer = async {
+                let request = read(&mut far).await?;
+                let nonce = if answer_to_this_call {
+                    request.nonce
+                } else {
+                    super::nonce()
+                };
+                write(&mut far, &Envelope::sign(genesis, nonce, &1u8, &voter)?).await
+            };
+            let (reply, answered) = tokio::join!(
+                converse::<u8>(&mut near, voter.public_key(), genesis, &client, 0u8),
+                answer
+            );
+            answered?;
+            if answer_to_this_call {
+                assert_eq!(reply, Ok(1));
+            } else {
+                assert_eq!(reply, Err(CoordinationError::Denied));
+            }
+        }
+        Ok(())
+    }
 }

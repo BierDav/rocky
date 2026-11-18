@@ -7,7 +7,6 @@ use rocky_credentials::{
 use rocky_iroh::iroh::{Endpoint, RelayMode, RelayUrl, SecretKey, endpoint::presets};
 use std::path::Path;
 
-/// A real tenant registration and cleanup through a relay-only client.
 pub(super) async fn run(
     bundle: &Path,
     relay: &str,

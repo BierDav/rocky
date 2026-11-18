@@ -1,23 +1,12 @@
-//! Portable writer and row identities.
-//!
-//! A writer is named by its node's full 32-byte public key, so independent
-//! devices never need a shared allocator. A row identity is that writer and
-//! its monotonic creation sequence; its canonical form is 40 bytes, the key
-//! followed by the big-endian sequence, so byte order is identity order.
 use crate::SqlValue;
 use std::fmt;
 
-/// The bytes of a canonical row identity.
 pub const ROW_IDENTITY_BYTES: usize = 40;
-/// The highest creation sequence; SQLite stores sequences as signed integers.
 pub const MAX_ROW_SEQUENCE: u64 = i64::MAX as u64;
 
-/// A writer namespace: a node's full public key, never a shortened number.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WriterId([u8; 32]);
 
-/// A row's immutable incarnation: its creating writer and that writer's
-/// creation sequence, with no timestamp.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RowIdentity {
     writer: WriterId,
@@ -81,9 +70,8 @@ impl RowIdentity {
         }
         Ok(Self { writer, sequence })
     }
-    /// Continues a summarized creation log; zero means no prior creation.
-    pub fn next(writer: WriterId, highest: u64) -> Result<Self, RowIdentityError> {
-        let sequence = highest
+    pub fn next(writer: WriterId, highest_prior_or_zero: u64) -> Result<Self, RowIdentityError> {
+        let sequence = highest_prior_or_zero
             .checked_add(1)
             .filter(|sequence| *sequence <= MAX_ROW_SEQUENCE)
             .ok_or(RowIdentityError::Exhausted)?;
@@ -101,7 +89,6 @@ impl RowIdentity {
         bytes[32..].copy_from_slice(&self.sequence.to_be_bytes());
         bytes
     }
-    /// Decodes the canonical form, refusing every other length or sequence.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RowIdentityError> {
         if bytes.len() != ROW_IDENTITY_BYTES {
             return Err(RowIdentityError::Representation);
@@ -114,11 +101,9 @@ impl RowIdentity {
         );
         Self::new(WriterId::from_slice(writer)?, sequence)
     }
-    /// The SQL value of an `id` column: a 40-byte BLOB.
     pub fn sql(self) -> SqlValue {
         SqlValue::Blob(self.to_bytes().to_vec())
     }
-    /// Reads an `id` column, refusing every other storage class.
     pub fn from_sql(value: &SqlValue) -> Result<Self, RowIdentityError> {
         match value {
             SqlValue::Blob(bytes) => Self::from_bytes(bytes),
@@ -146,7 +131,6 @@ impl std::str::FromStr for RowIdentity {
 fn hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
     bytes.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
 }
-/// Lowercase hexadecimal only, so every value has one spelling.
 fn unhex(value: &str) -> Result<Vec<u8>, RowIdentityError> {
     let digit = |byte: u8| match byte {
         b'0'..=b'9' => Ok(byte - b'0'),
@@ -163,7 +147,6 @@ fn unhex(value: &str) -> Result<Vec<u8>, RowIdentityError> {
         .collect()
 }
 
-/// Text in human-readable formats, canonical bytes in binary ones.
 macro_rules! serde_bytes_or_text {
     ($type:ty, $expecting:literal, $from:expr) => {
         impl serde::Serialize for $type {

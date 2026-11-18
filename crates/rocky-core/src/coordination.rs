@@ -1,5 +1,3 @@
-//! Generic coordination metadata: commitments, errors and issue-time
-//! sequences shared with the coordinator. No application payload.
 use crate::*;
 use sha2::{Digest, Sha256};
 
@@ -8,34 +6,23 @@ pub type Configuration = [u8; 16];
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CoordinationError {
     Unavailable,
-    /// The signed request is outside the authority clock window.
-    ClockSkew {
-        coordinator_time: u64,
-    },
-    /// The coordinator's durable state is missing where it must exist.
+    ClockSkew { coordinator_time: u64 },
     CoordinationStateLost,
     UnknownDomain,
     Denied,
     Configuration,
     StaleEpoch,
-    /// The log head moved past the position a call expected.
     StaleHead,
     InvalidCommitment,
     RequestConflict,
     Corrupt,
-    /// A retried call is older than one the coordinator already answered.
     Retired,
-    /// The signed request is older than the retry window: it never applies.
     Expired,
-    /// A window or quota is full. Retry the same identity later.
     Backpressure,
-    /// A persisted or wire format this build refuses to migrate.
     UnsupportedFormat,
-    /// The tip's log ended with a terminal entry and takes no other.
     Sealed,
 }
 impl CoordinationError {
-    /// A short category for diagnostics.
     pub fn category(&self) -> &'static str {
         match self {
             Self::Unavailable => "unavailable",
@@ -63,18 +50,12 @@ impl std::fmt::Display for CoordinationError {
     }
 }
 impl std::error::Error for CoordinationError {}
-/// Coordinator calls occur outside storage transactions.
 pub type CoordinationFuture<'a, T> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, CoordinationError>> + Send + 'a>>;
-/// Request sequences carry their issue time in whole seconds above a
-/// per-second counter, so a coordinator bounds admission and retention by
-/// time without remembering every identity.
 pub const ISSUE_SHIFT: u32 = 24;
-/// Issue time, in seconds since the Unix epoch, of a request sequence.
 pub const fn issued_at(sequence: u64) -> u64 {
     sequence >> ISSUE_SHIFT
 }
-/// The next strictly increasing request sequence issued at `now` seconds.
 pub fn next_request_sequence(previous: u64, now: u64) -> Result<AuthorSequence, ProtocolError> {
     let floor = now
         .checked_mul(1 << ISSUE_SHIFT)
@@ -86,7 +67,6 @@ pub fn next_request_sequence(previous: u64, now: u64) -> Result<AuthorSequence, 
             .max(floor),
     )
 }
-/// Incremental form of `commitment`, with the same domain separation.
 pub struct CommitmentBuilder(Sha256);
 impl CommitmentBuilder {
     pub fn new(prefix: &str) -> Self {

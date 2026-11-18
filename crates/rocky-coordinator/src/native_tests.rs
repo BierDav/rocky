@@ -1,4 +1,3 @@
-//! Metadata retries and the native client lane, independent of any Raft host.
 use crate::{
     Limits,
     certified::*,
@@ -9,8 +8,6 @@ use p2panda_core::PrivateKey;
 use rocky_core::*;
 use std::{collections::BTreeSet, sync::Arc};
 
-/// A genesis whose directory key also administers membership, and the
-/// trusted node of its one domain.
 fn certified() -> (CertifiedGenesis, PrivateKey, Scope, PrivateKey) {
     let root = PrivateKey::new();
     let directory = PrivateKey::new();

@@ -2,7 +2,6 @@ use std::fmt;
 
 pub const VERSION_1: u32 = 1;
 pub const MAX_COUNTER: u64 = i64::MAX as u64;
-/// Generic framing ceiling; applications may impose a smaller payload limit.
 pub const MAX_PAYLOAD_BYTES: usize = 65_536;
 
 macro_rules! ids {
@@ -128,7 +127,6 @@ impl Envelope {
         Ok(())
     }
 
-    /// Validate the union of predecessor and, for updates, entity creation.
     pub fn validate_dependencies(&self, is_create: bool) -> Result<(), ProtocolError> {
         self.validate()?;
         if is_create && self.entity != self.id {
@@ -222,7 +220,6 @@ impl fmt::Display for ProtocolError {
 }
 impl std::error::Error for ProtocolError {}
 
-/// Stable trusted-development identities, each with repeated literal bytes.
 pub mod fixtures {
     use super::*;
     pub const MESH: MeshId = MeshId([0x11; 16]);
@@ -238,13 +235,11 @@ pub mod fixtures {
     };
 }
 
-/// Author serialization is scoped to an application domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuthorKey {
     pub scope: Scope,
     pub node: NodeId,
 }
-/// Revision counters from different domains cannot be compared as one cursor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RevisionKey {
     pub scope: Scope,

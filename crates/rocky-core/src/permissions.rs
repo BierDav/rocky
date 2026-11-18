@@ -2,7 +2,6 @@ use crate::{Commitment, Scope};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// An encryption/replication boundary, independent of the invariant domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ResourceScope {
     pub domain: Scope,
@@ -48,10 +47,6 @@ impl RowSelection {
     }
 }
 
-/// The fields a grant covers. Field ids derive from names, so `All`
-/// covers every field the table has in any generation, added later
-/// included, and `Only` the named ones in every generation. Encoded as
-/// an optional set: none for `All`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     from = "Option<BTreeSet<Commitment>>",
@@ -75,14 +70,12 @@ impl FieldSelection {
             _ => false,
         }
     }
-    /// The number of named fields; none for `All`.
     pub fn named(&self) -> usize {
         match self {
             Self::All => 0,
             Self::Only(fields) => fields.len(),
         }
     }
-    /// Whether this selects no field at all, as custody does.
     pub fn is_none(&self) -> bool {
         matches!(self, Self::Only(fields) if fields.is_empty())
     }
@@ -100,14 +93,12 @@ impl From<FieldSelection> for Option<BTreeSet<Commitment>> {
         }
     }
 }
-/// Collected field ids name exactly those fields.
 impl FromIterator<Commitment> for FieldSelection {
     fn from_iter<I: IntoIterator<Item = Commitment>>(fields: I) -> Self {
         Self::Only(fields.into_iter().collect())
     }
 }
 
-/// Fields and rows stay paired inside each grant; permissions never form a cross product.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceGrant {
     pub scope: ResourceScope,
@@ -129,7 +120,6 @@ impl ResourceGrant {
 
 pub type RowFields = BTreeMap<Commitment, Vec<u8>>;
 
-/// Exact before/after images are encrypted with the row, including generated changes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowChange {
     pub scope: ResourceScope,
@@ -161,8 +151,6 @@ impl RowChange {
         self.right()
             .is_some_and(|right| self.permitted_fields(right, &self.changed_fields(), grants))
     }
-    /// One grant on this row holds `right`, and every field has a grant with
-    /// `right` on this same row. A delete names no fields.
     fn permitted_fields(
         &self,
         right: Right,
@@ -181,23 +169,18 @@ impl RowChange {
     }
 }
 
-/// A row change with its write mask: the fields an update republishes
-/// although their value is unchanged, as the all-assigned update policy
-/// requires. Every published field needs a paired row/field grant.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowWrite {
     pub change: RowChange,
     pub assigned: BTreeSet<Commitment>,
 }
 impl RowWrite {
-    /// Publishes only the values that differ.
     pub fn changed(change: RowChange) -> Self {
         Self {
             change,
             assigned: BTreeSet::new(),
         }
     }
-    /// A mask is valid only on an update and only for fields the after image holds.
     pub fn valid(&self) -> bool {
         self.assigned.is_empty()
             || matches!(
@@ -211,7 +194,6 @@ impl RowWrite {
             right => right,
         }
     }
-    /// Changed fields and assigned fields: everything this write stamps.
     pub fn published_fields(&self) -> BTreeSet<Commitment> {
         let mut fields = self.change.changed_fields();
         fields.extend(self.assigned.iter().copied());
@@ -226,31 +208,22 @@ impl RowWrite {
     }
 }
 
-/// Installed application code validates old/new rows and identifies ACL fields.
-/// The runtime applies the supplied precise changes only after the entire batch passes.
 pub trait RowApplication: Send + Sync + 'static {
-    /// Immutable compiled definition, verified and cached when a replica opens.
     fn manifest(&self) -> crate::ApplicationManifest;
-    /// An owned semantic validator for one exact authenticated source definition.
-    /// Used for original held rows; it supplies no current authority or projection.
     fn source_application(
         &self,
         _definition: &crate::ApplicationManifest,
     ) -> Result<Box<dyn RowApplication>, String> {
         Err("source row validation is unavailable".into())
     }
-    /// Immutable ACL-controlling fields of this definition; the runtime may cache them.
     fn permission_fields(&self) -> BTreeSet<Commitment>;
     fn validate_changes(&self, changes: &[RowChange]) -> Result<(), String>;
-    /// Optional partition identity of an application row.
     fn row_partition(&self, _change: &RowChange) -> Result<Option<crate::PartitionTuple>, String> {
         Ok(None)
     }
     fn row_identity(&self, _change: &RowChange) -> Result<Option<crate::RowIdentity>, String> {
         Ok(None)
     }
-    /// Checks a write's mask beyond its images, such as fields that must
-    /// publish together.
     fn validate_write(&self, _write: &RowWrite) -> Result<(), String> {
         Ok(())
     }
@@ -285,6 +258,20 @@ mod tests {
             .iter()
             .map(|(field, value)| ([*field; 32], value.as_bytes().to_vec()))
             .collect()
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn field_selections_encode_as_an_optional_set_with_none_for_every_field() {
+        let encoded = |selection: &FieldSelection| serde_json::to_string(selection).unwrap();
+        assert_eq!(encoded(&FieldSelection::All), "null");
+        assert_eq!(encoded(&FieldSelection::Only(BTreeSet::new())), "[]");
+        let named: FieldSelection = [[1; 32]].into_iter().collect();
+        assert_eq!(
+            serde_json::from_str::<FieldSelection>(&encoded(&named)).unwrap(),
+            named
+        );
+        assert!(FieldSelection::Only(BTreeSet::new()).is_none());
+        assert_eq!(FieldSelection::All.named(), 0);
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]

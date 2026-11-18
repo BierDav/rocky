@@ -1,5 +1,3 @@
-//! Claim rights: nodes that are not trusted claim and read the counters
-//! their publisher-rooted claim chain covers, and do nothing else.
 use super::coordinated_tests::{Fixture, T};
 use super::*;
 use crate::coordinated::Action;
@@ -16,7 +14,6 @@ fn claim(n: u8, issued: u64) -> Claim {
         issued,
     }
 }
-/// An identity holding a claim right, and one node it certified.
 struct Holder {
     identity: PrivateKey,
     node: PrivateKey,
@@ -31,7 +28,6 @@ impl Fixture {
             grant: [7; 32],
         }
     }
-    /// The owner, the domain's publisher, grants `right` at `T`.
     fn holder(&self, right: ClaimRight, delegations: u8) -> Holder {
         let (identity, node) = (PrivateKey::new(), PrivateKey::new());
         let link = rocky_credentials::Authority::owner(&self.owner)
@@ -113,7 +109,6 @@ impl Fixture {
             other => panic!("claim: {other:?}"),
         }
     }
-    /// The owner revokes `identity`; `pusher` pushes the statement.
     fn push_revocation(&mut self, identity: PublicKey, pusher: &PrivateKey, time: u64) -> Outcome {
         let statement = SignedRevocation::sign_in(
             Revocation {

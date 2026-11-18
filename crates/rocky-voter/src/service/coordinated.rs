@@ -1,4 +1,3 @@
-//! Volatile leader acknowledgments and explicit deadline resolution.
 use super::*;
 
 pub(super) struct VolatileAcknowledgments {

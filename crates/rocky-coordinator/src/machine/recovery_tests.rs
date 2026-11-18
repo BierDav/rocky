@@ -1,4 +1,3 @@
-//! The owner's recovery seal of a stuck log on in-memory coordinator state.
 use super::coordinated_tests::{Fixture, T};
 use super::*;
 use crate::coordinated::{Action, HASH_WINDOW, Log, Result as LogResult};
@@ -11,7 +10,6 @@ use rocky_credentials::{
 fn point(position: u64, running: Commitment) -> LogPoint {
     LogPoint { position, running }
 }
-/// The running hash after `position`, from the genesis anchor.
 fn running(head: &crate::coordinated::Head, position: u64) -> Commitment {
     assert!(head.commit as usize == head.hashes.len());
     (1..=position).fold(head.genesis, |running, p| {

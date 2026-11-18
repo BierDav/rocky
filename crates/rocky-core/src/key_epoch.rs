@@ -1,10 +1,7 @@
-//! Encryption epoch identity and deterministic writer order.
 use crate::{Commitment, commitment};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
-/// A generation and the domain-separated hash of its scope secret.
-/// Greater identities win: newer generations, then the lower secret hash.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeyEpoch {

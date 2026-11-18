@@ -1,35 +1,26 @@
-//! Typed tables as secure rows: one row per business key, one field per
-//! replicated column. The row contract that `EncryptedReplica` admits and a
-//! secure SQL session commits.
 use crate::{
     ApplicationManifest, Commitment, DomainId, KeyColumn, LogicalSchema, RowApplication, RowChange,
     RowFields, RowWrite, SchemaError, SqlValue, commitment, key_components,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-/// One replayed table: its field per column, in declared order.
 #[derive(Clone, Debug)]
 pub struct TypedTable {
     pub sql_name: String,
     pub id: Commitment,
     pub fields: Vec<Commitment>,
-    /// Column positions of the primary key, in key order.
     pub key: Vec<usize>,
     key_columns: Vec<KeyColumn>,
 }
-/// A logical schema's typed tables as a `RowApplication`.
 #[derive(Clone, Debug)]
 pub struct TypedRows {
     schema: LogicalSchema,
     domains: Vec<DomainId>,
     tables: BTreeMap<Commitment, TypedTable>,
-    /// The schema generation of the signed manifest; 1 until a transition.
     generation: u32,
-    /// The engine the signed manifest names; this build's by default.
     engine: crate::EngineIdentity,
 }
 impl TypedRows {
-    /// The schema must be supported on the secure profile.
     pub fn new(schema: LogicalSchema, domains: Vec<DomainId>) -> Result<Self, SchemaError> {
         schema.supported_on(crate::Profile::Secure)?;
         let mut tables = BTreeMap::new();
@@ -74,7 +65,6 @@ impl TypedRows {
             engine: crate::EngineIdentity::current(),
         })
     }
-    /// These tables at schema generation `generation`.
     pub fn at_generation(mut self, generation: u32) -> Result<Self, SchemaError> {
         if generation == 0 {
             return Err(SchemaError::Invalid("generations start at 1".into()));
@@ -82,7 +72,6 @@ impl TypedRows {
         self.generation = generation;
         Ok(self)
     }
-    /// These tables as a tip replayed on `engine` commits them.
     pub fn on_engine(mut self, engine: crate::EngineIdentity) -> Self {
         self.engine = engine;
         self
@@ -99,7 +88,6 @@ impl TypedRows {
     pub fn tables(&self) -> impl Iterator<Item = &TypedTable> {
         self.tables.values()
     }
-    /// The stable row identity of a key, bound to its domain and table.
     pub fn row_id(
         &self,
         domain: DomainId,
@@ -115,7 +103,6 @@ impl TypedRows {
             .map_err(|error| format!("key of {}: {error}", table.sql_name))
     }
 
-    /// Row fields of a typed row, in declared column order.
     pub fn fields(&self, table: &TypedTable, values: &[SqlValue]) -> Result<RowFields, String> {
         if values.len() != table.fields.len() {
             return Err(format!(
@@ -135,7 +122,6 @@ impl TypedRows {
             })
             .collect())
     }
-    /// The typed row of `fields`: every column present, in stored form.
     pub fn values(&self, table: &TypedTable, fields: &RowFields) -> Result<Vec<SqlValue>, String> {
         let logical = self
             .schema
@@ -166,7 +152,6 @@ impl TypedRows {
             })
             .collect()
     }
-    /// The immutable incarnation carried in both signed row images.
     pub fn identity(&self, change: &RowChange) -> Result<Option<crate::RowIdentity>, String> {
         let table = self
             .tables
@@ -237,8 +222,6 @@ impl TypedRows {
         .map(Some)
         .map_err(|error| error.to_string())
     }
-    /// The partition tuple a change's images name, which the replica binds
-    /// to the change's keyed scope; partition columns cannot change.
     pub fn change_partition(
         &self,
         change: &RowChange,
@@ -272,7 +255,6 @@ impl RowApplication for TypedRows {
     fn row_identity(&self, change: &RowChange) -> Result<Option<crate::RowIdentity>, String> {
         self.identity(change)
     }
-    /// Typed tables replicate intents, never row images.
     fn validate_changes(&self, changes: &[RowChange]) -> Result<(), String> {
         if changes.is_empty() {
             Ok(())
@@ -285,8 +267,6 @@ impl RowApplication for TypedRows {
     }
 }
 
-/// The value of a column's default literal, as the definition writes it:
-/// an integer, a real or a quoted string. NULL and anything else is none.
 pub fn default_value(column: &crate::LogicalColumn) -> Option<SqlValue> {
     default_literal(column.affinity, column.default.as_deref()?)
 }

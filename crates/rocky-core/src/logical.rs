@@ -1,5 +1,3 @@
-//! The canonical logical schema descriptor: what an ORM declared, how each
-//! part is replicated and which identities it has.
 use crate::{
     AppId, ApplicationManifest, AuthorLogScope, Commitment, DefinitionItem, DomainId, DomainRule,
     SqlValue, commitment, definition_item_id,
@@ -7,12 +5,8 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// Current descriptor format: replayed and local tables only, each with a
-/// 40-byte BLOB `id` naming its creating writer and creation sequence.
 pub const LOGICAL_SCHEMA_FORMAT: u32 = 7;
-/// The domain rule and operation shape of a typed manifest.
 pub const TYPED_RULE: &str = "rocky.sdk.typed.v2";
-/// Largest canonical descriptor a parser accepts.
 pub const MAX_LOGICAL_SCHEMA_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,7 +16,6 @@ pub enum Affinity {
     Real,
     Text,
     Blob,
-    /// Installed for local tables only; it has no single storage class.
     Numeric,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,14 +28,10 @@ pub enum Collation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TableClass {
-    /// Installed, never written by a replicated operation.
     LocalOnly,
-    /// Replicated as intents: replicas replay each partition's transactions
-    /// in canonical order and drop those that fail.
     Replayed,
 }
 impl TableClass {
-    /// Keyed rows other replicas hold.
     pub fn typed(self) -> bool {
         self == Self::Replayed
     }
@@ -52,12 +41,8 @@ impl TableClass {
 pub enum ColumnClass {
     Replicated,
     LocalOnly,
-    /// Recomputed from the row's other columns by this installed expression.
-    Derived {
-        rule: String,
-    },
+    Derived { rule: String },
 }
-/// The ORM's own schema identity, carried and never interpreted.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchemaSource {
@@ -68,7 +53,6 @@ pub struct SchemaSource {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogicalColumn {
-    /// The field's identity, forever.
     pub sql_name: String,
     pub affinity: Affinity,
     pub not_null: bool,
@@ -89,10 +73,8 @@ pub struct LogicalIndex {
     pub unique: bool,
     pub columns: Vec<IndexColumn>,
     pub create_sql: String,
-    /// Rule expressions indexed after `columns`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expressions: Vec<String>,
-    /// The rule expression choosing the indexed rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicate: Option<String>,
 }
@@ -104,7 +86,6 @@ pub struct LogicalForeignKey {
     pub references: Vec<String>,
     pub on_delete: String,
     pub on_update: String,
-    /// Checked when the transaction ends rather than after each statement.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deferred: bool,
 }
@@ -121,11 +102,7 @@ pub struct LogicalAssertion {
     pub select_sql: String,
 }
 
-/// A cross-row invariant of replayed tables: a `SELECT` that returns the
-/// rows violating it. It reads replayed tables of one partition group.
 impl LogicalAssertion {
-    /// The tables it reads, lowercase, sorted; empty for an assertion
-    /// schema install refuses.
     pub fn tables(&self) -> Vec<String> {
         match crate::deterministic::assertion_tables(&self.select_sql) {
             crate::deterministic::AssertionShape::Reads(tables) => tables
@@ -142,26 +119,17 @@ impl LogicalAssertion {
             .any(|name| name.eq_ignore_ascii_case(table))
     }
 }
-/// A transition check of a replayed table: a row that matched `when` as it
-/// stood before a transaction may not be updated or deleted by it, as
-/// `refuse_update` and `refuse_delete` say. Checked on the before and after
-/// images of the author's commit and of every replay, cascaded and
-/// SET NULL changes included. Unlike an assertion, which judges only the
-/// state a transaction leaves, it judges the change itself.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogicalRestriction {
     pub name: String,
     pub table: String,
-    /// A rule expression over the row's replicated or derived columns;
-    /// every row when absent. A row matches when it is true, not NULL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<String>,
     pub refuse_update: bool,
     pub refuse_delete: bool,
 }
 impl LogicalRestriction {
-    /// Rows matching `when` never change or go: posted invoices.
     pub fn immutable(
         name: impl Into<String>,
         table: impl Into<String>,
@@ -175,7 +143,6 @@ impl LogicalRestriction {
             refuse_delete: true,
         }
     }
-    /// No row of `table` ever changes or goes: an audit log.
     pub fn append_only(name: impl Into<String>, table: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -185,8 +152,6 @@ impl LogicalRestriction {
             refuse_delete: true,
         }
     }
-    /// `when` with each column replaced by `bind(column)`; `None` when it
-    /// names anything but a replicated or derived column of `table`.
     pub fn bind_when(
         &self,
         table: &LogicalTable,
@@ -206,18 +171,13 @@ impl LogicalRestriction {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogicalTable {
-    /// The table's identity, forever.
     pub sql_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granted_like: Option<String>,
     pub class: TableClass,
-    /// The ORM's own statement, naming `sql_name`.
     pub create_sql: String,
-    /// The engine or ORM assigns the key.
     pub auto_generate: bool,
-    /// Declaration order.
     pub columns: Vec<LogicalColumn>,
-    /// Column SQL names in key order.
     pub primary_key: Vec<String>,
     pub partition_by: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -232,7 +192,6 @@ pub struct LogicalSchema {
     pub publisher: [u8; 32],
     pub application: String,
     pub source: SchemaSource,
-    /// Sorted by name, each table's identity.
     pub tables: Vec<LogicalTable>,
     pub views: Vec<LogicalView>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -244,35 +203,19 @@ pub struct LogicalSchema {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Incompatibility {
     ForeignKey,
-    /// A replayed table's expression or an assertion calls a function
-    /// outside the deterministic allowlist, named.
     Function(String),
-    /// A replayed table's expression applies this operator, which SQLite
-    /// turns into REAL on `i64` overflow; it must call `checked_add`,
-    /// `checked_sub`, `checked_mul` or `checked_div`.
     Arithmetic(char),
-    /// A foreign key Rocky cannot resolve, named by its first column.
     Reference(String),
-    /// Parent and child of a foreign key lie in different reader scopes.
     CrossScopeReference(String),
-    /// A foreign key between a replayed and a local table, named by its
-    /// first column.
     ClassReference(String),
-    /// An assertion that is not one deterministic `SELECT` of replayed
-    /// tables in one partition group, and why.
     Assertion(String),
-    /// A restriction on a table that is not replayed.
     Restriction(String),
-    /// A table class this profile cannot keep convergent yet.
     Unsupported(TableClass),
 }
 
-/// The storage profile a descriptor is installed on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Profile {
-    /// `rocky-runtime`: typed tables over replicated incarnations.
     Trusted,
-    /// `rocky-secure`: typed tables over encrypted rows of reader scopes.
     Secure,
 }
 impl Profile {
@@ -280,14 +223,10 @@ impl Profile {
         matches!(self, Self::Secure)
     }
 }
-/// 2^63, an exact double: an integral REAL strictly within ±2^63 is an INTEGER.
 const TWO_POW_63: f64 = -(i64::MIN as f64);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SchemaError {
-    /// Not a well-formed canonical descriptor.
     Invalid(String),
-    /// A well-formed schema this runtime cannot install without breaking
-    /// convergence or a stated guarantee.
     Incompatible {
         table: String,
         reason: Incompatibility,
@@ -305,14 +244,10 @@ impl std::fmt::Display for SchemaError {
 }
 impl std::error::Error for SchemaError {}
 
-/// Why a column cannot store a value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueError {
-    /// NULL in a key or a NOT NULL column.
     Null,
-    /// Not the storage class of the column's affinity.
     Class(Affinity),
-    /// An INTEGER a REAL column cannot hold exactly.
     Precision,
     Arity,
     KeyTooLong,
@@ -325,7 +260,6 @@ impl std::fmt::Display for ValueError {
 impl std::error::Error for ValueError {}
 
 impl Affinity {
-    /// SQLite's rule for a declared column type.
     pub fn of_declared(declared: &str) -> Self {
         let declared = declared.to_ascii_uppercase();
         let has = |part: &str| declared.contains(part);
@@ -341,9 +275,6 @@ impl Affinity {
             Self::Numeric
         }
     }
-    /// The value as a column of this affinity stores it. Columns are strict:
-    /// NULL or one storage class. An integral REAL is an INTEGER and an
-    /// exactly representable INTEGER is a REAL; nothing else converts.
     pub fn store(self, value: SqlValue) -> Result<SqlValue, ValueError> {
         const EXACT: i64 = 1 << 53;
         match (self, value) {
@@ -377,7 +308,6 @@ impl Collation {
             _ => None,
         }
     }
-    /// The bytes two texts share exactly when the collation calls them equal.
     pub fn fold(self, text: &str) -> Vec<u8> {
         match self {
             Self::Binary => text.as_bytes().to_vec(),
@@ -387,7 +317,6 @@ impl Collation {
     }
 }
 
-/// A plain SQL identifier the runtime can quote and rewrite.
 pub fn identifier(name: &str) -> bool {
     let bytes = name.as_bytes();
     !bytes.is_empty()
@@ -400,8 +329,6 @@ pub fn identifier(name: &str) -> bool {
 fn quote(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
-/// The clause of a foreign key: SQLite performs its delete action inside
-/// the transaction that deletes the parent.
 pub fn foreign_key_clause(key: &LogicalForeignKey) -> String {
     let deferred = if key.deferred {
         " DEFERRABLE INITIALLY DEFERRED"
@@ -424,10 +351,8 @@ pub fn foreign_key_clause(key: &LogicalForeignKey) -> String {
         key.on_delete
     )
 }
-/// The delete actions a foreign key may declare.
 pub const DELETE_CASCADE: &str = "CASCADE";
 pub const DELETE_SET_NULL: &str = "SET NULL";
-/// The name prefix of the triggers `LogicalSchema::delete_triggers` makes.
 pub const DELETE_TRIGGERS: &str = "rocky_set_null_";
 fn reserved(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
@@ -441,8 +366,6 @@ pub(crate) enum Token {
     Literal,
     Symbol(char),
 }
-/// Words, quoted identifiers, literals and symbols with their byte spans;
-/// None if a quote is open.
 fn spanned(sql: &str) -> Option<Vec<(Token, std::ops::Range<usize>)>> {
     let mut chars = sql.char_indices().peekable();
     let mut tokens = Vec::new();
@@ -502,7 +425,6 @@ pub(crate) fn tokenize(sql: &str) -> Option<Vec<Token>> {
 pub(crate) fn keyword(token: &Token, expected: &str) -> bool {
     matches!(token, Token::Word(word) if word.eq_ignore_ascii_case(expected))
 }
-/// The `COLLATE` name each column of a `CREATE TABLE` statement declares.
 pub fn declared_collations(create_sql: &str) -> Vec<(String, String)> {
     let tokens = tokenize(create_sql).unwrap_or_default();
     let (mut depth, mut column, mut collations) = (0usize, None::<String>, Vec::new());
@@ -539,7 +461,6 @@ pub fn declared_collations(create_sql: &str) -> Vec<(String, String)> {
     }
     collations
 }
-/// Deterministic scalar functions a derived rule may call.
 const RULE_FUNCTIONS: &[&str] = &[
     "abs",
     "checked_add",
@@ -565,7 +486,6 @@ const RULE_FUNCTIONS: &[&str] = &[
 const RULE_WORDS: &[&str] = &[
     "AND", "CASE", "ELSE", "END", "IS", "NOT", "NULL", "OR", "THEN", "WHEN",
 ];
-/// How a rule token is read: a literal part, or a reference to a column.
 fn rule_reference(
     tokens: &[(Token, std::ops::Range<usize>)],
     index: usize,
@@ -588,12 +508,11 @@ fn rule_reference(
         }
     }
 }
-/// `rule` with each column reference replaced by what `bind` returns for it.
-/// None unless `rule` is one expression: literals, operators, `CASE`, the
-/// listed deterministic functions and columns `bind` knows. No subquery,
-/// parameter, qualified name or statement separator can appear.
+const MAX_RULE_BYTES: usize = 512;
+
 pub fn bind_rule(rule: &str, bind: impl Fn(&str) -> Option<String>) -> Option<String> {
-    let tokens = spanned(rule).filter(|tokens| !tokens.is_empty() && rule.len() <= 512)?;
+    let tokens =
+        spanned(rule).filter(|tokens| !tokens.is_empty() && rule.len() <= MAX_RULE_BYTES)?;
     let (mut bound, mut copied) = (String::new(), 0);
     for (index, (_, span)) in tokens.iter().enumerate() {
         if let Some(column) = rule_reference(&tokens, index)? {
@@ -605,9 +524,6 @@ pub fn bind_rule(rule: &str, bind: impl Fn(&str) -> Option<String>) -> Option<St
     bound.push_str(&rule[copied..]);
     Some(bound)
 }
-/// Whether `sql` could be one expression of a declaration: its parentheses
-/// balance and it holds no subquery or statement separator. SQLite and the
-/// function allowlist judge the rest at install.
 pub(crate) fn single_expression(sql: &str) -> bool {
     let Some(tokens) = tokenize(sql).filter(|tokens| !tokens.is_empty()) else {
         return false;
@@ -625,7 +541,6 @@ pub(crate) fn single_expression(sql: &str) -> bool {
     }
     depth == 0
 }
-/// Whether `rule` is a valid derived expression over `columns`.
 pub fn derived_rule(rule: &str, columns: &[&str]) -> bool {
     bind_rule(rule, |column| columns.contains(&column).then(String::new)).is_some()
 }
@@ -634,10 +549,6 @@ fn invalid<T>(reason: impl Into<String>) -> Result<T, SchemaError> {
     Err(SchemaError::Invalid(reason.into()))
 }
 impl LogicalTable {
-    /// The clause SQLite enforces for `key`. SQLite's `SET NULL` nulls
-    /// every column of a reference, so one with a non-null column, such as
-    /// a partition column, takes no action and `delete_triggers` nulls only
-    /// its nullable columns.
     pub fn foreign_key_sql(&self, key: &LogicalForeignKey) -> String {
         if key.on_delete == DELETE_SET_NULL && !self.nulls_whole(key) {
             return foreign_key_clause(&LogicalForeignKey {
@@ -652,8 +563,6 @@ impl LogicalTable {
             .iter()
             .all(|name| self.column(name).is_some_and(|column| !column.not_null))
     }
-    /// The identity index columns, which foreign keys reference: the
-    /// partition columns in front of `id`.
     pub fn identity_columns(&self) -> Vec<String> {
         let mut columns = self.partition_by.clone();
         if !columns.iter().any(|name| name.eq_ignore_ascii_case("id")) {
@@ -678,11 +587,9 @@ impl LogicalTable {
             .iter()
             .find(|column| column.sql_name.eq_ignore_ascii_case(sql_name))
     }
-    /// Key columns in key order.
     pub fn key(&self) -> impl Iterator<Item = &LogicalColumn> {
         self.primary_key.iter().filter_map(|name| self.column(name))
     }
-    /// Replicated columns, the key excluded, in declaration order.
     pub fn fields(&self) -> impl Iterator<Item = &LogicalColumn> {
         self.columns.iter().filter(|column| {
             column.class == ColumnClass::Replicated
@@ -750,8 +657,6 @@ impl LogicalTable {
         }
         Ok(())
     }
-    /// Whether SQLite can enforce this table's constraints during replay;
-    /// the schema checks references across tables.
     fn installable(&self) -> Result<(), Incompatibility> {
         let statement = tokenize(&self.create_sql).unwrap_or_default();
         let references = statement
@@ -824,16 +729,11 @@ struct ReplicatedTable<'a> {
     partition_group: Option<&'a str>,
     replayed: ReplayedConstraints<'a>,
 }
-/// What SQLite enforces when a replayed table's transactions replay: every
-/// replica must run the same statements and assertions.
 #[derive(Serialize)]
 struct ReplayedConstraints<'a> {
     create_sql: &'a str,
-    /// Sorted.
     indexes: Vec<&'a str>,
-    /// The assertions reading the table, in declaration order.
     assertions: Vec<&'a LogicalAssertion>,
-    /// Its restrictions, in declaration order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     restrictions: Vec<&'a LogicalRestriction>,
 }
@@ -903,16 +803,11 @@ fn replicated_table<'a>(schema: &'a LogicalSchema, table: &'a LogicalTable) -> R
         },
     }
 }
-/// JSON of a value holding only strings, numbers, booleans and lists, which
-/// always serializes.
 fn json(value: &impl Serialize) -> String {
     serde_json::to_string(value).unwrap_or_default()
 }
 
 impl LogicalSchema {
-    /// Triggers that null the nullable columns of each `SET NULL`
-    /// reference SQLite cannot null whole, when its parent row is deleted:
-    /// those whose two tables are `installed`.
     pub fn delete_triggers(&self, installed: impl Fn(&str) -> bool) -> Vec<String> {
         let mut triggers = Vec::new();
         for table in self
@@ -954,7 +849,6 @@ impl LogicalSchema {
     pub fn app_id(&self) -> AppId {
         ApplicationManifest::app_id(self.publisher, &self.application)
     }
-    /// Structural validity of a canonical descriptor.
     pub fn validate(&self) -> Result<(), SchemaError> {
         self.require_row_identity()?;
         if self.application.is_empty() || self.application.len() > 128 {
@@ -1096,7 +990,6 @@ impl LogicalSchema {
         }
         Ok(())
     }
-    /// The restrictions of `table`, in declaration order.
     pub fn restrictions_of<'a>(
         &'a self,
         table: &'a LogicalTable,
@@ -1105,7 +998,6 @@ impl LogicalSchema {
             .iter()
             .filter(|restriction| restriction.table.eq_ignore_ascii_case(&table.sql_name))
     }
-    /// Checks stored descriptor format before an opener changes the file.
     pub fn check_stored_row_identity(bytes: &[u8]) -> Result<(), SchemaError> {
         #[derive(Deserialize)]
         struct Format {
@@ -1118,15 +1010,12 @@ impl LogicalSchema {
         }
         Ok(())
     }
-    /// Refuses historical and unknown row formats before installation or writes.
     pub fn require_row_identity(&self) -> Result<(), SchemaError> {
         if self.format != LOGICAL_SCHEMA_FORMAT {
             return invalid("unsupported schema descriptor format");
         }
         Ok(())
     }
-    /// The first column of a reference from `table` across replication
-    /// classes. No spelling of one can converge, so it is refused first.
     fn cross_class_reference(&self, table: &LogicalTable) -> Option<String> {
         table.foreign_keys.iter().find_map(|key| {
             self.tables
@@ -1136,7 +1025,6 @@ impl LogicalSchema {
                 .map(|_| key.columns.first().cloned().unwrap_or_default())
         })
     }
-    /// Whether this runtime can install the schema and keep it convergent.
     pub fn installable(&self) -> Result<(), SchemaError> {
         self.require_row_identity()?;
         self.validate()?;
@@ -1212,8 +1100,6 @@ impl LogicalSchema {
         }
         Ok(())
     }
-    /// An assertion reads replayed tables that replay in one order and
-    /// partition alike: all unpartitioned, or all of one partition group.
     fn assertion_installable(&self, assertion: &LogicalAssertion) -> Result<(), Incompatibility> {
         use crate::deterministic::{AssertionShape, assertion_tables};
         let refused = |reason: &str| Err(Incompatibility::Assertion(reason.into()));
@@ -1242,8 +1128,6 @@ impl LogicalSchema {
         }
         Ok(())
     }
-    /// Every reason `profile` cannot install the schema, in table order.
-    /// Empty when `supported_on` accepts it.
     pub fn diagnose(&self, profile: Profile) -> Vec<SchemaError> {
         if let Err(error) = self.installable() {
             return vec![error];
@@ -1258,20 +1142,16 @@ impl LogicalSchema {
             })
             .collect()
     }
-    /// Whether `profile` can install the schema with every stated guarantee.
-    /// Refusals happen here, before anything is created or applied.
     pub fn supported_on(&self, profile: Profile) -> Result<(), SchemaError> {
         match self.diagnose(profile).into_iter().next() {
             Some(error) => Err(error),
             None => Ok(()),
         }
     }
-    /// Canonical bytes: the JSON encoding of a valid descriptor.
     pub fn canonical(&self) -> Result<Vec<u8>, SchemaError> {
         self.validate()?;
         serde_json::to_vec(self).map_err(|error| SchemaError::Invalid(error.to_string()))
     }
-    /// Accepts only bytes `canonical` would produce.
     pub fn parse(bytes: &[u8]) -> Result<Self, SchemaError> {
         if bytes.len() > MAX_LOGICAL_SCHEMA_BYTES {
             return invalid("descriptor quota");
@@ -1284,12 +1164,9 @@ impl LogicalSchema {
         }
         Ok(schema)
     }
-    /// Commits to everything installed, local tables and SQL spelling included.
     pub fn fingerprint(&self) -> Result<Commitment, SchemaError> {
         Ok(commitment("rocky.logical-schema.v1", &self.canonical()?))
     }
-    /// Commits to what replicas must agree on: replayed tables by name,
-    /// their keys, fields and the constraints replay enforces.
     pub fn replicated_fingerprint(&self) -> Commitment {
         let replicated = Replicated {
             format: self.format,
@@ -1303,7 +1180,6 @@ impl LogicalSchema {
             json(&replicated).as_bytes(),
         )
     }
-    /// Replayed tables: those with signed entities and fields.
     pub fn typed(&self) -> impl Iterator<Item = &LogicalTable> {
         self.tables.iter().filter(|table| table.class.typed())
     }
@@ -1319,13 +1195,9 @@ impl LogicalSchema {
         let name = format!("{}.{}", table.sql_name, column.sql_name);
         definition_item_id(self.publisher, self.app_id(), "field", &name)
     }
-    /// The replicated definition as an unsigned manifest for `domains`. Its
-    /// hash does not change with SQL spelling, indexes or local tables.
     pub fn manifest(&self, domains: &[DomainId]) -> ApplicationManifest {
         self.manifest_at(domains, 1, crate::EngineIdentity::current())
     }
-    /// The manifest of schema generation `schema` replayed on `engine`: the
-    /// first generation is 1, and a signed transition makes each next one.
     pub fn manifest_at(
         &self,
         domains: &[DomainId],

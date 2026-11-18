@@ -1,4 +1,3 @@
-//! Authenticated finite migration runs; ciphertext bundle membership stays private.
 use crate::{Commitment, NodeKey, Scope, TipId, commitment};
 use serde::{Deserialize, Serialize};
 
@@ -15,7 +14,6 @@ pub struct MigrationPublicationStatement {
     pub parent: Commitment,
     pub schema: Commitment,
     pub publication: Commitment,
-    /// The node that authors the run; its key is its writer identity.
     pub writer: NodeKey,
     pub frames: u64,
     pub bytes: u64,
@@ -29,8 +27,6 @@ pub struct MigrationSum {
     pub bytes: u64,
 }
 
-/// Siblings are ordered from the leaf toward the root. Tree shape follows
-/// `migration_split`; no padding or uncommitted directions are accepted.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationProof {
     pub format: u32,
@@ -47,16 +43,12 @@ impl std::fmt::Display for MigrationError {
 }
 impl std::error::Error for MigrationError {}
 
-/// Largest power of two strictly below `frames`, for a non-leaf tree.
 pub fn migration_split(frames: u64) -> Result<u64, MigrationError> {
     if frames < 2 {
         return Err(MigrationError("migration tree is a leaf"));
     }
     Ok(1u64 << (63 - (frames - 1).leading_zeros()))
 }
-/// The root-to-leaf path to frame `index`: whether each step goes right and
-/// the frames of its sibling. At most 64 steps, independent of the
-/// advertised extent, because each split halves a `u64` count.
 fn migration_proof_shape(frames: u64, index: u64) -> Result<Vec<(bool, u64)>, MigrationError> {
     let (mut count, mut index) = (frames, index);
     let mut shape = Vec::new();
@@ -89,7 +81,6 @@ impl MigrationPublicationStatement {
         }
         Ok(())
     }
-    /// Fixed-width little-endian counters, in declaration order, excluding root.
     pub fn context(&self) -> Commitment {
         let mut bytes = Vec::with_capacity(280);
         bytes.extend(self.format.to_le_bytes());
@@ -270,6 +261,24 @@ mod tests {
                 malformed.siblings.push(s.empty());
                 assert!(s.verify(&malformed, [index as u8; 32], 10).is_err());
             }
+        }
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn the_split_is_the_largest_power_of_two_below_the_frames_so_a_path_has_at_most_64_steps() {
+        for (frames, split) in [
+            (2, 1),
+            (3, 2),
+            (4, 2),
+            (5, 4),
+            (8, 4),
+            (9, 8),
+            (u64::MAX, 1 << 63),
+        ] {
+            assert_eq!(migration_split(frames).unwrap(), split, "{frames} frames");
+        }
+        assert!(migration_split(0).is_err() && migration_split(1).is_err());
+        for index in [0, 1 << 62, u64::MAX - 1] {
+            assert!(migration_proof_shape(u64::MAX, index).unwrap().len() <= 64);
         }
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]

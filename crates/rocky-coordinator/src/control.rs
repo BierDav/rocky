@@ -1,4 +1,3 @@
-//! Tenant administration of a voter service, owned by the application.
 use crate::{
     certified::{ControlCertificate, DomainControl, TrustBundle},
     service::NetworkCoordinator,
@@ -31,7 +30,6 @@ pub struct ControlReceipt {
     pub control: Commitment,
     pub expires: u64,
 }
-/// Metadata the application obtains from its database and root signer.
 pub struct Domain {
     pub scope: Scope,
     pub application: String,

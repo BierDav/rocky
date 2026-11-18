@@ -1,6 +1,5 @@
 use crate::{ApplicationManifest, Commitment, ProtocolError};
 
-/// Field references in one exact source table, in canonical name order.
 pub struct FieldOrdinals<'a> {
     fields: Vec<&'a crate::DefinitionItem>,
     ordinals: std::collections::BTreeMap<Commitment, u32>,

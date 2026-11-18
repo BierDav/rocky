@@ -1,7 +1,5 @@
-//! Always-on custody launcher.
 use rocky_sdk::Failure;
 
-/// The custody peer is a native server.
 #[cfg(target_family = "wasm")]
 fn main() -> Result<(), Failure> {
     Err("rocky-peer runs natively".into())
@@ -36,7 +34,11 @@ fn main() -> Result<(), Failure> {
     let coordinator_transport = config
         .coordination
         .as_ref()
-        .map(|_| runtime.block_on(coordinator_transport(&config.transport)))
+        .map(|_| {
+            runtime.block_on(coordinator_transport_on_an_ephemeral_port(
+                &config.transport,
+            ))
+        })
         .transpose()?;
     let coordination = config
         .coordination
@@ -76,9 +78,8 @@ fn main() -> Result<(), Failure> {
     })
 }
 
-/// Outbound coordinator calls must not reserve the custody listener's port.
 #[cfg(not(target_family = "wasm"))]
-async fn coordinator_transport(
+async fn coordinator_transport_on_an_ephemeral_port(
     options: &rocky_iroh::Options,
 ) -> Result<rocky_iroh::Attachment, Failure> {
     let mut options = options.clone();
@@ -107,7 +108,7 @@ mod tests {
         let bind = reserved.local_addr()?;
         drop(reserved);
         let options = rocky_iroh::Options::isolated(&bind.to_string());
-        let coordinator = coordinator_transport(&options).await?;
+        let coordinator = coordinator_transport_on_an_ephemeral_port(&options).await?;
         let custody = options.start([92; 32]).await?;
         assert!(
             custody

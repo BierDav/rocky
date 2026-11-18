@@ -1,7 +1,6 @@
 use crate::{Commitment, RowIdentity, WriterId, commitment};
 use serde::{Deserialize, Serialize};
 
-/// The original birth statement, independent of its transport and signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreationStatement {
     pub manifest: Commitment,
@@ -45,17 +44,10 @@ impl CreationStatement {
     }
 }
 
-/// The largest valid hybrid clock: SQLite stores clocks as signed integers,
-/// and its order must be the stamps' order. Every replica refuses a larger
-/// one alike, so the refusal is permanent.
 pub const MAX_CLOCK: u64 = i64::MAX as u64;
 
-/// How far a received stamp may be ahead of this device's clock before
-/// its frame waits: the most skew a peer's clock imposes on hybrid stamps
-/// and last-writer-wins order here.
 pub const MAX_CLOCK_AHEAD: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// Decodes a hybrid clock, refusing one above `MAX_CLOCK`.
 pub fn bounded_clock<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
     let clock = u64::deserialize(deserializer)?;
     if clock > MAX_CLOCK {
@@ -64,8 +56,6 @@ pub fn bounded_clock<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Resul
     Ok(clock)
 }
 
-/// Register order within a domain: clock, then the writing node's key,
-/// then its domain-wide sequence.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(try_from = "(u64, WriterId, u64)", into = "(u64, WriterId, u64)")]
 pub struct SecureStamp {
@@ -91,5 +81,34 @@ impl TryFrom<(u64, WriterId, u64)> for SecureStamp {
 impl From<SecureStamp> for (u64, WriterId, u64) {
     fn from(stamp: SecureStamp) -> Self {
         (stamp.clock, stamp.author, stamp.sequence)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stamp(clock: u64, writer: u8, sequence: u64) -> SecureStamp {
+        SecureStamp {
+            clock,
+            author: WriterId::from_bytes([writer; 32]),
+            sequence,
+        }
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn stamps_order_by_clock_then_writer_then_sequence() {
+        assert!(stamp(1, 9, 9) < stamp(2, 0, 0));
+        assert!(stamp(2, 1, 9) < stamp(2, 2, 0));
+        assert!(stamp(2, 2, 1) < stamp(2, 2, 2));
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_clock_past_sqlite_signed_integers_is_refused_when_decoded() {
+        assert_eq!(MAX_CLOCK, i64::MAX as u64);
+        let largest = serde_json::to_string(&stamp(MAX_CLOCK, 1, 1)).unwrap();
+        assert!(serde_json::from_str::<SecureStamp>(&largest).is_ok());
+        let past = largest.replacen(&MAX_CLOCK.to_string(), &(MAX_CLOCK + 1).to_string(), 1);
+        assert!(serde_json::from_str::<SecureStamp>(&past).is_err());
     }
 }

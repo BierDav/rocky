@@ -356,6 +356,28 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
+fn table_carried(
+    path: Option<&super::schemas::PathFields>,
+    schema: &rocky_core::LogicalSchema,
+    table: &rocky_core::LogicalTable,
+) -> bool {
+    path.is_none_or(|path| path.tables.contains(&schema.table_id(table)))
+}
+fn column_carried(
+    path: Option<&super::schemas::PathFields>,
+    schema: &rocky_core::LogicalSchema,
+    table: &rocky_core::LogicalTable,
+    installed: &rocky_core::LogicalColumn,
+    rebuilt: &rocky_core::LogicalColumn,
+) -> bool {
+    let local =
+        |column: &rocky_core::LogicalColumn| column.class == rocky_core::ColumnClass::LocalOnly;
+    table_carried(path, schema, table)
+        && path.is_none_or(|path| {
+            (local(installed) && local(rebuilt))
+                || path.fields.contains(&schema.field_id(table, rebuilt))
+        })
+}
 fn reason_named(name: &str) -> Result<DropReason, Error> {
     Ok(match name {
         "constraint" => DropReason::Constraint,
@@ -677,19 +699,13 @@ impl<A: RowApplication> Inner<A> {
             let Some(before) = installed.table(name).filter(|_| created) else {
                 continue;
             };
-            let on_path = |column: &rocky_core::LogicalColumn| {
-                path.is_none_or(|path| {
-                    path.tables.contains(&schema.table_id(table))
-                        && path.fields.contains(&schema.field_id(table, column))
-                })
-            };
             let kept: Vec<(String, String)> = before
                 .columns
                 .iter()
                 .filter_map(|column| {
                     let kept = table.column(&column.sql_name).filter(|kept| {
                         !matches!(kept.class, rocky_core::ColumnClass::Derived { .. })
-                            && on_path(kept)
+                            && column_carried(path, schema, table, column, kept)
                     })?;
                     let name = typed::quoted(&column.sql_name);
                     let value = match (&kept.default, kept.not_null && !column.not_null) {
@@ -773,19 +789,9 @@ impl<A: RowApplication> Inner<A> {
         path: Option<&super::schemas::PathFields>,
     ) -> Result<(), Error> {
         let mut changed = BTreeMap::new();
-        let on_path = |table: &rocky_core::LogicalTable,
-                       column: Option<&rocky_core::LogicalColumn>| {
-            path.is_none_or(|path| {
-                path.tables.contains(&after.table_id(table))
-                    && column
-                        .is_none_or(|column| path.fields.contains(&after.field_id(table, column)))
-            })
-        };
-        for table in after
-            .tables
-            .iter()
-            .filter(|table| table.class == TableClass::Replayed && on_path(table, None))
-        {
+        for table in after.tables.iter().filter(|table| {
+            table.class == TableClass::Replayed && table_carried(path, after, table)
+        }) {
             let Some(old) = before.table(&table.sql_name) else {
                 continue;
             };
@@ -795,8 +801,12 @@ impl<A: RowApplication> Inner<A> {
                 .map(|column| {
                     old.columns
                         .iter()
-                        .position(|o| o.sql_name.eq_ignore_ascii_case(&column.sql_name))
-                        .filter(|_| on_path(table, Some(column)))
+                        .enumerate()
+                        .find(|(_, o)| o.sql_name.eq_ignore_ascii_case(&column.sql_name))
+                        .filter(|(_, installed)| {
+                            column_carried(path, after, table, installed, column)
+                        })
+                        .map(|(from, _)| from)
                         .ok_or_else(|| rocky_core::default_value(column).unwrap_or(SqlValue::Null))
                 })
                 .collect();
@@ -817,7 +827,7 @@ impl<A: RowApplication> Inner<A> {
                 table.class == TableClass::Replayed
                     && after
                         .table(&table.sql_name)
-                        .is_none_or(|table| !on_path(table, None))
+                        .is_none_or(|table| !table_carried(path, after, table))
             })
             .map(|table| table.sql_name.to_ascii_lowercase())
             .collect();

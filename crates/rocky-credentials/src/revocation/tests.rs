@@ -158,11 +158,17 @@ fn the_mode_is_required_signed_and_only_the_root_may_cascade() {
     let mut tampered = lost.clone();
     tampered.statement.mode = RevocationMode::Compromised;
     assert_ne!(lost.id().unwrap(), tampered.id().unwrap());
-    assert!(tampered.verify(publisher.public_key(), APP).is_err());
+    assert!(
+        tampered
+            .verify_historic(publisher.public_key(), APP)
+            .is_err()
+    );
     let compromised =
         SignedRevocation::sign(tampered.statement, &publisher, &CredentialChain::default())
             .unwrap();
-    compromised.verify(publisher.public_key(), APP).unwrap();
+    compromised
+        .verify_historic(publisher.public_key(), APP)
+        .unwrap();
 
     let recovery = Revocation {
         recovery: Some(RootDecision::Grants(RootRecovery {
@@ -183,7 +189,7 @@ fn the_mode_is_required_signed_and_only_the_root_may_cascade() {
         &CredentialChain::default(),
     )
     .unwrap()
-    .verify(publisher.public_key(), APP)
+    .verify_historic(publisher.public_key(), APP)
     .unwrap();
 
     let issuing = issuer(&publisher);
@@ -199,7 +205,7 @@ fn the_mode_is_required_signed_and_only_the_root_may_cascade() {
     );
     let mut forged = signed(statement(&issuing.0, NOW, target), &issuing);
     forged.statement.mode = RevocationMode::Compromised;
-    assert!(forged.verify(publisher.public_key(), APP).is_err());
+    assert!(forged.verify_historic(publisher.public_key(), APP).is_err());
 
     let mut old = serde_json::to_value(&lost).unwrap();
     old["statement"].as_object_mut().unwrap().remove("mode");
@@ -597,19 +603,19 @@ fn no_statement_revokes_the_publisher_or_recovers_to_it() {
         |body: Revocation| SignedRevocation::sign(body, &publisher, &CredentialChain::default());
     by_root(statement(&publisher, NOW, PrivateKey::new().public_key()))
         .unwrap()
-        .verify(anchor, APP)
+        .verify_historic(anchor, APP)
         .unwrap();
     assert!(
         by_root(statement(&publisher, NOW, anchor))
             .unwrap()
-            .verify(anchor, APP)
+            .verify_historic(anchor, APP)
             .is_err(),
         "not even the root revokes the publisher identity"
     );
     let issuer = issuer(&publisher);
     assert!(
         signed(statement(&issuer.0, NOW, anchor), &issuer)
-            .verify(anchor, APP)
+            .verify_historic(anchor, APP)
             .is_err()
     );
     let recovery = |keep: PublicKey| Revocation {
@@ -621,10 +627,10 @@ fn no_statement_revokes_the_publisher_or_recovers_to_it() {
     };
     by_root(recovery(PrivateKey::new().public_key()))
         .unwrap()
-        .verify(anchor, APP)
+        .verify_historic(anchor, APP)
         .unwrap();
     assert!(
-        !by_root(recovery(anchor)).is_ok_and(|signed| signed.verify(anchor, APP).is_ok()),
+        !by_root(recovery(anchor)).is_ok_and(|signed| signed.verify_historic(anchor, APP).is_ok()),
         "a recovery keeps a trusted identity, never the publisher"
     );
 }

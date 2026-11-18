@@ -253,7 +253,7 @@ impl SignedRevocation {
     fn identity_unlink(&self) -> bool {
         self.attestation.certificate().is_none() && Self::unlink_shape(&self.statement, &self.chain)
     }
-    pub fn verify(&self, publisher: PublicKey, app: AppId) -> Result<Commitment, Error> {
+    pub fn verify_historic(&self, publisher: PublicKey, app: AppId) -> Result<Commitment, Error> {
         let statement = &self.statement;
         if let Some(database) = self.database {
             if database.publisher != publisher || database.scope.app != app {
@@ -836,7 +836,7 @@ impl RevocationSet {
     }
     pub fn verify(&self, publisher: PublicKey, app: AppId) -> Result<(), Error> {
         for signed in self.statements.values() {
-            signed.verify(publisher, app)?;
+            signed.verify_historic(publisher, app)?;
         }
         for certificate in self.certificates.values() {
             certificate.certifies(
@@ -892,7 +892,7 @@ impl RevocationSet {
             if self.statements.contains_key(id) {
                 continue;
             }
-            signed.verify(publisher, app)?;
+            signed.verify_historic(publisher, app)?;
             if signed.live(time) && next.insert(signed.clone())? {
                 added.push(signed.clone());
             }

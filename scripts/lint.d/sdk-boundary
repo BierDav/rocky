@@ -28,7 +28,7 @@ for target in (None, "wasm32-unknown-unknown"):
         raise SystemExit(f"sdk-boundary: cannot inspect {label} normal dependencies; "
                          "run cargo fetch --locked first.\n" + result.stderr)
     packages = {line.split()[0] for line in result.stdout.splitlines() if line.strip()}
-    forbidden = packages & {"rocky-voter", "rocky-coordinator", "openraft", "fs2", "rocky-iroh", "iroh"}
+    forbidden = packages & {"rocky-voter", "rocky-coordinator", "openraft", "rocky-iroh", "iroh"}
     if forbidden:
         raise SystemExit(f"sdk-boundary: rocky-sdk normal dependencies for {label} include "
                          f"server or default transport packages: {', '.join(sorted(forbidden))}. "

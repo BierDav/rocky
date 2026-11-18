@@ -675,3 +675,31 @@ async fn an_interrupted_restore_never_opens_unfenced_or_with_the_backup_leader_v
         }
     }
 }
+
+#[test]
+fn a_dropped_store_unlocks_while_a_spawned_process_still_holds_its_lock_descriptor() {
+    let (genesis, ..) = certified();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let store = Store::open(&source, genesis.clone(), true, Limits::default()).unwrap();
+    let mut inheritor = std::process::Command::new("cat")
+        .stdin(std::process::Stdio::piped())
+        .stdout(store.0._lock.0.try_clone().unwrap())
+        .spawn()
+        .unwrap();
+    drop(store);
+    let reopened = Store::open(&source, genesis.clone(), false, Limits::default()).map(drop);
+    let backup = Store::backup(&source, genesis, 1, &directory.path().join("backup")).map(drop);
+    drop(inheritor.stdin.take());
+    assert!(inheritor.wait().unwrap().success());
+    assert_eq!(
+        reopened,
+        Ok(()),
+        "a reopen must not wait for a process that inherited the lock descriptor"
+    );
+    assert_eq!(
+        backup,
+        Ok(()),
+        "a backup must not wait for a process that inherited the lock descriptor"
+    );
+}

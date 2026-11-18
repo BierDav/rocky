@@ -175,7 +175,7 @@ mod archive {
             std::io::copy(&mut reader(path)?, &mut out)?;
         }
         out.finish(false)?;
-        rocky_platform::fs::replace_database_not_atomic_in_browser(&partial, target)?;
+        rocky_platform::fs::rename(&partial, target)?;
         Ok(inventory)
     }
 
@@ -329,7 +329,7 @@ mod archive {
                 }
                 rocky_platform::fs::sync_dir(directory)?;
             }
-            rocky_platform::fs::replace_database_not_atomic_in_browser(staged, target)?;
+            rocky_platform::fs::rename(staged, target)?;
         }
         Ok(())
     }

@@ -224,27 +224,24 @@ pub fn create_private_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
 
 pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
     let (from, to) = (key(from.as_ref())?, key(to.as_ref())?);
-    if in_pool(&from)? {
+    let database = in_pool(&from)?;
+    if from == to {
+        return if database || committed_row_exists(&from)? {
+            Ok(())
+        } else {
+            Err(not_found(&from))
+        };
+    }
+    if in_pool(&to)? || (database && committed_row_exists(&to)?) {
         return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
+            io::ErrorKind::AlreadyExists,
             format!(
-                "{from} is a database, which a browser cannot rename atomically; \
-                 use replace_database_not_atomic_in_browser"
+                "{to} exists; a browser rename replaces no database and moves none onto a name"
             ),
         ));
     }
-    rename_file(&from, &to)
-}
-
-pub fn replace_database_not_atomic_in_browser(
-    from: impl AsRef<Path>,
-    to: impl AsRef<Path>,
-) -> io::Result<()> {
-    let (from, to) = (key(from.as_ref())?, key(to.as_ref())?);
-    if in_pool(&from)? {
-        return pool()?
-            .rename_not_atomically(&from, &to)
-            .map_err(unavailable);
+    if database {
+        return pool()?.rename(&from, &to).map_err(unavailable);
     }
     rename_file(&from, &to)
 }

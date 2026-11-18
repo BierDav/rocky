@@ -125,11 +125,10 @@ mod installs {
     }
     async fn announced(hub: &Hub, name: &str) {
         let topic = *account().discovery().topic();
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            while !hub.topics(name).contains(&topic) {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            hub.wait_announced(|hub| hub.topics(name).contains(&topic)),
+        )
         .await
         .expect("announced under the bootstrap topic");
     }

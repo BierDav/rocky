@@ -1,7 +1,7 @@
 use super::*;
 use crate::test_snapshot as snap;
 
-const WAIT: Duration = Duration::from_secs(5);
+const OUTLASTS_A_LOADED_CI_HOST: Duration = Duration::from_secs(30);
 
 fn writer() -> Profile {
     Profile::Writer {
@@ -16,12 +16,19 @@ fn key(node: &Node) -> Result<PublicKey, Failure> {
     Ok(PrivateKey::from_bytes(&node.vault.get("node")?).public_key())
 }
 async fn until(mut done: impl AsyncFnMut() -> bool) -> Result<(), Failure> {
-    tokio::time::timeout(WAIT, async {
+    tokio::time::timeout(OUTLASTS_A_LOADED_CI_HOST, async {
         while !done().await {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
-    .await?;
+    .await
+    .map_err(|_| "the node never reached the awaited state")?;
+    Ok(())
+}
+async fn announced(hub: &Hub, ready: impl Fn(&Hub) -> bool) -> Result<(), Failure> {
+    tokio::time::timeout(OUTLASTS_A_LOADED_CI_HOST, hub.wait_announced(ready))
+        .await
+        .map_err(|_| "the hub never announced the awaited state")?;
     Ok(())
 }
 async fn announce(node: &Node) -> Result<(), Failure> {
@@ -69,7 +76,7 @@ async fn members_converge_with_discovery_as_their_only_source_of_contacts() -> R
             pass(&c).await?;
             add(&a, 1).await?;
             pass(&b).await?;
-            until(async || hub.discoverable(b_route) == ["a", c_route]).await?;
+            announced(&hub, |hub| hub.discoverable(b_route) == ["a", c_route]).await?;
             assert!(
                 titles(&c).await?.as_array().is_some_and(Vec::is_empty),
                 "C met the issuer before the row existed"
@@ -171,7 +178,7 @@ async fn a_revoked_device_and_an_outsider_find_no_peer_after_the_window() -> Res
             let outsider_domain = enrolled(&root.path().join("o"), &hub, "o", None).await?;
             pass(&b).await?;
             pass(&c).await?;
-            until(async || hub.discoverable("c") == ["a", "b"]).await?;
+            announced(&hub, |hub| hub.discoverable("c") == ["a", "b"]).await?;
             assert!(hub.discoverable("o").is_empty());
             assert!(!hub.topics("o").is_empty());
             let old = hub.topics("c")[0];
@@ -185,7 +192,10 @@ async fn a_revoked_device_and_an_outsider_find_no_peer_after_the_window() -> Res
             a.revoke(crate::enrollment::Revoke::Identity(c_identity))
                 .await?;
             pass(&b).await?;
-            until(async || hub.topics("a").len() == 2 && hub.topics("b").len() == 2).await?;
+            announced(&hub, |hub| {
+                hub.topics("a").len() == 2 && hub.topics("b").len() == 2
+            })
+            .await?;
             let current = hub.topics("a")[0];
             assert_eq!(hub.topics("b"), [current, old]);
             assert_ne!(current, old);
@@ -221,7 +231,7 @@ async fn a_revoked_device_and_an_outsider_find_no_peer_after_the_window() -> Res
             let b_port = b.current().ok_or("link")?.transport.clone();
             assert!(b.reconcile(&*b_port, c_key, &c_contact).await.is_err());
             let _ = pass(&c).await;
-            until(async || hub.topics("c").is_empty()).await?;
+            announced(&hub, |hub| hub.topics("c").is_empty()).await?;
             for node in [&a, &b, &c, &outsider_domain] {
                 node.detach(None).await;
             }

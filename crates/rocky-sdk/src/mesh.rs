@@ -76,7 +76,7 @@ pub(crate) fn create_root(vault: &Vault, signer: Signer<'_>, scope: Scope) -> Re
 pub(crate) fn mint_value(
     vault: &Vault,
     signer: Signer<'_>,
-    scope: Scope,
+    (publisher, scope): (PublicKey, Scope),
     set: &rocky_credentials::RevocationSet,
     statement: &Revocation,
 ) -> Result<(), Failure> {
@@ -84,11 +84,12 @@ pub(crate) fn mint_value(
     let id = HEXLOWER.encode(&statement.id()?);
     let time = now()?;
     state.values.retain(|named, value| {
-        named == &id
+        (named == &id
             || value
                 .statement
                 .and_then(|id| set.get(&id))
-                .is_some_and(|signed| signed.live(time))
+                .is_some_and(|signed| signed.live(time)))
+            && value.verify_unrevoked(publisher, scope, set).is_ok()
     });
     if let std::collections::btree_map::Entry::Vacant(entry) = state.values.entry(id) {
         entry.insert(DiscoverySecret::sign(
@@ -277,34 +278,40 @@ impl Settings {
         let scope = self.domain()?.scope;
         let mut state = Discovery::load(vault)?;
         let previous = state.clone();
+        let time = now()?;
         if let Some(root) = root {
             let root = *root;
-            root.verify(self.publisher, scope)?;
-            if root.statement.is_some() || state.root.as_ref().is_some_and(|held| held != &root) {
+            root.verify_root(self.publisher, scope)?;
+            if state.root.as_ref().is_some_and(|held| held != &root) {
                 return Err("discovery root mismatch".into());
             }
             state.root = Some(root);
         }
-        let time = now()?;
-        state.values.retain(|id, _| {
-            self.revocations.statements().any(|signed| {
-                signed.live(time) && signed.id().is_ok_and(|held| HEXLOWER.encode(&held) == *id)
-            })
-        });
+        if !values.is_empty() {
+            state.values.retain(|id, value| {
+                self.counts_in_topics(value, scope, time)
+                    && value
+                        .statement
+                        .is_some_and(|statement| HEXLOWER.encode(&statement) == *id)
+            });
+        }
         for value in values {
-            value.verify(self.publisher, scope)?;
             let id = value.statement.ok_or("discovery value lacks statement")?;
-            let Some(statement) = self.revocations.get(&id) else {
+            if self.revocations.get(&id).is_none() {
                 return Err("discovery value names an unknown statement".into());
-            };
-            if !statement.live(time) {
+            }
+            if !self.counts_in_topics(&value, scope, time) {
+                value.verify_historic(self.publisher, scope)?;
                 continue;
             }
             let id = HEXLOWER.encode(&id);
-            if state.values.get(&id).is_some_and(|held| held != &value) {
-                return Err("discovery value substitution".into());
+            if state
+                .values
+                .get(&id)
+                .is_none_or(|held| value.value < held.value)
+            {
+                state.values.insert(id, value);
             }
-            state.values.insert(id, value);
         }
         if state != previous {
             state.save(vault)?;
@@ -325,6 +332,17 @@ impl Settings {
             next,
         })
     }
+    fn counts_in_topics(&self, value: &DiscoverySecret, scope: Scope, time: u64) -> bool {
+        value
+            .statement
+            .and_then(|id| self.revocations.get(&id))
+            .is_some_and(|signed| {
+                signed.live(time)
+                    && value
+                        .verify_unrevoked(self.publisher, scope, &self.revocations)
+                        .is_ok()
+            })
+    }
     pub(crate) fn discovery_topics(
         &self,
         vault: &Vault,
@@ -337,17 +355,18 @@ impl Settings {
             .as_ref()
             .ok_or("discovery root not received in an admitted session")?;
         let scope = self.domain()?.scope;
-        root.verify(self.publisher, scope)?;
-        for (id, value) in &state.values {
-            value.verify(self.publisher, scope)?;
-            if value
+        root.verify_root(self.publisher, scope)?;
+        if state.values.iter().any(|(id, value)| {
+            value
                 .statement
                 .is_none_or(|statement| HEXLOWER.encode(&statement) != *id)
-            {
-                return Err("invalid stored discovery value".into());
-            }
+        }) {
+            return Err("invalid stored discovery value".into());
         }
         let mut bytes = root.value.to_vec();
+        state
+            .values
+            .retain(|_, value| self.counts_in_topics(value, scope, time));
         for signed in self
             .revocations
             .statements()
@@ -501,7 +520,7 @@ mod tests {
                 rocky_credentials::Signer::node(&node, &credentials)?,
                 &owner,
             ),
-            a.domain()?.scope,
+            (a.publisher, a.domain()?.scope),
             &a.revocations,
             &statement,
         )?;
@@ -525,6 +544,349 @@ mod tests {
         assert_ne!(missing_statement.discovery_topics(&bv, now()?)?.0, new);
         assert_eq!(a.discovery_topics(&av, now()? + 86400)?.1, None);
         assert_eq!(Discovery::load(&av)?.values, a_state.values);
+        Ok(())
+    }
+    struct Fixture {
+        _dir: rocky_platform::fs::Scratch,
+        store: Arc<dyn SecretStore>,
+        root: rocky_credentials::RootKey,
+        settings: Settings,
+        member: PrivateKey,
+    }
+    impl Fixture {
+        async fn new() -> Result<Self, Failure> {
+            let dir = rocky_platform::fs::Scratch::new().await;
+            let store: Arc<dyn SecretStore> = Arc::new(FileSecretStore::new(dir.path()));
+            let root = rocky_credentials::RootKey::generate();
+            let settings = Settings::create(
+                &Schema::parse(SCHEMA)?,
+                &store,
+                crate::enrollment::DEFAULT_TTL,
+                None,
+                &root,
+            )?;
+            let member = PrivateKey::from_bytes(&settings.vault(&store).get("node")?);
+            Ok(Self {
+                _dir: dir,
+                store,
+                root,
+                settings,
+                member,
+            })
+        }
+        fn revocation(
+            &self,
+            nodes: BTreeSet<rocky_credentials::PeerId>,
+            identities: BTreeSet<PublicKey>,
+        ) -> Result<(Revocation, rocky_credentials::RevocationSet), Failure> {
+            let statement = self.statement(nodes, identities)?;
+            let signed = SignedRevocation::sign(
+                statement.clone(),
+                rocky_credentials::Signer::from(&self.root),
+                &rocky_credentials::CredentialChain(Vec::new()),
+            )?;
+            Ok((
+                statement,
+                rocky_credentials::RevocationSet::try_from(vec![signed])?,
+            ))
+        }
+        fn owner_revocation(
+            &self,
+            identities: BTreeSet<PublicKey>,
+        ) -> Result<rocky_credentials::RevocationSet, Failure> {
+            let signer = rocky_credentials::Signer::node(&self.member, &self.settings.credentials)?;
+            let signed = SignedRevocation::sign(
+                Revocation {
+                    issuer: signer.principal()?,
+                    ..self.statement(BTreeSet::new(), identities)?
+                },
+                signer,
+                &self.settings.issuer_links(),
+            )?;
+            assert!(!signed.root());
+            Ok(rocky_credentials::RevocationSet::try_from(vec![signed])?)
+        }
+        fn statement(
+            &self,
+            nodes: BTreeSet<rocky_credentials::PeerId>,
+            identities: BTreeSet<PublicKey>,
+        ) -> Result<Revocation, Failure> {
+            Ok(Revocation {
+                app: self.settings.domain()?.manifest().app,
+                issuer: self.settings.publisher,
+                time: now()?,
+                nodes,
+                identities,
+                capabilities: BTreeSet::new(),
+                cut: Default::default(),
+                mode: rocky_credentials::RevocationMode::Lost,
+                recovery: None,
+            })
+        }
+        fn learn(
+            peer: &mut Settings,
+            set: &rocky_credentials::RevocationSet,
+        ) -> Result<(), Failure> {
+            let (publisher, app) = (peer.publisher, peer.domain()?.manifest().app);
+            peer.revocations.merge(set, publisher, app, now()?)?;
+            Ok(())
+        }
+        fn honest(&self, statement: &Revocation) -> Result<DiscoverySecret, Failure> {
+            Ok(DiscoverySecret::sign(
+                self.settings.domain()?.scope,
+                Some(statement.id()?),
+                crate::enrollment::random(),
+                (
+                    rocky_credentials::Signer::from(&self.root),
+                    &rocky_credentials::CredentialChain(Vec::new()),
+                ),
+            )?)
+        }
+        fn delegate(
+            &self,
+            issued_at: u64,
+            lifetime: u64,
+        ) -> Result<(PrivateKey, PrivateKey, rocky_credentials::CredentialChain), Failure> {
+            let delegate = PrivateKey::new();
+            let node = PrivateKey::new();
+            let owner =
+                rocky_credentials::Authority::issuer(&self.member, &self.settings.credentials)?;
+            let credentials = owner
+                .chain_of(owner.issue_issuer(
+                    delegate.public_key(),
+                    rocky_credentials::Validity {
+                        issued_at,
+                        lifetime: std::time::Duration::from_secs(lifetime),
+                        clock_skew: std::time::Duration::from_secs(1),
+                    },
+                )?)
+                .certify(&delegate, node.public_key())?;
+            Ok((delegate, node, credentials))
+        }
+        fn peer(&self, installation: &str) -> Result<(Settings, Vault), Failure> {
+            let mut peer = self.settings.clone();
+            peer.installation = installation.into();
+            let vault = peer.vault(&self.store);
+            let root = Discovery::load(&self.settings.vault(&self.store))?
+                .root
+                .map(Box::new);
+            peer.discovery_exchange(&vault, root, Vec::new(), None)?;
+            Ok((peer, vault))
+        }
+    }
+    fn held(vault: &Vault) -> Result<Vec<DiscoverySecret>, Failure> {
+        Ok(Discovery::load(vault)?.values.into_values().collect())
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_value_signed_by_a_revoked_member_counts_as_absent_whether_stored_before_or_after_the_revocation()
+    -> Result<(), Failure> {
+        let mut fixture = Fixture::new().await?;
+        let scope = fixture.settings.domain()?.scope;
+        let (unrelated, unrelated_set) =
+            fixture.revocation(BTreeSet::new(), [PrivateKey::new().public_key()].into())?;
+        let (_, member_revoked) = fixture.revocation(
+            [rocky_credentials::PeerId::of(fixture.member.public_key())].into(),
+            BTreeSet::new(),
+        )?;
+        Fixture::learn(&mut fixture.settings, &unrelated_set)?;
+        let credentials = fixture.settings.credentials.clone();
+        let forged = DiscoverySecret::sign(
+            scope,
+            Some(unrelated.id()?),
+            crate::enrollment::random(),
+            (
+                rocky_credentials::Signer::node(&fixture.member, &credentials)?,
+                &fixture.settings.issuer_links(),
+            ),
+        )?;
+        let honest = fixture.honest(&unrelated)?;
+        let (mut exchanged, exchanged_vault) = fixture.peer("exchanged")?;
+        let (mut idle, idle_vault) = fixture.peer("idle")?;
+        let (mut late, late_vault) = fixture.peer("late")?;
+        for (peer, vault) in [(&exchanged, &exchanged_vault), (&idle, &idle_vault)] {
+            peer.discovery_exchange(vault, None, vec![forged.clone()], None)?;
+            assert_eq!(held(vault)?, vec![forged.clone()]);
+        }
+        for peer in [&mut exchanged, &mut idle, &mut late] {
+            Fixture::learn(peer, &member_revoked)?;
+        }
+        exchanged.discovery_exchange(&exchanged_vault, None, vec![honest.clone()], None)?;
+        assert_eq!(held(&exchanged_vault)?, vec![honest.clone()]);
+        let time = now()?;
+        assert_eq!(
+            idle.discovery_topics(&idle_vault, time)?.0,
+            late.discovery_topics(&late_vault, time)?.0
+        );
+        forged.verify_historic(late.publisher, scope)?;
+        late.discovery_exchange(
+            &late_vault,
+            None,
+            vec![forged.clone(), honest.clone()],
+            None,
+        )?;
+        idle.discovery_exchange(&idle_vault, None, vec![honest.clone()], None)?;
+        let topic = exchanged.discovery_topics(&exchanged_vault, time)?.0;
+        for (peer, vault) in [(&idle, &idle_vault), (&late, &late_vault)] {
+            assert_eq!(held(vault)?, vec![honest.clone()]);
+            assert_eq!(peer.discovery_topics(vault, time)?.0, topic);
+        }
+        Ok(())
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_delegated_issuers_value_outlives_its_chain_but_not_a_revocation_by_its_owner()
+    -> Result<(), Failure> {
+        let mut fixture = Fixture::new().await?;
+        let scope = fixture.settings.domain()?.scope;
+        let (statement, set) =
+            fixture.revocation(BTreeSet::new(), [PrivateKey::new().public_key()].into())?;
+        Fixture::learn(&mut fixture.settings, &set)?;
+        let lifetime = 60;
+        let (delegate, delegate_node, delegate_credentials) =
+            fixture.delegate(statement.time + lifetime, lifetime)?;
+        let minted = DiscoverySecret::sign(
+            scope,
+            Some(statement.id()?),
+            crate::enrollment::random(),
+            (
+                rocky_credentials::Signer::node(&delegate_node, &delegate_credentials)?,
+                &delegate_credentials.capabilities(),
+            ),
+        )?;
+        let (mut holder, holder_vault) = fixture.peer("holder")?;
+        let (mut empty, empty_vault) = fixture.peer("empty")?;
+        holder.discovery_exchange(&holder_vault, None, vec![minted.clone()], None)?;
+        let expired = statement.time + 10 * lifetime;
+        assert!(
+            set.get(&statement.id()?)
+                .is_some_and(|signed| signed.live(expired))
+        );
+        assert_ne!(
+            holder.discovery_topics(&holder_vault, expired)?.0,
+            empty.discovery_topics(&empty_vault, expired)?.0
+        );
+        assert_eq!(held(&holder_vault)?, vec![minted]);
+        let delegate_revoked = fixture.owner_revocation([delegate.public_key()].into())?;
+        Fixture::learn(&mut holder, &delegate_revoked)?;
+        Fixture::learn(&mut empty, &delegate_revoked)?;
+        assert_eq!(
+            holder.discovery_topics(&holder_vault, expired)?.0,
+            empty.discovery_topics(&empty_vault, expired)?.0
+        );
+        assert!(held(&holder_vault)?.is_empty());
+        Ok(())
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_discovery_root_is_taken_only_from_the_root_key_or_a_trusted_identity()
+    -> Result<(), Failure> {
+        let fixture = Fixture::new().await?;
+        let scope = fixture.settings.domain()?.scope;
+        let (_, node, credentials) = fixture.delegate(now()?, 3600)?;
+        let foreign = DiscoverySecret::sign(
+            scope,
+            None,
+            crate::enrollment::random(),
+            (
+                rocky_credentials::Signer::node(&node, &credentials)?,
+                &credentials.capabilities(),
+            ),
+        )?;
+        foreign.verify_historic(fixture.settings.publisher, scope)?;
+        let mut joiner = fixture.settings.clone();
+        joiner.installation = "joiner".into();
+        let vault = joiner.vault(&fixture.store);
+        assert!(
+            joiner
+                .discovery_exchange(&vault, Some(Box::new(foreign)), Vec::new(), None)
+                .is_err()
+        );
+        assert_eq!(Discovery::load(&vault)?.root, None);
+        let (statement, set) =
+            fixture.revocation(BTreeSet::new(), [PrivateKey::new().public_key()].into())?;
+        Fixture::learn(&mut joiner, &set)?;
+        assert!(
+            joiner
+                .discovery_exchange(
+                    &vault,
+                    Some(Box::new(fixture.honest(&statement)?)),
+                    Vec::new(),
+                    None
+                )
+                .is_err()
+        );
+        assert_eq!(Discovery::load(&vault)?.root, None);
+        let owned = Discovery::load(&fixture.settings.vault(&fixture.store))?
+            .root
+            .ok_or("the owner holds a root")?;
+        joiner.discovery_exchange(&vault, Some(Box::new(owned.clone())), Vec::new(), None)?;
+        assert_eq!(Discovery::load(&vault)?.root, Some(owned));
+        Ok(())
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn peers_given_two_honest_values_for_one_statement_in_either_order_keep_the_lower()
+    -> Result<(), Failure> {
+        let mut fixture = Fixture::new().await?;
+        let (statement, set) =
+            fixture.revocation(BTreeSet::new(), [PrivateKey::new().public_key()].into())?;
+        Fixture::learn(&mut fixture.settings, &set)?;
+        let (first, second) = (fixture.honest(&statement)?, fixture.honest(&statement)?);
+        let lower = if first.value < second.value {
+            first.clone()
+        } else {
+            second.clone()
+        };
+        let (one, one_vault) = fixture.peer("one")?;
+        let (other, other_vault) = fixture.peer("other")?;
+        one.discovery_exchange(&one_vault, None, vec![first.clone()], None)?;
+        one.discovery_exchange(&one_vault, None, vec![second.clone()], None)?;
+        other.discovery_exchange(&other_vault, None, vec![second], None)?;
+        other.discovery_exchange(&other_vault, None, vec![first], None)?;
+        assert_eq!(held(&one_vault)?, vec![lower.clone()]);
+        assert_eq!(held(&other_vault)?, vec![lower]);
+        let time = now()?;
+        assert_eq!(
+            one.discovery_topics(&one_vault, time)?.0,
+            other.discovery_topics(&other_vault, time)?.0
+        );
+        Ok(())
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_rotation_mints_again_over_a_stored_value_whose_minter_was_revoked()
+    -> Result<(), Failure> {
+        let mut fixture = Fixture::new().await?;
+        let scope = fixture.settings.domain()?.scope;
+        let (statement, set) =
+            fixture.revocation(BTreeSet::new(), [PrivateKey::new().public_key()].into())?;
+        let (_, member_revoked) = fixture.revocation(
+            [rocky_credentials::PeerId::of(fixture.member.public_key())].into(),
+            BTreeSet::new(),
+        )?;
+        Fixture::learn(&mut fixture.settings, &set)?;
+        let credentials = fixture.settings.credentials.clone();
+        let revoked = DiscoverySecret::sign(
+            scope,
+            Some(statement.id()?),
+            crate::enrollment::random(),
+            (
+                rocky_credentials::Signer::node(&fixture.member, &credentials)?,
+                &fixture.settings.issuer_links(),
+            ),
+        )?;
+        let (mut minter, vault) = fixture.peer("minter")?;
+        minter.discovery_exchange(&vault, None, vec![revoked.clone()], None)?;
+        Fixture::learn(&mut minter, &member_revoked)?;
+        mint_value(
+            &vault,
+            (
+                rocky_credentials::Signer::from(&fixture.root),
+                &rocky_credentials::CredentialChain(Vec::new()),
+            ),
+            (minter.publisher, scope),
+            &minter.revocations,
+            &statement,
+        )?;
+        let minted = held(&vault)?;
+        assert_eq!(minted.len(), 1);
+        assert_ne!(minted, vec![revoked]);
         Ok(())
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

@@ -215,6 +215,41 @@ impl Endorsement {
     ) -> Result<PublicKey, Error> {
         self.check(publisher, label, value, Some((revocations, time)))
     }
+    pub fn verify_unrevoked<T: Serialize>(
+        &self,
+        publisher: PublicKey,
+        label: &str,
+        value: &T,
+        revocations: &RevocationSet,
+    ) -> Result<PublicKey, Error> {
+        self.check(
+            publisher,
+            label,
+            value,
+            Some((revocations, self.whole_chain_valid_from())),
+        )
+    }
+    fn whole_chain_valid_from(&self) -> u64 {
+        self.chain
+            .0
+            .iter()
+            .flat_map(|link| {
+                [
+                    Some(link.capability.not_before),
+                    link.attestation
+                        .certificate()
+                        .map(|certificate| certificate.capability.not_before),
+                ]
+            })
+            .flatten()
+            .chain(
+                self.attestation
+                    .certificate()
+                    .map(|certificate| certificate.capability.not_before),
+            )
+            .max()
+            .unwrap_or(0)
+    }
     fn check<T: Serialize>(
         &self,
         publisher: PublicKey,

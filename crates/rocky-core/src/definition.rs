@@ -977,6 +977,47 @@ mod replayed_tests {
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_foreign_key_over_a_local_only_column_is_refused() {
+        let mut local_reference = definition(serde_json::Value::Null);
+        let members = table(&mut local_reference, "members");
+        let team = members
+            .columns
+            .iter_mut()
+            .find(|column| column.name == "team")
+            .unwrap();
+        team.local_only = true;
+        assert_eq!(
+            match local_reference.build() {
+                Err(SchemaError::Invalid(reason)) => reason,
+                other => panic!("{other:?}"),
+            },
+            "members.team is local-only and cannot hold a foreign key",
+            "a local column differs between devices; replay cannot judge a reference over it"
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_foreign_key_over_a_derived_column_of_a_replayed_table_is_refused() {
+        let mut derived_reference = definition(serde_json::Value::Null);
+        let members = table(&mut derived_reference, "members");
+        let team = members
+            .columns
+            .iter_mut()
+            .find(|column| column.name == "team")
+            .unwrap();
+        team.not_null = false;
+        team.derived = Some("email".into());
+        assert_eq!(
+            match derived_reference.build() {
+                Err(SchemaError::Invalid(reason)) => reason,
+                other => panic!("{other:?}"),
+            },
+            "members.team is derived and cannot hold a foreign key",
+            "a rebuild computes a derived column for every row, so neither switch rule nor replay can judge a reference over it"
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn restrictions_name_replayed_tables_and_rule_predicates_over_their_columns() {
         let restricted = |restriction: serde_json::Value| {
             definition(serde_json::json!({ "restrictions": [restriction] }))

@@ -7,7 +7,10 @@ pub use coordinated::*;
 mod definition;
 pub use definition::*;
 mod generation;
-pub use generation::{Generation, Removed, SchemaChange, Unsupported, classify, removed};
+pub use generation::{
+    Generation, Removed, SchemaChange, Unsupported, classify, classify_carrying,
+    classify_withdrawal, removed,
+};
 mod manifest;
 pub use manifest::*;
 mod secure_row;

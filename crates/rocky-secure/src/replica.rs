@@ -498,6 +498,8 @@ pub(super) struct Inner<A> {
     #[cfg(test)]
     plan_fault: bool,
     #[cfg(test)]
+    switch_fault: bool,
+    #[cfg(test)]
     stage_exit: bool,
     #[cfg(test)]
     pub(super) fail_before_commit: usize,
@@ -1138,6 +1140,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             #[cfg(test)]
             plan_fault: false,
             #[cfg(test)]
+            switch_fault: false,
+            #[cfg(test)]
             stage_exit: false,
             #[cfg(test)]
             fail_before_commit: 0,
@@ -1312,8 +1316,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })?;
         inner.load_schemas().await?;
         inner.load_tip_graphs().await?;
-        if !inner.schema_switching().await? {
-            inner.finish_plan().await?;
+        if !inner.schema_switching().await?
+            && let Err(replay::BrokenReference(violation)) = inner.finish_or_discard_plan().await?
+        {
+            tracing::warn!(
+                %violation,
+                "a recorded projection rebuild would break a foreign key and is discarded"
+            );
         }
         inner.load_typed().await?;
         inner.load_partitions().await?;

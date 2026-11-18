@@ -676,6 +676,519 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() {
     erin.audit(items).await.unwrap();
 }
 
+async fn tags_with_parents(replica: &EncryptedReplica<TypedRows>) -> Vec<Vec<SqlValue>> {
+    select(
+        replica,
+        "SELECT t.key,i.key,a.key FROM tags t LEFT JOIN items i ON i.id=t.item LEFT JOIN items a ON a.id=t.also ORDER BY t.key",
+    )
+    .await
+}
+async fn declared_references(replica: &EncryptedReplica<TypedRows>) -> (Vec<Vec<SqlValue>>, bool) {
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    let violations = rows(
+        &inner.conn,
+        "SELECT * FROM pragma_foreign_key_check('tags')",
+    )
+    .await
+    .unwrap();
+    let deferred = rows(
+        &inner.conn,
+        "SELECT 1 FROM sqlite_master WHERE name='tags' AND sql LIKE '%DEFERRABLE INITIALLY DEFERRED%'",
+    )
+    .await
+    .unwrap();
+    (violations, deferred.len() == 1)
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_changed_reference_rebuilds_children_of_an_indexed_identity_alike_before_and_after_their_rows_arrive()
+ {
+    let mut lineage = Lineage::new();
+    lineage.linked = true;
+    lineage.deferred_from = Some(3);
+    let dir = Scratch::new().await;
+    let (alice_key, carol_key) = (PrivateKey::new(), PrivateKey::new());
+    let alice = lineage
+        .open(&dir.path().join("alice.db"), &alice_key, 2, None)
+        .await
+        .unwrap();
+    let carol = lineage
+        .open(&dir.path().join("carol.db"), &carol_key, 2, None)
+        .await
+        .unwrap();
+    super::super::compaction::follow_main(&lineage, &alice).await;
+    crate::tests::exchange_graphs(&alice, &carol, lineage.domain).await;
+    let mut parents = Vec::new();
+    for key in ["0001", "0002"] {
+        identity_insert(
+            &session(&alice).await,
+            &format!("INSERT INTO items VALUES('{key}','title',NULL)"),
+            vec![],
+        )
+        .await
+        .unwrap();
+        let id = format!("SELECT id FROM items WHERE key='{key}'");
+        parents.extend(select(&alice, &id).await.remove(0));
+    }
+    identity_insert(
+        &session(&alice).await,
+        "INSERT INTO tags(key,label,item,also) VALUES('t','l',?,?)",
+        parents,
+    )
+    .await
+    .unwrap();
+    let statements = lineage.publish(&alice, 3).await.unwrap();
+    for (replica, key) in [(&alice, &alice_key), (&carol, &carol_key)] {
+        assert!(
+            lineage
+                .follow(replica, lineage.config(3, key), 3, &statements)
+                .await
+                .unwrap(),
+            "a switch that rebuilds a child holding references to an identity kept unique by an index succeeds"
+        );
+    }
+    for table in ["items", "tags"] {
+        super::sync(
+            &alice,
+            &carol,
+            &carol_key,
+            &lineage,
+            3,
+            lineage.scope(table),
+        )
+        .await;
+    }
+    let expected = vec![vec![text("t"), text("0001"), text("0002")]];
+    for replica in [&alice, &carol] {
+        assert_eq!(tags_with_parents(replica).await, expected);
+        assert_eq!(
+            declared_references(replica).await,
+            (Vec::new(), true),
+            "the rebuilt child declares the new reference and every row satisfies it"
+        );
+    }
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_field_readded_with_a_reference_is_followed_from_before_its_removal() {
+    let mut lineage = Lineage::new();
+    lineage.note_references_from = Some(5);
+    let dir = Scratch::new().await;
+    let (alice_key, bob_key) = (PrivateKey::new(), PrivateKey::new());
+    let alice = lineage
+        .open(&dir.path().join("alice.db"), &alice_key, 3, None)
+        .await
+        .unwrap();
+    let bob = lineage
+        .open(&dir.path().join("bob.db"), &bob_key, 3, None)
+        .await
+        .unwrap();
+    super::super::compaction::follow_main(&lineage, &alice).await;
+    crate::tests::exchange_graphs(&alice, &bob, lineage.domain).await;
+    identity_insert(
+        &session(&alice).await,
+        "INSERT INTO items VALUES('0001','title','not an item',NULL)",
+        vec![],
+    )
+    .await
+    .unwrap();
+    sync(&lineage, &alice, &bob, &bob_key).await;
+    let notes = "SELECT key,note FROM items ORDER BY key";
+    assert_eq!(
+        select(&bob, notes).await,
+        vec![vec![text("0001"), text("not an item")]]
+    );
+    for version in [4, 5] {
+        let statements = lineage.publish(&alice, version).await.unwrap();
+        assert!(
+            lineage
+                .follow(
+                    &alice,
+                    lineage.config(version, &alice_key),
+                    version,
+                    &statements
+                )
+                .await
+                .unwrap()
+        );
+    }
+    let statements = crate::tests::all_tip_statements(&alice).await;
+    assert!(
+        lineage
+            .follow(&bob, lineage.config(5, &bob_key), 5, &statements)
+            .await
+            .unwrap(),
+        "a peer following A to C at once carries no value of a field B removed, so C may retype it and reference it"
+    );
+    let empty = vec![vec![text("0001"), SqlValue::Null]];
+    assert_eq!(select(&alice, notes).await, empty);
+    assert_eq!(select(&bob, notes).await, empty);
+    let inner = bob.inner.lock(crate::replica::Class::Background).await;
+    assert_eq!(
+        rows(
+            &inner.conn,
+            "SELECT * FROM pragma_foreign_key_check('items')"
+        )
+        .await
+        .unwrap(),
+        Vec::<Vec<SqlValue>>::new()
+    );
+}
+
+async fn force_rebuild(replica: &EncryptedReplica<TypedRows>, raw: &[&str]) -> Result<(), Error> {
+    plan_rebuild(replica, raw).await;
+    replica.run_plan().await
+}
+async fn plan_rebuild(replica: &EncryptedReplica<TypedRows>, raw: &[&str]) {
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    for sql in raw.iter().chain(&[
+        "INSERT INTO secure_projection_plan SELECT 1,descriptor,domain,readers FROM secure_typed WHERE id=1",
+    ]) {
+        inner.conn.execute(*sql, ()).await.unwrap();
+    }
+}
+const ORPHAN_TAG: [&str; 3] = [
+    "PRAGMA foreign_keys=OFF",
+    "UPDATE tags SET also=x'00'",
+    "PRAGMA foreign_keys=ON",
+];
+struct Tagged {
+    _dir: Scratch,
+    path: std::path::PathBuf,
+    key: PrivateKey,
+    replica: EncryptedReplica<TypedRows>,
+}
+async fn linked_with_a_tag(lineage: &Lineage) -> Tagged {
+    let dir = Scratch::new().await;
+    let path = dir.path().join("alice.db");
+    let key = PrivateKey::new();
+    let replica = lineage.open(&path, &key, 2, None).await.unwrap();
+    identity_insert(
+        &session(&replica).await,
+        "INSERT INTO items VALUES('0001','title',NULL)",
+        vec![],
+    )
+    .await
+    .unwrap();
+    let parent = select(&replica, "SELECT id FROM items").await.remove(0);
+    identity_insert(
+        &session(&replica).await,
+        "INSERT INTO tags(key,label,item,also) VALUES('t','l',?,NULL)",
+        parent,
+    )
+    .await
+    .unwrap();
+    Tagged {
+        _dir: dir,
+        path,
+        key,
+        replica,
+    }
+}
+fn linked() -> Lineage {
+    let mut lineage = Lineage::new();
+    lineage.linked = true;
+    lineage
+}
+fn refused_for_an_orphan(result: &Result<impl std::fmt::Debug, Error>) -> bool {
+    matches!(result, Err(Error::Incompatible(reason)) if reason == "the projection rebuild would keep rows that break a foreign key: a row of tags references a missing row of items")
+}
+async fn raw_rows(replica: &EncryptedReplica<TypedRows>, sql: &str) -> Vec<Vec<SqlValue>> {
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    rows(&inner.conn, sql).await.unwrap()
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_rebuild_fails_rather_than_commit_rows_that_break_a_foreign_key() {
+    let lineage = linked();
+    let tagged = linked_with_a_tag(&lineage).await;
+    let refused = force_rebuild(&tagged.replica, &ORPHAN_TAG).await;
+    assert!(refused_for_an_orphan(&refused), "{refused:?}");
+    let orphan = vec![vec![SqlValue::Blob(vec![0])]];
+    assert_eq!(
+        raw_rows(&tagged.replica, "SELECT also FROM tags").await,
+        orphan,
+        "the refused rebuild leaves the tables as they were"
+    );
+    assert_eq!(tagged.replica.projection_plan().await.unwrap(), None);
+    drop(tagged.replica);
+    let replica = lineage.open(&tagged.path, &tagged.key, 2, None).await;
+    let replica = replica.expect("a refused rebuild leaves the database openable");
+    assert_eq!(raw_rows(&replica, "SELECT also FROM tags").await, orphan);
+    let again = force_rebuild(&replica, &[]).await;
+    assert!(
+        refused_for_an_orphan(&again),
+        "a retried rebuild is refused for the same reason: {again:?}"
+    );
+}
+
+async fn plan_schema(replica: &EncryptedReplica<TypedRows>, raw: &[&str], schema: &LogicalSchema) {
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    for sql in raw {
+        inner.conn.execute(*sql, ()).await.unwrap();
+    }
+    inner
+        .conn
+        .execute(
+            "INSERT INTO secure_projection_plan SELECT 1,?1,domain,readers FROM secure_typed WHERE id=1",
+            [schema.canonical().unwrap()],
+        )
+        .await
+        .unwrap();
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_rebuild_refused_before_its_plan_ran_never_blocks_opening() {
+    let mut lineage = linked();
+    let tagged = linked_with_a_tag(&lineage).await;
+    lineage.deferred_from = Some(2);
+    let deferred = lineage.schema(2);
+    lineage.deferred_from = None;
+    plan_schema(&tagged.replica, &ORPHAN_TAG, &deferred).await;
+    let revision = "SELECT revision FROM secure_metadata";
+    let planned_at = raw_rows(&tagged.replica, revision).await;
+    drop(tagged.replica);
+    let replica = lineage.open(&tagged.path, &tagged.key, 2, None).await;
+    let replica = replica
+        .expect("a database whose recorded rebuild is refused opens on its installed schema");
+    assert_eq!(replica.projection_plan().await.unwrap(), None);
+    assert_eq!(
+        raw_rows(&replica, revision).await,
+        planned_at,
+        "opening discards the plan without running it"
+    );
+    let (orphans, now_deferred) = declared_references(&replica).await;
+    assert_eq!(orphans.len(), 1, "the orphan stays: {orphans:?}");
+    assert!(!now_deferred);
+    {
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
+        inner
+            .conn
+            .execute("UPDATE tags SET also=NULL", ())
+            .await
+            .unwrap();
+    }
+    plan_schema(&replica, &[], &deferred).await;
+    let fixed_at = raw_rows(&replica, revision).await;
+    drop(replica);
+    let replica = lineage
+        .open(&tagged.path, &tagged.key, 2, None)
+        .await
+        .unwrap();
+    assert_eq!(replica.projection_plan().await.unwrap(), None);
+    assert_ne!(
+        raw_rows(&replica, revision).await,
+        fixed_at,
+        "the same plan runs on opening once no row breaks the reference, so only the orphan refused it"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_refused_schema_switch_is_withdrawn_and_the_peer_stays_on_its_source() {
+    let mut lineage = linked();
+    lineage.deferred_from = Some(3);
+    let tagged = linked_with_a_tag(&lineage).await;
+    let alice = &tagged.replica;
+    super::super::compaction::follow_main(&lineage, alice).await;
+    let source = alice.followed_tip().await;
+    {
+        let inner = alice.inner.lock(crate::replica::Class::Background).await;
+        for sql in ORPHAN_TAG {
+            inner.conn.execute(sql, ()).await.unwrap();
+        }
+    }
+    let statements = lineage.publish(alice, 3).await.unwrap();
+    let refused = lineage
+        .follow(alice, lineage.config(3, &tagged.key), 3, &statements)
+        .await;
+    assert!(refused_for_an_orphan(&refused), "{refused:?}");
+    let staged = "SELECT (SELECT count(*) FROM secure_schema_switch),(SELECT count(*) FROM secure_projection_plan)";
+    let nothing_staged = vec![vec![SqlValue::Integer(0), SqlValue::Integer(0)]];
+    assert_eq!(
+        raw_rows(alice, staged).await,
+        nothing_staged,
+        "a refused switch is withdrawn"
+    );
+    assert_eq!(alice.followed_tip().await, source);
+    drop(tagged.replica);
+    let alice = lineage
+        .reopen(&tagged.path, &tagged.key, 2, 2)
+        .await
+        .expect("a peer whose switch was refused reopens on its source schema");
+    assert_eq!(alice.followed_tip().await, source);
+    assert_eq!(
+        declared_references(&alice).await,
+        (Vec::new(), false),
+        "withdrawing replays the source tables from their writes, which hold no orphan"
+    );
+    assert_eq!(
+        tags_with_parents(&alice).await,
+        vec![vec![text("t"), text("0001"), SqlValue::Null]]
+    );
+    let retried = lineage
+        .follow(&alice, lineage.config(3, &tagged.key), 3, &statements)
+        .await;
+    assert!(
+        matches!(retried, Ok(true)),
+        "the switch succeeds once the rows that broke it are gone: {retried:?}"
+    );
+    assert_eq!(raw_rows(&alice, staged).await, nothing_staged);
+    assert_eq!(declared_references(&alice).await, (Vec::new(), true));
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_rebuild_that_cannot_set_a_table_aside_rewrites_trigger_bodies_on_rename_again() {
+    let tagged = linked_with_a_tag(&linked()).await;
+    let refused = force_rebuild(
+        &tagged.replica,
+        &[
+            "CREATE TABLE secure_rebuild_items(x)",
+            "CREATE TABLE secure_rebuild_tags(x)",
+        ],
+    )
+    .await;
+    assert!(
+        matches!(&refused, Err(Error::Storage(_)))
+            && format!("{refused:?}")
+                .contains("another table or index with this name: secure_rebuild_items"),
+        "the rebuild fails renaming items aside: {refused:?}"
+    );
+    assert_eq!(
+        raw_rows(&tagged.replica, "PRAGMA legacy_alter_table").await,
+        vec![vec![SqlValue::Integer(0)]]
+    );
+}
+
+fn injected_incompatible(result: &Result<impl std::fmt::Debug, Error>) -> bool {
+    matches!(result, Err(Error::Incompatible(reason)) if reason == "an injected incompatible switch")
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_rebuild_failing_for_another_incompatibility_keeps_its_plan() {
+    let lineage = linked();
+    let tagged = linked_with_a_tag(&lineage).await;
+    plan_rebuild(&tagged.replica, &[]).await;
+    let plan = tagged.replica.projection_plan().await.unwrap();
+    assert!(plan.is_some());
+    tagged.replica.refuse_next_switch_as_incompatible().await;
+    let failed = tagged.replica.run_plan().await;
+    assert!(injected_incompatible(&failed), "{failed:?}");
+    assert_eq!(
+        tagged.replica.projection_plan().await.unwrap(),
+        plan,
+        "only rows that break a foreign key discard the plan"
+    );
+    tagged.replica.run_plan().await.unwrap();
+    assert_eq!(tagged.replica.projection_plan().await.unwrap(), None);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_schema_switch_failing_for_another_incompatibility_stays_staged() {
+    let mut lineage = linked();
+    lineage.deferred_from = Some(3);
+    let tagged = linked_with_a_tag(&lineage).await;
+    let alice = &tagged.replica;
+    super::super::compaction::follow_main(&lineage, alice).await;
+    let statements = lineage.publish(alice, 3).await.unwrap();
+    alice.refuse_next_switch_as_incompatible().await;
+    let failed = lineage
+        .follow(alice, lineage.config(3, &tagged.key), 3, &statements)
+        .await;
+    assert!(injected_incompatible(&failed), "{failed:?}");
+    assert_eq!(
+        raw_rows(alice, "SELECT count(*) FROM secure_schema_switch").await,
+        vec![vec![SqlValue::Integer(1)]],
+        "only rows that break a foreign key withdraw the switch"
+    );
+    let retried = lineage
+        .follow(alice, lineage.config(3, &tagged.key), 3, &statements)
+        .await;
+    assert!(matches!(retried, Ok(true)), "{retried:?}");
+    assert_eq!(declared_references(alice).await, (Vec::new(), true));
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_refused_schema_switch_discards_its_plan_only_with_its_intent() {
+    let mut lineage = linked();
+    lineage.deferred_from = Some(3);
+    let tagged = linked_with_a_tag(&lineage).await;
+    let alice = &tagged.replica;
+    super::super::compaction::follow_main(&lineage, alice).await;
+    {
+        let inner = alice.inner.lock(crate::replica::Class::Background).await;
+        for sql in ORPHAN_TAG.iter().chain(&[
+            "CREATE TEMP TRIGGER fail_withdrawal AFTER DELETE ON secure_schema_switch WHEN EXISTS(SELECT 1 FROM secure_projection_plan) BEGIN SELECT RAISE(ABORT,'withdraw rollback'); END",
+        ]) {
+            inner.conn.execute(*sql, ()).await.unwrap();
+        }
+    }
+    let statements = lineage.publish(alice, 3).await.unwrap();
+    let failed = lineage
+        .follow(alice, lineage.config(3, &tagged.key), 3, &statements)
+        .await;
+    assert!(
+        format!("{failed:?}").contains("withdraw rollback"),
+        "{failed:?}"
+    );
+    assert_eq!(
+        raw_rows(
+            alice,
+            "SELECT (SELECT count(*) FROM secure_schema_switch),(SELECT count(*) FROM secure_projection_plan)"
+        )
+        .await,
+        vec![vec![SqlValue::Integer(1), SqlValue::Integer(1)]],
+        "a withdrawal that fails keeps the switch intent together with its plan"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_stored_descriptor_the_current_rules_refuse_is_incompatible_rather_than_corrupt() {
+    let lineage = linked();
+    let tagged = linked_with_a_tag(&lineage).await;
+    {
+        let inner = tagged
+            .replica
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await;
+        let stored = rows(
+            &inner.conn,
+            "SELECT descriptor FROM secure_typed WHERE id=1",
+        )
+        .await
+        .unwrap();
+        let [SqlValue::Blob(descriptor)] = stored[0].as_slice() else {
+            panic!("{stored:?}");
+        };
+        let mut schema: LogicalSchema = serde_json::from_slice(descriptor).unwrap();
+        let tags = schema
+            .tables
+            .iter_mut()
+            .find(|table| table.sql_name == "tags")
+            .unwrap();
+        tags.columns
+            .iter_mut()
+            .find(|column| column.sql_name == "item")
+            .unwrap()
+            .class = rocky_core::ColumnClass::LocalOnly;
+        inner
+            .conn
+            .execute(
+                "UPDATE secure_typed SET descriptor=?",
+                [serde_json::to_vec(&schema).unwrap()],
+            )
+            .await
+            .unwrap();
+    }
+    drop(tagged.replica);
+    let refused = lineage.open(&tagged.path, &tagged.key, 2, None).await;
+    assert!(
+        matches!(&refused, Err(Error::Incompatible(reason)) if reason == "the stored typed table descriptor no longer validates: invalid logical schema: tags.item is local-only and cannot hold a foreign key"),
+        "{:?}",
+        refused.err()
+    );
+}
+
 async fn with_a_draft(
     lineage: &Lineage,
     dir: &Scratch,

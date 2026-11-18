@@ -362,30 +362,16 @@ impl<A: RowApplication> Inner<A> {
         let Some(typed) = self.workspace.typed.as_ref() else {
             return Ok(None);
         };
-        for table in typed.rows.schema().tables.iter().filter(|table| {
-            table.class == TableClass::Replayed
-                && !table.foreign_keys.is_empty()
-                && typed.by_name(&table.sql_name).is_some()
-        }) {
-            if let Some([_, _, SqlValue::Text(parent), ..]) = collect_rows(
-                self.conn
-                    .query(
-                        "SELECT * FROM pragma_foreign_key_check(?) LIMIT 1",
-                        [table.sql_name.clone()],
-                    )
-                    .await?,
-            )
-            .await?
-            .first()
-            .map(Vec::as_slice)
-            {
-                return Ok(Some(format!(
-                    "a row of {} references a missing row of {parent}",
-                    table.sql_name
-                )));
-            }
-        }
-        Ok(None)
+        let replayed: Vec<_> = typed
+            .rows
+            .schema()
+            .tables
+            .iter()
+            .filter(|table| {
+                table.class == TableClass::Replayed && typed.by_name(&table.sql_name).is_some()
+            })
+            .collect();
+        self.orphan_in(&replayed).await
     }
     pub(in crate::replica) async fn prune_shadowed_outcomes(
         &self,

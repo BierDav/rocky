@@ -855,3 +855,39 @@ async fn a_new_member_imports_an_earlier_schemas_checkpoint_before_the_migration
     a.close().await;
     Ok(())
 }
+
+const LISTED: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[
+ {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"set_null"}]},
+ {"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true},{"name":"first","type":"blob"}],"primary_key":["id"],"foreign_keys":[{"columns":["first"],"table":"items","on_delete":"set_null"}]}]}"#;
+const UNLISTED_FAILING: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
+ {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
+ {"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true},{"name":"first","type":"blob"}],"primary_key":["id"],"foreign_keys":[{"columns":["first"],"table":"items","on_delete":"set_null"}]}],
+ "migrations":[{"version":2,"statements":["UPDATE items SET title = NULL"]}]}"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_migration_that_drops_a_reference_withdraws_to_the_schema_holding_it()
+-> Result<(), Failure> {
+    let root = crate::support::small_directory()?;
+    let a = Device::new(Database::create(open(root.path(), LISTED, None), None)?)?
+        .with_identity(common::external_identity(root.path()));
+    a.follow_main_migrating().await;
+    a.add(1, "apples").await;
+    a.close().await;
+
+    let failed = Database::open(open(root.path(), UNLISTED_FAILING, None))
+        .err()
+        .ok_or("a failing migration opened")?;
+    assert!(
+        failed
+            .to_string()
+            .contains("migration to version 2 failed at statement 1"),
+        "withdrawing the stage returns to the schema whose reference its rows satisfy: {failed}"
+    );
+    let a = reopen(open(root.path(), LISTED, None))?;
+    let status = generation(&a).await;
+    assert_eq!(status["current"]["schema"], 1, "{status}");
+    assert_eq!(status["application"], "current");
+    assert_eq!(a.titles().await, ["apples"]);
+    a.close().await;
+    Ok(())
+}

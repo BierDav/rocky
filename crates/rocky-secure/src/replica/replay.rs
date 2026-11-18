@@ -356,14 +356,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
-fn table_carried(
+pub(super) fn table_carried(
     path: Option<&super::schemas::PathFields>,
     schema: &rocky_core::LogicalSchema,
     table: &rocky_core::LogicalTable,
 ) -> bool {
     path.is_none_or(|path| path.tables.contains(&schema.table_id(table)))
 }
-fn column_carried(
+pub(super) fn column_carried(
     path: Option<&super::schemas::PathFields>,
     schema: &rocky_core::LogicalSchema,
     table: &rocky_core::LogicalTable,
@@ -377,6 +377,35 @@ fn column_carried(
             (local(installed) && local(rebuilt))
                 || path.fields.contains(&schema.field_id(table, rebuilt))
         })
+}
+#[derive(Clone, Debug)]
+pub(super) struct BrokenReference(pub(super) String);
+impl From<BrokenReference> for Error {
+    fn from(BrokenReference(violation): BrokenReference) -> Self {
+        Error::Incompatible(format!(
+            "the projection rebuild would keep rows that break a foreign key: {violation}"
+        ))
+    }
+}
+struct SetAside<'a> {
+    rebuilt: &'a rocky_core::LogicalTable,
+    installed: &'a rocky_core::LogicalTable,
+    copied: Vec<(String, String)>,
+}
+fn set_aside_name(name: &str) -> String {
+    format!("secure_rebuild_{name}")
+}
+fn keys_a_reference(
+    schema: &rocky_core::LogicalSchema,
+    parent: &rocky_core::LogicalTable,
+    index: &rocky_core::LogicalIndex,
+) -> bool {
+    parent.is_identity_index(index)
+        && schema
+            .tables
+            .iter()
+            .flat_map(|child| &child.foreign_keys)
+            .any(|key| key.table.eq_ignore_ascii_case(&parent.sql_name))
 }
 fn reason_named(name: &str) -> Result<DropReason, Error> {
     Ok(match name {
@@ -674,16 +703,13 @@ impl<A: RowApplication> Inner<A> {
         self.conn.execute(pragma, ()).await?;
         Ok(())
     }
-
-    pub(super) async fn rebuild_replayed(
+    async fn set_aside<'a>(
         &self,
-        installed: &rocky_core::LogicalSchema,
+        installed: &'a rocky_core::LogicalSchema,
         schema: &rocky_core::LogicalSchema,
-        tables: &[&rocky_core::LogicalTable],
+        tables: &[&'a rocky_core::LogicalTable],
         path: Option<&super::schemas::PathFields>,
-    ) -> Result<(), Error> {
-        let old = |name: &str| typed::quoted(&format!("secure_rebuild_{name}"));
-        self.keep_trigger_bodies_on_rename(true).await?;
+    ) -> Result<Vec<SetAside<'a>>, Error> {
         let mut copies = Vec::new();
         for table in tables {
             let name = &table.sql_name;
@@ -720,38 +746,67 @@ impl<A: RowApplication> Inner<A> {
                     format!(
                         "ALTER TABLE {} RENAME TO {}",
                         typed::quoted(name),
-                        old(name)
+                        typed::quoted(&set_aside_name(name))
                     ),
                     (),
                 )
                 .await?;
-            copies.push((*table, before, kept));
+            copies.push(SetAside {
+                rebuilt: table,
+                installed: before,
+                copied: kept,
+            });
         }
+        Ok(copies)
+    }
+    pub(super) async fn rebuild_replayed(
+        &self,
+        installed: &rocky_core::LogicalSchema,
+        schema: &rocky_core::LogicalSchema,
+        tables: &[&rocky_core::LogicalTable],
+        path: Option<&super::schemas::PathFields>,
+    ) -> Result<Result<(), BrokenReference>, Error> {
+        self.keep_trigger_bodies_on_rename(true).await?;
+        let set_aside = self.set_aside(installed, schema, tables, path).await;
         self.keep_trigger_bodies_on_rename(false).await?;
+        let copies = set_aside?;
+        for copy in &copies {
+            self.release_index_names(&set_aside_name(&copy.rebuilt.sql_name))
+                .await?;
+        }
+        let (parent_keys, other_indexes): (Vec<_>, Vec<_>) = tables
+            .iter()
+            .flat_map(|table| table.indexes.iter().map(move |index| (*table, index)))
+            .partition(|(table, index)| keys_a_reference(schema, table, index));
         for table in tables {
             self.conn.execute(table.create_sql.clone(), ()).await?;
+            self.touch(&table.sql_name);
+        }
+        for (_, index) in parent_keys {
+            self.conn.execute(index.create_sql.clone(), ()).await?;
         }
         self.conn
             .execute("PRAGMA defer_foreign_keys=ON", ())
             .await?;
-        for (table, _, kept) in &copies {
-            if !kept.is_empty() {
-                let (columns, values): (Vec<_>, Vec<_>) = kept.iter().cloned().unzip();
+        for copy in &copies {
+            if !copy.copied.is_empty() {
+                let (columns, values): (Vec<_>, Vec<_>) = copy.copied.iter().cloned().unzip();
+                let name = &copy.rebuilt.sql_name;
                 self.conn
                     .execute(
                         format!(
                             "INSERT INTO {}({}) SELECT {} FROM {}",
-                            typed::quoted(&table.sql_name),
+                            typed::quoted(name),
                             columns.join(","),
                             values.join(","),
-                            old(&table.sql_name),
+                            typed::quoted(&set_aside_name(name)),
                         ),
                         (),
                     )
                     .await?;
             }
         }
-        let mut left: Vec<_> = copies.iter().map(|(_, before, _)| *before).collect();
+        let mut left: Vec<_> = copies.iter().map(|copy| copy.installed).collect();
         while !left.is_empty() {
             let leaf = left
                 .iter()
@@ -767,17 +822,68 @@ impl<A: RowApplication> Inner<A> {
                 .unwrap_or(0);
             let table = left.remove(leaf);
             self.conn
-                .execute(format!("DROP TABLE {}", old(&table.sql_name)), ())
+                .execute(
+                    format!(
+                        "DROP TABLE {}",
+                        typed::quoted(&set_aside_name(&table.sql_name))
+                    ),
+                    (),
+                )
                 .await?;
+        }
+        for (_, index) in other_indexes {
+            self.conn.execute(index.create_sql.clone(), ()).await?;
+        }
+        if let Some(violation) = self.orphan_in(tables).await? {
+            return Ok(Err(BrokenReference(violation)));
         }
         self.conn
             .execute("PRAGMA defer_foreign_keys=OFF", ())
             .await?;
-        for table in tables {
-            for index in &table.indexes {
-                self.conn.execute(index.create_sql.clone(), ()).await?;
+        Ok(Ok(()))
+    }
+    pub(super) async fn orphan_in(
+        &self,
+        tables: &[&rocky_core::LogicalTable],
+    ) -> Result<Option<String>, Error> {
+        for table in tables.iter().filter(|table| !table.foreign_keys.is_empty()) {
+            if let Some([_, _, SqlValue::Text(parent), ..]) = collect_rows(
+                self.conn
+                    .query(
+                        "SELECT * FROM pragma_foreign_key_check(?) LIMIT 1",
+                        [table.sql_name.clone()],
+                    )
+                    .await?,
+            )
+            .await?
+            .first()
+            .map(Vec::as_slice)
+            {
+                return Ok(Some(format!(
+                    "a row of {} references a missing row of {parent}",
+                    table.sql_name
+                )));
             }
-            self.touch(&table.sql_name);
+        }
+        Ok(None)
+    }
+    async fn release_index_names(&self, renamed: &str) -> Result<(), Error> {
+        let declared = collect_rows(
+            self.conn
+                .query(
+                    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=?1 AND sql IS NOT NULL",
+                    [renamed.to_string()],
+                )
+                .await?,
+        )
+        .await?;
+        for index in declared {
+            let [SqlValue::Text(name)] = index.as_slice() else {
+                return Err(Error::Corrupt("index of a rebuilt table".into()));
+            };
+            self.conn
+                .execute(format!("DROP INDEX {}", typed::quoted(name)), ())
+                .await?;
         }
         Ok(())
     }

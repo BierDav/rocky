@@ -14,7 +14,3 @@ fix() {
     cargo fmt --all
     for manifest in $manifests; do cargo fmt --manifest-path "$manifest"; done
 }
-
-# shellcheck disable=SC2016 # jj expands $root and $path
-jj_fix_command='["rustfmt", "--config-path", "$root/rustfmt.toml"]'
-jj_fix_patterns="[\"glob:'**/*.rs' ~ glob:'benchmarks/engine-comparison/**' ~ glob:'benchmarks/engine-scale/**'\"]"

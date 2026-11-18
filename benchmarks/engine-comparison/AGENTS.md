@@ -1,7 +1,7 @@
 # Engine benchmark work
 
-The root [AGENTS.md](../../AGENTS.md) also applies, including Jujutsu-only version
-control, no comments in Rust code and the preference for focused documentation.
+The root [AGENTS.md](../../AGENTS.md) also applies, including no comments in Rust code
+and the preference for focused documentation.
 
 ## Scope
 

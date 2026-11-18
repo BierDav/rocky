@@ -2,8 +2,8 @@
 # Checks commit messages against Conventional Commits.
 #
 #   scripts/commitlint [--protected] FILE          one message (`-` reads stdin)
-#   scripts/commitlint [--protected] --jj [REVSET] every described commit in REVSET
-#                                                  (default: trunk()..@)
+#   scripts/commitlint [--protected] --git [RANGE] every commit in RANGE, as git rev-list
+#                                                  takes it (default: origin/main..HEAD)
 #
 # --protected also refuses fixup!/squash!/amend! commits, which must not reach main.
 set -eu
@@ -11,7 +11,7 @@ set -eu
 types='feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert'
 header="^($types)(\\([a-z0-9][a-z0-9._/-]*\\))?!?: [^ ]"
 max_header=100
-# Commits Git and jj produce themselves, which a later squash removes.
+# Commits Git produces itself, which a later squash removes.
 generated='^(Merge |Revert ")'
 autosquash='^(fixup|squash|amend)! '
 
@@ -58,12 +58,12 @@ report() { # label, message on stdin
 }
 
 case "${1:-}" in
---jj)
-    revset=${2:-'trunk()..@'}
+--git)
+    shift
+    [ "$#" -gt 0 ] || set -- origin/main..HEAD
     failed=0
-    # The working-copy commit has no description until it is described.
-    for id in $(jj log --no-graph -r "($revset) ~ (@ & description(exact:\"\"))" -T 'commit_id ++ "\n"'); do
-        jj log --no-graph -r "$id" -T description | report "$(jj log --no-graph -r "$id" -T 'change_id.short()')" || failed=1
+    for id in $(git rev-list "$@"); do
+        git log -1 --format=%B "$id" | report "$(git rev-parse --short "$id")" || failed=1
     done
     exit "$failed"
     ;;

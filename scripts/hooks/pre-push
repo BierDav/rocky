@@ -1,0 +1,15 @@
+#!/bin/sh
+# Git pre-push hook; installed by scripts/setup. Checks the messages of the commits a push publishes.
+set -eu
+
+commitlint="$(dirname -- "$0")/../../scripts/commitlint"
+failed=0
+# Git passes `<local ref> <local sha> <remote ref> <remote sha>` per pushed ref.
+while read -r _ local_sha _ remote_sha; do
+    case $local_sha in *[!0]*) ;; *) continue ;; esac # deleting a ref publishes nothing
+    case $remote_sha in
+    *[!0]*) "$commitlint" --git "$remote_sha..$local_sha" || failed=1 ;;
+    *) "$commitlint" --git "$local_sha" --not --remotes || failed=1 ;;
+    esac
+done
+exit "$failed"

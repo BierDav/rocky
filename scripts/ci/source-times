@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 import time
 
-EXCLUDED = {".git", ".jj", ".idea", ".gradle", ".kotlin", ".amper", "target", "build", "local", "node_modules"}
+EXCLUDED = {".git", ".idea", ".gradle", ".kotlin", ".amper", "target", "build", "local", "node_modules"}
 
 
 def normalize(root, cache):

@@ -61,7 +61,16 @@ pub(crate) struct Readiness {
 #[derive(Default)]
 struct ReadinessCache {
     generation: u64,
-    domains: BTreeMap<Scope, (u64, u64, Commitment, Arc<DomainReadiness>)>,
+    domains: BTreeMap<Scope, (u64, u64, ReadinessContext, Arc<DomainReadiness>)>,
+}
+#[derive(PartialEq, Eq)]
+struct ReadinessContext {
+    authority: u64,
+    manifest: Commitment,
+    tip: TipId,
+    followed: Option<(Scope, String)>,
+    graph_sizes: Option<[usize; 6]>,
+    custody: Vec<ResourceScope>,
 }
 impl Readiness {
     pub(super) fn new(conn: &ScopedConnection) -> Result<Self, Error> {
@@ -98,14 +107,14 @@ impl Readiness {
                 .map(|(table, updates)| (table.as_str(), *updates)),
         )
     }
-    fn get(&self, domain: Scope, context: Commitment) -> Option<Arc<DomainReadiness>> {
+    fn get(&self, domain: Scope, context: &ReadinessContext) -> Option<Arc<DomainReadiness>> {
         let cache = self.cache();
         let writes = self.write_count();
         cache
             .domains
             .get(&domain)
             .filter(|(generation, seen, known, _)| {
-                *generation == cache.generation && *seen == writes && *known == context
+                *generation == cache.generation && *seen == writes && known == context
             })
             .map(|(.., readiness)| readiness.clone())
     }
@@ -113,7 +122,7 @@ impl Readiness {
         &self,
         domain: Scope,
         (generation, writes): (u64, u64),
-        context: Commitment,
+        context: ReadinessContext,
         readiness: Arc<DomainReadiness>,
     ) {
         let mut cache = self.cache();
@@ -129,13 +138,13 @@ impl Readiness {
 }
 
 impl<A: RowApplication> Inner<A> {
-    fn readiness_context(&self, domain: Scope) -> Result<Commitment, Error> {
-        let custody: Vec<_> = self
+    fn readiness_context(&self, domain: Scope) -> Result<ReadinessContext, Error> {
+        let custody = self
             .custody_scopes(now()?)?
             .into_iter()
             .filter(|scope| scope.domain == domain)
             .collect();
-        let counts = self.graphs.get(&domain).map(|graph| {
+        let graph_sizes = self.graphs.get(&domain).map(|graph| {
             [
                 graph.seals.len(),
                 graph.openings.len(),
@@ -145,21 +154,18 @@ impl<A: RowApplication> Inner<A> {
                 graph.revoked.len(),
             ]
         });
-        Ok(rocky_core::commitment(
-            "rocky.readiness-context.v1",
-            &encode(&(
-                self.authority,
-                self.manifest,
-                self.workspace.tip,
-                &self.workspace.followed,
-                counts,
-                custody,
-            ))?,
-        ))
+        Ok(ReadinessContext {
+            authority: self.authority,
+            manifest: self.manifest,
+            tip: self.workspace.tip,
+            followed: self.workspace.followed.clone(),
+            graph_sizes,
+            custody,
+        })
     }
     pub(super) async fn readiness(&self, domain: Scope) -> Result<Arc<DomainReadiness>, Error> {
         let context = self.readiness_context(domain)?;
-        if let Some(readiness) = self.readiness.get(domain, context) {
+        if let Some(readiness) = self.readiness.get(domain, &context) {
             return Ok(readiness);
         }
         let mark = self.readiness.mark();

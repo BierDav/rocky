@@ -95,13 +95,17 @@ impl<A: RowApplication> Inner<A> {
         let mut unavailable = BTreeMap::new();
         let views = match &self.workspace.typed {
             Some(typed) => {
+                let readiness = self.readiness(typed.domain).await;
                 for table in &typed.tables {
-                    let name = table.table.sql_name.to_ascii_lowercase();
-                    if let Err(error) = self
-                        .availability(&BTreeSet::from([name.clone()]), status)
-                        .await
-                    {
-                        unavailable.insert(name, error);
+                    let available = match &readiness {
+                        Ok(readiness) => {
+                            self.table_availability(typed, readiness, table, status)
+                                .await
+                        }
+                        Err(error) => Err(group::shared(error)),
+                    };
+                    if let Err(error) = available {
+                        unavailable.insert(table.table.sql_name.to_ascii_lowercase(), error);
                     }
                 }
                 typed.rows.schema().views.clone()
@@ -266,42 +270,55 @@ impl<A: RowApplication> Inner<A> {
         let Some(typed) = &self.workspace.typed else {
             return Ok(());
         };
-        for name in tables {
-            let Some(projected) = typed
-                .tables
-                .iter()
-                .find(|table| table.table.sql_name.eq_ignore_ascii_case(name))
-            else {
-                continue;
-            };
-            self.require_scope_readable(projected.scope).await?;
-            if typed.partitioned(projected) {
-                continue;
-            }
-            let scope = projected.scope;
-            if !status.scopes.contains(&scope) {
-                continue;
-            }
-            let keyed = self.config.keys.iter().any(|key| key.scope == scope);
-            let reason = if !keyed {
-                Unavailable::KeyMissing
-            } else if !status.readable.contains(&scope) {
-                continue;
-            } else if !self.holds(scope).await? {
-                Unavailable::NotHeld
-            } else if self.restoring(scope).await?
-                || (self.engine_matches() && self.pending_now(scope).await?)
-            {
-                Unavailable::Incomplete
-            } else {
-                continue;
-            };
-            return Err(Error::Sql(SqlError::Unavailable {
-                table: projected.table.sql_name.clone(),
-                reason,
-            }));
+        let projected: Vec<_> = tables
+            .iter()
+            .filter_map(|name| {
+                typed
+                    .tables
+                    .iter()
+                    .find(|table| table.table.sql_name.eq_ignore_ascii_case(name))
+            })
+            .collect();
+        if projected.is_empty() {
+            return Ok(());
+        }
+        let readiness = self.readiness(typed.domain).await?;
+        for projected in projected {
+            self.table_availability(typed, &readiness, projected, status)
+                .await?;
         }
         Ok(())
+    }
+    async fn table_availability(
+        &self,
+        typed: &typed::Typed,
+        readiness: &blockers::DomainReadiness,
+        projected: &typed::Projected,
+        status: &SessionStatus,
+    ) -> Result<(), Error> {
+        let scope = projected.scope;
+        blockers::refuse(self.readable_in(readiness, scope).await?)?;
+        if typed.partitioned(projected) || !status.scopes.contains(&scope) {
+            return Ok(());
+        }
+        let keyed = self.config.keys.iter().any(|key| key.scope == scope);
+        let reason = if !keyed {
+            Unavailable::KeyMissing
+        } else if !status.readable.contains(&scope) {
+            return Ok(());
+        } else if !self.holds(scope).await? {
+            Unavailable::NotHeld
+        } else if self.restoring(scope).await?
+            || (self.engine_matches() && self.pending_now(scope).await?)
+        {
+            Unavailable::Incomplete
+        } else {
+            return Ok(());
+        };
+        Err(Error::Sql(SqlError::Unavailable {
+            table: projected.table.sql_name.clone(),
+            reason,
+        }))
     }
 }
 

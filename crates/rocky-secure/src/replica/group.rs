@@ -864,8 +864,19 @@ pub(super) fn shared(error: &Error) -> Error {
         Error::Rejected(message) => Error::Rejected(message.clone()),
         Error::Incompatible(message) => Error::Incompatible(message.clone()),
         Error::Durability(message) => Error::Durability(message.clone()),
-        Error::Corrupt(_) | Error::Rollback { .. } => Error::Corrupt(error.to_string()),
+        Error::Corrupt(message) => Error::Corrupt(message.clone()),
+        Error::Rollback { .. } => Error::Corrupt(error.to_string()),
         Error::Io(source) => Error::Io(std::io::Error::new(source.kind(), source.to_string())),
         other => Error::Io(std::io::Error::other(other.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod sharing {
+    use super::*;
+    #[test]
+    fn a_corrupt_error_shared_again_keeps_one_consistency_prefix() {
+        let original = Error::Corrupt("torn page".into());
+        assert_eq!(shared(&shared(&original)).to_string(), original.to_string());
     }
 }

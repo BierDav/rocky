@@ -175,7 +175,9 @@ fn a_trusted_identity_keeps_both_lanes_through_unlink_and_root_cuts() {
     };
     let unlink =
         crate::SignedRevocation::sign(unlink_statement.clone(), &identity, &chains[0]).unwrap();
-    unlink.verify(root.public_key(), scope.app).unwrap();
+    unlink
+        .verify_historic(root.public_key(), scope.app)
+        .unwrap();
     for foreign_identity in [false, true] {
         let mut forged = unlink_statement.clone();
         if foreign_identity {
@@ -331,8 +333,12 @@ fn implicit_empty_unlink_cut_matches_an_explicit_empty_lane() {
         &chain,
     )
     .unwrap();
-    implicit.verify(root.public_key(), scope.app).unwrap();
-    explicit.verify(root.public_key(), scope.app).unwrap();
+    implicit
+        .verify_historic(root.public_key(), scope.app)
+        .unwrap();
+    explicit
+        .verify_historic(root.public_key(), scope.app)
+        .unwrap();
     assert!(implicit.to_bytes().unwrap().len() < explicit.to_bytes().unwrap().len());
     let implicit = RevocationSet::try_from(vec![implicit]).unwrap();
     let explicit = RevocationSet::try_from(vec![explicit]).unwrap();

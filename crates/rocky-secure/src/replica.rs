@@ -1782,7 +1782,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         }
         for signed in statements {
-            signed.verify(publisher, app).map_err(credential)?;
+            signed.verify_historic(publisher, app).map_err(credential)?;
             let single = RevocationSet::try_from(vec![signed.clone()]).map_err(credential)?;
             single
                 .verify_in(own.database_context(publisher).map_err(credential)?)

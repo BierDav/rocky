@@ -173,7 +173,7 @@ fn a_reset_ends_every_node_it_does_not_keep_even_one_never_seen() {
     let (custodian, custodian_chain) = owner.node();
     let (laptop, laptop_chain) = owner.node();
     let reset = owner.reset(&[], &[this, custodian], fence(&[(1, laptop, 3)]));
-    reset.verify(owner.root.public_key(), APP).unwrap();
+    reset.verify_historic(owner.root.public_key(), APP).unwrap();
     let held = set(&[&reset]);
     assert!(!ended(&held, &this_chain));
     assert!(!ended(&held, &custodian_chain));
@@ -471,14 +471,20 @@ fn forged_malformed_and_old_resets_are_refused() {
     }
     let signed = owner.sign(valid.clone(), RevocationMode::Lost).unwrap();
     assert!(
-        signed.verify(PrivateKey::new().public_key(), APP).is_err(),
+        signed
+            .verify_historic(PrivateKey::new().public_key(), APP)
+            .is_err(),
         "another root's statement fails verification"
     );
     let mut tampered = signed.clone();
     if let Some(RootDecision::Reset(reset)) = &mut tampered.statement.recovery {
         reset.keep.insert(PeerId::of(laptop));
     }
-    assert!(tampered.verify(owner.root.public_key(), APP).is_err());
+    assert!(
+        tampered
+            .verify_historic(owner.root.public_key(), APP)
+            .is_err()
+    );
     let forged = RevocationSet::try_from(vec![tampered]).unwrap();
     assert!(
         RevocationSet::new()

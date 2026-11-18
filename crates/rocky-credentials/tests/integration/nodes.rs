@@ -270,7 +270,7 @@ fn an_identity_unlinks_only_its_certified_node_and_the_unlink_does_not_expire() 
     let unlink = first_chain
         .unlink(&identity, APP, NOW, first.public_key())
         .unwrap();
-    unlink.verify(root.public_key(), APP).unwrap();
+    unlink.verify_historic(root.public_key(), APP).unwrap();
     assert!(unlink.live(NOW + 10 * MAX_CHAIN_LIFETIME));
     let revoked = RevocationSet::try_from(vec![unlink]).unwrap();
     assert!(

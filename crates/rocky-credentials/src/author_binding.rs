@@ -79,7 +79,7 @@ impl AuthorBinding {
             self.issues,
         )
     }
-    pub fn verify_node_issuer(&self, issuer: PublicKey, node: PublicKey) -> Result<(), Error> {
+    pub fn verify_historic(&self, issuer: PublicKey, node: PublicKey) -> Result<(), Error> {
         if self.version != BINDING_VERSION
             || self.issuer != issuer
             || self.subject != node
@@ -183,7 +183,7 @@ mod tests {
         let chain = crate::device_chain(identity, &user, node.public_key()).unwrap();
         let binding = &chain.0[1].author_binding;
         binding
-            .verify_node_issuer(user.public_key(), node.public_key())
+            .verify_historic(user.public_key(), node.public_key())
             .unwrap();
         for version in [BINDING_VERSION - 1, BINDING_VERSION + 1] {
             let other = AuthorBinding {
@@ -192,7 +192,7 @@ mod tests {
             };
             assert!(
                 other
-                    .verify_node_issuer(user.public_key(), node.public_key())
+                    .verify_historic(user.public_key(), node.public_key())
                     .is_err(),
                 "version {version} is refused although its signature covers only the current one"
             );

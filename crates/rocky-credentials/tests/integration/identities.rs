@@ -291,7 +291,7 @@ async fn revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_nod
         .expect("signed");
     assert!(
         signed
-            .verify(domain.publisher(), domain.manifest.app)
+            .verify_historic(domain.publisher(), domain.manifest.app)
             .is_err(),
         "the owner's identity is never revoked"
     );

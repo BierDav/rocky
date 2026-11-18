@@ -97,7 +97,7 @@ impl SignedMigrationPublication {
             return Err(denied("descriptor must be endorsed by the opening signer"));
         }
         let node = PublicKey::from_bytes(&s.writer).map_err(|_| denied("migration writer key"))?;
-        self.writer.verify_node_issuer(identity, node)?;
+        self.writer.verify_historic(identity, node)?;
         if let Some((revocations, _)) = current
             && (revocations.revokes_reference(&PeerId::of(node)) || revocations.revokes(&identity))
         {

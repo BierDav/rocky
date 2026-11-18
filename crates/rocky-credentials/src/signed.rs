@@ -521,7 +521,7 @@ impl SignedCapability {
         {
             return Err(denied("not a current certificate of this node"));
         }
-        self.author_binding.verify_node_issuer(self.issuer, node)?;
+        self.author_binding.verify_historic(self.issuer, node)?;
         Ok(self.issuer)
     }
 

@@ -63,6 +63,8 @@ if ! $wasm_only && { [ -z "$tiers" ] || $all; } && [ -z "$packages$changed$archi
 fi
 # Archives always contain the complete validation matrix.
 [ -z "$archives" ] || { [ -z "$packages" ] && [ -z "$changed" ]; } || usage
+# wasm32 is never archived, so --wasm cannot run from or into archives.
+[ -z "$archives" ] || ! $wasm_only || usage
 # Reject formatting before metadata, nextest discovery or compilation.
 if { [ -z "$tiers" ] || $all; } && [ -z "$build" ]; then
     cargo fmt --all -- --check
@@ -86,8 +88,10 @@ wasm_packages="$browser_packages rocky-secure"
 run_wasm() {
     set --
     for package in $wasm_packages; do set -- "$@" -p "$package"; done
+    # The full check calls this under `|| side=1`, which turns off errexit, so
+    # each failure returns explicitly. rocky-secure's tests only build here.
     scripts/clippy --locked \
-        --target wasm32-unknown-unknown --tests "$@" -- -D warnings
+        --target wasm32-unknown-unknown --tests "$@" -- -D warnings || return
     set --
     for package in $browser_packages; do set -- "$@" -p "$package"; done
     # The binaries run at once, each in its own browser; large ones in shards.

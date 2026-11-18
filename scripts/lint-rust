@@ -204,6 +204,10 @@ def check_workspace():
 
 
 def main(arguments):
+    if options := [argument for argument in arguments if argument.startswith('-')]:
+        print(f'lint-rust: unknown option {options[0]}', file=sys.stderr)
+        print(__doc__, end='', file=sys.stderr)
+        return 2
     if arguments:
         return int(check_paths(map(Path, arguments)))
     return int(check_workspace())

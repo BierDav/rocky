@@ -185,6 +185,96 @@ async fn add(node: &Node, handle: u8) -> Result<(), Failure> {
 }
 
 #[tokio::test]
+async fn forgetting_readers_keeps_an_open_transaction_and_refreshes_after_it() -> Result<(), Failure>
+{
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let node = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let client = node.client(1)?;
+            snap::value(node.execute_sql(&client, "BEGIN", Vec::new(), None)).await?;
+            let transaction = Arc::downgrade(&node.sql_reader(&client).await?.sql);
+            node.forget_readers().await;
+            let id = snap::value(node.next_id(&client, "items", None)).await?["id"].clone();
+            snap::value(node.execute_sql(
+                &client,
+                "INSERT INTO items(key,title,id) VALUES('kept','Milk',?)",
+                vec![snap::row_id(&id)],
+                None,
+            ))
+            .await?;
+            node.forget_readers().await;
+            snap::value(node.execute_sql(&client, "COMMIT", Vec::new(), Some([1; 32]))).await?;
+            let current = node.sql_reader(&client).await?.sql;
+            assert!(
+                transaction
+                    .upgrade()
+                    .is_none_or(|forgotten| !Arc::ptr_eq(&forgotten, &current)),
+                "a reader forgotten during a transaction is replaced once it ends"
+            );
+            let rows = snap::value(node.read(
+                &client,
+                rocky_sdk::ReadQuery {
+                    sql: "SELECT key FROM items".to_owned(),
+                    values: Vec::new(),
+                    max_rows: 64,
+                    max_bytes: None,
+                    cursor: None,
+                },
+            ))
+            .await?;
+            assert_eq!(rows["rows"].as_array().map(Vec::len), Some(1));
+            node.detach(None).await;
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test]
+async fn forgetting_readers_keeps_an_aborted_transaction_until_it_is_rolled_back()
+-> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let node = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let client = node.client(1)?;
+            snap::value(node.execute_sql(&client, "BEGIN", Vec::new(), None)).await?;
+            let id = snap::value(node.next_id(&client, "items", None)).await?["id"].clone();
+            node.sql_reader(&client).await?.sql.cancel().await;
+            node.forget_readers().await;
+            assert!(
+                node.execute_sql(
+                    &client,
+                    "INSERT INTO items(key,title,id) VALUES('orphan','Milk',?)",
+                    vec![snap::row_id(&id)],
+                    None,
+                )
+                .await
+                .is_err(),
+                "a statement after an aborted transaction fails instead of autocommitting"
+            );
+            snap::value(node.execute_sql(&client, "ROLLBACK", Vec::new(), None)).await?;
+            let rows = snap::value(node.read(
+                &client,
+                rocky_sdk::ReadQuery {
+                    sql: "SELECT key FROM items".to_owned(),
+                    values: Vec::new(),
+                    max_rows: 64,
+                    max_bytes: None,
+                    cursor: None,
+                },
+            ))
+            .await?;
+            assert_eq!(rows["rows"].as_array().map(Vec::len), Some(0));
+            node.detach(None).await;
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test]
 async fn idle_has_no_poll_and_a_commit_reaches_the_peer_without_time_advancing()
 -> Result<(), Failure> {
     tokio::task::LocalSet::new()

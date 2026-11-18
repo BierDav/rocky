@@ -92,6 +92,11 @@ struct Reader {
     session: SecureSession<TypedRows>,
     sql: Arc<SecureSql<TypedRows>>,
 }
+#[derive(Default)]
+struct CachedReader {
+    reader: Option<Reader>,
+    stale: bool,
+}
 struct Subscription {
     query: Query,
     delivered: Option<String>,
@@ -134,7 +139,7 @@ impl SyncStatus {
 }
 
 pub(crate) struct Client {
-    reader: Mutex<Option<Reader>>,
+    reader: Mutex<CachedReader>,
     cursor_key: [u8; 32],
     subscriptions: std::sync::Mutex<BTreeMap<u64, Subscription>>,
     next: AtomicU64,
@@ -142,6 +147,9 @@ pub(crate) struct Client {
     subscriptions_changed: watch::Sender<()>,
 }
 impl Client {
+    async fn retire_reader(&self) {
+        self.reader.lock().await.stale = true;
+    }
     fn subscriptions(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, BTreeMap<u64, Subscription>>, Failure> {
@@ -499,7 +507,7 @@ impl Node {
             return Err("session quota".into());
         }
         let client = Arc::new(Client {
-            reader: Mutex::new(None),
+            reader: Mutex::new(CachedReader::default()),
             cursor_key: rocky_platform::entropy::random(),
             subscriptions: std::sync::Mutex::new(BTreeMap::new()),
             next: AtomicU64::new(1),
@@ -521,17 +529,18 @@ impl Node {
     }
     async fn reader(&self, client: &Client) -> Result<Reader, Failure> {
         let mut cached = client.reader.lock().await;
-        if let Some(reader) = &*cached
-            && reader.session.status().await.is_ok()
+        if let Some(reader) = &cached.reader
+            && (reader.sql.in_transaction().await
+                || (!cached.stale && reader.session.status().await.is_ok()))
         {
             return Ok(reader.clone());
         }
-        *cached = None;
+        *cached = CachedReader::default();
         let scopes = self.app_scopes();
         let session = self.replica.session(scopes.into_iter().collect()).await?;
         let sql = Arc::new(session.sql(SqlOptions::default()).await?);
         let reader = Reader { session, sql };
-        *cached = Some(reader.clone());
+        cached.reader = Some(reader.clone());
         Ok(reader)
     }
     pub(crate) async fn sql_session(
@@ -549,7 +558,7 @@ impl Node {
     }
     async fn forget_readers(&self) {
         for client in self.clients() {
-            *client.reader.lock().await = None;
+            client.retire_reader().await;
         }
     }
 
@@ -3365,11 +3374,14 @@ impl Node {
         Ok(grant)
     }
     async fn sql_reader(&self, client: &Client) -> Result<Reader, Failure> {
-        let cached = client.reader.lock().await.clone();
-        match cached {
-            Some(reader) => Ok(reader),
-            None => self.reader(client).await,
+        let cached = client.reader.lock().await;
+        if let Some(reader) = &cached.reader
+            && !cached.stale
+        {
+            return Ok(reader.clone());
         }
+        drop(cached);
+        self.reader(client).await
     }
     async fn next_id(
         &self,
@@ -3408,7 +3420,7 @@ impl Node {
             Err(error)
                 if sql.trim().to_ascii_uppercase().starts_with("BEGIN") && is_authority(&error) =>
             {
-                *client.reader.lock().await = None;
+                client.retire_reader().await;
                 run(self.sql_reader(client).await?).await?
             }
             other => other?,
@@ -3446,7 +3458,7 @@ impl Node {
     async fn read(&self, client: &Client, query: Query) -> Result<crate::ReadPage, Failure> {
         match self.read_once(client, query.clone()).await {
             Err(error) if is_authority(&error) => {
-                *client.reader.lock().await = None;
+                client.retire_reader().await;
                 self.read_once(client, query).await
             }
             other => other,

@@ -161,6 +161,15 @@ mod tests {
         Ok(())
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn the_file_provider_meets_the_key_provider_contract() {
+        let directory = rocky_platform::fs::Scratch::new().await;
+        crate::testing::key_provider_contract(&FileKeyProvider::new(directory.path()));
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn the_memory_keys_meet_the_key_provider_contract() {
+        crate::testing::key_provider_contract(&crate::testing::MemoryKeys::default());
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn a_missing_secret_is_an_error_and_an_existing_one_is_not_replaced() -> Result<(), Error>
     {
         let directory = rocky_platform::fs::Scratch::new().await;

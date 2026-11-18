@@ -254,10 +254,36 @@ pub fn bytes<T: Serialize>(label: &str, value: &T) -> Result<Vec<u8>, Coordinati
     encode(&(label, value))
 }
 pub fn now() -> Result<u64, CoordinationError> {
-    rocky_platform::time::SystemTime::now()
+    let time = rocky_platform::time::SystemTime::now()
         .duration_since(rocky_platform::time::UNIX_EPOCH)
         .map(|t| t.as_secs())
-        .map_err(|_| CoordinationError::Corrupt)
+        .map_err(|_| CoordinationError::Corrupt)?;
+    #[cfg(test)]
+    let time = time.saturating_add(CLOCK_SKEW.with(std::cell::Cell::get));
+    Ok(time)
+}
+#[cfg(test)]
+thread_local! {
+    static CLOCK_SKEW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+#[must_use]
+pub(crate) struct SkewedClock(());
+#[cfg(test)]
+impl SkewedClock {
+    pub(crate) fn new() -> Self {
+        CLOCK_SKEW.with(|skew| skew.set(0));
+        Self(())
+    }
+    pub(crate) fn pass(&self, seconds: u64) {
+        CLOCK_SKEW.with(|skew| skew.set(skew.get().saturating_add(seconds)));
+    }
+}
+#[cfg(test)]
+impl Drop for SkewedClock {
+    fn drop(&mut self) {
+        CLOCK_SKEW.with(|skew| skew.set(0));
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -945,11 +945,7 @@ impl MemoryLog {
         if state.unavailable {
             return Err(CoordinationError::Unavailable);
         }
-        let time = rocky_platform::time::SystemTime::now()
-            .duration_since(rocky_platform::time::UNIX_EPOCH)
-            .map_err(|_| CoordinationError::Corrupt)?
-            .as_secs()
-            + state.clock_offset_seconds;
+        let time = crate::certified::now()?.saturating_add(state.clock_offset_seconds);
         let owner = state.owners.get(&scope).copied();
         let (logs, acknowledged) = state
             .domains

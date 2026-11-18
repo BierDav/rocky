@@ -530,6 +530,7 @@ impl<A: RowApplication> Inner<A> {
             return Ok(BTreeMap::new());
         };
         let mut rules = BTreeMap::new();
+        let mut domain_readiness = None;
         for projected in &typed.tables {
             if referenced.is_some_and(|names| {
                 !names.contains(&projected.table.sql_name.to_ascii_lowercase())
@@ -544,7 +545,12 @@ impl<A: RowApplication> Inner<A> {
             if logical.partition_by.is_empty() {
                 continue;
             }
-            let readiness = self.readiness(typed.domain).await?;
+            let readiness = match &domain_readiness {
+                Some(readiness) => Arc::clone(readiness),
+                None => domain_readiness
+                    .insert(self.readiness(typed.domain).await?)
+                    .clone(),
+            };
             let mut held = Vec::new();
             let mut waiting = Vec::new();
             let mut complete = self.table_complete(projected.table.id).await?;

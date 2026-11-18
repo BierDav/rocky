@@ -124,12 +124,11 @@ fn doc() {}
 '''
         self.assertEqual(list(comments(source)), [1, 2, 3, 4])
 
-    def run_workspace(self, budgets, sources, *arguments, files=None):
+    def run_workspace(self, sources, files=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / 'scripts').mkdir()
             shutil.copy2(SCRIPTS / 'lint-rust', root / 'scripts/lint-rust')
-            (root / 'scripts/comment-budgets.toml').write_text('# Header.\n\n' + budgets)
             packages = []
             for package, source in sources.items():
                 manifest = root / package / 'Cargo.toml'
@@ -147,39 +146,19 @@ fn doc() {}
                                    'workspace_members': [p['id'] for p in packages]})
             (binary / 'cargo').write_text(f"#!/bin/sh\ncat <<'EOF'\n{metadata}\nEOF\n")
             (binary / 'cargo').chmod(0o755)
-            result = subprocess.run(
-                [str(root / 'scripts/lint-rust'), *arguments], capture_output=True, text=True,
+            return subprocess.run(
+                [str(root / 'scripts/lint-rust')], capture_output=True, text=True,
                 env=dict(os.environ, PATH=f'{binary}:{os.environ["PATH"]}'))
-            budget_file = root / 'scripts/comment-budgets.toml'
-            return result, budget_file.read_text() if budget_file.exists() else None
 
-    def test_unbudgeted_packages_report_each_comment_including_vendored_members(self):
-        result, _ = self.run_workspace('', {'crates/a': '\n/// docs\n', 'vendor/b': '// fork\n'})
+    def test_workspace_packages_report_each_comment_including_vendored_members(self):
+        result = self.run_workspace({'crates/a': '\n/// docs\n', 'vendor/b': '// fork\n'})
         self.assertEqual(result.returncode, 1)
         self.assertIn('crates/a/src/lib.rs:2: error: comments, doc comments and #[doc = ...] text '
                       'are forbidden', result.stderr)
         self.assertIn('vendor/b/src/lib.rs:1: error:', result.stderr)
 
-    def test_a_budget_must_match_and_only_fix_lowers_it(self):
-        two = '/// one\n#[doc = "two"]\n'
-        result, _ = self.run_workspace('a = 2\n', {'crates/a': two})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        result, _ = self.run_workspace('a = 1\n', {'crates/a': two})
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('a: error: 2 comment lines exceed its budget of 1', result.stderr)
-        result, _ = self.run_workspace('a = 3\n', {'crates/a': two})
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('lower it with scripts/lint --fix', result.stderr)
-        result, budgets = self.run_workspace('a = 3\nb = 1\n', {'crates/a': two, 'crates/b': ''},
-                                             '--fix')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(budgets, '# Header.\n\na = 2\n')
-        result, budgets = self.run_workspace('a = 1\n', {'crates/a': two}, '--fix')
-        self.assertEqual(result.returncode, 1)
-        self.assertEqual(budgets, '# Header.\n\na = 1\n')
-
     def test_only_the_repository_local_directory_is_skipped(self):
-        result, _ = self.run_workspace('', {'crates/a': ''}, files={
+        result = self.run_workspace({'crates/a': ''}, files={
             'crates/a/src/local/inner.rs': '#[allow(dead_code)]\n/// docs\n',
             'local/scratch.rs': '// scratch\n#[allow(dead_code)]\n'})
         self.assertEqual(result.returncode, 1)
@@ -189,7 +168,7 @@ fn doc() {}
         self.assertNotIn('scratch.rs', result.stderr)
 
     def test_cargo_workspaces_outside_the_root_one_hold_no_comments_except_upstream(self):
-        result, _ = self.run_workspace('', {'crates/a': ''}, files={
+        result = self.run_workspace({'crates/a': ''}, files={
             'benchmarks/chaos/src/main.rs': '\n// chaos\n',
             'benchmarks/engine-scale/crates/harness/src/lib.rs': '/// harness\n',
             'benchmarks/engine-scale/turso-patched/src/main.rs': '//! patched\n',
@@ -200,22 +179,6 @@ fn doc() {}
                      'benchmarks/engine-scale/turso-patched/src/main.rs:1:'):
             self.assertIn(path, result.stderr)
         self.assertNotIn('turso_core', result.stderr)
-        result, _ = self.run_workspace('"benchmarks/chaos" = 1\n', {'crates/a': ''}, files={
-            'benchmarks/chaos/src/main.rs': '// chaos\n'})
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('benchmarks/chaos is not a workspace package', result.stderr)
-
-    def test_fix_deletes_the_budget_file_once_every_budget_is_zero(self):
-        result, budgets = self.run_workspace('a = 2\n', {'crates/a': ''}, '--fix')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIsNone(budgets)
-        result, _ = self.run_workspace('', {'crates/a': '// one\n'})
-        self.assertEqual(result.returncode, 1)
-
-    def test_budgets_name_workspace_packages(self):
-        result, _ = self.run_workspace('gone = 1\n', {'crates/a': ''})
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('gone is not a workspace package', result.stderr)
 
 
 class ClippyConfiguration(unittest.TestCase):

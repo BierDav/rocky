@@ -42,8 +42,6 @@
   makes the mistake impossible; a test named after the rule or an assertion
   message; a clearer name for the item, parameter or constant; otherwise delete
   it. Examples are ordinary tests, not doctests.
-- Packages in `scripts/comment-budgets.toml` still carry old comments. Convert
-  them when you touch that code; budgets only go down.
 
 ## Version control
 
@@ -57,8 +55,7 @@
 
 - Use `#[expect(lint, reason = "...")]`; `allow` attributes are forbidden.
 - Develop with `./scripts/check --unit` and `cargo test -p <package>`; finish
-  with `./scripts/lint` and `./scripts/check`. `./scripts/lint --fix` formats and
-  lowers comment budgets.
+  with `./scripts/lint` and `./scripts/check`. `./scripts/lint --fix` formats.
 - Test behavior, invariants and regressions deterministically, separate from
   benchmarks: fault injection instead of sleeps, no timing assertions.
 - Check supported feature combinations, not blindly `--all-features`.

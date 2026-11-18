@@ -2,12 +2,8 @@
 """Rust source policy: no allow attributes, no comments and no doc text.
 
   scripts/lint-rust              check every workspace package and every Cargo
-                                 workspace of OUTSIDE_THE_WORKSPACE; a workspace
-                                 package listed in scripts/comment-budgets.toml
-                                 may hold exactly its budget of comment lines
-  scripts/lint-rust PATH...      check the named files, reporting every comment
-  scripts/lint-rust --fix        lower budgets to the current counts, then check;
-                                 the budget file goes once every budget is zero
+                                 workspace of OUTSIDE_THE_WORKSPACE
+  scripts/lint-rust PATH...      check the named files
 """
 import json
 import os
@@ -15,11 +11,9 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-import tomllib
 
 
 ROOT = Path(__file__).resolve().parent.parent
-BUDGETS = ROOT / 'scripts/comment-budgets.toml'
 OUTSIDE_THE_WORKSPACE = ('benchmarks/chaos', 'benchmarks/engine-comparison',
                          'benchmarks/engine-scale')
 UPSTREAM = ('benchmarks/engine-scale/turso-patched/vendor',)
@@ -166,22 +160,22 @@ def rust_sources(directory, nested_packages):
 
 
 def workspace_packages():
-    """`(name, directory)` per member of the root Cargo workspace."""
+    """The directory of each member of the root Cargo workspace."""
     metadata = json.loads(subprocess.check_output(
         ['cargo', 'metadata', '--offline', '--locked', '--no-deps', '--format-version', '1'], cwd=ROOT))
     members = set(metadata['workspace_members'])
     for package in sorted(metadata['packages'], key=lambda package: package['name']):
         if package['id'] in members:
-            yield package['name'], Path(package['manifest_path']).parent.resolve()
+            yield Path(package['manifest_path']).parent.resolve()
 
 
-def scanned(packages):
-    """`(name, sources)` per workspace package, then per Cargo workspace outside it."""
-    for name, directory in packages.items():
-        yield name, rust_sources(directory, nested_packages=False)
+def scanned():
+    """The sources of each workspace package, then of each Cargo workspace outside it."""
+    for directory in workspace_packages():
+        yield rust_sources(directory, nested_packages=False)
     for path in OUTSIDE_THE_WORKSPACE:
         if (ROOT / path).is_dir():
-            yield path, rust_sources(ROOT / path, nested_packages=True)
+            yield rust_sources(ROOT / path, nested_packages=True)
 
 
 def report(path, lines, guidance):
@@ -199,69 +193,20 @@ def check_paths(paths):
     return failed
 
 
-def check_workspace(fix):
+def check_workspace():
     failed = False
-    counts = {}
-    packages = dict(workspace_packages())
-    for name, sources in scanned(packages):
-        found = []
+    for sources in scanned():
         for path in sources:
             source = path.read_text()
             failed |= report(path, list(violations(source)), ALLOW_GUIDANCE)
-            found.extend((path, number) for number in comments(source))
-        counts[name] = found
-    budgets, over = check_budgets(counts, packages, fix)
-    failed |= over
-    for name, found in counts.items():
-        if name not in budgets:
-            for path, number in found:
-                failed |= report(path, [number], COMMENT_GUIDANCE)
+            failed |= report(path, list(comments(source)), COMMENT_GUIDANCE)
     return failed
 
 
-def check_budgets(counts, packages, fix):
-    """Budgets of packages still converting; delete with the budget file once it is gone."""
-    budgets = tomllib.loads(BUDGETS.read_text()) if BUDGETS.exists() else {}
-    if fix and budgets:
-        budgets = {name: min(budget, len(counts.get(name, [])))
-                   for name, budget in budgets.items()}
-        budgets = {name: budget for name, budget in budgets.items() if budget}
-        if budgets:
-            header = ''.join(line for line in BUDGETS.read_text().splitlines(keepends=True)
-                             if line.startswith('#'))
-            BUDGETS.write_text(header + '\n' + ''.join(f'{name} = {count}\n'
-                                                       for name, count in sorted(budgets.items())))
-        else:
-            BUDGETS.unlink()
-            print(f'{BUDGETS.name}: every budget is zero; the file is gone', file=sys.stderr)
-    failed = False
-    for name, budget in budgets.items():
-        found = len(counts.get(name, []))
-        if name not in packages:
-            print(f'{BUDGETS}: error: {name} is not a workspace package', file=sys.stderr)
-            failed = True
-        elif found > budget:
-            print(f'{name}: error: {found} comment lines exceed its budget of {budget} in '
-                  f'{BUDGETS.name}; list a file\'s comments with scripts/lint-rust PATH',
-                  file=sys.stderr)
-            failed = True
-        elif found < budget:
-            print(f'{name}: error: {found} comment lines remain under its budget of {budget}; '
-                  'lower it with scripts/lint --fix', file=sys.stderr)
-            failed = True
-    return budgets, failed
-
-
 def main(arguments):
-    fix = arguments[:1] == ['--fix']
-    if fix:
-        arguments = arguments[1:]
-    if arguments and not fix:
-        return int(check_paths(map(Path, arguments)))
     if arguments:
-        print(__doc__.strip(), file=sys.stderr)
-        return 2
-    return int(check_workspace(fix))
+        return int(check_paths(map(Path, arguments)))
+    return int(check_workspace())
 
 
 if __name__ == '__main__':

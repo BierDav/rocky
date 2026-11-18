@@ -11,7 +11,6 @@ check() {
 }
 
 fix() {
-    scripts/lint-rust --fix || true
     cargo fmt --all
     for manifest in $manifests; do cargo fmt --manifest-path "$manifest"; done
 }

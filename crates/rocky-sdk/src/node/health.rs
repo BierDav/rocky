@@ -510,8 +510,7 @@ impl Node {
                 }
                 issuing.trusted_nodes = observed;
             }
-            draft.save(&self.path)?;
-            *settings = draft;
+            settings.commit(draft, &self.path)?;
         }
         let membership_alerts = if registry.is_some() {
             settings
@@ -577,8 +576,7 @@ impl Node {
                 .as_mut()
                 .ok_or("a trusted node issues")?
                 .stale_after = Some(seconds);
-            draft.save(&self.path)?;
-            *settings = draft;
+            settings.commit(draft, &self.path)?;
         }
         self.refresh_trusted_watch().await?;
         self.observations.touch();

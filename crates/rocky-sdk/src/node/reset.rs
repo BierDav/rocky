@@ -17,7 +17,7 @@ impl Node {
             settings.publisher,
             "signing out everywhere else",
         )?;
-        if let Some(ended) = settings.revocation(&self.path)? {
+        if let Some(ended) = self.revocation_notice.revoked(&settings)? {
             return Err(Box::new(crate::ResetRefused::DeviceSignedOut {
                 statement: ended.id()?,
             }));
@@ -116,8 +116,7 @@ impl Node {
         if let Some(device) = &mut draft.personal {
             device.unwitnessed = true;
         }
-        draft.save(&self.path)?;
-        *settings = draft;
+        settings.commit(draft, &self.path)?;
         self.apply(&mut settings, Vec::new()).await?;
         drop(settings);
         let pushed = match self.push_revocations().await {
@@ -174,8 +173,8 @@ impl Node {
     }
     pub(super) async fn freshness(&self) -> Result<crate::Freshness, Failure> {
         let own = PeerId::of(PrivateKey::from_bytes(&self.vault.get("node")?).public_key());
-        let settings = self.settings.lock().await;
-        if settings.revocation(&self.path)?.is_some() {
+        let settings = self.settings.published();
+        if self.revocation_notice.revoked(&settings)?.is_some() {
             return Ok(crate::Freshness::LocallyAnchored);
         }
         let baseline = if settings.personal.is_some_and(|device| device.unwitnessed) {
@@ -183,7 +182,6 @@ impl Node {
         } else {
             crate::Freshness::LocallyAnchored
         };
-        drop(settings);
         let revocations = self.replica.revocations().await;
         let fenced = revocations
             .reset_heads()

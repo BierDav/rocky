@@ -25,7 +25,7 @@ use rocky_secure::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -171,6 +171,120 @@ struct Notice {
     statement: SignedRevocation,
 }
 const NOTICE_VERSION: u32 = 3;
+
+enum Recorded {
+    Absent,
+    Revoked(Box<SignedRevocation>),
+}
+impl Recorded {
+    fn read(settings: &Settings, path: &Path) -> Result<Self, Failure> {
+        let bytes = match rocky_platform::fs::read(path.with_file_name("revoked.json")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self::Absent),
+            Err(error) => return Err(error.into()),
+        };
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        if value["version"].as_u64() != Some(u64::from(NOTICE_VERSION)) {
+            return Err("unsupported device revocation notice".into());
+        }
+        let notice: Notice = serde_json::from_value(value)?;
+        let set = RevocationSet::try_from(vec![notice.statement.clone()])?;
+        if settings.revoking(&set)?.is_none() {
+            return Err("invalid device revocation notice".into());
+        }
+        Ok(Self::Revoked(Box::new(notice.statement)))
+    }
+    fn write(settings: &Settings, path: &Path, statement: SignedRevocation) -> Result<(), Failure> {
+        let set = RevocationSet::try_from(vec![statement.clone()])?;
+        if settings.revoking(&set)?.is_none() {
+            return Err("the statement does not revoke this device".into());
+        }
+        write_private(
+            &path.with_file_name("revoked.json"),
+            &serde_json::to_vec(&Notice {
+                version: NOTICE_VERSION,
+                statement,
+            })?,
+        )?;
+        Ok(())
+    }
+    fn statement(&self) -> Option<&SignedRevocation> {
+        match self {
+            Self::Absent => None,
+            Self::Revoked(statement) => Some(statement),
+        }
+    }
+}
+
+pub(crate) struct RevocationNotice {
+    path: PathBuf,
+    recorded: std::sync::Mutex<Option<Recorded>>,
+}
+impl RevocationNotice {
+    pub(crate) fn open(settings: &Settings, path: &Path) -> Self {
+        Self {
+            path: path.to_owned(),
+            recorded: std::sync::Mutex::new(Recorded::read(settings, path).ok()),
+        }
+    }
+    fn recorded(&self) -> std::sync::MutexGuard<'_, Option<Recorded>> {
+        self.recorded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    fn known(
+        &self,
+        recorded: &mut Option<Recorded>,
+        settings: &Settings,
+    ) -> Result<Option<SignedRevocation>, Failure> {
+        let known = match recorded {
+            Some(known) => known,
+            None => recorded.insert(Recorded::read(settings, &self.path)?),
+        };
+        Ok(known.statement().cloned())
+    }
+    fn write(
+        &self,
+        recorded: &mut Option<Recorded>,
+        settings: &Settings,
+        statement: SignedRevocation,
+    ) -> Result<(), Failure> {
+        let written = Recorded::write(settings, &self.path, statement);
+        *recorded = Recorded::read(settings, &self.path).ok();
+        written
+    }
+    pub(crate) fn revoked(&self, settings: &Settings) -> Result<Option<SignedRevocation>, Failure> {
+        self.known(&mut self.recorded(), settings)
+    }
+    pub(crate) fn record(
+        &self,
+        settings: &Settings,
+        statement: SignedRevocation,
+    ) -> Result<(), Failure> {
+        self.write(&mut self.recorded(), settings, statement)
+    }
+    pub(crate) fn record_unless_revoked(
+        &self,
+        settings: &Settings,
+        statement: SignedRevocation,
+    ) -> Result<bool, Failure> {
+        let mut recorded = self.recorded();
+        if self.known(&mut recorded, settings)?.is_some() {
+            return Ok(false);
+        }
+        self.write(&mut recorded, settings, statement)?;
+        Ok(true)
+    }
+    pub(crate) fn admit_personal(&self, settings: &Settings) -> Result<(), Failure> {
+        if !settings.kind()?.is_personal() {
+            return Ok(());
+        }
+        match self.revoked(settings)? {
+            Some(statement) => Err(Box::new(Revoked(statement))),
+            None => Ok(()),
+        }
+    }
+}
 
 pub(crate) fn personal_refusal(error: PersonalError) -> Failure {
     Box::new(rocky_credentials::Error::Personal(error))
@@ -661,24 +775,6 @@ impl Settings {
         Ok(set.revoking_holder(&self.credentials)?.cloned())
     }
 
-    pub(crate) fn revocation(&self, path: &Path) -> Result<Option<SignedRevocation>, Failure> {
-        let bytes = match rocky_platform::fs::read(path.with_file_name("revoked.json")) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-        if value["version"].as_u64() != Some(u64::from(NOTICE_VERSION)) {
-            return Err("unsupported device revocation notice".into());
-        }
-        let notice: Notice = serde_json::from_value(value)?;
-        let set = RevocationSet::try_from(vec![notice.statement.clone()])?;
-        if self.revoking(&set)?.is_none() {
-            return Err("invalid device revocation notice".into());
-        }
-        Ok(Some(notice.statement))
-    }
-
     pub(crate) fn revocation_reason(
         &self,
         statement: &SignedRevocation,
@@ -708,25 +804,6 @@ impl Settings {
         } else {
             crate::RevocationReason::Capability
         })
-    }
-
-    pub(crate) fn record_revocation(
-        &self,
-        path: &Path,
-        statement: SignedRevocation,
-    ) -> Result<(), Failure> {
-        let set = RevocationSet::try_from(vec![statement.clone()])?;
-        if self.revoking(&set)?.is_none() {
-            return Err("the statement does not revoke this device".into());
-        }
-        write_private(
-            &path.with_file_name("revoked.json"),
-            &serde_json::to_vec(&Notice {
-                version: NOTICE_VERSION,
-                statement,
-            })?,
-        )?;
-        Ok(())
     }
 
     pub(crate) fn learn_revocations(
@@ -2026,12 +2103,7 @@ impl Settings {
         let address = transport.address().await?;
         let token = vault.replace("invitation")?;
         let expires = now()? + INVITATION_TTL;
-        let issuing = self.issuing("invites devices")?;
-        issuing.invitation_label = label;
-        issuing.invitation = Some(Invitation::open(&token, profile.clone(), expires));
-        issuing.claimed = None;
-        let notes = issuing.requests.end(Dropped::Replaced);
-        self.save(path)?;
+        let invitation = Invitation::open(&token, profile.clone(), expires);
         let invite = Invite {
             v: INVITE_VERSION,
             routes: vec![Route {
@@ -2050,6 +2122,12 @@ impl Settings {
             "rocky://join/{}",
             BASE64URL_NOPAD.encode(&serde_json::to_vec(&invite)?)
         );
+        let issuing = self.issuing("invites devices")?;
+        issuing.invitation_label = label;
+        issuing.invitation = Some(invitation);
+        issuing.claimed = None;
+        let notes = issuing.requests.end(Dropped::Replaced);
+        self.save(path)?;
         Ok((uri, expires, notes))
     }
     fn check_profile(&self, profile: &Profile) -> Result<(), Failure> {

@@ -165,7 +165,7 @@ impl Node {
         let context = settings
             .personal()?
             .ok_or_else(|| refused("this database is not a personal one"))?;
-        if settings.logged_out || settings.revocation(&self.path)?.is_some() {
+        if settings.logged_out || self.revocation_notice.revoked(&settings)?.is_some() {
             return Err(refused("this device was revoked or logged out"));
         }
         Ok((
@@ -382,8 +382,7 @@ impl Node {
         if added {
             let mut draft = current.clone();
             draft.learn_revocations(&known)?;
-            draft.save(&self.path)?;
-            *current = draft;
+            current.commit(draft, &self.path)?;
             tracing::debug!(
                 node = %node.to_hex(),
                 publication = %data_encoding::HEXLOWER.encode(&publication_id),
@@ -420,8 +419,7 @@ impl Node {
             unwitnessed: false,
             ..device
         });
-        draft.save(&self.path)?;
-        *current = draft;
+        current.commit(draft, &self.path)?;
         tracing::debug!(peer = %peer.to_hex(), "an owner device witnessed this device");
         Ok(())
     }

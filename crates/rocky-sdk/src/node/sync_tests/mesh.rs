@@ -300,13 +300,13 @@ async fn revoked_peers_receive_no_contact_or_discovery_material_and_are_unknown_
                 .settings
                 .lock()
                 .await
-                .discovery_topics(&a.vault, now()?)?
+                .advance_discovery_topics(&a.vault, now()?)?
                 .0;
             let b_topic = b
                 .settings
                 .lock()
                 .await
-                .discovery_topics(&b.vault, now()?)?
+                .advance_discovery_topics(&b.vault, now()?)?
                 .0;
             assert_eq!(a_topic, b_topic);
             let db = rusqlite::Connection::open(root.path().join("b/rocky.sqlite"))?;

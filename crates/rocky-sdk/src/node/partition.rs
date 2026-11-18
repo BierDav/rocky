@@ -319,9 +319,8 @@ impl Node {
             .epoch_statements
             .entry(secret_role(&record.address, epoch))
             .or_insert(ids);
-        draft.save(&self.path)?;
-        let granted = draft.granted(&self.domain());
-        *settings = draft;
+        settings.commit(draft, &self.path)?;
+        let granted = settings.granted(&self.domain());
         let partition = GroupPartition::of(&self.domain(), &record)?;
         self.hold_keys(&settings, std::slice::from_ref(&partition))
             .await?;
@@ -430,9 +429,8 @@ impl Node {
         draft
             .epoch_statements
             .insert(role, envelope.statements().to_vec());
-        draft.save(&self.path)?;
-        let granted = draft.granted(&self.domain());
-        *settings = draft;
+        settings.commit(draft, &self.path)?;
+        let granted = settings.granted(&self.domain());
         let partition = GroupPartition::of(&self.domain(), &record)?;
         self.hold_keys(&settings, std::slice::from_ref(&partition))
             .await?;
@@ -522,8 +520,7 @@ impl Node {
             )?;
             draft.queue(*recipient, &record, epoch, &delivery, true)?;
         }
-        draft.save(&self.path)?;
-        *settings = draft;
+        settings.commit(draft, &self.path)?;
         Ok(crate::PartitionShare {
             epoch,
             recipients,

@@ -100,8 +100,14 @@ impl Node {
             Request::DiscoveryTopics(reply) => {
                 let _ = reply.send(
                     async {
-                        let settings = self.settings.lock().await;
-                        let (current, previous) = settings.discovery_topics(&self.vault, now()?)?;
+                        let time = now()?;
+                        let (current, previous) = match self.settings.try_lock() {
+                            Ok(settings) => settings.advance_discovery_topics(&self.vault, time)?,
+                            Err(_) => self
+                                .settings
+                                .published()
+                                .discovery_topics(&self.vault, time)?,
+                        };
                         Ok(crate::DiscoveryTopics { current, previous })
                     }
                     .await,

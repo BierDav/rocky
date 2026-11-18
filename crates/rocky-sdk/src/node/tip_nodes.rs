@@ -54,13 +54,13 @@ impl Node {
     }
     pub(crate) async fn refresh_line_node(
         &self,
-        settings: &mut Shared<Settings>,
+        settings: &mut super::SettingsGuard<'_>,
     ) -> Result<(), Failure> {
         self.line_node(settings, true).await
     }
     async fn line_node(
         &self,
-        settings: &mut Shared<Settings>,
+        settings: &mut super::SettingsGuard<'_>,
         refresh: bool,
     ) -> Result<(), Failure> {
         let needed = self.replica.line_node_needed().await;

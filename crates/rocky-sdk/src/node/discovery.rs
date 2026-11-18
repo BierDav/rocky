@@ -16,7 +16,7 @@ impl Node {
         }
         let public = !self.replica.private_schema().await.unwrap_or(true);
         let settings = self.settings.lock().await;
-        if settings.logged_out || !matches!(settings.revocation(&self.path), Ok(None)) {
+        if settings.logged_out || !matches!(self.revocation_notice.revoked(&settings), Ok(None)) {
             return Vec::new();
         }
         let personal = self
@@ -25,7 +25,7 @@ impl Node {
             .ok()
             .flatten();
         let shared = match self.discovery_time() {
-            Ok(time) if public => match settings.discovery_topics(&self.vault, time) {
+            Ok(time) if public => match settings.advance_discovery_topics(&self.vault, time) {
                 Ok((current, previous)) => std::iter::once(current).chain(previous).collect(),
                 Err(_) => Vec::new(),
             },

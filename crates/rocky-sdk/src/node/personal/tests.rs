@@ -58,7 +58,7 @@ fn spent_replay_state_is_bounded() {
 #[cfg(not(target_family = "wasm"))]
 mod device_actions {
     use super::*;
-    use crate::{PersonalAccount, PersonalNamespace, VerifiedPasskeyPrf};
+    use crate::{PersonalAccount, PersonalNamespace, VerifiedPasskeyPrf, request::Request};
     use rocky_credentials::testing::MemoryKeys;
     use std::path::Path;
 
@@ -125,6 +125,227 @@ mod device_actions {
             .certificate()
             .cloned()
             .ok_or_else(|| "certificate".into())
+    }
+
+    async fn ask<T>(
+        node: &Node,
+        request: impl FnOnce(tokio::sync::oneshot::Sender<Result<T, Failure>>) -> Request,
+    ) -> Result<T, Failure> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        node.request(request(reply), node.client(1)).await;
+        answer.await?
+    }
+    async fn execute(node: &Node, sql: &str) -> Result<crate::SessionRows, Failure> {
+        ask(node, |reply| {
+            Request::Execute(sql.into(), Vec::new(), None, reply)
+        })
+        .await
+    }
+    async fn within_a_transaction_while_apply_waits_holding_settings<T>(
+        node: &Node,
+        work: impl std::future::Future<Output = Result<T, Failure>>,
+    ) -> Result<T, Failure> {
+        execute(node, "BEGIN").await?;
+        let held = node.settings.lock().await;
+        let background = async {
+            let mut held = held;
+            node.apply(&mut held, Vec::new()).await
+        };
+        let transaction = async {
+            let done = work.await;
+            let ended = execute(node, "COMMIT").await;
+            ended.and(done)
+        };
+        let (applied, finished) = tokio::join!(background, transaction);
+        applied?;
+        finished
+    }
+    async fn reopen(
+        directory: &Path,
+        store: &Arc<dyn crate::SecretStore>,
+    ) -> Result<Node, Failure> {
+        let settings = Settings::load(&directory.join("identity.json"))?;
+        let vault = settings.vault(store);
+        let domain = settings.domain()?;
+        let replica = EncryptedReplica::open(
+            directory.join("rocky.sqlite"),
+            domain.app.clone(),
+            settings.config(&vault, &domain)?,
+        )
+        .await?;
+        Ok(Node::new(
+            replica,
+            domain,
+            vault,
+            settings,
+            directory.join("identity.json"),
+        ))
+    }
+
+    #[tokio::test]
+    async fn request_paths_see_a_settings_change_once_it_is_saved() -> Result<(), Failure> {
+        let directory = tempfile::tempdir()?;
+        let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
+        let node = personal(directory.path(), &store).await?;
+        let before = node.settings.published().ttl;
+        let mut held = node.settings.lock().await;
+        held.ttl = before + 1;
+        assert_eq!(
+            node.settings.published().ttl,
+            before,
+            "an unsaved change stays unpublished"
+        );
+        held.save(&node.path)?;
+        assert_eq!(
+            node.settings.published().ttl,
+            before + 1,
+            "a saved change is published while the settings lock is still held"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_settings_change_whose_save_failed_is_never_published() -> Result<(), Failure> {
+        let directory = tempfile::tempdir()?;
+        let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
+        let node = personal(directory.path(), &store).await?;
+        let unwritable = directory.path().join("missing").join("identity.json");
+        let before = node.settings.published().ttl;
+        let mut held = node.settings.lock().await;
+        held.ttl = before + 1;
+        assert!(held.save(&unwritable).is_err());
+        let mut draft = held.clone();
+        draft.ttl = before + 2;
+        assert!(held.commit(draft, &unwritable).is_err());
+        assert_eq!(
+            held.ttl,
+            before + 1,
+            "a failed commit keeps the held settings"
+        );
+        drop(held);
+        assert_eq!(
+            node.settings.published().ttl,
+            before,
+            "only settings a save committed are published"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sql_in_an_open_transaction_proceeds_while_apply_holds_settings_for_the_replica()
+    -> Result<(), Failure> {
+        let directory = tempfile::tempdir()?;
+        let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
+        let node = personal(directory.path(), &store).await?;
+        within_a_transaction_while_apply_waits_holding_settings(
+            &node,
+            execute(&node, "SELECT title FROM notes"),
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_paged_read_in_an_open_transaction_proceeds_while_apply_holds_settings()
+    -> Result<(), Failure> {
+        let directory = tempfile::tempdir()?;
+        let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
+        let node = personal(directory.path(), &store).await?;
+        for title in ["a", "b"] {
+            execute(&node, "BEGIN").await?;
+            let id = ask(&node, |reply| Request::NextId("notes".into(), None, reply)).await?;
+            ask(&node, |reply| {
+                Request::Execute(
+                    "INSERT INTO notes (id, title) VALUES (?, ?)".into(),
+                    vec![id.into(), crate::SqlValue::Text(title.into())],
+                    None,
+                    reply,
+                )
+            })
+            .await?;
+            execute(&node, "COMMIT").await?;
+        }
+        let paged = within_a_transaction_while_apply_waits_holding_settings(&node, async {
+            let first = ask(&node, |reply| {
+                Request::Read(crate::ReadQuery::new("SELECT title FROM notes", 1), reply)
+            })
+            .await?;
+            let mut next = crate::ReadQuery::new("SELECT title FROM notes", 1);
+            next.cursor = first.next.clone();
+            let second = ask(&node, |reply| Request::Read(next, reply)).await?;
+            Ok((first, second))
+        })
+        .await?;
+        assert_eq!(paged.0.rows.len() + paged.1.rows.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn discovery_topics_in_an_open_transaction_proceed_while_apply_holds_settings()
+    -> Result<(), Failure> {
+        let directory = tempfile::tempdir()?;
+        let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
+        let node = personal(directory.path(), &store).await?;
+        within_a_transaction_while_apply_waits_holding_settings(
+            &node,
+            ask(&node, Request::DiscoveryTopics),
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_recorded_personal_revocation_refuses_requests_before_and_after_reopening()
+    -> Result<(), Failure> {
+        let directory = tempfile::tempdir()?;
+        let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
+        let node = personal(directory.path(), &store).await?;
+        execute(&node, "SELECT title FROM notes").await?;
+        let own = rocky_credentials::PeerId::of(Settings::node_key(&node.vault)?.public_key());
+        node.revoke_personal_device(own, prf()).await?;
+        let refused = execute(&node, "SELECT title FROM notes").await;
+        assert!(refused.is_err_and(|error| error.is::<crate::enrollment::Revoked>()));
+        drop(node);
+        let reopened = reopen(directory.path(), &store).await?;
+        let refused = execute(&reopened, "SELECT title FROM notes").await;
+        assert!(
+            refused.is_err_and(|error| error.is::<crate::enrollment::Revoked>()),
+            "a reopened node enforces the notice it recorded before"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_recorded_personal_revocation_refuses_gated_peer_requests() -> Result<(), Failure> {
+        let directory = tempfile::tempdir()?;
+        let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
+        let node = personal(directory.path(), &store).await?;
+        let tip_schema = || PeerRequest::TipSchema { manifest: [0; 32] };
+        node.answer_peer(tip_schema()).await?;
+        let own = rocky_credentials::PeerId::of(Settings::node_key(&node.vault)?.public_key());
+        node.revoke_personal_device(own, prf()).await?;
+        let refused = node.answer_peer(tip_schema()).await;
+        assert!(refused.is_err_and(|error| error.is::<crate::enrollment::Revoked>()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_revocation_notice_is_read_again_by_the_next_request()
+    -> Result<(), Failure> {
+        let directory = tempfile::tempdir()?;
+        let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
+        drop(personal(directory.path(), &store).await?);
+        let notice = directory.path().join("revoked.json");
+        std::fs::write(&notice, b"not a notice")?;
+        let node = reopen(directory.path(), &store).await?;
+        let refused = execute(&node, "SELECT title FROM notes").await;
+        assert!(
+            refused.is_err_and(|error| error.is::<serde_json::Error>()),
+            "the refusal keeps the error kind of the unreadable notice"
+        );
+        std::fs::remove_file(&notice)?;
+        execute(&node, "SELECT title FROM notes").await?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -287,7 +508,7 @@ mod device_actions {
             database,
         )?;
         let extra_id = extra.id()?;
-        let ended = settings.revocation(&node.path)?.ok_or("cause")?;
+        let ended = node.revocation_notice.revoked(&settings)?.ok_or("cause")?;
         let update = RevocationSet::try_from(vec![ended, extra])?;
         let PeerReply::Unlink(reply) = node.answer_peer(PeerRequest::Unlink(update)).await? else {
             return Err("unlink reply".into());

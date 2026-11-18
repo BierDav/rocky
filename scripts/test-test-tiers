@@ -79,6 +79,31 @@ class BatchedExecution(unittest.TestCase):
         self.assertIn("---- binary returns_error: failed ----\nError: Denied\n", report.getvalue())
         self.assertIn("---- binary missing: missing ----", report.getvalue())
 
+    def test_a_timed_out_batch_keeps_its_passes_and_names_the_running_cases(self):
+        events = [
+            {"type": "suite", "event": "started", "test_count": 4},
+            {"type": "test", "event": "started", "name": "passes"},
+            {"type": "test", "event": "started", "name": "fails"},
+            {"type": "test", "event": "started", "name": "hangs"},
+            {"type": "test", "name": "passes", "event": "ok", "exec_time": 0.5},
+            {"type": "test", "name": "fails", "event": "failed", "stdout": "assertion failed\n"},
+            {"type": "test", "event": "timeout", "name": "hangs"},
+        ]
+        printed = "".join(json.dumps(event) + "\n" for event in events).encode()
+        killed = subprocess.TimeoutExpired("binary", tiers.UNIT_BINARY_TIMEOUT, output=printed,
+                                           stderr=b"hangs is waiting on its peer\n")
+        suite = {"binary-id": "binary", "binary-path": "/binary", "cwd": "/"}
+        names = ["passes", "fails", "hangs", "never_started"]
+        report = io.StringIO()
+        with patch.object(tiers.subprocess, "run", side_effect=killed), \
+                contextlib.redirect_stderr(report):
+            timed, failed, _ = tiers.run_batches(None, [(suite, name) for name in names])
+        self.assertEqual([name for _, _, name, _ in timed], ["passes"])
+        self.assertEqual(set(failed), {f"binary timed out after {tiers.UNIT_BINARY_TIMEOUT}s",
+                                       "binary fails: failed", "binary hangs: timed out",
+                                       "binary never_started: missing"})
+        self.assertIn("hangs is waiting on its peer", report.getvalue())
+
     def test_isolated_cases_are_excluded_from_batches_and_all_results_combine(self):
         suite = {"binary-id": "binary", "binary-path": "/binary"}
         isolated, shared = (suite, "isolated"), (suite, "shared")

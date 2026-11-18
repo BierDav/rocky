@@ -141,7 +141,8 @@ class Source:
 
 
 def libtest(suite, names, threads=None):
-    """Runs tests of one binary in process; returns {name: (event, seconds)} and output."""
+    """Runs tests of one binary in process; returns {name: (event, seconds,
+    stdout)}, stderr and the exit code, which is None if the binary timed out."""
     cmd = [suite["binary-path"], "--exact", "-Zunstable-options", "--format", "json",
            "--report-time", *names]
     if threads:
@@ -154,18 +155,53 @@ def libtest(suite, names, threads=None):
         proc = subprocess.run(cmd, cwd=suite["cwd"], env=env, capture_output=True,
                               text=True, timeout=UNIT_BINARY_TIMEOUT)
     except subprocess.TimeoutExpired as error:
-        return {}, f"timed out after {UNIT_BINARY_TIMEOUT}s\n{error.stdout or ''}", None
+        # The output read before the kill comes as bytes even for a text run.
+        stdout, stderr = ((stream or b"").decode(errors="replace")
+                          for stream in (error.stdout, error.stderr))
+        return test_events(stdout, unfinished="timed out"), stderr, None
+    return test_events(proc.stdout, unfinished="unfinished"), proc.stderr, proc.returncode
+
+
+def test_events(stdout, unfinished):
+    """Each started test's result from libtest's JSON lines. A test that started
+    but has no result was still running when the binary stopped; libtest's
+    `timeout` event only warns that a test is slow, so it is not a result."""
     results = {}
-    for line in proc.stdout.splitlines():
+    for line in stdout.splitlines():
         try:
             event = json.loads(line)
         except ValueError:
             continue
-        if isinstance(event, dict) and event.get("type") == "test" \
-                and event.get("event") in ("ok", "failed", "timeout"):
-            results[event["name"]] = (event["event"], event.get("exec_time", 0.0),
-                                      event.get("stdout", ""))
-    return results, proc.stderr, proc.returncode
+        if not isinstance(event, dict) or event.get("type") != "test":
+            continue
+        name = event.get("name")
+        if event.get("event") == "started":
+            results.setdefault(name, (unfinished, 0.0, ""))
+        elif event.get("event") in ("ok", "failed"):
+            results[name] = (event["event"], event.get("exec_time", 0.0), event.get("stdout", ""))
+    return results
+
+
+def judge(source, suite, names, run):
+    """Splits one libtest run of `names` into timings and failures. Tests that
+    passed count even if the binary failed or timed out later; a test that never
+    started is missing."""
+    events, stderr, code = run
+    timed, failed = [], []
+    if code is None:
+        failed.append(f"{suite['binary-id']} timed out after {UNIT_BINARY_TIMEOUT}s")
+    elif code != 0:
+        failed.append(f"{suite['binary-id']} exited {code}")
+    for name in names:
+        event, took, stdout = events.get(name, ("missing", 0.0, ""))
+        if event == "ok":
+            timed.append((source, suite, name, took))
+        else:
+            failed.append(f"{suite['binary-id']} {name}: {event}")
+            show_output(suite, name, event, stdout)
+    if (not events or code is None) and stderr:
+        print(stderr, file=sys.stderr)
+    return timed, failed
 
 
 def show_output(suite, name, event, stdout):
@@ -184,19 +220,11 @@ def run_unit(source, tests):
     timed, failed, wall = [], [], 0.0
     for suite, names in by_binary.values():
         start = time.monotonic()
-        results, stderr, code = libtest(suite, names)
-        if code != 0:
-            failed.append(f"{suite['binary-id']} exited {code}")
+        run = libtest(suite, names)
         wall += time.monotonic() - start
-        for name in names:
-            event, took, stdout = results.get(name, ("missing", 0.0, ""))
-            if event == "ok":
-                timed.append((source, suite, name, took))
-            else:
-                failed.append(f"{suite['binary-id']} {name}: {event}")
-                show_output(suite, name, event, stdout)
-        if not results and stderr:
-            print(stderr, file=sys.stderr)
+        completed, problems = judge(source, suite, names, run)
+        timed.extend(completed)
+        failed.extend(problems)
     return timed, failed, wall
 
 
@@ -239,20 +267,7 @@ def run_batches(source, tests, durations=None):
     groups = sorted(batches(tests, durations=durations), key=lambda group: -predicted(group))
     def run(group):
         suite, names = group
-        events, stderr, code = libtest(suite, names, threads=min(4, CPUS))
-        timed, failed = [], []
-        if code != 0:
-            failed.append(f"{suite['binary-id']} exited {code}")
-        for name in names:
-            event, took, stdout = events.get(name, ("missing", 0.0, ""))
-            if event == "ok":
-                timed.append((source, suite, name, took))
-            else:
-                failed.append(f"{suite['binary-id']} {name}: {event}")
-                show_output(suite, name, event, stdout)
-        if not events and stderr:
-            print(stderr, file=sys.stderr)
-        return timed, failed
+        return judge(source, suite, names, libtest(suite, names, threads=min(4, CPUS)))
     timed, failed = [], []
     with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as pool:
         for completed, problems in pool.map(run, groups):

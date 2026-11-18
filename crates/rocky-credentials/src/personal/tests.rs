@@ -466,6 +466,57 @@ fn a_shared_genesis_refuses_personal_certificates() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_verified_chain_does_not_carry_over_to_another_genesis() {
+    let p = Personal::new(1);
+    let root = p.root.public_key();
+    let (node, device) = p.device();
+    let shared = SignedManifest::sign(&p.manifest, DatabaseKind::Shared, &p.root).unwrap();
+    let mut personal = RevocationSet::new();
+    personal.pin(&p.genesis, root).unwrap();
+    let mut other = RevocationSet::new();
+    other.pin(&shared, root).unwrap();
+    assert!(!p.verifies(&device, &other));
+
+    let verified = device.verified(root, &personal, NOW).unwrap();
+    assert!(
+        verified
+            .selectors(node.public_key(), &personal, NOW)
+            .is_ok()
+    );
+    assert!(
+        verified.selectors(node.public_key(), &other, NOW).is_err(),
+        "the same revocations pinned to another genesis must not reuse this verdict"
+    );
+
+    let mut pinning = RevocationSet::new();
+    let unpinned = device.verified(root, &pinning, NOW).unwrap();
+    pinning.pin(&shared, root).unwrap();
+    assert!(
+        unpinned
+            .selectors(node.public_key(), &pinning, NOW)
+            .is_err(),
+        "pinning a set invalidates verdicts reached before the pin"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn an_unlink_receipt_from_a_pinned_holder_verifies_after_the_wire() {
+    let p = Personal::new(1);
+    let mut known = RevocationSet::new();
+    known.pin(&p.genesis, p.root.public_key()).unwrap();
+    let node = PrivateKey::new();
+    let receipt = crate::UnlinkReply::sign(known, p.context.database, &node).unwrap();
+    let received: crate::UnlinkReply =
+        crate::decode_bounded(&crate::encode(&receipt).unwrap(), 1 << 20).unwrap();
+    assert!(
+        received
+            .verify(p.context.database, PeerId::of(node.public_key()))
+            .is_ok(),
+        "a receipt signs the replicated revocations, never the signer's local pin"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn a_personal_genesis_admits_only_its_owners_bound_devices() {
     let p = Personal::new(1);
     let root = p.root.public_key();

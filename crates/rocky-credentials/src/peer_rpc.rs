@@ -115,10 +115,7 @@ impl UnlinkReply {
     ) -> Result<Self, Error> {
         known.verify_in(database)?;
         let public = node.public_key();
-        let bytes = signing_bytes(
-            "rocky.unlink-receipt.v1",
-            &(database, known.fingerprint()?, public),
-        )?;
+        let bytes = receipt_bytes(database, &known, public)?;
         Ok(Self {
             database,
             known,
@@ -135,15 +132,22 @@ impl UnlinkReply {
             return Err(denied("unlink receipt belongs to another peer or database"));
         }
         self.known.verify_in(database)?;
-        let bytes = signing_bytes(
-            "rocky.unlink-receipt.v1",
-            &(database, self.known.fingerprint()?, self.node),
-        )?;
+        let bytes = receipt_bytes(database, &self.known, self.node)?;
         if !self.node.verify(&bytes, &self.signature) {
             return Err(denied("invalid unlink receipt signature"));
         }
         Ok(&self.known)
     }
+}
+fn receipt_bytes(
+    database: crate::DatabaseContext,
+    known: &RevocationSet,
+    node: PublicKey,
+) -> Result<Vec<u8>, Error> {
+    signing_bytes(
+        "rocky.unlink-receipt.v1",
+        &(database, known.replicated_commitment()?, node),
+    )
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

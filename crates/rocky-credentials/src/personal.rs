@@ -135,7 +135,7 @@ impl DatabaseKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct Genesis {
     kind: DatabaseKind,
     descriptor: Commitment,

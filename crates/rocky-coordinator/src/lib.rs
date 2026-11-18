@@ -24,7 +24,10 @@ pub mod protocol {
     pub use crate::service::Reply;
     #[cfg(not(target_family = "wasm"))]
     pub use crate::transport::exchange;
-    pub use crate::transport::{Envelope, WireMessage as Message, converse, nonce, read, write};
+    pub use crate::transport::{
+        Envelope, MAX_CLIENT_FRAME, WireMessage as Message, converse, nonce, read, read_bounded,
+        write,
+    };
 }
 
 pub mod coordinated;

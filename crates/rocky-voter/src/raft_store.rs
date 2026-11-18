@@ -650,6 +650,10 @@ impl Store {
         machine.metadata.authorize_authenticated(request).ok()?;
         machine.metadata.tenant_lane(request)
     }
+    #[cfg(test)]
+    pub(crate) async fn hold_machine(&self) -> impl Sized + '_ {
+        self.0.machine.write().await
+    }
     pub async fn tenants(&self) -> usize {
         self.0.machine.read().await.metadata.tenants()
     }

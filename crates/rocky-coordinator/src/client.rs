@@ -180,7 +180,8 @@ impl NetworkCoordinator {
         id: Commitment,
         operation: Operation,
     ) -> Result<Outcome, CoordinationError> {
-        let result = self.request(id, operation).await;
+        let request = self.request(id, operation)?;
+        let result = self.send(&request).await;
         let observer = self
             .observer
             .lock()
@@ -191,11 +192,7 @@ impl NetworkCoordinator {
         }
         result
     }
-    async fn request(
-        &self,
-        id: Commitment,
-        operation: Operation,
-    ) -> Result<Outcome, CoordinationError> {
+    fn request(&self, id: Commitment, operation: Operation) -> Result<Request, CoordinationError> {
         let certificate = self
             .certificate
             .lock()
@@ -219,9 +216,13 @@ impl NetworkCoordinator {
         if let Some(claims) = claims {
             request = request.with_claims(claims, &self.key)?;
         }
+        request.within_client_limit()?;
+        Ok(request)
+    }
+    async fn send(&self, request: &Request) -> Result<Outcome, CoordinationError> {
         timeout(Duration::from_secs(12), async {
             for _ in 0..3 {
-                for response in self.attempt_leader_first(&request).await {
+                for response in self.attempt_leader_first(request).await {
                     match response {
                         Ok(reply) if reply.result != Err(CoordinationError::Unavailable) => {
                             return reply.result;

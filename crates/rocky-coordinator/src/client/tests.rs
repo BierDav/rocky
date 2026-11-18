@@ -503,6 +503,59 @@ async fn a_claim_right_holder_claims_until_its_revocation_is_pushed() {
     );
 }
 
+fn control_beyond_the_client_request_limit(service: &Service) -> ControlCertificate {
+    let mut control = service
+        .control
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    control.revision += 1;
+    control
+        .trusted
+        .extend((0..Request::MAX_CLIENT_BYTES / 32).map(|_| PrivateKey::new().public_key()));
+    ControlCertificate::sign(control, &service.tenant).unwrap()
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_request_beyond_the_client_request_limit_is_denied_without_contacting_a_voter() {
+    let service = Service::start().await;
+    let contacted = service.voter.streams.load(Ordering::Relaxed);
+    let oversized = control_beyond_the_client_request_limit(&service);
+    assert_eq!(
+        service.owner.control(oversized, nonce()).await,
+        Err(CoordinationError::Denied),
+        "a request no voter answers is refused for good, not reported as an outage"
+    );
+    assert_eq!(
+        service.voter.streams.load(Ordering::Relaxed),
+        contacted,
+        "the client refuses an oversized request before it contacts any voter"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn an_observer_never_hears_of_a_request_refused_before_any_voter_was_contacted() {
+    let service = Service::start().await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = seen.clone();
+    service.owner.observe(Arc::new(move |result| {
+        record
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(result.err().cloned());
+    }));
+    let oversized = control_beyond_the_client_request_limit(&service);
+    assert_eq!(
+        service.owner.control(oversized, nonce()).await,
+        Err(CoordinationError::Denied)
+    );
+    assert_eq!(
+        *seen.lock().unwrap_or_else(PoisonError::into_inner),
+        Vec::new(),
+        "a local refusal says nothing about whether any voter answers"
+    );
+}
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_answer_not_signed_by_the_certified_voter_is_refused() {
     let service = Service::answered_by(Some(PrivateKey::new())).await;
@@ -519,7 +572,7 @@ async fn an_answer_not_signed_by_the_certified_voter_is_refused() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn an_observer_sees_every_answer_and_refusal() {
+async fn an_observer_sees_every_voter_answer_and_refusal() {
     let service = Service::start().await;
     let client = service.client(&service.node);
     let seen = Arc::new(Mutex::new(Vec::new()));

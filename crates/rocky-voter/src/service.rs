@@ -23,9 +23,11 @@ use tokio::{net::TcpListener, sync::Semaphore};
 
 const READ_WITHOUT_LOG_MAX_AUTHORITY_AGE_SECONDS: u64 = 30;
 
-const PRIVATE_SERVICE_CLIENT_LANES: usize = 16;
-
 const PAUSE_AFTER_FAILED_ACCEPT: std::time::Duration = std::time::Duration::from_millis(50);
+
+const VOTER_CONNECTION_SLOTS: usize = 64;
+
+const VOTER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Default)]
 struct Counters {
@@ -74,12 +76,13 @@ pub struct VoterService {
     key: PrivateKey,
     node: u64,
     counters: Counters,
-    client_requests: Arc<Semaphore>,
-    tenant_lanes: std::sync::Mutex<HashMap<Option<PublicKey>, Arc<Semaphore>>>,
+    admission: Admission,
     fenced: AtomicBool,
     acknowledgments: tokio::sync::Mutex<HashMap<TipLog, VolatileAcknowledgments>>,
 }
+mod clients;
 mod coordinated;
+use clients::Admission;
 use coordinated::VolatileAcknowledgments;
 impl VoterService {
     pub async fn open(
@@ -130,19 +133,14 @@ impl VoterService {
         )
         .await
         .map_err(|_| CoordinationError::Corrupt)?;
-        let client_lanes = match &genesis.genesis.public {
-            Some(_) => CLIENT_LANES as usize,
-            None => PRIVATE_SERVICE_CLIENT_LANES,
-        };
         let service = Arc::new(Self {
             raft,
+            admission: Admission::new(&genesis.genesis),
             store,
             genesis,
             key,
             node,
             counters: Counters::default(),
-            client_requests: Arc::new(Semaphore::new(client_lanes)),
-            tenant_lanes: Default::default(),
             fenced: AtomicBool::new(fenced_after_restore),
             acknowledgments: Default::default(),
         });
@@ -191,44 +189,13 @@ impl VoterService {
             }
         }
     }
-    async fn lane(&self, request: &Request) -> Result<Option<Arc<Semaphore>>, CoordinationError> {
-        let Some(public) = &self.genesis.genesis.public else {
-            return Ok(None);
-        };
-        let tenant = self.store.lane(request).await;
-        let mut lanes = self
-            .tenant_lanes
-            .lock()
-            .map_err(|_| CoordinationError::Corrupt)?;
-        if lanes.len() > public.tenants as usize {
-            let permits_per_lane = public.tenant_lanes as usize;
-            lanes.retain(|_, lane| lane.available_permits() < permits_per_lane);
-        }
-        Ok(Some(
-            lanes
-                .entry(tenant)
-                .or_insert_with(|| Arc::new(Semaphore::new(public.tenant_lanes as usize)))
-                .clone(),
-        ))
-    }
-    async fn admit(&self, request: Request) -> Reply {
-        let refuse = |error| Reply {
+    fn refuse(&self, error: CoordinationError) -> Reply {
+        Reply {
             leader: self.raft.metrics().borrow().current_leader,
             result: Err(error),
-        };
-        if self.fenced.load(Ordering::SeqCst) {
-            return refuse(CoordinationError::Unavailable);
         }
-        let lane = match self.lane(&request).await {
-            Ok(lane) => lane,
-            Err(error) => return refuse(error),
-        };
-        let tenant = lane.as_ref().map(|lane| lane.try_acquire()).transpose();
-        let (Ok(_client_permit), Ok(_tenant_permit)) = (self.client_requests.try_acquire(), tenant)
-        else {
-            self.counters.busy.fetch_add(1, Ordering::Relaxed);
-            return refuse(busy_refusal(&request.operation));
-        };
+    }
+    async fn answer(&self, request: Request) -> Reply {
         let reply = self.client(request).await;
         self.counters.record(&reply.result);
         reply
@@ -260,9 +227,7 @@ impl VoterService {
         let result = async {
             request.authenticate(self.genesis.id()?)?;
             request.fresh()?;
-            if encode(&request)?.len() > 16 * 1024 {
-                return Err(CoordinationError::Denied);
-            }
+            request.within_client_limit()?;
             self.store.preflight(&request).await?;
             if let Operation::Coordinated {
                 log,
@@ -314,10 +279,7 @@ impl VoterService {
         }
         .await;
         match result {
-            Err(error) => Reply {
-                leader: self.raft.metrics().borrow().current_leader,
-                result: Err(error),
-            },
+            Err(error) => self.refuse(error),
             Ok((data, _)) => {
                 crash("reply.before_send");
                 Reply {
@@ -372,8 +334,11 @@ impl VoterService {
             );
             CoordinationError::Unavailable
         })?;
-        let slots = Arc::new(Semaphore::new(64));
         log_lifecycle(self.node, &format!("serving voters at {}", voter.address));
+        self.serve_voters(listener).await
+    }
+    async fn serve_voters(self: Arc<Self>, listener: TcpListener) -> Result<(), CoordinationError> {
+        let slots = Arc::new(Semaphore::new(VOTER_CONNECTION_SLOTS));
         loop {
             let Ok((mut stream, _)) = listener.accept().await else {
                 tokio::time::sleep(PAUSE_AFTER_FAILED_ACCEPT).await;
@@ -385,7 +350,7 @@ impl VoterService {
             let service = self.clone();
             tokio::spawn(async move {
                 let _slot = slot;
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let _ = tokio::time::timeout(VOTER_REQUEST_TIMEOUT, async {
                     let envelope = read(&mut stream).await?;
                     envelope.authenticate(service.genesis.id()?)?;
                     let message: Message = decode(&envelope.body)?;
@@ -418,7 +383,12 @@ impl VoterService {
                             if request.key != envelope.key {
                                 return Err(CoordinationError::Denied);
                             }
-                            encode(&service.admit(*request).await)?
+                            let reply = if administrative {
+                                service.administer(*request).await
+                            } else {
+                                service.admit(*request, None).await
+                            };
+                            encode(&reply)?
                         }
                         Message::Append(rpc)
                             if peer && sender == Some(rpc.vote.leader_id.node_id) =>
@@ -501,15 +471,6 @@ impl VoterService {
         }
     }
 }
-fn busy_refusal(operation: &Operation) -> CoordinationError {
-    match operation {
-        Operation::Coordinated {
-            action: rocky_coordinator::coordinated::Action::Append { .. },
-            ..
-        } => CoordinationError::Unavailable,
-        _ => CoordinationError::Backpressure,
-    }
-}
 pub fn backup(
     path: &Path,
     genesis: CertifiedGenesis,
@@ -526,287 +487,6 @@ pub fn restore(
 ) -> Result<Backup, CoordinationError> {
     Store::restore(backup, genesis, node, path)
 }
-impl VoterService {
-    pub async fn serve_clients(self: Arc<Self>, transport: Arc<dyn Transport>) {
-        if transport.listen(None, true).is_err() {
-            return;
-        }
-        log_lifecycle(self.node, "serving clients");
-        while let Some(incoming) = transport.accept().await {
-            let rocky_core::net::Incoming::Stream(Protocol::Coordinate, mut stream) = incoming
-            else {
-                continue;
-            };
-            let lanes_full = self.client_requests.available_permits() == 0;
-            if lanes_full {
-                self.counters.busy.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-            let service = self.clone();
-            tokio::spawn(async move {
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                    let genesis = service.genesis.id()?;
-                    let envelope = read(&mut stream).await?;
-                    envelope.authenticate(genesis)?;
-                    let Message::Client(request) = decode::<Message>(&envelope.body)? else {
-                        return Err(CoordinationError::Denied);
-                    };
-                    if request.key != envelope.key {
-                        return Err(CoordinationError::Denied);
-                    }
-                    let body = encode(&service.admit(*request).await)?;
-                    let response = crate::transport::Envelope::from_body(
-                        genesis,
-                        envelope.nonce,
-                        body,
-                        &service.key,
-                    )?;
-                    write(&mut stream, &response).await
-                })
-                .await;
-            });
-        }
-        log_lifecycle(self.node, "client transport closed");
-    }
-}
 
 #[cfg(test)]
-mod listener_tests {
-    use super::*;
-    use rocky_core::net::{BoxFuture, Failure, Incoming, Stream};
-
-    #[test]
-    fn saturated_voter_connections_are_counted_in_status_metrics() {
-        let counters = Counters::default();
-        let slots = Arc::new(Semaphore::new(64));
-        let held: Vec<_> = (0..64)
-            .map(|_| counters.connection_slot(&slots).unwrap())
-            .collect();
-        assert!(counters.connection_slot(&slots).is_none());
-        assert_eq!(counters.snapshot().busy, 1);
-        assert_eq!(counters.snapshot().requests, 0);
-        drop(held);
-        assert!(counters.connection_slot(&slots).is_some());
-        assert_eq!(counters.snapshot().busy, 1);
-    }
-
-    #[test]
-    fn a_busy_append_is_unavailable_since_admission_cannot_know_an_earlier_assignment() {
-        let log = TipLog {
-            scope: Scope {
-                mesh: MeshId([1; 16]),
-                app: rocky_core::AppId([5; 16]),
-                domain: rocky_core::DomainId([2; 16]),
-            },
-            tip: rocky_core::TipId([3; 32]),
-        };
-        let append = Operation::Coordinated {
-            log,
-            action: rocky_coordinator::coordinated::Action::Append {
-                expected: 0,
-                epoch: 1,
-                hash: [4; 32],
-                duration: 30,
-                sequence: 0,
-            },
-        };
-        assert_eq!(busy_refusal(&append), CoordinationError::Unavailable);
-        assert_eq!(
-            busy_refusal(&Operation::Usage),
-            CoordinationError::Backpressure
-        );
-    }
-
-    struct CallerOwned {
-        incoming: tokio::sync::mpsc::UnboundedSender<Option<Incoming>>,
-        accepted: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Option<Incoming>>>,
-        listening_refused: AtomicBool,
-        closes: AtomicU64,
-    }
-    impl CallerOwned {
-        fn new() -> Arc<Self> {
-            let (incoming, accepted) = tokio::sync::mpsc::unbounded_channel();
-            Arc::new(Self {
-                incoming,
-                accepted: tokio::sync::Mutex::new(accepted),
-                listening_refused: AtomicBool::new(false),
-                closes: AtomicU64::new(0),
-            })
-        }
-        fn refuse_listening(&self, refused: bool) {
-            self.listening_refused.store(refused, Ordering::SeqCst);
-        }
-        fn closes(&self) -> u64 {
-            self.closes.load(Ordering::SeqCst)
-        }
-        fn deliver(&self, protocol: Protocol) -> tokio::io::DuplexStream {
-            let (caller, voter) = tokio::io::duplex(2 * MAX_FRAME);
-            self.incoming
-                .send(Some(Incoming::Stream(protocol, Stream::new(voter))))
-                .expect("the caller's transport stays open to new streams");
-            caller
-        }
-        fn pause_accepting(&self) {
-            self.incoming
-                .send(None)
-                .expect("the caller's transport stays open to new streams");
-        }
-    }
-    impl Transport for CallerOwned {
-        fn kind(&self) -> &str {
-            "memory"
-        }
-        fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
-            Box::pin(async { Ok("voter-1".into()) })
-        }
-        fn connect<'a>(
-            &'a self,
-            _: &'a str,
-            protocol: Protocol,
-            _: Option<Scope>,
-        ) -> BoxFuture<'a, Result<Stream, Failure>> {
-            Box::pin(async move {
-                if self.closes() > 0 {
-                    return Err("the caller's transport was closed".into());
-                }
-                Ok(Stream::new(self.deliver(protocol)))
-            })
-        }
-        fn accept(&self) -> BoxFuture<'_, Option<Incoming>> {
-            Box::pin(async move { self.accepted.lock().await.recv().await.flatten() })
-        }
-        fn listen(&self, _: Option<Scope>, _: bool) -> Result<(), Failure> {
-            if self.listening_refused.load(Ordering::SeqCst) {
-                return Err("listening refused".into());
-            }
-            Ok(())
-        }
-        fn request<'a>(
-            &'a self,
-            _: &'a [String],
-            _: Scope,
-            _: &'a [u8],
-        ) -> BoxFuture<'a, Result<Vec<u8>, Failure>> {
-            Box::pin(async { Err("the caller's transport carries coordination only".into()) })
-        }
-        fn session<'a>(
-            &'a self,
-            _: &'a [String],
-            _: Scope,
-        ) -> BoxFuture<'a, Result<Stream, Failure>> {
-            Box::pin(async { Err("the caller's transport carries coordination only".into()) })
-        }
-        fn close(&self) -> BoxFuture<'_, ()> {
-            self.closes.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async {})
-        }
-    }
-
-    async fn reply_to(mut caller: tokio::io::DuplexStream) -> Vec<u8> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        caller.shutdown().await.unwrap();
-        let mut reply = Vec::new();
-        caller.read_to_end(&mut reply).await.unwrap();
-        reply
-    }
-
-    #[tokio::test]
-    async fn serving_clients_never_closes_the_callers_transport() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = PrivateKey::new();
-        let key = PrivateKey::new();
-        let genesis = CertifiedGenesis::sign(
-            Genesis {
-                mesh: MeshId([0x61; 16]),
-                configuration: [6; 16],
-                voters: (1..=3)
-                    .map(|id| Voter {
-                        id,
-                        address: format!("127.0.0.1:{id}"),
-                        key: if id == 1 {
-                            key.public_key()
-                        } else {
-                            PrivateKey::new().public_key()
-                        },
-                    })
-                    .collect(),
-                initial_voters: BTreeSet::from([1, 2, 3]),
-                membership_authority: PrivateKey::new().public_key(),
-                directory_definition: [0; 32],
-                directory: None,
-                authorities: Vec::new(),
-                max_control_lifetime: 86_400,
-                public: Some(PublicService {
-                    endpoints: vec![ClientEndpoint {
-                        voter: 1,
-                        kind: "memory".into(),
-                        address: "voter-1".into(),
-                    }],
-                    admission: None,
-                    limits: rocky_coordinator::Limits::default(),
-                    tenants: 4,
-                    registrations_per_day: 16,
-                    tenant_lanes: 4,
-                }),
-            },
-            &root,
-        )
-        .unwrap();
-        let voter = VoterService::open(
-            directory.path(),
-            genesis.clone(),
-            root.public_key(),
-            genesis.genesis.mesh,
-            1,
-            key,
-            true,
-        )
-        .await
-        .unwrap();
-        let transport = CallerOwned::new();
-        let client = NetworkCoordinator::connect(
-            &TrustBundle::new(&genesis).unwrap(),
-            PrivateKey::new(),
-            transport.clone(),
-        )
-        .unwrap();
-
-        transport.refuse_listening(true);
-        voter.clone().serve_clients(transport.clone()).await;
-        transport.refuse_listening(false);
-
-        let serving = tokio::spawn(voter.clone().serve_clients(transport.clone()));
-        assert_eq!(
-            reply_to(transport.deliver(Protocol::Link)).await,
-            Vec::<u8>::new(),
-            "a stream of another protocol is dropped unanswered"
-        );
-        assert_eq!(
-            reply_to(transport.deliver(Protocol::Coordinate)).await,
-            Vec::<u8>::new(),
-            "a connection that sends no request is dropped unanswered"
-        );
-        assert_eq!(
-            client.usage().await.map(drop),
-            Err(CoordinationError::Denied),
-            "an unregistered client is answered with a refusal"
-        );
-        transport.pause_accepting();
-        serving.await.unwrap();
-
-        let aborted = tokio::spawn(voter.clone().serve_clients(transport.clone()));
-        assert_eq!(
-            client.usage().await.map(drop),
-            Err(CoordinationError::Denied),
-            "the caller's transport serves another request"
-        );
-        aborted.abort();
-        assert!(aborted.await.unwrap_err().is_cancelled());
-
-        assert_eq!(
-            transport.closes(),
-            0,
-            "serving clients never closes the transport its caller owns"
-        );
-    }
-}
+mod tests;

@@ -587,6 +587,7 @@ impl RevocationSet {
             genesis.check_node(certificate.issuer, &certificate.capability)?;
         }
         self.genesis = Pinned(Some(std::sync::Arc::new(genesis)));
+        self.derived = Derived::default();
         Ok(())
     }
     pub fn pinned_only(&self) -> Self {
@@ -998,8 +999,17 @@ impl RevocationSet {
         }
         #[cfg(test)]
         tests::count_derivation();
-        let fingerprint = rocky_core::commitment("rocky.revocation-set.held.v1", &encode(self)?);
+        let fingerprint = rocky_core::commitment(
+            "rocky.revocation-set.pinned.v1",
+            &encode(&(self, self.genesis()))?,
+        );
         Ok(*self.derived.fingerprint.get_or_init(|| fingerprint))
+    }
+    pub fn replicated_commitment(&self) -> Result<Commitment, Error> {
+        Ok(rocky_core::commitment(
+            "rocky.revocation-set.held.v1",
+            &self.to_bytes()?,
+        ))
     }
     pub fn cut(&self, identity: &PublicKey, lane: &PublicKey) -> Option<&Heads> {
         self.cuts.get(&(*identity, *lane))

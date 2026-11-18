@@ -2,7 +2,7 @@ use openraft::raft::{AppendEntriesRequest, InstallSnapshotRequest, VoteRequest};
 use p2panda_core::PrivateKey;
 pub(crate) use rocky_coordinator::{
     certified::*,
-    protocol::{Envelope, exchange, nonce, read, write},
+    protocol::{Envelope, MAX_CLIENT_FRAME, exchange, nonce, read, read_bounded, write},
 };
 use rocky_core::CoordinationError;
 use serde::{Serialize, de::DeserializeOwned};

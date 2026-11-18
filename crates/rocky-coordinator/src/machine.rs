@@ -276,6 +276,13 @@ impl Request {
         }
         Ok(())
     }
+    pub const MAX_CLIENT_BYTES: usize = 16 * 1024;
+    pub fn within_client_limit(&self) -> Result<(), CoordinationError> {
+        if encode(self)?.len() > Self::MAX_CLIENT_BYTES {
+            return Err(CoordinationError::Denied);
+        }
+        Ok(())
+    }
     pub fn fresh(&self) -> Result<(), CoordinationError> {
         let coordinator_time = now()?;
         if coordinator_time.abs_diff(self.time) > 30 {

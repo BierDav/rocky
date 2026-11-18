@@ -73,15 +73,31 @@ impl Envelope {
 }
 pub(crate) const MAX_CLOCK_SKEW_SECONDS: u64 = 30;
 
+const CLIENT_MESSAGE_TAG_BYTES: usize = 8;
+
+const ENCODED_BYTES_PER_ENVELOPE_BODY_BYTE: usize = 2;
+
+const ENVELOPE_BYTES_BESIDES_BODY_ELEMENTS: usize = 285;
+
+pub const MAX_CLIENT_FRAME: usize = ENVELOPE_BYTES_BESIDES_BODY_ELEMENTS
+    + ENCODED_BYTES_PER_ENVELOPE_BODY_BYTE
+        * (crate::machine::Request::MAX_CLIENT_BYTES + CLIENT_MESSAGE_TAG_BYTES);
+
 pub fn nonce() -> Commitment {
     *PrivateKey::new().public_key().as_bytes()
 }
 pub async fn read(stream: &mut (impl AsyncRead + Unpin)) -> Result<Envelope, CoordinationError> {
+    read_bounded(stream, MAX_FRAME).await
+}
+pub async fn read_bounded(
+    stream: &mut (impl AsyncRead + Unpin),
+    max_frame: usize,
+) -> Result<Envelope, CoordinationError> {
     let len = stream
         .read_u32()
         .await
         .map_err(|_| CoordinationError::Unavailable)? as usize;
-    if len > MAX_FRAME {
+    if len > max_frame.min(MAX_FRAME) {
         return Err(CoordinationError::Denied);
     }
     let mut bytes = vec![0; len];
@@ -170,6 +186,39 @@ mod tests {
         assert!(
             decode::<Message>(&encode(&WireMessage::<u8, u8, u8>::Append(7))?).is_err(),
             "a client never decodes a Raft RPC"
+        );
+        Ok(())
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn the_client_frame_limit_holds_the_largest_answerable_request_in_its_worst_encoding()
+    -> Result<(), CoordinationError> {
+        let key = PrivateKey::new();
+        let request = crate::machine::Request::certified(
+            [0; 32],
+            nonce(),
+            crate::service::Operation::Usage,
+            (&key, None),
+            now()?,
+        )?;
+        assert_eq!(
+            encode(&Message::Client(Box::new(request.clone())))?.len(),
+            encode(&request)?.len() + CLIENT_MESSAGE_TAG_BYTES,
+            "a client message adds its tag to the request"
+        );
+        let largest_body =
+            vec![u8::MAX; crate::machine::Request::MAX_CLIENT_BYTES + CLIENT_MESSAGE_TAG_BYTES];
+        let worst = Envelope::from_body([u8::MAX; 32], [u8::MAX; 32], largest_body, &key)?;
+        let encoded = encode(&worst)?.len();
+        assert!(
+            encoded <= MAX_CLIENT_FRAME,
+            "the largest answerable request fits the client frame limit: {encoded} > {MAX_CLIENT_FRAME}"
+        );
+        let reserved_for_a_64_bit_time_and_a_32_bit_body_length = 4 + 2;
+        assert_eq!(
+            MAX_CLIENT_FRAME - encoded,
+            reserved_for_a_64_bit_time_and_a_32_bit_body_length,
+            "the client frame limit is computed from the envelope encoding"
         );
         Ok(())
     }

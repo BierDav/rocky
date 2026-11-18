@@ -241,8 +241,7 @@ impl Node {
                 let mut settings = self.settings.lock().await;
                 let mut draft = (**settings).clone();
                 draft.install_trust(&self.vault, link).map_err(refused)?;
-                draft.save(&self.path)?;
-                *settings = Shared::new(draft);
+                settings.commit(Shared::new(draft), &self.path)?;
                 self.apply(&mut settings, Vec::new()).await?;
                 drop(settings);
                 self.observations.touch();
@@ -619,7 +618,7 @@ impl Node {
 
     pub(super) async fn tip_signer(&self, scope: Scope) -> Result<Signer, Failure> {
         let settings = self.settings.lock().await.clone();
-        if let Some(statement) = settings.revocation(&self.path)? {
+        if let Some(statement) = self.revocation_notice.revoked(&settings)? {
             return Err(Box::new(crate::enrollment::Revoked(statement)));
         }
         let node = Settings::node_key(&self.vault)?;

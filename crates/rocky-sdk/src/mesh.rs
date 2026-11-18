@@ -102,6 +102,12 @@ pub(crate) fn mint_value(
     }
     Ok(())
 }
+#[cfg(test)]
+pub(crate) fn holds_value(vault: &Vault, statement: &Revocation) -> Result<bool, Failure> {
+    Ok(Discovery::load(vault)?
+        .values
+        .contains_key(&HEXLOWER.encode(&statement.id()?)))
+}
 impl Settings {
     pub(crate) fn learn_contact(
         &mut self,
@@ -343,13 +349,12 @@ impl Settings {
                         .is_ok()
             })
     }
-    pub(crate) fn discovery_topics(
+    fn next_discovery(
         &self,
-        vault: &Vault,
+        loaded: &Discovery,
         time: u64,
-    ) -> Result<(Commitment, Option<Commitment>), Failure> {
-        let mut state = Discovery::load(vault)?;
-        let loaded = state.clone();
+    ) -> Result<(Discovery, Commitment), Failure> {
+        let mut state = loaded.clone();
         let root = state
             .root
             .as_ref()
@@ -388,6 +393,23 @@ impl Settings {
             state.current = Some(topic);
         }
         state.previous = state.previous.filter(|(_, until)| time < *until);
+        Ok((state, topic))
+    }
+    pub(crate) fn discovery_topics(
+        &self,
+        vault: &Vault,
+        time: u64,
+    ) -> Result<(Commitment, Option<Commitment>), Failure> {
+        let (state, topic) = self.next_discovery(&Discovery::load(vault)?, time)?;
+        Ok((topic, state.previous.map(|(topic, _)| topic)))
+    }
+    pub(crate) fn advance_discovery_topics(
+        &self,
+        vault: &Vault,
+        time: u64,
+    ) -> Result<(Commitment, Option<Commitment>), Failure> {
+        let loaded = Discovery::load(vault)?;
+        let (state, topic) = self.next_discovery(&loaded, time)?;
         if state != loaded {
             state.save(vault)?;
         }
@@ -491,7 +513,7 @@ mod tests {
         let owner = a.issuer_links();
         let node = PrivateKey::from_bytes(&av.get("node")?);
         let credentials = a.credentials.clone();
-        let old = a.discovery_topics(&av, now()?)?.0;
+        let old = a.advance_discovery_topics(&av, now()?)?.0;
         let statement = Revocation {
             app: a.domain()?.manifest().app,
             issuer: publisher,
@@ -529,20 +551,25 @@ mod tests {
         let bv = b.vault(&store);
         let a_state = Discovery::load(&av)?;
         b.discovery_exchange(&bv, a_state.root.clone().map(Box::new), Vec::new(), None)?;
-        let missing = b.discovery_topics(&bv, now()?)?.0;
-        let (new, previous) = a.discovery_topics(&av, now()?)?;
+        let missing = b.advance_discovery_topics(&bv, now()?)?.0;
+        let (new, previous) = a.advance_discovery_topics(&av, now()?)?;
         assert_ne!(missing, new);
         assert_ne!(old, new);
         assert_eq!(previous, Some(old));
         b.discovery_exchange(&bv, None, a_state.values.values().cloned().collect(), None)?;
-        assert_eq!(b.discovery_topics(&bv, now()?)?.0, new);
+        assert_eq!(b.advance_discovery_topics(&bv, now()?)?.0, new);
         let mut wrong = a_state.values.values().next().ok_or("value")?.clone();
         wrong.value[0] ^= 1;
         assert!(b.discovery_exchange(&bv, None, vec![wrong], None).is_err());
         let mut missing_statement = b.clone();
         missing_statement.revocations = Default::default();
         assert_ne!(missing_statement.discovery_topics(&bv, now()?)?.0, new);
-        assert_eq!(a.discovery_topics(&av, now()? + 86400)?.1, None);
+        assert_eq!(
+            b.discovery_topics(&bv, now()?)?.0,
+            new,
+            "a copy that lacks the statement leaves its stored value in place"
+        );
+        assert_eq!(a.advance_discovery_topics(&av, now()? + 86400)?.1, None);
         assert_eq!(Discovery::load(&av)?.values, a_state.values);
         Ok(())
     }
@@ -714,8 +741,8 @@ mod tests {
         assert_eq!(held(&exchanged_vault)?, vec![honest.clone()]);
         let time = now()?;
         assert_eq!(
-            idle.discovery_topics(&idle_vault, time)?.0,
-            late.discovery_topics(&late_vault, time)?.0
+            idle.advance_discovery_topics(&idle_vault, time)?.0,
+            late.advance_discovery_topics(&late_vault, time)?.0
         );
         forged.verify_historic(late.publisher, scope)?;
         late.discovery_exchange(
@@ -725,10 +752,12 @@ mod tests {
             None,
         )?;
         idle.discovery_exchange(&idle_vault, None, vec![honest.clone()], None)?;
-        let topic = exchanged.discovery_topics(&exchanged_vault, time)?.0;
+        let topic = exchanged
+            .advance_discovery_topics(&exchanged_vault, time)?
+            .0;
         for (peer, vault) in [(&idle, &idle_vault), (&late, &late_vault)] {
             assert_eq!(held(vault)?, vec![honest.clone()]);
-            assert_eq!(peer.discovery_topics(vault, time)?.0, topic);
+            assert_eq!(peer.advance_discovery_topics(vault, time)?.0, topic);
         }
         Ok(())
     }
@@ -761,16 +790,16 @@ mod tests {
                 .is_some_and(|signed| signed.live(expired))
         );
         assert_ne!(
-            holder.discovery_topics(&holder_vault, expired)?.0,
-            empty.discovery_topics(&empty_vault, expired)?.0
+            holder.advance_discovery_topics(&holder_vault, expired)?.0,
+            empty.advance_discovery_topics(&empty_vault, expired)?.0
         );
         assert_eq!(held(&holder_vault)?, vec![minted]);
         let delegate_revoked = fixture.owner_revocation([delegate.public_key()].into())?;
         Fixture::learn(&mut holder, &delegate_revoked)?;
         Fixture::learn(&mut empty, &delegate_revoked)?;
         assert_eq!(
-            holder.discovery_topics(&holder_vault, expired)?.0,
-            empty.discovery_topics(&empty_vault, expired)?.0
+            holder.advance_discovery_topics(&holder_vault, expired)?.0,
+            empty.advance_discovery_topics(&empty_vault, expired)?.0
         );
         assert!(held(&holder_vault)?.is_empty());
         Ok(())
@@ -844,8 +873,8 @@ mod tests {
         assert_eq!(held(&other_vault)?, vec![lower]);
         let time = now()?;
         assert_eq!(
-            one.discovery_topics(&one_vault, time)?.0,
-            other.discovery_topics(&other_vault, time)?.0
+            one.advance_discovery_topics(&one_vault, time)?.0,
+            other.advance_discovery_topics(&other_vault, time)?.0
         );
         Ok(())
     }

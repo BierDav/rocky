@@ -384,14 +384,12 @@ impl Node {
                 },
             )
             .await?;
-        crate::database::attach(&self.replica, &mut draft, &self.vault, &domain, &self.path)
-            .await?;
+        crate::database::attach(&self.replica, &mut draft, &self.vault, &domain).await?;
         crate::database::retain(&self.replica, &draft, &domain).await?;
         draft.pending = None;
-        draft.save(&self.path)?;
-        *self.granted.lock().map_err(|_| "scope catalog poisoned")? = draft.granted(&domain);
+        settings.commit(Shared::new(draft), &self.path)?;
+        *self.granted.lock().map_err(|_| "scope catalog poisoned")? = settings.granted(&domain);
         *self.domain.write().map_err(|_| "domain catalog poisoned")? = Arc::new(domain);
-        *settings = Shared::new(draft);
         drop(settings);
         self.try_ensure_tip_node().await;
         Ok(())

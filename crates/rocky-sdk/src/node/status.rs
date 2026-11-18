@@ -205,8 +205,9 @@ impl Node {
                 expires_at_epoch_seconds: settings.expires(),
                 expired: settings.expires() <= self.status_time()?,
                 logged_out: self.lifecycle.lock().await.is_logged_out() || settings.logged_out,
-                verified_revocation: settings
-                    .revocation(&self.path)?
+                verified_revocation: self
+                    .revocation_notice
+                    .revoked(&settings)?
                     .map(|notice| {
                         let node = self
                             .node_identity
@@ -523,7 +524,7 @@ impl Node {
             self.deliver_unlinks().await?;
         }
         let _syncing = self.syncing.lock().await;
-        if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
+        if let Some(statement) = self.revocation_notice.revoked(&self.settings.published())? {
             return Err(Box::new(crate::enrollment::Revoked(statement)));
         }
         let started_at_epoch_millis = epoch_millis();

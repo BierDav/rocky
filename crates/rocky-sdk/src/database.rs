@@ -1522,14 +1522,12 @@ pub(crate) async fn attach(
     settings: &mut Settings,
     vault: &crate::secrets::Vault,
     domain: &crate::domain::Domain,
-    path: &Path,
-) -> Result<(), Failure> {
+) -> Result<bool, Failure> {
     replica
         .install_readable_tables(domain.logical().clone(), domain.scope, domain.readers())
         .await?;
-    if settings.recover_groups(vault, domain, &replica.retained_partitions().await?)? {
-        settings.save(path)?;
-    }
+    let recovered =
+        settings.recover_groups(vault, domain, &replica.retained_partitions().await?)?;
     install_group_keys(replica, settings, vault, domain).await?;
     if replica.role().await?.role == rocky_secure::ReplicaRole::Partial {
         hold_late_group_members(replica, settings, domain).await?;
@@ -1539,7 +1537,8 @@ pub(crate) async fn attach(
             &vault.get("node")?,
         ))
         .await?;
-    crate::escrow::keep(replica, settings, vault, domain).await
+    crate::escrow::keep(replica, settings, vault, domain).await?;
+    Ok(recovered)
 }
 
 async fn install_group_keys(
@@ -2037,7 +2036,9 @@ async fn run_inner(
             )
             .await?
         };
-        attach(&replica, &mut settings, &vault, &domain, &path).await?;
+        if attach(&replica, &mut settings, &vault, &domain).await? {
+            settings.save(&path)?;
+        }
         crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Attached)?;
         let mut newest_first = keys_awaiting_tables;
         newest_first.sort_by_key(|key| std::cmp::Reverse(key.generation));

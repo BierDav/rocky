@@ -233,6 +233,118 @@ async fn a_saved_root_revocation_preserves_its_mode_and_cascade_targets() -> Res
     Ok(())
 }
 
+#[tokio::test]
+async fn discovery_topics_keep_a_value_minted_for_a_statement_under_the_settings_lock()
+-> Result<(), Failure> {
+    use rocky_credentials::{Revocation, RevocationMode, RevocationSet, SignedRevocation, Signer};
+    let directory = tempfile::tempdir()?;
+    let node = issuer(directory.path(), Arc::new(Keys::default())).await?;
+    let topics = || async {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        node.request(
+            crate::request::Request::DiscoveryTopics(reply),
+            node.client(1),
+        )
+        .await;
+        answer.await?
+    };
+    let key = Settings::node_key(&node.vault)?;
+    let mut held = node.settings.lock().await;
+    let statement = Revocation {
+        app: held.domain()?.manifest().app,
+        issuer: held.identity,
+        time: now()?,
+        nodes: Default::default(),
+        identities: [PrivateKey::new().public_key()].into(),
+        capabilities: Default::default(),
+        cut: Default::default(),
+        mode: RevocationMode::Lost,
+        recovery: None,
+    };
+    let credentials = held.credentials.clone();
+    let links = held.issuer_links();
+    let signed =
+        SignedRevocation::sign(statement.clone(), Signer::node(&key, &credentials)?, &links)?;
+    let mut draft = held.clone();
+    draft.learn_revocations(&RevocationSet::try_from(vec![signed])?)?;
+    crate::mesh::mint_value(
+        &node.vault,
+        (Signer::node(&key, &credentials)?, &links),
+        (draft.publisher, draft.domain()?.scope),
+        &draft.revocations,
+        &statement,
+    )?;
+    topics().await?;
+    assert!(
+        crate::mesh::holds_value(&node.vault, &statement)?,
+        "a topics request keeps a value minted for a statement not yet committed"
+    );
+    held.commit(draft, &node.path)?;
+    topics().await?;
+    assert!(
+        crate::mesh::holds_value(&node.vault, &statement)?,
+        "a topics request keeps a value minted for a statement committed under the lock"
+    );
+    drop(held);
+    topics().await?;
+    assert!(crate::mesh::holds_value(&node.vault, &statement)?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_exposure_rotation_that_fails_while_absorbing_revocations_leaves_memory_as_saved()
+-> Result<(), Failure> {
+    use rocky_credentials::{Revocation, RevocationMode, RevocationSet, SignedRevocation, Signer};
+    let directory = tempfile::tempdir()?;
+    let node = issuer(directory.path(), Arc::new(Keys::default())).await?;
+    let key = Settings::node_key(&node.vault)?;
+    let settings = node.settings.lock().await.clone();
+    let statement = Revocation {
+        app: settings.domain()?.manifest().app,
+        issuer: settings.identity,
+        time: now()?,
+        nodes: Default::default(),
+        identities: [PrivateKey::new().public_key()].into(),
+        capabilities: Default::default(),
+        cut: Default::default(),
+        mode: RevocationMode::Lost,
+        recovery: None,
+    };
+    let signed = SignedRevocation::sign(
+        statement,
+        Signer::node(&key, &settings.credentials)?,
+        &settings.issuer_links(),
+    )?;
+    node.replica
+        .learn_revocations(&RevocationSet::try_from(vec![signed])?)
+        .await?;
+    fault::STOP.with(|at| at.set(Some((fault::Stage::Signed, 0))));
+    assert!(node.absorb_revocations(None).await.is_err());
+    let held = node.settings.lock().await;
+    assert!(
+        held.authority
+            .as_ref()
+            .is_some_and(|authority| authority.rotation.is_some()),
+        "the rotation intent was committed"
+    );
+    assert!(
+        held.persisted_eq(&Settings::load(&node.path)?),
+        "a rotation that failed part way leaves no unsaved change in memory"
+    );
+    drop(held);
+    node.absorb_revocations(None).await?;
+    assert!(
+        node.settings
+            .lock()
+            .await
+            .authority
+            .as_ref()
+            .is_some_and(|authority| authority.rotation.is_none()),
+        "the next absorb resumes the committed rotation and finishes it"
+    );
+    Ok(())
+}
+
 #[test]
 fn reopen_completes_each_revocation_reader_secret_boundary() -> Result<(), Failure> {
     use fault::Stage;
@@ -614,9 +726,12 @@ async fn unlinking_the_last_node_keeps_the_identity_and_allows_relinking() -> Re
     )
     .await?;
     let settings = node.settings.lock().await;
-    assert!(settings.revocation(&node.path)?.is_some());
+    assert!(node.revocation_notice.revoked(&settings)?.is_some());
     assert!(!settings.revocations.revokes(&settings.identity));
-    let ended = settings.revocation(&node.path)?.ok_or("revocation")?;
+    let ended = node
+        .revocation_notice
+        .revoked(&settings)?
+        .ok_or("revocation")?;
     assert!(RevocationSet::try_from(vec![ended])?.ends_node(own, true));
     let membership = settings.revocations.membership()?;
     let replacement = PrivateKey::new();

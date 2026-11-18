@@ -19,7 +19,7 @@ impl Node {
         if let Some(certificate) = settings.credentials.certificate() {
             known.link(certificate.clone())?;
         }
-        if let Some(ended) = settings.revocation(&self.path)? {
+        if let Some(ended) = self.revocation_notice.revoked(&settings)? {
             known.merge_in(
                 &RevocationSet::try_from(vec![ended])?,
                 settings.database_context()?,
@@ -107,10 +107,9 @@ impl Node {
             draft.begin_exposure_rotation(&registry)?;
         }
         if own {
-            draft.record_revocation(&self.path, signed)?;
+            self.revocation_notice.record(&draft, signed)?;
         }
-        draft.save(&self.path)?;
-        *settings = draft;
+        settings.commit(draft, &self.path)?;
         drop(settings);
         if !own {
             loop {
@@ -123,8 +122,7 @@ impl Node {
                 if !pending && !draft.begin_exposure_rotation(&registry)? {
                     break;
                 }
-                draft.save(&self.path)?;
-                *settings = draft;
+                settings.commit(draft, &self.path)?;
                 let keys = settings
                     .rotate(&self.vault)?
                     .ok_or("missing unlink rotation")?;
@@ -194,7 +192,7 @@ impl Node {
         });
         use futures_util::StreamExt;
         let mut known = snapshot.revocations.clone();
-        if let Some(ended) = snapshot.revocation(&self.path)? {
+        if let Some(ended) = self.revocation_notice.revoked(&snapshot)? {
             known.merge_in(
                 &RevocationSet::try_from(vec![ended])?,
                 snapshot.database_context()?,
@@ -287,8 +285,10 @@ impl Node {
         let mut draft = settings.clone();
         draft.learn_revocations(&known)?;
         if let Some(statement) = settings.revoking(&draft.revocations)? {
-            if settings.revocation(&self.path)?.is_none() {
-                settings.record_revocation(&self.path, statement.clone())?;
+            if self
+                .revocation_notice
+                .record_unless_revoked(&settings, statement.clone())?
+            {
                 self.record_ended(&statement, settings.identity)?;
             }
             drop(settings);
@@ -301,8 +301,7 @@ impl Node {
             return Ok(known);
         }
         let rotated = draft.begin_exposure_rotation(&registry)?;
-        draft.save(&self.path)?;
-        *settings = draft;
+        settings.commit(draft, &self.path)?;
         if rotated {
             let keys = settings
                 .rotate(&self.vault)?
@@ -353,8 +352,7 @@ impl Node {
             known.admit_personal(certificate.clone(), &context)?;
             let mut draft = current.clone();
             draft.learn_revocations(&known)?;
-            draft.save(&self.path)?;
-            *current = draft;
+            current.commit(draft, &self.path)?;
             self.replica.learn_revocations(&known).await?;
             drop(current);
             self.observations.touch();
@@ -384,8 +382,7 @@ impl Node {
         known.link(certificate)?;
         let mut draft = current.clone();
         draft.learn_revocations(&known)?;
-        draft.save(&self.path)?;
-        *current = draft;
+        current.commit(draft, &self.path)?;
         self.replica.learn_revocations(&known).await?;
         self.activity
             .record(crate::ActivityKind::MembershipLinkRecorded {

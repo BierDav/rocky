@@ -587,7 +587,7 @@ impl Node {
         {
             return Err("live links are disabled".into());
         }
-        if let Some(statement) = settings.revocation(&self.path)? {
+        if let Some(statement) = self.revocation_notice.revoked(&settings)? {
             return Err(Box::new(crate::enrollment::Revoked(statement)));
         }
         let mut authority = self.replica.observe_authority().await;
@@ -704,7 +704,10 @@ impl Node {
                 return Err("live links are disabled in the background".into());
             }
             let admission_excludes_revocation_receipt = self.settings.lock().await;
-            if let Some(statement) = admission_excludes_revocation_receipt.revocation(&self.path)? {
+            if let Some(statement) = self
+                .revocation_notice
+                .revoked(&admission_excludes_revocation_receipt)?
+            {
                 return Err(Box::new(crate::enrollment::Revoked(statement)));
             }
             let mut entries = service

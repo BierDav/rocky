@@ -572,6 +572,8 @@ impl LogicalTable {
     }
     pub fn is_identity_index(&self, index: &LogicalIndex) -> bool {
         index.unique
+            && index.expressions.is_empty()
+            && index.predicate.is_none()
             && index.columns.iter().all(|column| !column.descending)
             && index
                 .columns
@@ -650,8 +652,19 @@ impl LogicalTable {
                 return invalid(format!("{name} foreign key"));
             }
             for column in &key.columns {
-                if self.column(column).is_none() {
-                    return invalid(format!("{name} column {column}"));
+                match self.column(column).map(|held| &held.class) {
+                    None => return invalid(format!("{name} column {column}")),
+                    Some(ColumnClass::LocalOnly) => {
+                        return invalid(format!(
+                            "{name}.{column} is local-only and cannot hold a foreign key"
+                        ));
+                    }
+                    Some(ColumnClass::Derived { .. }) if self.class == TableClass::Replayed => {
+                        return invalid(format!(
+                            "{name}.{column} is derived and cannot hold a foreign key"
+                        ));
+                    }
+                    Some(_) => {}
                 }
             }
         }
@@ -864,6 +877,29 @@ impl LogicalSchema {
         let mut names = BTreeSet::new();
         for table in &self.tables {
             table.validate()?;
+            for key in &table.foreign_keys {
+                let Some(parent) = self.table(&key.table) else {
+                    return invalid(format!(
+                        "{} references unknown table {}",
+                        table.sql_name, key.table
+                    ));
+                };
+                let identity = parent.identity_columns();
+                if key.references.len() != identity.len()
+                    || key
+                        .references
+                        .iter()
+                        .zip(&identity)
+                        .any(|(name, column)| !name.eq_ignore_ascii_case(column))
+                {
+                    return invalid(format!(
+                        "{}({}) must reference the identity of {}",
+                        table.sql_name,
+                        key.columns.join(","),
+                        parent.sql_name
+                    ));
+                }
+            }
             if let Some(like) = &table.granted_like
                 && (!table.class.typed()
                     || like == &table.sql_name
@@ -1042,40 +1078,41 @@ impl LogicalSchema {
                 return incompatible(&table.sql_name, reason);
             }
             for key in &table.foreign_keys {
-                if let Some(target) = self.table(&key.table) {
-                    for (column, name) in key.columns.iter().zip(&key.references) {
-                        if target.column(name).is_none() {
-                            return invalid(format!("{} column {name}", target.sql_name));
-                        }
-                        let references_portable_identity = name.eq_ignore_ascii_case("id");
-                        if references_portable_identity
-                            && table
-                                .column(column)
-                                .is_some_and(|column| column.affinity != Affinity::Blob)
-                        {
-                            return invalid(format!(
-                                "{}.{column} references {}.id and must be a blob",
-                                table.sql_name, target.sql_name
-                            ));
-                        }
-                    }
-                    let reason = if !target.partition_by.is_empty()
-                        && (table.partition_by.is_empty()
-                            || table.partition_group.is_none()
-                            || table.partition_group != target.partition_group)
+                let Some(target) = self.table(&key.table) else {
+                    return invalid(format!(
+                        "{} references the undeclared table {}",
+                        table.sql_name, key.table
+                    ));
+                };
+                for (column, name) in key.columns.iter().zip(&key.references) {
+                    let references_portable_identity = name.eq_ignore_ascii_case("id");
+                    if references_portable_identity
+                        && table
+                            .column(column)
+                            .is_some_and(|column| column.affinity != Affinity::Blob)
                     {
-                        Some("partitioned references require the same explicit partition group")
-                    } else if !table.partition_by.is_empty() && target.partition_by.is_empty() {
-                        Some("a partitioned child cannot reference an unpartitioned parent")
-                    } else {
-                        None
-                    };
-                    if let Some(reason) = reason {
-                        return incompatible(
-                            &table.sql_name,
-                            Incompatibility::CrossScopeReference(reason.into()),
-                        );
+                        return invalid(format!(
+                            "{}.{column} references {}.id and must be a blob",
+                            table.sql_name, target.sql_name
+                        ));
                     }
+                }
+                let reason = if !target.partition_by.is_empty()
+                    && (table.partition_by.is_empty()
+                        || table.partition_group.is_none()
+                        || table.partition_group != target.partition_group)
+                {
+                    Some("partitioned references require the same explicit partition group")
+                } else if !table.partition_by.is_empty() && target.partition_by.is_empty() {
+                    Some("a partitioned child cannot reference an unpartitioned parent")
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
+                    return incompatible(
+                        &table.sql_name,
+                        Incompatibility::CrossScopeReference(reason.into()),
+                    );
                 }
             }
         }
@@ -1289,6 +1326,60 @@ mod tests {
         }
     }
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_foreign_key_references_exactly_the_identity_of_a_known_parent() {
+        let refused = |table: &str, references: &[&str]| {
+            let mut schema = schema();
+            let items = &mut schema.tables[0];
+            items.columns.push(column("link", Affinity::Blob));
+            items.foreign_keys.push(LogicalForeignKey {
+                columns: ["link", "title"][..references.len()]
+                    .iter()
+                    .map(|name| (*name).into())
+                    .collect(),
+                table: table.into(),
+                references: references.iter().map(|name| (*name).into()).collect(),
+                on_delete: DELETE_CASCADE.into(),
+                on_update: "NO ACTION".into(),
+                deferred: false,
+            });
+            schema.validate().err()
+        };
+        assert_eq!(refused("ITEMS", &["ID"]), None);
+        let not_identity = Some(SchemaError::Invalid(
+            "items(link) must reference the identity of items".into(),
+        ));
+        assert_eq!(refused("items", &["title"]), not_identity);
+        assert_eq!(refused("items", &["key"]), not_identity);
+        assert_eq!(
+            refused("items", &["id", "title"]),
+            Some(SchemaError::Invalid(
+                "items(link,title) must reference the identity of items".into(),
+            ))
+        );
+        assert_eq!(
+            refused("missing", &["id"]),
+            Some(SchemaError::Invalid(
+                "items references unknown table missing".into()
+            ))
+        );
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn an_identity_index_covers_every_row_by_its_identity_columns_alone() {
+        let identity = schema().tables[0].indexes[0].clone();
+        let table = &schema().tables[0];
+        assert!(table.is_identity_index(&identity));
+        let partial = LogicalIndex {
+            predicate: Some("title IS NOT NULL".into()),
+            ..identity.clone()
+        };
+        let widened = LogicalIndex {
+            expressions: vec!["lower(title)".into()],
+            ..identity
+        };
+        assert!(!table.is_identity_index(&partial));
+        assert!(!table.is_identity_index(&widened));
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn sql_column_and_reference_names_use_ascii_case_insensitive_lookup() {
         let mut schema = schema();
         let table = &mut schema.tables[0];
@@ -1311,13 +1402,6 @@ mod tests {
             .push_str(&format!(",{})", foreign_key_clause(&key)));
         table.foreign_keys.push(key);
         schema.installable().unwrap();
-        schema.tables[0].foreign_keys[0].references = vec!["missing".into()];
-        let clause = foreign_key_clause(&schema.tables[0].foreign_keys[0]);
-        schema.tables[0].create_sql = format!("CREATE TABLE items ({clause})");
-        assert_eq!(
-            schema.installable(),
-            Err(SchemaError::Invalid("items column missing".into()))
-        );
         let mut duplicate = schema.clone();
         duplicate.tables[0]
             .columns

@@ -1,3 +1,4 @@
+use super::replay::{BrokenReference, column_carried, table_carried};
 use super::typed::{Typed, quoted};
 use super::*;
 use rocky_core::{LogicalSchema, SchemaChange, Scope, TableClass};
@@ -10,6 +11,13 @@ pub(super) const SCHEMA: &[&str] = &[
 pub struct ProjectionPlan {
     pub schema: Commitment,
     pub tables: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PlanCause {
+    Install,
+    Switch,
+    Withdrawal,
 }
 
 struct Record {
@@ -37,8 +45,7 @@ impl<A: RowApplication> Inner<A> {
             return Err(Error::Corrupt("projection plan record".into()));
         };
         Ok(Some(Record {
-            schema: LogicalSchema::parse(descriptor)
-                .map_err(|_| Error::Corrupt("projection plan descriptor".into()))?,
+            schema: stored_schema(descriptor, "projection plan descriptor")?,
             domain: decode(domain)?,
             readers: decode(readers)?,
         }))
@@ -63,8 +70,7 @@ impl<A: RowApplication> Inner<A> {
             return Err(Error::Corrupt("typed table record".into()));
         };
         Ok(Some((
-            LogicalSchema::parse(descriptor)
-                .map_err(|_| Error::Corrupt("typed table descriptor".into()))?,
+            stored_schema(descriptor, "typed table descriptor")?,
             decode(domain)?,
             decode(readers)?,
         )))
@@ -74,15 +80,7 @@ impl<A: RowApplication> Inner<A> {
         schema: &LogicalSchema,
         domain: Scope,
         readers: &BTreeMap<String, Commitment>,
-    ) -> Result<(), Error> {
-        self.record_plan_as(schema, domain, readers, false).await
-    }
-    pub(super) async fn record_plan_as(
-        &self,
-        schema: &LogicalSchema,
-        domain: Scope,
-        readers: &BTreeMap<String, Commitment>,
-        rebuild: bool,
+        cause: PlanCause,
     ) -> Result<(), Error> {
         let incompatible = |reason: String| Error::Incompatible(reason);
         let descriptor = schema
@@ -110,12 +108,30 @@ impl<A: RowApplication> Inner<A> {
                 "a projection plan keeps the domain and reader scopes".into(),
             ));
         }
-        match rocky_core::classify(&installed, schema)
-            .map_err(|refusal| incompatible(refusal.to_string()))?
-        {
-            SchemaChange::Unchanged if !rebuild => return Ok(()),
-            SchemaChange::Unchanged => {}
-            SchemaChange::Local | SchemaChange::Replicated => {}
+        let switch_path = self.switch_path_fields().await?;
+        let switch_path = switch_path.as_ref();
+        let carried = |table: &rocky_core::LogicalTable,
+                       column: Option<&rocky_core::LogicalColumn>| {
+            match column {
+                None => table_carried(switch_path, &installed, table),
+                Some(column) => {
+                    let rebuilt = schema
+                        .table(&table.sql_name)
+                        .and_then(|rebuilt| rebuilt.column(&column.sql_name))
+                        .unwrap_or(column);
+                    column_carried(switch_path, &installed, table, column, rebuilt)
+                }
+            }
+        };
+        let change = match cause {
+            PlanCause::Withdrawal => rocky_core::classify_withdrawal(&installed, schema, carried),
+            PlanCause::Install | PlanCause::Switch => {
+                rocky_core::classify_carrying(&installed, schema, carried)
+            }
+        };
+        match change.map_err(|refusal| incompatible(refusal.to_string()))? {
+            SchemaChange::Unchanged if cause == PlanCause::Install => return Ok(()),
+            SchemaChange::Unchanged | SchemaChange::Local | SchemaChange::Replicated => {}
         }
         for table in installed
             .tables
@@ -189,9 +205,15 @@ impl<A: RowApplication> Inner<A> {
             tables: record.schema.typed().count(),
         }))
     }
-    pub(super) async fn finish_plan(&mut self) -> Result<(), Error> {
+    async fn switch_path_fields(&self) -> Result<Option<super::schemas::PathFields>, Error> {
+        match self.schema_switch_intent().await? {
+            Some((scope, ..)) => self.staged_row_fields(scope).await,
+            None => Ok(None),
+        }
+    }
+    pub(super) async fn finish_plan(&mut self) -> Result<Result<(), BrokenReference>, Error> {
         let Some(record) = self.plan_record().await? else {
-            return Ok(());
+            return Ok(Ok(()));
         };
         let intent = self.schema_switch_intent().await?;
         if let Some((scope, _, _, target)) = intent
@@ -205,10 +227,7 @@ impl<A: RowApplication> Inner<A> {
                 "a staged schema switch resumes only with its target schema",
             ));
         }
-        let fields_on_switch_path = match intent {
-            Some((scope, ..)) => self.staged_row_fields(scope).await?,
-            None => None,
-        };
+        let fields_on_switch_path = self.switch_path_fields().await?;
         let installed = self
             .installed_typed()
             .await?
@@ -227,6 +246,7 @@ impl<A: RowApplication> Inner<A> {
             .await?,
         );
         let previous = self.workspace.typed.replace(projected.clone());
+        let mut broken = None;
         let switched = transaction!(self, |inner| {
             let switching = match &previous {
                 Some(old) => inner.begin_switch_history(old, &projected).await?,
@@ -256,14 +276,18 @@ impl<A: RowApplication> Inner<A> {
                     TableClass::LocalOnly => inner.replace_indexes(&installed, table).await?,
                 }
             }
-            inner
+            if let Err(refused) = inner
                 .rebuild_replayed(
                     &installed,
                     &record.schema,
                     &replayed,
                     fields_on_switch_path.as_ref(),
                 )
-                .await?;
+                .await?
+            {
+                broken = Some(refused.clone());
+                return Err(refused.into());
+            }
             inner.install_delete_triggers(&projected).await?;
             inner
                 .reshape_undo(&installed, &record.schema, fields_on_switch_path.as_ref())
@@ -273,17 +297,35 @@ impl<A: RowApplication> Inner<A> {
             }
             inner.install_history().await?;
             inner.end_switch_history(&projected, switching).await?;
+            #[cfg(test)]
+            if std::mem::take(&mut inner.switch_fault) {
+                return Err(Error::Incompatible(
+                    "an injected incompatible switch".into(),
+                ));
+            }
             inner.finish_switch(&record).await
         });
         if let Err(error) = switched {
             self.abandon_switch_history();
             self.workspace.typed = previous;
-            return Err(error);
+            return match broken {
+                Some(refused) => Ok(Err(refused)),
+                None => Err(error),
+            };
         }
         self.start_events();
         self.bump_authority();
         self.publish_revision().await?;
-        Ok(())
+        Ok(Ok(()))
+    }
+    pub(super) async fn finish_or_discard_plan(
+        &mut self,
+    ) -> Result<Result<(), BrokenReference>, Error> {
+        let finished = self.finish_plan().await?;
+        if finished.is_err() {
+            transaction!(self, |inner| inner.discard_plan().await)?;
+        }
+        Ok(finished)
     }
     async fn replace_indexes(
         &self,
@@ -362,8 +404,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.inner
             .lock(crate::replica::Class::Background)
             .await
-            .finish_plan()
-            .await
+            .finish_or_discard_plan()
+            .await?
+            .map_err(Error::from)
     }
     #[cfg(test)]
     pub(crate) async fn fail_next_plan_switch(&self) {
@@ -371,6 +414,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .lock(crate::replica::Class::Background)
             .await
             .plan_fault = true;
+    }
+    #[cfg(test)]
+    pub(crate) async fn refuse_next_switch_as_incompatible(&self) {
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .switch_fault = true;
     }
 }
 
@@ -380,5 +430,21 @@ fn removed_replayed<'a>(
 ) -> impl Iterator<Item = &'a rocky_core::LogicalTable> {
     installed.tables.iter().filter(|table| {
         table.class == TableClass::Replayed && schema.table(&table.sql_name).is_none()
+    })
+}
+
+pub(super) fn stored_schema(descriptor: &[u8], record: &str) -> Result<LogicalSchema, Error> {
+    LogicalSchema::parse(descriptor).map_err(|refusal| {
+        let well_formed = serde_json::from_slice::<LogicalSchema>(descriptor)
+            .ok()
+            .and_then(|schema| serde_json::to_vec(&schema).ok())
+            .is_some_and(|reencoded| reencoded == descriptor);
+        if well_formed {
+            Error::Incompatible(format!(
+                "the stored {record} no longer validates: {refusal}"
+            ))
+        } else {
+            Error::Corrupt(record.into())
+        }
     })
 }

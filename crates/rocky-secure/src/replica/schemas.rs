@@ -834,7 +834,11 @@ impl<A: RowApplication> Inner<A> {
                     inner.finish_schema_switch().await?;
                     return Ok(true);
                 }
-                inner.record_plan_as(schema, *domain, readers, true).await?;
+                let cause = match withdraw {
+                    Some(_) => super::migrate::PlanCause::Withdrawal,
+                    None => super::migrate::PlanCause::Switch,
+                };
+                inner.record_plan(schema, *domain, readers, cause).await?;
                 return Ok(false);
             }
             if inner.workspace.typed.is_some() {
@@ -863,11 +867,17 @@ impl<A: RowApplication> Inner<A> {
         }
         if !in_place {
             inner.load_schemas().await?;
-            if let Err(error) = inner.finish_plan().await {
+            let finished = inner.finish_plan().await;
+            if !matches!(finished, Ok(Ok(()))) {
                 if inner.schema_switching().await? {
                     reinstall_switch_source(inner, &mut definition, old_typed).await?;
+                    if withdraw.is_none() && matches!(finished, Ok(Err(_))) {
+                        transaction!(inner, |inner| {
+                            inner.withdraw_schema_switch(scope, &name).await
+                        })?;
+                    }
                 }
-                return Err(error);
+                finished??;
             }
         }
         inner.load_schemas().await?;

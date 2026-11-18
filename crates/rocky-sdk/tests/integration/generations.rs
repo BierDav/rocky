@@ -1394,3 +1394,28 @@ async fn reopening_main_restores_the_branch_signer_of_its_shared_checkpoint() ->
     a.close().await;
     Ok(())
 }
+
+const LINKABLE: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+const LINKED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"set_null"}]},{"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rollout_refuses_a_reference_over_a_field_existing_rows_hold() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let a = Device::new(Database::create(open(root.path(), LINKABLE, None), None)?)?;
+    a.follow_main_migrating().await;
+    a.close().await;
+    let error = Database::open(open(root.path(), LINKED, None))
+        .err()
+        .expect("refused")
+        .to_string();
+    assert!(
+        error.contains(
+            "the application schema cannot replace the installed one: foreign key items(list) -> lists would constrain existing rows; declare it on a new optional field"
+        ),
+        "{error}"
+    );
+    let a = reopen(open(root.path(), LINKABLE, None))?;
+    assert_eq!(generation(&a).await["current"]["schema"], 1);
+    a.close().await;
+    Ok(())
+}

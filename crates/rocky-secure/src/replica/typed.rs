@@ -243,7 +243,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     return Ok(false);
                 }
                 Some(_) => {
-                    inner.record_plan(&schema, domain, &readers).await?;
+                    inner
+                        .record_plan(
+                            &schema,
+                            domain,
+                            &readers,
+                            super::migrate::PlanCause::Install,
+                        )
+                        .await?;
                     return Ok(true);
                 }
                 None => {}
@@ -385,8 +392,7 @@ impl<A: RowApplication> Inner<A> {
         else {
             return Err(Error::Corrupt("typed table record".into()));
         };
-        let schema = LogicalSchema::parse(descriptor)
-            .map_err(|_| Error::Corrupt("typed table descriptor".into()))?;
+        let schema = super::migrate::stored_schema(descriptor, "typed table descriptor")?;
         let mut typed = self
             .authorized_projection(Typed::new(schema, decode(domain)?, &decode(readers)?)?)
             .await?;

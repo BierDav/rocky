@@ -20,7 +20,24 @@ fn column(name: &str, affinity: Affinity, not_null: bool) -> LogicalColumn {
         class: ColumnClass::Replicated,
     }
 }
-fn table(name: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable {
+fn table(name: &str, columns: Vec<LogicalColumn>) -> LogicalTable {
+    referencing(name, columns, Vec::new())
+}
+fn item_reference(column: &str, on_delete: &str, deferred: bool) -> rocky_core::LogicalForeignKey {
+    rocky_core::LogicalForeignKey {
+        table: "items".into(),
+        columns: vec![column.into()],
+        references: vec!["id".into()],
+        on_delete: on_delete.into(),
+        on_update: "NO ACTION".into(),
+        deferred,
+    }
+}
+fn referencing(
+    name: &str,
+    mut columns: Vec<LogicalColumn>,
+    foreign_keys: Vec<rocky_core::LogicalForeignKey>,
+) -> LogicalTable {
     columns.push(column("id", Affinity::Blob, true));
     let sql: Vec<String> = columns
         .iter()
@@ -47,11 +64,11 @@ fn table(name: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable {
             )
         })
         .collect();
-    LogicalTable {
+    let mut table = LogicalTable {
         sql_name: name.into(),
         granted_like: None,
         class: TableClass::Replayed,
-        create_sql: format!("CREATE TABLE {name}({})", sql.join(",")),
+        create_sql: String::new(),
         auto_generate: false,
         columns,
         primary_key: vec!["key".into()],
@@ -68,8 +85,15 @@ fn table(name: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable {
             expressions: Vec::new(),
             predicate: None,
         }],
-        foreign_keys: Vec::new(),
-    }
+        foreign_keys,
+    };
+    let clauses = table
+        .foreign_keys
+        .iter()
+        .map(|key| table.foreign_key_sql(key));
+    let definitions: Vec<String> = sql.into_iter().chain(clauses).collect();
+    table.create_sql = format!("CREATE TABLE {name}({})", definitions.join(","));
+    table
 }
 pub(super) fn text(value: &str) -> SqlValue {
     SqlValue::Text(value.into())
@@ -83,6 +107,8 @@ pub(super) struct Lineage {
     pub(super) children_first: bool,
     pub(super) local_draft: bool,
     pub(super) local_note_from: Option<u32>,
+    pub(super) deferred_from: Option<u32>,
+    pub(super) note_references_from: Option<u32>,
 }
 impl Lineage {
     pub(super) async fn root(&self, replica: &EncryptedReplica<TypedRows>) -> Result<u32, Error> {
@@ -218,6 +244,8 @@ impl Lineage {
             children_first: false,
             local_draft: false,
             local_note_from: None,
+            deferred_from: None,
+            note_references_from: None,
         }
     }
     fn schema(&self, generation: u32) -> LogicalSchema {
@@ -225,18 +253,27 @@ impl Lineage {
             column("key", Affinity::Text, true),
             column("title", Affinity::Text, true),
         ];
+        let mut item_keys = Vec::new();
         if matches!(generation, 2 | 3 | 5) {
-            let note = column("note", Affinity::Text, false);
-            items.push(
-                if self.local_note_from.is_some_and(|from| generation >= from) {
-                    LogicalColumn {
-                        class: ColumnClass::LocalOnly,
-                        ..note
-                    }
-                } else {
-                    note
-                },
-            );
+            if self
+                .note_references_from
+                .is_some_and(|from| generation >= from)
+            {
+                items.push(column("note", Affinity::Blob, false));
+                item_keys.push(item_reference("note", "SET NULL", false));
+            } else {
+                let note = column("note", Affinity::Text, false);
+                items.push(
+                    if self.local_note_from.is_some_and(|from| generation >= from) {
+                        LogicalColumn {
+                            class: ColumnClass::LocalOnly,
+                            ..note
+                        }
+                    } else {
+                        note
+                    },
+                );
+            }
         }
         if generation >= 3 {
             items.push(column("rank", Affinity::Integer, false));
@@ -247,36 +284,21 @@ impl Lineage {
                 ..column("draft", Affinity::Text, false)
             });
         }
-        let mut tables = vec![table("items", items)];
+        let mut tables = vec![referencing("items", items, item_keys)];
         if matches!(generation, 2 | 3) {
-            tables.push(table(
-                self.child_table(),
-                vec![
-                    column("key", Affinity::Text, true),
-                    column("label", Affinity::Text, true),
-                ],
-            ));
-        }
-        for tags in tables
-            .iter_mut()
-            .filter(|table| self.linked && table.sql_name == self.child_table())
-        {
-            let mut clauses = Vec::new();
-            for (name, action) in [("item", "CASCADE"), ("also", "SET NULL")] {
-                tags.columns.push(column(name, Affinity::Blob, false));
-                let key = rocky_core::LogicalForeignKey {
-                    table: "items".into(),
-                    columns: vec![name.into()],
-                    references: vec!["id".into()],
-                    on_delete: action.into(),
-                    on_update: "NO ACTION".into(),
-                    deferred: false,
-                };
-                clauses.push(tags.foreign_key_sql(&key));
-                tags.foreign_keys.push(key);
+            let mut tags = vec![
+                column("key", Affinity::Text, true),
+                column("label", Affinity::Text, true),
+            ];
+            let mut tag_keys = Vec::new();
+            if self.linked {
+                let deferred = self.deferred_from.is_some_and(|from| generation >= from);
+                for (name, action) in [("item", "CASCADE"), ("also", "SET NULL")] {
+                    tags.push(column(name, Affinity::Blob, false));
+                    tag_keys.push(item_reference(name, action, deferred));
+                }
             }
-            let sql = tags.create_sql.strip_suffix(')').unwrap();
-            tags.create_sql = format!("{sql},item BLOB,also BLOB,{})", clauses.join(","));
+            tables.push(referencing(self.child_table(), tags, tag_keys));
         }
         for tags in tables
             .iter_mut()

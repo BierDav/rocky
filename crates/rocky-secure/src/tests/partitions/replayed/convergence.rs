@@ -4,6 +4,7 @@ use rocky_core::Commitment;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod crashes;
+mod golden;
 mod successor;
 
 const KEYS: [(&str, [u8; 32]); 2] = [("A", [1; 32]), ("B", [2; 32])];

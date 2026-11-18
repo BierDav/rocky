@@ -272,13 +272,8 @@ impl Cluster {
     pub async fn wait_unfenced_leader(&self, admin: &NetworkCoordinator) -> u64 {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         loop {
-            for id in 1..=3 {
-                if let Ok(status) = admin.status(id).await
-                    && status.leader == Some(id)
-                    && !status.fenced
-                {
-                    return id;
-                }
+            if let Some(leader) = leader_recognized_by_majority(admin).await {
+                return leader;
             }
             assert!(tokio::time::Instant::now() < deadline, "no leader");
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -294,6 +289,22 @@ impl Drop for Cluster {
             self.stop(id);
         }
     }
+}
+const VOTERS: u64 = 3;
+pub async fn leader_recognized_by_majority(admin: &NetworkCoordinator) -> Option<u64> {
+    let mut statuses = Vec::new();
+    for id in 1..=VOTERS {
+        if let Ok(status) = admin.status(id).await {
+            statuses.push((id, status));
+        }
+    }
+    statuses.iter().find_map(|(id, status)| {
+        let recognizing = statuses
+            .iter()
+            .filter(|(_, other)| other.leader == Some(*id))
+            .count() as u64;
+        (status.leader == Some(*id) && !status.fenced && 2 * recognizing > VOTERS).then_some(*id)
+    })
 }
 pub fn timestamp() -> u64 {
     std::time::SystemTime::now()

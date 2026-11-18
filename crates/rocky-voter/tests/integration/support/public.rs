@@ -198,13 +198,8 @@ impl PublicCluster {
     pub async fn wait_unfenced_leader(&self, admin: &NetworkCoordinator) -> u64 {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         loop {
-            for id in 1..=3 {
-                if let Ok(status) = admin.status(id).await
-                    && status.leader == Some(id)
-                    && !status.fenced
-                {
-                    return id;
-                }
+            if let Some(leader) = super::leader_recognized_by_majority(admin).await {
+                return leader;
             }
             if tokio::time::Instant::now() >= deadline {
                 let mut statuses = Vec::new();

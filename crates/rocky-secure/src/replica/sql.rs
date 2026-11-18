@@ -395,6 +395,10 @@ impl<A: RowApplication> SecureSql<A> {
             lease.aborted = Some(AbortReason::Cancelled);
         }
     }
+    pub async fn in_transaction(&self) -> bool {
+        let lease = self.lease.lock().await;
+        lease.held.is_some() || lease.aborted.is_some()
+    }
     pub async fn state(&self) -> SqlState {
         if self.lease.lock().await.held.is_some() {
             SqlState::Active

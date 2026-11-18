@@ -573,6 +573,7 @@ impl VoterService {
 #[cfg(test)]
 mod listener_tests {
     use super::*;
+    use rocky_core::net::{BoxFuture, Failure, Incoming, Stream};
 
     #[test]
     fn saturated_voter_connections_are_counted_in_status_metrics() {
@@ -613,6 +614,199 @@ mod listener_tests {
         assert_eq!(
             busy_refusal(&Operation::Usage),
             CoordinationError::Backpressure
+        );
+    }
+
+    struct CallerOwned {
+        incoming: tokio::sync::mpsc::UnboundedSender<Option<Incoming>>,
+        accepted: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Option<Incoming>>>,
+        listening_refused: AtomicBool,
+        closes: AtomicU64,
+    }
+    impl CallerOwned {
+        fn new() -> Arc<Self> {
+            let (incoming, accepted) = tokio::sync::mpsc::unbounded_channel();
+            Arc::new(Self {
+                incoming,
+                accepted: tokio::sync::Mutex::new(accepted),
+                listening_refused: AtomicBool::new(false),
+                closes: AtomicU64::new(0),
+            })
+        }
+        fn refuse_listening(&self, refused: bool) {
+            self.listening_refused.store(refused, Ordering::SeqCst);
+        }
+        fn closes(&self) -> u64 {
+            self.closes.load(Ordering::SeqCst)
+        }
+        fn deliver(&self, protocol: Protocol) -> tokio::io::DuplexStream {
+            let (caller, voter) = tokio::io::duplex(2 * MAX_FRAME);
+            self.incoming
+                .send(Some(Incoming::Stream(protocol, Stream::new(voter))))
+                .expect("the caller's transport stays open to new streams");
+            caller
+        }
+        fn pause_accepting(&self) {
+            self.incoming
+                .send(None)
+                .expect("the caller's transport stays open to new streams");
+        }
+    }
+    impl Transport for CallerOwned {
+        fn kind(&self) -> &str {
+            "memory"
+        }
+        fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
+            Box::pin(async { Ok("voter-1".into()) })
+        }
+        fn connect<'a>(
+            &'a self,
+            _: &'a str,
+            protocol: Protocol,
+            _: Option<Scope>,
+        ) -> BoxFuture<'a, Result<Stream, Failure>> {
+            Box::pin(async move {
+                if self.closes() > 0 {
+                    return Err("the caller's transport was closed".into());
+                }
+                Ok(Stream::new(self.deliver(protocol)))
+            })
+        }
+        fn accept(&self) -> BoxFuture<'_, Option<Incoming>> {
+            Box::pin(async move { self.accepted.lock().await.recv().await.flatten() })
+        }
+        fn listen(&self, _: Option<Scope>, _: bool) -> Result<(), Failure> {
+            if self.listening_refused.load(Ordering::SeqCst) {
+                return Err("listening refused".into());
+            }
+            Ok(())
+        }
+        fn request<'a>(
+            &'a self,
+            _: &'a [String],
+            _: Scope,
+            _: &'a [u8],
+        ) -> BoxFuture<'a, Result<Vec<u8>, Failure>> {
+            Box::pin(async { Err("the caller's transport carries coordination only".into()) })
+        }
+        fn session<'a>(
+            &'a self,
+            _: &'a [String],
+            _: Scope,
+        ) -> BoxFuture<'a, Result<Stream, Failure>> {
+            Box::pin(async { Err("the caller's transport carries coordination only".into()) })
+        }
+        fn close(&self) -> BoxFuture<'_, ()> {
+            self.closes.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {})
+        }
+    }
+
+    async fn reply_to(mut caller: tokio::io::DuplexStream) -> Vec<u8> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        caller.shutdown().await.unwrap();
+        let mut reply = Vec::new();
+        caller.read_to_end(&mut reply).await.unwrap();
+        reply
+    }
+
+    #[tokio::test]
+    async fn serving_clients_never_closes_the_callers_transport() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = PrivateKey::new();
+        let key = PrivateKey::new();
+        let genesis = CertifiedGenesis::sign(
+            Genesis {
+                mesh: MeshId([0x61; 16]),
+                configuration: [6; 16],
+                voters: (1..=3)
+                    .map(|id| Voter {
+                        id,
+                        address: format!("127.0.0.1:{id}"),
+                        key: if id == 1 {
+                            key.public_key()
+                        } else {
+                            PrivateKey::new().public_key()
+                        },
+                    })
+                    .collect(),
+                initial_voters: BTreeSet::from([1, 2, 3]),
+                membership_authority: PrivateKey::new().public_key(),
+                directory_definition: [0; 32],
+                directory: None,
+                authorities: Vec::new(),
+                max_control_lifetime: 86_400,
+                public: Some(PublicService {
+                    endpoints: vec![ClientEndpoint {
+                        voter: 1,
+                        kind: "memory".into(),
+                        address: "voter-1".into(),
+                    }],
+                    admission: None,
+                    limits: rocky_coordinator::Limits::default(),
+                    tenants: 4,
+                    registrations_per_day: 16,
+                    tenant_lanes: 4,
+                }),
+            },
+            &root,
+        )
+        .unwrap();
+        let voter = VoterService::open(
+            directory.path(),
+            genesis.clone(),
+            root.public_key(),
+            genesis.genesis.mesh,
+            1,
+            key,
+            true,
+        )
+        .await
+        .unwrap();
+        let transport = CallerOwned::new();
+        let client = NetworkCoordinator::connect(
+            &TrustBundle::new(&genesis).unwrap(),
+            PrivateKey::new(),
+            transport.clone(),
+        )
+        .unwrap();
+
+        transport.refuse_listening(true);
+        voter.clone().serve_clients(transport.clone()).await;
+        transport.refuse_listening(false);
+
+        let serving = tokio::spawn(voter.clone().serve_clients(transport.clone()));
+        assert_eq!(
+            reply_to(transport.deliver(Protocol::Link)).await,
+            Vec::<u8>::new(),
+            "a stream of another protocol is dropped unanswered"
+        );
+        assert_eq!(
+            reply_to(transport.deliver(Protocol::Coordinate)).await,
+            Vec::<u8>::new(),
+            "a connection that sends no request is dropped unanswered"
+        );
+        assert_eq!(
+            client.usage().await.map(drop),
+            Err(CoordinationError::Denied),
+            "an unregistered client is answered with a refusal"
+        );
+        transport.pause_accepting();
+        serving.await.unwrap();
+
+        let aborted = tokio::spawn(voter.clone().serve_clients(transport.clone()));
+        assert_eq!(
+            client.usage().await.map(drop),
+            Err(CoordinationError::Denied),
+            "the caller's transport serves another request"
+        );
+        aborted.abort();
+        assert!(aborted.await.unwrap_err().is_cancelled());
+
+        assert_eq!(
+            transport.closes(),
+            0,
+            "serving clients never closes the transport its caller owns"
         );
     }
 }

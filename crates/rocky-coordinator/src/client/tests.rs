@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    certified::SkewedClock,
     counters::{CLAIM_WINDOW, Claim, Lookup, Name},
     machine::{Metadata, self_certificate_in},
     retention::DAY,
@@ -146,6 +147,9 @@ struct Service {
     scope: Scope,
     publisher: PrivateKey,
     node: PrivateKey,
+    owner: NetworkCoordinator,
+    tenant: PrivateKey,
+    control: Mutex<DomainControl>,
 }
 impl Service {
     async fn start() -> Self {
@@ -184,23 +188,30 @@ impl Service {
             &publisher,
         )
         .unwrap();
-        let control = ControlCertificate::sign(
-            DomainControl {
-                scope,
-                configuration: genesis.genesis.configuration,
-                revision: 1,
-                trusted: vec![node.public_key()],
-                publisher: Some(Box::new(publisher.public_key())),
-                not_before: time - 60,
-                expires: time + 3600,
-            },
-            &tenant,
+        let control = DomainControl {
+            scope,
+            configuration: genesis.genesis.configuration,
+            revision: 1,
+            trusted: vec![node.public_key()],
+            publisher: Some(Box::new(publisher.public_key())),
+            not_before: time - 60,
+            expires: time + 3600,
+        };
+        let owner = NetworkCoordinator::connect(
+            &bundle,
+            tenant.clone(),
+            Arc::new(Lane(memory.clone(), KIND)),
         )
         .unwrap();
-        let owner =
-            NetworkCoordinator::connect(&bundle, tenant, Arc::new(Lane(memory.clone(), KIND)))
-                .unwrap();
-        owner.register(grant, None, control, [1; 32]).await.unwrap();
+        owner
+            .register(
+                grant,
+                None,
+                ControlCertificate::sign(control.clone(), &tenant).unwrap(),
+                [1; 32],
+            )
+            .await
+            .unwrap();
         let memory = match impostor {
             None => memory,
             Some(key) => Arc::new(Memory {
@@ -217,6 +228,27 @@ impl Service {
             scope,
             publisher,
             node,
+            owner,
+            tenant,
+            control: Mutex::new(control),
+        }
+    }
+    async fn pass(&self, clock: &SkewedClock, seconds: u64) {
+        clock.pass(seconds);
+        let time = now().unwrap();
+        let renewed = {
+            let mut control = self.control.lock().unwrap_or_else(PoisonError::into_inner);
+            control.revision += 1;
+            control.not_before = time - 60;
+            control.expires = time + 3600;
+            ControlCertificate::sign(control.clone(), &self.tenant).unwrap()
+        };
+        self.owner.control(renewed, nonce()).await.unwrap();
+    }
+    fn database(&self) -> rocky_credentials::DatabaseContext {
+        rocky_credentials::DatabaseContext {
+            publisher: self.publisher.public_key(),
+            scope: self.scope,
         }
     }
     fn client(&self, key: &PrivateKey) -> NetworkCoordinator {
@@ -271,19 +303,64 @@ async fn a_trusted_node_claims_and_a_retry_returns_the_same_value() {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn the_network_coordinator_meets_the_claim_contract() {
+    let clock = SkewedClock::new();
     let service = Service::start().await;
-    rocky_credentials::testing::claim_contract(&service.client(&service.node), service.scope).await;
+    rocky_credentials::testing::claim_contract(
+        &service.client(&service.node),
+        service.scope,
+        async |seconds| service.pass(&clock, seconds).await,
+    )
+    .await;
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn the_network_coordinator_meets_the_coordinator_contract() {
+    let service = Service::start().await;
+    rocky_credentials::testing::coordinator_contract(
+        &service.client(&service.node),
+        &service.node,
+        service.database(),
+        rocky_credentials::testing::CoordinatorBehaviour {
+            observes_calls: true,
+            denies_untrusted_claims: true,
+        },
+    )
+    .await;
+}
+
+const MEMORY_LOG_SCOPE: Scope = Scope {
+    mesh: MeshId([1; 16]),
+    app: AppId([2; 16]),
+    domain: DomainId([3; 16]),
+};
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn the_memory_log_meets_the_claim_contract() {
-    let client = crate::coordinated::MemoryLog::new().client(PrivateKey::new().public_key());
-    let scope = Scope {
-        mesh: MeshId([1; 16]),
-        app: AppId([2; 16]),
-        domain: DomainId([3; 16]),
-    };
-    rocky_credentials::testing::claim_contract(&client, scope).await;
+    let log = crate::coordinated::MemoryLog::new();
+    rocky_credentials::testing::claim_contract(
+        &log.client(PrivateKey::new().public_key()),
+        MEMORY_LOG_SCOPE,
+        async |seconds| log.advance(seconds),
+    )
+    .await;
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn the_memory_log_meets_the_coordinator_contract() {
+    let trusted = PrivateKey::new();
+    rocky_credentials::testing::coordinator_contract(
+        &crate::coordinated::MemoryLog::new().client(trusted.public_key()),
+        &trusted,
+        rocky_credentials::DatabaseContext {
+            publisher: PrivateKey::new().public_key(),
+            scope: MEMORY_LOG_SCOPE,
+        },
+        rocky_credentials::testing::CoordinatorBehaviour {
+            observes_calls: false,
+            denies_untrusted_claims: false,
+        },
+    )
+    .await;
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

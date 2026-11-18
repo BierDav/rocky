@@ -15,12 +15,8 @@ impl Node {
             return;
         }
         match request {
-            Request::WithIdentity(identity, request) => {
-                Box::pin(crate::identities::supplying(
-                    Some(identity),
-                    self.request(*request, Ok(client)),
-                ))
-                .await;
+            Request::WithIdentity(loan, request) => {
+                Box::pin(loan.supply(self.request(*request, Ok(client)))).await;
             }
             Request::Domain(reply) => {
                 let _ = reply.send(self.domain_info().await);
@@ -251,12 +247,8 @@ impl Node {
             Request::PersonalReset(prf, keep, reply) => {
                 let _ = reply.send(self.reset_personal(prf, keep).await);
             }
-            Request::Unlink(node, identity, reply) => {
-                let _ = reply.send(
-                    crate::identities::supplying(Some(identity), self.unlink(node))
-                        .await
-                        .map(drop),
-                );
+            Request::Unlink(node, reply) => {
+                let _ = reply.send(self.unlink(node).await.map(drop));
             }
             Request::Backup(target, reply) => {
                 let _ = reply.send(self.backup(&target).await);

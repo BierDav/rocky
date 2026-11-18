@@ -183,7 +183,7 @@ pub(crate) enum Request {
     Activity(u64, Reply<crate::ActivityPage>),
     ActivityNext(u64, Reply<crate::ActivityPage>),
 
-    WithIdentity(std::sync::Arc<dyn crate::IdentityProvider>, Box<Request>),
+    WithIdentity(crate::identities::Loan, Box<Request>),
     Network(Reply<crate::NetworkStatus>),
     Peers(Reply<Vec<crate::Peer>>),
     Status(Reply<crate::DatabaseStatus>),
@@ -246,11 +246,7 @@ pub(crate) enum Request {
         crate::ResetKeep,
         Reply<crate::ResetReceipt>,
     ),
-    Unlink(
-        rocky_credentials::PeerId,
-        std::sync::Arc<dyn crate::IdentityProvider>,
-        Reply<()>,
-    ),
+    Unlink(rocky_credentials::PeerId, Reply<()>),
     Backup(std::path::PathBuf, Reply<crate::BackupInventory>),
     RevokeIdentity(
         rocky_credentials::PublicKey,
@@ -597,7 +593,7 @@ impl Request {
             Self::PersonalReset(_, _, reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::Unlink(_, _, reply) => {
+            Self::Unlink(_, reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::Backup(_, reply) => {

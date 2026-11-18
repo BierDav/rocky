@@ -5,7 +5,7 @@ use rocky_credentials::{
 use std::sync::Arc;
 
 tokio::task_local! {
-    static SUPPLIED: Arc<dyn IdentityProvider>;
+    static SUPPLIED: Loan;
 }
 
 pub(crate) async fn supplying<T>(
@@ -13,8 +13,56 @@ pub(crate) async fn supplying<T>(
     call: impl std::future::Future<Output = T>,
 ) -> T {
     match identity {
-        Some(identity) => SUPPLIED.scope(identity, call).await,
+        Some(identity) => Loan::untracked(identity).supply(call).await,
         None => call.await,
+    }
+}
+
+pub(crate) struct Loan {
+    provider: Option<Arc<dyn IdentityProvider>>,
+    returned: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+pub(crate) struct Return(tokio::sync::oneshot::Receiver<()>);
+
+pub(crate) fn lend(provider: Arc<dyn IdentityProvider>) -> (Loan, Return) {
+    let (returned, released) = tokio::sync::oneshot::channel();
+    (
+        Loan {
+            provider: Some(provider),
+            returned: Some(returned),
+        },
+        Return(released),
+    )
+}
+
+impl Loan {
+    pub(crate) fn untracked(provider: Arc<dyn IdentityProvider>) -> Self {
+        Self {
+            provider: Some(provider),
+            returned: None,
+        }
+    }
+    pub(crate) fn signer(&self) -> Option<&dyn IdentityProvider> {
+        self.provider.as_deref()
+    }
+    pub(crate) async fn supply<T>(self, call: impl std::future::Future<Output = T>) -> T {
+        SUPPLIED.scope(self, call).await
+    }
+}
+
+impl Drop for Loan {
+    fn drop(&mut self) {
+        drop(self.provider.take());
+        if let Some(returned) = self.returned.take() {
+            let _ = returned.send(());
+        }
+    }
+}
+
+impl Return {
+    pub(crate) async fn released(self) {
+        let _ = self.0.await;
     }
 }
 
@@ -22,7 +70,7 @@ pub(crate) fn with_identity<T>(
     provider: Arc<dyn IdentityProvider>,
     operation: impl FnOnce() -> T,
 ) -> T {
-    SUPPLIED.sync_scope(provider, operation)
+    SUPPLIED.sync_scope(Loan::untracked(provider), operation)
 }
 
 impl Settings {
@@ -34,8 +82,10 @@ impl Settings {
     }
     fn installing_identity(&self) -> Result<Arc<dyn IdentityProvider>, Failure> {
         let provider = SUPPLIED
-            .try_with(Arc::clone)
-            .map_err(|_| "supply the identity for this call")?;
+            .try_with(|loan| loan.provider.clone())
+            .ok()
+            .flatten()
+            .ok_or("supply the identity for this call")?;
         if provider.public_key()? != self.identity {
             return Err("the identity provider supplies another identity".into());
         }

@@ -912,12 +912,34 @@ impl Session {
         &self,
         request: impl FnOnce(oneshot::Sender<Result<T, Failure>>) -> crate::request::Request,
     ) -> Result<T, Failure> {
-        self.send_signed(None, request).await
+        self.send_lending(None, |_, reply| request(reply)).await
     }
     pub(crate) async fn send_signed<T>(
         &self,
         identity: Option<Arc<dyn crate::IdentityProvider>>,
         request: impl FnOnce(oneshot::Sender<Result<T, Failure>>) -> crate::request::Request,
+    ) -> Result<T, Failure> {
+        self.send_lending(identity, |loan, reply| match loan {
+            Some(loan) => crate::request::Request::WithIdentity(loan, Box::new(request(reply))),
+            None => request(reply),
+        })
+        .await
+    }
+    pub(crate) async fn send_rooted<T>(
+        &self,
+        root: Option<Arc<dyn crate::IdentityProvider>>,
+        request: impl FnOnce(node::Root, oneshot::Sender<Result<T, Failure>>) -> crate::request::Request,
+    ) -> Result<T, Failure> {
+        self.send_lending(root, |loan, reply| request(node::Root::lent(loan), reply))
+            .await
+    }
+    async fn send_lending<T>(
+        &self,
+        provider: Option<Arc<dyn crate::IdentityProvider>>,
+        request: impl FnOnce(
+            Option<crate::identities::Loan>,
+            oneshot::Sender<Result<T, Failure>>,
+        ) -> crate::request::Request,
     ) -> Result<T, Failure> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(ServiceError::Closed("session").into());
@@ -930,19 +952,19 @@ impl Session {
             .budget
             .try_acquire()
             .map_err(|_| "pending call quota")?;
-        self.shared
+        let (loan, returned) = provider.map(crate::identities::lend).unzip();
+        let result = self
+            .shared
             .request(|reply| Command::Request {
                 session: self.id,
                 ending: self.closed.clone(),
-                request: Box::new(match identity {
-                    Some(identity) => {
-                        crate::request::Request::WithIdentity(identity, Box::new(request(reply)))
-                    }
-                    None => request(reply),
-                }),
+                request: Box::new(request(loan, reply)),
             })
-            .await?
-            .map_err(crate::CallFailure::boxed)
+            .await;
+        if let Some(returned) = returned {
+            returned.released().await;
+        }
+        result?.map_err(crate::CallFailure::boxed)
     }
     pub async fn network(&self) -> Result<crate::NetworkStatus, Failure> {
         self.send(crate::request::Request::Network).await
@@ -993,8 +1015,10 @@ impl Session {
         change: crate::request::TipChange,
         root: Option<Arc<dyn crate::IdentityProvider>>,
     ) -> Result<crate::TipStatus, Failure> {
-        self.send(|reply| crate::request::Request::ChangeTip(change, node::Root(root), reply))
-            .await
+        self.send_rooted(root, |root, reply| {
+            crate::request::Request::ChangeTip(change, root, reply)
+        })
+        .await
     }
     pub async fn tip_status(&self) -> Result<crate::TipStatus, Failure> {
         self.change_tip(crate::request::TipChange::Status, None)
@@ -1141,8 +1165,10 @@ impl Session {
         root: Arc<dyn crate::IdentityProvider>,
     ) -> Result<crate::TrustGrant, Failure> {
         let identity = identity.parse()?;
-        self.send(|reply| crate::request::Request::Trust(identity, node::Root(Some(root)), reply))
-            .await
+        self.send_rooted(Some(root), |root, reply| {
+            crate::request::Request::Trust(identity, root, reply)
+        })
+        .await
     }
     pub async fn revoke_trusted(
         &self,
@@ -1158,8 +1184,8 @@ impl Session {
         root: Arc<dyn crate::IdentityProvider>,
         keep: crate::ResetKeep,
     ) -> Result<crate::ResetReceipt, Failure> {
-        self.send(|reply| {
-            crate::request::Request::SignOutEverywhereElse(node::Root(Some(root)), keep, reply)
+        self.send_rooted(Some(root), |root, reply| {
+            crate::request::Request::SignOutEverywhereElse(root, keep, reply)
         })
         .await
     }
@@ -1186,8 +1212,8 @@ impl Session {
         keep: bool,
     ) -> Result<crate::RevocationResult, Failure> {
         let identity = identity.parse()?;
-        self.send(|reply| {
-            crate::request::Request::RevokeIdentity(identity, mode, node::Root(root), keep, reply)
+        self.send_rooted(root, |root, reply| {
+            crate::request::Request::RevokeIdentity(identity, mode, root, keep, reply)
         })
         .await
     }

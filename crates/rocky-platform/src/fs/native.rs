@@ -66,13 +66,6 @@ pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
     Ok(())
 }
 
-pub fn replace_database_not_atomic_in_browser(
-    from: impl AsRef<Path>,
-    to: impl AsRef<Path>,
-) -> io::Result<()> {
-    rename(from, to)
-}
-
 pub fn read_dir(directory: impl AsRef<Path>) -> io::Result<Vec<PathBuf>> {
     let directory = directory.as_ref();
     std::fs::read_dir(directory)?

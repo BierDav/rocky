@@ -246,8 +246,6 @@ impl OpfsSAHPool {
         } else {
             self.header_buffer
                 .fill(0, 0, HEADER_MAX_FILENAME_SIZE as u32);
-            sah.truncate_with_u32(HEADER_OFFSET_DATA as u32)
-                .map_err(OpfsSAHError::Truncate)?;
         }
 
         sah.write_with_js_u8_array_and_options(&self.header_buffer, &read_write_options(0.0))
@@ -316,18 +314,16 @@ impl OpfsSAHPool {
 
     fn delete_file(&self, filename: &str) -> Result<bool> {
         let mut map_filename_to_file = self.map_filename_to_file.borrow_mut();
-        let mut available_files = self.available_files.borrow_mut();
-
-        if let Some(file) = map_filename_to_file.remove(filename) {
-            available_files.push(file);
-            let Some(file) = available_files.last() else {
-                unreachable!();
-            };
-            self.set_associated_filename(&file.handle, None, 0)?;
-            Ok(true)
-        } else {
-            Ok(false)
+        let Some(file) = map_filename_to_file.remove(filename) else {
+            return Ok(false);
+        };
+        if let Err(error) = self.set_associated_filename(&file.handle, None, 0) {
+            map_filename_to_file.insert(filename.into(), file);
+            return Err(error);
         }
+        let flushed = file.handle.flush().map_err(OpfsSAHError::Flush);
+        self.available_files.borrow_mut().push(file);
+        flushed.map(|()| true)
     }
 
     fn has_filename(&self, filename: &str) -> bool {
@@ -369,6 +365,10 @@ impl OpfsSAHPool {
         let file = available_files
             .pop()
             .ok_or_else(|| OpfsSAHError::Generic("No files available in the pool".into()))?;
+        if let Err(error) = file.handle.truncate_with_u32(HEADER_OFFSET_DATA as u32) {
+            available_files.push(file);
+            return Err(OpfsSAHError::Truncate(error));
+        }
         map_filename_to_file.insert(filename.into(), file);
 
         let Some(file) = map_filename_to_file.get(filename) else {
@@ -969,17 +969,24 @@ impl OpfsSAHPoolUtil {
             .unwrap_or_else(|| Err(OpfsSAHError::Generic(format!("{filename} not found"))))
     }
 
-    pub fn rename_not_atomically(&self, from: &str, to: &str) -> Result<()> {
-        self.pool.delete_file(to)?;
+    pub fn rename(&self, from: &str, to: &str) -> Result<()> {
         let mut files = self.pool.map_filename_to_file.borrow_mut();
+        if files.contains_key(to) {
+            return Err(OpfsSAHError::Generic(format!("{to} file already exists")));
+        }
         let file = files
             .remove(from)
             .ok_or_else(|| OpfsSAHError::Generic(format!("{from} not found")))?;
-        self.pool
-            .set_associated_filename(&file.handle, Some(to), SQLITE_OPEN_MAIN_DB)?;
-        file.handle.flush().map_err(OpfsSAHError::Flush)?;
+        if let Err(error) =
+            self.pool
+                .set_associated_filename(&file.handle, Some(to), SQLITE_OPEN_MAIN_DB)
+        {
+            files.insert(from.into(), file);
+            return Err(error);
+        }
+        let flushed = file.handle.flush().map_err(OpfsSAHError::Flush);
         files.insert(to.into(), file);
-        Ok(())
+        flushed
     }
 
     pub fn size(&self, filename: &str) -> Result<Option<u64>> {
@@ -1038,11 +1045,73 @@ pub async fn install<C: OsCallback>(
 #[cfg(all(test, target_arch = "wasm32"))]
 mod tests {
     use super::{
-        OpfsSAHPool, OpfsSAHPoolCfgBuilder, SyncAccessFile, SyncAccessHandleAppData,
-        SyncAccessHandleStore,
+        HEADER_MAX_FILENAME_SIZE, OpfsSAHPool, OpfsSAHPoolCfgBuilder, OpfsSAHPoolUtil,
+        SyncAccessFile, SyncAccessHandleAppData, SyncAccessHandleStore,
     };
     use rsqlite_vfs::{VfsAppData, test_suite::test_vfs_store};
     use wasm_bindgen_test::wasm_bindgen_test;
+
+    async fn fresh_pool(name: &str) -> OpfsSAHPoolUtil {
+        super::install::<rocky_sqlite::WasmOsCallback>(
+            &OpfsSAHPoolCfgBuilder::new()
+                .vfs_name(name)
+                .directory(name)
+                .clear_on_init(true)
+                .initial_capacity(4)
+                .build(),
+            false,
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn reread(pool: &OpfsSAHPoolUtil) -> Vec<String> {
+        pool.pause_vfs().unwrap();
+        pool.unpause_vfs().await.unwrap();
+        let mut names = pool.list();
+        names.sort();
+        names
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_rename_never_takes_a_named_slot_and_a_refused_one_keeps_the_old_name() {
+        let pool = fresh_pool("test_opfs_rename").await;
+        pool.write("live", b"old").unwrap();
+        pool.write("staged", b"new").unwrap();
+        let capacity = pool.get_capacity();
+
+        assert!(pool.rename("staged", "live").is_err());
+        let unwritable = "n".repeat(HEADER_MAX_FILENAME_SIZE);
+        assert!(pool.rename("staged", &unwritable).is_err());
+        assert!(
+            pool.exists("staged").unwrap(),
+            "a failed rename keeps the slot"
+        );
+        assert_eq!(reread(&pool).await, ["live", "staged"]);
+        assert_eq!(pool.get_capacity(), capacity, "no slot was lost or doubled");
+        assert_eq!(pool.export_db("live").unwrap(), b"old");
+        assert_eq!(pool.export_db("staged").unwrap(), b"new");
+
+        pool.rename("staged", "moved").unwrap();
+        assert_eq!(reread(&pool).await, ["live", "moved"]);
+        assert_eq!(pool.export_db("moved").unwrap(), b"new");
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_deleted_file_stays_unnamed_when_the_pool_is_read_again() {
+        let pool = fresh_pool("test_opfs_delete").await;
+        pool.write("kept", b"kept").unwrap();
+        pool.write("gone", b"gone").unwrap();
+        let capacity = pool.get_capacity();
+
+        assert!(pool.delete_db("gone").unwrap());
+        assert!(!pool.delete_db("gone").unwrap());
+        assert_eq!(reread(&pool).await, ["kept"]);
+        assert_eq!(pool.get_capacity(), capacity);
+        pool.write("gone", b"again").unwrap();
+        assert_eq!(reread(&pool).await, ["gone", "kept"]);
+        assert_eq!(pool.export_db("gone").unwrap(), b"again");
+    }
 
     #[wasm_bindgen_test]
     async fn test_opfs_vfs_store() {

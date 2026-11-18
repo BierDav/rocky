@@ -111,25 +111,45 @@ async fn one_owner_per_file() {
 }
 
 #[wasm_bindgen_test(unsupported = tokio::test)]
-async fn only_the_named_replacement_moves_a_database_where_a_browser_cannot_rename_atomically() {
+async fn a_database_renames_to_a_free_name_and_only_natively_over_a_taken_one() {
     let scratch = fs::Scratch::new().await;
     let database = scratch.path().join("live.sqlite");
     let staged = scratch.path().join("staged.sqlite");
+    let plain = scratch.path().join("plain");
     fs::prepare(&database).await.unwrap();
+    fs::write_database(&database, b"old").unwrap();
     fs::write_database(&staged, b"staged").unwrap();
-    let renamed = fs::rename(&staged, &database);
+    fs::write(&plain, b"plain").unwrap();
+    fs::rename(&plain, &plain).unwrap();
+    fs::rename(&database, &database).unwrap();
+    assert_eq!(
+        (fs::read(&plain).unwrap(), fs::read(&database).unwrap()),
+        (b"plain".to_vec(), b"old".to_vec()),
+        "renaming a file to its own name keeps it"
+    );
+
+    let over_a_database = fs::rename(&staged, &database);
     if cfg!(target_family = "wasm") {
-        assert_eq!(
-            renamed.unwrap_err().kind(),
-            std::io::ErrorKind::InvalidInput,
-            "an atomic rename refuses a database in the browser"
-        );
-        fs::replace_database_not_atomic_in_browser(&staged, &database).unwrap();
+        for refused in [
+            over_a_database,
+            fs::rename(&staged, &plain),
+            fs::rename(&plain, &database),
+        ] {
+            assert_eq!(
+                refused.unwrap_err().kind(),
+                std::io::ErrorKind::AlreadyExists,
+                "a browser rename neither replaces a database nor moves one onto a taken name"
+            );
+        }
+        assert_eq!(fs::read(&database).unwrap(), b"old");
+        assert_eq!(fs::read(&plain).unwrap(), b"plain");
+        fs::remove_file(&database).unwrap();
+        fs::rename(&staged, &database).unwrap();
     } else {
-        renamed.unwrap();
+        over_a_database.unwrap();
     }
     assert!(fs::exists(&database) && !fs::exists(&staged));
-    assert_eq!(fs::len(&database).unwrap(), 6);
+    assert_eq!(fs::read(&database).unwrap(), b"staged");
 }
 
 #[wasm_bindgen_test(unsupported = tokio::test)]

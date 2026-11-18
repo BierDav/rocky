@@ -62,5 +62,15 @@ connections to a file could see each other's unfinished pages. OPFS access
 handles already exclude other workers and tabs; the lock state is plain safe
 Rust with unit tests, and the callbacks only translate pointers and codes.
 `OpfsSAHPoolUtil` gains `write`, `flush`, `rename` and `size` for
-`rocky_platform::fs`. The IndexedDB VFS is removed. `rocky-storage`'s
-`files::tests` run the same WAL and locking test natively and in Firefox.
+`rocky_platform::fs`. A slot's name lives in its header. Every delete,
+SQLite's own (such as a `-wal` on the last close) and `delete_db`, clears that
+header and flushes it before it returns, and leaves the slot's data until the
+slot is handed out again, so a delete cut short never leaves a named empty
+file. `rename` refuses a name another slot
+holds, writes the new name in one header write and flushes it; if the write
+fails, the slot keeps its old name. So no two slots hold one name in memory,
+and a delete or rename that succeeded was flushed before its name could go to
+another slot. That a flushed header survives power loss is the browser's
+promise, which no test here shows. The IndexedDB VFS is removed.
+`rocky-storage`'s `files::tests` run the same WAL and locking test natively
+and in Firefox.

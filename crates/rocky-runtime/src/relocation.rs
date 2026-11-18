@@ -166,7 +166,7 @@ async fn write(
 ) -> Result<(), Error> {
     conn.execute("BEGIN IMMEDIATE", ()).await?;
     let result = body(conn).await;
-    storage::finish(conn, result).await
+    storage::finish(conn.connection(), result).await
 }
 async fn migrations(catalog: &ScopedConnection) -> Result<Vec<Migration>, Error> {
     let rows = storage::rows(

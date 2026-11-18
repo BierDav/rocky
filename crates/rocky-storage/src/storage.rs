@@ -216,8 +216,12 @@ pub fn retryable(e: &Error) -> bool {
 }
 
 pub const TRANSACTION_ATTEMPTS: usize = 10;
+const FIRST_BACKOFF_MILLIS: u64 = 2;
+const BACKOFF_DOUBLINGS_BEFORE_PLATEAU: usize = 5;
 pub fn backoff(attempt: usize) -> std::time::Duration {
-    std::time::Duration::from_millis(2 << attempt.min(5))
+    std::time::Duration::from_millis(
+        FIRST_BACKOFF_MILLIS << attempt.min(BACKOFF_DOUBLINGS_BEFORE_PLATEAU),
+    )
 }
 pub const READ_TRANSACTION_BOUND: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -270,51 +274,159 @@ pub fn bindings(values: Vec<SqlValue>) -> Vec<sqlite::Value> {
         })
         .collect()
 }
-pub async fn finish_raw<T>(
-    conn: &sqlite::Connection,
-    result: Result<T, Error>,
-) -> Result<T, Error> {
-    let result = match result {
+pub async fn finish<T>(conn: &sqlite::Connection, result: Result<T, Error>) -> Result<T, Error> {
+    let cause = match result {
         Ok(value) => match conn.execute("COMMIT", ()).await {
             Ok(_) => return Ok(value),
-            Err(e) => Err(Error::from(e)),
+            Err(commit) => Error::from(commit),
         },
-        Err(e) => Err(e),
-    };
-    if conn.is_autocommit()? {
-        return result;
-    }
-    if let Err(rollback) = conn.execute("ROLLBACK", ()).await {
-        return Err(Error::Rollback {
-            cause: result.err().map(|e| e.to_string()).unwrap_or_default(),
-            rollback: rollback.into(),
-        });
-    }
-    result
-}
-pub async fn finish<T>(conn: &Connection, result: Result<T, Error>) -> Result<T, Error> {
-    let result = match result {
-        Ok(value) => match conn.execute("COMMIT", ()).await {
-            Ok(_) => return Ok(value),
-            Err(e) => Err(Error::from(e)),
-        },
-        Err(e) => Err(e),
+        Err(cause) => cause,
     };
     let sqlite_already_ended_transaction = conn.is_autocommit()?;
     if sqlite_already_ended_transaction {
-        return result;
+        return Err(cause);
     }
-    if let Err(rollback) = conn.execute("ROLLBACK", ()).await {
-        return Err(Error::Rollback {
-            cause: result.err().map(|e| e.to_string()).unwrap_or_default(),
+    match conn.execute("ROLLBACK", ()).await {
+        Ok(_) => Err(cause),
+        Err(rollback) => Err(Error::Rollback {
+            cause: cause.to_string(),
             rollback: rollback.into(),
-        });
+        }),
     }
-    result
 }
 
 impl From<rocky_core::CoordinationError> for Error {
     fn from(e: rocky_core::CoordinationError) -> Self {
         Self::Coordination(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SCHEMA: &[&str] = &[
+        "CREATE TABLE parent(id INTEGER PRIMARY KEY)",
+        "CREATE TABLE child(parent INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)",
+    ];
+
+    enum Body {
+        Succeeds,
+        Fails,
+        ViolatesDeferredForeignKey,
+        RollsBackItselfThenFails,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct Outcome {
+        result: Result<i64, &'static str>,
+        children: Vec<Vec<SqlValue>>,
+        transaction_open: bool,
+    }
+
+    async fn run(body: Body) -> Outcome {
+        let conn = Connection::new(
+            sqlite::Connection::open_in_memory().unwrap(),
+            Some("scope"),
+            SCHEMA,
+        );
+        conn.execute("PRAGMA foreign_keys=ON", ()).await.unwrap();
+        for sql in SCHEMA {
+            conn.execute(sql, ()).await.unwrap();
+        }
+        conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
+        let result = match body {
+            Body::Succeeds => {
+                conn.execute("INSERT INTO parent(id) VALUES(1)", ())
+                    .await
+                    .unwrap();
+                conn.execute("INSERT INTO child(parent) VALUES(1)", ())
+                    .await
+                    .unwrap();
+                Ok(7)
+            }
+            Body::Fails => {
+                conn.execute("INSERT INTO parent(id) VALUES(1)", ())
+                    .await
+                    .unwrap();
+                conn.execute("INSERT INTO child(parent) VALUES(1)", ())
+                    .await
+                    .unwrap();
+                Err(Error::Conflict)
+            }
+            Body::ViolatesDeferredForeignKey => {
+                conn.execute("INSERT INTO child(parent) VALUES(9)", ())
+                    .await
+                    .unwrap();
+                Ok(7)
+            }
+            Body::RollsBackItselfThenFails => {
+                conn.execute("ROLLBACK", ()).await.unwrap();
+                Err(Error::Conflict)
+            }
+        };
+        let result = finish(conn.connection(), result).await;
+        Outcome {
+            result: result.map_err(|error| error.category()),
+            children: rows(&conn, "SELECT parent FROM child").await.unwrap(),
+            transaction_open: !conn.is_autocommit().unwrap(),
+        }
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_successful_body_commits_its_writes_and_returns_its_value() {
+        assert_eq!(
+            run(Body::Succeeds).await,
+            Outcome {
+                result: Ok(7),
+                children: vec![vec![SqlValue::Integer(1)]],
+                transaction_open: false,
+            },
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_failed_body_rolls_back_and_returns_its_own_error() {
+        assert_eq!(
+            run(Body::Fails).await,
+            Outcome {
+                result: Err("conflict"),
+                children: Vec::new(),
+                transaction_open: false,
+            },
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_refused_commit_rolls_back_and_returns_the_storage_error() {
+        assert_eq!(
+            run(Body::ViolatesDeferredForeignKey).await,
+            Outcome {
+                result: Err("storage"),
+                children: Vec::new(),
+                transaction_open: false,
+            },
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_transaction_already_ended_before_finish_is_not_rolled_back_again() {
+        assert_eq!(
+            run(Body::RollsBackItselfThenFails).await,
+            Outcome {
+                result: Err("conflict"),
+                children: Vec::new(),
+                transaction_open: false,
+            },
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn backoff_doubles_from_two_milliseconds_and_stops_at_sixty_four() {
+        let millis: Vec<_> = (0..TRANSACTION_ATTEMPTS)
+            .map(|attempt| backoff(attempt).as_millis())
+            .collect();
+        assert_eq!(millis, [2, 4, 8, 16, 32, 64, 64, 64, 64, 64]);
+        assert_eq!(backoff(usize::MAX).as_millis(), 64);
     }
 }

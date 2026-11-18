@@ -315,7 +315,7 @@ where
         }
         .await;
         if let Err(error) = initialization {
-            return finish(&conn, Err(error)).await;
+            return finish(conn.connection(), Err(error)).await;
         }
         let mut worker = Self {
             writer: conn,
@@ -388,7 +388,7 @@ where
             Ok(())
         }
         .await;
-        finish(worker.conn(), migration).await?;
+        finish(worker.conn().connection(), migration).await?;
         worker.cascades = cascades(worker.conn(), &worker.schema.statements).await?;
         worker
             .transaction(async |worker| worker.restore(true).await)
@@ -605,7 +605,7 @@ where
                         },
                         Err(error) => Err(error),
                     };
-                    finish(self.conn(), result).await
+                    finish(self.conn().connection(), result).await
                 }
                 Err(error) => Err(Error::from(error)),
             };
@@ -639,7 +639,7 @@ where
                 Ok(()) => match self.conn().execute("BEGIN", ()).await {
                     Ok(_) => {
                         let result = body(self).await;
-                        finish(self.conn(), result).await
+                        finish(self.conn().connection(), result).await
                     }
                     Err(error) => Err(Error::from(error)),
                 },

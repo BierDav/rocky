@@ -31,7 +31,7 @@ macro_rules! transaction {
                         Ok(value)
                     }
                     .await;
-                    $crate::storage::finish(&owner.conn, result).await
+                    $crate::storage::finish(owner.conn.connection(), result).await
                 }
                 Err(error) => Err($crate::Error::from(error)),
             };

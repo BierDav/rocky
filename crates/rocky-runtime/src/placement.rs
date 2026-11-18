@@ -215,7 +215,7 @@ async fn prepare<A: StoredApplication>(
         }
         Ok(())
     }.await;
-    storage::finish(&catalog, result).await?;
+    storage::finish(catalog.connection(), result).await?;
     let mut jobs = Vec::new();
     for (index, owner, conn, binding) in opened {
         let pending: Vec<_> = selected[&index]
@@ -322,7 +322,7 @@ async fn prepare<A: StoredApplication>(
                     Ok(())
                 }
                 .await;
-                storage::finish(&catalog, marked).await?;
+                storage::finish(catalog.connection(), marked).await?;
             }
             result.push((index, (owner, conn.into_connection()?)));
         }

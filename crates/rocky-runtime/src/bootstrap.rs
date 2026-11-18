@@ -68,7 +68,7 @@ pub(crate) async fn install(
         root.execute("INSERT OR IGNORE INTO rocky_bootstrap VALUES(1,?,?,0)", sqlite::params![binding.to_vec(), hash.to_vec()]).await?;
         Ok(())
     }.await;
-    storage::finish(root, result).await?;
+    storage::finish(root.connection(), result).await?;
     let recorded = storage::rows(
         root,
         "SELECT binding,plan,position FROM rocky_bootstrap WHERE id=1",
@@ -110,7 +110,7 @@ pub(crate) async fn install(
             Ok(())
         }
         .await;
-        storage::finish(root, result).await?;
+        storage::finish(root.connection(), result).await?;
         position = end;
         #[cfg(test)]
         if ABORT_AFTER_STEP.load(std::sync::atomic::Ordering::Relaxed) {
@@ -128,7 +128,7 @@ pub(crate) async fn install(
         Ok(())
     }
     .await;
-    storage::finish(root, result).await
+    storage::finish(root.connection(), result).await
 }
 #[cfg(test)]
 pub(crate) static ABORT_AFTER_STEP: std::sync::atomic::AtomicBool =

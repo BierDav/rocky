@@ -116,7 +116,7 @@ async fn rebind(
             Ok(())
         }
         .await;
-        crate::storage::finish(&conn, result).await?;
+        crate::storage::finish(conn.connection(), result).await?;
         drop(owner);
         Ok(())
     }

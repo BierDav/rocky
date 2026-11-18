@@ -619,7 +619,7 @@ where
             self.synchronous(&conn, true).await?;
             self.begin(&conn).await?;
             let written = change_header_page(&conn).await;
-            storage::finish_raw(&conn, written).await
+            storage::finish(&conn, written).await
         }
         .await;
         let restored = self.synchronous(&conn, false).await;

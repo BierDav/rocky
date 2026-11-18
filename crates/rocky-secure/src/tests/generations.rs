@@ -81,6 +81,8 @@ pub(super) struct Lineage {
     pub(super) partitioned: bool,
     pub(super) linked: bool,
     pub(super) children_first: bool,
+    pub(super) local_draft: bool,
+    pub(super) local_note_from: Option<u32>,
 }
 impl Lineage {
     pub(super) async fn root(&self, replica: &EncryptedReplica<TypedRows>) -> Result<u32, Error> {
@@ -214,6 +216,8 @@ impl Lineage {
             partitioned: false,
             linked: false,
             children_first: false,
+            local_draft: false,
+            local_note_from: None,
         }
     }
     fn schema(&self, generation: u32) -> LogicalSchema {
@@ -222,10 +226,26 @@ impl Lineage {
             column("title", Affinity::Text, true),
         ];
         if matches!(generation, 2 | 3 | 5) {
-            items.push(column("note", Affinity::Text, false));
+            let note = column("note", Affinity::Text, false);
+            items.push(
+                if self.local_note_from.is_some_and(|from| generation >= from) {
+                    LogicalColumn {
+                        class: ColumnClass::LocalOnly,
+                        ..note
+                    }
+                } else {
+                    note
+                },
+            );
         }
         if generation >= 3 {
             items.push(column("rank", Affinity::Integer, false));
+        }
+        if self.local_draft {
+            items.push(LogicalColumn {
+                class: ColumnClass::LocalOnly,
+                ..column("draft", Affinity::Text, false)
+            });
         }
         let mut tables = vec![table("items", items)];
         if matches!(generation, 2 | 3) {

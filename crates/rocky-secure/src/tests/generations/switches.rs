@@ -675,3 +675,140 @@ async fn a_readded_field_never_receives_a_value_written_before_its_removal() {
     );
     erin.audit(items).await.unwrap();
 }
+
+async fn with_a_draft(
+    lineage: &Lineage,
+    dir: &Scratch,
+    key: &PrivateKey,
+) -> EncryptedReplica<TypedRows> {
+    let alice = lineage
+        .open(&dir.path().join("alice.db"), key, 3, None)
+        .await
+        .unwrap();
+    super::super::compaction::follow_main(lineage, &alice).await;
+    identity_insert(
+        &session(&alice).await,
+        "INSERT INTO items(key,title,note) VALUES('0001','title','noted')",
+        vec![],
+    )
+    .await
+    .unwrap();
+    write(&alice, "UPDATE items SET draft='mine' WHERE key='0001'").await;
+    alice
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_switch_that_removes_a_field_keeps_local_values_of_the_rows_it_rebuilds() {
+    let mut lineage = Lineage::new();
+    lineage.local_draft = true;
+    let dir = Scratch::new().await;
+    let key = PrivateKey::new();
+    let alice = with_a_draft(&lineage, &dir, &key).await;
+    let drafts = "SELECT key,draft FROM items";
+    let kept = vec![vec![text("0001"), text("mine")]];
+    assert_eq!(select(&alice, drafts).await, kept);
+    assert!(
+        lineage
+            .advance(&alice, lineage.config(4, &key), 4)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        select(&alice, drafts).await,
+        kept,
+        "a local value is no field of the switch path and stays on its row"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_switch_that_removes_a_field_keeps_local_values_in_the_undo_of_unsealed_writes() {
+    let mut lineage = Lineage::new();
+    lineage.local_draft = true;
+    let dir = Scratch::new().await;
+    let key = PrivateKey::new();
+    let alice = with_a_draft(&lineage, &dir, &key).await;
+    let writer = session(&alice).await;
+    writer.run("BEGIN", vec![]).await.unwrap();
+    writer
+        .run(
+            "UPDATE items SET title='retitled',draft='new' WHERE key='0001'",
+            vec![],
+        )
+        .await
+        .unwrap();
+    identity_insert(&writer, "INSERT INTO tags VALUES('t','label')", vec![])
+        .await
+        .unwrap();
+    writer.run("COMMIT", vec![]).await.unwrap();
+    drop(writer);
+    assert!(
+        lineage
+            .advance(&alice, lineage.config(4, &key), 4)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        select(&alice, "SELECT key,title,draft FROM items").await,
+        vec![vec![text("0001"), text("title"), text("mine")]],
+        "a write the switch drops is rewound through its undo, which restores the local value"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_replicated_field_back_as_a_local_one_starts_empty_on_any_path() {
+    let mut lineage = Lineage::new();
+    lineage.local_note_from = Some(5);
+    let dir = Scratch::new().await;
+    let (alice_key, bob_key) = (PrivateKey::new(), PrivateKey::new());
+    let alice = lineage
+        .open(&dir.path().join("alice.db"), &alice_key, 3, None)
+        .await
+        .unwrap();
+    let bob = lineage
+        .open(&dir.path().join("bob.db"), &bob_key, 3, None)
+        .await
+        .unwrap();
+    super::super::compaction::follow_main(&lineage, &alice).await;
+    crate::tests::exchange_graphs(&alice, &bob, lineage.domain).await;
+    identity_insert(
+        &session(&alice).await,
+        "INSERT INTO items(key,title,note) VALUES('0001','title','replicated')",
+        vec![],
+    )
+    .await
+    .unwrap();
+    sync(&lineage, &alice, &bob, &bob_key).await;
+    let notes = "SELECT key,note FROM items";
+    assert_eq!(
+        select(&bob, notes).await,
+        vec![vec![text("0001"), text("replicated")]]
+    );
+    for version in [4, 5] {
+        let statements = lineage.publish(&alice, version).await.unwrap();
+        assert!(
+            lineage
+                .follow(
+                    &alice,
+                    lineage.config(version, &alice_key),
+                    version,
+                    &statements
+                )
+                .await
+                .unwrap()
+        );
+    }
+    let statements = crate::tests::all_tip_statements(&alice).await;
+    assert!(
+        lineage
+            .follow(&bob, lineage.config(5, &bob_key), 5, &statements)
+            .await
+            .unwrap()
+    );
+    let empty = vec![vec![text("0001"), SqlValue::Null]];
+    assert_eq!(select(&alice, notes).await, empty);
+    assert_eq!(
+        select(&bob, notes).await,
+        empty,
+        "a local column only keeps values it held as a local column"
+    );
+}

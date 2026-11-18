@@ -225,25 +225,24 @@ fn numbered(dir: &Path) -> Result<Vec<(u64, PathBuf)>, CoordinationError> {
     files.sort();
     Ok(files)
 }
-fn copy_store(from: &Path, to: &Path) -> Result<(), CoordinationError> {
+fn copy_store_without_state(from: &Path, to: &Path) -> Result<(), CoordinationError> {
     let fail = |_| CoordinationError::Corrupt;
-    for dir in ["", "log", "snapshots"] {
-        std::fs::create_dir_all(to.join(dir)).map_err(fail)?;
-    }
-    for name in ["PROVISIONED", "state.cbor"] {
-        std::fs::copy(from.join(name), to.join(name)).map_err(fail)?;
-    }
+    let copy_synced = |source: &Path, target: &Path| {
+        std::fs::copy(source, target)
+            .and_then(|_| File::open(target))
+            .and_then(|f| f.sync_all())
+            .map_err(fail)
+    };
+    std::fs::create_dir_all(to).map_err(fail)?;
+    copy_synced(&from.join(PROVISIONED), &to.join(PROVISIONED))?;
+    sync_directory(to).map_err(fail)?;
     for dir in ["log", "snapshots"] {
+        std::fs::create_dir_all(to.join(dir)).map_err(fail)?;
         for (index, source) in numbered(&from.join(dir))? {
-            std::fs::copy(&source, to.join(dir).join(file_name(index))).map_err(fail)?;
+            copy_synced(&source, &to.join(dir).join(file_name(index)))?;
         }
         File::open(to.join(dir))
             .and_then(|d| d.sync_all())
-            .map_err(fail)?;
-    }
-    for name in ["PROVISIONED", "state.cbor"] {
-        File::open(to.join(name))
-            .and_then(|f| f.sync_all())
             .map_err(fail)?;
     }
     sync_directory(to).map_err(fail)
@@ -728,7 +727,13 @@ impl Store {
         if out.exists() {
             return Err(CoordinationError::Configuration);
         }
-        copy_store(path, out)?;
+        copy_store_without_state(path, out)?;
+        atomic_write(
+            &out.join("state.cbor"),
+            &read(&path.join("state.cbor"))?,
+            "backup.state",
+        )
+        .map_err(|_| CoordinationError::Corrupt)?;
         atomic_write(&out.join(BACKUP), &seal(BACKUP_LABEL, &backup)?, "backup")
             .map_err(|_| CoordinationError::Corrupt)?;
         Ok(backup)
@@ -747,21 +752,28 @@ impl Store {
             return Err(CoordinationError::Configuration);
         }
         check_store_format(backup, true)?;
-        copy_store(backup, path)?;
-        let state = path.join("state.cbor");
-        let mut hard: Hard = unseal(STATE_LABEL, &read(&state)?)?;
+        let mut hard: Hard = unseal(STATE_LABEL, &read(&backup.join("state.cbor"))?)?;
         if hard.identity != manifest.identity {
             return Err(CoordinationError::Configuration);
         }
         hard.vote = hard.vote.map(as_follower);
-        atomic_write(&state, &seal(STATE_LABEL, &hard)?, "restore")
-            .map_err(|_| CoordinationError::Corrupt)?;
         let fence = Fence {
             index: manifest.index,
             learner: false,
         };
-        atomic_write(&path.join(FENCE), &seal(FENCE_LABEL, &fence)?, "restore")
-            .map_err(|_| CoordinationError::Corrupt)?;
+        copy_store_without_state(backup, path)?;
+        atomic_write(
+            &path.join(FENCE),
+            &seal(FENCE_LABEL, &fence)?,
+            "restore.fence",
+        )
+        .map_err(|_| CoordinationError::Corrupt)?;
+        atomic_write(
+            &path.join("state.cbor"),
+            &seal(STATE_LABEL, &hard)?,
+            "restore.state",
+        )
+        .map_err(|_| CoordinationError::Corrupt)?;
         Ok(manifest)
     }
     pub async fn desired_voters(&self) -> std::collections::BTreeSet<u64> {

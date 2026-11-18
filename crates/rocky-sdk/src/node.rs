@@ -638,7 +638,7 @@ impl Node {
             return Err(refused("this device logged out of the domain"));
         }
         let issuer = self.settings.lock().await.issuer();
-        let key = Settings::transport_key(&self.vault)?;
+        let key = Settings::route_secret(&self.vault)?;
         let (transport, owned) = network.start(issuer, key).await?;
         self.install(&mut slot, transport, owned)
     }

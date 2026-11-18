@@ -268,9 +268,13 @@ struct Counting {
     starts: AtomicUsize,
 }
 impl Connector for Counting {
-    fn start(&self, accepts: bool, secret: [u8; 32]) -> BoxFuture<'_, Result<Connected, Failure>> {
+    fn start(
+        &self,
+        accepts: bool,
+        route_secret: [u8; 32],
+    ) -> BoxFuture<'_, Result<Connected, Failure>> {
         self.starts.fetch_add(1, Ordering::SeqCst);
-        self.inner.start(accepts, secret)
+        self.inner.start(accepts, route_secret)
     }
 }
 fn files(directory: &Path) -> Result<BTreeMap<std::path::PathBuf, Vec<u8>>, Failure> {

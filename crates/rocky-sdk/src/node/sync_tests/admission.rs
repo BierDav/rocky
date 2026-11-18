@@ -106,3 +106,59 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
         })
         .await
 }
+
+#[tokio::test]
+async fn a_transport_secret_identifies_a_route_never_authority() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let writer = Profile::Writer {
+                scopes: ["items".into()].into(),
+            };
+            let b = enrolled(&root.path().join("b"), &hub, "b", Some((&a, writer))).await?;
+            let route_secret = Settings::route_secret(&b.vault)?;
+            let node = PrivateKey::from_bytes(&b.vault.get("node")?);
+            assert_ne!(
+                &route_secret,
+                node.as_bytes(),
+                "the transport secret is its own vault role, never the node key"
+            );
+            let chain = b.settings.lock().await.credentials.clone();
+            let replica = EncryptedReplica::open(
+                root.path().join("impostor.sqlite"),
+                b.domain().app.clone(),
+                b.settings.lock().await.config(&b.vault, &b.domain())?,
+            )
+            .await?;
+            let impostor = hub.connector("impostor").start(false, route_secret).await?;
+            let own = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
+            let stream = impostor.connect("a", Protocol::Link, None).await?;
+            let presented = match Link::open(
+                stream,
+                &replica,
+                PrivateKey::from_bytes(&route_secret),
+                chain.clone(),
+                Some(own),
+            )
+            .await
+            {
+                Ok(mut opened) => opened.ready(false).await.map(|_| opened),
+                Err(error) => Err(error),
+            };
+            assert!(
+                presented.is_err(),
+                "b's transport secret with b's own chain signs as no member"
+            );
+            let stream = impostor.connect("a", Protocol::Link, None).await?;
+            let mut admitted = Link::open(stream, &replica, node, chain, Some(own)).await?;
+            admitted.ready(false).await?;
+            drop(admitted);
+            impostor.close().await;
+            b.detach(None).await;
+            a.detach(None).await;
+            Ok(())
+        })
+        .await
+}

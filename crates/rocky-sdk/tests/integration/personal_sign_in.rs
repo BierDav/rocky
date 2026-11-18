@@ -727,9 +727,13 @@ fn leave_intent_as_after_a_crash(path: &Path, intent: &[u8]) -> std::io::Result<
     std::fs::write(path.join("personal.intent"), intent)
 }
 impl Connector for Losing {
-    fn start(&self, accepts: bool, secret: [u8; 32]) -> BoxFuture<'_, Result<Connected, Failure>> {
+    fn start(
+        &self,
+        accepts: bool,
+        route_secret: [u8; 32],
+    ) -> BoxFuture<'_, Result<Connected, Failure>> {
         Box::pin(async move {
-            let started = self.inner.start(accepts, secret).await?;
+            let started = self.inner.start(accepts, route_secret).await?;
             Ok(Connected {
                 transport: Arc::new(LosingTransport {
                     inner: started.transport,
@@ -1063,9 +1067,13 @@ struct Forging {
     times: usize,
 }
 impl Connector for Forging {
-    fn start(&self, accepts: bool, secret: [u8; 32]) -> BoxFuture<'_, Result<Connected, Failure>> {
+    fn start(
+        &self,
+        accepts: bool,
+        route_secret: [u8; 32],
+    ) -> BoxFuture<'_, Result<Connected, Failure>> {
         Box::pin(async move {
-            let started = self.inner.start(accepts, secret).await?;
+            let started = self.inner.start(accepts, route_secret).await?;
             Ok(Connected {
                 transport: Arc::new(ForgingTransport {
                     inner: started.transport,

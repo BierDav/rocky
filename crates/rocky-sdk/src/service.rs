@@ -14,10 +14,10 @@ impl Network {
     pub(crate) async fn start(
         self,
         accepts: bool,
-        secret: [u8; 32],
+        route_secret: [u8; 32],
     ) -> Result<(Connected, bool), Failure> {
         Ok(match self {
-            Self::Owned(connector) => (connector.start(accepts, secret).await?, true),
+            Self::Owned(connector) => (connector.start(accepts, route_secret).await?, true),
             Self::Borrowed(transport) => (Connected::new(transport), false),
             Self::Attached(connected) => (connected, false),
         })

@@ -156,7 +156,7 @@ pub(crate) async fn install(
                 Ok((settings, coverage)) => {
                     let link = match network {
                         Some(network) => {
-                            let key = Settings::transport_key(&settings.vault(secrets))?;
+                            let key = Settings::route_secret(&settings.vault(secrets))?;
                             Some(network.start(true, key).await?)
                         }
                         None => None,
@@ -168,18 +168,17 @@ pub(crate) async fn install(
         }
         SignInSource::Discover => {
             let network = network.ok_or(PersonalSignInError::SourceUnavailable)?;
-            let (node, transport_key) = match Installing::saved_keys(directory, secrets, &account)?
-            {
+            let (node, route_secret) = match Installing::saved_keys(directory, secrets, &account)? {
                 Some(keys) => keys,
                 None => (PrivateKey::new(), rocky_platform::entropy::random()),
             };
-            let (transport, owned) = network.start(true, transport_key).await?;
+            let (transport, owned) = network.start(true, route_secret).await?;
             let installed = discovered(
                 (path, directory),
                 secrets,
                 schema,
                 &account,
-                (&node, transport_key),
+                (&node, route_secret),
                 (&transport, sign_in.wait),
             )
             .await;
@@ -241,7 +240,7 @@ async fn discover(
     let _ = discovery.announce(own, &[]).await;
     let mut candidates: Vec<Candidate> = Vec::new();
     for found in hints {
-        if found.node == own
+        if found.claimed_node == own
             || candidates
                 .iter()
                 .any(|known| known.address == found.address)
@@ -366,7 +365,7 @@ async fn discovered(
     secrets: &Arc<dyn SecretStore>,
     schema: &crate::Schema,
     account: &PersonalAccount,
-    (node, transport_key): (&PrivateKey, [u8; 32]),
+    (node, route_secret): (&PrivateKey, [u8; 32]),
     (transport, wait): (&Connected, rocky_platform::time::Duration),
 ) -> Result<(Settings, RestoreCoverage, Freshness), Failure> {
     let database = database(account, schema);
@@ -383,7 +382,7 @@ async fn discovered(
             account,
             rocky_credentials::DiscoveryCapability::from_secret(*account.discovery().topic()),
         ),
-        (node, transport_key),
+        (node, route_secret),
     )?;
     super::fault::check(directory, super::fault::Stage::Prepared)?;
     let mut last: Option<Failure> = None;

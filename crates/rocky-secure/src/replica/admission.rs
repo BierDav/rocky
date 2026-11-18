@@ -143,6 +143,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .configured = peers.into_iter().collect();
     }
     #[cfg(test)]
+    pub(crate) async fn admitted_tip(&self, peer: PublicKey) -> Option<TipId> {
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .peer_tips
+            .get(&PeerId::of(peer))
+            .copied()
+    }
+    #[cfg(test)]
     pub(crate) async fn recorded_peers(&self) -> usize {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         rows(

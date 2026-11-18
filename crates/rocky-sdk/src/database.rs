@@ -1404,7 +1404,7 @@ async fn identity(
                 let Some(network) = network else {
                     return Ok(None);
                 };
-                let key = Settings::transport_key(&vault)?;
+                let key = Settings::route_secret(&vault)?;
                 Ok::<_, Failure>(Some(network.start(true, key).await?))
             }
             .await;
@@ -1422,7 +1422,7 @@ async fn identity(
             let network = network.ok_or(ServiceError::NetworkRequired("join"))?;
             let joining =
                 Settings::prepare_join(path, (invitation, name), secrets, setup.identity.clone())?;
-            let key = Settings::transport_key(&joining.vault)?;
+            let key = Settings::route_secret(&joining.vault)?;
             let (transport, owned) = network.start(false, key).await?;
             match joining.enroll(path, schema, &*transport).await {
                 Ok(settings) => Ok((settings, Some((transport, owned)))),
@@ -1442,7 +1442,7 @@ async fn identity(
                 .clone()
                 .ok_or("another node of an identity needs that identity's provider")?;
             let prepared = Settings::prepare_identity(path, secrets, &provider, contact)?;
-            let key = Settings::transport_key(&prepared.1)?;
+            let key = Settings::route_secret(&prepared.1)?;
             let (transport, owned) = network.start(false, key).await?;
             match Settings::enroll_identity(
                 path,
@@ -1478,7 +1478,7 @@ async fn identity(
             let Some(network) = network else {
                 return Ok((settings, None));
             };
-            let key = Settings::transport_key(&settings.vault(secrets))?;
+            let key = Settings::route_secret(&settings.vault(secrets))?;
             Ok((settings, Some(network.start(false, key).await?)))
         }
         Install::Restore {
@@ -1516,7 +1516,7 @@ async fn identity(
             let Some(network) = network else {
                 return Ok((settings, None));
             };
-            let key = Settings::transport_key(&settings.vault(secrets))?;
+            let key = Settings::route_secret(&settings.vault(secrets))?;
             Ok((settings, Some(network.start(true, key).await?)))
         }
         Install::Installed => {
@@ -1527,7 +1527,7 @@ async fn identity(
             let vault = settings.vault(secrets);
             let link = match network {
                 Some(network) => {
-                    let key = Settings::transport_key(&vault)?;
+                    let key = Settings::route_secret(&vault)?;
                     Some(network.start(settings.issuer(), key).await?)
                 }
                 None => None,
@@ -1739,14 +1739,14 @@ async fn restore(
     let (settings, link) = if rocky_platform::fs::exists(path) {
         let settings = Settings::load(path)?;
         let vault = settings.vault(secrets);
-        let key = Settings::transport_key(&vault)?;
+        let key = Settings::route_secret(&vault)?;
         let link = network.start(settings.issuer(), key).await?;
         (settings, link)
     } else {
         let fresh_single_use_identity = None;
         let joining =
             Settings::prepare_join(path, (invitation, ""), secrets, fresh_single_use_identity)?;
-        let key = Settings::transport_key(&joining.vault)?;
+        let key = Settings::route_secret(&joining.vault)?;
         let (transport, owned) = network.start(false, key).await?;
         match joining.enroll(path, schema, &*transport).await {
             Ok(mut settings) => {

@@ -1262,7 +1262,7 @@ impl Options {
     fn allows_multicast(&self) -> bool {
         self.local && !cfg!(target_os = "ios")
     }
-    pub async fn bind(&self, secret: [u8; 32]) -> Result<Endpoint, Failure> {
+    pub async fn bind(&self, route_secret: [u8; 32]) -> Result<Endpoint, Failure> {
         let relay_mode = match self.relay.as_deref().unwrap_or("default") {
             "default" => RelayMode::Default,
             "staging" => RelayMode::Staging,
@@ -1270,7 +1270,7 @@ impl Options {
             url => RelayMode::Custom(url.parse::<RelayUrl>()?.into()),
         };
         let mut builder = Endpoint::builder(presets::Minimal)
-            .secret_key(SecretKey::from_bytes(&secret))
+            .secret_key(SecretKey::from_bytes(&route_secret))
             .relay_mode(relay_mode);
         #[cfg(feature = "qualification")]
         if self.bind.as_deref().is_some_and(|bind| {
@@ -1318,15 +1318,16 @@ impl Options {
         }
         Ok(builder.bind().await?)
     }
-    pub async fn start(&self, secret: [u8; 32]) -> Result<Attachment, Failure> {
-        self.start_serving(secret, Protocol::ALL.to_vec()).await
+    pub async fn start(&self, route_secret: [u8; 32]) -> Result<Attachment, Failure> {
+        self.start_serving(route_secret, Protocol::ALL.to_vec())
+            .await
     }
     pub async fn start_serving(
         &self,
-        secret: [u8; 32],
+        route_secret: [u8; 32],
         protocols: Vec<Protocol>,
     ) -> Result<Attachment, Failure> {
-        let endpoint = self.bind(secret).await?;
+        let endpoint = self.bind(route_secret).await?;
         let attachment = Attachment::build(
             endpoint.clone(),
             self.relays(),
@@ -1334,7 +1335,7 @@ impl Options {
             self.discover(),
             Some(self.relay.clone().unwrap_or_else(|| "default".into())),
         );
-        *attachment.0.restart.lock().await = Some((self.clone(), secret));
+        *attachment.0.restart.lock().await = Some((self.clone(), route_secret));
         let router = attachment.register(Router::builder(endpoint)).spawn();
         *attachment
             .0
@@ -1345,8 +1346,12 @@ impl Options {
     }
 }
 impl Connector for Options {
-    fn start(&self, _accepts: bool, secret: [u8; 32]) -> BoxFuture<'_, Result<Connected, Failure>> {
-        Box::pin(async move { Ok(Options::start(self, secret).await?.connected()) })
+    fn start(
+        &self,
+        _accepts: bool,
+        route_secret: [u8; 32],
+    ) -> BoxFuture<'_, Result<Connected, Failure>> {
+        Box::pin(async move { Ok(Options::start(self, route_secret).await?.connected()) })
     }
 }
 

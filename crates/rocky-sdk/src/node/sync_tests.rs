@@ -132,7 +132,7 @@ async fn enrolled_schema(
         let joining = Settings::prepare_join(&path, (&invite, ""), &store, None)?;
         let transport = hub
             .connector(name)
-            .start(false, Settings::transport_key(&joining.vault)?)
+            .start(false, Settings::route_secret(&joining.vault)?)
             .await?;
         let settings = joining.enroll(&path, schema, &*transport).await?;
         let vault = settings.vault(&store);
@@ -149,7 +149,7 @@ async fn enrolled_schema(
         let vault = settings.vault(&store);
         let transport = hub
             .connector(name)
-            .start(true, Settings::transport_key(&vault)?)
+            .start(true, Settings::route_secret(&vault)?)
             .await?;
         node(root, settings, vault, transport).await
     }
@@ -579,7 +579,7 @@ async fn consumer_sql_allocates_text_named_ids_of_its_writer() -> Result<(), Fai
     let hub = Arc::new(Hub::default());
     let transport = hub
         .connector("numeric")
-        .start(true, Settings::transport_key(&vault)?)
+        .start(true, Settings::route_secret(&vault)?)
         .await?;
     let node = node(root.path(), settings, vault, transport).await?;
     let client = node.client(1)?;

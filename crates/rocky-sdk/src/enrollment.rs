@@ -1327,7 +1327,7 @@ impl Settings {
         }
         roles
     }
-    pub fn transport_key(vault: &Vault) -> Result<[u8; 32], Failure> {
+    pub fn route_secret(vault: &Vault) -> Result<[u8; 32], Failure> {
         Ok(vault.get("transport")?)
     }
     pub(crate) fn renewal_routes(&self) -> Vec<crate::RenewalRoute> {

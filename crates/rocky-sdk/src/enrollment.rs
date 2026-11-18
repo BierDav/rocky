@@ -4235,7 +4235,7 @@ impl Settings {
             crate::mesh::mint_value(
                 vault,
                 (signer, &links),
-                self.domain()?.scope,
+                (self.publisher, self.domain()?.scope),
                 &self.revocations,
                 &statement,
             )?;

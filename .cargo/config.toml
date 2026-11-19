@@ -1,6 +1,6 @@
 [build]
 # Shares compiled dependencies across worktrees; SCCACHE_DIR selects the cache location.
-rustc-wrapper = "sccache"
+rustc-wrapper = "scripts/sccache"
 
 # wasm32 is the browser: its tests run in a headless browser through the
 # pinned wasm-bindgen-test-runner, never one first on PATH; scripts/wasm-runner

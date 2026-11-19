@@ -1116,6 +1116,20 @@ impl<A: RowApplication> Inner<A> {
             "this node does not hold the seal the tip starts from; pull it from a node that keeps it",
         ))
     }
+    pub(super) async fn rebind_node_tips(
+        &self,
+        scope: Scope,
+        from: TipId,
+        to: TipId,
+    ) -> Result<(), Error> {
+        self.conn
+            .execute(
+                "UPDATE secure_node_tips SET tip=? WHERE scope=? AND tip=?",
+                [encode(&to)?, encode(&scope)?, encode(&from)?],
+            )
+            .await?;
+        Ok(())
+    }
     async fn node_continues(
         &self,
         scope: Scope,

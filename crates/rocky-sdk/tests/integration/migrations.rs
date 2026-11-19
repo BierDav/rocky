@@ -891,3 +891,35 @@ async fn a_failed_migration_that_drops_a_reference_withdraws_to_the_schema_holdi
     a.close().await;
     Ok(())
 }
+
+const UNTITLED_FAILING: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
+ {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true}],"primary_key":["key"]}],
+ "migrations":[{"version":2,"statements":["UPDATE items SET completed = NULL"]}]}"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_migration_that_drops_a_required_field_reopens_on_the_source_schema()
+-> Result<(), Failure> {
+    let root = crate::support::small_directory()?;
+    let a = Device::create(root.path(), None)?;
+    a.follow_main_migrating().await;
+    a.add(1, "apples").await;
+    a.close().await;
+
+    let failed = common::confirmed(open(root.path(), UNTITLED_FAILING, None))
+        .err()
+        .ok_or("a failing migration opened")?;
+    assert!(
+        failed
+            .to_string()
+            .contains("migration to version 2 failed at statement 1"),
+        "the withdrawal restores the dropped field from history instead of refusing: {failed}"
+    );
+    let a = reopen(open(root.path(), common::SCHEMA, None))?;
+    let status = generation(&a).await;
+    assert_eq!(status["current"]["schema"], 1, "{status}");
+    assert_eq!(status["application"], "current");
+    assert_eq!(status["migration"], Value::Null, "{status}");
+    assert_eq!(a.titles().await, ["apples"]);
+    a.close().await;
+    Ok(())
+}

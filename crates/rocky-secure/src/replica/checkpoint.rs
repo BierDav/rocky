@@ -1135,7 +1135,7 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
     pub(super) async fn forget_handles(&self, limit: usize) -> Result<(), Error> {
-        let (count, mut digest) = self.handle_set().await?;
+        let (count, _) = self.handle_set().await?;
         let excess = count.saturating_sub(self.limits.handles as u64);
         if excess == 0 {
             return Ok(());
@@ -1143,15 +1143,38 @@ impl<A: RowApplication> Inner<A> {
         let forgotten = collect_rows(
             self.conn
                 .query(
-                    "SELECT rowid,handle,input,hash FROM secure_handles h WHERE NOT EXISTS(SELECT 1 FROM secure_operations o WHERE o.hash=h.hash) ORDER BY rowid LIMIT ?",
+                    "SELECT handle,input,hash FROM secure_handles h WHERE NOT EXISTS(SELECT 1 FROM secure_operations o WHERE o.hash=h.hash) ORDER BY rowid LIMIT ?",
                     [excess.min(limit as u64) as i64],
                 )
                 .await?,
         )
         .await?;
-        for record in &forgotten {
+        self.remove_handles(&forgotten).await
+    }
+    pub(super) async fn forget_handles_of(&self, hashes: &[Vec<u8>]) -> Result<(), Error> {
+        let mut forgotten = Vec::new();
+        for hash in hashes {
+            forgotten.extend(
+                collect_rows(
+                    self.conn
+                        .query(
+                            "SELECT handle,input,hash FROM secure_handles WHERE hash=?",
+                            [hash.clone()],
+                        )
+                        .await?,
+                )
+                .await?,
+            );
+        }
+        self.remove_handles(&forgotten).await
+    }
+    async fn remove_handles(&self, records: &[Vec<SqlValue>]) -> Result<(), Error> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let (count, mut digest) = self.handle_set().await?;
+        for record in records {
             let [
-                SqlValue::Integer(rowid),
                 SqlValue::Blob(handle),
                 SqlValue::Blob(input),
                 SqlValue::Blob(hash),
@@ -1160,7 +1183,10 @@ impl<A: RowApplication> Inner<A> {
                 return Err(Error::Corrupt("mutation handle".into()));
             };
             self.conn
-                .execute("DELETE FROM secure_handles WHERE rowid=?", [*rowid])
+                .execute(
+                    "DELETE FROM secure_handles WHERE handle=?",
+                    [handle.clone()],
+                )
                 .await?;
             self.conn
                 .execute(
@@ -1170,17 +1196,15 @@ impl<A: RowApplication> Inner<A> {
                 .await?;
             digest.remove(HANDLE_LABEL, &handle_item(handle, input, hash));
         }
-        if !forgotten.is_empty() {
-            self.conn
-                .execute(
-                    "UPDATE secure_retained SET handles=?,handle_digest=?",
-                    bindings(vec![
-                        integer(count - forgotten.len() as u64),
-                        SqlValue::Blob(digest.to_bytes()),
-                    ]),
-                )
-                .await?;
-        }
+        let remaining = count
+            .checked_sub(records.len() as u64)
+            .ok_or_else(|| Error::Corrupt("retained history counters".into()))?;
+        self.conn
+            .execute(
+                "UPDATE secure_retained SET handles=?,handle_digest=?",
+                bindings(vec![integer(remaining), SqlValue::Blob(digest.to_bytes())]),
+            )
+            .await?;
         Ok(())
     }
     pub(super) async fn checkpoint_record(

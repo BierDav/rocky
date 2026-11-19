@@ -140,18 +140,7 @@ impl<A: RowApplication> Inner<A> {
         self.reshape_undo(&before, &schema, None).await?;
         self.record_projection_access(&projected).await?;
         self.refresh_history_for(&projected).await?;
-        self.conn
-            .execute(
-                "UPDATE secure_typed SET descriptor=?,domain=?,readers=? WHERE id=1",
-                [
-                    schema
-                        .canonical()
-                        .map_err(|error| Error::Incompatible(error.to_string()))?,
-                    encode(&domain)?,
-                    encode(readers)?,
-                ],
-            )
-            .await?;
+        self.store_typed(&schema, domain, readers).await?;
         self.workspace.typed = Some(projected);
         Ok(true)
     }

@@ -134,6 +134,12 @@ impl PathFields {
                 .iter()
                 .any(|field| !self.fields.contains(&field.id))
     }
+    pub(super) fn empty() -> Self {
+        Self {
+            tables: BTreeSet::new(),
+            fields: BTreeSet::new(),
+        }
+    }
     fn of(definition: &ApplicationManifest) -> Self {
         Self {
             tables: definition.entities.iter().map(|item| item.id).collect(),
@@ -643,13 +649,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
+type ProjectionTables = (
+    rocky_core::LogicalSchema,
+    Scope,
+    BTreeMap<String, Commitment>,
+);
+
 pub struct SchemaConfig {
     pub security: SecureConfig,
-    pub tables: Option<(
-        rocky_core::LogicalSchema,
-        Scope,
-        BTreeMap<String, Commitment>,
-    )>,
+    pub tables: Option<ProjectionTables>,
 }
 
 impl<A: RowApplication> Inner<A> {
@@ -657,13 +665,12 @@ impl<A: RowApplication> Inner<A> {
         &mut self,
         tip: TipId,
         app: A,
-        mut config: SchemaConfig,
-        withdraw: Option<&super::staging::SchemaStage>,
+        config: SchemaConfig,
     ) -> Result<bool, Error> {
         IN_PLACE_SWITCH_CHANGES.store(-1, std::sync::atomic::Ordering::SeqCst);
         let inner = self;
         let manifest = app.manifest();
-        if withdraw.is_none() && manifest.engine != inner.engine {
+        if manifest.engine != inner.engine {
             return Err(Error::Incompatible(
                 super::generation::ENGINE_UPGRADE_REQUIRED.into(),
             ));
@@ -673,7 +680,7 @@ impl<A: RowApplication> Inner<A> {
             .followed
             .clone()
             .ok_or_else(|| denied("schema switching requires following a bookmark"))?;
-        if withdraw.is_none() && inner.schema_switching().await? {
+        if inner.schema_switching().await? {
             transaction!(inner, |inner| inner.reconcile_staged_switch().await)?;
         }
         let staged = inner.schema_switch_intent().await?;
@@ -687,115 +694,26 @@ impl<A: RowApplication> Inner<A> {
                 "a different schema switch is staged; withdraw it before switching",
             ));
         }
-        let graph = inner.graph_for(scope)?;
-        let followed = match graph.bookmark(&name).map_err(credential)? {
-            Some(followed) if followed == tip => true,
-            Some(followed) if staged.is_some() => graph.continues(tip, followed).unwrap_or(false),
-            _ => false,
-        };
-        if !followed
-            || graph.schema(tip).map_err(credential)? != manifest.hash()
-            || config
-                .security
-                .manifest
-                .verify_historic(config.security.publisher)
-                .map_err(credential)?
-                .hash()
-                != graph.genesis_schema
-        {
-            return Err(denied("schema does not authenticate the followed tip"));
-        }
+        inner.authenticate_switch(
+            scope,
+            &name,
+            tip,
+            &manifest,
+            &config.security,
+            staged.is_some(),
+        )?;
         if inner.manifest == manifest.hash() && inner.workspace.tip == tip {
             return Ok(false);
         }
-        if inner.config.publisher != config.security.publisher
-            || inner.config.node.public_key() != config.security.node.public_key()
-            || inner.config.credentials.principal() != config.security.credentials.principal()
-            || inner.definition.domains != manifest.domains
-            || inner.definition.app != manifest.app
-            || inner.definition.operations != manifest.operations
-        {
-            return Err(denied(
-                "schema switch changed domain identity or operations",
-            ));
-        }
-        let missing = inner.missing_live_schemas().await?;
-        if !missing.is_empty() {
-            return Err(Error::Incompatible(format!(
-                "followed path schemas missing: {missing:?}"
-            )));
-        }
-        config
-            .security
-            .credentials
-            .verify_database(
-                inner
-                    .config
-                    .credentials
-                    .database_context(inner.config.publisher)
-                    .map_err(credential)?,
-            )
-            .map_err(credential)?;
-        let families = match &config.tables {
-            Some((schema, domain, readers)) => {
-                typed::Typed::new(schema.clone(), *domain, readers)?.families
-            }
-            None => config_families(&config.security, &manifest)?,
-        };
-        let security = &mut config.security;
-        security
-            .revocations
-            .pin(&security.manifest, security.publisher)
-            .map_err(credential)?;
-        check_config_with_families(&config.security, &manifest, &families)?;
         let source = inner.workspace.tip;
-        let mut security = config.security;
-        let (current, mut history) = keys::split(std::mem::take(&mut security.keys));
-        security.keys = current;
-        for key in &inner.config.keys {
-            if manifest
-                .entities
-                .iter()
-                .any(|table| table.id == key.scope.table)
-                && !security.keys.iter().any(|held| held.scope == key.scope)
-            {
-                security.keys.push(key.clone());
-            }
-        }
-        for key in inner.opening_keys() {
-            if !security
-                .keys
-                .iter()
-                .chain(&history)
-                .any(|held| held.scope == key.scope && held.generation == key.generation)
-            {
-                history.push(key.clone());
-            }
-        }
-        let permission_fields = app.permission_fields().into_iter().collect();
-        let mut definition = generation::Definition {
-            app: Arc::new(app),
-            permission_fields,
-            chain: Chain::new(security.credentials.clone())?,
-            node_author: inner.node_author.clone(),
-            families,
-            config: security,
-            history,
-            manifest: manifest.hash(),
-            tip,
-            tables: manifest.entities.iter().map(|item| item.id).collect(),
-            fields: manifest.fields.iter().map(|item| item.id).collect(),
-            domains: manifest.domains.iter().map(|rule| rule.domain).collect(),
-            definition: manifest,
-        };
+        let mut definition = inner
+            .switch_definition(tip, app, config.security, config.tables.as_ref())
+            .await?;
         let old_typed = inner.workspace.typed.clone();
         definition.swap(inner);
         inner.invalidate_context();
         let changes_before = inner.conn.connection().total_changes()?;
         let staged = transaction!(inner, |inner| {
-            if let Some(stage) = withdraw {
-                inner.discard_schema_stage(stage).await?;
-            }
             inner
                 .conn
                 .execute(
@@ -834,11 +752,9 @@ impl<A: RowApplication> Inner<A> {
                     inner.finish_schema_switch().await?;
                     return Ok(true);
                 }
-                let cause = match withdraw {
-                    Some(_) => super::migrate::PlanCause::Withdrawal,
-                    None => super::migrate::PlanCause::Switch,
-                };
-                inner.record_plan(schema, *domain, readers, cause).await?;
+                inner
+                    .record_plan(schema, *domain, readers, super::migrate::PlanCause::Switch)
+                    .await?;
                 return Ok(false);
             }
             if inner.workspace.typed.is_some() {
@@ -871,7 +787,7 @@ impl<A: RowApplication> Inner<A> {
             if !matches!(finished, Ok(Ok(()))) {
                 if inner.schema_switching().await? {
                     reinstall_switch_source(inner, &mut definition, old_typed).await?;
-                    if withdraw.is_none() && matches!(finished, Ok(Err(_))) {
+                    if matches!(finished, Ok(Err(_))) {
                         transaction!(inner, |inner| {
                             inner.withdraw_schema_switch(scope, &name).await
                         })?;
@@ -884,6 +800,118 @@ impl<A: RowApplication> Inner<A> {
         inner.load_partitions().await?;
         inner.start_events();
         Ok(true)
+    }
+    fn authenticate_switch(
+        &self,
+        scope: Scope,
+        name: &str,
+        tip: TipId,
+        manifest: &ApplicationManifest,
+        security: &SecureConfig,
+        staged: bool,
+    ) -> Result<(), Error> {
+        let graph = self.graph_for(scope)?;
+        let followed = match graph.bookmark(name).map_err(credential)? {
+            Some(followed) if followed == tip => true,
+            Some(followed) if staged => graph.continues(tip, followed).unwrap_or(false),
+            _ => false,
+        };
+        if !followed
+            || graph.schema(tip).map_err(credential)? != manifest.hash()
+            || security
+                .manifest
+                .verify_historic(security.publisher)
+                .map_err(credential)?
+                .hash()
+                != graph.genesis_schema
+        {
+            return Err(denied("schema does not authenticate the followed tip"));
+        }
+        Ok(())
+    }
+    async fn switch_definition(
+        &self,
+        tip: TipId,
+        app: A,
+        mut security: SecureConfig,
+        tables: Option<&ProjectionTables>,
+    ) -> Result<generation::Definition<A>, Error> {
+        let manifest = app.manifest();
+        if self.config.publisher != security.publisher
+            || self.config.node.public_key() != security.node.public_key()
+            || self.config.credentials.principal() != security.credentials.principal()
+            || self.definition.domains != manifest.domains
+            || self.definition.app != manifest.app
+            || self.definition.operations != manifest.operations
+        {
+            return Err(denied(
+                "schema switch changed domain identity or operations",
+            ));
+        }
+        let missing = self.missing_live_schemas().await?;
+        if !missing.is_empty() {
+            return Err(Error::Incompatible(format!(
+                "followed path schemas missing: {missing:?}"
+            )));
+        }
+        security
+            .credentials
+            .verify_database(
+                self.config
+                    .credentials
+                    .database_context(self.config.publisher)
+                    .map_err(credential)?,
+            )
+            .map_err(credential)?;
+        let families = match tables {
+            Some((schema, domain, readers)) => {
+                typed::Typed::new(schema.clone(), *domain, readers)?.families
+            }
+            None => config_families(&security, &manifest)?,
+        };
+        security
+            .revocations
+            .pin(&security.manifest, security.publisher)
+            .map_err(credential)?;
+        check_config_with_families(&security, &manifest, &families)?;
+        let (current, mut history) = keys::split(std::mem::take(&mut security.keys));
+        security.keys = current;
+        for key in &self.config.keys {
+            if manifest
+                .entities
+                .iter()
+                .any(|table| table.id == key.scope.table)
+                && !security.keys.iter().any(|held| held.scope == key.scope)
+            {
+                security.keys.push(key.clone());
+            }
+        }
+        for key in self.opening_keys() {
+            if !security
+                .keys
+                .iter()
+                .chain(&history)
+                .any(|held| held.scope == key.scope && held.generation == key.generation)
+            {
+                history.push(key.clone());
+            }
+        }
+        let permission_fields = app.permission_fields().into_iter().collect();
+        Ok(generation::Definition {
+            app: Arc::new(app),
+            permission_fields,
+            chain: Chain::new(security.credentials.clone())?,
+            node_author: self.node_author.clone(),
+            families,
+            config: security,
+            history,
+            manifest: manifest.hash(),
+            tip,
+            tables: manifest.entities.iter().map(|item| item.id).collect(),
+            fields: manifest.fields.iter().map(|item| item.id).collect(),
+            domains: manifest.domains.iter().map(|rule| rule.domain).collect(),
+            definition: manifest,
+        })
     }
     pub(in crate::replica) async fn schema_switch_intent(
         &self,
@@ -1039,39 +1067,46 @@ impl<A: RowApplication> Inner<A> {
                 "withdrawing a staged schema switch needs its source schema installed",
             ));
         }
+        self.restore_source(scope, bookmark).await
+    }
+    async fn restore_source(&mut self, scope: Scope, bookmark: &str) -> Result<(), Error> {
         self.invalidate_context();
         self.conn
             .execute("DELETE FROM secure_schema_switch WHERE id=1", ())
             .await?;
         self.discard_plan().await?;
-        let mut stored = Vec::new();
+        let mut replayed = Vec::new();
         for record in rows(
             &self.conn,
             "SELECT id,scope FROM secure_scope_state ORDER BY id",
         )
         .await?
         {
-            let [SqlValue::Integer(_), SqlValue::Blob(bytes)] = record.as_slice() else {
+            let [SqlValue::Integer(id), SqlValue::Blob(bytes)] = record.as_slice() else {
                 return Err(Error::Corrupt("scope state".into()));
             };
             let resource: ResourceScope = decode(bytes)?;
-            if resource.domain == scope {
-                stored.push(resource);
+            if resource.domain != scope {
+                continue;
+            }
+            if self.replayed_scope(resource) {
+                replayed.push(*id);
+            } else {
+                self.restore_rows(resource, i64::MAX).await?;
+                self.reproject(resource).await?;
             }
         }
-        let (replayed, stored): (Vec<_>, Vec<_>) = stored
-            .into_iter()
-            .partition(|resource| self.replayed_scope(*resource));
-        for resource in stored {
-            self.rebuild_rows(resource)
-                .await?
-                .map_err(|broken| broken.refuses(Rebuilding::Withdrawal))?;
+        if !replayed.is_empty()
+            && let Err(broken) = self.replay_from_frames(now()?).await?
+        {
+            self.rederive_later(&replayed, broken).await?;
         }
-        if !replayed.is_empty() {
-            self.replay_from_frames(now()?)
-                .await?
-                .map_err(|broken| broken.refuses(Rebuilding::Withdrawal))?;
-        }
+        self.conn
+            .execute(
+                "UPDATE secure_metadata SET revision=revision+1 WHERE id=1",
+                (),
+            )
+            .await?;
         match self
             .graph_for(scope)?
             .bookmark(bookmark)
@@ -1085,6 +1120,167 @@ impl<A: RowApplication> Inner<A> {
                 Ok(())
             }
         }
+    }
+    async fn withdraw_stage(
+        &mut self,
+        stage: &super::staging::SchemaStage,
+        app: A,
+        config: SchemaConfig,
+    ) -> Result<(), Error> {
+        let (graphs, tip) = (self.graphs.clone(), self.workspace.tip);
+        let author = self.node_author.clone();
+        let nodes = self.line_nodes.clone();
+        let followed = self.workspace.followed.clone();
+        let ids: BTreeSet<Commitment> = stage
+            .statements
+            .iter()
+            .map(TipStatement::id)
+            .collect::<Result<_, _>>()?;
+        self.invalidate_context();
+        if let Some(graph) = self.graphs.get_mut(&stage.scope) {
+            let graph = Arc::make_mut(graph);
+            graph
+                .seals
+                .retain(|seal| seal.id().is_ok_and(|id| !ids.contains(&id)));
+            graph
+                .openings
+                .retain(|opening| opening.id().is_ok_and(|id| !ids.contains(&id)));
+            graph
+                .moves
+                .retain(|movement| movement.id().is_ok_and(|id| !ids.contains(&id)));
+        }
+        self.workspace.tip = stage.source;
+        self.invalidate_context();
+        match self.commit_withdrawal(stage, app, config).await {
+            Ok(reinstalled) => {
+                let reloaded = if reinstalled {
+                    self.reload_withdrawn_source().await
+                } else {
+                    Ok(())
+                };
+                self.publish_revision().await?;
+                reloaded
+            }
+            Err(error) => {
+                self.graphs = graphs;
+                self.workspace.tip = tip;
+                self.node_author = author;
+                self.line_nodes = nodes;
+                self.workspace.followed = followed;
+                self.invalidate_context();
+                Err(error)
+            }
+        }
+    }
+    async fn commit_withdrawal(
+        &mut self,
+        stage: &super::staging::SchemaStage,
+        app: A,
+        config: SchemaConfig,
+    ) -> Result<bool, Error> {
+        let source = self
+            .graph_for(stage.scope)?
+            .schema_any(stage.source)
+            .map_err(credential)?;
+        let manifest = app.manifest();
+        if manifest.hash() != source {
+            return Err(denied(
+                "withdrawing a staged schema switch needs its source schema installed",
+            ));
+        }
+        if self.workspace.typed.is_some() && config.tables.is_none() {
+            return Err(denied("schema switch must supply its SQL projection"));
+        }
+        let mut reinstalled = None;
+        if self.manifest != source {
+            self.authenticate_switch(
+                stage.scope,
+                &stage.bookmark,
+                stage.source,
+                &manifest,
+                &config.security,
+                false,
+            )?;
+            let mut definition = self
+                .switch_definition(stage.source, app, config.security, config.tables.as_ref())
+                .await?;
+            let staged = self.workspace.typed.clone();
+            definition.swap(self);
+            reinstalled = Some((definition, staged));
+        }
+        let restored = transaction!(self, |inner| {
+            inner.discard_schema_stage(stage).await?;
+            inner.discard_tip_writes(stage.target).await?;
+            inner
+                .rebind_node_tips(stage.scope, stage.target, stage.source)
+                .await?;
+            if let Some((_, staged)) = &reinstalled
+                && let Some((schema, domain, readers)) = &config.tables
+            {
+                inner
+                    .reinstall_projection(staged.as_deref(), schema, *domain, readers)
+                    .await?;
+            }
+            inner.forget_undeclared_scopes(stage.scope).await?;
+            inner.restore_source(stage.scope, &stage.bookmark).await?;
+            inner.load_tip_graphs().await
+        });
+        match (restored, reinstalled) {
+            (Ok(()), reinstalled) => Ok(reinstalled.is_some()),
+            (Err(error), Some((mut definition, staged))) => {
+                self.abandon_switch_history();
+                reinstall_switch_source(self, &mut definition, staged).await?;
+                Err(error)
+            }
+            (Err(error), None) => Err(error),
+        }
+    }
+    async fn reload_withdrawn_source(&mut self) -> Result<(), Error> {
+        let loaded = self.load_withdrawn_schemas().await;
+        self.start_events();
+        self.bump_authority();
+        loaded
+    }
+    async fn load_withdrawn_schemas(&mut self) -> Result<(), Error> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.withdrawal_reload_fault) {
+            return Err(Error::InjectedFailure);
+        }
+        self.load_schemas().await?;
+        self.load_partitions().await
+    }
+    async fn reinstall_projection(
+        &mut self,
+        staged: Option<&typed::Typed>,
+        schema: &rocky_core::LogicalSchema,
+        domain: Scope,
+        readers: &BTreeMap<String, Commitment>,
+    ) -> Result<(), Error> {
+        let installed = self
+            .installed_typed()
+            .await?
+            .ok_or_else(|| Error::Corrupt("a staged schema without typed tables".into()))?
+            .0;
+        let projected = Arc::new(
+            self.authorized_projection(typed::Typed::new(schema.clone(), domain, readers)?)
+                .await?,
+        );
+        self.workspace.typed = Some(projected.clone());
+        self.install_projection(
+            &installed,
+            schema,
+            staged,
+            &projected,
+            Some(&PathFields::empty()),
+        )
+        .await?
+        .map_err(|broken| broken.refuses(Rebuilding::SchemaProjection))?;
+        if let Some(staged) = staged {
+            self.drop_unprojected_history(staged, &projected).await?;
+        }
+        self.store_typed(schema, domain, readers).await?;
+        self.cause(crate::observe::Cause::Rebuild);
+        Ok(())
     }
     pub(super) async fn schema_switching(&self) -> Result<bool, Error> {
         Ok(
@@ -1231,7 +1427,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .inner
             .lock(crate::replica::Class::Background)
             .await
-            .switch_schema_now(tip, app, config, None)
+            .switch_schema_now(tip, app, config)
             .await?;
         self.settle().await?;
         Ok(switched)
@@ -1264,78 +1460,18 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 "a partially authored schema publication never withdraws",
             ));
         }
-        let staged = match inner.schema_switch_intent().await? {
-            Some((scope, bookmark, source, target))
-                if scope == stage.scope && source == stage.source && target == stage.target =>
-            {
-                if inner.manifest != app.manifest().hash()
-                    || inner
-                        .graph_for(stage.scope)?
-                        .schema_any(stage.source)
-                        .map_err(credential)?
-                        != inner.manifest
-                {
-                    return Err(denied(
-                        "withdrawing a staged schema switch needs its source schema installed",
-                    ));
-                }
-                Some(bookmark)
-            }
-            _ => None,
-        };
-        let (graphs, tip) = (inner.graphs.clone(), inner.workspace.tip);
-        let author = inner.node_author.clone();
-        let nodes = inner.line_nodes.clone();
-        let followed = inner.workspace.followed.clone();
-        let ids: BTreeSet<Commitment> = stage
-            .statements
-            .iter()
-            .map(TipStatement::id)
-            .collect::<Result<_, _>>()?;
-        inner.invalidate_context();
-        if let Some(graph) = inner.graphs.get_mut(&stage.scope) {
-            let graph = Arc::make_mut(graph);
-            graph
-                .seals
-                .retain(|seal| seal.id().is_ok_and(|id| !ids.contains(&id)));
-            graph
-                .openings
-                .retain(|opening| opening.id().is_ok_and(|id| !ids.contains(&id)));
-            graph
-                .moves
-                .retain(|movement| movement.id().is_ok_and(|id| !ids.contains(&id)));
-        }
-        inner.workspace.tip = stage.source;
-        inner.invalidate_context();
-        let result = match staged {
-            Some(bookmark) => transaction!(inner, |inner| {
-                inner.discard_schema_stage(&stage).await?;
-                inner.withdraw_schema_switch(stage.scope, &bookmark).await?;
-                inner.load_tip_graphs().await
-            })
-            .map(|()| true),
-            None => {
-                inner
-                    .switch_schema_now(stage.source, app, config, Some(&stage))
-                    .await
-            }
-        };
-        match result {
-            Ok(_) => inner.publish_revision().await,
-            Err(error) => {
-                inner.graphs = graphs;
-                inner.workspace.tip = tip;
-                inner.node_author = author;
-                inner.line_nodes = nodes;
-                inner.workspace.followed = followed;
-                inner.invalidate_context();
-                Err(error)
-            }
-        }
+        inner.withdraw_stage(&stage, app, config).await
     }
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
+    #[cfg(test)]
+    pub(crate) async fn fail_next_withdrawal_reload(&self) {
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .withdrawal_reload_fault = true;
+    }
     pub async fn drop_unrequired_schemas(&self) -> Result<Vec<Commitment>, Error> {
         self.schema_requirements(true, async |inner, required| {
             inner.drop_unrequired_schemas(required).await

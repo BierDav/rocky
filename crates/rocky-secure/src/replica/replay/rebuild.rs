@@ -263,16 +263,7 @@ impl<A: RowApplication> Inner<A> {
             }
             Ok(Some(violation)) => {
                 undo().await?;
-                tracing::warn!(%violation, "replayed rows cannot be derived again");
-                self.conn
-                    .execute(
-                        "INSERT OR REPLACE INTO secure_replayed_stuck VALUES(1,?,?)",
-                        bindings(vec![
-                            SqlValue::Blob(inputs),
-                            SqlValue::Text(violation.clone()),
-                        ]),
-                    )
-                    .await?;
+                self.record_stuck(inputs, &violation).await?;
                 Ok(Rederived::Stuck(violation))
             }
             Err(Error::Rejected(reason)) if reason == KEY_WAITS => {
@@ -284,6 +275,36 @@ impl<A: RowApplication> Inner<A> {
                 Err(error)
             }
         }
+    }
+    async fn record_stuck(&self, inputs: Vec<u8>, violation: &str) -> Result<(), Error> {
+        tracing::warn!(%violation, "replayed rows cannot be derived again");
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO secure_replayed_stuck VALUES(1,?,?)",
+                bindings(vec![
+                    SqlValue::Blob(inputs),
+                    SqlValue::Text(violation.into()),
+                ]),
+            )
+            .await?;
+        Ok(())
+    }
+    pub(in crate::replica) async fn rederive_later(
+        &mut self,
+        scopes: &[i64],
+        BrokenReference(violation): BrokenReference,
+    ) -> Result<(), Error> {
+        for id in scopes {
+            self.conn
+                .execute(
+                    "INSERT INTO secure_replayed_rederive VALUES(?) ON CONFLICT DO NOTHING",
+                    [*id],
+                )
+                .await?;
+        }
+        self.rederive_marked = true;
+        let inputs = self.rederive_inputs().await?;
+        self.record_stuck(inputs, &violation).await
     }
     pub(in crate::replica) async fn retry_rederive(
         &mut self,

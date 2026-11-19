@@ -2,6 +2,8 @@ use super::*;
 use rocky_core::Scope;
 use rocky_credentials::SealFinality;
 
+mod discarded_writes;
+
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_staged_schema(publication BLOB PRIMARY KEY,stage BLOB NOT NULL,state TEXT NOT NULL CHECK(state IN('staged','committed','released'))) WITHOUT ROWID",
 ];

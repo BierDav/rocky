@@ -10,6 +10,7 @@ mod named_coordinator;
 mod source_availability;
 pub(in crate::tests) mod source_validation;
 mod staging;
+mod withdrawal;
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn withdrawing_a_private_stage_discards_cached_schema_paths_and_frontiers() {

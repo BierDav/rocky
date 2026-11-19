@@ -109,6 +109,7 @@ pub(super) struct Lineage {
     pub(super) local_note_from: Option<u32>,
     pub(super) deferred_from: Option<u32>,
     pub(super) note_references_from: Option<u32>,
+    pub(super) unlinked_at: Option<u32>,
 }
 impl Lineage {
     pub(super) async fn root(&self, replica: &EncryptedReplica<TypedRows>) -> Result<u32, Error> {
@@ -246,6 +247,7 @@ impl Lineage {
             local_note_from: None,
             deferred_from: None,
             note_references_from: None,
+            unlinked_at: None,
         }
     }
     fn schema(&self, generation: u32) -> LogicalSchema {
@@ -295,7 +297,9 @@ impl Lineage {
                 let deferred = self.deferred_from.is_some_and(|from| generation >= from);
                 for (name, action) in [("item", "CASCADE"), ("also", "SET NULL")] {
                     tags.push(column(name, Affinity::Blob, false));
-                    tag_keys.push(item_reference(name, action, deferred));
+                    if self.unlinked_at != Some(generation) {
+                        tag_keys.push(item_reference(name, action, deferred));
+                    }
                 }
             }
             tables.push(referencing(self.child_table(), tags, tag_keys));

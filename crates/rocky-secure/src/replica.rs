@@ -512,6 +512,8 @@ pub(super) struct Inner<A> {
     #[cfg(test)]
     switch_fault: bool,
     #[cfg(test)]
+    withdrawal_reload_fault: bool,
+    #[cfg(test)]
     stage_exit: bool,
     #[cfg(test)]
     pub(super) fail_before_commit: usize,
@@ -1153,6 +1155,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             plan_fault: false,
             #[cfg(test)]
             switch_fault: false,
+            #[cfg(test)]
+            withdrawal_reload_fault: false,
             #[cfg(test)]
             stage_exit: false,
             #[cfg(test)]

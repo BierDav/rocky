@@ -209,12 +209,12 @@ impl Settings {
         }
         let signer_under_issuer_chain = PrivateKey::from_bytes(&vault.get("node")?);
         let mut pending = Vec::new();
-        for (address, generation) in &rotation.groups {
+        for (address, target) in &rotation.groups {
             let Some(record) = self.groups.get(address).cloned() else {
                 continue;
             };
-            let secret = vault.get(&format!("rotation.partition.{address}.{generation}"))?;
-            let epoch = KeyEpoch::new(*generation, &secret);
+            let secret = vault.get(&format!("rotation.partition.{address}.{target}"))?;
+            let epoch = KeyEpoch::new(target.generation(), &secret);
             let partition = GroupPartition::of(domain, &record)?;
             let statements = self
                 .epoch_statements

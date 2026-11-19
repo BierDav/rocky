@@ -509,7 +509,7 @@ async fn stop_at(
                 .iter()
                 .map(|epoch| epoch.generation)
                 .collect::<Vec<_>>(),
-            vec![1, *target],
+            vec![1, target.generation()],
             "{stop:?}"
         );
     }
@@ -520,7 +520,7 @@ async fn stop_at(
                 .iter()
                 .map(|epoch| epoch.generation)
                 .collect::<Vec<_>>(),
-            vec![1, *target],
+            vec![1, target.generation()],
             "{stop:?}"
         );
     }

@@ -29,6 +29,9 @@ use std::{
     sync::Arc,
 };
 
+mod rotation_epoch;
+pub(crate) use rotation_epoch::RotationEpoch;
+
 pub const VERSION: u32 = 37;
 const INVITE_VERSION: u32 = 7;
 const ANSWER_FORMAT: u32 = 8;
@@ -367,8 +370,8 @@ pub struct Rotation {
     pub statement: Revocation,
     pub signed: Option<SignedRevocation>,
     pub statements: Vec<Commitment>,
-    pub keys: BTreeMap<String, u64>,
-    pub groups: BTreeMap<String, u64>,
+    pub keys: BTreeMap<String, RotationEpoch>,
+    pub groups: BTreeMap<String, RotationEpoch>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Revoke {
@@ -4085,16 +4088,9 @@ impl Settings {
             if epochs.len() >= MAX_EPOCHS {
                 return Err("key epoch capacity reached".into());
             }
-            let held = epochs
-                .iter()
-                .map(|epoch| epoch.generation)
-                .max()
-                .unwrap_or(0);
             keys.insert(
                 name.clone(),
-                held.checked_add(1)
-                    .filter(|generation| *generation <= i64::MAX as u64)
-                    .ok_or("key epoch overflow")?,
+                RotationEpoch::after(epochs.iter().max().copied()).ok_or("key epoch overflow")?,
             );
         }
         let groups = if claim_right_reads_nothing {
@@ -4137,7 +4133,7 @@ impl Settings {
         domain: &Domain,
         records: &[Revoking],
         readable: &[Profile],
-    ) -> Result<BTreeMap<String, u64>, Failure> {
+    ) -> Result<BTreeMap<String, RotationEpoch>, Failure> {
         let bounded_by_records = !records.is_empty();
         let mut groups = BTreeMap::new();
         for partition in self.partitions(domain)? {
@@ -4150,11 +4146,8 @@ impl Settings {
                 })
                 || records.iter().any(|record| record.selects(&partition));
             if let (true, Some(held)) = (read, partition.record.current()) {
-                let target = held
-                    .generation
-                    .checked_add(1)
-                    .filter(|generation| *generation <= i64::MAX as u64)
-                    .ok_or("group secret epoch overflow")?;
+                let target =
+                    RotationEpoch::after(Some(held)).ok_or("group secret epoch overflow")?;
                 if partition.record.epochs.len() >= crate::groups::MAX_GROUP_EPOCHS {
                     return Err("group secret epoch capacity reached".into());
                 }
@@ -4217,11 +4210,7 @@ impl Settings {
                     }
                     keys.insert(
                         name.clone(),
-                        current
-                            .generation
-                            .checked_add(1)
-                            .filter(|generation| *generation <= i64::MAX as u64)
-                            .ok_or("key epoch overflow")?,
+                        RotationEpoch::after(Some(*current)).ok_or("key epoch overflow")?,
                     );
                     trigger = Some(signed.statement.clone());
                 }
@@ -4251,11 +4240,7 @@ impl Settings {
                     }
                     groups.insert(
                         crate::groups::record_key(&partition.record.address),
-                        current
-                            .generation
-                            .checked_add(1)
-                            .filter(|generation| *generation <= i64::MAX as u64)
-                            .ok_or("group epoch overflow")?,
+                        RotationEpoch::after(Some(current)).ok_or("group epoch overflow")?,
                     );
                     trigger = Some(signed.statement.clone());
                 }
@@ -4326,7 +4311,7 @@ impl Settings {
                 Some(key) => key,
                 None => vault.create(&role)?,
             };
-            let epoch = rocky_core::KeyEpoch::new(epoch, &key);
+            let epoch = rocky_core::KeyEpoch::new(epoch.generation(), &key);
             vault.put(&key_role(&name, epoch), &key)?;
             self.epoch_statements
                 .insert(key_role(&name, epoch), ids.clone());
@@ -4352,7 +4337,7 @@ impl Settings {
                 Some(secret) => secret,
                 None => vault.create(&role)?,
             };
-            let epoch = rocky_core::KeyEpoch::new(epoch, &secret);
+            let epoch = rocky_core::KeyEpoch::new(epoch.generation(), &secret);
             vault.put(&secret_role(&record.address, epoch), &secret)?;
             self.epoch_statements
                 .insert(secret_role(&record.address, epoch), ids.clone());

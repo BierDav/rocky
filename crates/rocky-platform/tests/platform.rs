@@ -104,7 +104,7 @@ async fn one_owner_per_file() {
     let owner = fs::Owner::acquire(&path).await.unwrap();
     assert!(
         fs::Owner::acquire(&path).await.is_err(),
-        "a second owner is refused, natively after briefly retrying"
+        "a second owner is refused"
     );
     drop(owner);
     fs::Owner::acquire(&path).await.unwrap();

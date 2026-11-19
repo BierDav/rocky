@@ -131,12 +131,7 @@ fn lock_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-const LOCK_ATTEMPTS: u32 = 10;
-const LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
-
-pub struct Owner {
-    _lock: File,
-}
+pub struct Owner(File);
 impl Owner {
     pub async fn acquire(path: &Path) -> io::Result<Self> {
         let lock = OpenOptions::new()
@@ -145,18 +140,18 @@ impl Owner {
             .create(true)
             .truncate(false)
             .open(lock_path(path))?;
-        let mut attempt = 0;
-        while let Err(error) = lock.try_lock() {
-            attempt += 1;
-            if attempt == LOCK_ATTEMPTS {
-                return Err(io::Error::new(
-                    io::ErrorKind::ResourceBusy,
-                    format!("already open or file lock unavailable: {error}"),
-                ));
-            }
-            tokio::time::sleep(LOCK_RETRY_DELAY).await;
-        }
-        Ok(Self { _lock: lock })
+        lock.try_lock().map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::ResourceBusy,
+                format!("already open or file lock unavailable: {error}"),
+            )
+        })?;
+        Ok(Self(lock))
+    }
+}
+impl Drop for Owner {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
     }
 }
 
@@ -201,6 +196,28 @@ mod tests {
         write_private(root.join("private"), b"private")?;
         assert_eq!(synced(), [root.to_path_buf()]);
         assert_eq!(read(root.join("a/moved"))?, b"new");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dropped_owner_unlocks_while_a_spawned_process_still_holds_its_lock_descriptor()
+    -> io::Result<()> {
+        let scratch = Scratch::new().await;
+        let path = scratch.path().join("owned.db");
+        let owner = Owner::acquire(&path).await?;
+        let mut inheritor = std::process::Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(owner.0.try_clone()?)
+            .spawn()?;
+        drop(owner);
+        let reopened = Owner::acquire(&path).await.map(drop);
+        drop(inheritor.stdin.take());
+        assert!(inheritor.wait()?.success());
+        assert!(
+            reopened.is_ok(),
+            "a reopen must not wait for a process that inherited the lock descriptor: {reopened:?}"
+        );
         Ok(())
     }
 }

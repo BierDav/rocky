@@ -825,7 +825,7 @@ impl Node {
         let node = self.clone();
         let close_rx = close.subscribe();
         let changed_tx = changed.clone();
-        crate::reactor::spawn_local("live_link", async move {
+        self.background.spawn("live_link", async move {
             let started = rocky_platform::time::Instant::now();
             let _permit = permit;
             let result = node

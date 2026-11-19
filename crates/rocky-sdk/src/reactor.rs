@@ -8,6 +8,33 @@ pub(crate) fn spawn_local<T: 'static>(
     rocky_platform::task::spawn_local(task(name, future))
 }
 
+#[derive(Default)]
+pub(crate) struct Background(std::sync::Mutex<JoinSet<()>>);
+impl Background {
+    pub(crate) fn spawn(&self, name: &'static str, future: impl Future<Output = ()> + 'static) {
+        let mut tasks = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while tasks.try_join_next().is_some() {}
+        spawn_in(&mut tasks, name, future);
+    }
+    pub(crate) async fn finish(&self) {
+        loop {
+            let mut tasks = std::mem::take(
+                &mut *self
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            if tasks.is_empty() {
+                return;
+            }
+            while tasks.join_next().await.is_some() {}
+        }
+    }
+}
+
 pub(crate) fn spawn_in<T: 'static>(
     tasks: &mut JoinSet<T>,
     name: &'static str,

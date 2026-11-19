@@ -257,6 +257,7 @@ async fn settle() {
 
 pub(crate) struct Node {
     owner: std::sync::OnceLock<std::sync::Weak<Node>>,
+    pub(crate) background: crate::reactor::Background,
     pub replica: EncryptedReplica<TypedRows>,
     domain: std::sync::RwLock<Arc<Domain>>,
     granted: std::sync::Mutex<Vec<ResourceScope>>,
@@ -387,6 +388,7 @@ impl Node {
             verified_under_settings: AtomicU64::new(0),
             observations,
             owner: Default::default(),
+            background: Default::default(),
             replica,
             granted: std::sync::Mutex::new(settings.granted(&domain)),
             domain: std::sync::RwLock::new(Arc::new(domain)),

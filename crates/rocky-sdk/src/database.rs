@@ -311,7 +311,7 @@ impl Worker {
             drop(claim);
         })
     }
-    #[cfg(target_family = "wasm")]
+    #[cfg(any(test, target_family = "wasm"))]
     fn local(serving: Serving, claim: residence::Claim, hello: Hello) -> std::io::Result<Self> {
         Ok(Self::Task(crate::reactor::spawn_local(
             "database",
@@ -832,6 +832,9 @@ impl Database {
             .try_recv()
             .map_err(|_| "the database exposed no node")?;
         Ok(Hosted { opened, node })
+    }
+    async fn launch_local(open: Open<'_>, install: Install) -> Result<Opened, Failure> {
+        Self::launch_in(open, install, None, Worker::local).await
     }
     pub(crate) async fn crash(&self) {
         self.shared.closed.store(true, Ordering::SeqCst);
@@ -2267,7 +2270,9 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     if personal && let Err(error) = crate::personal::finish(&directory) {
         tracing::warn!(%error, "the finished personal install intent could not be removed");
     }
-    if rocky_platform::fs::exists(directory.join("bootstrap.json")) && network.is_some() {
+    let bootstrapping = (rocky_platform::fs::exists(directory.join("bootstrap.json"))
+        && network.is_some())
+    .then(|| {
         let joining = node.clone();
         let held = directory.clone();
         crate::reactor::spawn_local("bootstrap", async move {
@@ -2275,8 +2280,8 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
             if let Err(error) = joining.initial_sync().await {
                 tracing::debug!(%error, "initial sync failed; its bootstrap intent stays for the next sync or open");
             }
-        });
-    }
+        })
+    });
     let budget = Arc::new(Semaphore::new(ACTIVE_CALL_QUOTA));
     let connections = Arc::new(connection::Registry::default());
     let mut tasks = rocky_platform::task::JoinSet::new();
@@ -2484,14 +2489,19 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         while tasks.try_join_next().is_some() {}
     }
     pause::at(&directory, pause::Point::Teardown).await;
-    recovering.abort();
-    let _ = recovering.await;
+    for background in std::iter::once(recovering).chain(bootstrapping) {
+        background.abort();
+        let _ = background.await;
+    }
     end_users_of_file(&node, &connections, &mut tasks).await;
     let purge = node.lifecycle.lock().await.purge_on_close();
-    drop(node);
+    let released = Arc::into_inner(node).is_some();
     settling.abort();
     let _ = settling.await;
     let mut result = close_file(replica).await;
+    if !released {
+        result = Err("a task still holds the database, so its file stays open".into());
+    }
     if purge && result.is_ok() {
         result = purge_directory(&directory).map_err(|e| e.to_string());
     }
@@ -2510,6 +2520,7 @@ async fn end_users_of_file(
     node.detach(None).await;
     while tasks.join_next().await.is_some() {}
     node.detach(None).await;
+    node.background.finish().await;
 }
 async fn close_file(replica: EncryptedReplica<rocky_core::TypedRows>) -> Result<(), String> {
     let flushed = replica.flush().await.map(drop).map_err(|e| e.to_string());
@@ -2754,6 +2765,53 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     const HELD_SCHEMA: &str = r#"{"application":"held","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn close_succeeds_only_once_a_running_bootstrap_let_go_of_the_file() -> Result<(), Failure>
+    {
+        let directory = rocky_platform::fs::Scratch::new().await;
+        let hub = Arc::new(crate::transport::memory::Hub::default());
+        let open = || Open {
+            directory: directory.path(),
+            schema: HELD_SCHEMA,
+            secrets: None,
+            identity: None,
+            network: Some(Network::Owned(hub.connector("held"))),
+            coordination: None,
+        };
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let create = Database::create_install(
+                    None,
+                    Arc::new(crate::RootKey::generate()),
+                    None,
+                    None,
+                )?;
+                Database::launch_local(open(), create)
+                    .await?
+                    .database
+                    .close()
+                    .await?;
+                std::fs::write(directory.path().join("bootstrap.json"), b"true")?;
+                let (bootstrapping, _never_released) =
+                    pause::arm(directory.path(), pause::Point::Bootstrap);
+                let database = Database::launch_local(open(), Install::Installed)
+                    .await?
+                    .database;
+                bootstrapping
+                    .await
+                    .map_err(|_| -> Failure { "the bootstrap never started".into() })?;
+                database.close().await?;
+                let reopened = Database::launch_local(open(), Install::Installed)
+                    .await
+                    .map_err(|error| -> Failure {
+                        format!("closed, yet the file is still held: {error}").into()
+                    })?;
+                reopened.database.close().await
+            })
+            .await
+    }
 
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]

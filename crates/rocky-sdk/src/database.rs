@@ -282,7 +282,11 @@ thread_local! {
 }
 impl Worker {
     #[cfg(not(target_family = "wasm"))]
-    fn thread(serve: impl FnOnce() + Send + 'static) -> std::io::Result<Self> {
+    fn serving_thread(
+        serving: Serving,
+        claim: residence::Claim,
+        hello: Hello,
+    ) -> std::io::Result<Self> {
         let (end, ended) = oneshot::channel();
         #[cfg(test)]
         let held = HOLD_END.with(|hold| hold.borrow_mut().take());
@@ -290,7 +294,8 @@ impl Worker {
             .name("rocky-sdk".into())
             .stack_size(rocky_platform::task::THREAD_STACK)
             .spawn(move || {
-                serve();
+                serve_on_thread(serving, &hello);
+                drop(claim);
                 #[cfg(test)]
                 if let Some((reached, release)) = held {
                     let _ = reached.send(());
@@ -299,17 +304,6 @@ impl Worker {
                 let _ = end.send(());
             })?;
         Ok(Self::Thread { thread, ended })
-    }
-    #[cfg(not(target_family = "wasm"))]
-    fn serving_thread(
-        serving: Serving,
-        claim: residence::Claim,
-        hello: Hello,
-    ) -> std::io::Result<Self> {
-        Self::thread(move || {
-            serve_on_thread(serving, &hello);
-            drop(claim);
-        })
     }
     #[cfg(any(test, target_family = "wasm"))]
     fn local(serving: Serving, claim: residence::Claim, hello: Hello) -> std::io::Result<Self> {
@@ -2002,7 +1996,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         predecessor,
     } = serving;
     let directory = setup.directory.clone();
-    predecessor.departed(&directory).await;
+    predecessor.departed(&directory).await?;
     if matches!(setup.install, Install::Installed)
         && rocky_platform::fs::exists(directory.join("identity.json"))
     {
@@ -2500,7 +2494,10 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     let _ = settling.await;
     let mut result = close_file(replica).await;
     if !released {
-        result = Err("a task still holds the database, so its file stays open".into());
+        result = Err(
+            "a task still held the database at close, so its directory was not purged; open and close it again"
+                .into(),
+        );
     }
     if purge && result.is_ok() {
         result = purge_directory(&directory).map_err(|e| e.to_string());

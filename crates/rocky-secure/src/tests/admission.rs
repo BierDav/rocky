@@ -261,8 +261,8 @@ async fn a_revoked_peer_learns_its_statement_and_both_sides_end_the_session() {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn another_session_version_is_refused_with_the_authentication_error() {
-    let first_version_and_parent_format_v10 = [1, 10];
-    for version in first_version_and_parent_format_v10 {
+    let first_parent_format_and_tip_carrying_hello = [1, 10, 30];
+    for version in first_parent_format_and_tip_carrying_hello {
         refused_session_version(version).await;
     }
 }
@@ -468,4 +468,87 @@ async fn each_side_of_a_handshake_learns_the_others_clock_offset() {
             accepted.clock_offset
         );
     }
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_replayed_hello_without_the_peers_key_records_no_tip_for_that_peer() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let (alice, victim, attacker) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
+    let a = open(&f, &dir, "a.db", &alice).await;
+    let v = open(&f, &dir, "v.db", &victim).await;
+    let (victim_end, mut attacker_end) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
+    let (dialed_attacker, harvested) = tokio::join!(
+        Link::open(
+            victim_end,
+            &v,
+            victim.clone(),
+            f.credentials(&victim, f.full()),
+            Some(attacker.public_key()),
+        ),
+        async {
+            let hello = testing::harvested_hello(&mut attacker_end).await;
+            drop(attacker_end);
+            hello
+        },
+    );
+    assert!(dialed_attacker.is_err());
+    let replayed = harvested.unwrap();
+    let (attacker_end, acceptor_end) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
+    let (accepted, _) = tokio::join!(
+        Link::open(
+            acceptor_end,
+            &a,
+            alice.clone(),
+            f.credentials(&alice, f.full()),
+            None
+        ),
+        testing::replay_hello(attacker_end, &replayed, &attacker),
+    );
+    match accepted {
+        Err(Error::Rejected(message)) => assert_eq!(message, "link authentication failed"),
+        other => panic!("expected the authentication error, got {:?}", other.err()),
+    }
+    assert_eq!(
+        a.admitted_tip(victim.public_key()).await,
+        None,
+        "a failed handshake must not record a tip for the node its hello names"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_revoked_peer_with_its_own_key_gets_no_tip_recorded_when_alice_accepts() {
+    revoked_peer_gets_no_tip(Alice::Accepts).await;
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_revoked_peer_with_its_own_key_gets_no_tip_recorded_when_alice_dials() {
+    revoked_peer_gets_no_tip(Alice::Dials).await;
+}
+
+enum Alice {
+    Accepts,
+    Dials,
+}
+async fn revoked_peer_gets_no_tip(alice_side: Alice) {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let (alice, dave) = (PrivateKey::new(), PrivateKey::new());
+    let a = open(&f, &dir, "a.db", &alice).await;
+    let d = open(&f, &dir, "d.db", &dave).await;
+    let learned_not_pinned = statements(&f, 1, &[dave.public_key()]);
+    a.learn_revocations(&learned_not_pinned).await.unwrap();
+    let refused = match alice_side {
+        Alice::Accepts => hello((&alice, &a), (&dave, &d), &f).await.0,
+        Alice::Dials => hello((&dave, &d), (&alice, &a), &f).await.1,
+    };
+    match refused {
+        Err(Error::Rejected(message)) => assert_eq!(message, PEER_REVOKED),
+        other => panic!("expected the revocation refusal, got {:?}", other.err()),
+    }
+    assert_eq!(
+        a.admitted_tip(dave.public_key()).await,
+        None,
+        "a peer refused as revoked must not have its tip recorded"
+    );
 }

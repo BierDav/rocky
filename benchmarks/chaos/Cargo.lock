@@ -795,6 +795,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha2",
+ "zeroize",
 ]
 
 [[package]]
@@ -816,19 +817,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rocky-runtime"
-version = "0.1.0"
-dependencies = [
- "rocky-core",
- "rocky-platform",
- "rocky-storage",
- "serde",
- "serde_json",
- "tokio",
- "web-time",
-]
-
-[[package]]
 name = "rocky-sdk"
 version = "0.1.0"
 dependencies = [
@@ -838,7 +826,6 @@ dependencies = [
  "rocky-core",
  "rocky-credentials",
  "rocky-platform",
- "rocky-runtime",
  "rocky-secure",
  "rocky-storage",
  "serde",

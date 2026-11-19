@@ -13,9 +13,6 @@ impl DatabaseOwner {
     pub fn connect(&self) -> Result<sqlite::Connection, Error> {
         Ok(sqlite::Connection::open(&self.path)?)
     }
-    pub fn connect_read_only(&self) -> Result<sqlite::Connection, Error> {
-        Ok(sqlite::Connection::open_read_only(&self.path)?)
-    }
     pub async fn open(path: &Path) -> Result<(Self, sqlite::Connection), Error> {
         let path_string = path
             .to_str()

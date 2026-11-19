@@ -1,4 +1,4 @@
-use std::{cell::Cell, collections::VecDeque, path::Path, sync::Mutex};
+use std::{collections::VecDeque, path::Path, sync::Mutex};
 use web_time::Instant;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -9,7 +9,6 @@ pub enum Error {
     Deadline,
     Denied,
     Unsupported(String),
-    Group(String),
     Build(String),
     Sqlite(rusqlite::Error),
     Type(String),
@@ -62,7 +61,6 @@ impl std::fmt::Display for Error {
             Self::Deadline => write!(f, "read transaction exceeded its time bound"),
             Self::Denied => write!(f, "statement is not authorized"),
             Self::Unsupported(reason) => write!(f, "unsupported statement: {reason}"),
-            Self::Group(message) => write!(f, "group commit failed: {message}"),
             Self::Build(message) => f.write_str(message),
             Self::Sqlite(error) => error.fmt(f),
             Self::Type(message) => write!(f, "unexpected column value: {message}"),
@@ -228,7 +226,6 @@ impl Rows {
 
 #[derive(Clone)]
 struct Hooks {
-    tracker: std::sync::Arc<Mutex<crate::digest::Tracker>>,
     capture: std::sync::Arc<Mutex<crate::capture::Sink>>,
     writes: std::sync::Arc<Writes>,
 }
@@ -444,9 +441,6 @@ impl Connection {
             Default::default(),
         ))
     }
-    pub fn tracker(&self) -> Result<std::sync::Arc<Mutex<crate::digest::Tracker>>> {
-        Ok(self.hooks()?.tracker)
-    }
     pub fn capture(&self) -> Result<std::sync::Arc<Mutex<crate::capture::Sink>>> {
         Ok(self.hooks()?.capture)
     }
@@ -511,7 +505,6 @@ impl Connection {
             return Ok(hooks.clone());
         }
         let hooks = Hooks {
-            tracker: Default::default(),
             capture: Default::default(),
             writes: Default::default(),
         };
@@ -522,21 +515,14 @@ impl Connection {
                 if database == "main" {
                     shared.writes.observe(table, row);
                 }
-                let (Ok(mut tracker), Ok(mut capture)) =
-                    (shared.tracker.lock(), shared.capture.lock())
-                else {
+                let Ok(mut capture) = shared.capture.lock() else {
                     return;
                 };
                 let main = database == "main";
                 if row.change() == Change::Insert && main && row.depth() == 0 {
                     capture.inserted(table);
                 }
-                let tracked = tracker
-                    .table(table)
-                    .filter(|_| main)
-                    .map(|(slot, logical)| (slot, logical.to_string()));
-                let captured = capture.wants(main, table);
-                if tracked.is_none() && !captured {
+                if !capture.wants(main, table) {
                     return;
                 }
                 let old = || {
@@ -555,27 +541,8 @@ impl Connection {
                     Change::Update => old().and_then(|removed| Ok((Some(removed), Some(new()?)))),
                 };
                 match rows {
-                    Ok((removed, added)) => {
-                        if let Some((slot, logical)) = tracked {
-                            let hash = |values: &Vec<Value>| {
-                                crate::digest::row_hash(&logical, values.iter())
-                            };
-                            tracker.record(
-                                slot,
-                                removed.as_ref().map(hash),
-                                added.as_ref().map(hash),
-                            );
-                        }
-                        if captured {
-                            capture.observe(table, removed, added);
-                        }
-                    }
-                    Err(_) => {
-                        if tracked.is_some() {
-                            tracker.fail();
-                        }
-                        capture.fail("a changed row could not be read");
-                    }
+                    Ok((removed, added)) => capture.observe(table, removed, added),
+                    Err(_) => capture.fail("a changed row could not be read"),
                 }
             },
         )?;
@@ -788,18 +755,6 @@ impl Connection {
         self.raw()?.busy_timeout(timeout)?;
         Ok(())
     }
-    pub fn set_query_only(&self) -> Result<()> {
-        self.raw()?.pragma_update(None, "query_only", 1)?;
-        Ok(())
-    }
-    pub fn track_wal(&self) -> Result<()> {
-        fn record(_: &rusqlite::hooks::Wal, frames: std::ffi::c_int) -> rusqlite::Result<()> {
-            WAL_FRAMES.with(|cell| cell.set(i64::from(frames)));
-            Ok(())
-        }
-        self.raw()?.wal_hook(Some(record));
-        Ok(())
-    }
     #[cfg(feature = "qualification")]
     pub fn qualification_exit_in_commit(&self) -> Result<()> {
         let raw = self.raw()?;
@@ -810,33 +765,6 @@ impl Connection {
         Err(Error::Type(
             "qualification COMMIT returned without invoking its callback".into(),
         ))
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn abort_when_busy(&self) -> Result<()> {
-        fn abort(_: i32) -> bool {
-            std::process::abort()
-        }
-        self.raw()?.busy_handler(Some(abort))?;
-        Ok(())
-    }
-    pub fn restrict_reads(&self, tables: Option<Vec<String>>) -> Result<()> {
-        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-        let raw = self.raw()?;
-        match tables {
-            Some(tables) => {
-                raw.authorizer(Some(move |context: AuthContext<'_>| match context.action {
-                    AuthAction::Select | AuthAction::Function { .. } => Authorization::Allow,
-                    AuthAction::Read { table_name, .. }
-                        if tables.iter().any(|table| table == table_name) =>
-                    {
-                        Authorization::Allow
-                    }
-                    _ => Authorization::Deny,
-                }))?
-            }
-            None => raw.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?,
-        }
-        Ok(())
     }
     pub fn page(
         &self,
@@ -884,8 +812,6 @@ impl Connection {
             page.rows.push(values);
         }
         drop(rows);
-        #[cfg(any(test, feature = "test-support"))]
-        count_steps(&statement);
         Ok(page)
     }
     pub fn rows(&self, sql: &str, params: impl IntoParams) -> Result<Vec<Vec<Value>>> {
@@ -918,8 +844,6 @@ impl Connection {
             result.push_back(Row(values));
         }
         drop(rows);
-        #[cfg(any(test, feature = "test-support"))]
-        count_steps(&statement);
         drop(statement);
         Ok((result, raw.changes()))
     }
@@ -952,30 +876,14 @@ pub(crate) fn value(value: rusqlite::types::ValueRef<'_>) -> Result<Value> {
     })
 }
 
-thread_local! {
-    static WAL_FRAMES: Cell<i64> = const { Cell::new(0) };
-}
-pub fn wal_frames() -> i64 {
-    WAL_FRAMES.with(Cell::get)
-}
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    static VM_STEPS: Cell<u64> = const { Cell::new(0) };
-    static STATEMENTS: Cell<u64> = const { Cell::new(0) };
+    static STATEMENTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static STATEMENT_TRACE: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
 }
 #[cfg(any(test, feature = "test-support"))]
 pub fn statements() -> u64 {
-    STATEMENTS.with(Cell::get)
-}
-#[cfg(any(test, feature = "test-support"))]
-fn count_steps(statement: &rusqlite::Statement<'_>) {
-    let steps = statement.reset_status(rusqlite::StatementStatus::VmStep);
-    VM_STEPS.with(|cell| cell.set(cell.get() + steps.max(0) as u64));
-}
-#[cfg(any(test, feature = "test-support"))]
-pub fn vm_steps() -> u64 {
-    VM_STEPS.with(Cell::get)
+    STATEMENTS.with(std::cell::Cell::get)
 }
 
 #[cfg(any(test, feature = "test-support"))]

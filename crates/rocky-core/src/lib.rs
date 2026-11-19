@@ -1,7 +1,5 @@
 mod blocker;
 pub use blocker::*;
-mod capture;
-mod codec;
 mod coordinated;
 pub use coordinated::*;
 mod definition;
@@ -17,7 +15,6 @@ mod secure_row;
 pub use secure_row::{CreationStatement, MAX_CLOCK, MAX_CLOCK_AHEAD, SecureStamp, bounded_clock};
 mod field_ordinals;
 pub use field_ordinals::FieldOrdinals;
-mod history;
 mod key;
 mod key_epoch;
 pub use key_epoch::KeyEpoch;
@@ -30,63 +27,20 @@ mod migration;
 pub use migration::*;
 pub mod net;
 pub mod replay;
-mod storage;
 mod types;
 mod value;
 
-pub use capture::{Intent, TransactionToken};
-pub use history::{AppliedOperations, Delivery};
 pub use key::{KeyColumn, MAX_KEY_BYTES, bound_key, key_components, key_values};
 pub use logical::*;
-pub use storage::{
-    ApplicationDescriptor, AuthoredFollow, CompiledSchema, InstalledSchema, ProjectionSchema,
-    ProjectionStatement, ReadView, Sql, StoredApplication, columns, installed_definition,
-};
 pub use types::*;
 pub use value::{Real, SqlValue};
-
-#[derive(Clone, Copy, Debug)]
-pub struct AdmissionContext {
-    pub scope: Scope,
-    pub caller: PrincipalId,
-    pub policy_version: u64,
-    pub boundary: AdmissionBoundary,
-}
-pub trait Application {
-    type State: Default;
-    type Error: std::error::Error + Send + Sync + 'static;
-    type Policy;
-
-    fn validate(&self, envelope: &Envelope) -> Result<(), Self::Error>;
-    fn admit(&self, envelope: &Envelope, policy: &Self::Policy) -> Result<(), Self::Error>;
-    fn policy_version(&self, _policy: &Self::Policy) -> u64 {
-        1
-    }
-    fn admit_candidate(
-        &self,
-        _before: &Self::State,
-        _after: &Self::State,
-        envelope: &Envelope,
-        _context: AdmissionContext,
-        policy: &Self::Policy,
-    ) -> Result<(), Self::Error> {
-        self.admit(envelope, policy)
-    }
-    fn definite_drop(&self, _state: &Self::State, _envelope: &Envelope) -> bool {
-        false
-    }
-    fn apply_ready(
-        &self,
-        state: &mut Self::State,
-        envelope: &Envelope,
-        boundary: AdmissionBoundary,
-    ) -> Result<(), Self::Error>;
-}
 
 mod coordination;
 pub use coordination::*;
 mod tip;
 pub use tip::TipId;
+mod token;
+pub use token::TransactionToken;
 
 mod partition_groups;
 pub use partition_groups::{GroupAddress, PartitionGroup};

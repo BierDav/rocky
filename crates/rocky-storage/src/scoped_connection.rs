@@ -238,22 +238,8 @@ impl ScopedConnection {
     ) -> Self {
         Self::shared(Arc::new(raw), namespace, schema)
     }
-    pub fn with_connection(&self, raw: Arc<crate::sqlite::Connection>) -> Self {
-        Self {
-            raw,
-            names: self.names.clone(),
-            rewritten: Mutex::new(HashMap::new()),
-        }
-    }
     pub fn connection(&self) -> &crate::sqlite::Connection {
         &self.raw
-    }
-    pub fn rescoped(&self, namespace: Option<&str>, schema: &[impl AsRef<str>]) -> Self {
-        Self::shared(self.raw.clone(), namespace, schema)
-    }
-    pub fn into_connection(self) -> Result<crate::sqlite::Connection, crate::Error> {
-        Arc::try_unwrap(self.raw)
-            .map_err(|_| crate::Error::Corrupt("connection is still shared".into()))
     }
     pub fn shared(
         raw: Arc<crate::sqlite::Connection>,

@@ -1,6 +1,6 @@
 [package]
 name = "rocky-storage"
-description = "SQLite access, row capture and errors shared by the runtimes"
+description = "SQLite access, SQL analysis, row capture and storage errors"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

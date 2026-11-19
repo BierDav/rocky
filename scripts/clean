@@ -1,25 +1,10 @@
 #!/bin/sh
-# Reclaim regenerable build output.
-#
-#   scripts/clean             this checkout's Cargo output
-#   scripts/clean --evidence  also this checkout's generated benchmark databases
+# Reclaim this checkout's regenerable Cargo output.
 set -eu
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
 
-usage() { sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
-
-evidence=false
-case "${1:-}" in
-'') ;;
---evidence) evidence=true ;;
-*) usage ;;
-esac
+[ "$#" -eq 0 ] || { echo "usage: scripts/clean" >&2; exit 2; }
 
 cargo clean
-
-if $evidence; then
-    find benchmarks/runtime-scaling/evidence -type f \
-        \( -name '*.db' -o -name '*.db-wal' -o -name '*.db-shm' \) -delete
-fi

@@ -52,21 +52,6 @@ impl std::fmt::Display for CoordinationError {
 impl std::error::Error for CoordinationError {}
 pub type CoordinationFuture<'a, T> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, CoordinationError>> + Send + 'a>>;
-pub const ISSUE_SHIFT: u32 = 24;
-pub const fn issued_at(sequence: u64) -> u64 {
-    sequence >> ISSUE_SHIFT
-}
-pub fn next_request_sequence(previous: u64, now: u64) -> Result<AuthorSequence, ProtocolError> {
-    let floor = now
-        .checked_mul(1 << ISSUE_SHIFT)
-        .ok_or(ProtocolError::InvalidCounter)?;
-    AuthorSequence::new(
-        previous
-            .checked_add(1)
-            .ok_or(ProtocolError::InvalidCounter)?
-            .max(floor),
-    )
-}
 pub struct CommitmentBuilder(Sha256);
 impl CommitmentBuilder {
     pub fn new(prefix: &str) -> Self {

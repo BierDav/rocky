@@ -1,7 +1,11 @@
 use crate::{Failure, node::Node};
 use rocky_core::{SqlValue, TypedRows};
-use rocky_runtime::{CursorLimits, SnapshotCursor, SqlControl, TableObserver, classify_sql};
 use rocky_secure::{Error, SecureSql, SqlError, Unavailable};
+use rocky_storage::{
+    cursor::{CursorLimits, SnapshotCursor},
+    observe::TableObserver,
+    sql::{Control, classify},
+};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex as StdMutex},
@@ -519,9 +523,9 @@ impl State {
     }
 
     async fn write(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<Pending, Failure> {
-        let control = classify_sql(sql).map_err(Error::Sql)?;
+        let control = classify(sql).map_err(Error::Sql)?;
         match control {
-            SqlControl::Begin(mode) => {
+            Control::Begin(mode) => {
                 if self.active() {
                     return Err(failure(
                         code::ERROR,
@@ -532,7 +536,7 @@ impl State {
                 self.begin = Some(mode);
                 return Ok(Pending::rows(Vec::new(), Vec::new()));
             }
-            SqlControl::Commit | SqlControl::Rollback if self.begin.is_some() => {
+            Control::Commit | Control::Rollback if self.begin.is_some() => {
                 self.begin = None;
                 self.handle = None;
                 return Ok(Pending::rows(Vec::new(), Vec::new()));
@@ -540,16 +544,16 @@ impl State {
             _ => {}
         }
         self.begun().await?;
-        let ending = matches!(control, SqlControl::Commit | SqlControl::Rollback);
-        if matches!(control, SqlControl::Savepoint(_)) {
+        let ending = matches!(control, Control::Commit | Control::Rollback);
+        if matches!(control, Control::Savepoint(_)) {
             self.open = true;
         }
         let handle = if ending { self.handle.take() } else { None };
         let ran = match (&control, handle) {
-            (SqlControl::Commit, Some(handle)) => self.sql().await?.commit(handle).await,
+            (Control::Commit, Some(handle)) => self.sql().await?.commit(handle).await,
             _ => self.sql().await?.run(sql, params).await,
         };
-        if matches!(control, SqlControl::Commit) {
+        if matches!(control, Control::Commit) {
             self.committed = None;
             if let Ok(rows) = &ran
                 && let Some(commit) = rows
@@ -562,7 +566,7 @@ impl State {
             }
         }
         let session_may_have_ended =
-            ending || ran.is_err() || matches!(control, SqlControl::Release(_));
+            ending || ran.is_err() || matches!(control, Control::Release(_));
         if session_may_have_ended {
             let aborted = matches!(&ran, Err(Error::Sql(SqlError::Aborted(_))));
             let active = self.sql().await?.state().await == rocky_secure::SqlState::Active;
@@ -574,39 +578,39 @@ impl State {
     }
 
     async fn read(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<Pending, Failure> {
-        let control = classify_sql(sql).map_err(Error::Sql)?;
+        let control = classify(sql).map_err(Error::Sql)?;
         let none = || Ok(Pending::rows(Vec::new(), Vec::new()));
         let no_transaction = || -> Result<Pending, Failure> {
             Err(failure(code::ERROR, "no transaction is active").into())
         };
-        let release = matches!(control, SqlControl::Release(_));
+        let release = matches!(control, Control::Release(_));
         match control {
-            SqlControl::Begin("DEFERRED") if self.reading.is_none() => {
+            Control::Begin("DEFERRED") if self.reading.is_none() => {
                 self.reading = Some(Reading::default());
                 none()
             }
-            SqlControl::Begin("DEFERRED") => Err(failure(
+            Control::Begin("DEFERRED") => Err(failure(
                 code::ERROR,
                 "cannot start a transaction within a transaction",
             )
             .into()),
-            SqlControl::Begin(_) if self.seal.is_some() && self.reading.is_none() => {
+            Control::Begin(_) if self.seal.is_some() && self.reading.is_none() => {
                 self.reading = Some(Reading::default());
                 none()
             }
-            SqlControl::Begin(_) if self.seal.is_some() => Err(failure(
+            Control::Begin(_) if self.seal.is_some() => Err(failure(
                 code::ERROR,
                 "cannot start a transaction within a transaction",
             )
             .into()),
-            SqlControl::Begin(_) => {
+            Control::Begin(_) => {
                 Err(failure(code::READONLY, "a reader connection cannot write").into())
             }
-            SqlControl::Commit | SqlControl::Rollback => match self.reading.take() {
+            Control::Commit | Control::Rollback => match self.reading.take() {
                 Some(_) => none(),
                 None => no_transaction(),
             },
-            SqlControl::Savepoint(name) => {
+            Control::Savepoint(name) => {
                 let reading = self.reading.get_or_insert_with(|| Reading {
                     implicit: true,
                     ..Reading::default()
@@ -614,7 +618,7 @@ impl State {
                 reading.savepoints.push(name);
                 none()
             }
-            SqlControl::Release(name) | SqlControl::RollbackTo(name) => {
+            Control::Release(name) | Control::RollbackTo(name) => {
                 let Some(reading) = &mut self.reading else {
                     return no_transaction();
                 };
@@ -635,7 +639,7 @@ impl State {
                 }
                 none()
             }
-            SqlControl::Statement => {
+            Control::Statement => {
                 let limits = CursorLimits::default();
                 let opened = self.opened.as_ref().ok_or("connection has no session")?;
                 let readonly = |error: Error| -> Failure {

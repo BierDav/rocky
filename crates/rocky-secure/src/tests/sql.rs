@@ -922,6 +922,64 @@ async fn cancel_and_timeout_roll_back_and_free_the_replica() {
     );
 }
 
+#[cfg(not(target_family = "wasm"))]
+#[tokio::test(start_paused = true)]
+async fn a_commit_past_the_lease_deadline_aborts_before_the_lease_watcher_runs() {
+    let t = Typed::new();
+    let dir = Scratch::new().await;
+    let both = [t.items, t.salaries];
+    let alice = t
+        .open(
+            &dir.path().join("a.db"),
+            &PrivateKey::new(),
+            t.full(),
+            &both,
+        )
+        .await;
+    let timeout = std::time::Duration::from_secs(1);
+    let held = alice
+        .session(both.into())
+        .await
+        .unwrap()
+        .sql(SqlOptions {
+            transaction_timeout: timeout,
+            ..SqlOptions::default()
+        })
+        .await
+        .unwrap();
+    held.run("BEGIN", vec![]).await.unwrap();
+    insert(&held, "INSERT INTO items VALUES('a','apples',0)", vec![])
+        .await
+        .unwrap();
+    assert_eq!(
+        held.state().await,
+        SqlState::Active,
+        "the paused clock has not reached the lease deadline yet"
+    );
+    let without_running_other_tasks = &mut std::task::Context::from_waker(std::task::Waker::noop());
+    let advanced = std::pin::pin!(tokio::time::advance(timeout)).poll(without_running_other_tasks);
+    assert!(
+        advanced.is_pending(),
+        "the clock moves past the deadline but the lease watcher gets no turn"
+    );
+    let mut commit = std::pin::pin!(held.run("COMMIT", vec![]));
+    let committed = match commit.as_mut().poll(without_running_other_tasks) {
+        std::task::Poll::Ready(committed) => committed,
+        std::task::Poll::Pending => commit.await,
+    };
+    assert_eq!(
+        sql_error(committed),
+        SqlError::Aborted(AbortReason::Timeout),
+        "a COMMIT after the lease deadline is aborted by the call itself, not by the watcher"
+    );
+    assert!(
+        select(&sql(&alice, &both).await, "SELECT key FROM items")
+            .await
+            .is_empty(),
+        "the expired transaction is rolled back"
+    );
+}
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn savepoint_rollback_and_cancellation_do_not_cache_uncommitted_frontiers() {
     let t = Typed::new();

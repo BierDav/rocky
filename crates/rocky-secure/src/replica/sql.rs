@@ -11,6 +11,9 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::OwnedMutexGuard;
 use web_time::Instant;
 
+mod expiry;
+use expiry::Expiry;
+
 const SQLITE_CONSTRAINT: i32 = 19;
 
 #[derive(Clone, Debug)]
@@ -28,12 +31,16 @@ pub struct SecureCommit {
     pub frames: Vec<EncryptedFrame>,
 }
 
-struct Held<A: RowApplication>(Guard<OwnedMutexGuard<Inner<A>>>, bool);
+struct Held<A: RowApplication> {
+    inner: Guard<OwnedMutexGuard<Inner<A>>>,
+    keeps_pending_pass: bool,
+    expiry: Expiry,
+}
 impl<A: RowApplication> Drop for Held<A> {
     fn drop(&mut self) {
-        let inner = &mut *self.0;
+        let inner = &mut *self.inner;
         inner.invalidate_context();
-        if self.1 {
+        if self.keeps_pending_pass {
             inner.keep_pending_pass();
         }
         let conn = inner.conn.connection();
@@ -55,7 +62,6 @@ struct Lease<A: RowApplication> {
     implicit: bool,
     aborted: Option<AbortReason>,
     turn: u64,
-    deadline: Instant,
     observed: sqlite::Observed,
     identities: Reserved,
     intents: Vec<super::intents::Recorded>,
@@ -188,7 +194,6 @@ impl<A: RowApplication> SecureSession<A> {
                 implicit: false,
                 aborted: None,
                 turn: 0,
-                deadline: Instant::now(),
                 observed: sqlite::Observed::default(),
                 identities: BTreeMap::new(),
                 intents: Vec::new(),
@@ -229,7 +234,7 @@ impl<A: RowApplication> SecureSql<A> {
             .held
             .as_ref()
             .ok_or_else(|| refused("next_id requires an active transaction"))?;
-        let inner = &held.0;
+        let inner = &held.inner;
         admit(inner, &self.session)?;
         let typed = inner
             .workspace
@@ -419,6 +424,10 @@ impl<A: RowApplication> SecureSql<A> {
         }
         let control = classify(sql).map_err(Error::Sql)?;
         let mut lease = self.lease.lock().await;
+        if lease.held.as_ref().is_some_and(|held| held.expiry.passed()) {
+            lease.held = None;
+            lease.aborted = Some(AbortReason::Timeout);
+        }
         if let Some(reason) = lease.aborted.clone() {
             return match control {
                 Control::Rollback => {
@@ -483,12 +492,12 @@ impl<A: RowApplication> SecureSql<A> {
             Control::RollbackTo(name) => {
                 let index = position(&lease, &name)?;
                 if let Some(held) = &lease.held {
-                    held.0.invalidate_context();
+                    held.inner.invalidate_context();
                 }
                 self.engine(&lease, &format!("ROLLBACK TO rocky_user_{index}"))?;
                 let mark = lease.savepoints[index].1;
                 if let Some(held) = &lease.held {
-                    held.0
+                    held.inner
                         .conn
                         .connection()
                         .capture()?
@@ -507,7 +516,7 @@ impl<A: RowApplication> SecureSql<A> {
                 let original = (sql, params.clone());
                 let checked = match &lease.held {
                     Some(held) => {
-                        held.0
+                        held.inner
                             .partition_statement(sql, &params, &self.session.status)
                             .await?
                     }
@@ -527,7 +536,7 @@ impl<A: RowApplication> SecureSql<A> {
                 {
                     match &lease.held {
                         Some(held) => {
-                            held.0
+                            held.inner
                                 .availability(&analyzed.tables, &self.session.status)
                                 .await?
                         }
@@ -568,8 +577,12 @@ impl<A: RowApplication> SecureSql<A> {
     ) -> Result<SecureRows, Error> {
         {
             let inner = self.session.replica.inner.lock(statement_class(sql)).await;
-            let deadline = Instant::now() + self.options.transaction_timeout;
-            match self.step(&inner, lease, sql, params.clone(), false, deadline)? {
+            let budget = Instant::now()
+                + self
+                    .options
+                    .statement_budget
+                    .min(self.options.transaction_timeout);
+            match self.step(&inner, lease, sql, params.clone(), false, budget)? {
                 Ok(Run::Writes) => {}
                 ran => return self.answer(lease, ran, SqlState::Idle),
             }
@@ -640,8 +653,13 @@ impl<A: RowApplication> SecureSql<A> {
             .map(|(index, _)| index)
             .collect();
         lease.plan = Arc::new(plan);
-        let held = Held(inner, false);
-        let conn = held.0.conn.connection();
+        let (expiry, lapse) = Expiry::start(self.options.transaction_timeout);
+        let held = Held {
+            inner,
+            keeps_pending_pass: false,
+            expiry,
+        };
+        let conn = held.inner.conn.connection();
         conn.run_now(sql).map_err(engine)?;
         lease.identities.clear();
         lease.intents.clear();
@@ -656,15 +674,12 @@ impl<A: RowApplication> SecureSql<A> {
         lease.savepoints.clear();
         lease.implicit = false;
         lease.turn += 1;
-        lease.deadline = Instant::now() + self.options.transaction_timeout;
         self.cancelled.store(false, Ordering::Relaxed);
-        let (watched, turn, timeout) = (
-            self.lease.clone(),
-            lease.turn,
-            self.options.transaction_timeout,
-        );
+        let (watched, turn) = (self.lease.clone(), lease.turn);
         rocky_platform::task::spawn(async move {
-            rocky_platform::time::sleep(timeout).await;
+            if !lapse.passed().await {
+                return;
+            }
             let mut lease = watched.lock().await;
             if lease.turn == turn && lease.held.take().is_some() {
                 lease.aborted = Some(AbortReason::Timeout);
@@ -685,7 +700,7 @@ impl<A: RowApplication> SecureSql<A> {
         )?;
         let mark = match &lease.held {
             Some(held) => held
-                .0
+                .inner
                 .conn
                 .connection()
                 .capture()?
@@ -701,7 +716,7 @@ impl<A: RowApplication> SecureSql<A> {
     }
     fn engine(&self, lease: &Lease<A>, sql: &str) -> Result<(), Error> {
         let held = lease.held.as_ref().ok_or(Error::Closed)?;
-        held.0.conn.connection().run_now(sql).map_err(engine)
+        held.inner.conn.connection().run_now(sql).map_err(engine)
     }
     fn statement(
         &self,
@@ -719,15 +734,18 @@ impl<A: RowApplication> SecureSql<A> {
         let sql = checked.as_deref().unwrap_or(sql);
         let held = lease.held.take().ok_or(Error::Closed)?;
         let mark = held
-            .0
+            .inner
             .conn
             .connection()
             .capture()?
             .lock()
             .map_err(|_| Error::Corrupt("capture poisoned".into()))?
             .mark();
-        let ran = self.step(&held.0, lease, sql, params, true, lease.deadline);
-        let conn = held.0.conn.connection();
+        let budget = held
+            .expiry
+            .bound(Instant::now() + self.options.statement_budget);
+        let ran = self.step(&held.inner, lease, sql, params, true, budget);
+        let conn = held.inner.conn.connection();
         let (failure, touched) = {
             let capture = conn.capture()?;
             let sink = capture
@@ -807,7 +825,7 @@ impl<A: RowApplication> SecureSql<A> {
         sql: &str,
         params: Vec<SqlValue>,
         write: bool,
-        deadline: Instant,
+        budget: Instant,
     ) -> Result<sqlite::Result<Run>, Error> {
         admit(inner, &self.session)?;
         let analyzed = if self.parents.is_empty() {
@@ -831,7 +849,6 @@ impl<A: RowApplication> SecureSql<A> {
             .map_err(|_| poisoned())?
             .arm(Some(lease.plan.clone()));
         capture.lock().map_err(|_| poisoned())?.begin_statement();
-        let budget = (Instant::now() + self.options.statement_budget).min(deadline);
         let result = conn
             .set_interrupt(budget, self.cancelled.clone())
             .and_then(|()| {
@@ -904,7 +921,7 @@ impl<A: RowApplication> SecureSql<A> {
         lease.implicit = false;
         let mut rows = rows.unwrap_or_else(|| empty(lease, SqlState::Idle));
         rows.state = SqlState::Idle;
-        let inner = &mut *held.0;
+        let inner = &mut *held.inner;
         #[cfg(feature = "qualification")]
         super::crash::qualification_kill("before");
         let local = matches!(target, Target::Bundle(_));
@@ -933,7 +950,7 @@ impl<A: RowApplication> SecureSql<A> {
         super::crash::qualification_kill("after");
         let current = local && inner.pending_pass_current(inner.commit);
         inner.note_commit().await;
-        held.1 = current;
+        held.keeps_pending_pass = current;
         let scopes = committed
             .frames
             .iter()
@@ -1194,7 +1211,7 @@ impl<A: RowApplication> SecureSql<A> {
         (sql, params): (&str, Vec<SqlValue>),
     ) -> Result<Option<Vec<super::intents::Recorded>>, Error> {
         let held = lease.held.as_ref().ok_or(Error::Closed)?;
-        held.0
+        held.inner
             .intent_copies(
                 sql,
                 &params,
@@ -1248,8 +1265,8 @@ impl<A: RowApplication> SecureSql<A> {
     ) -> Result<(ScopeFrontier, usize), Error> {
         let lease = self.lease.lock().await;
         let held = lease.held.as_ref().ok_or(Error::Closed)?;
-        let frontier = held.0.tip_frontier(scope).await?;
-        Ok((frontier, held.0.frontier_cache_stats().1))
+        let frontier = held.inner.tip_frontier(scope).await?;
+        Ok((frontier, held.inner.frontier_cache_stats().1))
     }
 }
 

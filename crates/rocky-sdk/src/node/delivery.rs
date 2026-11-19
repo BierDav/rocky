@@ -40,12 +40,15 @@ impl Deliveries for Port<'_> {
                 .get()
                 .and_then(std::sync::Weak::upgrade)
                 .ok_or_else(|| secure("delivery owner ended".into()))?;
-            crate::reactor::spawn_local("receive_deliveries", async move {
-                node.receive(peer, deliveries).await
-            })
-            .await
-            .map_err(|error| secure(error.into()))?
-            .map_err(secure)
+            let (received, receipts) = tokio::sync::oneshot::channel();
+            let receiving = node.clone();
+            node.background.spawn("receive_deliveries", async move {
+                let _ = received.send(receiving.receive(peer, deliveries).await);
+            });
+            receipts
+                .await
+                .map_err(|_| secure("the delivery receipt ended".into()))?
+                .map_err(secure)
         })
     }
     fn deposit<'a>(

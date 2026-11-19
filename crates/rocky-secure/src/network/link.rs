@@ -1,7 +1,7 @@
 use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
-pub(super) const HANDSHAKE_VERSION: u32 = 30;
+pub(super) const HANDSHAKE_VERSION: u32 = 31;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
 mod lanes;
@@ -792,7 +792,7 @@ mod tests {
     fn only_current_link_name_and_handshake_label() {
         assert_eq!(
             session_label(HANDSHAKE_VERSION),
-            "rocky.link.v30",
+            "rocky.link.v31",
             "the cryptographic handshake accepts one current version"
         );
     }
@@ -957,6 +957,18 @@ pub(crate) mod testing {
         let session = handle.open().await?;
         let answering = incoming.recv().await.ok_or_else(|| denied("link ended"))?;
         Ok((session, answering))
+    }
+    pub(crate) async fn harvested_hello(stream: &mut impl SessionStream) -> Result<Vec<u8>, Error> {
+        read_frame(stream).await
+    }
+    pub(crate) async fn replay_hello(
+        mut stream: impl SessionStream,
+        hello: &[u8],
+        forger: &PrivateKey,
+    ) -> Result<(), Error> {
+        write_frame(&mut stream, hello).await?;
+        let answered = read_frame(&mut stream).await?;
+        write_frame(&mut stream, &encode(&forger.sign(&answered))?).await
     }
     pub(crate) async fn sessions_over<A: RowApplication, B: RowApplication>(
         near: impl SessionStream + 'static,

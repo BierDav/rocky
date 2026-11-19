@@ -67,7 +67,6 @@ struct Hello {
     version: u32,
     node: PublicKey,
     challenge: [u8; 32],
-    tip: rocky_core::TipId,
     credentials: CredentialChain,
     exchange: [u8; 32],
     clock: u64,
@@ -286,7 +285,6 @@ impl NativeSession {
             version,
             node: own,
             challenge,
-            tip: replica.followed_tip().await,
             credentials,
             exchange,
             clock: micros()?,
@@ -308,9 +306,7 @@ impl NativeSession {
             return Err(denied("unexpected link peer"));
         }
         if side == Side::Acceptor {
-            replica
-                .admit_peer(peer.node, &peer.credentials, peer.tip)
-                .await?;
+            replica.admit_chain(peer.node, &peer.credentials).await?;
             write_frame(&mut stream, &local_bytes).await?;
         }
         let mut parts = [(hello.node, local_bytes), (peer.node, peer_bytes)];
@@ -323,9 +319,7 @@ impl NativeSession {
         }
         let offset = clock_offset(peer.clock, received)?;
         if side == Side::Initiator {
-            replica
-                .admit_peer(peer.node, &peer.credentials, peer.tip)
-                .await?;
+            replica.admit_chain(peer.node, &peer.credentials).await?;
         }
         let shared = exchange_secret.shared(&peer.exchange).map_err(credential)?;
         let contact_key = rocky_core::commitment(

@@ -786,7 +786,7 @@ async fn frames(
     target: &EncryptedReplica<TypedRows>,
     scope: ResourceScope,
 ) -> Vec<EncryptedFrame> {
-    let (node, credentials, tip_the_hello_declares) = {
+    let (node, credentials, tip_the_target_follows) = {
         let inner = target.inner.lock(crate::replica::Class::Background).await;
         (
             inner.config.node.public_key(),
@@ -795,7 +795,7 @@ async fn frames(
         )
     };
     source
-        .admit_peer(node, &credentials, tip_the_hello_declares)
+        .admit_peer(node, &credentials, tip_the_target_follows)
         .await
         .unwrap();
     frames_as(source, node, &credentials, scope).await
@@ -1019,12 +1019,12 @@ async fn sync(
     scope: ResourceScope,
 ) {
     let credentials = lineage.credentials(generation, target_key);
-    let tip_the_hello_declares = target.followed_tip().await;
+    let tip_the_target_follows = target.followed_tip().await;
     source
         .admit_peer(
             target_key.public_key(),
             &credentials,
-            tip_the_hello_declares,
+            tip_the_target_follows,
         )
         .await
         .unwrap();

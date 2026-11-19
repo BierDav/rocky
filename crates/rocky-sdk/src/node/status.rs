@@ -439,7 +439,7 @@ impl Node {
     pub(super) fn peer_reconciliation(
         &self,
         peer: PublicKey,
-        result: &Result<(bool, sync::Transfer), Failure>,
+        result: &Result<super::Exchanged, Failure>,
         first_attempt_id: u64,
     ) -> PeerReconciliation {
         let node = peer.to_hex();
@@ -467,8 +467,8 @@ impl Node {
             None
         };
         let transfer = match result {
-            Ok((retry, transfer)) => {
-                report.retry_pending = *retry;
+            Ok(super::Exchanged { work, transfer }) => {
+                report.retry_pending = *work == super::PeerWork::Owed;
                 Some(transfer)
             }
             Err(_) => partial.as_ref(),
@@ -512,7 +512,7 @@ impl Node {
         transport: Option<&dyn Transport>,
         automatic: bool,
         retry_only: bool,
-    ) -> Result<(ReconciliationReport, SyncStatus, bool), Failure> {
+    ) -> Result<(ReconciliationReport, super::PassOutcome), Failure> {
         let skip = if !self.online.load(Ordering::SeqCst) {
             Some(SkipReason::NetworkingDisabled)
         } else if !self.foreground.load(Ordering::SeqCst) {
@@ -531,7 +531,7 @@ impl Node {
         let first_attempt_id = self.observations.next_id();
         let peers = std::sync::Mutex::new(Vec::new());
         let result = if skip.is_some() {
-            Ok((SyncStatus::new(SyncState::Idle), false))
+            Ok(super::PassOutcome::idle())
         } else {
             let transport = transport.ok_or(ServiceError::NetworkRequired("sync"))?;
             let span = tracing::info_span!(
@@ -613,7 +613,7 @@ impl Node {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(report.clone());
         self.observations.touch();
-        result.map(|(status, retry)| (report, status, retry))
+        result.map(|outcome| (report, outcome))
     }
 }
 

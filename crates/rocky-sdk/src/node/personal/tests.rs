@@ -620,7 +620,7 @@ mod device_actions {
                 node.foreground.store(false, Ordering::SeqCst);
                 tokio::time::advance(Duration::from_secs(80)).await;
                 for retry_only in [false, true] {
-                    let (report, _, _) = node
+                    let (report, _) = node
                         .reconciliation_pass(Some(&*transport), false, retry_only)
                         .await?;
                     assert_eq!(report.skip, Some(crate::SkipReason::Suspended));

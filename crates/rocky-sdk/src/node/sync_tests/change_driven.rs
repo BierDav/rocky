@@ -684,9 +684,9 @@ async fn a_retry_wakeup_still_initializes_an_unattempted_peer() -> Result<(), Fa
                     .unwrap_or_else(PoisonError::into_inner)
                     .is_empty()
             );
-            let (status, retry) = a.sync_pass(&*transport(&a).await?, true, true).await?;
-            assert_eq!(status.state, SyncState::Connected);
-            assert!(!retry);
+            let outcome = a.sync_pass(&*transport(&a).await?, true, true).await?;
+            assert_eq!(outcome.status.state, SyncState::Connected);
+            assert!(!outcome.retry);
             assert_eq!(rows(&b).await?, ["1"]);
             a.detach(None).await;
             b.detach(None).await;

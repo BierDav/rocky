@@ -977,6 +977,9 @@ impl Settings {
     pub fn issuer(&self) -> bool {
         self.authority.is_some()
     }
+    pub(crate) fn renews_from_issuer(&self) -> bool {
+        !self.issuer() || !self.issuers.is_empty()
+    }
     pub fn domain(&self) -> Result<Domain, Failure> {
         let publisher = *self.publisher.as_bytes();
         Domain::at(

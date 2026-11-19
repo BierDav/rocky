@@ -885,10 +885,13 @@ async fn a_passive_checkpoint_runs_while_the_replica_is_held() {
         .unwrap();
     replica.set_wal_limits(0, u64::MAX).await;
     let mut inner = replica.inner.lock(crate::replica::Class::Background).await;
-    let before = inner.passive.completed();
+    let before = inner.file.passive.completed();
     let (started, ready) = tokio::sync::oneshot::channel();
     let (resume, paused) = std::sync::mpsc::channel();
-    inner.passive.pause(started, paused);
+    inner
+        .file
+        .passive
+        .pause(crate::replica::Hold::Checkpointing, started, paused);
     inner.checkpoint_if_due().await;
     ready.await.unwrap();
     let (scheduled, polled) = tokio::sync::oneshot::channel();
@@ -896,17 +899,179 @@ async fn a_passive_checkpoint_runs_while_the_replica_is_held() {
         scheduled.send(()).unwrap();
     });
     polled.await.unwrap();
-    assert_eq!(inner.passive.completed(), before);
+    assert_eq!(inner.file.passive.completed(), before);
     resume.send(()).unwrap();
-    inner.passive.wait().await;
-    assert_eq!(inner.passive.completed(), before + 1);
+    inner.file.passive.wait().await;
+    assert_eq!(inner.file.passive.completed(), before + 1);
     inner.checkpoint_if_due().await;
-    inner.passive.wait().await;
+    inner.file.passive.wait().await;
     assert_eq!(
-        inner.passive.completed(),
+        inner.file.passive.completed(),
         before + 1,
         "a second check at the same WAL size runs no other checkpoint"
     );
+}
+
+#[cfg(not(target_family = "wasm"))]
+struct HeldCheckpoint {
+    replica: EncryptedReplica<Employees>,
+    passive: Arc<crate::replica::Passive>,
+    resume: std::sync::mpsc::Sender<()>,
+    before: usize,
+}
+#[cfg(not(target_family = "wasm"))]
+async fn hold_passive_checkpoint(
+    f: &Fixture,
+    path: &std::path::Path,
+    node: &PrivateKey,
+    at: crate::replica::Hold,
+) -> HeldCheckpoint {
+    let replica = open(f, path, node).await;
+    replica
+        .author_buffered([1; 32], insert(f, 1), vec![])
+        .await
+        .unwrap();
+    replica.set_wal_limits(0, u64::MAX).await;
+    let mut inner = replica.inner.lock(crate::replica::Class::Background).await;
+    let passive = inner.file.passive.clone();
+    let before = passive.completed();
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let (resume, paused) = std::sync::mpsc::channel();
+    passive.pause(at, started, paused);
+    inner.checkpoint_if_due().await;
+    ready.await.unwrap();
+    drop(inner);
+    HeldCheckpoint {
+        replica,
+        passive,
+        resume,
+        before,
+    }
+}
+#[cfg(not(target_family = "wasm"))]
+async fn reopen(
+    f: &Fixture,
+    path: &std::path::Path,
+    node: &PrivateKey,
+) -> Result<EncryptedReplica<Employees>, Error> {
+    EncryptedReplica::open(path, f.app(), f.config(node, f.full(), &[f.public])).await
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn dropping_a_replica_skips_its_unstarted_passive_checkpoint_and_releases_the_file_at_once() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let path = dir.path().join("queued.db");
+    let node = PrivateKey::new();
+    let held = hold_passive_checkpoint(&f, &path, &node, crate::replica::Hold::Queued).await;
+    drop(held.replica);
+    let reopened = reopen(&f, &path, &node).await;
+    assert!(
+        reopened.is_ok(),
+        "a checkpoint that has not started must not keep the dropped replica's file: {:?}",
+        reopened.as_ref().err()
+    );
+    held.resume.send(()).unwrap();
+    held.passive.wait().await;
+    assert_eq!(
+        held.passive.completed(),
+        held.before,
+        "a checkpoint still waiting to run when its replica closes is skipped"
+    );
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn dropping_a_replica_lends_its_file_to_a_running_passive_checkpoint_without_waiting() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let path = dir.path().join("dropped.db");
+    let node = PrivateKey::new();
+    let held = hold_passive_checkpoint(&f, &path, &node, crate::replica::Hold::Checkpointing).await;
+    drop(held.replica);
+    assert_eq!(
+        held.passive.completed(),
+        held.before,
+        "dropping the replica returns while its checkpoint still runs"
+    );
+    let refused = reopen(&f, &path, &node)
+        .await
+        .err()
+        .map(|error| error.to_string());
+    assert!(
+        refused
+            .as_deref()
+            .is_some_and(|error| error.contains("already open")),
+        "the running checkpoint keeps the file until it finishes: {refused:?}"
+    );
+    held.resume.send(()).unwrap();
+    held.passive.wait().await;
+    assert_eq!(held.passive.completed(), held.before + 1);
+    let reopened = reopen(&f, &path, &node).await;
+    assert!(
+        reopened.is_ok(),
+        "the file is released once the running checkpoint finishes: {:?}",
+        reopened.as_ref().err()
+    );
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn closing_a_replica_waits_for_its_running_passive_checkpoint_to_release_the_file() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let path = dir.path().join("closed.db");
+    let node = PrivateKey::new();
+    let held = hold_passive_checkpoint(&f, &path, &node, crate::replica::Hold::Checkpointing).await;
+    let closing = rocky_platform::task::spawn(held.replica.close());
+    while !held.passive.stopped() {
+        rocky_platform::task::yield_now().await;
+    }
+    assert!(
+        !closing.is_finished(),
+        "close returns only after the running checkpoint finishes"
+    );
+    held.resume.send(()).unwrap();
+    closing.await.unwrap();
+    assert_eq!(held.passive.completed(), held.before + 1);
+    let reopened = reopen(&f, &path, &node).await;
+    assert!(
+        reopened.is_ok(),
+        "a closed replica's file reopens at once: {:?}",
+        reopened.as_ref().err()
+    );
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_passive_checkpoint_the_runtime_never_runs_still_lets_the_replica_close() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let replica = open(&f, &dir.path().join("unrun.db"), &PrivateKey::new()).await;
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    let passive = inner.file.passive.clone();
+    let flusher = inner.flusher.clone();
+    drop(inner);
+    let stopped = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let handle = stopped.handle().clone();
+    stopped.shutdown_background();
+    {
+        let _entered = handle.enter();
+        passive.schedule_past_every_mark(flusher);
+    }
+    let closing = tokio::task::unconstrained(replica.close());
+    let mut closing = std::pin::pin!(closing);
+    assert!(
+        closing
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+            .is_ready(),
+        "a checkpoint dropped before it ran must not leave the replica waiting for it"
+    );
+    assert_eq!(passive.completed(), 0);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

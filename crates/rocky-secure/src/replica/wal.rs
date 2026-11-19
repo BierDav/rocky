@@ -1,29 +1,61 @@
 use super::*;
 
+pub(crate) struct OwnedFile {
+    pub(crate) passive: Arc<Passive>,
+    path: PathBuf,
+}
+impl OwnedFile {
+    pub(super) fn open(database: DatabaseOwner) -> Result<Self, Error> {
+        Ok(Self {
+            path: database.path().to_path_buf(),
+            passive: Passive::open(database)?,
+        })
+    }
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+impl Drop for OwnedFile {
+    fn drop(&mut self) {
+        self.passive.stop();
+    }
+}
+
+struct CheckpointFile {
+    conn: crate::sqlite::Connection,
+    _database_released_after_conn: DatabaseOwner,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hold {
+    Queued,
+    Checkpointing,
+}
+
 #[derive(Default)]
 struct State {
+    file: Option<CheckpointFile>,
     running: bool,
+    stopped: bool,
     mark: u64,
     epoch: u64,
+    #[cfg(test)]
+    hold: Option<(
+        Hold,
+        tokio::sync::oneshot::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    )>,
 }
 pub(crate) struct Passive {
-    conn: crate::sqlite::Connection,
-    _owner: Arc<DatabaseOwner>,
     state: std::sync::Mutex<State>,
     idle: tokio::sync::Notify,
-    #[cfg(test)]
-    pause: std::sync::Mutex<
-        Option<(
-            tokio::sync::oneshot::Sender<()>,
-            std::sync::mpsc::Receiver<()>,
-        )>,
-    >,
     #[cfg(test)]
     completed: std::sync::atomic::AtomicUsize,
 }
 impl Passive {
-    pub(super) fn open(owner: Arc<DatabaseOwner>) -> Result<Arc<Self>, Error> {
-        let conn = owner.connect()?;
+    fn open(database: DatabaseOwner) -> Result<Arc<Self>, Error> {
+        let conn = database.connect()?;
         for (set, read, expected) in [
             ("PRAGMA synchronous=NORMAL", "PRAGMA synchronous", 1),
             ("PRAGMA fullfsync=1", "PRAGMA fullfsync", 1),
@@ -44,12 +76,14 @@ impl Passive {
             }
         }
         Ok(Arc::new(Self {
-            conn,
-            _owner: owner,
-            state: Default::default(),
+            state: std::sync::Mutex::new(State {
+                file: Some(CheckpointFile {
+                    conn,
+                    _database_released_after_conn: database,
+                }),
+                ..Default::default()
+            }),
             idle: Default::default(),
-            #[cfg(test)]
-            pause: Default::default(),
             #[cfg(test)]
             completed: Default::default(),
         }))
@@ -64,56 +98,58 @@ impl Passive {
         state.mark = 0;
         state.epoch = state.epoch.wrapping_add(1);
     }
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) fn schedule_past_every_mark(self: &Arc<Self>, flusher: Arc<Flusher>) {
+        self.schedule(u64::MAX, flusher);
+    }
     pub(super) fn schedule(self: &Arc<Self>, size: u64, flusher: Arc<Flusher>) {
         let epoch = {
             let mut state = self.state();
-            if state.running || size <= state.mark {
+            if state.running || state.stopped || size <= state.mark {
                 return;
             }
             state.running = true;
             state.epoch
         };
-        let checkpoint = self.clone();
-        rocky_platform::task::spawn_blocking(move || {
-            #[cfg(test)]
-            if let Some((started, resume)) = checkpoint
-                .pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-            {
-                let _ = started.send(());
-                let _ = resume.recv();
-            }
-            #[cfg(feature = "qualification")]
-            let started = web_time::Instant::now();
-            let result = checkpoint.conn.rows("PRAGMA wal_checkpoint(PASSIVE)", ());
-            #[cfg(feature = "qualification")]
-            if let Ok(result) = &result {
-                let pages = match result.first().map(Vec::as_slice) {
-                    Some([_, _, crate::sqlite::Value::Integer(done)]) => (*done).max(0) as u64,
-                    _ => 0,
-                };
-                flusher
-                    .measurements
-                    .checkpoint("passive", pages, started.elapsed());
-            }
-            #[cfg(not(feature = "qualification"))]
-            let _ = flusher;
-            {
-                let mut state = checkpoint.state();
-                if result.is_ok() {
-                    let wal_not_truncated_since_measured = state.epoch == epoch;
-                    if wal_not_truncated_since_measured {
-                        state.mark = size;
-                    }
-                    #[cfg(test)]
-                    checkpoint.completed.fetch_add(1, Ordering::Relaxed);
+        let run = Run {
+            passive: self.clone(),
+            file: None,
+            size,
+            epoch,
+            checkpointed: false,
+        };
+        rocky_platform::task::spawn_blocking(move || run.checkpoint(&flusher));
+    }
+    fn finish(&self, file: Option<CheckpointFile>, checkpointed: bool, size: u64, epoch: u64) {
+        let released = {
+            let mut state = self.state();
+            if checkpointed {
+                let wal_not_truncated_since_measured = state.epoch == epoch;
+                if wal_not_truncated_since_measured {
+                    state.mark = size;
                 }
-                state.running = false;
+                #[cfg(test)]
+                self.completed.fetch_add(1, Ordering::Relaxed);
             }
-            checkpoint.idle.notify_waiters();
-        });
+            state.running = false;
+            match file {
+                Some(file) if !state.stopped => {
+                    state.file = Some(file);
+                    None
+                }
+                released => released,
+            }
+        };
+        drop(released);
+        self.idle.notify_waiters();
+    }
+    fn stop(&self) {
+        let released = {
+            let mut state = self.state();
+            state.stopped = true;
+            state.file.take()
+        };
+        drop(released);
     }
     pub(crate) async fn wait(&self) {
         loop {
@@ -127,32 +163,102 @@ impl Passive {
         }
     }
     #[cfg(test)]
-    #[cfg_attr(
-        target_family = "wasm",
-        expect(
-            dead_code,
-            reason = "Flush pause hooks are exercised only by native thread tests."
-        )
-    )]
-    pub(crate) fn pause(
-        &self,
-        started: tokio::sync::oneshot::Sender<()>,
-        resume: std::sync::mpsc::Receiver<()>,
-    ) {
-        *self
-            .pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((started, resume));
+    fn hold(&self, at: Hold) {
+        let resume = {
+            let mut state = self.state();
+            match state.hold.take() {
+                Some((stage, started, resume)) if stage == at => {
+                    let _ = started.send(());
+                    Some(resume)
+                }
+                other => {
+                    state.hold = other;
+                    None
+                }
+            }
+        };
+        if let Some(resume) = resume {
+            let _ = resume.recv();
+        }
     }
     #[cfg(test)]
     #[cfg_attr(
         target_family = "wasm",
         expect(
             dead_code,
-            reason = "Flush pause hooks are exercised only by native thread tests."
+            reason = "Checkpoint pause hooks are exercised only by native thread tests."
+        )
+    )]
+    pub(crate) fn pause(
+        &self,
+        at: Hold,
+        started: tokio::sync::oneshot::Sender<()>,
+        resume: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.state().hold = Some((at, started, resume));
+    }
+    #[cfg(test)]
+    #[cfg_attr(
+        target_family = "wasm",
+        expect(
+            dead_code,
+            reason = "Checkpoint pause hooks are exercised only by native thread tests."
+        )
+    )]
+    pub(crate) fn stopped(&self) -> bool {
+        self.state().stopped
+    }
+    #[cfg(test)]
+    #[cfg_attr(
+        target_family = "wasm",
+        expect(
+            dead_code,
+            reason = "Checkpoint pause hooks are exercised only by native thread tests."
         )
     )]
     pub(crate) fn completed(&self) -> usize {
         self.completed.load(Ordering::Relaxed)
+    }
+}
+
+struct Run {
+    passive: Arc<Passive>,
+    file: Option<CheckpointFile>,
+    size: u64,
+    epoch: u64,
+    checkpointed: bool,
+}
+impl Run {
+    fn checkpoint(mut self, flusher: &Flusher) {
+        #[cfg(test)]
+        self.passive.hold(Hold::Queued);
+        self.file = self.passive.state().file.take();
+        let Some(file) = &self.file else {
+            return;
+        };
+        #[cfg(test)]
+        self.passive.hold(Hold::Checkpointing);
+        #[cfg(feature = "qualification")]
+        let started = web_time::Instant::now();
+        let result = file.conn.rows("PRAGMA wal_checkpoint(PASSIVE)", ());
+        #[cfg(feature = "qualification")]
+        if let Ok(result) = &result {
+            let pages = match result.first().map(Vec::as_slice) {
+                Some([_, _, crate::sqlite::Value::Integer(done)]) => (*done).max(0) as u64,
+                _ => 0,
+            };
+            flusher
+                .measurements
+                .checkpoint("passive", pages, started.elapsed());
+        }
+        #[cfg(not(feature = "qualification"))]
+        let _ = flusher;
+        self.checkpointed = result.is_ok();
+    }
+}
+impl Drop for Run {
+    fn drop(&mut self) {
+        self.passive
+            .finish(self.file.take(), self.checkpointed, self.size, self.epoch);
     }
 }

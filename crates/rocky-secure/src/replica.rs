@@ -11,6 +11,8 @@ pub use lock::LockMeasurements;
 pub(crate) use lock::{Class, Guard, ReplicaLock};
 #[cfg(feature = "qualification")]
 pub use lock::{HolderMeasurements, Measurements, with_measurement_connection};
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use wal::{Hold, Passive};
 mod apply;
 mod author;
 mod backup;
@@ -357,7 +359,6 @@ mod byte_fields {
     }
 }
 pub(super) struct Inner<A> {
-    _owner: Arc<DatabaseOwner>,
     pub(super) conn: Arc<ScopedConnection>,
     pub(super) app: Arc<A>,
     pub(super) config: SecureConfig,
@@ -443,7 +444,6 @@ pub(super) struct Inner<A> {
     pub(super) flusher: Arc<Flusher>,
     changes: u64,
     wal_limits: (u64, u64),
-    pub(super) passive: Arc<wal::Passive>,
     pub(super) limits: RetentionLimits,
     maintenance_error: Option<String>,
     maintenance: maintenance::Pass,
@@ -530,6 +530,7 @@ pub(super) struct Inner<A> {
     pub(super) audit_global_passes: usize,
     #[cfg(test)]
     pub(super) busy_hook: Option<Box<dyn FnMut(usize) + Send + Sync>>,
+    pub(super) file: wal::OwnedFile,
 }
 pub(super) struct Flusher {
     #[cfg(any(test, feature = "qualification"))]
@@ -1014,12 +1015,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
             #[cfg(test)]
             copy: Default::default(),
         });
-        let owner = Arc::new(owner);
-        let passive = wal::Passive::open(owner.clone())?;
+        let file = wal::OwnedFile::open(owner)?;
         let readiness = blockers::Readiness::new(&conn)?;
         let metadata = metadata::Metadata::new(&conn)?;
         let mut inner = Inner {
-            _owner: owner,
             conn,
             permission_fields: app.permission_fields().into_iter().collect(),
             app: Arc::new(app),
@@ -1105,7 +1104,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             flusher: flusher.clone(),
             changes: 0,
             wal_limits: (group::WAL_CHECKPOINT_BYTES, group::WAL_LIMIT_BYTES),
-            passive,
+            file,
             limits: RetentionLimits::default(),
             maintenance_error: None,
             maintenance: Default::default(),
@@ -1619,8 +1618,19 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn optimize(&self) {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let _ = inner.conn.execute("PRAGMA optimize", ()).await;
-        let passive = inner.passive.clone();
+        let passive = inner.file.passive.clone();
         drop(inner);
+        passive.wait().await;
+    }
+    pub async fn close(self) {
+        let passive = self
+            .inner
+            .lock(Class::Background)
+            .await
+            .file
+            .passive
+            .clone();
+        drop(self);
         passive.wait().await;
     }
     pub async fn maintain(&self) -> bool {
@@ -2325,7 +2335,7 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
     pub(super) fn path(&self) -> &Path {
-        self._owner.path()
+        self.file.path()
     }
     async fn load_revocations(
         &mut self,

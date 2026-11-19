@@ -13,6 +13,9 @@ use web_time::Instant;
 
 mod expiry;
 use expiry::Expiry;
+pub(crate) use expiry::LeaseClock;
+#[cfg(any(test, feature = "test-support"))]
+pub use expiry::ManualLeaseClock;
 
 const SQLITE_CONSTRAINT: i32 = 19;
 
@@ -653,7 +656,10 @@ impl<A: RowApplication> SecureSql<A> {
             .map(|(index, _)| index)
             .collect();
         lease.plan = Arc::new(plan);
-        let (expiry, lapse) = Expiry::start(self.options.transaction_timeout);
+        let (expiry, lapse) = Expiry::start(
+            &self.session.replica.lease_clock,
+            self.options.transaction_timeout,
+        );
         let held = Held {
             inner,
             keeps_pending_pass: false,

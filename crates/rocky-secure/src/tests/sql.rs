@@ -235,6 +235,21 @@ impl Typed {
             },
         )
     }
+    fn config(
+        &self,
+        node: &PrivateKey,
+        grants: Vec<ResourceGrant>,
+        keys: &[ResourceScope],
+    ) -> SecureConfig {
+        SecureConfig {
+            publisher: self.publisher.public_key(),
+            manifest: self.manifest.clone(),
+            revocations: self.policy.clone(),
+            node: node.clone(),
+            credentials: self.credentials(node, grants),
+            keys: keys.iter().map(|scope| self.key(*scope)).collect(),
+        }
+    }
     async fn open(
         &self,
         path: &std::path::Path,
@@ -242,20 +257,27 @@ impl Typed {
         grants: Vec<ResourceGrant>,
         keys: &[ResourceScope],
     ) -> EncryptedReplica<TypedRows> {
-        let replica = EncryptedReplica::open(
-            path,
-            self.app(),
-            SecureConfig {
-                publisher: self.publisher.public_key(),
-                manifest: self.manifest.clone(),
-                revocations: self.policy.clone(),
-                node: node.clone(),
-                credentials: self.credentials(node, grants),
-                keys: keys.iter().map(|scope| self.key(*scope)).collect(),
-            },
-        )
-        .await
-        .unwrap();
+        self.open_configured(path, self.config(node, grants, keys).into())
+            .await
+    }
+    async fn open_on_manual_lease_clock(
+        &self,
+        path: &std::path::Path,
+        clock: &crate::ManualLeaseClock,
+    ) -> EncryptedReplica<TypedRows> {
+        let both = [self.items, self.salaries];
+        let config = OpenConfig::from(self.config(&PrivateKey::new(), self.full(), &both));
+        self.open_configured(path, config.with_manual_lease_clock(clock))
+            .await
+    }
+    async fn open_configured(
+        &self,
+        path: &std::path::Path,
+        config: OpenConfig,
+    ) -> EncryptedReplica<TypedRows> {
+        let replica = EncryptedReplica::open(path, self.app(), config)
+            .await
+            .unwrap();
         replica
             .install_tables(
                 self.schema.clone(),
@@ -856,13 +878,9 @@ async fn cancel_and_timeout_roll_back_and_free_the_replica() {
     let t = Typed::new();
     let dir = Scratch::new().await;
     let both = [t.items, t.salaries];
+    let clock = crate::ManualLeaseClock::default();
     let alice = t
-        .open(
-            &dir.path().join("a.db"),
-            &PrivateKey::new(),
-            t.full(),
-            &both,
-        )
+        .open_on_manual_lease_clock(&dir.path().join("a.db"), &clock)
         .await;
     let session = sql(&alice, &both).await;
     session.run("BEGIN", vec![]).await.unwrap();
@@ -877,12 +895,13 @@ async fn cancel_and_timeout_roll_back_and_free_the_replica() {
     session.run("ROLLBACK", vec![]).await.unwrap();
     assert!(select(&session, "SELECT * FROM items").await.is_empty());
 
+    let short_timeout = std::time::Duration::from_millis(50);
     let short = alice
         .session(both.into())
         .await
         .unwrap()
         .sql(SqlOptions {
-            transaction_timeout: std::time::Duration::from_millis(50),
+            transaction_timeout: short_timeout,
             ..SqlOptions::default()
         })
         .await
@@ -891,9 +910,15 @@ async fn cancel_and_timeout_roll_back_and_free_the_replica() {
     insert(&short, "INSERT INTO items VALUES('b','bread',0)", vec![])
         .await
         .unwrap();
-    let written = insert(&session, "INSERT INTO items VALUES('c','cheese',0)", vec![])
-        .await
-        .unwrap();
+    let written = insert(&session, "INSERT INTO items VALUES('c','cheese',0)", vec![]);
+    tokio::pin!(written);
+    tokio::select! {
+        biased;
+        () = alice.inner.interactive_queued() => {}
+        written = &mut written => panic!("another writer ran inside a held lease: {:?}", written.err()),
+    }
+    clock.advance(short_timeout);
+    let written = written.await.unwrap();
     assert_eq!(
         written.committed.unwrap().frames.len(),
         1,
@@ -977,6 +1002,85 @@ async fn a_commit_past_the_lease_deadline_aborts_before_the_lease_watcher_runs()
             .await
             .is_empty(),
         "the expired transaction is rolled back"
+    );
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[tokio::test(start_paused = true)]
+async fn a_lease_on_a_manual_clock_expires_only_when_that_clock_passes_its_timeout() {
+    let t = Typed::new();
+    let dir = Scratch::new().await;
+    let both = [t.items, t.salaries];
+    let clock = crate::ManualLeaseClock::default();
+    let alice = t
+        .open_on_manual_lease_clock(&dir.path().join("a.db"), &clock)
+        .await;
+    let timeout = std::time::Duration::from_millis(50);
+    let held = alice
+        .session(both.into())
+        .await
+        .unwrap()
+        .sql(SqlOptions {
+            transaction_timeout: timeout,
+            ..SqlOptions::default()
+        })
+        .await
+        .unwrap();
+    held.run("BEGIN", vec![]).await.unwrap();
+    insert(&held, "INSERT INTO items VALUES('a','apples',0)", vec![])
+        .await
+        .unwrap();
+    tokio::time::advance(crate::sql::MAX_TRANSACTION_TIMEOUT).await;
+    insert(&held, "INSERT INTO items VALUES('b','bread',0)", vec![])
+        .await
+        .expect(
+            "a transaction slowed by a loaded host keeps its lease while the lease clock stands",
+        );
+    clock.advance(timeout - std::time::Duration::from_millis(1));
+    insert(&held, "INSERT INTO items VALUES('c','cheese',0)", vec![])
+        .await
+        .expect("the lease holds until its clock reaches the timeout");
+    clock.advance(std::time::Duration::from_millis(1));
+    assert_eq!(
+        sql_error(held.run("COMMIT", vec![]).await),
+        SqlError::Aborted(AbortReason::Timeout),
+        "the next call after the lease clock passes the timeout is aborted"
+    );
+    assert!(
+        select(&sql(&alice, &both).await, "SELECT key FROM items")
+            .await
+            .is_empty(),
+        "the expired transaction is rolled back"
+    );
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[tokio::test]
+async fn a_lease_watcher_ends_with_its_transaction_instead_of_waiting_for_the_deadline() {
+    let t = Typed::new();
+    let dir = Scratch::new().await;
+    let both = [t.items, t.salaries];
+    let clock = crate::ManualLeaseClock::default();
+    let alice = t
+        .open_on_manual_lease_clock(&dir.path().join("a.db"), &clock)
+        .await;
+    let held = sql(&alice, &both).await;
+    let idle = clock.followers();
+    held.run("BEGIN", vec![]).await.unwrap();
+    insert(&held, "INSERT INTO items VALUES('a','apples',0)", vec![])
+        .await
+        .unwrap();
+    assert_eq!(
+        clock.followers(),
+        idle + 2,
+        "the held transaction and its lease watcher follow the clock"
+    );
+    held.run("COMMIT", vec![]).await.unwrap();
+    tokio::task::yield_now().await;
+    assert_eq!(
+        clock.followers(),
+        idle,
+        "the lease watcher ends once its transaction commits"
     );
 }
 

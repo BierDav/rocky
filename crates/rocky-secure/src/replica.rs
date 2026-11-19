@@ -161,6 +161,8 @@ pub use roles::{
 };
 use serde::{Deserialize, Serialize};
 pub use session::{SecureSession, SecureTransaction, SessionStatus, UpdateMode};
+#[cfg(any(test, feature = "test-support"))]
+pub use sql::ManualLeaseClock;
 pub use sql::{SecureCommit, SecureRows, SecureSql};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::{
@@ -203,24 +205,33 @@ pub struct SecureConfig {
 pub struct OpenConfig {
     security: SecureConfig,
     table_scopes: Option<Vec<ResourceScope>>,
+    lease_clock: sql::LeaseClock,
 }
 impl From<SecureConfig> for OpenConfig {
     fn from(security: SecureConfig) -> Self {
         Self {
             security,
             table_scopes: None,
+            lease_clock: sql::LeaseClock::Wall,
         }
     }
 }
 impl SecureConfig {
     pub fn with_table_scopes(self, scopes: Vec<ResourceScope>) -> OpenConfig {
         OpenConfig {
-            security: self,
             table_scopes: Some(scopes),
+            ..self.into()
         }
     }
 }
 impl OpenConfig {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_manual_lease_clock(self, clock: &ManualLeaseClock) -> Self {
+        Self {
+            lease_clock: clock.lease_clock(),
+            ..self
+        }
+    }
     fn families(
         &self,
         manifest: &rocky_core::ApplicationManifest,
@@ -669,6 +680,7 @@ pub struct EncryptedReplica<A> {
     revisions: watch::Receiver<u64>,
     domain_log: Arc<std::sync::RwLock<Option<Arc<dyn rocky_core::DomainLog>>>>,
     node: PublicKey,
+    lease_clock: sql::LeaseClock,
 }
 impl<A> Clone for EncryptedReplica<A> {
     fn clone(&self) -> Self {
@@ -678,6 +690,7 @@ impl<A> Clone for EncryptedReplica<A> {
             revisions: self.revisions.clone(),
             domain_log: self.domain_log.clone(),
             node: self.node,
+            lease_clock: self.lease_clock.clone(),
         }
     }
 }
@@ -964,6 +977,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<Self, Error> {
         let manifest = app.manifest();
         let families = config.families(&manifest)?;
+        let lease_clock = config.lease_clock;
         let mut config = config.security;
         let genesis = config
             .manifest
@@ -1346,6 +1360,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             revisions,
             domain_log: Arc::default(),
             node,
+            lease_clock,
         };
         if let Some(revocations) = opening_revocations {
             replica.learn_revocations(&revocations).await?;

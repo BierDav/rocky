@@ -11,6 +11,9 @@ license-file.workspace = true
 [features]
 # Deterministic simulator fault hooks; never enabled in published artifacts.
 qualification = ["rocky-storage/qualification"]
+# A manual SQL lease clock a test may open a replica on, so its transactions
+# expire only when the test advances that clock; adds API, changes no default.
+test-support = []
 
 [dependencies]
 tracing.workspace = true

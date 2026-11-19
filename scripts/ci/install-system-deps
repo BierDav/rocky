@@ -29,11 +29,22 @@ command -v apt-get > /dev/null || {
     exit 1
 }
 echo "install-system-deps: installing $missing" >&2
-# shellcheck disable=SC2086 # the package names are words
-if [ "$(id -u)" -eq 0 ]; then
-    apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing
-else
-    sudo apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
-    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing
-fi
+# A runner image's mirror can briefly lack a just-published package version or
+# drop connections; apt retries each download and the whole step runs twice,
+# refreshing the index in between.
+apt() {
+    if [ "$(id -u)" -eq 0 ]; then
+        env DEBIAN_FRONTEND=noninteractive apt-get "$@"
+    else
+        sudo env DEBIAN_FRONTEND=noninteractive apt-get "$@"
+    fi
+}
+options="-o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=5"
+for attempt in 1 2; do
+    # shellcheck disable=SC2086 # the options and package names are words
+    if apt $options update && apt $options install -y --no-install-recommends $missing; then
+        exit 0
+    fi
+    echo "install-system-deps: attempt $attempt failed" >&2
+done
+exit 1

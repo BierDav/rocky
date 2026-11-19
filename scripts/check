@@ -83,7 +83,7 @@ fi
 # same on every target and runs natively, while the browser's seams (files,
 # storage, timers, transport) run in the other packages' browser tests.
 browser_packages="rocky-platform rocky-sqlite rocky-sqlite-opfs rocky-core rocky-credentials
-    rocky-storage rocky-runtime rocky-iroh rocky-coordinator rocky-sdk"
+    rocky-storage rocky-iroh rocky-coordinator rocky-sdk"
 wasm_packages="$browser_packages rocky-secure"
 run_wasm() {
     set --

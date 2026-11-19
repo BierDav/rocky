@@ -9,7 +9,7 @@ impl<A: RowApplication> Inner<A> {
         let records = collect_rows(
             self.conn
                 .query(
-                    "SELECT stage FROM secure_staged_schema WHERE publication=? AND state='staged'",
+                    "SELECT stage FROM secure_staged_schema WHERE publication=? AND state='staged' AND refusal IS NULL",
                     [publication.to_vec()],
                 )
                 .await?,

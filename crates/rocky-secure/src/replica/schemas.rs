@@ -652,18 +652,24 @@ pub struct SchemaConfig {
     )>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SwitchDirection {
+    Forward,
+    WithdrawingStage(Commitment),
+}
+
 impl<A: RowApplication> Inner<A> {
     async fn switch_schema_now(
         &mut self,
         tip: TipId,
         app: A,
         mut config: SchemaConfig,
-        withdraw: Option<&super::staging::SchemaStage>,
+        direction: SwitchDirection,
     ) -> Result<bool, Error> {
         IN_PLACE_SWITCH_CHANGES.store(-1, std::sync::atomic::Ordering::SeqCst);
         let inner = self;
         let manifest = app.manifest();
-        if withdraw.is_none() && manifest.engine != inner.engine {
+        if direction == SwitchDirection::Forward && manifest.engine != inner.engine {
             return Err(Error::Incompatible(
                 super::generation::ENGINE_UPGRADE_REQUIRED.into(),
             ));
@@ -673,7 +679,7 @@ impl<A: RowApplication> Inner<A> {
             .followed
             .clone()
             .ok_or_else(|| denied("schema switching requires following a bookmark"))?;
-        if withdraw.is_none() && inner.schema_switching().await? {
+        if direction == SwitchDirection::Forward && inner.schema_switching().await? {
             transaction!(inner, |inner| inner.reconcile_staged_switch().await)?;
         }
         let staged = inner.schema_switch_intent().await?;
@@ -793,9 +799,6 @@ impl<A: RowApplication> Inner<A> {
         inner.invalidate_context();
         let changes_before = inner.conn.connection().total_changes()?;
         let staged = transaction!(inner, |inner| {
-            if let Some(stage) = withdraw {
-                inner.discard_schema_stage(stage).await?;
-            }
             inner
                 .conn
                 .execute(
@@ -834,9 +837,9 @@ impl<A: RowApplication> Inner<A> {
                     inner.finish_schema_switch().await?;
                     return Ok(true);
                 }
-                let cause = match withdraw {
-                    Some(_) => super::migrate::PlanCause::Withdrawal,
-                    None => super::migrate::PlanCause::Switch,
+                let cause = match direction {
+                    SwitchDirection::Forward => super::migrate::PlanCause::Switch,
+                    SwitchDirection::WithdrawingStage(_) => super::migrate::PlanCause::Withdrawal,
                 };
                 inner.record_plan(schema, *domain, readers, cause).await?;
                 return Ok(false);
@@ -871,9 +874,16 @@ impl<A: RowApplication> Inner<A> {
             if !matches!(finished, Ok(Ok(()))) {
                 if inner.schema_switching().await? {
                     reinstall_switch_source(inner, &mut definition, old_typed).await?;
-                    if withdraw.is_none() && matches!(finished, Ok(Err(_))) {
-                        transaction!(inner, |inner| {
-                            inner.withdraw_schema_switch(scope, &name).await
+                    if let Ok(Err(broken)) = &finished {
+                        let refusal = broken.reason();
+                        transaction!(inner, |inner| match direction {
+                            SwitchDirection::Forward => {
+                                inner.withdraw_schema_switch(scope, &name).await
+                            }
+                            SwitchDirection::WithdrawingStage(publication) => {
+                                inner.clear_stage_withdrawal().await?;
+                                inner.refuse_stage_withdrawal(publication, &refusal).await
+                            }
                         })?;
                     }
                 }
@@ -1082,6 +1092,28 @@ impl<A: RowApplication> Inner<A> {
             }
         }
     }
+    async fn clear_stage_withdrawal(&mut self) -> Result<(), Error> {
+        self.invalidate_context();
+        self.conn
+            .execute("DELETE FROM secure_schema_switch WHERE id=1", ())
+            .await?;
+        self.discard_plan().await
+    }
+    pub(super) async fn abandon_interrupted_stage_withdrawal(&mut self) -> Result<(), Error> {
+        let Some((scope, bookmark, source, target)) = self.schema_switch_intent().await? else {
+            return Ok(());
+        };
+        let withdraws_a_stage = source == target
+            && self.workspace.tip != source
+            && self
+                .stage_leaving(scope, &bookmark, source)
+                .await?
+                .is_some();
+        if withdraws_a_stage {
+            self.clear_stage_withdrawal().await?;
+        }
+        Ok(())
+    }
     pub(super) async fn schema_switching(&self) -> Result<bool, Error> {
         Ok(
             !rows(&self.conn, "SELECT 1 FROM secure_schema_switch WHERE id=1")
@@ -1191,6 +1223,11 @@ impl<A: RowApplication> Inner<A> {
         {
             return Err(denied("schema switch target no longer resolves"));
         }
+        if source == target
+            && let Some(stage) = self.stage_leaving(scope, bookmark, target).await?
+        {
+            self.discard_schema_stage(&stage).await?;
+        }
         for record in rows(&self.conn, "SELECT id,scope FROM secure_scope_state").await? {
             let [SqlValue::Integer(id), SqlValue::Blob(bytes)] = record.as_slice() else {
                 return Err(Error::Corrupt("scope state".into()));
@@ -1227,7 +1264,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .inner
             .lock(crate::replica::Class::Background)
             .await
-            .switch_schema_now(tip, app, config, None)
+            .switch_schema_now(tip, app, config, SwitchDirection::Forward)
             .await?;
         self.settle().await?;
         Ok(switched)
@@ -1312,7 +1349,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .map(|()| true),
             None => {
                 inner
-                    .switch_schema_now(stage.source, app, config, Some(&stage))
+                    .switch_schema_now(
+                        stage.source,
+                        app,
+                        config,
+                        SwitchDirection::WithdrawingStage(stage.publication),
+                    )
                     .await
             }
         };

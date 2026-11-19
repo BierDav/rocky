@@ -156,6 +156,9 @@ impl Node {
             Request::ChangeTip(change, root, reply) => {
                 let _ = reply.send(self.change_tip(change, &root).await);
             }
+            Request::WithdrawFailedMigration(reply) => {
+                let _ = reply.send(self.withdraw_failed_migration().await);
+            }
             Request::InspectTips(reply) => {
                 let _ = reply.send(self.inspect_tips(self.domain().scope).await);
             }

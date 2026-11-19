@@ -191,6 +191,9 @@ impl Session {
         })
         .await
     }
+    pub async fn withdraw_failed_migration(&self) -> Result<crate::GenerationStatus, Failure> {
+        self.send(Request::WithdrawFailedMigration).await
+    }
     pub async fn info(&self) -> Result<SessionInfo, Failure> {
         self.send(Request::Info).await
     }

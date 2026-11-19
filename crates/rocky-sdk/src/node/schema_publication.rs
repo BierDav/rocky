@@ -7,7 +7,7 @@ use rocky_credentials::{
     SEAL_FORMAT, SealAction, SealStatement, SignedSeal, SignedTipOpening, TIP_OPENING_FORMAT,
     TipOpeningStatement,
 };
-use rocky_secure::{SchemaStage, TipStatement};
+use rocky_secure::{SchemaStage, StageState, TipStatement};
 use std::collections::BTreeSet;
 
 impl Node {
@@ -15,9 +15,13 @@ impl Node {
         &self,
         confirmation: Option<&str>,
     ) -> Result<(), Failure> {
-        if self.replica.staged_schema().await?.is_some() {
-            self.follow_schema().await?;
-            return self.run_staged_migration().await;
+        match self.replica.staged_schema().await? {
+            Some((_, StageState::WithdrawalRefused(_))) => return Ok(()),
+            Some(_) => {
+                self.follow_schema().await?;
+                return self.run_staged_migration().await;
+            }
+            None => {}
         }
         let Some((scope, bookmark)) = self.replica.followed_bookmark().await else {
             return Ok(());
@@ -259,12 +263,11 @@ impl Node {
     }
 
     async fn run_staged_migration(&self) -> Result<(), Failure> {
-        let Some((stage, committed)) = self.replica.staged_schema().await? else {
-            return Ok(());
+        let stage = match self.replica.staged_schema().await? {
+            None | Some((_, StageState::WithdrawalRefused(_))) => return Ok(()),
+            Some((stage, StageState::Committed)) => return self.endorse_migration(&stage).await,
+            Some((stage, StageState::Staged)) => stage,
         };
-        if committed {
-            return self.endorse_migration(&stage).await;
-        }
         self.ensure_tip_node().await?;
         if self.replica.publication_staged(stage.publication).await? {
             self.replica
@@ -312,13 +315,18 @@ impl Node {
                 if let Err(error) = ran {
                     sql.cancel().await;
                     drop(sql);
-                    self.withdraw_stage(&stage).await?;
-                    return Err(format!(
+                    let failed = format!(
                         "migration to version {} failed at statement {}: {error}",
                         migration.version,
                         number + 1
-                    )
-                    .into());
+                    );
+                    return Err(match self.withdraw_stage(&stage).await {
+                        Ok(()) => failed.into(),
+                        Err(refused) => format!(
+                            "{failed}; the database stays on the migration's schema because withdrawing it was refused: {refused}"
+                        )
+                        .into(),
+                    });
                 }
             }
         }
@@ -350,6 +358,17 @@ impl Node {
         Ok(())
     }
 
+    pub(super) async fn withdraw_failed_migration(
+        &self,
+    ) -> Result<crate::GenerationStatus, Failure> {
+        let Some((stage, StageState::WithdrawalRefused(_))) = self.replica.staged_schema().await?
+        else {
+            return Err(refused("no failed migration waits for its withdrawal"));
+        };
+        self.withdraw_stage(&stage).await?;
+        self.observations.touch();
+        self.generation().await
+    }
     async fn withdraw_stage(&self, stage: &SchemaStage) -> Result<(), Failure> {
         let manifest = self
             .replica
@@ -374,7 +393,8 @@ impl Node {
         draft.generation = record.generation;
         draft.engine = record.engine;
         draft.prepare_schema(&self.vault, &domain)?;
-        self.replica
+        let withdrawn = self
+            .replica
             .withdraw_staged_schema(
                 stage.publication,
                 domain.app.clone(),
@@ -383,7 +403,11 @@ impl Node {
                     tables: Some((domain.logical().clone(), domain.scope, domain.readers())),
                 },
             )
-            .await?;
+            .await;
+        if let Err(refused) = withdrawn {
+            settings.save(&self.path)?;
+            return Err(refused.into());
+        }
         crate::database::attach(&self.replica, &mut draft, &self.vault, &domain).await?;
         crate::database::retain(&self.replica, &draft, &domain).await?;
         draft.pending = None;

@@ -29,8 +29,8 @@ pub use replica::{
     ScopeFrontier, ScopeStatus, SealRebootstrap, SealViews, SealedOutcome, SealedOutcomes,
     SealedTransaction, SecureCommit, SecureConfig, SecurePage, SecureRows, SecureSession,
     SecureSnapshot, SecureSql, SecureTransaction, SessionStatus, SetSummary, SignedCheckpoint,
-    SignedVoid, StagedCloseStatus, StateAdvice, TipDevice, TipNodeObservation, TipObservation,
-    TipStatement, UpdateMode, created_name, installed_tip_schema,
+    SignedVoid, StageState, StagedCloseStatus, StateAdvice, TipDevice, TipNodeObservation,
+    TipObservation, TipStatement, UpdateMode, created_name, installed_tip_schema,
 };
 pub use rocky_core::{Blocker, BlockerKind, ClearsBy, WaitReason, domain_label, scope_label};
 pub use rocky_credentials as credentials;

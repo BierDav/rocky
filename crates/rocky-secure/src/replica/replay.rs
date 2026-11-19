@@ -381,10 +381,16 @@ pub(super) fn column_carried(
 #[derive(Clone, Debug)]
 pub(super) struct BrokenReference(pub(super) String);
 impl From<BrokenReference> for Error {
-    fn from(BrokenReference(violation): BrokenReference) -> Self {
-        Error::Incompatible(format!(
-            "the projection rebuild would keep rows that break a foreign key: {violation}"
-        ))
+    fn from(broken: BrokenReference) -> Self {
+        Error::Incompatible(broken.reason())
+    }
+}
+impl BrokenReference {
+    pub(super) fn reason(&self) -> String {
+        format!(
+            "the projection rebuild would keep rows that break a foreign key: {}",
+            self.0
+        )
     }
 }
 struct SetAside<'a> {

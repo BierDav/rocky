@@ -3,7 +3,7 @@ use rocky_core::Scope;
 use rocky_credentials::SealFinality;
 
 pub(super) const SCHEMA: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS secure_staged_schema(publication BLOB PRIMARY KEY,stage BLOB NOT NULL,state TEXT NOT NULL CHECK(state IN('staged','committed','released'))) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_staged_schema(publication BLOB PRIMARY KEY,stage BLOB NOT NULL,state TEXT NOT NULL CHECK(state IN('staged','committed','released')),refusal TEXT CHECK(refusal IS NULL OR state='staged')) WITHOUT ROWID",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -18,6 +18,13 @@ pub struct SchemaStage {
     pub statements: Vec<TipStatement>,
     pub program: Vec<u8>,
     pub parents: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StageState {
+    Staged,
+    WithdrawalRefused(String),
+    Committed,
 }
 
 impl<A: RowApplication> Inner<A> {
@@ -82,7 +89,7 @@ impl<A: RowApplication> Inner<A> {
     pub(super) async fn record_schema_stage(&self, stage: &SchemaStage) -> Result<(), Error> {
         self.conn
             .execute(
-                "INSERT INTO secure_staged_schema VALUES(?,?,'staged')",
+                "INSERT INTO secure_staged_schema VALUES(?,?,'staged',NULL)",
                 [stage.publication.to_vec(), encode(stage)?],
             )
             .await?;
@@ -107,6 +114,50 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         self.drop_migration_parents(stage).await
+    }
+    pub(super) async fn refuse_stage_withdrawal(
+        &self,
+        publication: Commitment,
+        refusal: &str,
+    ) -> Result<(), Error> {
+        let marked = self
+            .conn
+            .execute(
+                "UPDATE secure_staged_schema SET refusal=? WHERE publication=? AND state='staged'",
+                bindings(vec![
+                    SqlValue::Text(refusal.into()),
+                    SqlValue::Blob(publication.to_vec()),
+                ]),
+            )
+            .await?;
+        if marked != 1 {
+            return Err(Error::Corrupt(
+                "a refused withdrawal names no staged schema".into(),
+            ));
+        }
+        Ok(())
+    }
+    pub(super) async fn stage_leaving(
+        &self,
+        scope: Scope,
+        bookmark: &str,
+        source: TipId,
+    ) -> Result<Option<SchemaStage>, Error> {
+        for record in rows(
+            &self.conn,
+            "SELECT stage FROM secure_staged_schema WHERE state='staged'",
+        )
+        .await?
+        {
+            let [SqlValue::Blob(bytes)] = record.as_slice() else {
+                return Err(Error::Corrupt("staged schema".into()));
+            };
+            let stage: SchemaStage = decode(bytes)?;
+            if stage.scope == scope && stage.bookmark == bookmark && stage.source == source {
+                return Ok(Some(stage));
+            }
+        }
+        Ok(None)
     }
     pub(super) async fn private_schema(&self) -> Result<bool, Error> {
         Ok(!rows(
@@ -276,20 +327,28 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .private_schema()
             .await
     }
-    pub async fn staged_schema(&self) -> Result<Option<(SchemaStage, bool)>, Error> {
+    pub async fn staged_schema(&self) -> Result<Option<(SchemaStage, StageState)>, Error> {
         let inner = self.inner.lock(crate::replica::Class::Background).await;
         let records = rows(
             &inner.conn,
-            "SELECT stage,state FROM secure_staged_schema WHERE state!='released'",
+            "SELECT stage,state,refusal FROM secure_staged_schema WHERE state!='released'",
         )
         .await?;
-        match records.first().map(Vec::as_slice) {
-            Some([SqlValue::Blob(bytes), SqlValue::Text(state)]) => {
-                Ok(Some((decode(bytes)?, state == "committed")))
-            }
-            None => Ok(None),
-            _ => Err(Error::Corrupt("staged schema publication".into())),
-        }
+        let Some([SqlValue::Blob(bytes), SqlValue::Text(state), refusal]) =
+            records.first().map(Vec::as_slice)
+        else {
+            return match records.first() {
+                None => Ok(None),
+                Some(_) => Err(Error::Corrupt("staged schema publication".into())),
+            };
+        };
+        let state = match (state.as_str(), refusal) {
+            ("staged", SqlValue::Null) => StageState::Staged,
+            ("staged", SqlValue::Text(refusal)) => StageState::WithdrawalRefused(refusal.clone()),
+            ("committed", SqlValue::Null) => StageState::Committed,
+            _ => return Err(Error::Corrupt("staged schema publication".into())),
+        };
+        Ok(Some((decode(bytes)?, state)))
     }
     pub async fn release_staged_schema(
         &self,

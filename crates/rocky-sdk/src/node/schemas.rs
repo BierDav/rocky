@@ -187,12 +187,11 @@ impl Node {
         &self,
         transport: &dyn Transport,
     ) -> Result<bool, Failure> {
-        let Some((stage, committed)) = self.replica.staged_schema().await? else {
-            return Ok(true);
+        let stage = match self.replica.staged_schema().await? {
+            None => return Ok(true),
+            Some((stage, rocky_secure::StageState::Committed)) => stage,
+            Some(_) => return Ok(false),
         };
-        if !committed {
-            return Ok(false);
-        }
         let close = stage
             .statements
             .iter()

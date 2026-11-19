@@ -37,7 +37,7 @@ mod frontiers;
 mod generation;
 mod schemas;
 mod staging;
-pub use staging::SchemaStage;
+pub use staging::{SchemaStage, StageState};
 mod inplace;
 pub use schemas::{
     InstalledTipSchema, PendingSchema, SchemaConfig, installed_tip_schema,
@@ -1288,6 +1288,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             } else {
                 inner.load_schemas().await?;
                 inner.load_tip_graphs().await?;
+                inner.abandon_interrupted_stage_withdrawal().await?;
                 if inner.workspace.followed.is_some() {
                     identity =
                         generation::identity(inner.workspace.tip, inner.config.node.public_key())?;

@@ -1,6 +1,7 @@
 use crate::common;
 mod prepared_pull;
 mod replayed;
+mod withdrawal;
 use crate::support::snapshot as snap;
 use common::{Device, Failure, introduce};
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};

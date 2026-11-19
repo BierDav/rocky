@@ -477,6 +477,11 @@ impl Node {
         &self,
         settings: &Settings,
     ) -> Result<Option<crate::MigrationStatus>, Failure> {
+        if let Some((_, rocky_secure::StageState::WithdrawalRefused(reason))) =
+            self.replica.staged_schema().await?
+        {
+            return Ok(Some(crate::MigrationStatus::WithdrawalRefused { reason }));
+        }
         let (mut bundles, mut published) = (0, 0);
         let mut pending = false;
         for publication in self.replica.publications().await? {

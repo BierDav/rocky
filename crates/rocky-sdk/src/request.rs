@@ -37,6 +37,7 @@ pub(crate) enum Kind {
     NetworkBackground,
     Logout,
     Tips,
+    WithdrawFailedMigration,
     Claims,
     Invitation,
     InvitationState,
@@ -195,6 +196,7 @@ pub(crate) enum Request {
     Background(Reply<()>),
     Logout(bool, Reply<()>),
     ChangeTip(TipChange, crate::node::Root, Reply<crate::TipStatus>),
+    WithdrawFailedMigration(Reply<crate::GenerationStatus>),
     InspectTips(Reply<crate::TipInspection>),
     KeptSeals(Reply<crate::KeptSeals>),
     SetKeptSeals(crate::KeptSeals, Reply<crate::KeptSeals>),
@@ -353,6 +355,7 @@ impl Request {
             Self::Background(..) => Kind::NetworkBackground,
             Self::Logout(..) => Kind::Logout,
             Self::ChangeTip(..) => Kind::Tips,
+            Self::WithdrawFailedMigration(..) => Kind::WithdrawFailedMigration,
             Self::InspectTips(..) => Kind::Tips,
             Self::KeptSeals(..) => Kind::Tips,
             Self::SetKeptSeals(..) => Kind::Tips,
@@ -510,6 +513,9 @@ impl Request {
                 let _ = reply.send(Err(error));
             }
             Self::ChangeTip(_, _, reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::WithdrawFailedMigration(reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::InspectTips(reply) => {

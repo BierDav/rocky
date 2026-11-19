@@ -185,11 +185,12 @@ impl From<rocky_secure::EngineStatus> for EngineStatus {
         }
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum MigrationStatus {
     FullAccessRequired,
     Publishing { bundles: u64, published: u64 },
+    WithdrawalRefused { reason: String },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

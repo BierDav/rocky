@@ -495,8 +495,8 @@ async fn a_revoked_writer_between_chunks_names_its_blocker_and_releases_nothing(
             .staged_schema()
             .await
             .unwrap()
-            .map(|(_, committed)| committed),
-        Some(false)
+            .map(|(_, state)| state),
+        Some(crate::StageState::Staged)
     );
     assert!(
         s.replica

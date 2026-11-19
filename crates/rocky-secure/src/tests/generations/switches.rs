@@ -1036,6 +1036,305 @@ async fn a_refused_schema_switch_is_withdrawn_and_the_peer_stays_on_its_source()
     assert_eq!(declared_references(&alice).await, (Vec::new(), true));
 }
 
+struct StagedSwitch {
+    source: rocky_core::TipId,
+    target: rocky_core::TipId,
+    publication: Commitment,
+}
+async fn stage(lineage: &Lineage, tagged: &Tagged) -> StagedSwitch {
+    let alice = &tagged.replica;
+    super::super::compaction::follow_main(lineage, alice).await;
+    let source = alice.followed_tip().await;
+    let mut statement = super::super::compaction::sign_seal(
+        lineage,
+        source,
+        alice.seal_frontier(lineage.domain, false).await.unwrap(),
+    )
+    .statement;
+    statement.action = rocky_credentials::SealAction::Continue {
+        schema: lineage.definition(3).hash(),
+    };
+    let seal = rocky_credentials::SignedSeal::sign(statement, lineage.publisher()).unwrap();
+    let target = seal.successor().unwrap().unwrap();
+    let publication = rocky_core::commitment("refused.withdrawal", &target.0);
+    alice
+        .stage_schema(crate::SchemaStage {
+            publication,
+            scope: lineage.domain,
+            bookmark: "main".into(),
+            source,
+            target,
+            from_version: 2,
+            coordinated: false,
+            statements: vec![
+                crate::TipStatement::Seal(seal),
+                super::super::compaction::bookmark(lineage, Some(source), target),
+            ],
+            program: vec![],
+            parents: vec![],
+        })
+        .await
+        .unwrap();
+    alice
+        .install_tip_schema(target, lineage.definition(3), b"verified".to_vec())
+        .await
+        .unwrap();
+    StagedSwitch {
+        source,
+        target,
+        publication,
+    }
+}
+async fn switch_to_stage(
+    lineage: &Lineage,
+    tagged: &Tagged,
+    staged: &StagedSwitch,
+) -> Result<bool, Error> {
+    let mut security = lineage.config(3, &tagged.key);
+    security.manifest = lineage.config(2, &tagged.key).manifest;
+    tagged
+        .replica
+        .switch_schema(
+            staged.target,
+            lineage.app(3),
+            crate::SchemaConfig {
+                security,
+                tables: Some(lineage.projection(3)),
+            },
+        )
+        .await
+}
+async fn stage_and_switch(lineage: &Lineage, tagged: &Tagged) -> StagedSwitch {
+    let staged = stage(lineage, tagged).await;
+    assert!(switch_to_stage(lineage, tagged, &staged).await.unwrap());
+    staged
+}
+async fn plant_orphan(replica: &EncryptedReplica<TypedRows>) {
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    for sql in ORPHAN_TAG {
+        inner.conn.execute(sql, ()).await.unwrap();
+    }
+}
+async fn withdraw_stage(
+    lineage: &Lineage,
+    key: &PrivateKey,
+    replica: &EncryptedReplica<TypedRows>,
+    publication: Commitment,
+) -> Result<(), Error> {
+    replica
+        .withdraw_staged_schema(
+            publication,
+            lineage.app(2),
+            crate::SchemaConfig {
+                security: lineage.config(2, key),
+                tables: Some(lineage.projection(2)),
+            },
+        )
+        .await
+}
+async fn stage_state(
+    replica: &EncryptedReplica<TypedRows>,
+) -> Option<(Commitment, crate::StageState)> {
+    replica
+        .staged_schema()
+        .await
+        .unwrap()
+        .map(|(stage, state)| (stage.publication, state))
+}
+const MID_SWITCH: &str = "SELECT (SELECT count(*) FROM secure_schema_switch),(SELECT count(*) FROM secure_projection_plan)";
+fn mid_switch(intents: i64, plans: i64) -> Vec<Vec<SqlValue>> {
+    vec![vec![SqlValue::Integer(intents), SqlValue::Integer(plans)]]
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_stage_whose_withdrawal_rebuild_is_refused_stays_installed_with_its_stage() {
+    let mut lineage = linked();
+    lineage.deferred_from = Some(3);
+    let tagged = linked_with_a_tag(&lineage).await;
+    let alice = &tagged.replica;
+    let StagedSwitch {
+        source,
+        target,
+        publication,
+    } = stage_and_switch(&lineage, &tagged).await;
+    {
+        let inner = alice.inner.lock(crate::replica::Class::Background).await;
+        for sql in ORPHAN_TAG {
+            inner.conn.execute(sql, ()).await.unwrap();
+        }
+    }
+    let refused = withdraw_stage(&lineage, &tagged.key, alice, publication).await;
+    assert!(refused_for_an_orphan(&refused), "{refused:?}");
+    assert_eq!(
+        raw_rows(alice, MID_SWITCH).await,
+        mid_switch(0, 0),
+        "a refused withdrawal leaves no switch half done"
+    );
+    let refusal = crate::StageState::WithdrawalRefused(
+        "the projection rebuild would keep rows that break a foreign key: a row of tags references a missing row of items".into(),
+    );
+    assert_eq!(alice.followed_tip().await, target);
+    assert_eq!(
+        stage_state(alice).await,
+        Some((publication, refusal.clone())),
+        "the stage records why its withdrawal was refused"
+    );
+    drop(tagged.replica);
+    let alice = lineage
+        .reopen(&tagged.path, &tagged.key, 2, 3)
+        .await
+        .expect("a peer whose withdrawal was refused reopens on the staged schema");
+    assert_eq!(alice.followed_tip().await, target);
+    assert_eq!(stage_state(&alice).await, Some((publication, refusal)));
+    {
+        let inner = alice.inner.lock(crate::replica::Class::Background).await;
+        inner
+            .conn
+            .execute("UPDATE tags SET also=NULL", ())
+            .await
+            .unwrap();
+    }
+    identity_insert(
+        &session(&alice).await,
+        "INSERT INTO items(key,title) VALUES('0002','after refusal')",
+        vec![],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        select(&alice, "SELECT title FROM items ORDER BY key").await,
+        vec![vec![text("title")], vec![text("after refusal")]],
+        "the peer keeps working on the staged schema"
+    );
+    withdraw_stage(&lineage, &tagged.key, &alice, publication)
+        .await
+        .expect("the withdrawal runs again once no row breaks the restored reference");
+    assert_eq!(alice.followed_tip().await, source);
+    assert_eq!(stage_state(&alice).await, None);
+    assert_eq!(raw_rows(&alice, MID_SWITCH).await, mid_switch(0, 0));
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn no_withdrawal_holds_a_write_made_on_the_staged_schema_refused_or_not() {
+    let mut lineage = linked();
+    lineage.deferred_from = Some(3);
+    let tagged = linked_with_a_tag(&lineage).await;
+    let StagedSwitch {
+        source,
+        target,
+        publication,
+    } = stage_and_switch(&lineage, &tagged).await;
+    write(&tagged.replica, "UPDATE items SET rank=7").await;
+    plant_orphan(&tagged.replica).await;
+    let refused = withdraw_stage(&lineage, &tagged.key, &tagged.replica, publication).await;
+    assert!(refused_for_an_orphan(&refused), "{refused:?}");
+    assert!(
+        tagged.replica.held_changes().await.unwrap().is_empty(),
+        "a refused withdrawal holds none of the writes the staged schema keeps"
+    );
+    drop(tagged.replica);
+    let alice = lineage
+        .reopen(&tagged.path, &tagged.key, 2, 3)
+        .await
+        .unwrap();
+    assert_eq!(alice.followed_tip().await, target);
+    assert_eq!(
+        select(&alice, "SELECT rank FROM items").await,
+        vec![vec![SqlValue::Integer(7)]],
+        "the write stays live on the staged schema across a reopen"
+    );
+    let again = withdraw_stage(&lineage, &tagged.key, &alice, publication).await;
+    assert!(refused_for_an_orphan(&again), "{again:?}");
+    assert!(alice.held_changes().await.unwrap().is_empty());
+    {
+        let inner = alice.inner.lock(crate::replica::Class::Background).await;
+        inner
+            .conn
+            .execute("UPDATE tags SET also=NULL", ())
+            .await
+            .unwrap();
+    }
+    withdraw_stage(&lineage, &tagged.key, &alice, publication)
+        .await
+        .expect("the withdrawal runs once no row breaks the restored reference");
+    assert_eq!(alice.followed_tip().await, source);
+    assert!(
+        alice.held_changes().await.unwrap().is_empty(),
+        "a write made on the staged schema is not on its source's path, so no withdrawal holds it"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_withdrawal_interrupted_between_its_transactions_is_abandoned_at_the_next_open() {
+    let mut lineage = linked();
+    lineage.deferred_from = Some(3);
+    let tagged = linked_with_a_tag(&lineage).await;
+    let StagedSwitch {
+        target,
+        publication,
+        ..
+    } = stage_and_switch(&lineage, &tagged).await;
+    tagged.replica.fail_next_plan_switch().await;
+    let interrupted = withdraw_stage(&lineage, &tagged.key, &tagged.replica, publication).await;
+    assert!(
+        matches!(interrupted, Err(Error::InjectedFailure)),
+        "{interrupted:?}"
+    );
+    assert_eq!(
+        raw_rows(&tagged.replica, MID_SWITCH).await,
+        mid_switch(1, 1),
+        "the interruption leaves the withdrawal's intent and plan behind"
+    );
+    drop(tagged.replica);
+    let alice = lineage
+        .reopen(&tagged.path, &tagged.key, 2, 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        raw_rows(&alice, MID_SWITCH).await,
+        mid_switch(0, 0),
+        "the next open abandons the interrupted withdrawal"
+    );
+    assert_eq!(alice.followed_tip().await, target);
+    assert_eq!(
+        stage_state(&alice).await,
+        Some((publication, crate::StageState::Staged)),
+        "an interrupted withdrawal is no refusal: the migration may run again"
+    );
+    let migration = alice
+        .session([lineage.scope("items")].into())
+        .await
+        .unwrap()
+        .migration_sql(publication, crate::sql::SqlOptions::default())
+        .await
+        .unwrap();
+    migration.run("BEGIN", vec![]).await.unwrap();
+    migration.commit_publication(publication).await.unwrap();
+    drop(migration);
+    alice.author_staged_publication(publication).await.unwrap();
+    assert_eq!(stage_state(&alice).await, None, "the stage was released");
+    let other = rocky_credentials::SignedBookmarkMove::sign(
+        rocky_credentials::BookmarkMoveStatement {
+            format: rocky_credentials::BOOKMARK_MOVE_FORMAT,
+            scope: lineage.domain,
+            name: "other".into(),
+            from: None,
+            to: Some(target),
+        },
+        lineage.publisher(),
+    )
+    .unwrap();
+    alice
+        .publish_tip_statements(&[crate::TipStatement::Bookmark(other)])
+        .await
+        .unwrap();
+    alice
+        .follow_bookmark(lineage.domain, "other")
+        .await
+        .expect("no stale withdrawal blocks following another bookmark");
+    assert_eq!(alice.followed_tip().await, target);
+}
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_rebuild_that_cannot_set_a_table_aside_rewrites_trigger_bodies_on_rename_again() {
     let tagged = linked_with_a_tag(&linked()).await;

@@ -229,6 +229,49 @@ async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issu
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn links_from_different_issuers_never_collide_because_a_node_authors_under_its_own_key() {
+    let domain = Domain::new();
+    let set = RevocationSet::new();
+    let allocated = PeerId::from_bytes(rocky_core::commitment("issuer-allocated author", &[1]));
+    for _ in 0..2 {
+        let (issuer, issuing) = domain.issuer().await;
+        let authority = rocky_credentials::testing::authority(&issuer.provider, &issuing);
+        let member = FileIdentity::new().await;
+        let link = authority
+            .issue_terms(
+                member.key(),
+                vec![domain.grant()],
+                rocky_credentials::DelegationTerms { delegations: 1 },
+                VALIDITY,
+            )
+            .expect("granted");
+        let identity_chain = authority.chain_of(link);
+        let (own, own_chain) = node(&member.provider, &identity_chain, None);
+        assert!(domain.verify(&own_chain, &own, &set));
+        let honest = own_chain
+            .certificate()
+            .expect("certificate")
+            .capability
+            .clone();
+        let mut numbered = honest.extended().expect("extension");
+        assert_eq!(numbered.node, Some(PeerId::of(own.public_key())));
+        numbered.node = Some(allocated);
+        let refused = SignedCapability::sign(
+            Capability {
+                extension: Extension::new(numbered).expect("extension"),
+                ..honest
+            },
+            &member.provider,
+        );
+        assert_eq!(
+            refused.map(drop).map_err(|error| error.to_string()),
+            Err("invalid node certificate".into()),
+            "a node named by a number its issuer allocated is never signed, so sibling issuers have no range to share"
+        );
+    }
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_node() {
     let domain = Domain::new();
     let member = FileIdentity::new().await;

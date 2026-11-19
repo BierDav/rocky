@@ -1265,9 +1265,11 @@ mod tests {
     use super::*;
     use crate::PrivateKey;
 
-    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn a_capability_of_the_earlier_format_is_refused_and_names_no_generation() {
-        let (publisher, user, node) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
+    fn granted_device(
+        publisher: &PrivateKey,
+        user: &PrivateKey,
+        node: &PrivateKey,
+    ) -> (SignedCapability, CredentialChain) {
         let grant = ResourceGrant {
             scope: rocky_core::ResourceScope {
                 domain: rocky_core::Scope {
@@ -1282,7 +1284,7 @@ mod tests {
             rights: [rocky_core::Right::Read].into(),
             fields: rocky_core::FieldSelection::All,
         };
-        let root = crate::Authority::owner(&publisher)
+        let root = crate::Authority::owner(publisher)
             .issue(
                 user.public_key(),
                 vec![grant],
@@ -1293,7 +1295,14 @@ mod tests {
                 },
             )
             .unwrap();
-        let chain = crate::device_chain(root.clone(), &user, node.public_key()).unwrap();
+        let chain = crate::device_chain(root.clone(), user, node.public_key()).unwrap();
+        (root, chain)
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_capability_of_the_earlier_format_is_refused_and_names_no_generation() {
+        let (publisher, user, node) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
+        let (root, chain) = granted_device(&publisher, &user, &node);
         let revocations = RevocationSet::new();
         assert!(
             chain
@@ -1308,6 +1317,47 @@ mod tests {
             earlier
                 .verify(publisher.public_key(), node.public_key(), &revocations, 200)
                 .is_err()
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_node_certificate_naming_an_allocated_author_is_refused_by_verifiers() {
+        let (publisher, user, node) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
+        let (_, chain) = granted_device(&publisher, &user, &node);
+        let revocations = RevocationSet::new();
+        assert!(
+            chain
+                .verify(publisher.public_key(), node.public_key(), &revocations, 200)
+                .is_ok()
+        );
+        let mut links = chain.0;
+        let leaf = links.pop().unwrap();
+        let mut extended = leaf.capability.extended().unwrap();
+        extended.node = Some(crate::PeerId::from_bytes(rocky_core::commitment(
+            "issuer-allocated author",
+            &[1],
+        )));
+        let capability = Capability {
+            extension: Extension::new(extended).unwrap(),
+            ..leaf.capability
+        };
+        let signer = Signer::from(&user);
+        links.push(SignedCapability {
+            author_binding: crate::AuthorBinding::sign(&capability, &signer).unwrap(),
+            issuer: leaf.issuer,
+            attestation: signer
+                .attest(
+                    Purpose::NodeCertificate,
+                    &signing_bytes(CAPABILITY_LABEL, &capability).unwrap(),
+                )
+                .unwrap(),
+            capability,
+        });
+        assert!(
+            CredentialChain(links)
+                .verify(publisher.public_key(), node.public_key(), &revocations, 200)
+                .is_err(),
+            "a node certificate signed around the signing check still names its author by its own key"
         );
     }
 }

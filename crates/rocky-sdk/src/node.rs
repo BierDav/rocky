@@ -5,6 +5,8 @@ mod claims;
 mod coordinated;
 mod delivery;
 mod discovery;
+mod exchange;
+use exchange::{Exchanged, PeerWork};
 mod health;
 mod held;
 mod linking;
@@ -22,6 +24,8 @@ mod schema_publication;
 mod schemas;
 mod shared;
 mod status;
+mod sync_pass;
+use sync_pass::PassOutcome;
 mod tip_nodes;
 mod tips;
 use crate::{
@@ -222,6 +226,25 @@ struct Reached {
     refused: Vec<ResourceScope>,
     waiting: Vec<ResourceScope>,
     held: Vec<ResourceScope>,
+}
+impl Reached {
+    fn after(result: &Result<Exchanged, Failure>, at: u64) -> Self {
+        let (refused, waiting, held) = match result {
+            Ok(Exchanged { transfer, .. }) => (
+                transfer.refused.clone(),
+                transfer.waiting.clone(),
+                transfer.held.clone(),
+            ),
+            Err(_) => (Vec::new(), Vec::new(), Vec::new()),
+        };
+        Self {
+            at,
+            error: result.as_ref().err().map(ToString::to_string),
+            refused,
+            waiting,
+            held,
+        }
+    }
 }
 
 const LOCAL_SETTLE: std::time::Duration =
@@ -484,6 +507,12 @@ impl Node {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+    fn unpartitioned_scopes(&self) -> Vec<ResourceScope> {
+        self.scopes()
+            .into_iter()
+            .filter(|scope| !self.domain().partitioned_table(scope))
+            .collect()
     }
     fn app_scopes(&self) -> Vec<ResourceScope> {
         let registry = self.domain().registry();
@@ -1702,7 +1731,7 @@ impl Node {
         &self,
         peer: PublicKey,
         before: Option<Reached>,
-        result: &Result<(bool, sync::Transfer), Failure>,
+        result: &Result<Exchanged, Failure>,
     ) {
         let (before, refused_before, waiting_before) = match before {
             Some(reached) => (Some(reached.error), reached.refused, reached.waiting),
@@ -1719,7 +1748,7 @@ impl Node {
                         });
                 }
             }
-            Ok((_, transfer)) => {
+            Ok(Exchanged { transfer, .. }) => {
                 if !matches!(before, Some(None)) {
                     self.activity
                         .record(crate::ActivityKind::PeerReconciliationCompleted {
@@ -1956,7 +1985,7 @@ impl Node {
                     result = async {
                         let attached = self.network.read().await;
                         if attached.as_ref().is_none_or(|current| current.id != link.id) {
-                            return Ok((SyncStatus::new(SyncState::Idle), false));
+                            return Ok(PassOutcome::idle());
                         }
                         let result = self.sync_pass(&*link.transport, true, retry_only).await;
                         self.open_links(&link).await;
@@ -1966,10 +1995,7 @@ impl Node {
                 drop(running);
                 self.topics_changed();
                 let status = match result {
-                    Ok((mut status, retry)) => {
-                        status.retry = retry;
-                        status
-                    }
+                    Ok(outcome) => outcome.into_status(),
                     Err(error) if error.is::<crate::enrollment::Revoked>() => {
                         SyncStatus::failed(SyncState::Revoked, error.to_string(), false)
                     }
@@ -2014,8 +2040,8 @@ impl Node {
     ) -> Result<(crate::ReconciliationReport, bool), Failure> {
         let result = self.reconciliation_pass(transport, false, false).await;
         self.topics_changed();
-        let (report, _, retry) = result?;
-        Ok((report, retry))
+        let (report, outcome) = result?;
+        Ok((report, outcome.retry))
     }
     #[cfg(test)]
     async fn sync(&self, transport: &dyn Transport) -> Result<(Value, bool), Failure> {
@@ -2027,421 +2053,15 @@ impl Node {
         transport: &dyn Transport,
         automatic: bool,
         retry_only: bool,
-    ) -> Result<(SyncStatus, bool), Failure> {
+    ) -> Result<PassOutcome, Failure> {
         self.reconciliation_pass(Some(transport), automatic, retry_only)
             .await
-            .map(|(_, status, retry)| (status, retry))
-    }
-    async fn run_sync_pass(
-        &self,
-        transport: &dyn Transport,
-        automatic: bool,
-        retry_only: bool,
-        report: &std::sync::Mutex<Vec<crate::PeerReconciliation>>,
-        first_attempt_id: u64,
-    ) -> Result<(SyncStatus, bool), Failure> {
-        self.ensure_not_revoked().await?;
-        if !self.online.load(Ordering::SeqCst) {
-            return Ok((SyncStatus::new(SyncState::NetworkingDisabled), false));
-        }
-        if self.replica.private_schema().await? {
-            let released = self.relay_schema_publication(transport).await?;
-            if !released {
-                return Ok((SyncStatus::new(SyncState::SchemaPublicationPending), true));
-            }
-        }
-        if automatic
-            && retry_only
-            && {
-                let targets = self.dialed(&*self.settings.lock().await, true);
-                let retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
-                targets.iter().all(|(peer, _)| retries.contains_key(peer))
-                    && !retries
-                        .values()
-                        .any(|state| state.pending.pending() && state.retry.ready())
-            }
-            && self
-                .resolution_retries
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .is_empty()
-            && !self
-                .schema_acquisition
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .retry
-                .ready()
-        {
-            return Ok((
-                self.sync_status.borrow().clone(),
-                self.retry_deadline().is_some(),
-            ));
-        }
-        let _activity = SyncActivity(self.sync_state.clone());
-        self.sync_state.send_replace(SyncActivityState::Syncing);
-        self.adopt_named_coordinator().await;
-        let routine = self.seal_routinely().await;
-        self.finalize_seals().await;
-        let members = self.publish_for_members().await;
-        self.seal_skipped(routine.or(members));
-        self.close_migrations().await?;
-        Box::pin(self.resolve_saved_contacts(transport)).await;
-        let saved = self.settings.lock().await.clone();
-        if !automatic
-            && self.dialed(&saved, false).is_empty()
-            && !saved.unresolved_contacts().is_empty()
-        {
-            if saved
-                .unresolved_contacts()
-                .iter()
-                .all(|(_, contact)| contact.addresses(transport.kind()).is_empty())
-            {
-                return Err(ServiceError::NoRoute {
-                    peer: "a saved peer",
-                    network: transport.kind().into(),
-                }
-                .into());
-            }
-            return Ok((
-                SyncStatus::failed(
-                    SyncState::Unavailable,
-                    "saved contact resolution produced no route".into(),
-                    true,
-                ),
-                true,
-            ));
-        }
-        let settings = self.settings.lock().await.clone();
-        let member = !settings.issuer();
-        let renew_to_widen_grants = member
-            && settings.profile_widens(&self.domain())?
-            && self
-                .widened
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(HEXLOWER.encode(&settings.domain()?.manifest().hash()));
-        if renew_to_widen_grants || settings.expires() < now()?.saturating_add(settings.ttl / 2) {
-            let renewed = self.renew(Some(transport), false, None, false).await;
-            if let Err(error) = &renewed {
-                self.activity.record(crate::ActivityKind::RenewalFailed {
-                    error: (error.to_string()).to_owned(),
-                });
-            }
-            if !member {
-                renewed?;
-            } else if renewed.is_err() && settings.expires() <= now()? {
-                return Err("credentials expired; an issuer must be reachable to renew".into());
-            }
-        }
-        let renewable = member || !settings.issuers.is_empty();
-        if renewable && self.awaits_rotated_keys().await {
-            let _ = self.renew(Some(transport), true, None, true).await;
-            self.ensure_not_revoked().await?;
-        }
-        let tip = self.replica.followed_tip().await;
-        let follows_another_tip = self
-            .backoff_tip
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .replace(tip)
-            .is_some_and(|earlier| earlier != tip);
-        if follows_another_tip {
-            self.reset_retry(None);
-        }
-        if !automatic {
-            self.pending_sync();
-        }
-        let targets = self.dialed(&*self.settings.lock().await, automatic);
-        self.replica.configure_peers(settings.kept()).await;
-        let needs_initial = {
-            let retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
-            targets.iter().any(|(peer, _)| !retries.contains_key(peer))
-        };
-        let mut has_frames = false;
-        if needs_initial {
-            let node = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
-            let mut after = None;
-            loop {
-                let (scopes, next) = self
-                    .replica
-                    .held_scopes(node, &settings.credentials, after)
-                    .await?;
-                for scope in scopes {
-                    has_frames |= !self.replica.frontier(scope).await?.logs.is_empty();
-                }
-                if has_frames || next.is_none() {
-                    break;
-                }
-                after = next;
-            }
-        }
-        let targets: Vec<_> = {
-            let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
-            retries.retain(|peer, _| targets.iter().any(|(node, _)| node == peer));
-            targets
-                .into_iter()
-                .filter_map(|(peer, contact)| {
-                    let state = retries.entry(peer).or_insert_with(|| PeerRetry {
-                        pending: if has_frames {
-                            RepairWork::All
-                        } else {
-                            RepairWork::Empty
-                        },
-                        ..self.peer_retry(peer)
-                    });
-                    let skip = if automatic && !state.retry.ready() {
-                        Some(crate::SkipReason::Backoff)
-                    } else if automatic && retry_only && !state.pending.pending() {
-                        Some(crate::SkipReason::NoPendingWork)
-                    } else if automatic
-                        && self
-                            .current()
-                            .is_some_and(|service| service.live.inbound_short(peer))
-                    {
-                        Some(crate::SkipReason::InboundReconciliation)
-                    } else {
-                        None
-                    };
-                    if let Some(skip) = skip {
-                        Self::add_peer_report(report, Self::skipped_peer(peer.to_hex(), skip));
-                        None
-                    } else {
-                        Some((peer, contact, (state.generation, state.work_generation)))
-                    }
-                })
-                .collect()
-        };
-        if targets.is_empty() {
-            return Ok((
-                self.sync_status.borrow().clone(),
-                self.retry_deadline().is_some(),
-            ));
-        }
-        let needed: Vec<_> = self
-            .scopes()
-            .into_iter()
-            .filter(|scope| !self.domain().partitioned_table(scope))
-            .collect();
-        let imports = self.replica.observe_imports().await;
-        let imported = *imports.borrow();
-        let mut covered = std::collections::BTreeSet::new();
-        let mut targets = targets;
-        let mut results = Vec::new();
-        for round in 0..2 {
-            let local_first = targets.first().is_some_and(|(peer, _, _)| {
-                settings
-                    .contact_meta
-                    .get(peer)
-                    .is_some_and(|meta| meta.local)
-            });
-            let mut remaining = targets.into_iter();
-            let mut first_batch = true;
-            loop {
-                let width = if local_first && first_batch { 1 } else { 4 };
-                first_batch = false;
-                let mut batch: Vec<_> = remaining.by_ref().take(width).collect();
-                if batch.is_empty() {
-                    break;
-                }
-                if !needed.is_empty() && needed.iter().all(|scope| covered.contains(scope)) {
-                    let inviter = self.awaited_inviter();
-                    let mut choices = self.choices.lock().unwrap_or_else(PoisonError::into_inner);
-                    let mut owed = Vec::new();
-                    for target in batch.into_iter().chain(remaining.by_ref()) {
-                        if Some(target.0) == inviter {
-                            owed.push(target);
-                            continue;
-                        }
-                        choices.insert(target.0, "covered");
-                        Self::add_peer_report(
-                            report,
-                            Self::skipped_peer(target.0.to_hex(), crate::SkipReason::Covered),
-                        );
-                    }
-                    if owed.is_empty() {
-                        break;
-                    }
-                    batch = owed;
-                }
-                let attempts = stream::iter(batch)
-                    .map(|(peer, contact, generation)| async move {
-                        let mut result = self.reconcile(transport, peer, &contact).await;
-                        let settings = self.settings.lock().await.clone();
-                        let sources = match settings.epoch_sources() {
-                            Ok(sources) => sources,
-                            Err(error) => return (peer, contact, generation, Err(error)),
-                        };
-                        if settings.issuer()
-                            && sources.contains(&peer)
-                            && !result
-                                .as_ref()
-                                .is_err_and(|error| error.is::<ServiceError>())
-                        {
-                            match self.renew(Some(transport), true, Some(peer), true).await {
-                                Ok(true) => {
-                                    result = self.reconcile(transport, peer, &contact).await;
-                                }
-                                Ok(false) => {}
-                                Err(error) => self.activity.record_changed(
-                                    crate::ActivityKind::EpochDeliveryFailed {
-                                        peer: (peer).to_owned(),
-                                        error: (error.to_string()).to_owned(),
-                                    },
-                                ),
-                            }
-                        }
-                        (peer, contact, generation, result)
-                    })
-                    .buffer_unordered(4);
-                tokio::pin!(attempts);
-                while let Some((peer, contact, generation, result)) = attempts.next().await {
-                    Self::add_peer_report(
-                        report,
-                        self.peer_reconciliation(peer, &result, first_attempt_id),
-                    );
-                    let error = result.as_ref().err().map(ToString::to_string);
-                    let (refused, waiting) = match &result {
-                        Ok((_, transfer)) => (transfer.refused.clone(), transfer.waiting.clone()),
-                        Err(_) => (Vec::new(), Vec::new()),
-                    };
-                    let before = self.reached()?.insert(
-                        peer,
-                        Reached {
-                            at: now()?,
-                            error,
-                            refused,
-                            waiting,
-                            held: result
-                                .as_ref()
-                                .map(|(_, transfer)| transfer.held.clone())
-                                .unwrap_or_default(),
-                        },
-                    );
-                    if let Ok((_, transfer)) = &result {
-                        covered.extend(transfer.held.iter().copied());
-                    }
-                    self.record_reach(peer, before, &result);
-                    results.push((peer, contact, generation, result));
-                }
-            }
-            self.ensure_not_revoked().await?;
-            let failed = |result: &Result<(bool, sync::Transfer), Failure>| {
-                result
-                    .as_ref()
-                    .is_err_and(|error| !error.is::<ServiceError>())
-            };
-            let renewal_peer = results
-                .iter()
-                .filter(|(_, _, _, result)| {
-                    failed(result) && !result.as_ref().is_err_and(renewal_cannot_repair)
-                })
-                .min_by_key(|(peer, _, _, _)| !settings.issuers.contains(peer))
-                .map(|(peer, _, _, _)| *peer);
-            if round == 0
-                && renewable
-                && let Some(peer) = renewal_peer
-            {
-                let renewed = self
-                    .renew(Some(transport), true, Some(peer), false)
-                    .await
-                    .is_ok();
-                self.ensure_not_revoked().await?;
-                let learned = |result: &Result<(bool, sync::Transfer), Failure>| {
-                    result
-                        .as_ref()
-                        .is_err_and(|error| error.is::<sync::Learned>())
-                };
-                if renewed || results.iter().any(|(_, _, _, result)| learned(result)) {
-                    let admitted: std::collections::BTreeSet<_> = self
-                        .settings
-                        .lock()
-                        .await
-                        .targets()
-                        .into_iter()
-                        .map(|(peer, _)| peer)
-                        .collect();
-                    results.retain(|(peer, _, _, _)| admitted.contains(peer));
-                    covered.clear();
-                    let again = |result: &Result<_, Failure>| match renewed {
-                        true => result.is_ok() || failed(result),
-                        false => learned(result),
-                    };
-                    targets = results
-                        .iter()
-                        .filter(|(_, _, _, result)| again(result))
-                        .map(|(peer, contact, generation, _)| (*peer, contact.clone(), *generation))
-                        .collect();
-                    results.retain(|(_, _, _, result)| !again(result));
-                    continue;
-                }
-            }
-            break;
-        }
-        let catalog_changed = self.acquire_schemas(transport).await?;
-        let schema_changed = self.follow_schema().await?;
-        self.adopt_named_coordinator().await;
-        self.finalize_seals().await;
-        self.close_migrations().await?;
-        let (mut connected, mut first, mut retry) = (0, None, catalog_changed || schema_changed);
-        for (peer, _, generation, result) in results {
-            {
-                let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
-                if let Some(state) = retries.get_mut(&peer)
-                    && state.generation == generation.0
-                {
-                    match &result {
-                        Ok((false, transfer)) => {
-                            state.retry.reset();
-                            state.link_retry.reset();
-                            state.finish_repair(transfer.repair_generation.unwrap_or(generation.1));
-                        }
-                        Ok((true, _)) => {
-                            if !state.pending.pending() {
-                                state.repair_all();
-                            }
-                            state.retry.failed();
-                        }
-                        Err(_) if *imports.borrow() != imported => {
-                            state.repair_all();
-                            state.retry.soon();
-                        }
-                        Err(_) => state.retry.failed(),
-                    }
-                }
-            }
-            match result {
-                Ok((pending, _)) => {
-                    connected += 1;
-                    retry |= pending;
-                }
-                Err(error) => {
-                    first.get_or_insert(error);
-                }
-            }
-        }
-        retry |= first.is_some();
-        match first {
-            Some(error) if connected == 0 => Ok((
-                SyncStatus::failed(SyncState::Unavailable, error.to_string(), true),
-                true,
-            )),
-            _ => Ok((
-                SyncStatus {
-                    peers: connected,
-                    ..SyncStatus::new(SyncState::Connected)
-                },
-                retry,
-            )),
-        }
+            .map(|(_, outcome)| outcome)
     }
     fn dialed(&self, settings: &Settings, backoff: bool) -> Vec<(PublicKey, Contact)> {
         let reached = self.reached.lock().unwrap_or_else(PoisonError::into_inner);
         let retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
-        let needed: Vec<_> = self
-            .scopes()
-            .into_iter()
-            .filter(|scope| !self.domain().partitioned_table(scope))
-            .collect();
+        let needed = self.unpartitioned_scopes();
         let mut targets = settings.targets();
         let waiting = |node: &PublicKey| {
             backoff && retries.get(node).is_some_and(|state| !state.retry.ready())
@@ -2483,10 +2103,7 @@ impl Node {
         targets
     }
     async fn absorb_revocations(&self, outcome: Option<&Failure>) -> Result<(), Failure> {
-        let rotates_locally = {
-            let settings = self.settings.lock().await;
-            settings.issuer() && settings.issuers.is_empty()
-        };
+        let rotates_locally = !self.settings.lock().await.renews_from_issuer();
         let registry = if rotates_locally {
             Some(self.registry(&*self.settings_snapshot().await).await?)
         } else {
@@ -2658,15 +2275,15 @@ impl Node {
         transport: &dyn Transport,
         peer: PublicKey,
         contact: &Contact,
-    ) -> Result<(bool, sync::Transfer), Failure> {
+    ) -> Result<Exchanged, Failure> {
         let _ = self.observations.partial_transfer(&peer.to_hex());
         let mut result = self.reconcile_observed(transport, peer, contact).await;
-        if let Ok((_, transfer)) = &mut result
+        if let Ok(Exchanged { transfer, .. }) = &mut result
             && let Some(partial) = self.observations.partial_transfer(&peer.to_hex())
         {
             transfer.extend(partial);
         }
-        if let Ok((_, transfer)) = &result {
+        if let Ok(Exchanged { transfer, .. }) = &result {
             let mut failures = self
                 .sync_failures
                 .lock()
@@ -2697,12 +2314,13 @@ impl Node {
                     });
             }
         }
-        if let Ok((retry, transfer)) = &mut result
-            && !*retry
+        if let Ok(exchanged) = &mut result
+            && exchanged.work == PeerWork::Done
+            && self.owes_retry(peer, &exchanged.transfer).await
         {
-            *retry = self.owes_retry(peer, transfer).await;
+            exchanged.work = PeerWork::Owed;
         }
-        if let Ok((_, transfer)) = &result
+        if let Ok(Exchanged { transfer, .. }) = &result
             && transfer.failed.is_empty()
             && transfer.denied.is_empty()
             && let Err(error) = self.witnessed_by(peer).await
@@ -2744,7 +2362,7 @@ impl Node {
         transport: &dyn Transport,
         peer: PublicKey,
         contact: &Contact,
-    ) -> Result<(bool, sync::Transfer), Failure> {
+    ) -> Result<Exchanged, Failure> {
         let mut result = Err("link authority kept changing during reconciliation".into());
         for _ in 0..4 {
             let revocations = self.replica.revocation_digest().await?;
@@ -2799,7 +2417,7 @@ impl Node {
                 break;
             }
         }
-        let transfer = result?;
+        let exchanged = result?;
         let met = self.met.lock().unwrap_or_else(PoisonError::into_inner);
         let mut handover = self.handover.lock().unwrap_or_else(PoisonError::into_inner);
         handover.insert(peer);
@@ -2811,7 +2429,7 @@ impl Node {
         {
             handover.remove(&oldest);
         }
-        Ok(transfer)
+        Ok(exchanged)
     }
     pub(super) async fn request_link(
         &self,
@@ -2910,214 +2528,6 @@ impl Node {
         Err(Box::new(rocky_secure::Error::Application(Box::new(
             rocky_secure::network::link::AuthorityChanged,
         ))))
-    }
-    async fn exchange(
-        &self,
-        transport: &dyn Transport,
-        peer: PublicKey,
-        contact: &Contact,
-        attempt: &mut crate::status::Attempt,
-    ) -> Result<(bool, sync::Transfer), Failure> {
-        let mut node = peer.to_hex();
-        node.truncate(12);
-        let span = tracing::info_span!("exchange", peer = node, outcome = tracing::field::Empty);
-        let result = tracing::Instrument::instrument(
-            self.exchange_inner(transport, peer, contact, attempt),
-            span.clone(),
-        )
-        .await;
-        span.record("outcome", if result.is_ok() { "ok" } else { "error" });
-        result
-    }
-    async fn exchange_inner(
-        &self,
-        transport: &dyn Transport,
-        peer: PublicKey,
-        contact: &Contact,
-        attempt: &mut crate::status::Attempt,
-    ) -> Result<(bool, sync::Transfer), Failure> {
-        let service = self
-            .current()
-            .ok_or(ServiceError::NetworkRequired("sync"))?;
-        let revocations = self.replica.revocation_digest().await?;
-        let link = self.request_link(transport, peer, contact).await?;
-        let repair_generation = self
-            .retries
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&peer)
-            .map(|state| state.work_generation);
-        attempt.stage(crate::AttemptStage::Reconciliation);
-        let _short = service.live.short(peer);
-        let renewable = {
-            let settings = self.settings.lock().await;
-            !settings.issuer() || !settings.issuers.is_empty()
-        };
-        let keep = |scope, signer, cursor| self.keeps_import_source(scope, signer, cursor);
-        let control = *self.sync_control.borrow();
-        let scoped = self
-            .retries
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&peer)
-            .is_some_and(|state| state.pending.selected().is_some());
-        let (control_link, refresh_control) = service.live.begin_control(peer, control, scoped);
-        let upstream = Upstream {
-            observations: &self.observations,
-            link,
-            peer,
-            contacts: Some(self),
-            refresh_control,
-            control_started: Default::default(),
-            renew_from: match renewable {
-                true => Some(revocations),
-                false => None,
-            },
-            keep: Some(&keep),
-        };
-        let reconcile = upstream.link.begin_reconcile().await?;
-        let mut first = match self.deliver(&upstream).await {
-            Ok(delivered) => Some(delivered),
-            Err(error) => {
-                let _ = reconcile.close().await;
-                let _ = upstream.link.drain().await;
-                return Err(error);
-            }
-        };
-        let import_slot = self.bootstrap.lock().await;
-        let marker = self.path.with_file_name("bootstrap.json");
-        let mut bootstrapped = sync::Transfer {
-            repair_generation,
-            ..Default::default()
-        };
-        let mut importing = Vec::new();
-        let mut bootstrap_retry = false;
-        if rocky_platform::fs::exists(&marker) {
-            self.sync_state
-                .send_replace(SyncActivityState::Bootstrapping);
-            self.acquire_schemas(transport).await?;
-            let expected = rocky_platform::fs::read(&marker)?;
-            let pending = self
-                .bootstrap_pending(&serde_json::from_slice(&expected)?)
-                .await?;
-            self.replica
-                .set_importing(pending.iter().copied().collect())
-                .await;
-            self.activity
-                .record_changed(crate::ActivityKind::BootstrapStarted {
-                    peer: (peer).to_owned(),
-                    scopes: pending.len(),
-                });
-            let completed = sync::bootstrap(
-                &self.replica,
-                &upstream,
-                &pending,
-                &marker,
-                expected,
-                &mut bootstrapped,
-                first.take(),
-            )
-            .await;
-            let completed = match completed {
-                Err(_) => {
-                    bootstrap_retry = true;
-                    None
-                }
-                Ok(completed) => completed,
-            };
-            if completed.is_none() {
-                bootstrap_retry = true;
-                importing = self
-                    .bootstrap_pending(&serde_json::from_slice(&rocky_platform::fs::read(
-                        &marker,
-                    )?)?)
-                    .await?;
-            }
-            if let Some(completed) = completed {
-                self.replica.flush().await?;
-                if rocky_platform::fs::read(&marker)? != completed {
-                    return Err("bootstrap authority changed; retry with the new intent".into());
-                }
-                self.replica
-                    .set_importing(std::collections::BTreeSet::new())
-                    .await;
-                if let Some(waiting) = self.awaits_inviter(peer, &completed).await? {
-                    rocky_credentials::write_private(&marker, &waiting)?;
-                } else {
-                    rocky_platform::fs::remove_file(&marker)?;
-                    #[cfg(unix)]
-                    std::fs::File::open(
-                        marker.parent().ok_or("bootstrap marker has no directory")?,
-                    )?
-                    .sync_all()?;
-                    self.activity
-                        .record(crate::ActivityKind::BootstrapFinished {
-                            peer: (peer).to_owned(),
-                        });
-                }
-            }
-        }
-        self.sync_state.send_replace(SyncActivityState::Syncing);
-        let selected = self
-            .retries
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&peer)
-            .and_then(|state| state.pending.selected())
-            .cloned();
-        let eligible: Vec<_> = self
-            .scopes()
-            .into_iter()
-            .filter(|scope| !self.domain().partitioned_table(scope) && !importing.contains(scope))
-            .collect();
-        let scopes = match selected {
-            Some(selected) => {
-                self.replica
-                    .expand_repair_scopes(&selected.into_iter().collect::<Vec<_>>(), &eligible)
-                    .await?
-            }
-            None => eligible,
-        };
-        let reconciled = sync::reconcile(
-            &self.replica,
-            &upstream,
-            &scopes,
-            |bootstrap| {
-                self.sync_state.send_replace(if bootstrap {
-                    SyncActivityState::Bootstrapping
-                } else {
-                    SyncActivityState::Syncing
-                });
-            },
-            first,
-        )
-        .await;
-        drop(import_slot);
-        let (retry, transfer) = match reconciled {
-            Err(error) => {
-                self.observations
-                    .record_partial(peer.to_hex(), bootstrapped);
-                let _ = reconcile.close().await;
-                let _ = upstream.link.drain().await;
-                return Err(error);
-            }
-            Ok(reconciled) => reconciled,
-        };
-        bootstrapped.extend(transfer);
-        if let Err(error) = reconcile.close().await {
-            self.observations
-                .record_partial(peer.to_hex(), bootstrapped);
-            return Err(error.into());
-        }
-        if let Err(error) = upstream.link.drain().await {
-            self.observations
-                .record_partial(peer.to_hex(), bootstrapped);
-            return Err(error.into());
-        }
-        if !retry && !bootstrap_retry {
-            service.live.finish_control(peer, control_link, control);
-        }
-        Ok((retry || bootstrap_retry, bootstrapped))
     }
     pub async fn serve(&self, request: rocky_core::net::Request) -> Result<(), Failure> {
         let mut enrolled = false;

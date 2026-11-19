@@ -21,7 +21,7 @@ async fn pass(node: &Node) -> Result<Value, Failure> {
 async fn background(node: &Node) -> Result<Value, Failure> {
     let link = node.network.read().await;
     let transport = &*link.as_ref().ok_or("link")?.transport;
-    let (report, _, _) = node
+    let (report, _) = node
         .reconciliation_pass(Some(transport), true, false)
         .await?;
     Ok(serde_json::to_value(report)?)

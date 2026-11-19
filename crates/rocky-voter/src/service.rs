@@ -1,6 +1,8 @@
 pub use crate::raft_store::{Backup, Fence};
 use crate::{raft_store::*, transport::*};
-use openraft::{BasicNode, LogId, SnapshotPolicy};
+use openraft::{
+    BasicNode, LogId, RaftMetrics, SnapshotPolicy, error::Fatal, raft::ClientWriteResponse,
+};
 use p2panda_core::{PrivateKey, PublicKey};
 use rocky_coordinator::{
     certified::*,
@@ -13,13 +15,18 @@ use rocky_core::{
 };
 use std::{
     collections::{BTreeSet, HashMap},
+    convert::Infallible,
     path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
-use tokio::{net::TcpListener, sync::Semaphore};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::TcpListener,
+    sync::Semaphore,
+};
 
 const READ_WITHOUT_LOG_MAX_AUTHORITY_AGE_SECONDS: u64 = 30;
 
@@ -28,6 +35,51 @@ const PAUSE_AFTER_FAILED_ACCEPT: std::time::Duration = std::time::Duration::from
 const VOTER_CONNECTION_SLOTS: usize = 64;
 
 const VOTER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+const PROPOSAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+const HEARTBEAT_INTERVAL_MILLIS: u64 = 100;
+
+const ELECTION_TIMEOUT_MIN_MILLIS: u64 = 350;
+
+const ELECTION_TIMEOUT_MAX_MILLIS: u64 = 700;
+
+const OPENRAFT_TICK_MILLIS: u64 = HEARTBEAT_INTERVAL_MILLIS * 3 / 2;
+
+const SLOW_HEARTBEAT_ANSWER_MILLIS: u64 = 2_500;
+
+const QUORUM_ACK_LEASE_MILLIS: u64 = OPENRAFT_TICK_MILLIS + SLOW_HEARTBEAT_ANSWER_MILLIS;
+
+const _: () = assert!(
+    SLOW_HEARTBEAT_ANSWER_MILLIS > ELECTION_TIMEOUT_MAX_MILLIS,
+    "a heartbeat answer pays for a new connection and a signed round trip, so a leader its followers still follow refuses no writes"
+);
+
+fn quorum_acknowledged(metrics: &RaftMetrics<u64, BasicNode>) -> bool {
+    metrics
+        .millis_since_quorum_ack
+        .is_some_and(|millis| millis < QUORUM_ACK_LEASE_MILLIS)
+}
+
+#[derive(Debug)]
+pub enum ServeError {
+    Coordination(CoordinationError),
+    ConsensusHalted(Box<Fatal<u64>>),
+}
+impl From<CoordinationError> for ServeError {
+    fn from(error: CoordinationError) -> Self {
+        Self::Coordination(error)
+    }
+}
+impl std::fmt::Display for ServeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Coordination(error) => write!(f, "{error}"),
+            Self::ConsensusHalted(fatal) => write!(f, "consensus halted: {fatal}"),
+        }
+    }
+}
+impl std::error::Error for ServeError {}
 
 #[derive(Default)]
 struct Counters {
@@ -104,14 +156,23 @@ impl VoterService {
             return Err(CoordinationError::Denied);
         }
         let store = Store::open(path, genesis.clone(), provision, genesis.limits())?;
+        Self::start(store, genesis, node, key, Route::Tcp).await
+    }
+    async fn start(
+        store: Store,
+        genesis: CertifiedGenesis,
+        node: u64,
+        key: PrivateKey,
+        route: Route,
+    ) -> Result<Arc<Self>, CoordinationError> {
         store.set_node(node);
         let fence = store.fence().await;
         let fenced_after_restore = fence.is_some();
         let config = openraft::Config {
             cluster_name: format!("{:?}", genesis.id()?),
-            heartbeat_interval: 100,
-            election_timeout_min: 350,
-            election_timeout_max: 700,
+            heartbeat_interval: HEARTBEAT_INTERVAL_MILLIS,
+            election_timeout_min: ELECTION_TIMEOUT_MIN_MILLIS,
+            election_timeout_max: ELECTION_TIMEOUT_MAX_MILLIS,
             snapshot_policy: SnapshotPolicy::LogsSinceLast(1024),
             max_in_snapshot_log_to_keep: 8,
             snapshot_max_chunk_size: 64 * 1024,
@@ -127,6 +188,7 @@ impl VoterService {
             Network {
                 genesis: genesis.clone(),
                 key: key.clone(),
+                route,
             },
             store.clone(),
             store.clone(),
@@ -189,11 +251,45 @@ impl VoterService {
             }
         }
     }
+    fn leader_hint(&self) -> Option<u64> {
+        let metrics = self.raft.metrics();
+        let metrics = metrics.borrow();
+        metrics
+            .current_leader
+            .filter(|leader| *leader != self.node || quorum_acknowledged(&metrics))
+    }
     fn refuse(&self, error: CoordinationError) -> Reply {
         Reply {
-            leader: self.raft.metrics().borrow().current_leader,
+            leader: self.leader_hint(),
             result: Err(error),
         }
+    }
+    async fn propose(
+        &self,
+        request: Request,
+    ) -> Result<ClientWriteResponse<Types>, CoordinationError> {
+        if !quorum_acknowledged(&self.raft.metrics().borrow()) {
+            return Err(CoordinationError::Unavailable);
+        }
+        tokio::time::timeout(
+            PROPOSAL_TIMEOUT,
+            self.raft.client_write(Proposal {
+                time: now()?,
+                request,
+            }),
+        )
+        .await
+        .map_err(|_| CoordinationError::Unavailable)?
+        .map_err(|_| CoordinationError::Unavailable)
+    }
+    async fn consensus_halted(&self) -> Fatal<u64> {
+        let mut metrics = self.raft.metrics();
+        metrics
+            .wait_for(|metrics| metrics.running_state.is_err())
+            .await
+            .ok()
+            .and_then(|metrics| metrics.running_state.clone().err())
+            .unwrap_or(Fatal::Stopped)
     }
     async fn answer(&self, request: Request) -> Reply {
         let reply = self.client(request).await;
@@ -262,16 +358,7 @@ impl VoterService {
             if let Some(read) = self.read(&request).await {
                 return read;
             }
-            let response = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                self.raft.client_write(Proposal {
-                    time: now()?,
-                    request,
-                }),
-            )
-            .await
-            .map_err(|_| CoordinationError::Unavailable)?
-            .map_err(|_| CoordinationError::Unavailable)?;
+            let response = self.propose(request).await?;
             if let Ok(Outcome::Membership(voters)) = &response.data {
                 self.complete_membership(voters).await?;
             }
@@ -283,7 +370,7 @@ impl VoterService {
             Ok((data, _)) => {
                 crash("reply.before_send");
                 Reply {
-                    leader: self.raft.metrics().borrow().current_leader,
+                    leader: self.leader_hint(),
                     result: data,
                 }
             }
@@ -319,7 +406,7 @@ impl VoterService {
             .map_err(|_| CoordinationError::Unavailable)?;
         Ok(())
     }
-    pub async fn serve(self: Arc<Self>) -> Result<(), CoordinationError> {
+    pub async fn serve(self: Arc<Self>) -> Result<Infallible, ServeError> {
         let voter = self
             .genesis
             .genesis
@@ -337,10 +424,22 @@ impl VoterService {
         log_lifecycle(self.node, &format!("serving voters at {}", voter.address));
         self.serve_voters(listener).await
     }
-    async fn serve_voters(self: Arc<Self>, listener: TcpListener) -> Result<(), CoordinationError> {
+    async fn serve_voters(
+        self: Arc<Self>,
+        listener: TcpListener,
+    ) -> Result<Infallible, ServeError> {
         let slots = Arc::new(Semaphore::new(VOTER_CONNECTION_SLOTS));
+        let halted = self.consensus_halted();
+        tokio::pin!(halted);
         loop {
-            let Ok((mut stream, _)) = listener.accept().await else {
+            let accepted = tokio::select! {
+                fatal = &mut halted => {
+                    log_lifecycle(self.node, &format!("consensus halted: {fatal}"));
+                    return Err(ServeError::ConsensusHalted(Box::new(fatal)));
+                }
+                accepted = listener.accept() => accepted,
+            };
+            let Ok((stream, _)) = accepted else {
                 tokio::time::sleep(PAUSE_AFTER_FAILED_ACCEPT).await;
                 continue;
             };
@@ -350,125 +449,123 @@ impl VoterService {
             let service = self.clone();
             tokio::spawn(async move {
                 let _slot = slot;
-                let _ = tokio::time::timeout(VOTER_REQUEST_TIMEOUT, async {
-                    let envelope = read(&mut stream).await?;
-                    envelope.authenticate(service.genesis.id()?)?;
-                    let message: Message = decode(&envelope.body)?;
-                    if !matches!(message, Message::Client(_)) {
-                        envelope.verify(service.genesis.id()?)?;
-                    }
-                    let is_voter = service
-                        .genesis
-                        .genesis
-                        .voters
-                        .iter()
-                        .any(|v| v.key == envelope.key);
-                    let sender = service
-                        .genesis
-                        .genesis
-                        .voters
-                        .iter()
-                        .find(|v| v.key == envelope.key)
-                        .map(|v| v.id);
-                    let membership = service.raft.metrics().borrow().membership_config.clone();
-                    let peer = is_voter
-                        && (membership.nodes().next().is_none()
-                            || sender
-                                .is_some_and(|id| membership.membership().get_node(&id).is_some()));
-                    let administrative =
-                        envelope.key == service.genesis.genesis.membership_authority;
-                    let tenants_use_client_lane = service.genesis.genesis.public.is_some();
-                    let body = match message {
-                        Message::Client(request) if !tenants_use_client_lane || administrative => {
-                            if request.key != envelope.key {
-                                return Err(CoordinationError::Denied);
-                            }
-                            let reply = if administrative {
-                                service.administer(*request).await
-                            } else {
-                                service.admit(*request, None).await
-                            };
-                            encode(&reply)?
-                        }
-                        Message::Append(rpc)
-                            if peer && sender == Some(rpc.vote.leader_id.node_id) =>
-                        {
-                            encode(&service.raft.append_entries(rpc).await)?
-                        }
-                        Message::Vote(rpc)
-                            if peer
-                                && sender == Some(rpc.vote.leader_id.node_id)
-                                && !service.fenced.load(Ordering::SeqCst) =>
-                        {
-                            encode(&service.raft.vote(rpc).await)?
-                        }
-                        Message::Snapshot(rpc)
-                            if peer && sender == Some(rpc.vote.leader_id.node_id) =>
-                        {
-                            if rpc.offset.saturating_add(rpc.data.len() as u64) > MAX_STORE as u64 {
-                                return Err(CoordinationError::Backpressure);
-                            }
-                            encode(&service.raft.install_snapshot(rpc).await)?
-                        }
-                        Message::Status if administrative || is_voter => {
-                            let metrics = service.raft.metrics().borrow().clone();
-                            let footprint = service.store.footprint().await?;
-                            encode(&Status {
-                                logs: footprint.logs,
-                                snapshots: footprint.snapshots,
-                                disk_bytes: footprint.disk_bytes,
-                                allocated_bytes: footprint.allocated_bytes,
-                                state_bytes: footprint.state_bytes,
-                                retry_records: footprint.retry_records,
-                                tenants: service.store.tenants().await,
-                                fenced: service.fenced.load(Ordering::SeqCst),
-                                metrics: service.counters.snapshot(),
-                                node: service.node,
-                                leader: metrics.current_leader,
-                                applied: metrics.last_applied.map(|id| id.index),
-                                voters: metrics.membership_config.voter_ids().collect(),
-                                snapshot: metrics.snapshot.map(|id| id.index),
-                                health: format!("{:?}: {:?}", metrics.state, metrics.running_state),
-                            })?
-                        }
-                        Message::SnapshotNow if administrative => encode(
-                            &service
-                                .raft
-                                .trigger()
-                                .snapshot()
-                                .await
-                                .map_err(|_| CoordinationError::Unavailable),
-                        )?,
-                        Message::Initialize if administrative => {
-                            let members: std::collections::BTreeMap<_, _> = service
-                                .genesis
-                                .genesis
-                                .voters
-                                .iter()
-                                .filter(|v| service.genesis.genesis.initial_voters.contains(&v.id))
-                                .map(|v| (v.id, BasicNode::new(v.address.clone())))
-                                .collect();
-                            encode(
-                                &service
-                                    .raft
-                                    .initialize(members)
-                                    .await
-                                    .map_err(|_| CoordinationError::Configuration),
-                            )?
-                        }
-                        _ => return Err(CoordinationError::Denied),
-                    };
-                    let response = crate::transport::Envelope::from_body(
-                        service.genesis.id()?,
-                        envelope.nonce,
-                        body,
-                        &service.key,
-                    )?;
-                    write(&mut stream, &response).await
-                })
-                .await;
+                let _ =
+                    tokio::time::timeout(VOTER_REQUEST_TIMEOUT, service.answer_voter(stream)).await;
             });
         }
+    }
+    pub(crate) async fn answer_voter(
+        self: Arc<Self>,
+        mut stream: impl AsyncRead + AsyncWrite + Unpin,
+    ) -> Result<(), CoordinationError> {
+        let envelope = read(&mut stream).await?;
+        envelope.authenticate(self.genesis.id()?)?;
+        let message: Message = decode(&envelope.body)?;
+        if !matches!(message, Message::Client(_)) {
+            envelope.verify(self.genesis.id()?)?;
+        }
+        let is_voter = self
+            .genesis
+            .genesis
+            .voters
+            .iter()
+            .any(|v| v.key == envelope.key);
+        let sender = self
+            .genesis
+            .genesis
+            .voters
+            .iter()
+            .find(|v| v.key == envelope.key)
+            .map(|v| v.id);
+        let membership = self.raft.metrics().borrow().membership_config.clone();
+        let peer = is_voter
+            && (membership.nodes().next().is_none()
+                || sender.is_some_and(|id| membership.membership().get_node(&id).is_some()));
+        let administrative = envelope.key == self.genesis.genesis.membership_authority;
+        let tenants_use_client_lane = self.genesis.genesis.public.is_some();
+        let body = match message {
+            Message::Client(request) if !tenants_use_client_lane || administrative => {
+                if request.key != envelope.key {
+                    return Err(CoordinationError::Denied);
+                }
+                let reply = if administrative {
+                    self.administer(*request).await
+                } else {
+                    self.admit(*request, None).await
+                };
+                encode(&reply)?
+            }
+            Message::Append(rpc) if peer && sender == Some(rpc.vote.leader_id.node_id) => {
+                encode(&self.raft.append_entries(rpc).await)?
+            }
+            Message::Vote(rpc)
+                if peer
+                    && sender == Some(rpc.vote.leader_id.node_id)
+                    && !self.fenced.load(Ordering::SeqCst) =>
+            {
+                encode(&self.raft.vote(rpc).await)?
+            }
+            Message::Snapshot(rpc) if peer && sender == Some(rpc.vote.leader_id.node_id) => {
+                if rpc.offset.saturating_add(rpc.data.len() as u64) > MAX_STORE as u64 {
+                    return Err(CoordinationError::Backpressure);
+                }
+                encode(&self.raft.install_snapshot(rpc).await)?
+            }
+            Message::Status if administrative || is_voter => {
+                let metrics = self.raft.metrics().borrow().clone();
+                let footprint = self.store.footprint().await?;
+                encode(&Status {
+                    logs: footprint.logs,
+                    snapshots: footprint.snapshots,
+                    disk_bytes: footprint.disk_bytes,
+                    allocated_bytes: footprint.allocated_bytes,
+                    state_bytes: footprint.state_bytes,
+                    retry_records: footprint.retry_records,
+                    tenants: self.store.tenants().await,
+                    fenced: self.fenced.load(Ordering::SeqCst),
+                    metrics: self.counters.snapshot(),
+                    node: self.node,
+                    leader: metrics.current_leader,
+                    applied: metrics.last_applied.map(|id| id.index),
+                    voters: metrics.membership_config.voter_ids().collect(),
+                    snapshot: metrics.snapshot.map(|id| id.index),
+                    health: format!("{:?}: {:?}", metrics.state, metrics.running_state),
+                })?
+            }
+            Message::SnapshotNow if administrative => encode(
+                &self
+                    .raft
+                    .trigger()
+                    .snapshot()
+                    .await
+                    .map_err(|_| CoordinationError::Unavailable),
+            )?,
+            Message::Initialize if administrative => {
+                let members: std::collections::BTreeMap<_, _> = self
+                    .genesis
+                    .genesis
+                    .voters
+                    .iter()
+                    .filter(|v| self.genesis.genesis.initial_voters.contains(&v.id))
+                    .map(|v| (v.id, BasicNode::new(v.address.clone())))
+                    .collect();
+                encode(
+                    &self
+                        .raft
+                        .initialize(members)
+                        .await
+                        .map_err(|_| CoordinationError::Configuration),
+                )?
+            }
+            _ => return Err(CoordinationError::Denied),
+        };
+        let response = crate::transport::Envelope::from_body(
+            self.genesis.id()?,
+            envelope.nonce,
+            body,
+            &self.key,
+        )?;
+        write(&mut stream, &response).await
     }
 }
 pub fn backup(

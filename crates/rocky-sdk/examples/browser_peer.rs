@@ -275,7 +275,10 @@ mod native {
             .start_serving(secrets[index], vec![Protocol::Coordinate])
             .await?;
             tokio::spawn(voter.clone().serve_clients(lane.transport()));
-            tokio::spawn(voter.serve());
+            tokio::spawn(async move {
+                let Err(error) = voter.serve().await;
+                eprintln!("voter stopped serving: {error:?}");
+            });
         }
         let admin = NetworkCoordinator::open(
             genesis.clone(),

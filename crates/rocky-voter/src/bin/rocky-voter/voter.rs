@@ -133,8 +133,8 @@ async fn run(path: &Path, provision: bool) -> Result<(), Failure> {
         (Some(lane), true) => serve_clients(&service, lane).await?,
         (None, false) => {}
     }
-    service.serve().await?;
-    Ok(())
+    let Err(stopped) = service.serve().await;
+    Err(stopped.into())
 }
 
 const ANNOUNCES_A_TOPIC: bool = false;

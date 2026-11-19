@@ -5,10 +5,12 @@ name: Baseline checks
 # running again.
 
 on:
-  # Only the default branch and the release call run baselines; there are no
-  # other long-lived branches or pull requests.
+  # The default branch, pull requests and the release call run baselines.
   push:
     branches: [main]
+  # A pull request checks its head commit, the tree a rebase merge lands once
+  # the branch is up to date with main; its local check need not repeat this.
+  pull_request:
   # Releases call only `build` and `check`; auxiliary jobs run on pushes.
   # The build and checks are skipped for a tree that passed.
   workflow_call:
@@ -24,12 +26,13 @@ on:
 permissions:
   contents: read
 
-# A newer push supersedes a run, but a release's call must not cancel another
-# release's checks, which share the caller's workflow name and ref.
+# A newer push to main or to a pull request supersedes a run, but a release's
+# call must not cancel another release's checks, which share the caller's
+# workflow name and ref.
 concurrency:
   # Let runs from before cache seeding finish their checks.
   group: ${{ github.workflow }}-${{ github.ref }}-source-cache-v2
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -54,7 +57,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_API_URL: ${{ github.api_url }}
           GH_REPOSITORY: ${{ github.repository }}
-          GH_REVISION: ${{ inputs.revision || github.sha }}
+          GH_REVISION: ${{ inputs.revision || github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           api() {
@@ -134,7 +137,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_API_URL: ${{ github.api_url }}
           GH_REPOSITORY: ${{ github.repository }}
-          GH_REVISION: ${{ inputs.revision || github.sha }}
+          GH_REVISION: ${{ inputs.revision || github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           api() {
@@ -217,7 +220,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_API_URL: ${{ github.api_url }}
           GH_REPOSITORY: ${{ github.repository }}
-          GH_REVISION: ${{ inputs.revision || github.sha }}
+          GH_REVISION: ${{ inputs.revision || github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           api() {
@@ -332,7 +335,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_API_URL: ${{ github.api_url }}
           GH_REPOSITORY: ${{ github.repository }}
-          GH_REVISION: ${{ inputs.revision || github.sha }}
+          GH_REVISION: ${{ inputs.revision || github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           api() {
@@ -398,7 +401,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_API_URL: ${{ github.api_url }}
           GH_REPOSITORY: ${{ github.repository }}
-          GH_REVISION: ${{ inputs.revision || github.sha }}
+          GH_REVISION: ${{ inputs.revision || github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           api() {

@@ -116,6 +116,13 @@ impl<T> ReplicaLock<T> {
         self.gate.state().waiting > 0
     }
 
+    #[cfg(test)]
+    pub(crate) async fn interactive_queued(&self) {
+        while !self.interactive_waiting() {
+            rocky_platform::task::yield_now().await;
+        }
+    }
+
     #[track_caller]
     fn acquire<G, F: Future<Output = G>, L: Fn() -> F>(
         &self,

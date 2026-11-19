@@ -2442,24 +2442,19 @@ async fn a_cursor_racing_a_commit_reads_once_readers_are_refreshed() {
         .execute("UPDATE secure_read_epoch SET epoch=epoch+1 WHERE id=1", ())
         .await
         .unwrap();
-    let opened = tokio::join!(
-        session.cursor("SELECT key FROM items", vec![], CursorLimits::default()),
-        async {
-            for _ in 0..10_000 {
-                if replica.inner.interactive_waiting() {
-                    break;
-                }
-                rocky_platform::task::yield_now().await;
-            }
-            assert!(
-                replica.inner.interactive_waiting(),
-                "the cursor meets the stale epoch and queues for the lock"
-            );
-            inner.refresh_readers().await;
-            drop(inner);
-        },
-    )
-    .0;
+    let cursor = session.cursor("SELECT key FROM items", vec![], CursorLimits::default());
+    tokio::pin!(cursor);
+    tokio::select! {
+        biased;
+        () = replica.inner.interactive_queued() => {}
+        opened = &mut cursor => panic!(
+            "the cursor opened without meeting the stale epoch and queueing for the lock: {:?}",
+            opened.err()
+        ),
+    }
+    inner.refresh_readers().await;
+    drop(inner);
+    let opened = cursor.await;
     assert!(opened.is_ok(), "{:?}", opened.err());
 }
 

@@ -1,4 +1,5 @@
 use super::headers::HeaderSource;
+use super::replay::BrokenReference;
 use super::*;
 use rocky_core::{ApplicationManifest, Scope};
 use rocky_credentials::TipGraph;
@@ -658,6 +659,22 @@ enum SwitchDirection {
     WithdrawingStage(Commitment),
 }
 
+#[must_use]
+pub(super) enum SourceTables {
+    Replayed,
+    KeptOverBrokenReplay(BrokenReference),
+}
+impl SourceTables {
+    fn warn_if_kept(self) {
+        if let Self::KeptOverBrokenReplay(BrokenReference(violation)) = self {
+            tracing::warn!(
+                %violation,
+                "a withdrawn schema switch keeps its source tables because replaying them would break a foreign key"
+            );
+        }
+    }
+}
+
 impl<A: RowApplication> Inner<A> {
     async fn switch_schema_now(
         &mut self,
@@ -876,15 +893,23 @@ impl<A: RowApplication> Inner<A> {
                     reinstall_switch_source(inner, &mut definition, old_typed).await?;
                     if let Ok(Err(broken)) = &finished {
                         let refusal = broken.reason();
-                        transaction!(inner, |inner| match direction {
+                        let withdrawn = transaction!(inner, |inner| match direction {
                             SwitchDirection::Forward => {
                                 inner.withdraw_schema_switch(scope, &name).await
                             }
                             SwitchDirection::WithdrawingStage(publication) => {
                                 inner.clear_stage_withdrawal().await?;
-                                inner.refuse_stage_withdrawal(publication, &refusal).await
+                                inner.refuse_stage_withdrawal(publication, &refusal).await?;
+                                Ok(SourceTables::Replayed)
                             }
                         })?;
+                        if let SourceTables::KeptOverBrokenReplay(BrokenReference(violation)) =
+                            withdrawn
+                        {
+                            return Err(Error::Incompatible(format!(
+                                "{refusal}; the switch was withdrawn keeping the source tables, because replaying them would break a foreign key: {violation}"
+                            )));
+                        }
                     }
                 }
                 finished??;
@@ -1012,7 +1037,9 @@ impl<A: RowApplication> Inner<A> {
         if continues {
             return Ok(());
         }
-        self.withdraw_schema_switch(scope, &bookmark).await
+        self.withdraw_schema_switch(scope, &bookmark)
+            .await
+            .map(SourceTables::warn_if_kept)
     }
     async fn own_staged_target(&self, target: TipId) -> Result<bool, Error> {
         for record in rows(
@@ -1034,9 +1061,9 @@ impl<A: RowApplication> Inner<A> {
         &mut self,
         scope: Scope,
         bookmark: &str,
-    ) -> Result<(), Error> {
+    ) -> Result<SourceTables, Error> {
         let Some((_, _, source, _)) = self.schema_switch_intent().await? else {
-            return Ok(());
+            return Ok(SourceTables::Replayed);
         };
         if self.workspace.tip != source
             || self
@@ -1075,22 +1102,47 @@ impl<A: RowApplication> Inner<A> {
         for resource in stored {
             self.rebuild_rows(resource).await?;
         }
-        if !replayed.is_empty() {
-            self.replay_from_frames(now()?).await?;
-        }
+        let tables = if replayed.is_empty() {
+            SourceTables::Replayed
+        } else {
+            self.replay_source_tables().await?
+        };
         match self
             .graph_for(scope)?
             .bookmark(bookmark)
             .map_err(credential)?
         {
-            Some(followed) => self.switch_tip(scope, bookmark, followed).await,
+            Some(followed) => self.switch_tip(scope, bookmark, followed).await?,
             None => {
                 self.conn
                     .execute("DELETE FROM secure_pending_schema WHERE id=1", ())
                     .await?;
-                Ok(())
             }
         }
+        Ok(tables)
+    }
+    async fn replay_source_tables(&mut self) -> Result<SourceTables, Error> {
+        self.conn
+            .execute("SAVEPOINT withdrawn_switch_replay", ())
+            .await?;
+        self.replay_from_frames(now()?).await?;
+        #[cfg(test)]
+        for sql in std::mem::take(&mut self.withdrawal_replay_fault) {
+            self.conn.execute(sql, ()).await?;
+        }
+        let tables = match self.broken_replayed_reference().await? {
+            Some(broken) => {
+                self.conn
+                    .execute("ROLLBACK TO withdrawn_switch_replay", ())
+                    .await?;
+                SourceTables::KeptOverBrokenReplay(broken)
+            }
+            None => SourceTables::Replayed,
+        };
+        self.conn
+            .execute("RELEASE withdrawn_switch_replay", ())
+            .await?;
+        Ok(tables)
     }
     async fn clear_stage_withdrawal(&mut self) -> Result<(), Error> {
         self.invalidate_context();
@@ -1343,10 +1395,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let result = match staged {
             Some(bookmark) => transaction!(inner, |inner| {
                 inner.discard_schema_stage(&stage).await?;
-                inner.withdraw_schema_switch(stage.scope, &bookmark).await?;
-                inner.load_tip_graphs().await
+                let tables = inner.withdraw_schema_switch(stage.scope, &bookmark).await?;
+                inner.load_tip_graphs().await?;
+                Ok(tables)
             })
-            .map(|()| true),
+            .map(|tables| {
+                tables.warn_if_kept();
+                true
+            }),
             None => {
                 inner
                     .switch_schema_now(

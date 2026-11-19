@@ -422,6 +422,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await
             .switch_fault = true;
     }
+    #[cfg(test)]
+    pub(crate) async fn run_after_next_withdrawal_replay(&self, sql: Vec<&'static str>) {
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .withdrawal_replay_fault = sql;
+    }
 }
 
 fn removed_replayed<'a>(

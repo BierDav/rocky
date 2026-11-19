@@ -1036,6 +1036,117 @@ async fn a_refused_schema_switch_is_withdrawn_and_the_peer_stays_on_its_source()
     assert_eq!(declared_references(&alice).await, (Vec::new(), true));
 }
 
+const ORPHAN_AFTER_REPLAY: [&str; 2] =
+    ["PRAGMA defer_foreign_keys=ON", "UPDATE tags SET also=x'01'"];
+fn tag_also(value: SqlValue) -> Vec<Vec<SqlValue>> {
+    vec![vec![value]]
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_withdrawal_whose_replay_breaks_a_foreign_key_keeps_the_source_tables_and_reopens() {
+    let mut lineage = linked();
+    lineage.deferred_from = Some(3);
+    let tagged = linked_with_a_tag(&lineage).await;
+    let alice = &tagged.replica;
+    super::super::compaction::follow_main(&lineage, alice).await;
+    let source = alice.followed_tip().await;
+    plant_orphan(alice).await;
+    alice
+        .run_after_next_withdrawal_replay(ORPHAN_AFTER_REPLAY.to_vec())
+        .await;
+    let statements = lineage.publish(alice, 3).await.unwrap();
+    let refused = lineage
+        .follow(alice, lineage.config(3, &tagged.key), 3, &statements)
+        .await;
+    assert!(
+        matches!(&refused, Err(Error::Incompatible(reason)) if reason == "the projection rebuild would keep rows that break a foreign key: a row of tags references a missing row of items; the switch was withdrawn keeping the source tables, because replaying them would break a foreign key: a row of tags references a missing row of items"),
+        "the refusal names the switch's rows and the replay it set aside: {refused:?}"
+    );
+    assert_eq!(
+        raw_rows(alice, MID_SWITCH).await,
+        mid_switch(0, 0),
+        "the withdrawal commits without its replay, so no switch is left half done"
+    );
+    assert_eq!(alice.followed_tip().await, source);
+    let planted = tag_also(SqlValue::Blob(vec![0]));
+    assert_eq!(
+        raw_rows(alice, "SELECT also FROM tags").await,
+        planted,
+        "the source tables stay as they were before the switch, not as the broken replay left them"
+    );
+    drop(tagged.replica);
+    let alice = lineage
+        .reopen(&tagged.path, &tagged.key, 2, 2)
+        .await
+        .expect("a peer whose withdrawal kept its source tables reopens on its source schema");
+    assert_eq!(alice.followed_tip().await, source);
+    assert_eq!(raw_rows(&alice, MID_SWITCH).await, mid_switch(0, 0));
+    assert_eq!(raw_rows(&alice, "SELECT also FROM tags").await, planted);
+    let again = lineage
+        .follow(&alice, lineage.config(3, &tagged.key), 3, &statements)
+        .await;
+    assert!(
+        refused_for_an_orphan(&again),
+        "the next switch is refused for its own rows, not stuck behind the last one: {again:?}"
+    );
+    assert_eq!(raw_rows(&alice, MID_SWITCH).await, mid_switch(0, 0));
+    assert_eq!(
+        raw_rows(&alice, "SELECT also FROM tags").await,
+        tag_also(SqlValue::Null),
+        "a replay that keeps every reference is committed"
+    );
+    let switched = lineage
+        .follow(&alice, lineage.config(3, &tagged.key), 3, &statements)
+        .await;
+    assert!(matches!(switched, Ok(true)), "{switched:?}");
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn withdrawing_a_stage_whose_switch_was_interrupted_keeps_the_source_tables_over_a_broken_replay()
+ {
+    let mut lineage = linked();
+    lineage.deferred_from = Some(3);
+    let tagged = linked_with_a_tag(&lineage).await;
+    let staged = stage(&lineage, &tagged).await;
+    tagged.replica.fail_next_plan_switch().await;
+    let interrupted = switch_to_stage(&lineage, &tagged, &staged).await;
+    assert!(
+        matches!(interrupted, Err(Error::InjectedFailure)),
+        "{interrupted:?}"
+    );
+    assert_eq!(
+        raw_rows(&tagged.replica, MID_SWITCH).await,
+        mid_switch(1, 1),
+        "the switch to the stage waits with its intent and plan"
+    );
+    plant_orphan(&tagged.replica).await;
+    tagged
+        .replica
+        .run_after_next_withdrawal_replay(ORPHAN_AFTER_REPLAY.to_vec())
+        .await;
+    withdraw_stage(&lineage, &tagged.key, &tagged.replica, staged.publication)
+        .await
+        .expect("withdrawing the stage sets the broken replay aside rather than refusing");
+    assert_eq!(tagged.replica.followed_tip().await, staged.source);
+    assert_eq!(stage_state(&tagged.replica).await, None);
+    assert_eq!(
+        raw_rows(&tagged.replica, MID_SWITCH).await,
+        mid_switch(0, 0)
+    );
+    assert_eq!(
+        raw_rows(&tagged.replica, "SELECT also FROM tags").await,
+        tag_also(SqlValue::Blob(vec![0])),
+        "the source tables the switch never replaced are kept"
+    );
+    drop(tagged.replica);
+    let alice = lineage
+        .reopen(&tagged.path, &tagged.key, 2, 2)
+        .await
+        .expect("the withdrawn stage leaves its source schema openable");
+    assert_eq!(alice.followed_tip().await, staged.source);
+    assert_eq!(stage_state(&alice).await, None);
+}
+
 struct StagedSwitch {
     source: rocky_core::TipId,
     target: rocky_core::TipId,

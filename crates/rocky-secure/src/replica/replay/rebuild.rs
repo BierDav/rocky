@@ -241,7 +241,10 @@ impl<A: RowApplication> Inner<A> {
                     .await?;
             }
             self.replay_from_frames(time).await?;
-            self.replayed_violation_any().await
+            Ok(self
+                .broken_replayed_reference()
+                .await?
+                .map(|BrokenReference(violation)| violation))
         }
         .await;
         let undo = async || -> Result<(), Error> {
@@ -358,7 +361,9 @@ impl<A: RowApplication> Inner<A> {
         bytes.extend_from_slice(&self.workspace.tip.0);
         Ok(rocky_core::commitment("rocky.rederive.inputs.v1", &bytes).to_vec())
     }
-    async fn replayed_violation_any(&self) -> Result<Option<String>, Error> {
+    pub(in crate::replica) async fn broken_replayed_reference(
+        &self,
+    ) -> Result<Option<BrokenReference>, Error> {
         let Some(typed) = self.workspace.typed.as_ref() else {
             return Ok(None);
         };
@@ -371,7 +376,7 @@ impl<A: RowApplication> Inner<A> {
                 table.class == TableClass::Replayed && typed.by_name(&table.sql_name).is_some()
             })
             .collect();
-        self.orphan_in(&replayed).await
+        Ok(self.orphan_in(&replayed).await?.map(BrokenReference))
     }
     pub(in crate::replica) async fn prune_shadowed_outcomes(
         &self,

@@ -73,11 +73,29 @@ async fn node(
     vault: Vault,
     transport: impl Into<crate::transport::Connected>,
 ) -> Result<Arc<Node>, Failure> {
+    let leases_held_until_a_test_advances_them = rocky_secure::ManualLeaseClock::default();
+    node_on(
+        root,
+        settings,
+        vault,
+        transport,
+        &leases_held_until_a_test_advances_them,
+    )
+    .await
+}
+async fn node_on(
+    root: &std::path::Path,
+    settings: Settings,
+    vault: Vault,
+    transport: impl Into<crate::transport::Connected>,
+    lease_clock: &rocky_secure::ManualLeaseClock,
+) -> Result<Arc<Node>, Failure> {
     let domain = settings.domain()?;
     let replica = EncryptedReplica::open(
         root.join("rocky.sqlite"),
         domain.app.clone(),
-        settings.config(&vault, &domain)?,
+        rocky_secure::OpenConfig::from(settings.config(&vault, &domain)?)
+            .with_manual_lease_clock(lease_clock),
     )
     .await?;
     replica
@@ -648,6 +666,101 @@ async fn a_room_write_commits_while_a_renewal_waits_for_the_replica() -> Result<
         node.detach(None).await;
         Ok(())
     }).await
+}
+
+#[tokio::test]
+async fn the_write_lease_times_out_and_aborts_until_acknowledged() -> Result<(), Failure> {
+    use crate::connection::{Call, ConnectionOptions, Registry, Reply, code, serve};
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
+            let settings = Settings::create(
+                &Schema::parse(SCHEMA)?,
+                &store,
+                crate::enrollment::DEFAULT_TTL,
+                None,
+                &rocky_credentials::RootKey::generate(),
+            )?;
+            let vault = settings.vault(&store);
+            let transport = Arc::new(Hub::default())
+                .connector("a")
+                .start(true, Settings::route_secret(&vault)?)
+                .await?;
+            let clock = rocky_secure::ManualLeaseClock::default();
+            let node = node_on(root.path(), settings, vault, transport, &clock).await?;
+            let timeout = Duration::from_millis(200);
+            let connections = Registry::default();
+            let writer = connections.get(
+                connections
+                    .connect(
+                        node.clone(),
+                        ConnectionOptions {
+                            read_only: false,
+                            durability: crate::Durability::Buffered,
+                            profile: None,
+                            transaction_timeout: Some(timeout),
+                            binding: None,
+                        },
+                    )
+                    .await?,
+            )?;
+            let execute_with = |sql: &str, params: Vec<SqlValue>| {
+                let call = Call::Execute {
+                    statement: 1,
+                    sql: sql.into(),
+                    params,
+                };
+                serve(writer.clone(), call)
+            };
+            let execute = |sql: &str| execute_with(sql, Vec::new());
+            let in_transaction = || async {
+                match serve(writer.clone(), Call::InTransaction).await? {
+                    Reply::Flag(flag) => Ok::<_, Failure>(flag),
+                    _ => Err("in-transaction answers with a flag".into()),
+                }
+            };
+            let count = || async {
+                match execute("SELECT count(*) FROM items").await? {
+                    Reply::Page(page) => Ok::<_, Failure>(page.rows[0][0].clone()),
+                    _ => Err("a count answers with a page".into()),
+                }
+            };
+            execute("BEGIN IMMEDIATE TRANSACTION").await?;
+            let Reply::Page(page) = execute("SELECT rocky_next_id('items')").await? else {
+                return Err("no row id".into());
+            };
+            execute_with(
+                "INSERT INTO items(key,title,id) VALUES('k','held',?)",
+                vec![page.rows[0][0].clone()],
+            )
+            .await?;
+            clock.advance(timeout - Duration::from_millis(1));
+            assert_eq!(
+                count().await?,
+                SqlValue::Integer(1),
+                "the lease holds until its clock reaches the timeout"
+            );
+            clock.advance(Duration::from_millis(1));
+            let Err(error) = execute("SELECT count(*) FROM items").await else {
+                return Err("a statement after the lease clock passed the timeout ran".into());
+            };
+            assert_eq!(error.code, code::ABORT, "{error}");
+            assert!(
+                error.message.contains("Timeout"),
+                "the lease ends on its own: {error}"
+            );
+            assert!(
+                in_transaction().await?,
+                "a timed-out lease stays a transaction for the driver until it rolls back"
+            );
+            execute("ROLLBACK TRANSACTION").await?;
+            assert!(!in_transaction().await?);
+            assert_eq!(count().await?, SqlValue::Integer(0));
+            node.detach(None).await;
+            Ok(())
+        })
+        .await
 }
 
 #[tokio::test]

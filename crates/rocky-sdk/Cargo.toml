@@ -43,8 +43,9 @@ rocky-iroh.workspace = true
 p2panda-core = "=0.5.2"
 rocky-platform = { workspace = true, features = ["test-support", "simulation"] }
 sqlparser = { version = "0.63", default-features = false, features = ["std", "visitor"] }
-# The simulation crashes replicas at named points.
-rocky-secure = { path = "../rocky-secure", features = ["qualification"] }
+# The simulation crashes replicas at named points; node tests hold SQL leases
+# on a manual clock.
+rocky-secure = { path = "../rocky-secure", features = ["qualification", "test-support"] }
 rusqlite.workspace = true
 tracing-subscriber.workspace = true
 # Each test also runs in a browser on wasm32 (`wasm_bindgen_test(unsupported = ...)`).

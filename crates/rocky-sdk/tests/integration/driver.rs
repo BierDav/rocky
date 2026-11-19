@@ -15,7 +15,6 @@ use support::snapshot as snap;
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
 const SQLITE_ERROR: i32 = 1;
-const SQLITE_ABORT: i32 = 4;
 const SQLITE_READONLY: i32 = 8;
 const SQLITE_TOOBIG: i32 = 18;
 const SQLITE_AUTH: i32 = 23;
@@ -540,47 +539,6 @@ async fn bundle_limits_and_the_lease_fail_the_transaction_without_splitting_it()
         "exactly the replayed-row limit commits as one bundle of one intent frame"
     );
     assert!(seeded.0 > before.0);
-    writer.close().await;
-    database.close().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn the_write_lease_times_out_and_aborts_until_acknowledged() -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
-    let database = create(open(root.path(), None), None).await?.database;
-    let writer = database
-        .connect(ConnectionOptions {
-            transaction_timeout: Some(Duration::from_millis(200)),
-            ..WRITER
-        })
-        .await?;
-    run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
-    run(&writer, "INSERT INTO lists(key,title) VALUES('l1','held')").await?;
-    let error = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match all(&writer, "SELECT count(*) FROM lists", Vec::new()).await {
-                Ok(_) => tokio::time::sleep(Duration::from_millis(20)).await,
-                Err(error) => return error,
-            }
-        }
-    })
-    .await?;
-    let error = error
-        .downcast::<rocky_sdk::SqlFailure>()
-        .map_err(|_| "code")?;
-    assert_eq!(error.code, SQLITE_ABORT, "{error}");
-    assert!(
-        error.message.contains("Timeout"),
-        "the lease ends on its own: {error}"
-    );
-    assert!(
-        writer.in_transaction().await?,
-        "a timed-out lease stays a transaction for the driver until it rolls back"
-    );
-    run(&writer, "ROLLBACK TRANSACTION").await?;
-    assert!(!writer.in_transaction().await?);
-    assert_eq!(count(&writer, "lists").await?, 0);
     writer.close().await;
     database.close().await?;
     Ok(())

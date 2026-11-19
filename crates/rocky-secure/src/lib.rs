@@ -70,10 +70,7 @@ fn page_len<T: Serialize>(items: &[T], limit: usize) -> Result<usize, Error> {
 pub const MAX_SECURE_RECORDS: usize = 4096;
 pub const MAX_SECURE_BYTES: usize = 32 * 1024 * 1024;
 pub fn secure_node_id(key: PublicKey) -> rocky_core::NodeId {
-    let hash = rocky_core::commitment("rocky.secure-node.v1", key.as_bytes());
-    let mut id = [0; 16];
-    id.copy_from_slice(&hash[..16]);
-    rocky_core::NodeId(id)
+    rocky_credentials::PeerId::of(key).node_id()
 }
 fn denied(message: &str) -> Error {
     Error::Rejected(message.into())

@@ -228,15 +228,6 @@ impl CertifiedGenesis {
     }
 }
 
-pub fn node_id(key: PublicKey) -> NodeId {
-    {
-        let digest = commitment("rocky.secure-node.v1", key.as_bytes());
-        let mut id = [0; 16];
-        id.copy_from_slice(&digest[..16]);
-        NodeId(id)
-    }
-}
-
 pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, CoordinationError> {
     p2panda_core::cbor::encode_cbor(value).map_err(|_| CoordinationError::Corrupt)
 }

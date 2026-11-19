@@ -763,6 +763,7 @@ impl<A: RowApplication> Inner<A> {
             }
             return;
         }
+        self.file.passive.clone().wait().await;
         if !self.truncate_wal().await
             && size >= self.wal_limits.1
             && self.workspace.queries.cursors.preempt().await > 0

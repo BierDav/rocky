@@ -1410,6 +1410,37 @@ async fn an_in_budget_burst_spans_publication_pages_without_reconciliation() -> 
         .await
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum RacingCommit {
+    StaysDirty,
+    LeftToRepair,
+}
+
+async fn racing_commit(
+    node: &Node,
+    live: &crate::node::live_links::Registry,
+    peer: &Node,
+    scope: ResourceScope,
+    stored_after_generation: Option<u64>,
+) -> Result<RacingCommit, Failure> {
+    let peer = Settings::node_key(&peer.vault)?.public_key();
+    let (token, cursor) = loop {
+        match live.linked_scope(peer, scope) {
+            Some((generation, token, cursor)) if Some(generation) != stored_after_generation => {
+                break (token, cursor);
+            }
+            Some(_) | None => tokio::task::yield_now().await,
+        }
+    };
+    if token != crate::node::live_links::ScopeToken::read(node, scope).await? {
+        Ok(RacingCommit::StaysDirty)
+    } else if cursor != node.replica.frontier(scope).await? {
+        Ok(RacingCommit::LeftToRepair)
+    } else {
+        Err("the racing commit is neither dirty nor above the link's cursor".into())
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_local_commit_between_receipt_snapshots_remains_eligible_for_publication()
 -> Result<(), Failure> {
@@ -1443,11 +1474,12 @@ async fn a_local_commit_between_receipt_snapshots_remains_eligible_for_publicati
                     && !service_b.live.publishing_or_receiving()
             })
             .await;
-            let gate = Arc::new(crate::node::live_links::ReceiptGate {
-                entered: Semaphore::new(0),
-                resume: Semaphore::new(0),
-            });
-            *service_b.live.receipt_gate.lock().unwrap() = Some(gate.clone());
+            let scope = b.app_scopes()[0];
+            let gate = crate::node::live_links::ScopeReadGate::arm(
+                &service_b.live,
+                crate::node::live_links::ScopeReadSite::Receipt,
+                scope,
+            );
             let dials = [hub.dials_to("a"), hub.dials_to("b")];
             let activity = snap::Snapshot::snapshot(a.activity.after(0))["token"]
                 .as_str()
@@ -1456,8 +1488,17 @@ async fn a_local_commit_between_receipt_snapshots_remains_eligible_for_publicati
             add(&a, 1).await?;
             gate.entered.acquire().await?.forget();
             assert_eq!(rows(&b).await?, ["1"]);
+            let a_key = Settings::node_key(&a.vault)?.public_key();
+            let (generation, _, _) = service_b.live.linked_scope(a_key, scope).ok_or("link")?;
+            let publish = service_b.live.publishing.lock().await;
             add(&b, 2).await?;
             gate.resume.add_permits(1);
+            assert_eq!(
+                racing_commit(&b, &service_b.live, &a, scope, Some(generation)).await?,
+                RacingCommit::StaysDirty,
+                "a token read before a commit racing the receipt leaves the scope dirty for the next publication"
+            );
+            drop(publish);
             while rows(&a).await? != ["1", "2"] {
                 tokio::task::yield_now().await;
             }
@@ -1476,6 +1517,103 @@ async fn a_local_commit_between_receipt_snapshots_remains_eligible_for_publicati
                     .all(|event| event["kind"] != "peer_reconciliation_completed"
                         && event["kind"] != "rows_synced")
             );
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_local_commit_between_link_open_snapshots_remains_eligible_for_publication()
+-> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((
+                    &a,
+                    Profile::Reader {
+                        scopes: ["items".into()].into(),
+                    },
+                )),
+            )
+            .await?;
+            targets(&b, std::slice::from_ref(&a)).await?;
+            a.automatic.store(true, Ordering::SeqCst);
+            hub.stall_peer("b", true);
+            let service_a = a.current().ok_or("service")?;
+            let scope = a.app_scopes()[0];
+            let gate = crate::node::live_links::ScopeReadGate::arm(
+                &service_a.live,
+                crate::node::live_links::ScopeReadSite::LinkOpen,
+                scope,
+            );
+            let (started, publish) = tokio::join!(start(&b, true), async {
+                gate.entered.acquire().await?.forget();
+                let publish = service_a.live.publishing.lock().await;
+                add(&a, 1).await?;
+                gate.resume.add_permits(1);
+                Ok::<_, Failure>(publish)
+            });
+            started?;
+            let publish = publish?;
+            assert_eq!(
+                racing_commit(&a, &service_a.live, &b, scope, None).await?,
+                RacingCommit::StaysDirty,
+                "a token read before a commit racing the link open leaves the scope dirty for the first publication"
+            );
+            drop(publish);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_local_commit_between_failed_push_snapshots_is_left_to_the_peers_repair()
+-> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b) = pair(root.path(), &hub).await?;
+            let service_a = a.current().ok_or("service")?;
+            let service_b = b.current().ok_or("service")?;
+            until(|| {
+                !service_a.live.publishing_or_receiving()
+                    && !service_b.live.publishing_or_receiving()
+            })
+            .await;
+            let b_never_publishes_back = service_b.live.publishing.lock().await;
+            let scope = a.app_scopes()[0];
+            let b_key = Settings::node_key(&b.vault)?.public_key();
+            let publish = service_a.live.publishing.lock().await;
+            add_over_budget_burst(&a).await?;
+            let (generation, _, _) = service_a.live.linked_scope(b_key, scope).ok_or("link")?;
+            let gate = crate::node::live_links::ScopeReadGate::arm(
+                &service_a.live,
+                crate::node::live_links::ScopeReadSite::FailedPushRepair,
+                scope,
+            );
+            drop(publish);
+            gate.entered.acquire().await?.forget();
+            let publish = service_a.live.publishing.lock().await;
+            add(&a, 1).await?;
+            gate.resume.add_permits(1);
+            assert_eq!(
+                racing_commit(&a, &service_a.live, &b, scope, Some(generation)).await?,
+                RacingCommit::LeftToRepair,
+                "a frontier read before a commit racing the failed push leaves the commit to the peer's repair"
+            );
+            drop(publish);
+            drop(b_never_publishes_back);
             a.detach(None).await;
             b.detach(None).await;
             Ok(())
@@ -2267,6 +2405,28 @@ async fn count(node: &Node) -> Result<Value, Failure> {
     Ok(page["rows"][0][0]["value"].clone())
 }
 
+async fn add_over_budget_burst(node: &Node) -> Result<(), Failure> {
+    let title = "x".repeat(16 * 1024);
+    let client = node.client(1)?;
+    for key in 0..24u8 {
+        snap::value(node.execute_sql(&client, "BEGIN", Vec::new(), None)).await?;
+        let id = snap::value(node.next_id(&client, "items", None)).await?["id"].clone();
+        snap::value(node.execute_sql(
+            &client,
+            "INSERT INTO items(key,title,id) VALUES(?,?,?)",
+            vec![
+                rocky_sdk::SqlValue::Text(snap::text(&(format!("burst_{key}")))),
+                rocky_sdk::SqlValue::Text(snap::text(&(title))),
+                snap::row_id(&(id)),
+            ],
+            None,
+        ))
+        .await?;
+        snap::value(node.execute_sql(&client, "COMMIT", Vec::new(), Some([100 + key; 32]))).await?;
+    }
+    Ok(())
+}
+
 #[tokio::test(start_paused = true)]
 async fn an_over_budget_burst_is_repaired_once_and_later_edits_publish() -> Result<(), Failure> {
     tokio::task::LocalSet::new()
@@ -2283,36 +2443,8 @@ async fn an_over_budget_burst_is_repaired_once_and_later_edits_publish() -> Resu
             .await;
             let b_never_publishes_back = service_b.live.publishing.lock().await;
             let idle = || !service_a.live.publishing_or_receiving();
-            let title = "x".repeat(16 * 1024);
-            let client = a.client(1)?;
             let publish = service_a.live.publishing.lock().await;
-            for key in 0..24u8 {
-                snap::value(a.execute_sql(&client, "BEGIN", Vec::new(), None)).await?;
-                let id = snap::value(a.next_id(&client, "items", None)).await?["id"].clone();
-                snap::value(a.execute_sql(
-                    &client,
-                    "INSERT INTO items(key,title,id) VALUES(?,?,?)",
-                    vec![
-                        rocky_sdk::SqlValue::Text(snap::text(&(format!("burst_{key}")))),
-                        rocky_sdk::SqlValue::Text(snap::text(&(title))),
-                        snap::row_id(&(id)),
-                    ],
-                    None,
-                ))
-                .await?;
-                snap::value(
-                    a.execute_sql(
-                        &client,
-                        "COMMIT",
-                        Vec::new(),
-                        Some(
-                            serde_json::from_value::<[u8; 32]>(json!(vec![100 + key; 32]))
-                                .expect("typed fixture"),
-                        ),
-                    ),
-                )
-                .await?;
-            }
+            add_over_budget_burst(&a).await?;
             drop(publish);
             while count(&b).await? != "24" {
                 tokio::task::yield_now().await;

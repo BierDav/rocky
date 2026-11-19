@@ -1,20 +1,9 @@
 #!/bin/sh
-# Optimize CPU-heavy test binaries on CI hosts; retain debug assertions.
+# Keys the CI Rust cache to the source tree without changing compiler options.
+# Tests build with the profile local checks use (Cargo.toml): optimized
+# dependencies, rocky-core and rocky-credentials, unoptimized large workspace
+# crates. Appending keeps the repository's .cargo/config.toml (the sccache
+# rustc wrapper, the wasm32 runner and [env]).
 set -eu
 mkdir -p .cargo
-cat > .cargo/config.toml <<'EOF'
-[profile.test.package.rocky-core]
-opt-level = 3
-[profile.test.package.rocky-credentials]
-opt-level = 3
-[profile.test.package.rocky-storage]
-opt-level = 3
-[profile.test.package.rocky-secure]
-opt-level = 3
-[profile.test.package.rocky-sdk]
-opt-level = 3
-EOF
-
-# The Rust cache hashes configuration separately from its toolchain restore prefix.
-# Refresh the cleaned cache per source tree without changing compiler options.
-[ "$#" -eq 0 ] || printf '# CI source tree: %s\n' "$1" >> .cargo/config.toml
+[ "$#" -eq 0 ] || printf '\n# CI source tree: %s\n' "$1" >> .cargo/config.toml

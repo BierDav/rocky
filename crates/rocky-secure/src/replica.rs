@@ -449,9 +449,7 @@ pub(super) struct Inner<A> {
     maintenance: maintenance::Pass,
     maintenance_backoff: Option<(u64, u32)>,
     verified_at: BTreeMap<i64, u64>,
-    configured: BTreeSet<PublicKey>,
-    served: (u64, BTreeMap<rocky_credentials::PeerId, u64>),
-    pub(super) peer_tips: BTreeMap<rocky_credentials::PeerId, TipId>,
+    pub(super) known_peers: admission::KnownPeers,
     #[cfg(test)]
     checkpoint_export_pause: Option<(
         tokio::sync::oneshot::Sender<()>,
@@ -1110,9 +1108,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             maintenance: Default::default(),
             maintenance_backoff: None,
             verified_at: BTreeMap::new(),
-            configured: BTreeSet::new(),
-            served: (0, BTreeMap::new()),
-            peer_tips: BTreeMap::new(),
+            known_peers: Default::default(),
             #[cfg(test)]
             checkpoint_export_pause: None,
             #[cfg(test)]
@@ -1325,6 +1321,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         inner.load_typed().await?;
         inner.load_partitions().await?;
+        inner.load_custody_peers().await?;
         inner.revision = inner.stored_revision().await?;
         inner.notifications.send_replace(inner.revision);
         let revisions = inner.notifications.subscribe();

@@ -1,8 +1,11 @@
-#!/bin/sh
-# The rustc wrapper .cargo/config.toml names: sccache, without the target
-# directory variables. sccache keys a compile on every CARGO_* variable, so a
-# target directory per worktree or per check step (scripts/check's target/side,
-# scripts/cranelift's target/cranelift) gave each its own cache, though the
-# target directory changes no compiler output.
-unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR
-exec sccache "$@"
+#!/usr/bin/env python3
+"""Share sccache entries across Cargo target directories."""
+
+import os
+import sys
+
+# A shell can discard Cargo variables such as CARGO_BIN_EXE_rocky-voter.
+for name in ("CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR"):
+    os.environ.pop(name, None)
+
+os.execvp("sccache", ["sccache", *sys.argv[1:]])

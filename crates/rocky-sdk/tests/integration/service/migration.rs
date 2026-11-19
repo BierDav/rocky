@@ -6,6 +6,7 @@ const MIGRATING: &str = r#"{"application":"counter","version":2,"format":6,"tabl
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_voters_release_a_private_migration_without_reopening_the_publisher()
 -> Result<(), Failure> {
+    let fails_before_nextest_ends_the_test = tokio::time::Instant::now() + Duration::from_secs(25);
     let root = tempfile::tempdir()?;
     let (bundle, _admin) = service(root.path()).await?;
     let (a, t) = household(root.path(), &bundle).await?;
@@ -65,7 +66,10 @@ async fn real_voters_release_a_private_migration_without_reopening_the_publisher
     introduce(&a, &t).await?;
     a.session.set_automatic_sync(true).await?;
     t.session.set_automatic_sync(true).await?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut tokens = (
+        a.session.status().await?.token,
+        t.session.status().await?.token,
+    );
     loop {
         let generation = snap::value(t.session.generation()).await?;
         let a_graph = snap::value(a.session.inspect_tips()).await?;
@@ -80,11 +84,11 @@ async fn real_voters_release_a_private_migration_without_reopening_the_publisher
             );
             break;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "automatic release failed: generation={generation} A={a_graph} T={t_graph}"
-        );
-        tokio::task::yield_now().await;
+        either_changes(&a, &t, &mut tokens, fails_before_nextest_ends_the_test)
+            .await
+            .map_err(|error| -> Failure {
+                format!("automatic release failed: {error}: generation={generation} A={a_graph} T={t_graph}").into()
+            })?;
     }
     let (_, state) = stage(&a_dir)?;
     assert_eq!(state, "released");
@@ -103,6 +107,7 @@ async fn real_voters_release_a_private_migration_without_reopening_the_publisher
     }
     loop {
         let mut complete = true;
+        let mut seen = Vec::new();
         for peer in [&a, &t] {
             assert_eq!(snap::value(peer.session.tip_status()).await?["tip"], target);
             let rows = snap::value(peer.session.read(rocky_sdk::ReadQuery {
@@ -127,17 +132,39 @@ async fn real_voters_release_a_private_migration_without_reopening_the_publisher
                     ],
                     [text("included"), text("included")]
                 ]);
+            seen.push(rows["rows"].clone());
         }
         if complete {
             break;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "migration frames did not arrive automatically"
-        );
-        tokio::task::yield_now().await;
+        either_changes(&a, &t, &mut tokens, fails_before_nextest_ends_the_test)
+            .await
+            .map_err(|error| -> Failure {
+                format!("migration frames did not arrive automatically: {error}: rows on A and T={seen:?}").into()
+            })?;
     }
     t.close().await?;
     a.close().await?;
     Ok(())
+}
+
+async fn either_changes(
+    a: &Peer,
+    t: &Peer,
+    tokens: &mut (String, String),
+    deadline: tokio::time::Instant,
+) -> Result<(), Failure> {
+    let changed = tokio::time::timeout_at(deadline, async {
+        tokio::select! {
+            status = a.session.status_after(tokens.0.clone()) => {
+                tokens.0 = status?.token;
+            }
+            status = t.session.status_after(tokens.1.clone()) => {
+                tokens.1 = status?.token;
+            }
+        }
+        Ok::<_, Failure>(())
+    })
+    .await;
+    changed.map_err(|_| -> Failure { "the test's deadline passed".into() })?
 }

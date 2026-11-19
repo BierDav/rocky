@@ -8,25 +8,10 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-mod room;
-
 const PAGE_ROWS: usize = 256;
 const PAGE_BYTES: usize = 1024 * 1024;
 const MAX_RESULTS: usize = 64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Profile {
-    Room284,
-}
-impl std::str::FromStr for Profile {
-    type Err = Failure;
-    fn from_str(name: &str) -> Result<Self, Failure> {
-        match name {
-            "room-2.8.4" => Ok(Self::Room284),
-            other => Err(format!("unsupported connection profile {other}").into()),
-        }
-    }
-}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Binding {
     Seal(rocky_core::Commitment),
@@ -41,7 +26,6 @@ pub enum Durability {
 pub struct ConnectionOptions {
     pub read_only: bool,
     pub durability: Durability,
-    pub profile: Option<Profile>,
     pub transaction_timeout: Option<std::time::Duration>,
     pub binding: Option<Binding>,
 }
@@ -167,9 +151,9 @@ fn query_only(sql: &str) -> Option<QueryOnly> {
 const NEXT_ID: &str = "rocky_next_id";
 
 fn next_id(sql: &str, params: &[SqlValue]) -> Result<Option<(String, Vec<SqlValue>)>, Failure> {
-    let words = room::words(sql);
+    let words = words(sql);
     let function =
-        |word: &str| !word.starts_with('\'') && room::unquote(word).eq_ignore_ascii_case(NEXT_ID);
+        |word: &str| !word.starts_with('\'') && unquote(word).eq_ignore_ascii_case(NEXT_ID);
     let names_function = words
         .windows(2)
         .any(|pair| function(&pair[0]) && pair[1] == "(");
@@ -216,7 +200,7 @@ fn next_id(sql: &str, params: &[SqlValue]) -> Result<Option<(String, Vec<SqlValu
                 .cloned()
                 .ok_or_else(|| failure(code::ERROR, "rocky_next_id missing parameter"))?
         } else if word.starts_with('\'') {
-            SqlValue::Text(room::unquote(word))
+            SqlValue::Text(unquote(word))
         } else {
             SqlValue::Integer(
                 word.parse()
@@ -236,6 +220,54 @@ fn next_id(sql: &str, params: &[SqlValue]) -> Result<Option<(String, Vec<SqlValu
         .into());
     };
     Ok(Some((table.clone(), args[1..].to_vec())))
+}
+
+fn unquote(word: &str) -> String {
+    let quote = word.chars().next().unwrap_or(' ');
+    let close = if quote == '[' { ']' } else { quote };
+    if ['`', '"', '\'', '['].contains(&quote) && word.len() >= 2 && word.ends_with(close) {
+        let inner = &word[1..word.len() - 1];
+        inner.replace(&format!("{close}{close}"), &close.to_string())
+    } else {
+        word.to_string()
+    }
+}
+
+fn words(sql: &str) -> Vec<String> {
+    let mut chars = sql.chars().peekable();
+    let mut words = Vec::new();
+    while let Some(first) = chars.next() {
+        if first.is_whitespace() {
+            continue;
+        }
+        let mut word = String::from(first);
+        if ['\'', '"', '`', '['].contains(&first) {
+            let end = if first == '[' { ']' } else { first };
+            while let Some(next) = chars.next() {
+                word.push(next);
+                if next == end {
+                    if chars.peek() == Some(&end) {
+                        word.push(chars.next().unwrap_or(end));
+                    } else {
+                        break;
+                    }
+                }
+            }
+        } else if first.is_ascii_alphanumeric() || first == '_' {
+            while let Some(next) = chars.peek().copied() {
+                if !(next.is_ascii_alphanumeric() || next == '_') {
+                    break;
+                }
+                word.push(next);
+                chars.next();
+            }
+        }
+        words.push(word);
+    }
+    if words.last().is_some_and(|word| word == ";") {
+        words.pop();
+    }
+    words
 }
 
 enum Pending {
@@ -315,23 +347,12 @@ pub(crate) struct State {
     open: bool,
     reading: Option<Reading>,
     results: BTreeMap<u64, Pending>,
-    room: room::Housekeeping,
-    version: u32,
-    declared: Vec<rocky_core::LogicalTable>,
     seal: Option<rocky_core::Commitment>,
     committed: Option<rocky_core::TransactionToken>,
     handle: Option<rocky_core::Commitment>,
 }
 impl State {
     async fn new(node: Arc<Node>, options: ConnectionOptions) -> Result<Self, Failure> {
-        let room = match options.profile {
-            Some(Profile::Room284) => {
-                room::Housekeeping::new(Some(node.replica.observe_tables(None).await?))
-            }
-            None => room::Housekeeping::new(None),
-        };
-        let version = node.declared_version();
-        let declared = node.declared_differences()?;
         let seal = match &options.binding {
             None => None,
             Some(Binding::Seal(seal)) => Some(*seal),
@@ -351,9 +372,6 @@ impl State {
             open: false,
             reading: None,
             results: BTreeMap::new(),
-            room,
-            version,
-            declared,
             seal,
             committed: None,
             handle: None,
@@ -405,11 +423,8 @@ impl State {
         let mut pending = match (query_only(sql), next_id(sql, &params)?) {
             (Some(set), _) => self.query_only(set)?,
             (None, Some((table, values))) => self.next_id(&table, &values).await?,
-            (None, None) => match self.room_answer(sql, &params).await? {
-                Some(answer) => answer,
-                None if self.read_only => self.read(sql, params).await?,
-                None => self.write(sql, params).await?,
-            },
+            (None, None) if self.read_only => self.read(sql, params).await?,
+            (None, None) => self.write(sql, params).await?,
         };
         let page = pending.page().await?;
         if !page.done {
@@ -468,65 +483,6 @@ impl State {
             }
         }
     }
-    async fn room_answer(
-        &mut self,
-        sql: &str,
-        params: &[SqlValue],
-    ) -> Result<Option<Pending>, Failure> {
-        let answer = self.room_answer_once(sql, params).await;
-        if !self.authority_pinned()
-            && answer.as_ref().err().is_some_and(|error| {
-                matches!(
-                    error.downcast_ref::<Error>(),
-                    Some(Error::Sql(SqlError::Unavailable {
-                        reason: Unavailable::Revoked,
-                        ..
-                    }))
-                )
-            })
-        {
-            self.opened = None;
-            return self.room_answer_once(sql, params).await;
-        }
-        answer
-    }
-    async fn room_answer_once(
-        &mut self,
-        sql: &str,
-        params: &[SqlValue],
-    ) -> Result<Option<Pending>, Failure> {
-        if self.options.profile.is_none() {
-            return Ok(None);
-        }
-        let read_only = self.read_only && self.seal.is_none();
-        let timeout = self.options.sql().transaction_timeout.as_millis();
-        if !self.authority_pinned() {
-            self.declared = self.node.declared_differences()?;
-            self.sql().await?;
-        }
-        let Self {
-            opened,
-            room,
-            version,
-            declared,
-            ..
-        } = self;
-        let version = *version;
-        let sql_session = opened.as_ref().ok_or("connection has no session")?;
-        room.answer(
-            sql,
-            params,
-            room::Context {
-                sql: sql_session,
-                version,
-                declared,
-                read_only,
-                busy_timeout: i64::try_from(timeout).unwrap_or(i64::MAX),
-            },
-        )
-        .await
-    }
-
     async fn begun(&mut self) -> Result<(), Failure> {
         if let Some(mode) = self.begin.take() {
             self.sql()
@@ -899,5 +855,15 @@ mod next_id_tests {
             Some(("t".into(), vec![SqlValue::Integer(-1)]))
         );
         assert!(next_id("SELECT 'rocky_next_id(t)'", &[]).unwrap().is_none());
+        assert_eq!(
+            next_id("SELECT [rocky_next_id]('it''s', `x`);", &[])
+                .unwrap_err()
+                .to_string(),
+            "Error code: 1, message: rocky_next_id requires scalar arguments"
+        );
+        assert_eq!(
+            next_id("SELECT [rocky_next_id]('it''s', 7);", &[]).unwrap(),
+            Some(("it's".into(), vec![SqlValue::Integer(7)]))
+        );
     }
 }

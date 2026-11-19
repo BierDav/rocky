@@ -60,8 +60,7 @@ pub use backup::{Entry as BackupEntry, Inventory as BackupInventory};
 pub use claims::{ClaimCounters, ClaimGrant};
 pub use configuration::Configuration;
 pub use connection::{
-    Binding, ChangeCause, ConnectionOptions, Durability, Page, Profile, SqlFailure, TableChange,
-    TableEvents,
+    Binding, ChangeCause, ConnectionOptions, Durability, Page, SqlFailure, TableChange, TableEvents,
 };
 #[cfg(not(target_family = "wasm"))]
 pub use custody::{CustodyConfiguration, CustodyPeer};

@@ -454,19 +454,6 @@ impl Node {
         self.declared = schema;
         self
     }
-    pub fn declared_version(&self) -> u32 {
-        self.declared.version
-    }
-    pub fn declared_differences(&self) -> Result<Vec<rocky_core::LogicalTable>, Failure> {
-        let domain = self.domain();
-        let installed = domain.logical();
-        let declared = crate::domain::logical(&self.declared, installed.publisher)?;
-        Ok(declared
-            .tables
-            .into_iter()
-            .filter(|table| installed.table(&table.sql_name) != Some(table))
-            .collect())
-    }
     pub async fn application(&self, settings: &Settings) -> Result<crate::DeclaredSchema, Failure> {
         if self.replica.followed_bookmark().await.is_none() {
             return Ok(crate::DeclaredSchema::Ahead);

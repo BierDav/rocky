@@ -1302,7 +1302,7 @@ mod tests {
             publisher: [7; 32],
             application: "shop".into(),
             source: SchemaSource {
-                kind: "room".into(),
+                kind: "test".into(),
                 version: 2,
                 identity: "abc".into(),
             },

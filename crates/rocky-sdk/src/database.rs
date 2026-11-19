@@ -2882,7 +2882,6 @@ mod tests {
             .connect(ConnectionOptions {
                 read_only: true,
                 durability: connection::Durability::Buffered,
-                profile: None,
                 transaction_timeout: None,
                 binding: None,
             })

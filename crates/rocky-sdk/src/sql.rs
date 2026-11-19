@@ -343,7 +343,6 @@ fn options(read_only: bool, durability: Durability) -> ConnectionOptions {
     ConnectionOptions {
         read_only,
         durability,
-        profile: None,
         transaction_timeout: None,
         binding: None,
     }

@@ -57,7 +57,6 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
         .connect(rocky_sdk::ConnectionOptions {
             read_only: false,
             durability: rocky_sdk::Durability::Buffered,
-            profile: None,
             transaction_timeout: None,
             binding: None,
         })

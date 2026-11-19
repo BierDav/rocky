@@ -374,7 +374,11 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
             .and_then(|authority| authority.rotation.clone())
             .ok_or("intent")?;
         assert_eq!(
-            intent.keys,
+            intent
+                .keys
+                .iter()
+                .map(|(name, epoch)| (name.clone(), epoch.generation()))
+                .collect::<BTreeMap<_, _>>(),
             [
                 (crate::domain::REGISTRY.into(), 2),
                 ("items".into(), 2),
@@ -412,7 +416,10 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
         );
         assert_eq!(keys.len(), 3);
         for ((name, epoch, key), before) in keys.iter().zip(made_before_the_stop) {
-            assert_eq!(intent.keys.get(name), Some(&epoch.generation));
+            assert_eq!(
+                intent.keys.get(name).map(|target| target.generation()),
+                Some(epoch.generation)
+            );
             if let Some(before) = before {
                 assert_eq!(before, *key, "{stop:?}: {name}");
             }

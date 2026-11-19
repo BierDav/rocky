@@ -104,6 +104,47 @@ class BatchedExecution(unittest.TestCase):
                                        "binary never_started: missing"})
         self.assertIn("hangs is waiting on its peer", report.getvalue())
 
+    def test_a_case_that_passes_alone_is_flaky_and_does_not_fail_the_run(self):
+        suite = {"binary-id": "binary", "binary-path": "/binary"}
+        runs = []
+        def libtest(suite, names, threads=None):
+            runs.append((names, threads))
+            if len(names) > 1:
+                return {"ok": ("ok", 0.1, ""), "racy": ("failed", 0.0, "assertion failed")}, "", 101
+            return {"racy": ("ok", 0.2, "")}, "", 0
+        with patch.object(tiers, "libtest", side_effect=libtest), patch.object(tiers, "FLAKY", []), \
+                contextlib.redirect_stderr(io.StringIO()):
+            timed, failed, _ = tiers.run_batches(None, [(suite, "ok"), (suite, "racy")])
+            flaky = list(tiers.FLAKY)
+        self.assertEqual(runs[1:], [(["racy"], 1)])
+        self.assertEqual(sorted(name for _, _, name, _ in timed), ["ok", "racy"])
+        self.assertEqual((failed, flaky), ([], ["binary racy"]))
+
+    def test_a_case_that_fails_alone_too_still_fails_with_its_binary(self):
+        suite = {"binary-id": "binary", "binary-path": "/binary"}
+        def libtest(suite, names, threads=None):
+            if len(names) > 1:
+                return {"racy": ("failed", 0.0, ""), "broken": ("failed", 0.0, "")}, "", 101
+            if names == ["racy"]:
+                return {"racy": ("ok", 0.2, "")}, "", 0
+            return {"broken": ("failed", 0.0, "")}, "", 101
+        with patch.object(tiers, "libtest", side_effect=libtest), patch.object(tiers, "FLAKY", []), \
+                contextlib.redirect_stderr(io.StringIO()):
+            _, failed, _ = tiers.run_batches(None, [(suite, "racy"), (suite, "broken")])
+            flaky = list(tiers.FLAKY)
+        self.assertEqual(set(failed), {"binary exited 101", "binary broken: failed"})
+        self.assertEqual(flaky, ["binary racy"])
+
+    def test_no_retries_leaves_the_first_failure(self):
+        suite = {"binary-id": "binary", "binary-path": "/binary"}
+        events = {"racy": ("failed", 0.0, "")}
+        with patch.object(tiers, "libtest", return_value=(events, "", 101)) as run, \
+                patch.object(tiers, "RETRIES", 0), patch.object(tiers, "FLAKY", []), \
+                contextlib.redirect_stderr(io.StringIO()):
+            _, failed, _ = tiers.run_unit(None, [(suite, "racy")])
+        run.assert_called_once()
+        self.assertEqual(set(failed), {"binary exited 101", "binary racy: failed"})
+
     def test_isolated_cases_are_excluded_from_batches_and_all_results_combine(self):
         suite = {"binary-id": "binary", "binary-path": "/binary"}
         isolated, shared = (suite, "isolated"), (suite, "shared")

@@ -750,7 +750,7 @@ impl<A: RowApplication> Inner<A> {
         self.checkpoint_over(self.wal_limits.1).await;
     }
     pub(super) async fn cut_wal(&mut self) {
-        self.passive.clone().wait().await;
+        self.file.passive.clone().wait().await;
         self.checkpoint_over(WAL_CHECKPOINT_BYTES).await;
     }
     pub(super) async fn checkpoint_over(&mut self, limit: u64) {
@@ -759,7 +759,7 @@ impl<A: RowApplication> Inner<A> {
         let truncate = size >= limit;
         if !truncate {
             if size >= self.wal_limits.0 {
-                self.passive.schedule(size, self.flusher.clone());
+                self.file.passive.schedule(size, self.flusher.clone());
             }
             return;
         }
@@ -808,7 +808,7 @@ impl<A: RowApplication> Inner<A> {
                 if log == done
         );
         if complete {
-            self.passive.reset();
+            self.file.passive.reset();
         }
         complete
     }

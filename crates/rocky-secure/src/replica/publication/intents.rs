@@ -307,6 +307,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .inner
             .lock(crate::replica::Class::Background)
             .await
+            .file
             .passive
             .clone();
         passive.wait().await;

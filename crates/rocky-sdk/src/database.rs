@@ -2463,7 +2463,7 @@ async fn end_users_of_file(
 async fn close_file(replica: EncryptedReplica<rocky_core::TypedRows>) -> Result<(), String> {
     let flushed = replica.flush().await.map(drop).map_err(|e| e.to_string());
     replica.optimize().await;
-    drop(replica);
+    replica.close().await;
     flushed
 }
 async fn settle_commits(replica: EncryptedReplica<rocky_core::TypedRows>) {

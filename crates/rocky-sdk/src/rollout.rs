@@ -49,6 +49,13 @@ pub(crate) async fn confirm(
     rocky_core::classify(&current, &target).map_err(|refusal| {
         format!("the application schema cannot replace the installed one: {refusal}")
     })?;
+    if crate::generation::migrates(schema, settings.generation) {
+        rocky_core::classify_withdrawal(&target, &current, |_, _| true).map_err(|refusal| {
+            format!(
+                "the application schema's migrations cannot run, because withdrawing it to the installed schema after a failed migration would be refused: {refusal}; keep what the installed schema needs or roll the change out without migrations"
+            )
+        })?;
+    }
     let removed = rocky_core::removed(&current, &target);
     let kept = |name: &str| schema.tables.iter().any(|table| table.name == name);
     let (installed, declared) = (settings.schema.granted_like(), schema.granted_like());

@@ -20,6 +20,7 @@ pub enum Unsupported {
     RequiredField(String),
     AddedReference(String),
     FilledReference(String),
+    RestoredReference(String),
 }
 impl std::fmt::Display for Unsupported {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -37,6 +38,10 @@ impl std::fmt::Display for Unsupported {
             Self::FilledReference(key) => write!(
                 f,
                 "foreign key {key} would hold a required field's default on existing rows; keep the field optional or drop its default"
+            ),
+            Self::RestoredReference(key) => write!(
+                f,
+                "foreign key {key} would be restored over a default its rows may hold"
             ),
         }
     }
@@ -171,15 +176,21 @@ fn judge(
                     .column(name)
                     .is_some_and(|column| !column.not_null && !defaulted(column))
         };
-        let filled = |name: &String| {
-            held(name).is_some_and(|was| !was.not_null)
-                && after
-                    .column(name)
-                    .is_some_and(|column| column.not_null && defaulted(column))
+        let filled = |name: &String, kept: bool| {
+            let Some(now) = after.column(name) else {
+                return false;
+            };
+            let fills_no_value =
+                |was: &LogicalColumn| !was.not_null && now.not_null && defaulted(now);
+            match (rows, held(name)) {
+                (ExistingRows::WrittenUnderOld, Some(was)) => fills_no_value(was),
+                (ExistingRows::WrittenUnderOld, None) => false,
+                (ExistingRows::WrittenUnderNew, Some(was)) => {
+                    (defaulted(was) && !kept) || fills_no_value(was)
+                }
+                (ExistingRows::WrittenUnderNew, None) => defaulted(now),
+            }
         };
-        if rows == ExistingRows::WrittenUnderNew {
-            continue;
-        }
         for key in &after.foreign_keys {
             if key.columns.iter().any(starts_empty) {
                 continue;
@@ -196,11 +207,14 @@ fn judge(
                 && before.foreign_keys.iter().any(|was| {
                     same_reference(was, key) && was.columns.iter().all(|name| held(name).is_some())
                 });
-            if !kept {
+            if rows == ExistingRows::WrittenUnderOld && !kept {
                 return Err(Unsupported::AddedReference(named()));
             }
-            if key.columns.iter().any(filled) {
-                return Err(Unsupported::FilledReference(named()));
+            if key.columns.iter().any(|name| filled(name, kept)) {
+                return Err(match rows {
+                    ExistingRows::WrittenUnderOld => Unsupported::FilledReference(named()),
+                    ExistingRows::WrittenUnderNew => Unsupported::RestoredReference(named()),
+                });
             }
         }
     }
@@ -464,6 +478,72 @@ mod tests {
             classify_withdrawal(&unlinked, &required, everything),
             Err(Unsupported::RequiredField("tags.label".into())),
             "a withdrawal still judges its fields"
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_withdrawal_never_restores_a_reference_over_a_default_its_rows_may_hold() {
+        let linked_items = linked(
+            &["item"],
+            vec![reference("item", "items", crate::DELETE_CASCADE, false)],
+        );
+        let everything = |_: &LogicalTable, _: Option<&LogicalColumn>| true;
+        let defaulted = |schema: &LogicalSchema, required: bool| {
+            let mut schema = schema.clone();
+            schema.tables[2].columns[1].not_null = required;
+            schema.tables[2].columns[1].default = Some("x'00'".into());
+            schema
+        };
+        let unlinked = linked(&["item"], Vec::new());
+        let filled_unlinked = defaulted(&unlinked, true);
+        assert_eq!(
+            classify(&linked_items, &filled_unlinked),
+            Ok(SchemaChange::Replicated),
+            "dropping the reference lets the default fill rows that held no value"
+        );
+        let refused = Err(Unsupported::RestoredReference("tags(item) -> items".into()));
+        assert_eq!(
+            classify_withdrawal(&filled_unlinked, &linked_items, everything),
+            refused,
+            "withdrawing it would restore the reference over the filled default"
+        );
+        let mut required_linked = linked_items.clone();
+        required_linked.tables[2].columns[1].not_null = true;
+        assert_eq!(
+            classify_withdrawal(&filled_unlinked, &required_linked, everything),
+            refused,
+            "rows written without the field hold the default of a schema that dropped the reference"
+        );
+        assert_eq!(
+            classify_withdrawal(&defaulted(&unlinked, false), &linked_items, everything),
+            refused,
+            "an optional field's default lands in rows written without it"
+        );
+        let dropped = linked(&[], Vec::new());
+        assert_eq!(
+            classify_withdrawal(&dropped, &defaulted(&linked_items, false), everything),
+            refused,
+            "a field the withdrawn schema dropped comes back holding its default"
+        );
+        assert_eq!(
+            classify_withdrawal(&linked_items, &defaulted(&linked_items, true), everything),
+            refused,
+            "a restored required field fills rows that held no value with its default"
+        );
+        assert_eq!(
+            classify_withdrawal(&dropped, &linked_items, everything),
+            Ok(SchemaChange::Replicated),
+            "a field the withdrawn schema dropped comes back empty without a default"
+        );
+        assert_eq!(
+            classify_withdrawal(&unlinked, &linked_items, everything),
+            Ok(SchemaChange::Replicated),
+            "a field without a default holds only values the rows were given"
+        );
+        assert_eq!(
+            classify_withdrawal(&defaulted(&linked_items, true), &linked_items, everything),
+            Ok(SchemaChange::Replicated),
+            "a schema that keeps the reference checks its own default against it"
         );
     }
 

@@ -892,3 +892,103 @@ async fn a_failed_migration_that_drops_a_reference_withdraws_to_the_schema_holdi
     a.close().await;
     Ok(())
 }
+
+const FILLED_LIST_FAILING: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
+ {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob","not_null":true,"default":"x"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
+ {"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true},{"name":"first","type":"blob"}],"primary_key":["id"],"foreign_keys":[{"columns":["first"],"table":"items","on_delete":"set_null"}]}],
+ "migrations":[{"version":2,"statements":["UPDATE items SET title = NULL"]}]}"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_schema_filling_a_default_into_a_referencing_field_it_unlinks_is_refused_before_staging()
+-> Result<(), Failure> {
+    let root = crate::support::small_directory()?;
+    let a = Device::new(Database::create(open(root.path(), LISTED, None), None)?)?
+        .with_identity(common::external_identity(root.path()));
+    a.follow_main_migrating().await;
+    a.add(1, "apples").await;
+    let before = graph(&a).await;
+    a.close().await;
+
+    let refused = Database::open(open(root.path(), FILLED_LIST_FAILING, None))
+        .err()
+        .ok_or("a schema it could not withdraw from opened")?;
+    let a = reopen(open(root.path(), LISTED, None))?;
+    assert!(
+        refused.to_string().contains(
+            "withdrawing it to the installed schema after a failed migration would be refused: foreign key items(list) -> lists would be restored over a default its rows may hold"
+        ),
+        "withdrawing it would restore the reference over rows holding the default: {refused}"
+    );
+    let status = generation(&a).await;
+    assert_eq!(status["current"]["schema"], 1, "{status}");
+    assert_eq!(status["application"], "current");
+    assert_eq!(graph(&a).await, before, "nothing was staged");
+    assert_eq!(a.titles().await, ["apples"]);
+    a.close().await;
+    Ok(())
+}
+
+const TITLE_DROPPED_FAILING: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
+ {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob"}],"primary_key":["key"],"foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"set_null"}]},
+ {"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true},{"name":"first","type":"blob"}],"primary_key":["id"],"foreign_keys":[{"columns":["first"],"table":"items","on_delete":"set_null"}]}],
+ "migrations":[{"version":2,"statements":["UPDATE items SET completed = NULL"]}]}"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_migrating_schema_that_drops_a_required_field_is_refused_as_a_withdrawal_it_could_not_make()
+-> Result<(), Failure> {
+    let root = crate::support::small_directory()?;
+    let a = Device::new(Database::create(open(root.path(), LISTED, None), None)?)?
+        .with_identity(common::external_identity(root.path()));
+    a.follow_main_migrating().await;
+    a.add(1, "apples").await;
+    let before = graph(&a).await;
+    a.close().await;
+
+    let refused = Database::open(open(root.path(), TITLE_DROPPED_FAILING, None))
+        .err()
+        .ok_or("a schema it could not withdraw from opened")?;
+    assert!(
+        refused.to_string().contains(
+            "the application schema's migrations cannot run, because withdrawing it to the installed schema after a failed migration would be refused: required field items.title of an existing table needs a default; keep what the installed schema needs or roll the change out without migrations"
+        ),
+        "the refusal names the withdrawal, not the field being dropped: {refused}"
+    );
+    let a = reopen(open(root.path(), LISTED, None))?;
+    let status = generation(&a).await;
+    assert_eq!(status["current"]["schema"], 1, "{status}");
+    assert_eq!(graph(&a).await, before, "nothing was staged");
+    assert_eq!(a.titles().await, ["apples"]);
+    a.close().await;
+    Ok(())
+}
+
+const LISTED_WITH_DEFAULT: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[
+ {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"list","type":"blob","default":"x"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"set_null"}]},
+ {"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true},{"name":"first","type":"blob"}],"primary_key":["id"],"foreign_keys":[{"columns":["first"],"table":"items","on_delete":"set_null"}]}]}"#;
+const LIST_DROPPED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[
+ {"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
+ {"name":"lists","class":"replayed","columns":[{"name":"name","type":"text","not_null":true},{"name":"first","type":"blob"}],"primary_key":["id"],"foreign_keys":[{"columns":["first"],"table":"items","on_delete":"set_null"}]}]}"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rollout_without_migrations_drops_a_defaulted_referencing_field_it_never_withdraws()
+-> Result<(), Failure> {
+    let root = crate::support::small_directory()?;
+    let a = Device::new(Database::create(
+        open(root.path(), LISTED_WITH_DEFAULT, None),
+        None,
+    )?)?
+    .with_identity(common::external_identity(root.path()));
+    a.follow_main_migrating().await;
+    a.close().await;
+
+    let opened = common::confirmed(open(root.path(), LIST_DROPPED, None))
+        .map_err(|refused| format!("only a failed migration withdraws a rollout: {refused}"))?;
+    let a = Device::new(opened)?.with_identity(common::external_identity(root.path()));
+    let status = generation(&a).await;
+    assert_eq!(status["current"]["schema"], 2, "{status}");
+    assert_eq!(status["application"], "current");
+    a.add(1, "apples").await;
+    assert_eq!(a.titles().await, ["apples"]);
+    a.close().await;
+    Ok(())
+}

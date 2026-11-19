@@ -1,4 +1,7 @@
-use crate::Failure;
+use crate::{
+    Failure,
+    bootstrap_intent::{BootstrapIntent, BootstrapIntentFile},
+};
 use rocky_core::{ResourceScope, TypedRows};
 use rocky_secure::{
     EncryptedReplica, MAX_SECURE_FRAME, PublicKey,
@@ -175,7 +178,8 @@ pub(crate) async fn reconcile(
     }
     Ok((!transfer.failed.is_empty(), transfer))
 }
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Planned {
     pub scope: ResourceScope,
     pub checkpoint: rocky_core::Commitment,
@@ -185,19 +189,13 @@ pub(crate) async fn bootstrap(
     replica: &EncryptedReplica<TypedRows>,
     upstream: &Upstream<'_>,
     scopes: &[ResourceScope],
-    marker: &std::path::Path,
-    mut expected: Vec<u8>,
+    file: &BootstrapIntentFile,
+    mut expected: BootstrapIntent,
     transfer: &mut Transfer,
     mut first: Option<NativeSession>,
-) -> Result<Option<Vec<u8>>, Failure> {
-    let saved: serde_json::Value = serde_json::from_slice(&expected)?;
-    let intent = saved.get("intent").unwrap_or(&saved).clone();
+) -> Result<Option<BootstrapIntent>, Failure> {
     let mut pending = scopes.to_vec();
-    let mut totals: Vec<Planned> = saved
-        .get("totals")
-        .map(|totals| serde_json::from_value(totals.clone()))
-        .transpose()?
-        .unwrap_or_default();
+    let mut totals = expected.totals().to_vec();
     let mut planned = Vec::new();
     let mut tips_synced = false;
     for scope in scopes {
@@ -262,18 +260,11 @@ pub(crate) async fn bootstrap(
         }
     }
     planned.sort_by_key(|plan| (plan.rows == 0, plan.rows));
-    let record = |pending: &[ResourceScope], expected: &mut Vec<u8>| -> Result<(), Failure> {
-        if rocky_platform::fs::read(marker)? != *expected {
-            return Err("bootstrap authority changed; retry with the new intent".into());
-        }
-        let mut next = serde_json::json!({"intent": intent, "pending": pending, "totals": totals});
-        if let Some(inviter) = saved.get("inviter") {
-            next["inviter"] = inviter.clone();
-        }
-        *expected = serde_json::to_vec(&next)?;
-        rocky_credentials::write_private(marker, expected)?;
-        Ok(())
-    };
+    let record =
+        |pending: &[ResourceScope], expected: &mut BootstrapIntent| -> Result<(), Failure> {
+            *expected = file.record_progress(expected, pending, &totals)?;
+            Ok(())
+        };
     record(&pending, &mut expected)?;
     replica
         .set_importing(pending.iter().copied().collect())

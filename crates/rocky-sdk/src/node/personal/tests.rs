@@ -105,7 +105,14 @@ mod device_actions {
             .await?;
         let path = directory.join("identity.json");
         settings.save(&path)?;
-        let node = Node::new(replica, domain, vault, settings, path);
+        let node = Node::new(
+            replica,
+            domain,
+            vault,
+            settings,
+            path,
+            BootstrapIntentFile::in_directory(directory),
+        );
         node.record_self().await?;
         Ok(node)
     }
@@ -179,6 +186,7 @@ mod device_actions {
             vault,
             settings,
             directory.join("identity.json"),
+            BootstrapIntentFile::in_directory(directory),
         ))
     }
 

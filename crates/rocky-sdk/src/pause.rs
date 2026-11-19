@@ -5,6 +5,8 @@ pub(crate) enum Point {
     Bootstrap,
     Teardown,
     Succeeding,
+    BootstrapIntentLoaded,
+    BootstrapIntentContended,
 }
 
 #[cfg(test)]
@@ -36,21 +38,44 @@ pub(crate) fn arm(
 }
 
 #[cfg(test)]
-pub(crate) async fn at(directory: &Path, point: Point) {
-    let armed = {
+fn reach(directory: &Path, point: Point) -> Option<tokio::sync::oneshot::Receiver<()>> {
+    let (_, _, reached, released) = {
         let mut armed = ARMED
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        armed
+        let index = armed
             .iter()
-            .position(|(at, armed, _, _)| at == directory && *armed == point)
-            .map(|index| armed.remove(index))
+            .position(|(at, armed, _, _)| at == directory && *armed == point)?;
+        armed.remove(index)
     };
-    if let Some((_, _, reached, released)) = armed {
-        let _ = reached.send(());
+    let _ = reached.send(());
+    Some(released)
+}
+
+#[cfg(test)]
+pub(crate) async fn at(directory: &Path, point: Point) {
+    if let Some(released) = reach(directory, point) {
         let _ = released.await;
     }
 }
 
+#[cfg(test)]
+pub(crate) fn blocking_at(directory: &Path, point: Point) {
+    if let Some(released) = reach(directory, point) {
+        let _ = released.blocking_recv();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn passing(directory: &Path, point: Point) {
+    let _ = reach(directory, point);
+}
+
 #[cfg(not(test))]
 pub(crate) async fn at(_: &Path, _: Point) {}
+
+#[cfg(not(test))]
+pub(crate) fn blocking_at(_: &Path, _: Point) {}
+
+#[cfg(not(test))]
+pub(crate) fn passing(_: &Path, _: Point) {}

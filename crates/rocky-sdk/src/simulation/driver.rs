@@ -1126,6 +1126,7 @@ impl Simulation {
                 continue;
             };
             let blockers: Vec<Blocker> = running.blockers().await.unwrap_or_default();
+            let keeps_bootstrap_intent = running.bootstrap_intent.exists();
             drop(running);
             for blocker in blockers {
                 stuck.add(
@@ -1140,7 +1141,7 @@ impl Simulation {
                     ),
                 );
             }
-            if member.directory.join("bootstrap.json").exists() {
+            if keeps_bootstrap_intent {
                 stuck.add(
                     "bootstrap marker",
                     format!("{} keeps its bootstrap marker", member.name),

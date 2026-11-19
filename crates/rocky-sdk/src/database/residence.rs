@@ -112,7 +112,7 @@ impl Predecessor {
         let Some(mut departure) = self.0 else {
             return Ok(());
         };
-        super::pause::at(directory, super::pause::Point::Succeeding).await;
+        crate::pause::at(directory, crate::pause::Point::Succeeding).await;
         match rocky_platform::time::timeout(PREDECESSOR_TEARDOWN_BOUND, departure.changed()).await {
             Ok(_) => Ok(()),
             Err(_) => Err(IN_USE.into()),

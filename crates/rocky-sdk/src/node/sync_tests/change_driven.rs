@@ -244,7 +244,7 @@ async fn peer_signals(bootstrap: bool) -> Result<(), Failure> {
             targets(&a, &peers).await?;
             add(&a, 1).await?;
             if bootstrap {
-                std::fs::write(a.path.with_file_name("bootstrap.json"), b"true")?;
+                a.bootstrap_intent.request_checkpoint_import()?;
             }
             hub.stall_peer("d", true);
             let before = tokio::time::Instant::now();

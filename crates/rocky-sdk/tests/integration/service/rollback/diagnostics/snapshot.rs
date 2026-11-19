@@ -243,8 +243,8 @@ pub(super) fn capture(
     output["bootstrap_intent_later"] = match std::fs::read(marker) {
         Ok(bytes) => {
             let intent: Value = serde_json::from_slice(&bytes)?;
-            json!({"bytes":digest(&bytes),"intent":intent.get("intent").or_else(||intent.as_bool().map(|_|&intent)),
-                "pending":intent.get("pending"),"totals":intent.get("totals")})
+            json!({"bytes":digest(&bytes),"imports":intent.get("imports"),
+                "totals":intent.get("totals"),"inviter":intent.get("inviter")})
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Null,
         Err(error) => json!({"diagnostic_error":error.to_string()}),

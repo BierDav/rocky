@@ -4,9 +4,11 @@
 use crate::test_snapshot as snap;
 use crate::{
     Failure,
+    bootstrap_intent::{BOOTSTRAP_INTENT_FILE, BootstrapIntentFile},
     connection::{self, ConnectionOptions, Page, SqlFailure, TableEvents},
     enrollment::{DEFAULT_TTL, NodeKeys, Settings, Supplied, now},
     node::{self, Node},
+    pause,
     schema::Schema,
     secrets::{FileSecretStore, SecretStore},
     service::{Network, ServiceError},
@@ -21,7 +23,6 @@ use std::{
 };
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 
-mod pause;
 mod residence;
 
 pub struct Open<'a> {
@@ -1359,6 +1360,7 @@ type Link = (crate::transport::Connected, bool);
 async fn identity(
     path: &Path,
     setup: &Setup,
+    bootstrap_intent: &BootstrapIntentFile,
     network: Option<Network>,
 ) -> Result<(Settings, Option<Link>), Failure> {
     let Setup {
@@ -1524,8 +1526,16 @@ async fn identity(
                     rocky_credentials::PersonalError::WrongOwner,
                 ));
             }
-            crate::personal::sign_in::install(path, directory, secrets, schema, sign_in, network)
-                .await
+            crate::personal::sign_in::install(
+                path,
+                directory,
+                bootstrap_intent,
+                secrets,
+                schema,
+                sign_in,
+                network,
+            )
+            .await
         }
         Install::Supplied(supplied) => {
             let settings =
@@ -1840,20 +1850,6 @@ async fn restore(
     Ok((settings, Some(link)))
 }
 
-fn record_checkpoint_bootstrap(directory: &Path) -> Result<(), Failure> {
-    rocky_credentials::write_private(&directory.join("bootstrap.json"), b"true")
-}
-
-fn record_inviter_bootstrap(
-    directory: &Path,
-    inviter: &rocky_credentials::PublicKey,
-) -> Result<(), Failure> {
-    rocky_credentials::write_private(
-        &directory.join("bootstrap.json"),
-        &serde_json::to_vec(&serde_json::json!({"intent": true, "inviter": inviter.to_hex()}))?,
-    )
-}
-
 async fn confirm_removals(setup: &Setup, directory: &Path, path: &Path) -> Result<(), Failure> {
     let settings = Settings::load(path)?;
     let has_tip_schema = rocky_secure::installed_tip_schema(
@@ -2019,9 +2015,10 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         .await
         .map_err(|_| "data directory is already in use")?;
     rocky_secure::check_replica_format(&directory.join("rocky.sqlite")).await?;
+    let bootstrap_intent = BootstrapIntentFile::in_directory(&directory);
     let path = directory.join("identity.json");
     if setup.install.bootstraps_from_checkpoint() && !rocky_platform::fs::exists(&path) {
-        record_checkpoint_bootstrap(&directory)?;
+        bootstrap_intent.request_checkpoint_import()?;
     }
     if !matches!(setup.install, Install::Recover { .. }) {
         crate::recovery::refuse_unfinished(&directory)?;
@@ -2030,13 +2027,13 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         confirm_removals(&setup, &directory, &path).await?;
     }
     let fresh = setup.install.unwinds_on_failure() && !rocky_platform::fs::exists(&path);
-    let (mut settings, link) = match identity(&path, &setup, network).await {
+    let (mut settings, link) = match identity(&path, &setup, &bootstrap_intent, network).await {
         Ok(installed) => installed,
         Err(error) if fresh => return Err(unwind(&directory, None, error)),
         Err(error) => return Err(error),
     };
     if let (Install::Join { .. }, Some(inviter)) = (&setup.install, settings.issuers.first()) {
-        record_inviter_bootstrap(&directory, inviter)?;
+        bootstrap_intent.join(*inviter)?;
     }
     let startup_identity = setup.identity.take();
     let vault = settings.vault(&setup.secrets);
@@ -2057,7 +2054,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
             if rocky_platform::fs::exists(&path) {
                 let revokes_new_authors = settings.lacks(&renewed.revocations)?;
                 if revokes_new_authors {
-                    record_checkpoint_bootstrap(&directory)?;
+                    bootstrap_intent.request_checkpoint_import()?;
                 }
                 settings.adopt(&path, &vault, &renewed)?;
             } else {
@@ -2176,8 +2173,15 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     };
     let scope = domain.scope;
     let node = Arc::new(
-        Node::new(replica.clone(), domain, vault, settings, path.clone())
-            .with_declared(setup.schema.clone()),
+        Node::new(
+            replica.clone(),
+            domain,
+            vault,
+            settings,
+            path.clone(),
+            bootstrap_intent,
+        )
+        .with_declared(setup.schema.clone()),
     );
     #[cfg(test)]
     if let Some(expose) = &setup.expose {
@@ -2264,8 +2268,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     if personal && let Err(error) = crate::personal::finish(&directory) {
         tracing::warn!(%error, "the finished personal install intent could not be removed");
     }
-    let bootstrapping = (rocky_platform::fs::exists(directory.join("bootstrap.json"))
-        && network.is_some())
+    let bootstrapping = (node.bootstrap_intent.exists() && network.is_some())
     .then(|| {
         let joining = node.clone();
         let held = directory.clone();
@@ -2563,7 +2566,7 @@ const INSTALLATION_DATA_FILES: [&str; 6] = [
     "rocky.sqlite-wal",
     "rocky.sqlite-shm",
     "revoked.json",
-    "bootstrap.json",
+    BOOTSTRAP_INTENT_FILE,
     "mailbox.json",
 ];
 fn remove_if_present(path: &Path) -> Result<(), Failure> {
@@ -2790,7 +2793,7 @@ mod tests {
                     .database
                     .close()
                     .await?;
-                std::fs::write(directory.path().join("bootstrap.json"), b"true")?;
+                BootstrapIntentFile::in_directory(directory.path()).request_checkpoint_import()?;
                 let (bootstrapping, _never_released) =
                     pause::arm(directory.path(), pause::Point::Bootstrap);
                 let database = Database::launch_local(open(), Install::Installed)
@@ -2974,7 +2977,7 @@ mod tests {
             "rocky.sqlite-wal",
             "rocky.sqlite-shm",
             "revoked.json",
-            "bootstrap.json",
+            BOOTSTRAP_INTENT_FILE,
             "mailbox.json",
         ] {
             std::fs::write(directory.path().join(name), b"{}")?;
@@ -3119,7 +3122,7 @@ mod tests {
                 for name in [
                     "sdk.lock",
                     "identity.json",
-                    "bootstrap.json",
+                    BOOTSTRAP_INTENT_FILE,
                     "secrets",
                     "rocky.sqlite-wal",
                 ] {

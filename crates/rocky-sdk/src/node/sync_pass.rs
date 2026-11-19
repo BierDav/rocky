@@ -471,7 +471,8 @@ impl Node {
                 break;
             }
             if progress.covers(&pass.needed) {
-                batch = self.skip_covered(batch.into_iter().chain(remaining.by_ref()), pass.report);
+                batch =
+                    self.skip_covered(batch.into_iter().chain(remaining.by_ref()), pass.report)?;
                 if batch.is_empty() {
                     break;
                 }
@@ -496,8 +497,8 @@ impl Node {
         &self,
         targets: impl Iterator<Item = Target>,
         report: &std::sync::Mutex<Vec<PeerReconciliation>>,
-    ) -> Vec<Target> {
-        let inviter = self.awaited_inviter();
+    ) -> Result<Vec<Target>, Failure> {
+        let inviter = self.awaited_inviter()?;
         let mut choices = self.choices.lock().unwrap_or_else(PoisonError::into_inner);
         let mut owed = Vec::new();
         for target in targets {
@@ -511,7 +512,7 @@ impl Node {
                 Self::skipped_peer(target.peer.to_hex(), SkipReason::Covered),
             );
         }
-        owed
+        Ok(owed)
     }
     async fn reconcile_and_deliver_epochs(
         &self,

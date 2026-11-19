@@ -91,7 +91,14 @@ async fn issuer_with_root(
         .await?;
     let path = directory.join("identity.json");
     settings.save(&path)?;
-    let node = Node::new(replica, domain, vault, settings, path);
+    let node = Node::new(
+        replica,
+        domain,
+        vault,
+        settings,
+        path,
+        BootstrapIntentFile::in_directory(directory),
+    );
     node.record_self().await?;
     Ok(node)
 }
@@ -109,7 +116,14 @@ async fn reload(
         settings.config(&vault, &domain)?,
     )
     .await?;
-    Ok(Node::new(replica, domain, vault, settings, path))
+    Ok(Node::new(
+        replica,
+        domain,
+        vault,
+        settings,
+        path,
+        BootstrapIntentFile::in_directory(directory),
+    ))
 }
 fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> Result<(), Failure> {
     std::fs::create_dir_all(to)?;

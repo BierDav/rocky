@@ -415,7 +415,7 @@ async fn unconfigured_peers_stay_within_the_bound_and_the_least_recently_served_
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn an_admission_storm_evicts_neither_kept_nor_recently_admitted_peer_tips() {
-    use crate::replica::MAX_UNCONFIGURED_PEERS;
+    use crate::replica::{MAX_REMEMBERED_PEERS, MAX_UNCONFIGURED_PEERS};
     let f = Fixture::new();
     let dir = Scratch::new().await;
     let alice = PrivateKey::new();
@@ -473,7 +473,7 @@ async fn an_admission_storm_evicts_neither_kept_nor_recently_admitted_peer_tips(
     );
     assert_eq!(
         a.admitted_peers().await,
-        MAX_UNCONFIGURED_PEERS + 2,
+        MAX_REMEMBERED_PEERS + 2,
         "unconfigured tips stay within the bound beside the kept peers"
     );
     assert!(a.admitted_tip(strangers[0].public_key()).await.is_none());
@@ -555,6 +555,100 @@ async fn a_peer_acknowledging_frontiers_keeps_its_tip_through_an_admission_storm
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn admit_only_strangers_displace_an_idle_tip_only_past_the_bound_and_an_acknowledging_one_never()
+ {
+    use crate::replica::MAX_REMEMBERED_PEERS;
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let a = open(&f, &dir, "a.db", &PrivateKey::new()).await;
+    past_genesis(&f, &a).await;
+    insert(&a, &f, 1, "held").await;
+    let tip = a.followed_tip().await;
+    let admit = async |key: &PrivateKey| {
+        a.admit_peer(key.public_key(), &f.credentials(key, f.full()), tip)
+            .await
+            .unwrap();
+    };
+    let (idle, acknowledged_once) = (PrivateKey::new(), PrivateKey::new());
+    admit(&idle).await;
+    admit(&acknowledged_once).await;
+    let frontier = a.frontier(f.public).await.unwrap();
+    a.acknowledge_frontier(
+        acknowledged_once.public_key(),
+        &f.credentials(&acknowledged_once, f.full()),
+        &frontier,
+    )
+    .await
+    .unwrap();
+    for _ in 0..MAX_REMEMBERED_PEERS - 2 {
+        admit(&PrivateKey::new()).await;
+    }
+    assert_eq!(
+        a.admitted_tip(idle.public_key()).await,
+        Some(tip),
+        "an idle peer keeps its tip while the remembered peers fit the bound"
+    );
+    for _ in 0..2 * MAX_REMEMBERED_PEERS {
+        admit(&PrivateKey::new()).await;
+    }
+    assert_eq!(a.admitted_tip(idle.public_key()).await, None);
+    assert_eq!(
+        a.admitted_tip(acknowledged_once.public_key()).await,
+        Some(tip),
+        "strangers that only ever admit cannot displace a peer that has acknowledged"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn peers_that_acknowledged_once_hold_no_seat_against_a_newcomer_or_a_later_acknowledger() {
+    use crate::replica::MAX_REMEMBERED_PEERS;
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let a = open(&f, &dir, "a.db", &PrivateKey::new()).await;
+    past_genesis(&f, &a).await;
+    insert(&a, &f, 1, "held").await;
+    let tip = a.followed_tip().await;
+    let frontier = a.frontier(f.public).await.unwrap();
+    let admit = async |key: &PrivateKey| {
+        a.admit_peer(key.public_key(), &f.credentials(key, f.full()), tip)
+            .await
+            .unwrap();
+    };
+    let acknowledge = async |key: &PrivateKey| {
+        a.acknowledge_frontier(key.public_key(), &f.credentials(key, f.full()), &frontier)
+            .await
+            .unwrap();
+    };
+    let squatters: Vec<PrivateKey> = (1..MAX_REMEMBERED_PEERS)
+        .map(|_| PrivateKey::new())
+        .collect();
+    for squatter in &squatters {
+        admit(squatter).await;
+        acknowledge(squatter).await;
+    }
+    let honest = PrivateKey::new();
+    admit(&honest).await;
+    acknowledge(&honest).await;
+    for squatter in &squatters {
+        admit(squatter).await;
+    }
+    let newcomer = PrivateKey::new();
+    admit(&newcomer).await;
+    acknowledge(&newcomer).await;
+    assert_eq!(
+        a.admitted_tip(newcomer.public_key()).await,
+        Some(tip),
+        "a peer is never evicted by its own admission"
+    );
+    assert_eq!(held_by(&a, &newcomer).await, Some(1));
+    assert_eq!(
+        a.admitted_tip(honest.public_key()).await,
+        Some(tip),
+        "readmission alone does not outrank a more recent acknowledgment"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_readmitted_peer_keeps_its_frontier_records_by_the_same_recency_as_its_tip() {
     use crate::replica::MAX_UNCONFIGURED_PEERS;
     let f = Fixture::new();
@@ -594,12 +688,11 @@ async fn a_readmitted_peer_keeps_its_frontier_records_by_the_same_recency_as_its
     );
     assert_eq!(held_by(&a, &strangers[0]).await, None);
     assert!(a.admitted_tip(returning.public_key()).await.is_some());
-    assert!(a.admitted_tip(strangers[0].public_key()).await.is_none());
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn acknowledgments_without_logs_remember_nothing_and_displace_no_tip() {
-    use crate::replica::MAX_UNCONFIGURED_PEERS;
+    use crate::replica::MAX_REMEMBERED_PEERS;
     let f = Fixture::new();
     let dir = Scratch::new().await;
     let a = open(&f, &dir, "a.db", &PrivateKey::new()).await;
@@ -615,7 +708,7 @@ async fn acknowledgments_without_logs_remember_nothing_and_displace_no_tip() {
         scope: f.public,
         logs: vec![],
     };
-    for _ in 0..2 * MAX_UNCONFIGURED_PEERS {
+    for _ in 0..=MAX_REMEMBERED_PEERS {
         let genesis_stranger = PrivateKey::new();
         a.acknowledge_frontier(
             genesis_stranger.public_key(),
@@ -636,7 +729,7 @@ async fn acknowledgments_without_logs_remember_nothing_and_displace_no_tip() {
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn admission_reads_no_custody_policy_so_a_corrupt_one_fails_no_handshake() {
-    use crate::replica::MAX_UNCONFIGURED_PEERS;
+    use crate::replica::MAX_REMEMBERED_PEERS;
     let f = Fixture::new();
     let dir = Scratch::new().await;
     let a = open(&f, &dir, "a.db", &PrivateKey::new()).await;
@@ -661,7 +754,7 @@ async fn admission_reads_no_custody_policy_so_a_corrupt_one_fails_no_handshake()
         .await
     };
     admit(&configured).await.unwrap();
-    for _ in 0..MAX_UNCONFIGURED_PEERS {
+    for _ in 0..MAX_REMEMBERED_PEERS {
         admit(&PrivateKey::new())
             .await
             .expect("kept peers leave the whole bound to unconfigured peers");
@@ -673,13 +766,13 @@ async fn admission_reads_no_custody_policy_so_a_corrupt_one_fails_no_handshake()
     admit(&configured)
         .await
         .expect("a configured peer is admitted whatever storage holds");
-    assert_eq!(a.admitted_peers().await, MAX_UNCONFIGURED_PEERS + 1);
+    assert_eq!(a.admitted_peers().await, MAX_REMEMBERED_PEERS + 1);
     assert!(a.admitted_tip(newest.public_key()).await.is_some());
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn custody_peers_stay_kept_across_reopening_and_leave_with_their_policy() {
-    use crate::replica::MAX_UNCONFIGURED_PEERS;
+    use crate::replica::MAX_REMEMBERED_PEERS;
     let f = Fixture::new();
     let dir = Scratch::new().await;
     let alice = PrivateKey::new();
@@ -706,7 +799,7 @@ async fn custody_peers_stay_kept_across_reopening_and_leave_with_their_policy() 
         .unwrap();
     };
     admit(&full_node).await;
-    for _ in 0..=MAX_UNCONFIGURED_PEERS {
+    for _ in 0..=MAX_REMEMBERED_PEERS {
         admit(&PrivateKey::new()).await;
     }
     assert!(
@@ -720,7 +813,7 @@ async fn custody_peers_stay_kept_across_reopening_and_leave_with_their_policy() 
         a.admitted_tip(full_node.public_key()).await.is_none(),
         "a peer whose custody ends competes as the least recently seen"
     );
-    assert_eq!(a.admitted_peers().await, MAX_UNCONFIGURED_PEERS);
+    assert_eq!(a.admitted_peers().await, MAX_REMEMBERED_PEERS);
 }
 
 const HANDSHAKE_TIME_SLACK: u64 = 5_000_000;

@@ -125,6 +125,8 @@ use crate::{
     scoped_connection::ScopedConnection,
     storage::{bindings, collect_rows, retryable, rows},
 };
+#[cfg(test)]
+pub(crate) use admission::MAX_REMEMBERED_PEERS;
 pub use admission::MAX_UNCONFIGURED_PEERS;
 pub use bundle::{MAX_BUNDLE_BYTES, MAX_BUNDLE_FRAMES, MAX_BUNDLE_ROWS, ROWS_PER_FRAME};
 pub use checkpoint::{

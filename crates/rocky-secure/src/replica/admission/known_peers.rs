@@ -1,4 +1,4 @@
-use super::MAX_UNCONFIGURED_PEERS;
+use super::MAX_REMEMBERED_PEERS;
 use rocky_core::{ResourceScope, TipId};
 use rocky_credentials::PeerId;
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,6 +15,7 @@ pub(crate) struct KnownPeers {
 struct Seen {
     at: u64,
     tip: Option<TipId>,
+    acknowledged_at: u64,
 }
 
 impl KnownPeers {
@@ -35,16 +36,34 @@ impl KnownPeers {
     }
     pub(super) fn admit(&mut self, peer: PeerId, tip: TipId) {
         let at = self.tick();
-        self.seen.insert(peer, Seen { at, tip: Some(tip) });
-        self.evict_beyond_bound();
+        let acknowledged_at = self.seen.get(&peer).map_or(0, |seen| seen.acknowledged_at);
+        self.seen.insert(
+            peer,
+            Seen {
+                at,
+                tip: Some(tip),
+                acknowledged_at,
+            },
+        );
+        self.evict_beyond_bound(Some(peer));
     }
     pub(in crate::replica) fn acknowledged(&mut self, peer: PeerId, recorded: bool) {
         let at = self.tick();
         match self.seen.get_mut(&peer) {
-            Some(seen) => seen.at = at,
+            Some(seen) => {
+                seen.at = at;
+                seen.acknowledged_at = at;
+            }
             None if recorded => {
-                self.seen.insert(peer, Seen { at, tip: None });
-                self.evict_beyond_bound();
+                self.seen.insert(
+                    peer,
+                    Seen {
+                        at,
+                        tip: None,
+                        acknowledged_at: at,
+                    },
+                );
+                self.evict_beyond_bound(Some(peer));
             }
             None => {}
         }
@@ -52,6 +71,9 @@ impl KnownPeers {
     pub(super) fn configure(&mut self, peers: BTreeSet<PeerId>) {
         self.configured = peers;
         self.rekeep();
+    }
+    pub(in crate::replica) fn custody(&self, scope: &ResourceScope) -> BTreeSet<PeerId> {
+        self.custody.get(scope).cloned().unwrap_or_default()
     }
     pub(in crate::replica) fn set_custody(
         &mut self,
@@ -73,31 +95,31 @@ impl KnownPeers {
             .chain(&self.configured)
             .copied()
             .collect();
-        self.evict_beyond_bound();
+        self.evict_beyond_bound(None);
     }
     fn tick(&mut self) -> u64 {
         self.clock += 1;
         self.clock
     }
-    fn evict_beyond_bound(&mut self) {
-        let evictable = |(peer, _): &(&PeerId, &Seen)| !self.kept.contains(*peer);
+    fn evict_beyond_bound(&mut self, arriving: Option<PeerId>) {
+        let unkept = |peer: &PeerId| !self.kept.contains(peer);
         let excess = self
             .seen
-            .iter()
-            .filter(evictable)
+            .keys()
+            .filter(|peer| unkept(peer))
             .count()
-            .saturating_sub(MAX_UNCONFIGURED_PEERS);
+            .saturating_sub(MAX_REMEMBERED_PEERS);
         if excess == 0 {
             return;
         }
-        let mut oldest: Vec<_> = self
+        let mut least_recently_acknowledged: Vec<_> = self
             .seen
             .iter()
-            .filter(evictable)
-            .map(|(peer, seen)| (seen.at, *peer))
+            .filter(|(peer, _)| unkept(peer) && Some(**peer) != arriving)
+            .map(|(peer, seen)| (seen.acknowledged_at, seen.at, *peer))
             .collect();
-        oldest.sort_unstable();
-        for (_, peer) in &oldest[..excess] {
+        least_recently_acknowledged.sort_unstable();
+        for (_, _, peer) in least_recently_acknowledged.iter().take(excess) {
             self.seen.remove(peer);
         }
     }

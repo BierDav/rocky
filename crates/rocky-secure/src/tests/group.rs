@@ -770,19 +770,26 @@ async fn incoming_frames_cache_their_chain_after_membership_learning_and_revocat
         .author([73; 32], insert(&f, 3), vec![])
         .await
         .unwrap();
-    let before = member.crypto_stats().await;
+    let chain = first.chain().unwrap().credentials().clone();
+    let before = member.crypto_stats(&chain).await.unwrap();
     assert_eq!(
         member.receive(first.clone()).await.unwrap(),
         ReceiveStatus::Applied
     );
-    let after = member.crypto_stats().await;
+    let after = member.crypto_stats(&chain).await.unwrap();
     assert_eq!(after.0, before.0 + 1);
     assert!(after.1 > before.1);
+    member
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .local_grants(crate::now().unwrap() + 1)
+        .unwrap();
     assert_eq!(
         member.receive(second).await.unwrap(),
         ReceiveStatus::Applied
     );
-    let cached = member.crypto_stats().await;
+    let cached = member.crypto_stats(&chain).await.unwrap();
     assert_eq!(
         cached,
         (after.0 + 1, after.1),
@@ -792,7 +799,7 @@ async fn incoming_frames_cache_their_chain_after_membership_learning_and_revocat
         member.receive(first.clone()).await.unwrap(),
         ReceiveStatus::Duplicate
     );
-    assert_eq!(member.crypto_stats().await, cached);
+    assert_eq!(member.crypto_stats(&chain).await.unwrap(), cached);
     let revoked = revoking(
         &f.publisher,
         f.app().manifest().app,

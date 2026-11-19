@@ -532,7 +532,7 @@ fn node_signatures_never_inherit_trusted_identity_control() {
     .unwrap()
     .issue_trusted(identity.public_key(), graph.scope, 100)
     .unwrap();
-    let chain = rocky_credentials::device_chain(root, &identity, node.public_key()).unwrap();
+    let chain = rocky_credentials::device_chain(root, &identity, &node).unwrap();
     chain
         .verify(
             owner.public_key(),
@@ -848,7 +848,7 @@ fn trusted_node(graph: &TipGraph, owner: &PrivateKey) -> (PrivateKey, Credential
     .unwrap()
     .issue_trusted(identity.public_key(), graph.scope, 100)
     .unwrap();
-    let chain = rocky_credentials::device_chain(root, &identity, node.public_key()).unwrap();
+    let chain = rocky_credentials::device_chain(root, &identity, &node).unwrap();
     (node, chain)
 }
 fn ack(
@@ -1349,7 +1349,7 @@ fn a_control_only_trusted_identity_certifies_acknowledgers_without_row_authority
     .issue_trusted(identity.public_key(), graph.scope, 100)
     .unwrap();
     let chain = CredentialChain(vec![grant])
-        .certify(&identity, node.public_key())
+        .certify(&identity, &node)
         .unwrap();
     assert_eq!(
         chain

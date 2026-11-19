@@ -165,7 +165,7 @@ impl Fixture {
             },
         )
         .unwrap();
-        crate::device_chain(capability, &self.identity, self.node.public_key()).unwrap()
+        crate::device_chain(capability, &self.identity, &self.node).unwrap()
     }
     fn tuple(&self, table: usize, value: &str) -> (ResourceScope, PartitionTuple) {
         let slot = *self.partitions[table].selector.0.keys().next().unwrap();
@@ -393,7 +393,7 @@ fn delegation_checks_resolved_authority_and_cannot_remove_follower_restrictions(
     forged
         .0
         .push(crate::SignedCapability::sign(capability, &f.identity).unwrap());
-    let forged = forged.certify(&identity, node.public_key()).unwrap();
+    let forged = forged.certify(&identity, &node).unwrap();
     assert!(
         forged
             .verified_with_families(
@@ -425,7 +425,7 @@ fn delegation_checks_resolved_authority_and_cannot_remove_follower_restrictions(
             &f.families,
         )
         .unwrap()
-        .certify(&identity, node.public_key())
+        .certify(&identity, &node)
         .unwrap();
     let verified = delegated
         .verified_with_families(

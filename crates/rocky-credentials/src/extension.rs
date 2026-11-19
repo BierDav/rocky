@@ -1,12 +1,12 @@
 use crate::{Error, decode_bounded, denied, encode};
 use serde::{Deserialize, Serialize};
 
-const EXTENSION_VERSION: u32 = 13;
+const EXTENSION_VERSION: u32 = 14;
 const MAX_EXTENSION: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct Extension(Vec<u8>);
+pub struct Extension(#[serde(with = "serde_bytes")] Vec<u8>);
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Body {
@@ -23,6 +23,7 @@ struct Body {
     previous: Option<rocky_core::Commitment>,
     database: Option<DatabaseContext>,
     personal: Option<crate::PersonalBinding>,
+    possession: Option<crate::NodePossession>,
 }
 #[derive(Deserialize)]
 struct Versioned {
@@ -41,6 +42,7 @@ pub struct Extended {
     pub previous: Option<rocky_core::Commitment>,
     pub database: Option<DatabaseContext>,
     pub personal: Option<crate::PersonalBinding>,
+    pub possession: Option<crate::NodePossession>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -74,6 +76,7 @@ impl Extension {
             previous: extended.previous,
             database: extended.database,
             personal: extended.personal,
+            possession: extended.possession,
         };
         let extension = Self(encode(&body)?);
         extension.read()?;
@@ -91,6 +94,7 @@ impl Extension {
         let body: Body = decode_bounded(&self.0, MAX_EXTENSION)?;
         if (body.sequence.is_none() != body.previous.is_none() && body.sequence != Some(0))
             || (body.personal.is_some() && (body.sequence.is_some() || body.previous.is_some()))
+            || (body.possession.is_some() && body.node.is_none())
         {
             return Err(denied("invalid membership link"));
         }
@@ -115,6 +119,7 @@ impl Extension {
             previous: body.previous,
             database: body.database,
             personal: body.personal,
+            possession: body.possession,
         })
     }
 }
@@ -129,7 +134,7 @@ mod tests {
         assert_eq!(current.read().unwrap(), Extended::default());
         let body: Body = decode_bounded(&current.0, MAX_EXTENSION).unwrap();
         assert_eq!(body.version, EXTENSION_VERSION);
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, u32::MAX] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, u32::MAX] {
             let other = Extension(
                 encode(&Body {
                     node: None,
@@ -144,6 +149,7 @@ mod tests {
                     previous: None,
                     database: None,
                     personal: None,
+                    possession: None,
                 })
                 .unwrap(),
             );

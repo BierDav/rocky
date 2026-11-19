@@ -101,7 +101,7 @@ impl SecureDemo {
                 )
                 .map_err(signing)?;
             let credentials = CredentialChain(vec![root])
-                .certify(&identity, node.public_key())
+                .certify(&identity, &node)
                 .map_err(signing)?;
             Ok(SecureConfig {
                 publisher: publisher.public_key(),

@@ -48,7 +48,7 @@ fn holder_chain(
     )
     .unwrap();
     CredentialChain(vec![link])
-        .certify_claims(holder, node.public_key())
+        .certify_claims(holder, node)
         .unwrap()
 }
 
@@ -140,7 +140,7 @@ fn claim_links_expire_within_a_day_and_end_with_their_revocation() {
     let mut long = chain.0[0].capability.clone();
     long.expires = long.not_before + CLAIM_LIFETIME + CLAIM_SKEW + 1;
     let long = CredentialChain(vec![SignedCapability::sign(long, &owner).unwrap()])
-        .certify_claims(&holder, node.public_key())
+        .certify_claims(&holder, &node)
         .unwrap();
     assert!(
         long.claimant(
@@ -224,10 +224,7 @@ fn delegation_never_exceeds_the_delegators_claim_right() {
         )
     };
     let narrowed = delegate_with(only(&["invoices"])).unwrap();
-    let chain = narrowed
-        .clone()
-        .certify_claims(&delegate, node.public_key())
-        .unwrap();
+    let chain = narrowed.clone().certify_claims(&delegate, &node).unwrap();
     let claim = |chain: &CredentialChain, counter: &str| {
         chain.claimant(
             owner.public_key(),
@@ -269,7 +266,7 @@ fn delegation_never_exceeds_the_delegators_claim_right() {
         held.0[0].clone(),
         SignedCapability::sign(wide, &holder).unwrap(),
     ])
-    .certify_claims(&delegate, node.public_key())
+    .certify_claims(&delegate, &node)
     .unwrap();
     assert!(
         claim(&wide, "refunds").is_err(),
@@ -310,7 +307,7 @@ fn an_issuer_grants_claims_and_a_node_certificate_carries_none() {
         .unwrap();
     let chain = authority
         .chain_of(link)
-        .certify_claims(&holder, node.public_key())
+        .certify_claims(&holder, &node)
         .unwrap();
     assert_eq!(
         chain
@@ -364,7 +361,7 @@ fn revoking_a_grant_ends_every_issuers_links_of_it_and_no_other_grant() {
             .unwrap();
         authority
             .chain_of(link)
-            .certify_claims(&holder, node.public_key())
+            .certify_claims(&holder, &node)
             .unwrap()
     };
     let first = chain(&issuers[0], every(), NOW);

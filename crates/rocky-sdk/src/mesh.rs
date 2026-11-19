@@ -687,7 +687,7 @@ mod tests {
                         clock_skew: std::time::Duration::from_secs(1),
                     },
                 )?)
-                .certify(&delegate, node.public_key())?;
+                .certify(&delegate, &node)?;
             Ok((delegate, node, credentials))
         }
         fn peer(&self, installation: &str) -> Result<(Settings, Vault), Failure> {

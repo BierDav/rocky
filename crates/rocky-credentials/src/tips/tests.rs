@@ -122,14 +122,11 @@ fn a_trusted_identity_keeps_both_lanes_through_unlink_and_root_cuts() {
             .issue_trusted(identity.public_key(), scope, 100)
             .unwrap(),
     ]);
-    let first = grant
-        .clone()
-        .certify(&identity, nodes[0].public_key())
-        .unwrap();
+    let first = grant.clone().certify(&identity, &nodes[0]).unwrap();
     let second = grant
         .certify_member(
             &identity,
-            nodes[1].public_key(),
+            &nodes[1],
             1,
             Some(first.certificate().unwrap().id().unwrap()),
         )
@@ -305,7 +302,7 @@ fn implicit_empty_unlink_cut_matches_an_explicit_empty_lane() {
             .issue_trusted(identity.public_key(), scope, 100)
             .unwrap(),
     ])
-    .certify(&identity, node.public_key())
+    .certify(&identity, &node)
     .unwrap();
     let graph = TipGraph::new(scope, [4; 32]);
     let statement = Revocation {

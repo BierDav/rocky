@@ -12,7 +12,7 @@ async fn relayed_frames_cannot_hide_nodes_past_the_membership_bound() {
             .issue(receiver_identity.public_key(), fixture.full(), validity())
             .unwrap(),
     ])
-    .certify(&receiver_identity, receiver_key.public_key())
+    .certify(&receiver_identity, &receiver_key)
     .unwrap();
     let mut config = fixture.config(&receiver_key, fixture.full(), &[fixture.public]);
     config.credentials = receiver_chain;
@@ -32,7 +32,7 @@ async fn relayed_frames_cannot_hide_nodes_past_the_membership_bound() {
         let node = PrivateKey::new();
         let chain = links
             .clone()
-            .certify_member(&identity, node.public_key(), sequence as u64, previous)
+            .certify_member(&identity, &node, sequence as u64, previous)
             .unwrap();
         previous = Some(chain.certificate().unwrap().id().unwrap());
         let mut config = fixture.config(&node, fixture.full(), &[fixture.public]);
@@ -106,7 +106,7 @@ async fn an_existing_link_refreshes_membership_without_changing_the_row_revision
             .issue(identity.public_key(), f.full(), validity())
             .unwrap(),
     ])
-    .certify(&identity, PrivateKey::new().public_key())
+    .certify(&identity, &PrivateKey::new())
     .unwrap();
     let certificate = chain.certificate().unwrap().clone();
     let mut evidence = RevocationSet::new();

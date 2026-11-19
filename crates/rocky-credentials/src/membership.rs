@@ -221,6 +221,14 @@ mod tests {
         sequence: u64,
         previous: Option<Commitment>,
     ) -> SignedCapability {
+        let database = crate::DatabaseContext {
+            publisher: identity.public_key(),
+            scope: rocky_core::Scope {
+                mesh: rocky_core::MeshId([1; 16]),
+                app: rocky_core::AppId([2; 16]),
+                domain: rocky_core::DomainId([3; 16]),
+            },
+        };
         let capability = Capability {
             subject: node.public_key(),
             kind: rocky_core::PrincipalKind::Node,
@@ -232,14 +240,11 @@ mod tests {
                 node: Some(PeerId::of(node.public_key())),
                 sequence: Some(sequence),
                 previous,
-                database: Some(crate::DatabaseContext {
-                    publisher: identity.public_key(),
-                    scope: rocky_core::Scope {
-                        mesh: rocky_core::MeshId([1; 16]),
-                        app: rocky_core::AppId([2; 16]),
-                        domain: rocky_core::DomainId([3; 16]),
-                    },
-                }),
+                database: Some(database),
+                possession: Some(
+                    crate::NodePossession::sign(node, identity.public_key(), database, None)
+                        .unwrap(),
+                ),
                 ..Extended::default()
             })
             .unwrap(),

@@ -133,7 +133,7 @@ fn node(
         .clone()
         .certify_member(
             identity,
-            node.public_key(),
+            &node,
             sequence,
             previous.map(|certificate| certificate.id().unwrap()),
         )
@@ -204,15 +204,12 @@ async fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issu
     assert!(
         identity_chain
             .clone()
-            .certify_member(&member.provider, stranger.public_key(), 1, None)
+            .certify_member(&member.provider, &stranger, 1, None)
             .is_err()
     );
     let other = PrivateKey::new();
     assert!(
-        identity_chain
-            .clone()
-            .certify(&other, stranger.public_key())
-            .is_err(),
+        identity_chain.clone().certify(&other, &stranger).is_err(),
         "another identity cannot certify a node of this one"
     );
     let member_authority = rocky_credentials::testing::authority(&member.provider, &identity_chain);
@@ -370,7 +367,7 @@ async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_
     let member_node = PrivateKey::new();
     let member_chain = authority
         .chain_of(link)
-        .complete(&member, member_node.public_key())
+        .complete(&member, &member_node)
         .expect("a key held in memory certifies a node that writes under its own key");
     assert!(domain.verify(&member_chain, &member_node, &none));
 
@@ -438,14 +435,14 @@ async fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_
     );
     let renewed = renewal
         .chain()
-        .complete(&member, member_node.public_key())
+        .complete(&member, &member_node)
         .expect("certified");
     assert!(domain.verify(&renewed, &member_node, &revoked));
     let stale = Renewal::seal(&authority, &request, &prior, none, VALIDITY, b"keys")
         .expect("signed anyway");
     let stale = stale
         .chain()
-        .complete(&member, member_node.public_key())
+        .complete(&member, &member_node)
         .expect("certified");
     assert!(
         !domain.verify(&stale, &member_node, &revoked),

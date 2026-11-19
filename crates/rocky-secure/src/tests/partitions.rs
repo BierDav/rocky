@@ -135,8 +135,8 @@ impl Fixture {
         node: PrivateKey,
         grant: PartitionGrant,
     ) -> EncryptedReplica<TypedRows> {
-        let user = PrivateKey::new();
-        let time = now().unwrap();
+        let user = crate::tests::identity_of(&node);
+        let time = crate::tests::lifetime().0 + rocky_credentials::DAY;
         let root = Authority::owner(&self.publisher)
             .issue_partition_terms(
                 user.public_key(),
@@ -145,13 +145,13 @@ impl Fixture {
                 rocky_credentials::DelegationTerms { delegations: 1 },
                 rocky_credentials::Validity {
                     issued_at: time,
-                    lifetime: std::time::Duration::from_secs(3600),
+                    lifetime: std::time::Duration::from_secs(rocky_credentials::DAY),
                     clock_skew: std::time::Duration::from_secs(5),
                 },
             )
             .unwrap();
         let prefix = CredentialChain(vec![root]);
-        let credentials = prefix.clone().complete(&user, node.public_key()).unwrap();
+        let credentials = prefix.clone().complete(&user, &node).unwrap();
         let replica = EncryptedReplica::open(
             path,
             self.app(),

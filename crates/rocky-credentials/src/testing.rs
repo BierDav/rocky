@@ -10,7 +10,7 @@ pub fn node(
     let node = PrivateKey::new();
     let chain = chain
         .clone()
-        .certify(identity, node.public_key())
+        .certify(identity, &node)
         .expect("a node certificate");
     (node, chain)
 }
@@ -83,6 +83,15 @@ fn certificate(
     not_before: u64,
     database: Option<crate::DatabaseContext>,
 ) -> SignedCapability {
+    let identity_key = identity.public_key().expect("an identity");
+    let database = database.unwrap_or(crate::DatabaseContext {
+        publisher: identity_key,
+        scope: rocky_core::Scope {
+            mesh: rocky_core::MeshId([1; 16]),
+            app: rocky_core::AppId([2; 16]),
+            domain: rocky_core::DomainId([3; 16]),
+        },
+    });
     SignedCapability::sign(
         Capability {
             subject: node.public_key(),
@@ -94,14 +103,11 @@ fn certificate(
             extension: Extension::new(Extended {
                 node: Some(crate::PeerId::of(node.public_key())),
                 sequence: Some(0),
-                database: Some(database.unwrap_or(crate::DatabaseContext {
-                    publisher: identity.public_key().expect("a publisher"),
-                    scope: rocky_core::Scope {
-                        mesh: rocky_core::MeshId([1; 16]),
-                        app: rocky_core::AppId([2; 16]),
-                        domain: rocky_core::DomainId([3; 16]),
-                    },
-                })),
+                database: Some(database),
+                possession: Some(
+                    crate::NodePossession::sign(node, identity_key, database, None)
+                        .expect("a possession proof"),
+                ),
                 ..Extended::default()
             })
             .expect("an extension"),

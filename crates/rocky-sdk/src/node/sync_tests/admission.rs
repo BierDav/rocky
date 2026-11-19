@@ -44,7 +44,7 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
                     )?;
                     let mut chain = issuer_links.clone();
                     chain.0.push(capability);
-                    Ok((node.clone(), chain.complete(&user, node.public_key())?))
+                    Ok((node.clone(), chain.complete(&user, &node)?))
                 })
                 .collect::<Result<Vec<_>, Failure>>()?;
             let config = a.settings.lock().await.config(&a.vault, &a.domain())?;

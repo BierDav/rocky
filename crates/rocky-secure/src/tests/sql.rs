@@ -187,7 +187,7 @@ impl Typed {
         grants: Vec<ResourceGrant>,
         expires: u64,
     ) -> CredentialChain {
-        let user = PrivateKey::new();
+        let user = crate::tests::identity_of(node);
         let capability = |subject, kind, delegations| Capability {
             subject,
             kind,
@@ -220,8 +220,15 @@ impl Typed {
                 &self.publisher,
             )
             .unwrap(),
-            SignedCapability::sign(capability(node.public_key(), PrincipalKind::Node, 0), &user)
-                .unwrap(),
+            SignedCapability::sign(
+                crate::tests::proven(
+                    capability(node.public_key(), PrincipalKind::Node, 0),
+                    node,
+                    &user,
+                ),
+                &user,
+            )
+            .unwrap(),
         ])
     }
     fn key(&self, scope: ResourceScope) -> KeyMaterial {
@@ -752,7 +759,11 @@ async fn authority_changes_wait_for_the_lease_and_end_the_session() {
     assert!(alice.session(both.into()).await.is_err());
 
     alice
-        .renew_credentials(t.credentials(&node, t.full()))
+        .renew_credentials(t.credentials_until(
+            &node,
+            t.full(),
+            crate::tests::lifetime().1 - rocky_credentials::DAY,
+        ))
         .await
         .unwrap();
     let renewed = sql(&alice, &both).await;
@@ -2173,15 +2184,12 @@ async fn two_nodes_of_one_principal_write_every_table_under_their_own_keys() {
         )
         .unwrap();
     let prefix = CredentialChain(vec![root]);
-    let initial = prefix
-        .clone()
-        .certify(&principal, nodes[0].public_key())
-        .unwrap();
+    let initial = prefix.clone().certify(&principal, &nodes[0]).unwrap();
     let next = prefix
         .clone()
         .certify_member(
             &principal,
-            nodes[1].public_key(),
+            &nodes[1],
             1,
             Some(initial.certificate().unwrap().id().unwrap()),
         )
@@ -2206,7 +2214,7 @@ async fn two_nodes_of_one_principal_write_every_table_under_their_own_keys() {
                     .clone()
                     .certify_member(
                         &principal,
-                        nodes[index].public_key(),
+                        &nodes[index],
                         u64::from(number - 100),
                         match number {
                             100 => None,
@@ -2333,7 +2341,7 @@ async fn two_nodes_of_one_principal_write_every_table_under_their_own_keys() {
     let changed = prefix
         .certify_member(
             &principal,
-            nodes[0].public_key(),
+            &nodes[0],
             2,
             Some(next.certificate().unwrap().id().unwrap()),
         )

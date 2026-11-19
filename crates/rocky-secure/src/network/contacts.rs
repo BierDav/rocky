@@ -227,7 +227,7 @@ mod tests {
         )
         .unwrap();
         let config = |node: &PrivateKey| {
-            let user = PrivateKey::new();
+            let user = crate::tests::identity_of(node);
             let root = rocky_credentials::Authority::owner(&fixture.publisher)
                 .issue_partition_terms(
                     user.public_key(),
@@ -251,9 +251,7 @@ mod tests {
                 manifest: signed.clone(),
                 revocations: fixture.revocations.clone(),
                 node: node.clone(),
-                credentials: CredentialChain(vec![root])
-                    .complete(&user, node.public_key())
-                    .unwrap(),
+                credentials: CredentialChain(vec![root]).complete(&user, node).unwrap(),
                 keys: vec![],
             }
         };

@@ -623,6 +623,15 @@ fn certificate(
                 node: Some(PeerId::of(node.public_key())),
                 database: Some(database),
                 sequence: Some(0),
+                possession: Some(
+                    rocky_credentials::NodePossession::sign(
+                        node,
+                        identity.public_key(),
+                        database,
+                        None,
+                    )
+                    .unwrap(),
+                ),
                 ..Extended::default()
             })
             .unwrap(),
@@ -853,7 +862,7 @@ fn a_trusted_identity_cannot_present_another_databases_node_certificate() {
                 .issue_trusted(identity.public_key(), namespace, T)
                 .unwrap(),
         ])
-        .certify(&identity, node.public_key())
+        .certify(&identity, &node)
         .unwrap();
         let request = Request::certified(
             [0; 32],

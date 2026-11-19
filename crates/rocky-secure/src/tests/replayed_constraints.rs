@@ -290,7 +290,7 @@ impl Constrained {
             .collect()
     }
     fn credentials(&self, node: &PrivateKey) -> CredentialChain {
-        let user = PrivateKey::new();
+        let user = crate::tests::identity_of(node);
         if let Some(tenant) = self.tenant {
             let root = Authority::owner(&self.publisher)
                 .issue_partition_terms(
@@ -305,9 +305,7 @@ impl Constrained {
                     },
                 )
                 .unwrap();
-            return CredentialChain(vec![root])
-                .complete(&user, node.public_key())
-                .unwrap();
+            return CredentialChain(vec![root]).complete(&user, node).unwrap();
         }
         let capability = |subject, kind, delegations| Capability {
             subject,
@@ -341,8 +339,15 @@ impl Constrained {
                 &self.publisher,
             )
             .unwrap(),
-            SignedCapability::sign(capability(node.public_key(), PrincipalKind::Node, 0), &user)
-                .unwrap(),
+            SignedCapability::sign(
+                crate::tests::proven(
+                    capability(node.public_key(), PrincipalKind::Node, 0),
+                    node,
+                    &user,
+                ),
+                &user,
+            )
+            .unwrap(),
         ])
     }
     async fn open(&self, path: &Path) -> Device {

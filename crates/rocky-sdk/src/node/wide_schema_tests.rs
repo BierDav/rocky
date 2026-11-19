@@ -260,7 +260,7 @@ async fn exercise(count: usize, legacy: bool) -> Result<(), Failure> {
             vec![0; 4096],
             Some(saved.credentials.clone()),
         )?;
-        assert!(wrapper.payload_len() > 37 * 1024);
+        assert!(wrapper.payload_len() > 28 * 1024);
         assert!(wrapper.payload_len() <= rocky_credentials::MAX_DELIVERY_PAYLOAD);
         assert!(
             crate::delivery::Contents::seal(

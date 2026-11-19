@@ -102,11 +102,15 @@ impl Personal {
         chain.verified(self.root.public_key(), set, NOW).is_ok()
     }
     fn replay(&self, node: &PrivateKey) -> SignedCapability {
-        let binding = PersonalBinding::sign(
-            self.context.database,
-            self.context.owner,
+        let binding = PersonalBinding {
+            grant: self.context.grant,
+            descriptor: self.context.descriptor,
+        };
+        let possession = crate::NodePossession::sign(
             node,
-            (self.context.grant, self.context.descriptor),
+            self.context.owner,
+            self.context.database,
+            Some(&binding),
         )
         .unwrap();
         let capability = crate::Capability {
@@ -120,6 +124,7 @@ impl Personal {
                 node: Some(PeerId::of(node.public_key())),
                 database: Some(self.context.database),
                 personal: Some(binding),
+                possession: Some(possession),
                 ..crate::Extended::default()
             })
             .unwrap(),
@@ -403,9 +408,14 @@ fn wrong_bindings_and_forged_possession_change_nothing() {
     let mut forged = p.replay(&node);
     let other = p.replay(&PrivateKey::new());
     let mut extended = forged.capability.extended().unwrap();
-    extended.personal = other.capability.extended().unwrap().personal;
+    extended.possession = other.capability.extended().unwrap().possession;
     forged.capability.extension = crate::Extension::new(extended).unwrap();
-    let resigned = SignedCapability::sign(forged.capability.clone(), &p.owner).unwrap();
+    assert_eq!(
+        personal(SignedCapability::sign(forged.capability.clone(), &p.owner).unwrap_err()),
+        PersonalError::Possession,
+        "the owner cannot issue a certificate carrying another key's possession proof"
+    );
+    let resigned = SignedCapability::sign_unchecked_node(forged.capability.clone(), &p.owner);
     let error = set.link(resigned.clone()).unwrap_err();
     assert_eq!(
         personal(error),
@@ -531,7 +541,7 @@ fn a_personal_genesis_admits_only_its_owners_bound_devices() {
     let sequenced = p
         .grant
         .clone()
-        .certify(&p.owner, PrivateKey::new().public_key())
+        .certify(&p.owner, &PrivateKey::new())
         .unwrap();
     let error = set
         .link(sequenced.certificate().unwrap().clone())
@@ -567,7 +577,7 @@ fn a_personal_genesis_admits_only_its_owners_bound_devices() {
     ]);
     let strangers = trusted
         .clone()
-        .certify(&stranger, PrivateKey::new().public_key())
+        .certify(&stranger, &PrivateKey::new())
         .unwrap();
     assert!(
         !p.verifies(&strangers, &set),

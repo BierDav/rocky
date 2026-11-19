@@ -210,7 +210,7 @@ async fn ended_head_resolves(fork: bool) {
         let sibling = chain
             .credentials()
             .capabilities()
-            .certify(&identity, PrivateKey::new().public_key())
+            .certify(&identity, &PrivateKey::new())
             .unwrap();
         let mut evidence = RevocationSet::new();
         evidence

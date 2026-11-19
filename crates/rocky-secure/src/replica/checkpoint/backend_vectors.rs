@@ -56,7 +56,7 @@ fn signed() -> SignedCheckpoint {
             },
         )
         .unwrap();
-    let credentials = device_chain(root, &user, node.public_key()).unwrap();
+    let credentials = device_chain(root, &user, &node).unwrap();
     credentials
         .verify(
             owner.public_key(),

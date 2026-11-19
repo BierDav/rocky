@@ -1952,7 +1952,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             chain
                 .certify_member(
                     identity,
-                    key.public_key(),
+                    &key,
                     sequence,
                     membership.head(owner).map(|head| head.certificate),
                 )

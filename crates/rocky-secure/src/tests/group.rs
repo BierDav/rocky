@@ -482,6 +482,7 @@ async fn process_exit_inside_a_group_leaves_each_handle_whole_or_absent() {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "tests::group::group_crash_child", "--ignored"])
             .env("ROCKY_GROUP_CRASH_PATH", &path)
+            .env(super::LIFETIME_START, super::lifetime().0.to_string())
             .env("ROCKY_GROUP_CRASH_PHASE", phase)
             .status()
             .unwrap();

@@ -1,4 +1,4 @@
-use super::replay::{BrokenReference, column_carried, table_carried};
+use super::replay::{BrokenReference, Rebuilding, column_carried, table_carried};
 use super::typed::{Typed, quoted};
 use super::*;
 use rocky_core::{LogicalSchema, SchemaChange, Scope, TableClass};
@@ -286,7 +286,7 @@ impl<A: RowApplication> Inner<A> {
                 .await?
             {
                 broken = Some(refused.clone());
-                return Err(refused.into());
+                return Err(refused.refuses(Rebuilding::SchemaProjection));
             }
             inner.install_delete_triggers(&projected).await?;
             inner
@@ -406,7 +406,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await
             .finish_or_discard_plan()
             .await?
-            .map_err(Error::from)
+            .map_err(|broken| broken.refuses(Rebuilding::SchemaProjection))
     }
     #[cfg(test)]
     pub(crate) async fn fail_next_plan_switch(&self) {

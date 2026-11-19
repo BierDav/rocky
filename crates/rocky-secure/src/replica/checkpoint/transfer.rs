@@ -2387,6 +2387,7 @@ impl<A: RowApplication> Inner<A> {
         if replayed {
             self.clear_replayed(scope).await?;
             self.restore_staged(scope, statement.tip, id).await?;
+            self.mark_rederive_if_orphaned(scope, id).await?;
             self.cover_kept(scope, id, &statement).await?;
             self.store_staged_base(id).await?;
         }

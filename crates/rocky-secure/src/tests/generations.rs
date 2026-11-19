@@ -1055,5 +1055,5 @@ async fn sync(
 }
 
 mod replayed;
-mod sideways;
+pub(super) mod sideways;
 mod switches;

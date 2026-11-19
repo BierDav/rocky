@@ -176,7 +176,9 @@ impl<A: RowApplication> Inner<A> {
                 )
                 .await?;
             if self.tables.contains(&scope.table) {
-                self.rebuild_rows(scope).await?;
+                self.rebuild_rows(scope)
+                    .await?
+                    .map_err(|broken| broken.refuses(Rebuilding::Projection))?;
             }
             if let Some(id) = self.find_scope_id(scope).await? {
                 self.reseed_ledger(scope, id).await?;

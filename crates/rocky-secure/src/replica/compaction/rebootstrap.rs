@@ -217,7 +217,10 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         if self.replayed_scope(scope) {
             self.clear_replayed(scope).await?;
-            return self.replay_from_frames(now()?).await;
+            return self
+                .replay_from_frames(now()?)
+                .await?
+                .map_err(|broken| broken.refuses(Rebuilding::Rebootstrap));
         }
         self.reproject(scope).await
     }
@@ -293,7 +296,9 @@ impl<A: RowApplication> Inner<A> {
         }
         self.rebuild_tip_workspace(domain).await?;
         if reordered {
-            self.replay_from_frames(now()?).await?;
+            self.replay_from_frames(now()?)
+                .await?
+                .map_err(|broken| broken.refuses(Rebuilding::Rebootstrap))?;
         }
         self.rederive_replayed(None, now()?).await?;
         Ok(true)

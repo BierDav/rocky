@@ -858,18 +858,118 @@ async fn a_rebuild_that_cannot_hold_is_stuck_until_its_inputs_change() {
 }
 
 async fn clear_the_parent_base_a_child_references(replica: &Replica, items: ResourceScope) {
-    {
-        let inner = replica.inner.lock(crate::replica::Class::Background).await;
-        inner
-            .conn
-            .execute(
-                "DELETE FROM secure_replayed_base WHERE scope=(SELECT id FROM secure_scope_state WHERE scope=?)",
-                [encode(&items).unwrap()],
-            )
-            .await
-            .unwrap();
-    }
+    lose_the_parent_base(replica, items).await;
     replica.mark_rederive_for_test(items).await.unwrap();
+}
+async fn lose_the_parent_base(replica: &Replica, items: ResourceScope) {
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    inner
+        .conn
+        .execute(
+            "DELETE FROM secure_replayed_base WHERE scope=(SELECT id FROM secure_scope_state WHERE scope=?)",
+            [encode(&items).unwrap()],
+        )
+        .await
+        .unwrap();
+}
+type Visible = (
+    TipId,
+    Vec<Vec<SqlValue>>,
+    Vec<Vec<SqlValue>>,
+    Vec<Vec<SqlValue>>,
+);
+async fn visible(replica: &Replica) -> Visible {
+    (
+        replica.followed_tip().await,
+        titles(replica).await,
+        tags(replica).await,
+        stored(
+            replica,
+            "SELECT seal,compacted FROM secure_finalized ORDER BY depth",
+        )
+        .await,
+    )
+}
+fn orphans_a_tag(refused: Result<impl std::fmt::Debug, Error>, replaying: &str) {
+    let expected = format!(
+        "{replaying} that break a foreign key: a row of tags references a missing row of items"
+    );
+    assert!(
+        matches!(&refused, Err(Error::Incompatible(reason)) if *reason == expected),
+        "{refused:?}"
+    );
+}
+async fn follow_main_and_tag_a_parent(lineage: &Lineage, replica: &Replica) {
+    follow_main(lineage, replica).await;
+    insert(replica, "p", "parent").await;
+    tag(replica, "t", "p").await;
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_tip_switch_whose_replay_orphans_a_child_is_refused_and_changes_nothing() {
+    let lineage = linked();
+    let dir = Scratch::new().await;
+    let replica = open(&lineage, &dir, "a", &PrivateKey::new()).await;
+    follow_main_and_tag_a_parent(&lineage, &replica).await;
+    let sealed = seal(&lineage, &replica).await.id().unwrap();
+    replica.compact(lineage.domain, 0).await.unwrap();
+    insert(&replica, "q", "after the seal").await;
+    replica
+        .publish_tip_statements(&super::super::generations::sideways::open_dev(
+            &lineage, sealed, 3,
+        ))
+        .await
+        .unwrap();
+    lose_the_parent_base(&replica, lineage.scope("items")).await;
+    let before = visible(&replica).await;
+    orphans_a_tag(
+        replica.follow_bookmark(lineage.domain, "dev").await,
+        "switching tips would replay rows",
+    );
+    assert_eq!(visible(&replica).await, before);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_lost_finalized_seal_whose_replay_orphans_a_child_is_refused_and_changes_nothing() {
+    let lineage = linked();
+    let dir = Scratch::new().await;
+    let replica = open(&lineage, &dir, "a", &PrivateKey::new()).await;
+    follow_main_and_tag_a_parent(&lineage, &replica).await;
+    churn(&replica, RIVAL_CHURN, "c").await;
+    let first = seal(&lineage, &replica).await;
+    insert(&replica, "b", "second").await;
+    let second = rivalled_seal(&lineage, &replica).await;
+    let report = replica.compact(lineage.domain, 1).await.unwrap();
+    assert_eq!(
+        (report.compacted, report.finalized),
+        (Some(first.id().unwrap()), Some(second.id().unwrap()))
+    );
+    lose_the_parent_base(&replica, lineage.scope("items")).await;
+    let before = visible(&replica).await;
+    let (_, statements) = rival(&lineage, &second);
+    orphans_a_tag(
+        replica.receive_tip_statements(&statements).await,
+        "switching tips would replay rows",
+    );
+    assert_eq!(visible(&replica).await, before);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_projection_rebuild_whose_replay_orphans_a_child_is_refused_and_changes_nothing() {
+    let lineage = linked();
+    let dir = Scratch::new().await;
+    let replica = open(&lineage, &dir, "a", &PrivateKey::new()).await;
+    follow_main_and_tag_a_parent(&lineage, &replica).await;
+    seal(&lineage, &replica).await;
+    replica.compact(lineage.domain, 0).await.unwrap();
+    let items = lineage.scope("items");
+    lose_the_parent_base(&replica, items).await;
+    let before = visible(&replica).await;
+    orphans_a_tag(
+        replica.rebuild_projection(items).await,
+        "rebuilding the projection would replay rows",
+    );
+    assert_eq!(visible(&replica).await, before);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -994,4 +1094,278 @@ async fn a_cancelled_direct_import_reaches_no_rows_and_marks_nothing() {
         stored(&b, "SELECT key FROM tags").await,
         vec![vec![text("v")]]
     );
+}
+
+async fn orphaned_tags(replica: &Replica) -> Vec<Vec<SqlValue>> {
+    stored(
+        replica,
+        "SELECT t.key FROM tags t WHERE t.item IS NOT NULL AND NOT EXISTS(SELECT 1 FROM items i WHERE i.id=t.item) ORDER BY t.key",
+    )
+    .await
+}
+async fn marked_for_rederive(replica: &Replica) -> bool {
+    !stored(replica, "SELECT 1 FROM secure_replayed_rederive")
+        .await
+        .is_empty()
+}
+async fn forget_tag(replica: &Replica, key: &str) {
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    inner
+        .conn
+        .execute("DELETE FROM tags WHERE key=?", [key.to_string()])
+        .await
+        .unwrap();
+}
+async fn orphan_by_hand(replica: &Replica, item: &str) {
+    let inner = replica.inner.lock(crate::replica::Class::Background).await;
+    inner
+        .conn
+        .execute("PRAGMA foreign_keys=OFF", ())
+        .await
+        .unwrap();
+    inner
+        .conn
+        .execute("DELETE FROM items WHERE key=?", [item.to_string()])
+        .await
+        .unwrap();
+    inner
+        .conn
+        .execute("PRAGMA foreign_keys=ON", ())
+        .await
+        .unwrap();
+}
+async fn tags_imported_before_items(
+    lineage: &Lineage,
+    dir: &Scratch,
+    children: &[&str],
+) -> (Replica, Replica, [PrivateKey; 2]) {
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = open(lineage, dir, "a", &keys[0]).await;
+    follow_main(lineage, &a).await;
+    insert(&a, "p", "parent").await;
+    for child in children {
+        tag(&a, child, "p").await;
+    }
+    seal(lineage, &a).await;
+    a.compact(lineage.domain, 0).await.unwrap();
+    let b = open(lineage, dir, "b", &keys[1]).await;
+    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
+    import_checkpoint(lineage, &a, &b, &keys[1], lineage.scope("tags")).await;
+    (a, b, keys)
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_child_imported_before_its_parent_waits_on_the_parent_alone() {
+    let lineage = linked();
+    let dir = Scratch::new().await;
+    let (a, b, keys) = tags_imported_before_items(&lineage, &dir, &["t"]).await;
+    let (items, tag_scope) = (lineage.scope("items"), lineage.scope("tags"));
+    assert_eq!(orphaned_tags(&b).await, vec![vec![text("t")]]);
+    assert!(
+        !marked_for_rederive(&b).await,
+        "an orphan of a parent the replica holds no state of yet is not a rederive to retry"
+    );
+    let status = b.compaction_status(lineage.domain).await.unwrap();
+    assert!(
+        status
+            .waiting
+            .as_deref()
+            .is_some_and(|waiting| waiting.contains("has no verified state")),
+        "the parent's own readiness holds compaction: {status:?}"
+    );
+    b.rebuild_projection(tag_scope).await.unwrap();
+    import_checkpoint(&lineage, &a, &b, &keys[1], items).await;
+    let status = b.compaction_status(lineage.domain).await.unwrap();
+    assert_eq!(status.waiting, None);
+    assert_eq!(tags(&b).await, tagged(&[("t", "p")]));
+    assert!(orphaned_tags(&b).await.is_empty());
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_replay_restoring_more_children_of_a_parent_still_missing_keeps_them() {
+    let lineage = linked();
+    let dir = Scratch::new().await;
+    let (a, b, keys) = tags_imported_before_items(&lineage, &dir, &["t", "u"]).await;
+    forget_tag(&b, "u").await;
+    assert_eq!(orphaned_tags(&b).await, vec![vec![text("t")]]);
+    b.rebuild_projection(lineage.scope("tags")).await.unwrap();
+    assert_eq!(
+        orphaned_tags(&b).await,
+        vec![vec![text("t")], vec![text("u")]],
+        "the base brings back a second child of the parent that has not arrived"
+    );
+    import_checkpoint(&lineage, &a, &b, &keys[1], lineage.scope("items")).await;
+    assert_eq!(tags(&b).await, tagged(&[("t", "p"), ("u", "p")]));
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_rebuild_that_repairs_one_orphan_and_breaks_another_is_refused() {
+    let lineage = linked();
+    let dir = Scratch::new().await;
+    let replica = open(&lineage, &dir, "a", &PrivateKey::new()).await;
+    follow_main(&lineage, &replica).await;
+    insert(&replica, "p2", "sealed parent").await;
+    tag(&replica, "t2", "p2").await;
+    seal(&lineage, &replica).await;
+    replica.compact(lineage.domain, 0).await.unwrap();
+    insert(&replica, "p", "parent after the seal").await;
+    tag(&replica, "t", "p").await;
+    let items = lineage.scope("items");
+    lose_the_parent_base(&replica, items).await;
+    orphan_by_hand(&replica, "p").await;
+    assert_eq!(orphaned_tags(&replica).await, vec![vec![text("t")]]);
+    let before = visible(&replica).await;
+    orphans_a_tag(
+        replica.rebuild_projection(items).await,
+        "rebuilding the projection would replay rows",
+    );
+    assert_eq!(visible(&replica).await, before);
+    assert_eq!(
+        orphaned_tags(&replica).await,
+        vec![vec![text("t")]],
+        "the refused rebuild would have orphaned t2 instead"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_rival_that_takes_a_parent_off_its_base_waits_for_the_parent_and_recovers_on_reimport() {
+    let lineage = linked();
+    let dir = Scratch::new().await;
+    let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
+    let (items, tag_scope) = (lineage.scope("items"), lineage.scope("tags"));
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    follow_main_and_tag_a_parent(&lineage, &a).await;
+    seal(&lineage, &a).await;
+    a.compact(lineage.domain, 0).await.unwrap();
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
+    import_checkpoint(&lineage, &a, &b, &keys[1], tag_scope).await;
+    let keeps_the_first_seal = open(&lineage, &dir, "c", &keys[2]).await;
+    let c = &keeps_the_first_seal;
+    crate::tests::exchange_graphs(&a, c, lineage.domain).await;
+    import_checkpoint(&lineage, &a, c, &keys[2], items).await;
+    insert(&a, "q", "later").await;
+    let second = rivalled_seal(&lineage, &a).await;
+    a.compact(lineage.domain, 0).await.unwrap();
+    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
+    import_checkpoint(&lineage, &a, &b, &keys[1], items).await;
+    assert_eq!(tags(&b).await, tagged(&[("t", "p")]));
+
+    let (_, statements) = rival(&lineage, &second);
+    b.receive_tip_statements(&statements).await.unwrap();
+    let needs = b.seal_rebootstraps(lineage.domain).await.unwrap();
+    assert_eq!(
+        needs.iter().map(|need| need.scope).collect::<Vec<_>>(),
+        vec![items],
+        "the parent's base sits at the losing seal"
+    );
+    assert_eq!(
+        orphaned_tags(&b).await,
+        vec![vec![text("t")]],
+        "the child waits for its parent's base instead of refusing the rival"
+    );
+    let status = b.compaction_status(lineage.domain).await.unwrap();
+    assert!(status.waiting.is_some(), "{status:?}");
+
+    crate::tests::exchange_graphs(&b, c, lineage.domain).await;
+    import_checkpoint(&lineage, c, &b, &keys[1], items).await;
+    assert!(
+        b.seal_rebootstraps(lineage.domain)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let status = b.compaction_status(lineage.domain).await.unwrap();
+    assert_eq!(status.waiting, None);
+    assert_eq!(tags(&b).await, tagged(&[("t", "p")]));
+    assert!(orphaned_tags(&b).await.is_empty());
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_partial_replica_holding_a_child_without_its_parent_keeps_its_rows_and_moves_on() {
+    let lineage = linked();
+    let dir = Scratch::new().await;
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let tag_scope = lineage.scope("tags");
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    follow_main_and_tag_a_parent(&lineage, &a).await;
+    seal(&lineage, &a).await;
+    a.compact(lineage.domain, 0).await.unwrap();
+    let holding_only_tags = open(&lineage, &dir, "tags-only", &keys[1]).await;
+    let b = &holding_only_tags;
+    crate::tests::exchange_graphs(&a, b, lineage.domain).await;
+    partial(b, &a, &[tag_scope]).await;
+    import_checkpoint(&lineage, &a, b, &keys[1], tag_scope).await;
+    assert_eq!(orphaned_tags(b).await, vec![vec![text("t")]]);
+    assert!(
+        !marked_for_rederive(b).await,
+        "a parent the replica never holds is no reason to derive the child again"
+    );
+    assert_eq!(
+        b.compaction_status(lineage.domain).await.unwrap().waiting,
+        None
+    );
+    b.rebuild_projection(tag_scope).await.unwrap();
+    assert_eq!(orphaned_tags(b).await, vec![vec![text("t")]]);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_frame_dropped_for_a_missing_parent_stays_dropped_after_rewinding_to_a_kept_seal() {
+    let lineage = linked();
+    let dir = Scratch::new().await;
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let (items, tag_scope) = (lineage.scope("items"), lineage.scope("tags"));
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    follow_main(&lineage, &a).await;
+    a.keep_seals(crate::KeptSeals {
+        every: true,
+        ..crate::KeptSeals::default()
+    })
+    .await
+    .unwrap();
+    insert(&a, "p", "parent").await;
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    for scope in [items, tag_scope] {
+        sync_scope(&lineage, &a, &b, &keys[1], scope).await;
+    }
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+    let first = seal(&lineage, &a).await.id().unwrap();
+    a.finalize_path(lineage.domain).await.unwrap();
+    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
+    assert_eq!(a.followed_tip().await, b.followed_tip().await);
+    delete(&a, "p").await;
+    let late = tag(&b, "t", "p").await;
+    sync_scope(&lineage, &b, &a, &keys[0], tag_scope).await;
+    let dropped = Some(TransactionOutcome::Dropped {
+        reason: rocky_core::replay::DropReason::Constraint,
+        sealed: false,
+    });
+    assert_eq!(a.transaction_outcome(late).await.unwrap(), dropped);
+    a.publish_tip_statements(&super::super::generations::sideways::open_dev(
+        &lineage, first, 3,
+    ))
+    .await
+    .unwrap();
+    a.inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .rewound = 0;
+    for bookmark in ["dev", "main"] {
+        a.follow_bookmark(lineage.domain, bookmark).await.unwrap();
+    }
+    assert!(
+        a.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .rewound
+            > 0,
+        "the switches rewind to the kept seal"
+    );
+    assert_eq!(
+        a.transaction_outcome(late).await.unwrap(),
+        dropped,
+        "redo after a rewind enforces immediate keys per statement"
+    );
+    assert!(tags(&a).await.is_empty());
+    assert!(orphaned_tags(&a).await.is_empty());
 }

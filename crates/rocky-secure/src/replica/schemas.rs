@@ -877,7 +877,7 @@ impl<A: RowApplication> Inner<A> {
                         })?;
                     }
                 }
-                finished??;
+                finished?.map_err(|broken| broken.refuses(Rebuilding::SchemaProjection))?;
             }
         }
         inner.load_schemas().await?;
@@ -1063,10 +1063,14 @@ impl<A: RowApplication> Inner<A> {
             .into_iter()
             .partition(|resource| self.replayed_scope(*resource));
         for resource in stored {
-            self.rebuild_rows(resource).await?;
+            self.rebuild_rows(resource)
+                .await?
+                .map_err(|broken| broken.refuses(Rebuilding::Withdrawal))?;
         }
         if !replayed.is_empty() {
-            self.replay_from_frames(now()?).await?;
+            self.replay_from_frames(now()?)
+                .await?
+                .map_err(|broken| broken.refuses(Rebuilding::Withdrawal))?;
         }
         match self
             .graph_for(scope)?

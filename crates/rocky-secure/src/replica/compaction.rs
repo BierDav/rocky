@@ -1261,7 +1261,9 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         if reopened && restore {
-            self.replay_from_frames(now()?).await?;
+            self.replay_from_frames(now()?)
+                .await?
+                .map_err(|broken| broken.refuses(Rebuilding::LostSeal))?;
         }
         Ok(reopened)
     }

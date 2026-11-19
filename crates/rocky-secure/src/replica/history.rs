@@ -573,46 +573,46 @@ impl<A: RowApplication> Inner<A> {
         for history in &histories {
             self.touch(&history.name());
         }
-        self.conn
-            .execute("PRAGMA defer_foreign_keys=ON", ())
-            .await?;
         let copy = |history: &History| frozen.get(&history.name().to_ascii_lowercase());
-        loop {
-            let mut deleted = 0;
-            for history in &histories {
-                let sql = match copy(history) {
-                    Some(_) => format!("DELETE FROM main.{}", history.live),
-                    None => history.rewind_deletes(mark),
-                };
-                deleted += self.conn.execute(sql, ()).await?;
-            }
-            if deleted == 0 {
-                break;
-            }
-        }
-        for history in &histories {
-            let sql = match copy(history)
-                .and_then(|table| table.frozen.as_ref().map(|name| (table, name)))
-            {
-                Some((table, name)) => {
-                    let columns: Vec<String> = table
-                        .columns
-                        .iter()
-                        .map(|column| quoted(column))
-                        .filter(|column| history.columns.contains(column))
-                        .collect();
-                    format!(
-                        "INSERT INTO main.{}({columns}) SELECT {columns} FROM main.{}",
-                        history.live,
-                        quoted(name),
-                        columns = columns.join(",")
-                    )
+        self.deferring_foreign_keys(async || {
+            loop {
+                let mut deleted = 0;
+                for history in &histories {
+                    let sql = match copy(history) {
+                        Some(_) => format!("DELETE FROM main.{}", history.live),
+                        None => history.rewind_deletes(mark),
+                    };
+                    deleted += self.conn.execute(sql, ()).await?;
                 }
-                None => history.rewind_inserts(mark),
-            };
-            self.conn.execute(sql, ()).await?;
-        }
-        Ok(())
+                if deleted == 0 {
+                    break;
+                }
+            }
+            for history in &histories {
+                let sql = match copy(history)
+                    .and_then(|table| table.frozen.as_ref().map(|name| (table, name)))
+                {
+                    Some((table, name)) => {
+                        let columns: Vec<String> = table
+                            .columns
+                            .iter()
+                            .map(|column| quoted(column))
+                            .filter(|column| history.columns.contains(column))
+                            .collect();
+                        format!(
+                            "INSERT INTO main.{}({columns}) SELECT {columns} FROM main.{}",
+                            history.live,
+                            quoted(name),
+                            columns = columns.join(",")
+                        )
+                    }
+                    None => history.rewind_inserts(mark),
+                };
+                self.conn.execute(sql, ()).await?;
+            }
+            Ok(())
+        })
+        .await
     }
     async fn prune_history(&self) -> Result<(), Error> {
         for history in self.histories() {

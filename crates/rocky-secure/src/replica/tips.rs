@@ -1394,7 +1394,9 @@ impl<A: RowApplication> Inner<A> {
             }
             self.rebuilding_tip = true;
             self.tip_base = kept;
-            let rebuilt = self.rebuild_rows(scope).await;
+            let rebuilt = self.rebuild_rows(scope).await.and_then(|rebuilt| {
+                rebuilt.map_err(|broken| broken.refuses(Rebuilding::TipSwitch))
+            });
             self.rebuilding_tip = false;
             self.tip_base = false;
             rebuilt?;
@@ -1423,7 +1425,9 @@ impl<A: RowApplication> Inner<A> {
             if kept.is_some() {
                 self.rewound += replayed.len();
             }
-            self.replay_from(now()?, kept).await?;
+            self.replay_from(now()?, kept)
+                .await?
+                .map_err(|broken| broken.refuses(Rebuilding::TipSwitch))?;
         }
         self.install_needed_pulled(domain).await?;
         self.reseed_domain_ledgers(domain).await?;

@@ -107,15 +107,27 @@ impl Typed {
         values: &[SqlValue],
         partitions: &BTreeMap<ResourceScope, rocky_core::PartitionTuple>,
     ) -> Result<ResourceScope, Error> {
+        self.registered_row_scope(table, values, partitions)?
+            .ok_or_else(|| denied(super::partition::UNREGISTERED_PARTITION))
+    }
+    pub(super) fn registered_row_scope(
+        &self,
+        table: &Projected,
+        values: &[SqlValue],
+        partitions: &BTreeMap<ResourceScope, rocky_core::PartitionTuple>,
+    ) -> Result<Option<ResourceScope>, Error> {
         match self
             .rows
             .partition(&table.table, values)
             .map_err(|error| denied(&error))?
         {
-            Some(tuple) => {
-                super::partition::registered_scope(partitions, self.domain, table.table.id, &tuple)
-            }
-            None => Ok(table.scope),
+            Some(tuple) => Ok(super::partition::registered_scope(
+                partitions,
+                self.domain,
+                table.table.id,
+                &tuple,
+            )),
+            None => Ok(Some(table.scope)),
         }
     }
     pub(super) fn by_scope(&self, scope: ResourceScope) -> Option<&Projected> {

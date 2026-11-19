@@ -959,14 +959,8 @@ impl<A: RowApplication> Inner<A> {
         source: TipId,
         rows: &[(Commitment, Vec<u8>)],
     ) -> Result<(), Error> {
-        self.conn
-            .execute("PRAGMA defer_foreign_keys=ON", ())
-            .await?;
-        self.insert_images(scope, source, rows).await?;
-        self.conn
-            .execute("PRAGMA defer_foreign_keys=OFF", ())
-            .await?;
-        Ok(())
+        self.deferring_foreign_keys(async || self.insert_images(scope, source, rows).await)
+            .await
     }
     pub(in crate::replica) async fn restore_staged(
         &self,
@@ -975,24 +969,20 @@ impl<A: RowApplication> Inner<A> {
         id: i64,
     ) -> Result<(), Error> {
         let ordinals = self.stored_field_ordinals().await?;
-        self.conn
-            .execute("PRAGMA defer_foreign_keys=ON", ())
-            .await?;
-        let mut after = None;
-        loop {
-            let rows = self
-                .stored_page("secure_replayed_staged", id, after, &ordinals)
-                .await?;
-            let Some((last, _)) = rows.last() else {
-                break;
-            };
-            after = Some(*last);
-            self.insert_images(scope, source, &rows).await?;
-        }
-        self.conn
-            .execute("PRAGMA defer_foreign_keys=OFF", ())
-            .await?;
-        Ok(())
+        self.deferring_foreign_keys(async || {
+            let mut after = None;
+            loop {
+                let rows = self
+                    .stored_page("secure_replayed_staged", id, after, &ordinals)
+                    .await?;
+                let Some((last, _)) = rows.last() else {
+                    return Ok(());
+                };
+                after = Some(*last);
+                self.insert_images(scope, source, &rows).await?;
+            }
+        })
+        .await
     }
     async fn insert_images(
         &self,

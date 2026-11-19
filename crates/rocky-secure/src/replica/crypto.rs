@@ -54,7 +54,7 @@ pub(super) struct Cache {
     chains: std::sync::Mutex<VerifiedChains>,
     families: std::sync::Mutex<BTreeMap<Commitment, Arc<rocky_credentials::GrantFamilies>>>,
     #[cfg(test)]
-    pub(super) verifications: AtomicU64,
+    verifications: std::sync::Mutex<BTreeMap<Commitment, u64>>,
 }
 pub(in crate::replica) struct CreationHeader {
     bytes: Vec<u8>,
@@ -198,7 +198,14 @@ impl Cache {
             .verified_with_families(publisher, revocations, time, families)
             .map_err(credential)?;
         #[cfg(test)]
-        self.verifications.fetch_add(1, Ordering::Relaxed);
+        {
+            *self
+                .verifications
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(digest)
+                .or_default() += 1;
+        }
         if cache.len() >= 256 {
             cache.clear();
         }
@@ -257,12 +264,18 @@ fn verify_signatures(frames: &[EncryptedFrame]) {
 }
 impl<A: RowApplication> EncryptedReplica<A> {
     #[cfg(test)]
-    pub(crate) async fn crypto_stats(&self) -> (u64, u64) {
+    pub(crate) async fn crypto_stats(&self, chain: &CredentialChain) -> Result<(u64, u64), Error> {
+        let digest = rocky_core::commitment("rocky.credential-chain.v1", &encode(chain)?);
         let inner = self.inner.lock(crate::replica::Class::Background).await;
-        (
-            inner.crypto.opens.load(Ordering::Relaxed),
-            inner.crypto.verifications.load(Ordering::Relaxed),
-        )
+        let verified = inner
+            .crypto
+            .verifications
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&digest)
+            .copied()
+            .unwrap_or(0);
+        Ok((inner.crypto.opens.load(Ordering::Relaxed), verified))
     }
     pub(super) async fn preopen(
         &self,

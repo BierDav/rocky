@@ -21,6 +21,9 @@ use std::{
 };
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 
+mod pause;
+mod residence;
+
 pub struct Open<'a> {
     pub directory: &'a Path,
     pub schema: &'a str,
@@ -118,6 +121,18 @@ struct Setup {
     confirmation: Option<String>,
     #[cfg(test)]
     expose: Option<std::sync::mpsc::Sender<std::sync::Weak<Node>>>,
+}
+struct Serving {
+    setup: Setup,
+    network: Option<Network>,
+    input: mpsc::Receiver<Command>,
+    cleanups: mpsc::UnboundedReceiver<Command>,
+    predecessor: residence::Predecessor,
+}
+struct Senders {
+    input: mpsc::Sender<Command>,
+    cleanup: mpsc::UnboundedSender<Command>,
+    handles: residence::Handles,
 }
 enum Command {
     Request {
@@ -227,6 +242,7 @@ struct Shared {
     budget: Semaphore,
     closed: AtomicBool,
     sessions: AtomicU64,
+    _handles: residence::Handles,
 }
 impl Shared {
     async fn request<T>(
@@ -283,6 +299,29 @@ impl Worker {
                 let _ = end.send(());
             })?;
         Ok(Self::Thread { thread, ended })
+    }
+    #[cfg(not(target_family = "wasm"))]
+    fn serving_thread(
+        serving: Serving,
+        claim: residence::Claim,
+        hello: Hello,
+    ) -> std::io::Result<Self> {
+        Self::thread(move || {
+            serve_on_thread(serving, &hello);
+            drop(claim);
+        })
+    }
+    #[cfg(target_family = "wasm")]
+    fn local(serving: Serving, claim: residence::Claim, hello: Hello) -> std::io::Result<Self> {
+        Ok(Self::Task(crate::reactor::spawn_local(
+            "database",
+            async move {
+                if let Err(error) = run(serving, &hello).await {
+                    let _ = hello.send(Err(error));
+                }
+                drop(claim);
+            },
+        )))
     }
     async fn join(self) -> Result<(), Failure> {
         match self {
@@ -373,15 +412,11 @@ impl Database {
         install: Install,
         confirmation: Option<String>,
     ) -> Result<Opened, Failure> {
-        let (setup, network) = Self::setup(open, install, confirmation)?;
-        let (input, receiver) = mpsc::channel(32);
-        let (cleanup, cleanups) = mpsc::unbounded_channel();
+        let (serving, claim, senders) = Self::serving(open, install, confirmation)?;
         let (hello, greeting) = std::sync::mpsc::sync_channel::<Greeting>(1);
-        let hello = Hello::Thread(hello);
-        let worker =
-            Worker::thread(move || serve_on_thread(setup, network, receiver, cleanups, &hello))?;
+        let worker = Worker::serving_thread(serving, claim, Hello::Thread(hello))?;
         match greeting.recv().map_err(|_| "database failed to start")? {
-            Ok(ready) => Ok(Self::opened(ready, input, cleanup, worker)),
+            Ok(ready) => Ok(Self::opened(ready, senders, worker)),
             Err(error) => {
                 worker.release();
                 Err(error)
@@ -492,28 +527,32 @@ impl Database {
         install: Install,
         confirmation: Option<String>,
     ) -> Result<Opened, Failure> {
-        let (setup, network) = Self::setup(open, install, confirmation)?;
-        let (input, receiver) = mpsc::channel(32);
-        let (cleanup, cleanups) = mpsc::unbounded_channel();
-        let (hello, greeting) = oneshot::channel();
-        let hello = Hello::Task(std::sync::Mutex::new(Some(hello)));
         #[cfg(not(target_family = "wasm"))]
-        let worker =
-            Worker::thread(move || serve_on_thread(setup, network, receiver, cleanups, &hello))?;
+        let place = Worker::serving_thread;
         #[cfg(target_family = "wasm")]
-        let worker = {
-            rocky_platform::fs::prepare(&setup.directory.join("rocky.sqlite")).await?;
-            Worker::Task(crate::reactor::spawn_local("database", async move {
-                if let Err(error) = run(setup, network, receiver, cleanups, &hello).await {
-                    let _ = hello.send(Err(error));
-                }
-            }))
-        };
+        let place = Worker::local;
+        Self::launch_in(open, install, confirmation, place).await
+    }
+    async fn launch_in(
+        open: Open<'_>,
+        install: Install,
+        confirmation: Option<String>,
+        place: fn(Serving, residence::Claim, Hello) -> std::io::Result<Worker>,
+    ) -> Result<Opened, Failure> {
+        let (serving, claim, senders) = Self::serving(open, install, confirmation)?;
+        #[cfg(target_family = "wasm")]
+        rocky_platform::fs::prepare(&serving.setup.directory.join("rocky.sqlite")).await?;
+        let (hello, greeting) = oneshot::channel();
+        let worker = place(
+            serving,
+            claim,
+            Hello::Task(std::sync::Mutex::new(Some(hello))),
+        )?;
         match greeting
             .await
             .unwrap_or_else(|_| Err("database failed to start".into()))
         {
-            Ok(ready) => Ok(Self::opened(ready, input, cleanup, worker)),
+            Ok(ready) => Ok(Self::opened(ready, senders, worker)),
             Err(error) => {
                 let _ = worker.join().await;
                 Err(error)
@@ -604,18 +643,39 @@ impl Database {
         };
         Ok((setup, open.network))
     }
-    fn opened(
-        (scope, network, revoked): Ready,
-        input: mpsc::Sender<Command>,
-        cleanup: mpsc::UnboundedSender<Command>,
-        worker: Worker,
-    ) -> Opened {
+    fn serving(
+        open: Open<'_>,
+        install: Install,
+        confirmation: Option<String>,
+    ) -> Result<(Serving, residence::Claim, Senders), Failure> {
+        let (setup, network) = Self::setup(open, install, confirmation)?;
+        let claimed = residence::claim(&setup.directory)?;
+        let (input, receiver) = mpsc::channel(32);
+        let (cleanup, cleanups) = mpsc::unbounded_channel();
+        Ok((
+            Serving {
+                setup,
+                network,
+                input: receiver,
+                cleanups,
+                predecessor: claimed.predecessor,
+            },
+            claimed.claim,
+            Senders {
+                input,
+                cleanup,
+                handles: claimed.handles,
+            },
+        ))
+    }
+    fn opened((scope, network, revoked): Ready, senders: Senders, worker: Worker) -> Opened {
         let shared = Arc::new(Shared {
-            input,
-            cleanup,
+            input: senders.input,
+            cleanup: senders.cleanup,
             budget: Semaphore::new(ACTIVE_CALL_QUOTA),
             closed: AtomicBool::new(false),
             sessions: AtomicU64::new(1),
+            _handles: senders.handles,
         });
         Opened {
             root: None,
@@ -740,17 +800,15 @@ impl Database {
         install: Install,
         ahead: Arc<AtomicU64>,
     ) -> Result<Hosted, Failure> {
-        let (mut setup, network) = Self::setup(open, install, None)?;
+        let (mut serving, claim, senders) = Self::serving(open, install, None)?;
         let (expose, exposed) = std::sync::mpsc::channel();
-        setup.expose = Some(expose);
-        let (input, receiver) = mpsc::channel(32);
-        let (cleanup, cleanups) = mpsc::unbounded_channel();
+        serving.setup.expose = Some(expose);
         let (hello, greeting) = oneshot::channel();
         let hello = Hello::Task(std::sync::Mutex::new(Some(hello)));
         let task = crate::reactor::spawn_local("host", async move {
+            let _claim = claim;
             let local = tokio::task::LocalSet::new();
-            let mut served =
-                std::pin::pin!(local.run_until(run(setup, network, receiver, cleanups, &hello)));
+            let mut served = std::pin::pin!(local.run_until(run(serving, &hello)));
             let result = std::future::poll_fn(|cx| {
                 let seconds = ahead.load(Ordering::Relaxed);
                 if seconds == 0 {
@@ -769,7 +827,7 @@ impl Database {
         let greeting = greeting
             .await
             .unwrap_or_else(|_| Err("database failed to start".into()));
-        let opened = Self::opened(greeting?, input, cleanup, Worker::Task(task));
+        let opened = Self::opened(greeting?, senders, Worker::Task(task));
         let node = exposed
             .try_recv()
             .map_err(|_| "the database exposed no node")?;
@@ -1909,13 +1967,7 @@ async fn revoke_lost_trusted(
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn serve_on_thread(
-    setup: Setup,
-    network: Option<Network>,
-    receiver: mpsc::Receiver<Command>,
-    cleanups: mpsc::UnboundedReceiver<Command>,
-    hello: &Hello,
-) {
+fn serve_on_thread(serving: Serving, hello: &Hello) {
     let result = (|| -> Result<(), Failure> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -1924,34 +1976,30 @@ fn serve_on_thread(
             .enable_all()
             .build()?;
         let local = tokio::task::LocalSet::new();
-        runtime.block_on(local.run_until(run(setup, network, receiver, cleanups, hello)))
+        runtime.block_on(local.run_until(run(serving, hello)))
     })();
     if let Err(error) = result {
         let _ = hello.send(Err(error));
     }
 }
 
-async fn run(
-    setup: Setup,
-    network: Option<Network>,
-    input: mpsc::Receiver<Command>,
-    cleanups: mpsc::UnboundedReceiver<Command>,
-    hello: &Hello,
-) -> Result<(), Failure> {
-    let serving = run_inner(setup, network, input, cleanups, hello);
+async fn run(serving: Serving, hello: &Hello) -> Result<(), Failure> {
+    let serving = run_inner(serving, hello);
     #[cfg(feature = "qualification")]
     let serving = crate::reactor::scope(crate::ReactorMeasurements::default(), serving);
     serving.await
 }
 
-async fn run_inner(
-    mut setup: Setup,
-    network: Option<Network>,
-    mut input: mpsc::Receiver<Command>,
-    mut cleanups: mpsc::UnboundedReceiver<Command>,
-    hello: &Hello,
-) -> Result<(), Failure> {
+async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
+    let Serving {
+        mut setup,
+        network,
+        mut input,
+        mut cleanups,
+        predecessor,
+    } = serving;
     let directory = setup.directory.clone();
+    predecessor.departed(&directory).await;
     if matches!(setup.install, Install::Installed)
         && rocky_platform::fs::exists(directory.join("identity.json"))
     {
@@ -2221,7 +2269,9 @@ async fn run_inner(
     }
     if rocky_platform::fs::exists(directory.join("bootstrap.json")) && network.is_some() {
         let joining = node.clone();
+        let held = directory.clone();
         crate::reactor::spawn_local("bootstrap", async move {
+            pause::at(&held, pause::Point::Bootstrap).await;
             if let Err(error) = joining.initial_sync().await {
                 tracing::debug!(%error, "initial sync failed; its bootstrap intent stays for the next sync or open");
             }
@@ -2433,6 +2483,7 @@ async fn run_inner(
         }
         while tasks.try_join_next().is_some() {}
     }
+    pause::at(&directory, pause::Point::Teardown).await;
     recovering.abort();
     let _ = recovering.await;
     end_users_of_file(&node, &connections, &mut tasks).await;
@@ -2701,6 +2752,53 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(target_family = "wasm"))]
+    const HELD_SCHEMA: &str = r#"{"application":"held","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reopen_after_a_dropped_database_waits_for_its_teardown() -> Result<(), Failure> {
+        let directory = rocky_platform::fs::Scratch::new().await;
+        let path = directory.path().to_path_buf();
+        fn open(directory: &Path) -> Open<'_> {
+            Open {
+                directory,
+                schema: HELD_SCHEMA,
+                secrets: None,
+                identity: None,
+                network: None,
+                coordination: None,
+            }
+        }
+        let created = Database::create(open(&path), None)?;
+        let (tearing_down, finish_teardown) = pause::arm(&path, pause::Point::Teardown);
+        let (succeeding, let_successor_wait) = pause::arm(&path, pause::Point::Succeeding);
+        drop(created);
+        tearing_down
+            .await
+            .map_err(|_| -> Failure { "the dropped database never tore down".into() })?;
+        let reopening = {
+            let path = path.clone();
+            tokio::task::spawn_blocking(move || {
+                Database::open(open(&path)).map(|opened| opened.database)
+            })
+        };
+        tokio::pin!(reopening);
+        let reopened = tokio::select! {
+            reopened = &mut reopening => reopened?,
+            waiting = succeeding => {
+                waiting.map_err(|_| -> Failure { "the reopen stopped waiting".into() })?;
+                let _ = let_successor_wait.send(());
+                let _ = finish_teardown.send(());
+                reopening.await?
+            }
+        };
+        let database = reopened.map_err(|error| -> Failure {
+            format!("a reopen racing the dropped database's teardown failed: {error}").into()
+        })?;
+        database.close().await
+    }
+
     #[cfg(feature = "qualification")]
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
@@ -2793,6 +2891,7 @@ mod tests {
             budget: Semaphore::new(1),
             closed: AtomicBool::new(false),
             sessions: AtomicU64::new(1),
+            _handles: residence::claim(Path::new("unread-connection-reply"))?.handles,
         });
         let connection = Connection {
             shared,

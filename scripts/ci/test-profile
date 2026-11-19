@@ -11,8 +11,6 @@ opt-level = 3
 opt-level = 3
 [profile.test.package.rocky-secure]
 opt-level = 3
-[profile.test.package.rocky-runtime]
-opt-level = 3
 [profile.test.package.rocky-sdk]
 opt-level = 3
 EOF

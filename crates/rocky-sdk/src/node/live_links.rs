@@ -3,14 +3,12 @@ use rocky_secure::network::link::{self, CloseReason, Frame, Message};
 use std::collections::BTreeSet;
 pub(super) mod io;
 mod liveness;
+mod scope_reading;
+#[cfg(test)]
+pub(super) use scope_reading::ScopeReadGate;
+pub(super) use scope_reading::{ScopeReadSite, ScopeReading, ScopeToken};
 
 pub(super) const BUDGET: usize = 32;
-
-#[cfg(test)]
-pub(super) struct ReceiptGate {
-    pub entered: Semaphore,
-    pub resume: Semaphore,
-}
 
 #[derive(Clone)]
 struct ChangeHint {
@@ -32,7 +30,7 @@ struct Entry {
     authority: watch::Receiver<u64>,
     close: watch::Sender<Option<CloseReason>>,
     changed: watch::Sender<Option<ChangeHint>>,
-    frontiers: BTreeMap<ResourceScope, [u8; 32]>,
+    tokens: BTreeMap<ResourceScope, ScopeToken>,
     cursors: BTreeMap<ResourceScope, rocky_secure::ScopeFrontier>,
 }
 pub(super) struct Registry {
@@ -47,7 +45,7 @@ pub(super) struct Registry {
     #[cfg(test)]
     pub(super) push_gate: std::sync::Mutex<Option<Arc<Semaphore>>>,
     #[cfg(test)]
-    pub(super) receipt_gate: std::sync::Mutex<Option<Arc<ReceiptGate>>>,
+    scope_read_gate: std::sync::Mutex<Option<Arc<ScopeReadGate>>>,
     #[cfg(test)]
     pub(super) dropped_pushes: AtomicU64,
 }
@@ -65,7 +63,7 @@ impl Default for Registry {
             #[cfg(test)]
             push_gate: Default::default(),
             #[cfg(test)]
-            receipt_gate: Default::default(),
+            scope_read_gate: Default::default(),
             #[cfg(test)]
             dropped_pushes: AtomicU64::new(0),
         }
@@ -676,19 +674,32 @@ impl Node {
         let id = service.live.next.fetch_add(1, Ordering::Relaxed);
         let close = watch::channel(None).0;
         let changed = watch::channel(None).0;
-        let mut frontiers = BTreeMap::new();
+        let mut tokens = BTreeMap::new();
         let mut cursors = BTreeMap::new();
         for scope in &opened.held {
             let token = match opened.local_states.get(scope) {
-                Some(token) => *token,
-                None => self.link_scope_state(*scope).await?,
+                Some(token) => ScopeToken::from_handshake(*token),
+                None => ScopeToken::read(self, *scope).await?,
             };
-            cursors.insert(*scope, self.replica.frontier(*scope).await?);
-            frontiers.insert(*scope, token);
+            let reading = ScopeReading::racing_commit_stays_dirty(
+                self,
+                &service.live,
+                ScopeReadSite::LinkOpen,
+                *scope,
+                token,
+            )
+            .await?;
+            tokens.insert(*scope, reading.token());
+            cursors.insert(*scope, reading.into_frontier());
         }
-        let initial: Vec<_> = frontiers
+        let peer_tokens: BTreeMap<_, _> = opened
+            .states
             .iter()
-            .filter(|(scope, token)| opened.states.get(scope) != Some(token))
+            .map(|(scope, token)| (*scope, ScopeToken::from_handshake(*token)))
+            .collect();
+        let initial: Vec<_> = tokens
+            .iter()
+            .filter(|(scope, token)| peer_tokens.get(scope) != Some(token))
             .map(|(scope, _)| *scope)
             .take(link::SIGNAL_SCOPES)
             .collect();
@@ -747,7 +758,7 @@ impl Node {
                         authority: authority.clone(),
                         close: close.clone(),
                         changed: changed.clone(),
-                        frontiers,
+                        tokens,
                         cursors,
                     },
                 ) {
@@ -895,23 +906,23 @@ impl Node {
                 (
                     entry.cursor_generation,
                     entry.handle.clone(),
-                    entry.frontiers.clone(),
+                    entry.tokens.clone(),
                     entry.cursors.clone(),
                 )
             })
         else {
             return Ok(());
         };
-        let mut frontiers = old.clone();
+        let mut tokens = old.clone();
         let mut next = cursors.clone();
         let mut scopes = BTreeSet::new();
         let mut control = false;
         let mut changed = Vec::new();
         for scope in cursors.keys() {
-            let token = self.link_scope_state(*scope).await?;
+            let token = ScopeToken::read(self, *scope).await?;
             if old.get(scope) != Some(&token) {
                 changed.push(*scope);
-                frontiers.insert(*scope, token);
+                tokens.insert(*scope, token);
             }
         }
         if !changed.is_empty() {
@@ -961,8 +972,16 @@ impl Node {
                     for scope in failed {
                         let frontier = self.replica.frontier(scope).await?;
                         if next.get(&scope) != Some(&frontier) {
-                            frontiers.insert(scope, self.link_scope_state(scope).await?);
-                            next.insert(scope, frontier);
+                            let reading = ScopeReading::racing_commit_stays_in_repair(
+                                self,
+                                &service.live,
+                                ScopeReadSite::FailedPushRepair,
+                                scope,
+                                frontier,
+                            )
+                            .await?;
+                            tokens.insert(scope, reading.token());
+                            next.insert(scope, reading.into_frontier());
                             scopes.insert(scope);
                         } else if changed.contains(&scope) {
                             scopes.insert(scope);
@@ -982,7 +1001,7 @@ impl Node {
         }) else {
             return Ok::<_, Failure>(());
         };
-        entry.frontiers = frontiers;
+        entry.tokens = tokens;
         entry.cursors = next;
         entry.cursor_generation = entry.cursor_generation.wrapping_add(1);
         if !scopes.is_empty() {
@@ -994,7 +1013,7 @@ impl Node {
             let unsent = scopes.iter().skip(link::SIGNAL_SCOPES);
             for scope in unsent {
                 if let Some(old_token) = old.get(scope) {
-                    entry.frontiers.insert(*scope, *old_token);
+                    entry.tokens.insert(*scope, *old_token);
                 }
             }
             entry.changed.send_replace(Some(ChangeHint {
@@ -1013,20 +1032,15 @@ impl Node {
     ) -> Result<(), Failure> {
         for shared in &receipt.frontiers {
             let scope = shared.scope;
-            let token_before_frontier = self.link_scope_state(scope).await?;
-            #[cfg(test)]
-            let gate = service
-                .live
-                .receipt_gate
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take();
-            #[cfg(test)]
-            if let Some(gate) = gate {
-                gate.entered.add_permits(1);
-                gate.resume.acquire().await?.forget();
-            }
-            let frontier = self.replica.frontier(scope).await?;
+            let token = ScopeToken::read(self, scope).await?;
+            let reading = ScopeReading::racing_commit_stays_dirty(
+                self,
+                &service.live,
+                ScopeReadSite::Receipt,
+                scope,
+                token,
+            )
+            .await?;
             let mut entries = service
                 .live
                 .entries
@@ -1040,14 +1054,11 @@ impl Node {
             };
             acknowledge(cursor, shared);
             entry.cursor_generation = entry.cursor_generation.wrapping_add(1);
-            if *cursor == frontier {
-                entry.frontiers.insert(scope, token_before_frontier);
+            if cursor == reading.frontier() {
+                entry.tokens.insert(scope, reading.token());
             }
         }
         Ok(())
-    }
-    async fn link_scope_state(&self, scope: ResourceScope) -> Result<[u8; 32], Failure> {
-        Ok(link::scope_token(&self.replica, scope).await?)
     }
     pub(in crate::node) async fn signal_token(
         &self,
@@ -1055,7 +1066,7 @@ impl Node {
     ) -> Result<[u8; 32], Failure> {
         let mut state = Vec::new();
         for scope in scopes {
-            state.push((*scope, self.link_scope_state(*scope).await?));
+            state.push((*scope, link::scope_token(&self.replica, *scope).await?));
         }
         self.replica.flush().await?;
         Ok(commitment(

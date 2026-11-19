@@ -12,6 +12,8 @@ mod writer;
 pub use replica::CHUNK_PAGES;
 #[cfg(any(test, feature = "qualification"))]
 pub use replica::CrashPoint;
+#[cfg(any(test, feature = "test-support"))]
+pub use replica::ManualLeaseClock;
 pub use replica::{
     AuditReport, Buffered, COORDINATOR_MISMATCH, COORDINATOR_REQUIRED, CheckpointPage,
     CheckpointState, CheckpointStatement, CheckpointStatus, CiphertextPage, CompactReport,

@@ -875,6 +875,7 @@ async fn an_intent_without_offers_reports_no_progress() -> Result<(), Failure> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn join_progress_only_grows_to_its_total() -> Result<(), Failure> {
+    const STEP: usize = 8 * 1024;
     let root = crate::support::small_directory()?;
     let hub = Arc::new(Hub::default());
     let a = Device::create(
@@ -887,28 +888,64 @@ async fn join_progress_only_grows_to_its_total() -> Result<(), Failure> {
             .await;
     }
     a.seal_and_compact().await;
-    let b = Arc::new(Device::join(
-        &root.path().join("b"),
-        &a.invite().await,
-        Network::Owned(hub.connector("b")),
-    )?);
-    let observer = {
-        let b = b.clone();
-        tokio::spawn(async move {
-            let mut seen = Vec::new();
-            let mut status = snap::ok(b.session.status()).await;
-            while status["data"]["bootstrap_pending"] == true {
-                seen.push(status["data"]["bootstrap"].clone());
-                status = snap::ok(b.session.status_after(snap::text(&(status["token"])))).await;
-            }
-            (seen, status)
-        })
+    let invitation = a.invite().await;
+    hub.hold_cut
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    hub.cut_after(Some(0));
+    let mut written = hub.written();
+    let step = |written: &mut tokio::sync::watch::Receiver<usize>| {
+        let spent = *written.borrow_and_update() + STEP;
+        hub.cut_after(Some(STEP));
+        spent
     };
-    b.sync().await.expect("join sync");
-    let (seen, ready) = observer.await?;
+    let joining = tokio::task::spawn_blocking({
+        let (directory, network) = (root.path().join("b"), hub.connector("b"));
+        move || Device::join(&directory, &invitation, Network::Owned(network))
+    });
+    tokio::pin!(joining);
+    let b = loop {
+        let spent = step(&mut written);
+        tokio::select! {
+            joined = &mut joining => break joined??,
+            held = written.wait_for(|total| *total >= spent) => {
+                held.expect("the hub outlives the join");
+            }
+        }
+    };
+    let stepped = async {
+        let mut seen = Vec::new();
+        let mut status = snap::ok(b.session.status()).await;
+        while status["data"]["bootstrap_pending"] == true {
+            seen.push(status["data"]["bootstrap"].clone());
+            let spent = step(&mut written);
+            let mut watched = status.clone();
+            loop {
+                tokio::select! {
+                    held = written.wait_for(|total| *total >= spent) => {
+                        held.expect("the hub outlives the join");
+                        break;
+                    }
+                    next = snap::ok(b.session.status_after(snap::text(&(watched["token"])))) => {
+                        watched = next;
+                        if watched["data"]["bootstrap_pending"] != true {
+                            break;
+                        }
+                    }
+                }
+            }
+            status = snap::ok(b.session.status()).await;
+        }
+        hub.cut_after(None);
+        (seen, status)
+    };
+    let (synced, (seen, ready)) = tokio::join!(b.sync(), stepped);
+    synced.expect("join sync");
     assert!(ready["data"]["bootstrap"].is_null(), "{ready}");
     let progress: Vec<_> = seen.iter().filter(|progress| !progress.is_null()).collect();
-    assert!(!progress.is_empty(), "{seen:?}");
+    assert!(
+        !progress.is_empty(),
+        "a join held between byte steps is observed mid-import: {seen:?}"
+    );
     let total = progress[0]["rows_total"].clone();
     assert!(total.as_u64().is_some_and(|total| total >= 40), "{total}");
     for pair in progress.windows(2) {

@@ -1,0 +1,8 @@
+#!/bin/sh
+# The rustc wrapper .cargo/config.toml names: sccache, without the target
+# directory variables. sccache keys a compile on every CARGO_* variable, so a
+# target directory per worktree or per check step (scripts/check's target/side,
+# scripts/cranelift's target/cranelift) gave each its own cache, though the
+# target directory changes no compiler output.
+unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR
+exec sccache "$@"

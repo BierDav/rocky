@@ -200,14 +200,14 @@ impl<A: RowApplication> Inner<A> {
                     applied: count(applied)?,
                 });
         }
-        for peer in self.peer_tips.keys() {
+        for peer in self.known_peers.admitted() {
             peers.entry(*peer).or_default();
         }
         Ok(peers
             .into_iter()
             .map(|(node, frontiers)| TipDevice {
                 node,
-                tip: self.peer_tips.get(&node).copied(),
+                tip: self.known_peers.tip(&node),
                 frontiers: frontiers
                     .into_iter()
                     .map(|(scope, logs)| PeerScopeFrontier { scope, logs })

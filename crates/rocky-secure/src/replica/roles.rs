@@ -482,9 +482,9 @@ impl<A: RowApplication> Inner<A> {
             }
             reports.push((encode(&frontier.scope)?, frontier.logs.clone(), reads));
         }
-        self.touch_peer(peer);
-        let first = reports.iter().any(|(_, logs, _)| !logs.is_empty())
-            && self.unrecorded_peer(peer).await?;
+        let recorded = reports.iter().any(|(_, logs, _)| !logs.is_empty());
+        self.known_peers.acknowledged(PeerId::of(peer), recorded);
+        let first = recorded && self.unrecorded_peer(peer).await?;
         transaction!(@keeping_frontier_cache self, |inner| {
             for (scope, logs, reads) in &reports {
                 for log in logs {

@@ -342,7 +342,7 @@ fn bookmark(f: &Fixture, name: &str, from: Option<TipId>, to: Option<TipId>) -> 
         .unwrap(),
     )
 }
-async fn main(f: &Fixture, replica: &Replica) {
+pub(super) async fn main(f: &Fixture, replica: &Replica) {
     let genesis = replica.followed_tip().await;
     replica
         .receive_tip_statements(&[bookmark(f, "main", None, Some(genesis))])
@@ -402,7 +402,7 @@ async fn seal(f: &Fixture, replica: &Replica) -> SignedSeal {
     )
     .unwrap()
 }
-async fn advance(f: &Fixture, replica: &Replica) -> Vec<TipStatement> {
+pub(super) async fn advance(f: &Fixture, replica: &Replica) -> Vec<TipStatement> {
     let signed = seal(f, replica).await;
     let records = vec![
         TipStatement::Seal(signed.clone()),
@@ -1470,7 +1470,7 @@ async fn native_sessions_exchange_original_held_frames_across_followed_tips() {
     a.inner
         .lock(crate::replica::Class::Background)
         .await
-        .peer_tips
+        .known_peers
         .clear();
     assert!(
         a.transfer_page(

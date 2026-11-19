@@ -57,15 +57,20 @@ impl<A: RowApplication> Inner<A> {
             None => Ok(PartitionCustody::default()),
         }
     }
-    pub(super) async fn custody_peers(&self) -> Result<BTreeSet<PeerId>, Error> {
-        let mut peers = BTreeSet::new();
-        for row in rows(&self.conn, "SELECT policy FROM secure_partition_custody").await? {
-            let [SqlValue::Blob(bytes)] = row.as_slice() else {
+    pub(super) async fn load_custody_peers(&mut self) -> Result<(), Error> {
+        for row in rows(
+            &self.conn,
+            "SELECT scope,policy FROM secure_partition_custody",
+        )
+        .await?
+        {
+            let [SqlValue::Blob(scope), SqlValue::Blob(policy)] = row.as_slice() else {
                 return Err(Error::Corrupt("partition custody".into()));
             };
-            peers.extend(decode::<PartitionCustody>(bytes)?.peers);
+            self.known_peers
+                .set_custody(decode(scope)?, decode::<PartitionCustody>(policy)?.peers);
         }
-        Ok(peers)
+        Ok(())
     }
     pub(super) fn judge_custody_metadata(&self, record: &MetadataEscrow) -> Result<(), Error> {
         let (_, kind) = self
@@ -404,6 +409,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await?;
             Ok(())
         })?;
+        inner.known_peers.set_custody(scope, policy.peers);
         drop(flush_guard(inner, &self.inner).await?);
         Ok(())
     }

@@ -1,8 +1,10 @@
 use super::*;
 use rocky_credentials::PeerId;
 
+mod known_peers;
+pub(crate) use known_peers::KnownPeers;
+
 pub const MAX_UNCONFIGURED_PEERS: usize = 256;
-const MAX_PEER_TIPS: usize = 4 * MAX_UNCONFIGURED_PEERS;
 
 impl<A: RowApplication> Inner<A> {
     pub(super) fn admit_chain(
@@ -40,30 +42,13 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    fn record_peer_tip(&mut self, peer: PublicKey, tip: TipId) {
-        self.peer_tips.insert(PeerId::of(peer), tip);
-        if self.peer_tips.len() > MAX_PEER_TIPS
-            && let Some(oldest) = self
-                .peer_tips
-                .keys()
-                .min_by_key(|peer| self.served.1.get(*peer).copied().unwrap_or(0))
-                .copied()
-        {
-            self.peer_tips.remove(&oldest);
-        }
-    }
     pub(crate) fn peer_tip(&self, peer: PublicKey) -> Option<TipId> {
-        self.peer_tips.get(&PeerId::of(peer)).copied().or_else(|| {
+        self.known_peers.tip(&PeerId::of(peer)).or_else(|| {
             self.graphs
                 .values()
                 .all(|graph| graph.seals.is_empty() && graph.openings.is_empty())
                 .then_some(self.workspace.tip)
         })
-    }
-    pub(super) fn touch_peer(&mut self, peer: PublicKey) {
-        self.served.0 += 1;
-        let at = self.served.0;
-        self.served.1.insert(PeerId::of(peer), at);
     }
     pub(super) async fn unrecorded_peer(&self, peer: PublicKey) -> Result<bool, Error> {
         let key = PeerId::of(peer).as_bytes().to_vec();
@@ -76,10 +61,8 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(found.next().await?.is_none())
     }
-    pub(super) async fn bound_peers(&mut self) -> Result<(), Error> {
-        let full = self.custody_peers().await?;
-        let configured: BTreeSet<_> = self.configured.iter().copied().map(PeerId::of).collect();
-        let mut unconfigured = Vec::new();
+    pub(super) async fn bound_peers(&self) -> Result<(), Error> {
+        let mut unkept = Vec::new();
         for record in rows(
             &self.conn,
             "SELECT DISTINCT peer FROM secure_peer_frontiers",
@@ -94,21 +77,22 @@ impl<A: RowApplication> Inner<A> {
                     .try_into()
                     .map_err(|_| Error::Corrupt("peer reference".into()))?,
             );
-            if !configured.contains(&peer) && !full.contains(&peer) {
-                unconfigured.push(peer);
+            if !self.known_peers.kept(&peer) {
+                unkept.push((self.known_peers.last_seen(&peer), peer));
             }
         }
-        if unconfigured.len() <= MAX_UNCONFIGURED_PEERS {
+        let excess = unkept.len().saturating_sub(MAX_UNCONFIGURED_PEERS);
+        if excess == 0 {
             return Ok(());
         }
-        let excess = unconfigured.len() - MAX_UNCONFIGURED_PEERS;
-        unconfigured.sort_by_key(|peer| self.served.1.get(peer).copied().unwrap_or(0));
-        for peer in &unconfigured[..excess] {
-            let key = peer.as_bytes().to_vec();
+        unkept.sort_unstable();
+        for (_, peer) in &unkept[..excess] {
             self.conn
-                .execute("DELETE FROM secure_peer_frontiers WHERE peer=?", [key])
+                .execute(
+                    "DELETE FROM secure_peer_frontiers WHERE peer=?",
+                    [peer.as_bytes().to_vec()],
+                )
                 .await?;
-            self.served.1.remove(peer);
         }
         Ok(())
     }
@@ -133,23 +117,40 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<(), Error> {
         let mut inner = self.inner.lock(crate::replica::Class::Background).await;
         inner.admit_chain(node, chain, now()?)?;
-        inner.record_peer_tip(node, tip);
+        inner.known_peers.admit(PeerId::of(node), tip);
         Ok(())
     }
     pub async fn configure_peers(&self, peers: impl IntoIterator<Item = PublicKey>) {
         self.inner
             .lock(crate::replica::Class::Background)
             .await
-            .configured = peers.into_iter().collect();
+            .known_peers
+            .configure(peers.into_iter().map(PeerId::of).collect());
     }
     #[cfg(test)]
     pub(crate) async fn admitted_tip(&self, peer: PublicKey) -> Option<TipId> {
         self.inner
             .lock(crate::replica::Class::Background)
             .await
-            .peer_tips
-            .get(&PeerId::of(peer))
-            .copied()
+            .known_peers
+            .tip(&PeerId::of(peer))
+    }
+    #[cfg(test)]
+    pub(crate) async fn admitted_peers(&self) -> usize {
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .known_peers
+            .admitted()
+            .count()
+    }
+    #[cfg(test)]
+    pub(crate) async fn remembered_peers(&self) -> usize {
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .known_peers
+            .remembered()
     }
     #[cfg(test)]
     pub(crate) async fn recorded_peers(&self) -> usize {

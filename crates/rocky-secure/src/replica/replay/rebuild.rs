@@ -240,8 +240,11 @@ impl<A: RowApplication> Inner<A> {
                     .execute("DELETE FROM secure_replayed_rederive WHERE scope=?", [*id])
                     .await?;
             }
-            self.replay_from_frames(time).await?;
-            self.replayed_violation_any().await
+            Ok(self
+                .replay_from_frames(time)
+                .await?
+                .err()
+                .map(|BrokenReference(violation)| violation))
         }
         .await;
         let undo = async || -> Result<(), Error> {
@@ -358,11 +361,11 @@ impl<A: RowApplication> Inner<A> {
         bytes.extend_from_slice(&self.workspace.tip.0);
         Ok(rocky_core::commitment("rocky.rederive.inputs.v1", &bytes).to_vec())
     }
-    async fn replayed_violation_any(&self) -> Result<Option<String>, Error> {
+    fn replayed_tables(&self) -> Vec<&rocky_core::LogicalTable> {
         let Some(typed) = self.workspace.typed.as_ref() else {
-            return Ok(None);
+            return Vec::new();
         };
-        let replayed: Vec<_> = typed
+        typed
             .rows
             .schema()
             .tables
@@ -370,8 +373,113 @@ impl<A: RowApplication> Inner<A> {
             .filter(|table| {
                 table.class == TableClass::Replayed && typed.by_name(&table.sql_name).is_some()
             })
-            .collect();
-        self.orphan_in(&replayed).await
+            .collect()
+    }
+    async fn broken_reference(
+        &self,
+        touching: Option<&str>,
+    ) -> Result<Option<BrokenReference>, Error> {
+        let Some(typed) = self.workspace.typed.as_ref() else {
+            return Ok(None);
+        };
+        let mut settled_scopes = BTreeMap::new();
+        for child in self.replayed_tables() {
+            if child.foreign_keys.is_empty() {
+                continue;
+            }
+            let projected = typed
+                .by_name(&child.sql_name)
+                .ok_or_else(|| Error::Corrupt("a replayed table is not projected".into()))?;
+            let sql = match child.partition_by.is_empty() {
+                true => "SELECT parent FROM pragma_foreign_key_check(?)".to_string(),
+                false => format!(
+                    "SELECT k.parent,{} FROM pragma_foreign_key_check(?1) k JOIN {} c ON c.rowid=k.rowid",
+                    child
+                        .columns
+                        .iter()
+                        .map(|column| format!("c.{}", typed::quoted(&column.sql_name)))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    typed::quoted(&child.sql_name)
+                ),
+            };
+            for record in
+                collect_rows(self.conn.query(sql, [child.sql_name.clone()]).await?).await?
+            {
+                let [SqlValue::Text(parent), values @ ..] = record.as_slice() else {
+                    return Err(Error::Corrupt("foreign key check".into()));
+                };
+                if touching.is_some_and(|table| {
+                    !table.eq_ignore_ascii_case(&child.sql_name)
+                        && !table.eq_ignore_ascii_case(parent)
+                }) {
+                    continue;
+                }
+                let Some(scope) = self.parent_scope(projected, parent, values)? else {
+                    continue;
+                };
+                let settled = match settled_scopes.get(&scope) {
+                    Some(settled) => *settled,
+                    None => {
+                        let settled = self.holds(scope).await?
+                            && self.readable_blockers(scope).await?.is_empty();
+                        settled_scopes.insert(scope, settled);
+                        settled
+                    }
+                };
+                if settled {
+                    return Ok(Some(BrokenReference(missing_parent(
+                        &child.sql_name,
+                        parent,
+                    ))));
+                }
+            }
+        }
+        Ok(None)
+    }
+    fn parent_scope(
+        &self,
+        child: &typed::Projected,
+        parent: &str,
+        values: &[SqlValue],
+    ) -> Result<Option<ResourceScope>, Error> {
+        let Some(typed) = self.workspace.typed.as_ref() else {
+            return Ok(None);
+        };
+        let Some(parent) = typed.by_name(parent) else {
+            return Ok(None);
+        };
+        if !typed.partitioned(parent) {
+            return Ok(Some(parent.scope));
+        }
+        Ok(typed
+            .registered_row_scope(child, values, &self.partitions)?
+            .and_then(|row| self.group_member(row, parent.table.id)))
+    }
+    pub(in crate::replica) async fn mark_rederive_if_orphaned(
+        &mut self,
+        scope: ResourceScope,
+        id: i64,
+    ) -> Result<(), Error> {
+        let Some(table) = self
+            .workspace
+            .typed
+            .as_ref()
+            .and_then(|typed| typed.by_scope(scope))
+            .map(|projected| projected.table.sql_name.clone())
+        else {
+            return Ok(());
+        };
+        if self.broken_reference(Some(&table)).await?.is_some() {
+            self.conn
+                .execute(
+                    "INSERT INTO secure_replayed_rederive VALUES(?) ON CONFLICT DO NOTHING",
+                    [id],
+                )
+                .await?;
+            self.rederive_marked = true;
+        }
+        Ok(())
     }
     pub(in crate::replica) async fn prune_shadowed_outcomes(
         &self,
@@ -390,11 +498,23 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
-    pub(in crate::replica) async fn replay_from_frames(&self, time: u64) -> Result<(), Error> {
+    pub(in crate::replica) async fn replay_from_frames(
+        &self,
+        time: u64,
+    ) -> Result<Result<(), BrokenReference>, Error> {
         self.replay_from(time, None).await
     }
 
     pub(in crate::replica) async fn replay_from(
+        &self,
+        time: u64,
+        kept: Option<&history::Rewind>,
+    ) -> Result<Result<(), BrokenReference>, Error> {
+        self.replay_unchecked(time, kept).await?;
+        Ok(self.broken_reference(None).await?.map_or(Ok(()), Err))
+    }
+
+    async fn replay_unchecked(
         &self,
         time: u64,
         kept: Option<&history::Rewind>,

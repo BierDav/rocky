@@ -51,7 +51,11 @@ async fn follow(
     assert!(replica.pending_schema().await.unwrap().is_none());
 }
 
-fn open_dev(lineage: &Lineage, seal: Commitment, version: u32) -> Vec<TipStatement> {
+pub(in crate::tests) fn open_dev(
+    lineage: &Lineage,
+    seal: Commitment,
+    version: u32,
+) -> Vec<TipStatement> {
     let opening = SignedTipOpening::sign(
         TipOpeningStatement {
             format: TIP_OPENING_FORMAT,

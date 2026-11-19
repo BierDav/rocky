@@ -13,12 +13,11 @@ pub(super) fn registered_scope(
     domain: rocky_core::Scope,
     table: Commitment,
     tuple: &PartitionTuple,
-) -> Result<ResourceScope, Error> {
+) -> Option<ResourceScope> {
     partitions
         .iter()
         .find(|(scope, known)| scope.domain == domain && scope.table == table && *known == tuple)
         .map(|(scope, _)| *scope)
-        .ok_or_else(|| denied(UNREGISTERED_PARTITION))
 }
 
 pub fn created_name(naming: &[u8; 32], address: &Commitment) -> PartitionName {
@@ -26,6 +25,19 @@ pub fn created_name(naming: &[u8; 32], address: &Commitment) -> PartitionName {
 }
 
 impl<A: RowApplication> Inner<A> {
+    pub(super) fn group_member(
+        &self,
+        member: ResourceScope,
+        table: Commitment,
+    ) -> Option<ResourceScope> {
+        let name = self.partition_names.get(&member)?;
+        self.partition_names
+            .iter()
+            .find(|(scope, known)| {
+                scope.domain == member.domain && scope.table == table && *known == name
+            })
+            .map(|(scope, _)| *scope)
+    }
     pub(super) fn resolve_chain_at(
         &self,
         chain: &CredentialChain,

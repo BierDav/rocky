@@ -77,6 +77,7 @@ mod recovery;
 mod removal;
 pub(crate) mod replay;
 pub use removal::{local_row_counts, local_table_digests};
+use replay::Rebuilding;
 pub use replay::outcomes::OutcomeDivergence;
 mod reset_fence;
 pub use reset_fence::ResetEndsSigner;

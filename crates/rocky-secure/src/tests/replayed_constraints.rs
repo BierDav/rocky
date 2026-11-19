@@ -12,6 +12,7 @@ use std::path::Path;
 mod clock;
 #[cfg(not(target_family = "wasm"))]
 mod convergence;
+mod orphans;
 mod restrictions;
 
 fn definition() -> serde_json::Value {
@@ -57,6 +58,79 @@ fn definition() -> serde_json::Value {
              "select_sql": "SELECT o.id FROM orders o WHERE o.total <> (SELECT COALESCE(SUM(l.amount), 0) FROM lines l WHERE l.parent = o.id)"}
         ]
     })
+}
+
+fn replayed(name: &str, columns: serde_json::Value, rest: serde_json::Value) -> serde_json::Value {
+    let mut table = serde_json::json!({
+        "name": name, "class": "replayed", "columns": columns, "primary_key": ["id"],
+    });
+    table
+        .as_object_mut()
+        .unwrap()
+        .extend(rest.as_object().unwrap().clone());
+    table
+}
+
+fn graph() -> Constrained {
+    let tenant = serde_json::json!({"name": "tenant", "type": "integer", "not_null": true});
+    let partitioned = |extra: serde_json::Value| {
+        let mut rest = serde_json::json!({
+            "primary_key": ["tenant", "id"], "partition_by": ["tenant"], "partition_group": "tenants",
+        });
+        rest.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        rest
+    };
+    let definition = serde_json::json!({
+        "format": 6,
+        "application": "replayed-graph",
+        "tables": [
+            replayed("teams", serde_json::json!([tenant, {"name": "name", "type": "text", "not_null": true}]), partitioned(serde_json::json!({}))),
+            replayed(
+                "people",
+                serde_json::json!([tenant, {"name": "nickname", "type": "text", "not_null": true}]),
+                partitioned(serde_json::json!({"indexes": [
+                    {"name": "unique_nickname", "unique": true,
+                     "columns": [{"name": "tenant", "descending": false}],
+                     "expressions": ["lower(nickname)"]}
+                ]})),
+            ),
+            replayed("notes", serde_json::json!([tenant, {"name": "message", "type": "text", "not_null": true}]), partitioned(serde_json::json!({}))),
+            replayed(
+                "memberships",
+                serde_json::json!([
+                    tenant,
+                    {"name": "team", "type": "blob", "not_null": true},
+                    {"name": "person", "type": "blob", "not_null": true},
+                    {"name": "role", "type": "text", "not_null": true},
+                    {"name": "active", "type": "integer", "not_null": true},
+                    {"name": "seats", "type": "integer", "not_null": true}
+                ]),
+                partitioned(serde_json::json!({
+                    "checks": [
+                        "role IN ('owner', 'member')",
+                        "active IN (0, 1)",
+                        "seats BETWEEN 1 AND 10",
+                        "CASE WHEN role = 'owner' THEN active = 1 AND seats <= 2 ELSE 1 END"
+                    ],
+                    "indexes": [{"name": "one_membership", "unique": true, "columns": [
+                        {"name": "tenant", "descending": false},
+                        {"name": "team", "descending": false},
+                        {"name": "person", "descending": false}
+                    ]}, {"name": "one_active_owner", "unique": true, "columns": [
+                        {"name": "tenant", "descending": false},
+                        {"name": "team", "descending": false}
+                    ], "where": "role = 'owner' AND active = 1"}],
+                    "foreign_keys": [
+                        {"columns": ["tenant", "team"], "table": "teams", "on_delete": "cascade", "deferred": true},
+                        {"columns": ["tenant", "person"], "table": "people", "on_delete": "cascade", "deferred": true}
+                    ]
+                })),
+            ),
+        ],
+    });
+    Constrained::build(definition, Some(1), |_| {})
 }
 
 struct Constrained {

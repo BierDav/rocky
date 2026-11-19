@@ -28,7 +28,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("projection rebuild has unresolved inputs"));
         }
         transaction!(inner, |inner| {
-            inner.rebuild_rows(scope).await?;
+            inner
+                .rebuild_rows(scope)
+                .await?
+                .map_err(|broken| broken.refuses(Rebuilding::Projection))?;
             #[cfg(test)]
             if inner.fail_before_commit > 0 {
                 inner.fail_before_commit -= 1;
@@ -41,9 +44,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
-    pub(super) async fn rebuild_rows(&self, scope: ResourceScope) -> Result<(), Error> {
+    pub(super) async fn rebuild_rows(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<Result<(), replay::BrokenReference>, Error> {
         if self.replayed_scope(scope) {
-            self.replay_from_frames(now()?).await?;
+            if let Err(broken) = self.replay_from_frames(now()?).await? {
+                return Ok(Err(broken));
+            }
         } else {
             self.restore_rows(scope, i64::MAX).await?;
             self.reproject(scope).await?;
@@ -54,7 +62,7 @@ impl<A: RowApplication> Inner<A> {
                 (),
             )
             .await?;
-        Ok(())
+        Ok(Ok(()))
     }
     pub(super) async fn restore_rows(
         &self,

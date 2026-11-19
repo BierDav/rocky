@@ -378,13 +378,33 @@ pub(super) fn column_carried(
                 || path.fields.contains(&schema.field_id(table, rebuilt))
         })
 }
+fn missing_parent(child: &str, parent: &str) -> String {
+    format!("a row of {child} references a missing row of {parent}")
+}
 #[derive(Clone, Debug)]
 pub(super) struct BrokenReference(pub(super) String);
-impl From<BrokenReference> for Error {
-    fn from(BrokenReference(violation): BrokenReference) -> Self {
-        Error::Incompatible(format!(
-            "the projection rebuild would keep rows that break a foreign key: {violation}"
-        ))
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Rebuilding {
+    SchemaProjection,
+    Projection,
+    TipSwitch,
+    LostSeal,
+    Rebootstrap,
+    Withdrawal,
+    FullRebuild,
+}
+impl BrokenReference {
+    pub(super) fn refuses(self, rebuilding: Rebuilding) -> Error {
+        let refused = match rebuilding {
+            Rebuilding::SchemaProjection => "the projection rebuild would keep rows",
+            Rebuilding::Projection => "rebuilding the projection would replay rows",
+            Rebuilding::TipSwitch => "switching tips would replay rows",
+            Rebuilding::LostSeal => "reopening a lost finalized seal would replay rows",
+            Rebuilding::Rebootstrap => "the rebootstrap would replay rows",
+            Rebuilding::Withdrawal => "withdrawing the schema switch would replay rows",
+            Rebuilding::FullRebuild => "the full rebuild would replay rows",
+        };
+        Error::Incompatible(format!("{refused} that break a foreign key: {}", self.0))
     }
 }
 struct SetAside<'a> {
@@ -636,42 +656,39 @@ impl<A: RowApplication> Inner<A> {
                     .ok_or_else(corrupt)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        self.conn
-            .execute("PRAGMA defer_foreign_keys=ON", ())
-            .await?;
-        for (table, undo) in tables.iter().zip(undo) {
-            self.touch(&table.name);
-            if undo.before.is_none() {
+        self.deferring_foreign_keys(async || {
+            for (table, undo) in tables.iter().zip(undo) {
+                self.touch(&table.name);
+                if undo.before.is_none() {
+                    self.conn
+                        .execute(&table.delete_by_key(), bindings(undo.key.clone()))
+                        .await?;
+                }
+            }
+            let mut collided = Vec::new();
+            for (table, undo) in tables.iter().zip(undo) {
+                let Some(before) = &undo.before else {
+                    continue;
+                };
+                match self.restore_in_place(table, &undo.key, before).await {
+                    Ok(_) => {}
+                    Err(error) if error.is_constraint() => collided.push((table, undo, before)),
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            for (table, undo, _) in &collided {
                 self.conn
                     .execute(&table.delete_by_key(), bindings(undo.key.clone()))
                     .await?;
             }
-        }
-        let mut collided = Vec::new();
-        for (table, undo) in tables.iter().zip(undo) {
-            let Some(before) = &undo.before else {
-                continue;
-            };
-            match self.restore_in_place(table, &undo.key, before).await {
-                Ok(_) => {}
-                Err(error) if error.is_constraint() => collided.push((table, undo, before)),
-                Err(error) => return Err(error.into()),
+            for (table, _, before) in &collided {
+                self.conn
+                    .execute(&table.insert_image(), bindings(table.stored(before)))
+                    .await?;
             }
-        }
-        for (table, undo, _) in &collided {
-            self.conn
-                .execute(&table.delete_by_key(), bindings(undo.key.clone()))
-                .await?;
-        }
-        for (table, _, before) in &collided {
-            self.conn
-                .execute(&table.insert_image(), bindings(table.stored(before)))
-                .await?;
-        }
-        self.conn
-            .execute("PRAGMA defer_foreign_keys=OFF", ())
-            .await?;
-        Ok(())
+            Ok(())
+        })
+        .await
     }
     async fn restore_in_place(
         &self,
@@ -785,10 +802,18 @@ impl<A: RowApplication> Inner<A> {
         for (_, index) in parent_keys {
             self.conn.execute(index.create_sql.clone(), ()).await?;
         }
-        self.conn
-            .execute("PRAGMA defer_foreign_keys=ON", ())
-            .await?;
-        for copy in &copies {
+        self.deferring_foreign_keys(async || {
+            self.refill_rebuilt(tables, &copies, other_indexes).await
+        })
+        .await
+    }
+    async fn refill_rebuilt(
+        &self,
+        tables: &[&rocky_core::LogicalTable],
+        copies: &[SetAside<'_>],
+        other_indexes: Vec<(&rocky_core::LogicalTable, &rocky_core::LogicalIndex)>,
+    ) -> Result<Result<(), BrokenReference>, Error> {
+        for copy in copies {
             if !copy.copied.is_empty() {
                 let (columns, values): (Vec<_>, Vec<_>) = copy.copied.iter().cloned().unzip();
                 let name = &copy.rebuilt.sql_name;
@@ -834,15 +859,32 @@ impl<A: RowApplication> Inner<A> {
         for (_, index) in other_indexes {
             self.conn.execute(index.create_sql.clone(), ()).await?;
         }
-        if let Some(violation) = self.orphan_in(tables).await? {
-            return Ok(Err(BrokenReference(violation)));
+        Ok(match self.orphan_in(tables).await? {
+            Some(violation) => Err(BrokenReference(violation)),
+            None => Ok(()),
+        })
+    }
+    pub(super) async fn deferring_foreign_keys<T>(
+        &self,
+        work: impl AsyncFnOnce() -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let deferring = rows(&self.conn, "PRAGMA defer_foreign_keys").await?;
+        if matches!(
+            deferring.first().map(Vec::as_slice),
+            Some([SqlValue::Integer(1)])
+        ) {
+            return work().await;
         }
         self.conn
-            .execute("PRAGMA defer_foreign_keys=OFF", ())
+            .execute("PRAGMA defer_foreign_keys=ON", ())
             .await?;
-        Ok(Ok(()))
+        let result = work().await;
+        let enforced = self.conn.execute("PRAGMA defer_foreign_keys=OFF", ()).await;
+        let value = result?;
+        enforced?;
+        Ok(value)
     }
-    pub(super) async fn orphan_in(
+    async fn orphan_in(
         &self,
         tables: &[&rocky_core::LogicalTable],
     ) -> Result<Option<String>, Error> {
@@ -859,10 +901,7 @@ impl<A: RowApplication> Inner<A> {
             .first()
             .map(Vec::as_slice)
             {
-                return Ok(Some(format!(
-                    "a row of {} references a missing row of {parent}",
-                    table.sql_name
-                )));
+                return Ok(Some(missing_parent(&table.sql_name, parent)));
             }
         }
         Ok(None)
@@ -1244,6 +1283,32 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
 
+    async fn replay_intents(
+        &self,
+        intents: &[Replaying<'_>],
+        deferred_all: bool,
+    ) -> Result<(Vec<Replayed>, Option<Dropped>), Error> {
+        let mut replayed = Vec::with_capacity(intents.len());
+        for (frame, intent, grants, _) in intents {
+            match self.replay_intent(frame, intent, grants)? {
+                Ok(changed) => replayed.push(changed),
+                Err(reason) => return Ok((replayed, Some(reason))),
+            }
+        }
+        let mut written = Vec::new();
+        for row in replayed.iter().flat_map(|replayed| &replayed.written) {
+            note(&mut written, row.clone());
+        }
+        let dropped = self
+            .replayed_violation(&written, deferred_all)
+            .await?
+            .map(|violated| Dropped {
+                reason: DropReason::Constraint,
+                violated: Some(violated),
+            });
+        Ok((replayed, dropped))
+    }
+
     async fn replay_transaction(
         &self,
         (transaction, members): (Commitment, u16),
@@ -1276,40 +1341,13 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         self.conn.execute("SAVEPOINT intents", ()).await?;
-        let several = intents.len() > 1;
-        if several {
-            self.conn
-                .execute("PRAGMA defer_foreign_keys=ON", ())
-                .await?;
-        }
-        let mut replayed = Vec::with_capacity(intents.len());
-        let mut dropped = None;
-        for (frame, intent, grants, _) in intents {
-            match self.replay_intent(frame, intent, grants)? {
-                Ok(changed) => replayed.push(changed),
-                Err(reason) => {
-                    dropped = Some(reason);
-                    break;
-                }
+        let (mut replayed, dropped) = match intents.len() > 1 {
+            true => {
+                self.deferring_foreign_keys(async || self.replay_intents(intents, true).await)
+                    .await?
             }
-        }
-        if dropped.is_none() {
-            let mut written = Vec::new();
-            for row in replayed.iter().flat_map(|replayed| &replayed.written) {
-                note(&mut written, row.clone());
-            }
-            if let Some(violated) = self.replayed_violation(&written, several).await? {
-                dropped = Some(Dropped {
-                    reason: DropReason::Constraint,
-                    violated: Some(violated),
-                });
-            }
-        }
-        if several {
-            self.conn
-                .execute("PRAGMA defer_foreign_keys=OFF", ())
-                .await?;
-        }
+            false => self.replay_intents(intents, false).await?,
+        };
         if dropped.is_some() {
             self.conn.execute("ROLLBACK TO intents", ()).await?;
             replayed.clear();
@@ -1998,4 +2036,63 @@ pub(super) fn replayed_change(
     };
     let image = anchor.clone();
     Ok(change.right().is_some().then_some((change, image)))
+}
+
+#[cfg(test)]
+mod deferral_tests {
+    use super::*;
+    use crate::tests::{Fixture, revocations};
+    use rocky_platform::fs::Scratch;
+
+    async fn deferring<A: RowApplication>(inner: &Inner<A>) -> bool {
+        matches!(
+            rows(&inner.conn, "PRAGMA defer_foreign_keys")
+                .await
+                .unwrap()
+                .first()
+                .map(Vec::as_slice),
+            Some([SqlValue::Integer(1)])
+        )
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_nested_deferral_keeps_the_outer_region_deferred_and_every_exit_enforces_keys_again()
+    {
+        let f = Fixture::new();
+        let dir = Scratch::new().await;
+        let replica = revocations::open(&f, &dir, "deferral.db", &PrivateKey::new()).await;
+        let inner = replica.inner.lock(Class::Background).await;
+        for sql in [
+            "CREATE TEMP TABLE deferral_parent(id INTEGER PRIMARY KEY)",
+            "CREATE TEMP TABLE deferral_child(parent INTEGER REFERENCES deferral_parent(id))",
+            "BEGIN IMMEDIATE",
+        ] {
+            inner.conn.execute(sql, ()).await.unwrap();
+        }
+        inner
+            .deferring_foreign_keys(async || {
+                inner.deferring_foreign_keys(async || Ok(())).await?;
+                inner
+                    .conn
+                    .execute("INSERT INTO deferral_child VALUES(1)", ())
+                    .await?;
+                inner
+                    .conn
+                    .execute("INSERT INTO deferral_parent VALUES(1)", ())
+                    .await?;
+                Ok(())
+            })
+            .await
+            .expect("a child written before its parent inside the outer region");
+        assert!(!deferring(&inner).await);
+        let failed: Result<(), Error> = inner
+            .deferring_foreign_keys(async || Err(Error::Corrupt("the work failed".into())))
+            .await;
+        assert!(
+            matches!(&failed, Err(Error::Corrupt(reason)) if reason == "the work failed"),
+            "{failed:?}"
+        );
+        assert!(!deferring(&inner).await);
+        inner.conn.execute("ROLLBACK", ()).await.unwrap();
+    }
 }

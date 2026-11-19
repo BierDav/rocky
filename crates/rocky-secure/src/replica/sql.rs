@@ -301,7 +301,7 @@ impl<A: RowApplication> SecureSql<A> {
                 table.table.id,
                 tuple,
             )
-            .map_err(|_| denied("identity allocation requires a writable table"))?,
+            .ok_or_else(|| denied("identity allocation requires a writable table"))?,
             None => table.scope,
         };
         if !self.session.status.writable.contains(&scope) {

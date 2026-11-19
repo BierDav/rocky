@@ -391,7 +391,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("invalid partition custody policy"));
         }
         inner.graph_for(scope.domain)?;
-        transaction!(inner, |inner| {
+        let previous = inner.known_peers.custody(&scope);
+        inner
+            .known_peers
+            .set_custody(scope, previous.union(&policy.peers).copied().collect());
+        let committed = transaction!(inner, |inner| {
             inner.conn.execute("INSERT INTO secure_partition_custody VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET policy=excluded.policy", [encode(&scope)?, encode(&policy)?]).await?;
             inner
                 .conn
@@ -408,8 +412,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 )
                 .await?;
             Ok(())
-        })?;
-        inner.known_peers.set_custody(scope, policy.peers);
+        });
+        inner.known_peers.set_custody(
+            scope,
+            match committed {
+                Ok(()) => policy.peers,
+                Err(_) => previous,
+            },
+        );
+        committed?;
         drop(flush_guard(inner, &self.inner).await?);
         Ok(())
     }

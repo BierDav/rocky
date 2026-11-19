@@ -5,6 +5,7 @@ mod known_peers;
 pub(crate) use known_peers::KnownPeers;
 
 pub const MAX_UNCONFIGURED_PEERS: usize = 256;
+pub(crate) const MAX_REMEMBERED_PEERS: usize = 4 * MAX_UNCONFIGURED_PEERS;
 
 impl<A: RowApplication> Inner<A> {
     pub(super) fn admit_chain(

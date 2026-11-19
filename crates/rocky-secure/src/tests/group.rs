@@ -1074,6 +1074,49 @@ async fn a_passive_checkpoint_the_runtime_never_runs_still_lets_the_replica_clos
     assert_eq!(passive.completed(), 0);
 }
 
+#[cfg(not(target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_wal_over_its_limit_truncates_after_a_running_passive_checkpoint() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let path = dir.path().join("passive-truncate.db");
+    let held = hold_passive_checkpoint(
+        &f,
+        &path,
+        &PrivateKey::new(),
+        crate::replica::Hold::Checkpointing,
+    )
+    .await;
+    let mut inner = held
+        .replica
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await;
+    inner.wal_limits = (0, 0);
+    let before = inner.checkpoints;
+    {
+        let truncation = inner.checkpoint_if_due();
+        tokio::pin!(truncation);
+        std::future::poll_fn(|context| {
+            assert!(
+                truncation.as_mut().poll(context).is_pending(),
+                "a truncation over the limit waits for the passive checkpoint instead of giving up busy"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        held.resume.send(()).unwrap();
+        truncation.await;
+    }
+    assert_eq!(held.passive.completed(), held.before + 1);
+    assert_eq!(inner.checkpoints, before + 1);
+    assert_eq!(
+        rocky_platform::fs::len(dir.path().join("passive-truncate.db-wal")).unwrap(),
+        0,
+        "the WAL is truncated once the passive checkpoint ends"
+    );
+}
+
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn a_truncating_checkpoint_waits_for_the_replica_writer() {
     let f = Fixture::new();

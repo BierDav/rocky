@@ -446,7 +446,7 @@ pub(super) struct Inner<A> {
     pub(super) commit: u64,
     pub(super) flusher: Arc<Flusher>,
     changes: u64,
-    wal_limits: (u64, u64),
+    pub(super) wal_limits: (u64, u64),
     pub(super) limits: RetentionLimits,
     maintenance_error: Option<String>,
     maintenance: maintenance::Pass,

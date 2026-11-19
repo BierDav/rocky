@@ -13,6 +13,10 @@ Integration tests run in bounded batches; isolated tests and e2e use nextest.
 Timing is diagnostic only;
 assertion failures and hang timeouts fail the run.
 
+A libtest test that fails reruns alone, up to ROCKY_TEST_RETRIES times (default
+1, 0 for none); nextest tiers get the same count as NEXTEST_RETRIES. A test that
+passes on a rerun is reported as flaky and does not fail the run.
+
 Test processes keep their storage (TMPDIR) on a RAM-backed volume
 (scripts/test-volume), or in ROCKY_TEST_TMPDIR when the caller made one, so
 the flushes of the real durability path do not queue on the host's disk.
@@ -45,6 +49,10 @@ SOLO = 5.0
 VOLUME = ROOT / "scripts" / "test-volume"
 # The environment test processes get on top of this one's.
 TEST_ENV = {}
+# Reruns, each alone, of a libtest test that failed.
+RETRIES = int(os.environ.get("ROCKY_TEST_RETRIES", "1"))
+# Tests that failed and then passed alone, as "binary-id name".
+FLAKY = []
 
 
 def test_storage():
@@ -204,6 +212,33 @@ def judge(source, suite, names, run):
     return timed, failed
 
 
+def rerun_failures(source, suite, names, judged):
+    """Reruns each test of `names` that did not pass, alone, up to RETRIES
+    times. A test that passes is recorded in FLAKY and its failure dropped;
+    the binary's own failure is dropped once none of its tests still fail."""
+    timed, failed = judged
+    passed = {name for _, _, name, _ in timed}
+    again = [name for name in names if name not in passed]
+    if not failed or not again or RETRIES <= 0:
+        return timed, failed
+    recovered = []
+    for name in again:
+        for _ in range(RETRIES):
+            completed, _ = judge(source, suite, [name], libtest(suite, [name], threads=1))
+            if completed:
+                timed = timed + completed
+                recovered.append(name)
+                break
+    if not recovered:
+        return timed, failed
+    binary = suite["binary-id"]
+    FLAKY.extend(f"{binary} {name}" for name in recovered)
+    if len(recovered) == len(again):
+        return timed, []
+    gone = tuple(f"{binary} {name}: " for name in recovered)
+    return timed, [problem for problem in failed if not problem.startswith(gone)]
+
+
 def show_output(suite, name, event, stdout):
     """Prints a failed test's captured output under its name; a test that
     returns an error prints only `Error: ...`, with no panic line to name it."""
@@ -221,8 +256,8 @@ def run_unit(source, tests):
     for suite, names in by_binary.values():
         start = time.monotonic()
         run = libtest(suite, names)
+        completed, problems = rerun_failures(source, suite, names, judge(source, suite, names, run))
         wall += time.monotonic() - start
-        completed, problems = judge(source, suite, names, run)
         timed.extend(completed)
         failed.extend(problems)
     return timed, failed, wall
@@ -267,7 +302,8 @@ def run_batches(source, tests, durations=None):
     groups = sorted(batches(tests, durations=durations), key=lambda group: -predicted(group))
     def run(group):
         suite, names = group
-        return judge(source, suite, names, libtest(suite, names, threads=min(4, CPUS)))
+        run = libtest(suite, names, threads=min(4, CPUS))
+        return rerun_failures(source, suite, names, judge(source, suite, names, run))
     timed, failed = [], []
     with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as pool:
         for completed, problems in pool.map(run, groups):
@@ -343,6 +379,7 @@ def main():
     # Test threads poll the unoptimized workspace crates' deep futures; Cargo's
     # [env] sets the same for `cargo test` and nextest.
     os.environ.setdefault("RUST_MIN_STACK", str(16 << 20))
+    os.environ.setdefault("NEXTEST_RETRIES", str(max(RETRIES, 0)))
     config = Config()
     builds = args.build or ([] if args.archive else ["--workspace"])
     sources = [Source(build=b, cranelift=args.cranelift) for b in builds]
@@ -379,7 +416,17 @@ def main():
     failed = False
     for tier, state in states.items():
         failed = finish_tier(config, tier, state) or failed
+    report_flaky()
     sys.exit(1 if failed else 0)
+
+
+def report_flaky():
+    """Names each test that failed and then passed alone; in GitHub Actions
+    also as a warning annotation, so a flaky test is seen without failing."""
+    for test in FLAKY:
+        print(f"test-tiers: flaky: {test} failed, then passed alone", file=sys.stderr)
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            print(f"::warning title=Flaky test::{test} failed, then passed alone")
 
 
 def finish_tier(config, tier, state):

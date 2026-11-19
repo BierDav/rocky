@@ -10,6 +10,12 @@
 #
 # Without ROCKY_BROWSER, Firefox when the host has it (as CI does), else
 # Playwright's Chromium. Both run OPFS and the dedicated Worker alike.
+#
+# The runner kills a chromedriver it starts before that deletes its profile
+# (an org.chromium.Chromium.scoped_dir.* of up to 150 MB in the user temp
+# dir), so this script starts chromedriver itself, hands the runner its URL
+# and on every exit shuts it down through /shutdown, which ends any session
+# left open and deletes its profile.
 set -eu
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -34,6 +40,25 @@ playwright_chrome() {
         [ -x "$shell" ] && found=$shell
     done
     echo "${found:-}"
+}
+
+driver=
+driver_url=
+stop_chromedriver() {
+    status=$?
+    trap '' INT TERM HUP
+    if [ -n "$driver_url" ]; then
+        curl --silent --max-time 30 --output /dev/null "$driver_url/shutdown" || {
+            echo "wasm-runner: chromedriver did not shut down, so its profile may remain:" >&2
+            cat "$driver_log" >&2
+            kill -KILL "$driver" 2>/dev/null || :
+        }
+    elif [ -n "$driver" ]; then
+        kill -KILL "$driver" 2>/dev/null || :
+    fi
+    [ -z "$driver" ] || wait "$driver" 2>/dev/null || :
+    rm -f "$driver_log"
+    exit "$status"
 }
 
 browser=${ROCKY_BROWSER:-}
@@ -71,10 +96,38 @@ chrome)
         printf '{"goog:chromeOptions":{"binary":"%s"}}\n' "$chrome" >"$capabilities.$$"
         mv "$capabilities.$$" "$capabilities"
     fi
-    unset GECKODRIVER SAFARIDRIVER
-    CHROMEDRIVER="$bin/chromedriver"
+    unset CHROMEDRIVER GECKODRIVER SAFARIDRIVER
     WASM_BINDGEN_TEST_WEBDRIVER_JSON=$capabilities
-    export CHROMEDRIVER WASM_BINDGEN_TEST_WEBDRIVER_JSON
+    export WASM_BINDGEN_TEST_WEBDRIVER_JSON
+
+    driver_log=$(mktemp "${TMPDIR:-/tmp}/rocky-chromedriver.XXXXXX")
+    trap stop_chromedriver EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    # The driver outlives the signals that stop this run, so /shutdown can
+    # still close its browser and delete the profile; --port=0 picks a free port.
+    # shellcheck disable=SC2086 # CHROMEDRIVER_ARGS holds separate options
+    (trap '' INT TERM HUP && exec "$bin/chromedriver" --port=0 ${CHROMEDRIVER_ARGS:-}) >"$driver_log" 2>&1 &
+    driver=$!
+    tries=0
+    while :; do
+        port=$(sed -n 's/.*ChromeDriver was started successfully on port \([0-9][0-9]*\)\..*/\1/p' "$driver_log" | head -n 1)
+        [ -z "$port" ] || break
+        tries=$((tries + 1))
+        if ! kill -0 "$driver" 2>/dev/null || [ "$tries" -gt 300 ]; then
+            echo "wasm-runner: chromedriver did not start:" >&2
+            cat "$driver_log" >&2
+            exit 1
+        fi
+        sleep 0.1
+    done
+    driver_url=http://127.0.0.1:$port
+    CHROMEDRIVER_REMOTE=$driver_url
+    export CHROMEDRIVER_REMOTE
+    status=0
+    "$bin/wasm-bindgen-test-runner" "$@" || status=$?
+    exit "$status"
     ;;
 *)
     echo "wasm-runner: ROCKY_BROWSER must be firefox or chrome, not $browser" >&2

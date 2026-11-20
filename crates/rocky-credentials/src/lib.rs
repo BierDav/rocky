@@ -27,7 +27,6 @@ mod delivery;
 mod discovery;
 mod enroll;
 mod escrow;
-mod existence_base;
 mod extension;
 mod families;
 mod finality;
@@ -75,10 +74,6 @@ pub use enroll::{
 pub use escrow::{
     CarriedEscrow, MAX_ESCROW_PAYLOAD, MetadataEscrow, RootEscrow, VouchedEscrow, escrow_tag,
 };
-pub use existence_base::{
-    EXISTENCE_BASE_FORMAT, ExistenceBase, ExistenceBaseStatement, ExistenceCut, ExistenceIdentity,
-    ExistenceLog, MAX_EXISTENCE_BASE_LOGS, SignedExistenceBase,
-};
 pub use extension::{DatabaseContext, Extended, Extension, Origin};
 pub use families::GrantFamilies;
 pub use finality::{
@@ -88,8 +83,7 @@ pub use finality::{
 };
 pub use group::{GROUP_SECRET_LEN, GroupSecretEnvelope, GroupSecrets, derive_table_key};
 pub use identity::{
-    CoordinatorControl, ExternalLogin, FileIdentityProvider, Identity, IdentityProvider,
-    LoginProvider, Publisher, Purpose, ReaderScope, SigningDevice, TransportEndpoint,
+    CoordinatorControl, FileIdentityProvider, Identity, IdentityProvider, Publisher, Purpose,
 };
 pub use identity_key::IdentityKey;
 pub use issuance::{Delegation, DelegationTerms, Validity};

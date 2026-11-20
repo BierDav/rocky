@@ -255,20 +255,9 @@ fn chains_keep_publisher_revocations_expiry_attenuation_and_paired_rights() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_login_principal_alone_grants_nothing() {
+fn a_self_signed_capability_grants_nothing() {
     let domain = Domain::new();
     let policy = domain.policy();
-    struct Provider;
-    impl LoginProvider for Provider {
-        fn verify(&self, assertion: &[u8], _time: u64) -> Result<ExternalLogin, Error> {
-            Ok(ExternalLogin {
-                provider: "example".into(),
-                subject: String::from_utf8_lossy(assertion).into_owned(),
-            })
-        }
-    }
-    let login = Provider.verify(b"alice", NOW).expect("login");
-    assert_eq!(login.subject, "alice");
     let (user, node) = (PrivateKey::new(), PrivateKey::new());
     let grants = Profile::Issuer.grants(&domain.resources).expect("grants");
     let claimed = Authority::owner(&user)
@@ -285,11 +274,6 @@ fn a_login_principal_alone_grants_nothing() {
             .is_err()
     );
     let principal = Identity(user.public_key());
-    let device = SigningDevice(node.public_key());
-    assert_ne!(
-        principal.0, device.0,
-        "distinct identities are distinct types over distinct keys"
-    );
     assert_ne!(Publisher(domain.publisher.public_key()).0, principal.0);
 }
 

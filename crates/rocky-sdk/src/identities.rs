@@ -188,7 +188,7 @@ impl Settings {
                 let previous = membership.head(self.identity).map(|head| head.certificate);
                 links
                     .clone()
-                    .certify_member(&*identity, node, sequence, previous)?
+                    .certify_member(&*identity, &key, sequence, previous)?
                     .0
                     .pop()
                     .ok_or("missing certificate")?

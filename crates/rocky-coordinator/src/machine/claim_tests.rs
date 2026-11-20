@@ -39,7 +39,7 @@ impl Fixture {
             )
             .unwrap();
         let chain = CredentialChain(vec![link])
-            .certify_claims(&identity, node.public_key())
+            .certify_claims(&identity, &node)
             .unwrap();
         Holder {
             identity,
@@ -215,7 +215,7 @@ fn non_holders_and_other_counters_are_denied() {
             .issue_claims(identity.public_key(), f.right(None), 1, (T, CLAIM_LIFETIME))
             .unwrap();
         let chain = CredentialChain(vec![link])
-            .certify_claims(&identity, node.public_key())
+            .certify_claims(&identity, &node)
             .unwrap();
         Holder {
             identity,
@@ -412,9 +412,7 @@ fn a_delegate_claims_only_within_its_delegators_right() {
         )
         .unwrap();
     let delegate = Holder {
-        chain: narrowed
-            .certify_claims(&identity, node.public_key())
-            .unwrap(),
+        chain: narrowed.certify_claims(&identity, &node).unwrap(),
         identity,
         node,
     };

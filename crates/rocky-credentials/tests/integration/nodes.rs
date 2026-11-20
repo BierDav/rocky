@@ -55,7 +55,7 @@ fn a_certificate_outlives_three_renewals_and_ends_with_its_identity() {
         )
         .expect("a day's capability is issued");
     let certificate = CredentialChain(vec![capability.clone()])
-        .certify(&identity, node.public_key())
+        .certify(&identity, &node)
         .unwrap()
         .certificate()
         .unwrap()
@@ -131,7 +131,7 @@ fn issuers_sign_with_node_keys_and_a_revoked_node_signs_nothing_new() {
             .unwrap(),
     ]);
     let node = PrivateKey::new();
-    let node_chain = trusted.clone().certify(&issuer, node.public_key()).unwrap();
+    let node_chain = trusted.clone().certify(&issuer, &node).unwrap();
     let authority = Authority::issuer(&node, &node_chain).unwrap();
     assert_eq!(
         authority.identity().unwrap(),
@@ -157,7 +157,7 @@ fn issuers_sign_with_node_keys_and_a_revoked_node_signs_nothing_new() {
     let member_node = PrivateKey::new();
     let member_chain = authority
         .chain_of(link)
-        .certify(&member, member_node.public_key())
+        .certify(&member, &member_node)
         .unwrap();
     let none = RevocationSet::new();
     assert!(
@@ -210,7 +210,7 @@ fn issuers_sign_with_node_keys_and_a_revoked_node_signs_nothing_new() {
         .clone()
         .certify_member(
             &issuer,
-            other.public_key(),
+            &other,
             1,
             Some(node_chain.certificate().unwrap().id().unwrap()),
         )
@@ -251,11 +251,11 @@ fn an_identity_unlinks_only_its_certified_node_and_the_unlink_does_not_expire() 
     let links = CredentialChain(vec![grant]);
     let first_chain = links
         .clone()
-        .certify_member(&identity, first.public_key(), 0, None)
+        .certify_member(&identity, &first, 0, None)
         .unwrap();
     let head = first_chain.certificate().unwrap().id().unwrap();
     let second_chain = links
-        .certify_member(&identity, second.public_key(), 1, Some(head))
+        .certify_member(&identity, &second, 1, Some(head))
         .unwrap();
     assert!(
         first_chain
@@ -305,7 +305,7 @@ fn a_node_delegates_its_identitys_rights_without_the_identity_key() {
         )
         .unwrap();
     let held = CredentialChain(vec![grant])
-        .certify(&identity, node.public_key())
+        .certify(&identity, &node)
         .unwrap();
     drop(identity);
     let bindings = held
@@ -342,7 +342,7 @@ fn a_node_delegates_its_identitys_rights_without_the_identity_key() {
             },
         )
         .unwrap()
-        .certify(&recipient, recipient_node.public_key())
+        .certify(&recipient, &recipient_node)
         .unwrap();
     delegated
         .verify(
@@ -374,18 +374,18 @@ fn replicated_membership_voids_both_forks_and_relinks_without_reusing_authors() 
     let first = PrivateKey::new();
     let first_chain = links
         .clone()
-        .certify_member(&identity, first.public_key(), 0, None)
+        .certify_member(&identity, &first, 0, None)
         .unwrap();
     let predecessor = first_chain.certificate().unwrap().id().unwrap();
     let a = PrivateKey::new();
     let b = PrivateKey::new();
     let a_chain = links
         .clone()
-        .certify_member(&identity, a.public_key(), 1, Some(predecessor))
+        .certify_member(&identity, &a, 1, Some(predecessor))
         .unwrap();
     let b_chain = links
         .clone()
-        .certify_member(&identity, b.public_key(), 1, Some(predecessor))
+        .certify_member(&identity, &b, 1, Some(predecessor))
         .unwrap();
     let mut left = RevocationSet::new();
     left.link(first_chain.certificate().unwrap().clone())
@@ -416,7 +416,7 @@ fn replicated_membership_voids_both_forks_and_relinks_without_reusing_authors() 
     let recovered_chain = links
         .certify_member(
             &identity,
-            recovered.public_key(),
+            &recovered,
             2,
             view.head(identity.public_key())
                 .map(|head| head.certificate),
@@ -450,7 +450,7 @@ fn unlink_reuses_a_membership_slot_for_a_new_node_key() {
             .clone()
             .certify_member(
                 &identity,
-                key.public_key(),
+                &key,
                 sequence,
                 known
                     .membership()
@@ -498,7 +498,7 @@ fn unlink_reuses_a_membership_slot_for_a_new_node_key() {
         .clone()
         .certify_member(
             &identity,
-            replacement.public_key(),
+            &replacement,
             sequence,
             membership
                 .head(identity.public_key())
@@ -528,13 +528,13 @@ fn a_certificate_verifies_before_its_predecessor_history_arrives() {
     ]);
     let first = links
         .clone()
-        .certify(&identity, PrivateKey::new().public_key())
+        .certify(&identity, &PrivateKey::new())
         .unwrap();
     let node = PrivateKey::new();
     let second = links
         .certify_member(
             &identity,
-            node.public_key(),
+            &node,
             1,
             Some(first.certificate().unwrap().id().unwrap()),
         )
@@ -578,7 +578,7 @@ fn an_unlink_cannot_end_another_identitys_authority_for_the_same_node_key() {
                 .issue_trusted(identity.public_key(), SCOPE, NOW)
                 .unwrap(),
         ])
-        .certify(identity, node.public_key())
+        .certify(identity, &node)
         .unwrap()
     };
     let a_chain = certify(&a);

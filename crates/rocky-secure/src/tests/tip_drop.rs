@@ -33,10 +33,7 @@ async fn dropping_branch_frames_preserves_main_and_requires_catchup_on_return() 
             .unwrap(),
     ]);
     let mut config = f.config(&node, f.full(), &[f.public]);
-    config.credentials = chain
-        .clone()
-        .complete(&identity, node.public_key())
-        .unwrap();
+    config.credentials = chain.clone().complete(&identity, &node).unwrap();
     let replica = EncryptedReplica::open(&dir.path().join("drop.db"), f.app(), config)
         .await
         .unwrap();
@@ -104,7 +101,7 @@ async fn dropping_branch_frames_preserves_main_and_requires_catchup_on_return() 
             credentials: chain
                 .certify_member(
                     &identity,
-                    branch_node.public_key(),
+                    &branch_node,
                     1,
                     replica
                         .revocations()

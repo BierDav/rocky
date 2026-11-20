@@ -655,22 +655,49 @@ impl<'a> Authority<'a> {
 pub fn device_chain(
     root: SignedCapability,
     identity: &dyn IdentityProvider,
-    node: PublicKey,
+    node: &PrivateKey,
 ) -> Result<CredentialChain, Error> {
     CredentialChain(vec![root]).complete(identity, node)
 }
 
+pub(crate) fn node_certificate(
+    holder: &dyn IdentityProvider,
+    node: &PrivateKey,
+    database: crate::DatabaseContext,
+    not_before: u64,
+    (sequence, previous): (u64, Option<rocky_core::Commitment>),
+) -> Result<SignedCapability, Error> {
+    let possession = crate::NodePossession::sign(node, holder.public_key()?, database, None)?;
+    let leaf = Capability {
+        subject: node.public_key(),
+        kind: PrincipalKind::Node,
+        delegations: 0,
+        grants: Vec::new(),
+        not_before,
+        expires: NEVER,
+        extension: Extension::new(Extended {
+            node: Some(PeerId::of(node.public_key())),
+            sequence: Some(sequence),
+            previous,
+            database: Some(database),
+            possession: Some(possession),
+            ..Extended::default()
+        })?,
+    };
+    SignedCapability::sign(leaf, holder)
+}
+
 impl CredentialChain {
-    pub fn complete(self, holder: &dyn IdentityProvider, node: PublicKey) -> Result<Self, Error> {
+    pub fn complete(self, holder: &dyn IdentityProvider, node: &PrivateKey) -> Result<Self, Error> {
         self.certify(holder, node)
     }
-    pub fn certify(self, holder: &dyn IdentityProvider, node: PublicKey) -> Result<Self, Error> {
+    pub fn certify(self, holder: &dyn IdentityProvider, node: &PrivateKey) -> Result<Self, Error> {
         self.certify_member(holder, node, 0, None)
     }
     pub fn certify_member(
         mut self,
         holder: &dyn IdentityProvider,
-        node: PublicKey,
+        node: &PrivateKey,
         sequence: u64,
         previous: Option<rocky_core::Commitment>,
     ) -> Result<Self, Error> {
@@ -683,23 +710,9 @@ impl CredentialChain {
                 .ok_or_else(|| denied("missing authority"))?
                 .issuer,
         )?;
-        let last = self.holder(holder)?;
-        let leaf = Capability {
-            subject: node,
-            kind: PrincipalKind::Node,
-            delegations: 0,
-            grants: Vec::new(),
-            not_before: last.not_before,
-            expires: NEVER,
-            extension: Extension::new(Extended {
-                node: Some(crate::PeerId::of(node)),
-                sequence: Some(sequence),
-                previous,
-                database: Some(database),
-                ..Extended::default()
-            })?,
-        };
-        self.0.push(SignedCapability::sign(leaf, holder)?);
+        let not_before = self.holder(holder)?.not_before;
+        let leaf = node_certificate(holder, node, database, not_before, (sequence, previous))?;
+        self.0.push(leaf);
         Ok(self)
     }
     pub fn unlink(

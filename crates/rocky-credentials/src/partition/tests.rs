@@ -128,10 +128,7 @@ fn selector_fixture() -> SelectorFixture {
             },
         )
         .unwrap();
-    let chain = delegated
-        .clone()
-        .complete(&delegate, node.public_key())
-        .unwrap();
+    let chain = delegated.clone().complete(&delegate, &node).unwrap();
     let t = tuple("customer-x", "warehouse-y");
     let scope = t.scope(domain(), [3; 32], &[4; 32]).unwrap();
     SelectorFixture {
@@ -262,7 +259,7 @@ fn refuses_wider_partition_grant(wide: PartitionGrant) {
         prefix.0[0].clone(),
         SignedCapability::sign(leaf, &user).unwrap(),
     ])
-    .complete(&delegate, node.public_key())
+    .complete(&delegate, &node)
     .unwrap();
     assert!(
         forged
@@ -408,10 +405,7 @@ fn node_fixture() -> NodeFixture {
         )
         .unwrap();
     let prefix = CredentialChain(vec![root]);
-    let chain = prefix
-        .clone()
-        .complete(&holder, node_signer.public_key())
-        .unwrap();
+    let chain = prefix.clone().complete(&holder, &node_signer).unwrap();
     let t = tuple("x", "w");
     let scope = t.scope(domain(), [3; 32], &[4; 32]).unwrap();
     NodeFixture {
@@ -436,11 +430,9 @@ fn paired_grants_and_partition_nodes_never_expand_authority() {
         ..
     } = node_fixture();
     let cross = grant(Some("x"), None, &[Right::Insert, Right::Update], &[1, 2]);
-    let mut chain = prefix
-        .clone()
-        .complete(&holder, node_signer.public_key())
-        .unwrap();
+    let mut chain = prefix.clone().complete(&holder, &node_signer).unwrap();
     let mut leaf = chain.0.pop().unwrap().capability;
+    let certified = leaf.extended().unwrap();
     leaf.extension = Extension::new(Extended {
         node: Some(crate::PeerId::of(node_signer.public_key())),
         partitions: vec![cross],
@@ -451,8 +443,9 @@ fn paired_grants_and_partition_nodes_never_expand_authority() {
         origin: None,
         sequence: Some(0),
         previous: None,
-        database: None,
+        database: certified.database,
         personal: None,
+        possession: certified.possession,
     })
     .unwrap();
     assert!(
@@ -461,7 +454,7 @@ fn paired_grants_and_partition_nodes_never_expand_authority() {
     );
     assert!(
         prefix
-            .certify_member(&holder, node_signer.public_key(), 1, None)
+            .certify_member(&holder, &node_signer, 1, None)
             .is_err(),
         "a later membership sequence names its predecessor"
     );
@@ -608,9 +601,7 @@ fn partition_selectors_cannot_be_dropped() {
             VALIDITY,
         )
         .unwrap();
-    let chain = CredentialChain(vec![root])
-        .complete(&user, node.public_key())
-        .unwrap();
+    let chain = CredentialChain(vec![root]).complete(&user, &node).unwrap();
     let mut leaf = chain.0[1].capability.clone();
     leaf.extension = crate::Extension::new(crate::Extended::default()).unwrap();
     assert!(
@@ -666,9 +657,7 @@ fn partition_delegation_backdates_and_expires_within_its_parent() {
             .unwrap();
         let leaf = &chain.0.last().unwrap().capability;
         assert_eq!((leaf.not_before, leaf.expires), (not_before, expires));
-        let node = chain
-            .certify(&fixture.delegate, fixture.node.public_key())
-            .unwrap();
+        let node = chain.certify(&fixture.delegate, &fixture.node).unwrap();
         assert!(
             node.verified(fixture.publisher.public_key(), &policy(), not_before - 1)
                 .is_err()

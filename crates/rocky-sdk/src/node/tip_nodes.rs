@@ -174,7 +174,7 @@ impl Node {
                 .map(|head| head.certificate);
             let certificate = links
                 .clone()
-                .certify_member(&*identity, key.public_key(), sequence, previous)?
+                .certify_member(&*identity, &key, sequence, previous)?
                 .0
                 .pop()
                 .ok_or("missing node certificate")?;

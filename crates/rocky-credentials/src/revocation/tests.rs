@@ -515,12 +515,7 @@ fn forked_links() -> (PrivateKey, Vec<SignedCapability>) {
     let certify = |sequence: u32, previous: Option<Commitment>| {
         grant
             .clone()
-            .certify_member(
-                &identity,
-                PrivateKey::new().public_key(),
-                u64::from(sequence),
-                previous,
-            )
+            .certify_member(&identity, &PrivateKey::new(), u64::from(sequence), previous)
             .unwrap()
             .certificate()
             .unwrap()
@@ -633,4 +628,211 @@ fn no_statement_revokes_the_publisher_or_recovers_to_it() {
         !by_root(recovery(anchor)).is_ok_and(|signed| signed.verify_historic(anchor, APP).is_ok()),
         "a recovery keeps a trusted identity, never the publisher"
     );
+}
+
+fn trusted(root: &PrivateKey, identity: &PrivateKey) -> CredentialChain {
+    let scope = rocky_core::Scope {
+        mesh: rocky_core::MeshId([1; 16]),
+        app: APP,
+        domain: rocky_core::DomainId([3; 16]),
+    };
+    CredentialChain(vec![
+        Authority::owner(root)
+            .issue_trusted(identity.public_key(), scope, NOW)
+            .unwrap(),
+    ])
+}
+fn claim(
+    grant: &CredentialChain,
+    node: PublicKey,
+    possession: Option<crate::NodePossession>,
+) -> crate::Capability {
+    crate::Capability {
+        subject: node,
+        kind: rocky_core::PrincipalKind::Node,
+        grants: Vec::new(),
+        not_before: NOW,
+        expires: crate::NEVER,
+        delegations: 0,
+        extension: crate::Extension::new(crate::Extended {
+            node: Some(crate::PeerId::of(node)),
+            sequence: Some(0),
+            database: Some(grant.database_context(grant.0[0].issuer).unwrap()),
+            possession,
+            ..crate::Extended::default()
+        })
+        .unwrap(),
+    }
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_membership_certificate_for_another_identitys_node_without_its_signature_is_refused() {
+    let (root, a, b, node) = (
+        PrivateKey::new(),
+        PrivateKey::new(),
+        PrivateKey::new(),
+        PrivateKey::new(),
+    );
+    let a_chain = trusted(&root, &a).certify(&a, &node).unwrap();
+    let mut known = RevocationSet::new();
+    assert!(known.link(a_chain.certificate().unwrap().clone()).unwrap());
+    let b_grant = trusted(&root, &b);
+    let database = b_grant.database_context(root.public_key()).unwrap();
+    let replayed = a_chain
+        .certificate()
+        .unwrap()
+        .capability
+        .extended()
+        .unwrap()
+        .possession;
+    let impostor =
+        crate::NodePossession::sign(&PrivateKey::new(), b.public_key(), database, None).unwrap();
+    for possession in [None, replayed, Some(impostor)] {
+        let capability = claim(&b_grant, node.public_key(), possession);
+        assert!(
+            SignedCapability::sign(capability.clone(), &b).is_err(),
+            "an identity cannot issue a certificate the node never signed for it"
+        );
+        let forged = SignedCapability::sign_unchecked_node(capability, &b);
+        let before = known.clone();
+        assert!(known.link(forged.clone()).is_err());
+        assert_eq!(known, before);
+        let mut gossiped = RevocationSet::new();
+        gossiped
+            .certificates
+            .insert(forged.id().unwrap(), forged.clone());
+        assert!(known.merge(&gossiped, root.public_key(), APP, NOW).is_err());
+        assert_eq!(known, before);
+        assert!(RevocationSet::from_bytes(&gossiped.to_bytes().unwrap()).is_err());
+        let admitted = b_grant.clone().with_certificate(forged.clone());
+        assert!(
+            admitted
+                .verify(root.public_key(), node.public_key(), &known, NOW)
+                .is_err(),
+            "admission refuses the forged certificate"
+        );
+        assert!(Signer::node(&node, &admitted).is_err());
+        assert_eq!(known.membership().unwrap().links(b.public_key()).count(), 0);
+    }
+    a_chain
+        .verify(root.public_key(), node.public_key(), &known, NOW)
+        .unwrap();
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn a_node_that_signs_for_two_identities_is_ended_for_both_in_every_order() {
+    let (root, a, b, node) = (
+        PrivateKey::new(),
+        PrivateKey::new(),
+        PrivateKey::new(),
+        PrivateKey::new(),
+    );
+    let a_chain = trusted(&root, &a).certify(&a, &node).unwrap();
+    let b_chain = trusted(&root, &b).certify(&b, &node).unwrap();
+    let certificates = [
+        a_chain.certificate().unwrap().clone(),
+        b_chain.certificate().unwrap().clone(),
+    ];
+    let mut orders = Vec::new();
+    for order in [[0, 1], [1, 0]] {
+        let mut known = RevocationSet::new();
+        for index in order {
+            known.link(certificates[index].clone()).unwrap();
+        }
+        for (identity, chain) in [(&a, &a_chain), (&b, &b_chain)] {
+            assert!(known.ends_node_of(identity.public_key(), node.public_key(), false));
+            assert!(
+                chain
+                    .verify(root.public_key(), node.public_key(), &known, NOW)
+                    .is_err(),
+                "neither identity keeps a node it shares with another"
+            );
+        }
+        assert!(known.ends_node(node.public_key(), false));
+        assert!(known.contests_node(node.public_key()));
+        orders.push(known.digest(NOW).unwrap());
+        let revoker = issuer(&root);
+        known
+            .insert(signed(statement(&revoker.0, NOW, a.public_key()), &revoker))
+            .unwrap();
+        assert!(known.revokes(&a.public_key()));
+        assert!(
+            known.contests_node(node.public_key())
+                && known.ends_node_of(b.public_key(), node.public_key(), false),
+            "revoking one identity does not release a node it shares"
+        );
+    }
+    assert_eq!(orders[0], orders[1]);
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+fn an_unlink_hands_a_shared_node_to_the_other_identity_in_every_order_and_path() {
+    let (root, a, b, node) = (
+        PrivateKey::new(),
+        PrivateKey::new(),
+        PrivateKey::new(),
+        PrivateKey::new(),
+    );
+    let a_chain = trusted(&root, &a).certify(&a, &node).unwrap();
+    let b_chain = trusted(&root, &b).certify(&b, &node).unwrap();
+    let unlink = a_chain.unlink(&a, APP, NOW, node.public_key()).unwrap();
+    let certificates = [
+        a_chain.certificate().unwrap().clone(),
+        b_chain.certificate().unwrap().clone(),
+    ];
+    let apply = |known: &mut RevocationSet, item: usize, merged: bool| {
+        if merged {
+            let alone = certificates.get(item).map_or_else(
+                || single(&unlink),
+                |certificate| {
+                    let mut alone = RevocationSet::new();
+                    alone.link(certificate.clone()).unwrap();
+                    alone
+                },
+            );
+            known.merge(&alone, root.public_key(), APP, NOW).unwrap();
+        } else if let Some(certificate) = certificates.get(item) {
+            known.link(certificate.clone()).unwrap();
+        } else {
+            known.insert(unlink.clone()).unwrap();
+        }
+    };
+    let later = NOW + 400 * DAY;
+    let mut digests = BTreeSet::new();
+    let mut cases = 0;
+    for order in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        for paths in 0..8_u8 {
+            let mut known = RevocationSet::new();
+            for item in order {
+                apply(&mut known, item, paths & (1 << item) != 0);
+            }
+            let decoded = RevocationSet::from_bytes(&known.to_bytes().unwrap()).unwrap();
+            assert_eq!(decoded, known);
+            for set in [&known, &decoded] {
+                assert!(!set.contests_node(node.public_key()));
+                assert!(set.ends_node_of(a.public_key(), node.public_key(), false));
+                assert!(!set.ends_node_of(b.public_key(), node.public_key(), false));
+                assert!(
+                    a_chain
+                        .verify(root.public_key(), node.public_key(), set, NOW)
+                        .is_err(),
+                    "the identity that unlinked the node never keeps it"
+                );
+                b_chain
+                    .verify(root.public_key(), node.public_key(), set, NOW)
+                    .unwrap();
+                digests.insert((set.digest(NOW).unwrap(), set.digest(later).unwrap()));
+            }
+            cases += 1;
+        }
+    }
+    assert_eq!(cases, 48);
+    assert_eq!(digests.len(), 1, "every order and path converges");
 }

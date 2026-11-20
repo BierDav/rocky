@@ -18,6 +18,14 @@ pub fn log(scope: Scope) -> TipLog {
 }
 pub fn certificate(key: &PrivateKey) -> rocky_credentials::SignedCapability {
     use rocky_credentials::{Capability, Extended, Extension, PeerId};
+    let database = rocky_credentials::DatabaseContext {
+        publisher: key.public_key(),
+        scope: rocky_core::Scope {
+            mesh: rocky_core::MeshId([1; 16]),
+            app: rocky_core::AppId([2; 16]),
+            domain: rocky_core::DomainId([3; 16]),
+        },
+    };
     let capability = Capability {
         subject: key.public_key(),
         kind: PrincipalKind::Node,
@@ -27,15 +35,12 @@ pub fn certificate(key: &PrivateKey) -> rocky_credentials::SignedCapability {
         delegations: 0,
         extension: Extension::new(Extended {
             node: Some(PeerId::of(key.public_key())),
-            database: Some(rocky_credentials::DatabaseContext {
-                publisher: key.public_key(),
-                scope: rocky_core::Scope {
-                    mesh: rocky_core::MeshId([1; 16]),
-                    app: rocky_core::AppId([2; 16]),
-                    domain: rocky_core::DomainId([3; 16]),
-                },
-            }),
+            database: Some(database),
             sequence: Some(0),
+            possession: Some(
+                rocky_credentials::NodePossession::sign(key, key.public_key(), database, None)
+                    .unwrap(),
+            ),
             ..Extended::default()
         })
         .unwrap(),

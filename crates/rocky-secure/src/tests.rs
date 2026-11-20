@@ -261,14 +261,41 @@ pub(crate) async fn all_tip_statements<A: rocky_core::RowApplication>(
         statements.extend(page);
     }
 }
+pub(crate) fn identity_of(node: &PrivateKey) -> PrivateKey {
+    PrivateKey::from_bytes(&rocky_core::commitment(
+        "rocky.test.node-identity",
+        node.as_bytes(),
+    ))
+}
+pub(crate) fn proven(
+    capability: Capability,
+    node: &PrivateKey,
+    identity: &PrivateKey,
+) -> Capability {
+    let mut extended = capability.extended().unwrap();
+    extended.possession = Some(
+        rocky_credentials::NodePossession::sign(
+            node,
+            identity.public_key(),
+            extended.database.unwrap(),
+            extended.personal.as_ref(),
+        )
+        .unwrap(),
+    );
+    Capability {
+        extension: rocky_credentials::Extension::new(extended).unwrap(),
+        ..capability
+    }
+}
+pub(crate) const LIFETIME_START: &str = "ROCKY_TEST_LIFETIME_START";
 pub(crate) fn lifetime() -> (u64, u64) {
     static LIFETIME: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
     *LIFETIME.get_or_init(|| {
-        let time = now().unwrap();
-        (
-            time - rocky_credentials::DAY,
-            time + 300 * rocky_credentials::DAY,
-        )
+        let start = std::env::var(LIFETIME_START).ok().map_or_else(
+            || now().unwrap() - rocky_credentials::DAY,
+            |start| start.parse().unwrap(),
+        );
+        (start, start + 301 * rocky_credentials::DAY)
     })
 }
 pub(crate) fn validity() -> rocky_credentials::Validity {
@@ -387,7 +414,7 @@ impl Fixture {
         root: &PrivateKey,
         lifetime: (u64, u64),
     ) -> CredentialChain {
-        self.chain_under(node, grants, root, &PrivateKey::new(), lifetime)
+        self.chain_under(node, grants, root, &identity_of(node), lifetime)
     }
     fn chain_under(
         &self,
@@ -426,8 +453,15 @@ impl Fixture {
         CredentialChain(vec![
             SignedCapability::sign(capability(user.public_key(), PrincipalKind::User, 1), root)
                 .unwrap(),
-            SignedCapability::sign(capability(node.public_key(), PrincipalKind::Node, 0), user)
-                .unwrap(),
+            SignedCapability::sign(
+                crate::tests::proven(
+                    capability(node.public_key(), PrincipalKind::Node, 0),
+                    node,
+                    user,
+                ),
+                user,
+            )
+            .unwrap(),
         ])
     }
     pub(crate) fn config(
@@ -1217,7 +1251,7 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
         ]);
         assert!(
             chain
-                .certify(&delegate, node.public_key())
+                .certify(&delegate, &node)
                 .and_then(|chain| chain.verify(
                     fixture.publisher.public_key(),
                     node.public_key(),
@@ -1233,7 +1267,7 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
     ]);
     assert!(
         chain
-            .certify(&delegate, node.public_key())
+            .certify(&delegate, &node)
             .and_then(|chain| chain.verify(
                 fixture.publisher.public_key(),
                 node.public_key(),
@@ -1376,6 +1410,7 @@ async fn committed_ciphertext_survives_process_exit() {
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "tests::crash_child", "--ignored"])
         .env("ROCKY_CRASH_TEST_PATH", &path)
+        .env(LIFETIME_START, lifetime().0.to_string())
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(CRASH_EXIT_CODE));

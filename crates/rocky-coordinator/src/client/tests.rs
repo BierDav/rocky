@@ -429,7 +429,7 @@ async fn a_claim_right_holder_claims_until_its_revocation_is_pushed() {
         )
         .unwrap();
     let chain = CredentialChain(vec![link])
-        .certify_claims(&identity, node.public_key())
+        .certify_claims(&identity, &node)
         .unwrap();
     let holder = service.client(&node);
     let invoices = Name::new("invoices").unwrap();

@@ -41,6 +41,10 @@ fn delegated(
     })
     .unwrap();
     widen(&mut middle, f);
+    let database = rocky_credentials::DatabaseContext {
+        publisher: f.publisher.public_key(),
+        scope: f.public.domain,
+    };
     let leaf = Capability {
         subject: node.public_key(),
         kind: PrincipalKind::Node,
@@ -51,11 +55,17 @@ fn delegated(
             trusted: None,
             claims: None,
             node: Some(rocky_credentials::PeerId::of(node.public_key())),
-            database: Some(rocky_credentials::DatabaseContext {
-                publisher: f.publisher.public_key(),
-                scope: f.public.domain,
-            }),
+            database: Some(database),
             sequence: Some(0),
+            possession: Some(
+                rocky_credentials::NodePossession::sign(
+                    node,
+                    deployment.public_key(),
+                    database,
+                    None,
+                )
+                .unwrap(),
+            ),
             ..Default::default()
         })
         .unwrap(),

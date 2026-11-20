@@ -10,7 +10,7 @@ fn reader(f: &Fixture) -> Vec<ResourceGrant> {
     vec![grant(f.public, &[Right::Read, Right::Custody], &[])]
 }
 fn chain(f: &Fixture, node: &PrivateKey, grants: Vec<ResourceGrant>) -> CredentialChain {
-    let user = PrivateKey::new();
+    let user = crate::tests::identity_of(node);
     let (not_before, expires) = crate::tests::lifetime();
     let capability = |subject, kind, delegations| Capability {
         subject,
@@ -44,8 +44,15 @@ fn chain(f: &Fixture, node: &PrivateKey, grants: Vec<ResourceGrant>) -> Credenti
             &f.publisher,
         )
         .unwrap(),
-        SignedCapability::sign(capability(node.public_key(), PrincipalKind::Node, 0), &user)
-            .unwrap(),
+        SignedCapability::sign(
+            crate::tests::proven(
+                capability(node.public_key(), PrincipalKind::Node, 0),
+                node,
+                &user,
+            ),
+            &user,
+        )
+        .unwrap(),
     ])
 }
 fn revoking(f: &Fixture, revoked: &[PublicKey]) -> RevocationSet {

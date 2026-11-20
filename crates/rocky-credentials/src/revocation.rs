@@ -403,10 +403,15 @@ impl PartialEq for Pinned {
 impl Eq for Pinned {}
 #[derive(Clone, Default)]
 struct Derived {
-    fork_ended: OnceLock<BTreeSet<(PublicKey, crate::PeerId)>>,
+    membership_ended: OnceLock<MembershipEnded>,
     fingerprint: OnceLock<Commitment>,
     resets: OnceLock<crate::reset::Resets>,
     unfenced: OnceLock<Box<RevocationSet>>,
+}
+#[derive(Clone, Default)]
+struct MembershipEnded {
+    links: BTreeSet<(PublicKey, crate::PeerId)>,
+    contested: BTreeSet<crate::PeerId>,
 }
 impl PartialEq for Derived {
     fn eq(&self, _: &Self) -> bool {
@@ -708,21 +713,22 @@ impl RevocationSet {
             self.certificates.remove(&id);
         }
     }
-    fn fork_ends(&self, identity: PublicKey, node: crate::PeerId) -> bool {
-        self.fork_ended().contains(&(identity, node))
+    fn membership_ends(&self, identity: PublicKey, node: crate::PeerId) -> bool {
+        self.membership_ended().links.contains(&(identity, node))
     }
-    fn fork_ended(&self) -> &BTreeSet<(PublicKey, crate::PeerId)> {
+    fn membership_ended(&self) -> &MembershipEnded {
         self.derived
-            .fork_ended
-            .get_or_init(|| self.compute_fork_ended())
+            .membership_ended
+            .get_or_init(|| self.compute_membership_ended())
     }
-    fn compute_fork_ended(&self) -> BTreeSet<(PublicKey, crate::PeerId)> {
+    fn compute_membership_ended(&self) -> MembershipEnded {
         #[cfg(test)]
         tests::count_derivation();
         let Ok(membership) = self.membership() else {
-            return BTreeSet::new();
+            return MembershipEnded::default();
         };
         let void = membership.void_certificates();
+        let contested = self.contested_nodes(&void);
         let mut counts = BTreeMap::<PublicKey, BTreeSet<crate::PeerId>>::new();
         let mut valid = BTreeSet::new();
         let mut links: Vec<_> = self
@@ -732,7 +738,10 @@ impl RevocationSet {
             .collect();
         links.sort_by_key(|link| (link.identity, link.sequence, link.certificate));
         for link in &links {
-            if void.contains(&link.certificate) || self.identity_unlinks(link.identity, link.node) {
+            if void.contains(&link.certificate)
+                || self.identity_unlinks(link.identity, link.node)
+                || contested.contains_key(&link.node)
+            {
                 continue;
             }
             let nodes = counts.entry(link.identity).or_default();
@@ -741,11 +750,35 @@ impl RevocationSet {
                 valid.insert(link.certificate);
             }
         }
-        links
+        let ended = links
             .iter()
             .filter(|link| !valid.contains(&link.certificate))
             .map(|link| (link.identity, link.node))
-            .collect()
+            .chain(contested.iter().flat_map(|(node, identities)| {
+                identities.iter().map(move |identity| (*identity, *node))
+            }))
+            .collect();
+        MembershipEnded {
+            links: ended,
+            contested: contested.into_keys().collect(),
+        }
+    }
+    fn contested_nodes(
+        &self,
+        void: &BTreeSet<Commitment>,
+    ) -> BTreeMap<crate::PeerId, BTreeSet<PublicKey>> {
+        let mut claimants = BTreeMap::<crate::PeerId, BTreeSet<PublicKey>>::new();
+        for (id, certificate) in &self.certificates {
+            let node = crate::PeerId::of(certificate.capability.subject);
+            if !void.contains(id) && !self.identity_unlinks(certificate.issuer, node) {
+                claimants
+                    .entry(node)
+                    .or_default()
+                    .insert(certificate.issuer);
+            }
+        }
+        claimants.retain(|_, identities| identities.len() > 1);
+        claimants
     }
     fn insert(&mut self, signed: SignedRevocation) -> Result<bool, Error> {
         self.bind(signed.database)?;
@@ -944,9 +977,9 @@ impl RevocationSet {
         if !self.statements.is_empty() {
             return true;
         }
-        let forked = self.fork_ended();
+        let ended = &self.membership_ended().links;
         self.certificates.values().any(|certificate| {
-            forked.contains(&(
+            ended.contains(&(
                 certificate.issuer,
                 crate::PeerId::of(certificate.capability.subject),
             ))
@@ -965,7 +998,7 @@ impl RevocationSet {
             .filter(|(_, signed)| signed.live(time))
             .map(|(id, _)| id)
             .collect();
-        let forked = self.fork_ended();
+        let ended = &self.membership_ended().links;
         Ok(rocky_core::commitment(
             "rocky.revocation-set.v1",
             &encode(&(
@@ -973,7 +1006,7 @@ impl RevocationSet {
                 self.certificates
                     .values()
                     .filter(|certificate| {
-                        forked.contains(&(
+                        ended.contains(&(
                             certificate.issuer,
                             crate::PeerId::of(certificate.capability.subject),
                         ))
@@ -1080,7 +1113,7 @@ impl RevocationSet {
             || extended.node.is_some_and(|node| {
                 references.contains(&node)
                     || self.identity_unlinks(link.issuer, node)
-                    || self.fork_ends(link.issuer, node)
+                    || self.membership_ends(link.issuer, node)
             })
             || capabilities.contains(&link.id()?)
             || extended
@@ -1125,7 +1158,12 @@ impl RevocationSet {
             || references.contains(&crate::PeerId::of(node))
             || self.reset_ends(&crate::PeerId::of(node))
             || self.identity_unlinks(identity, crate::PeerId::of(node))
-            || self.fork_ends(identity, crate::PeerId::of(node))
+            || self.membership_ends(identity, crate::PeerId::of(node))
+    }
+    pub fn contests_node(&self, node: PublicKey) -> bool {
+        self.membership_ended()
+            .contested
+            .contains(&crate::PeerId::of(node))
     }
     pub fn identity_unlinks(&self, identity: PublicKey, node: crate::PeerId) -> bool {
         self.statements.values().any(|signed| {

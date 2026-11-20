@@ -1238,6 +1238,10 @@ async fn process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_au
                 "--ignored",
             ])
             .env("ROCKY_CHECKPOINT_CRASH_DIR", dir.path())
+            .env(
+                crate::tests::LIFETIME_START,
+                crate::tests::lifetime().0.to_string(),
+            )
             .env("ROCKY_CHECKPOINT_CRASH_STEP", step)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -1908,7 +1912,7 @@ async fn an_unpartitioned_checkpoint_preserves_other_tables_selector_grants() {
         .unwrap();
     let mut config = fixture.config(&node, fixture.full(), &[fixture.public]);
     config.credentials = CredentialChain(vec![root])
-        .complete(&principal, node.public_key())
+        .complete(&principal, &node)
         .unwrap();
     let replica =
         EncryptedReplica::open(directory.path().join("mixed.sqlite"), fixture.app(), config)

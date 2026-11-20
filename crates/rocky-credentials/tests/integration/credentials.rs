@@ -106,7 +106,7 @@ impl Domain {
                 VALIDITY,
             )
             .expect("capability");
-        let chain = device_chain(root, &user, node.public_key()).expect("chain");
+        let chain = device_chain(root, &user, &node).expect("chain");
         (user, node, chain)
     }
     fn verify(
@@ -225,7 +225,7 @@ fn chains_keep_publisher_revocations_expiry_attenuation_and_paired_rights() {
     let long = device_chain(
         SignedCapability::sign(long, &domain.publisher).expect("signed"),
         &user,
-        node.public_key(),
+        &node,
     )
     .expect("chain");
     assert!(
@@ -274,7 +274,7 @@ fn a_login_principal_alone_grants_nothing() {
     let claimed = Authority::owner(&user)
         .issue(user.public_key(), grants, VALIDITY)
         .expect("self-signed");
-    let chain = device_chain(claimed, &user, node.public_key()).expect("chain");
+    let chain = device_chain(claimed, &user, &node).expect("chain");
     assert!(
         domain.verify(&chain, &node, &policy, NOW).is_err(),
         "a capability the user signs itself grants nothing"
@@ -475,8 +475,7 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
         renewal.capability.capability.grants, chain.0[0].capability.grants,
         "a renewed reader stays a reader"
     );
-    let renewed =
-        device_chain(renewal.capability.clone(), &user, node.public_key()).expect("chain");
+    let renewed = device_chain(renewal.capability.clone(), &user, &node).expect("chain");
     assert_eq!(
         rights(
             &domain
@@ -573,7 +572,7 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
                 VALIDITY,
             )
             .expect("capability");
-        let chain = device_chain(reissued, &user, node.public_key()).expect("chain");
+        let chain = device_chain(reissued, &user, &node).expect("chain");
         assert!(domain.verify(&chain, &node, &revoked, NOW).is_err());
     }
 }
@@ -673,7 +672,7 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
         .authority()
         .issue_delegable(holder.public_key(), grants.clone(), 2, VALIDITY)
         .expect("root");
-    let own = device_chain(root.clone(), &holder, holder_node.public_key()).expect("own");
+    let own = device_chain(root.clone(), &holder, &holder_node).expect("own");
     assert_eq!(own.delegable().0.len(), 1);
     let (delegate, node) = (PrivateKey::new(), PrivateKey::new());
     let mut narrow = grants[0].clone();
@@ -701,10 +700,7 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
         NOW + 30 * DAY,
         "the delegation ends with its parent, however long it was asked for"
     );
-    let chain = link
-        .clone()
-        .complete(&delegate, node.public_key())
-        .expect("chain");
+    let chain = link.clone().complete(&delegate, &node).expect("chain");
     assert_eq!(chain.0.len(), 3);
     assert_eq!(
         domain
@@ -799,15 +795,12 @@ fn node_leaves_are_writers_named_by_their_own_keys() {
         )
         .unwrap();
     let prefix = CredentialChain(vec![root]);
-    let first = prefix
-        .clone()
-        .certify(&identity, nodes[0].public_key())
-        .unwrap();
+    let first = prefix.clone().certify(&identity, &nodes[0]).unwrap();
     let second = prefix
         .clone()
         .certify_member(
             &identity,
-            nodes[1].public_key(),
+            &nodes[1],
             1,
             Some(first.certificate().unwrap().id().unwrap()),
         )
@@ -909,10 +902,7 @@ fn delegations_narrow_and_unknown_extension_versions_are_refused() {
     let narrowed = delegate_with(1).expect("narrowed");
     assert!(delegate_with(2).is_err());
     let node = PrivateKey::new();
-    let chain = narrowed
-        .clone()
-        .complete(&delegate, node.public_key())
-        .expect("chain");
+    let chain = narrowed.clone().complete(&delegate, &node).expect("chain");
     let verify = |chain: &CredentialChain| {
         chain.verify(
             domain.publisher.public_key(),
@@ -932,7 +922,7 @@ fn delegations_narrow_and_unknown_extension_versions_are_refused() {
         root.clone(),
         SignedCapability::sign(wide, &holder).expect("signed"),
     ])
-    .complete(&delegate, node.public_key())
+    .complete(&delegate, &node)
     .expect("chain");
     assert!(
         verify(&widened).is_err(),
@@ -950,7 +940,7 @@ fn delegations_narrow_and_unknown_extension_versions_are_refused() {
         rotation: u64,
     }
     let bytes = rocky_credentials::encode(&Later {
-        version: 14,
+        version: 15,
         rotation: 9,
     })
     .expect("bytes");

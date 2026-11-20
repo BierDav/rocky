@@ -42,7 +42,7 @@ async fn switching_back_and_sideways_invalidates_warmed_inherited_frontiers() {
             credentials: identity_chain
                 .certify_member(
                     &identity,
-                    node.public_key(),
+                    &node,
                     1,
                     replica
                         .revocations()

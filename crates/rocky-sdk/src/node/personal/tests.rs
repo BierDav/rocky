@@ -540,7 +540,7 @@ mod device_actions {
             grant
                 .clone()
                 .certify_personal(&owner, &own, (owner.public_key(), [9; 32]))?,
-            grant.certify_member(&owner, own.public_key(), 0, None)?,
+            grant.certify_member(&owner, &own, 0, None)?,
         ];
         let before = std::fs::read(&node.path)?;
         let held = node.replica.revocations().await;

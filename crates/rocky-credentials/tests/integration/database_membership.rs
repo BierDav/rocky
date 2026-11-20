@@ -40,7 +40,7 @@ fn chain(root: &PrivateKey, identity: &PrivateKey, database: DatabaseContext) ->
             )
             .unwrap(),
     ])
-    .certify(identity, PrivateKey::new().public_key())
+    .certify(identity, &PrivateKey::new())
     .unwrap()
 }
 
@@ -128,7 +128,7 @@ fn one_identity_has_independent_membership_under_distinct_roots_and_namespaces()
             .capabilities()
             .certify_member(
                 &identity,
-                PrivateKey::new().public_key(),
+                &PrivateKey::new(),
                 sequence,
                 membership
                     .head(identity.public_key())

@@ -576,8 +576,15 @@ impl Lineage {
                 &self.publisher,
             )
             .unwrap(),
-            SignedCapability::sign(capability(node.public_key(), PrincipalKind::Node, 0), user)
-                .unwrap(),
+            SignedCapability::sign(
+                crate::tests::proven(
+                    capability(node.public_key(), PrincipalKind::Node, 0),
+                    node,
+                    user,
+                ),
+                user,
+            )
+            .unwrap(),
         ])
     }
     pub(super) fn config(&self, generation: u32, node: &PrivateKey) -> SecureConfig {

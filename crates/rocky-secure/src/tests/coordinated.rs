@@ -82,7 +82,7 @@ async fn open(lineage: &Lineage, dir: &Scratch, name: &str, key: &PrivateKey) ->
     lineage
         .open_trusted(
             &dir.path().join(format!("{name}.db")),
-            (&PrivateKey::new(), key),
+            (&crate::tests::identity_of(key), key),
             3,
             None,
         )

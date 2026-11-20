@@ -668,10 +668,9 @@ async fn concurrent_membership_links_void_both_alert_and_allow_a_fresh_sequence(
     let mut known = node.replica.revocations().await;
     let mut chains = Vec::new();
     for key in &keys {
-        let chain =
-            links
-                .clone()
-                .certify_member(&*identity, key.public_key(), 1, Some(predecessor))?;
+        let chain = links
+            .clone()
+            .certify_member(&*identity, key, 1, Some(predecessor))?;
         known.link(chain.certificate().ok_or("certificate")?.clone())?;
         chains.push(chain);
     }
@@ -692,7 +691,7 @@ async fn concurrent_membership_links_void_both_alert_and_allow_a_fresh_sequence(
     let membership = known.membership()?;
     let chain = links.certify_member(
         &*identity,
-        replacement.public_key(),
+        &replacement,
         membership.next_sequence(settings.identity)?,
         membership
             .head(settings.identity)
@@ -739,7 +738,7 @@ async fn unlinking_the_last_node_keeps_the_identity_and_allows_relinking() -> Re
     let sequence = membership.next_sequence(settings.identity)?;
     let chain = links.certify_member(
         &*identity,
-        replacement.public_key(),
+        &replacement,
         sequence,
         membership
             .head(settings.identity)

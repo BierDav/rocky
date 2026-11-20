@@ -180,7 +180,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let chain = crate::device_chain(identity, &user, node.public_key()).unwrap();
+        let chain = crate::device_chain(identity, &user, &node).unwrap();
         let binding = &chain.0[1].author_binding;
         binding
             .verify_historic(user.public_key(), node.public_key())

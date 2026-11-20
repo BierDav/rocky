@@ -395,7 +395,7 @@ fn trusted_siblings_claim_until_their_identity_unlinks_them() {
         .map(|(index, node)| {
             let chain = grant
                 .clone()
-                .certify_member(&identity, node.public_key(), index as u64, previous)
+                .certify_member(&identity, node, index as u64, previous)
                 .unwrap();
             previous = Some(chain.certificate().unwrap().id().unwrap());
             chain

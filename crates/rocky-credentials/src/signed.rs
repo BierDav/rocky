@@ -25,21 +25,20 @@ impl Certificate {
         })
     }
     pub fn node_of(&self, identity: PublicKey) -> Result<PublicKey, Error> {
-        node_shape(&self.capability)?;
+        check_node(&self.capability, identity)?;
         if !identity.verify(
             &signing_bytes(CAPABILITY_LABEL, &self.capability)?,
             &self.signature,
         ) {
             return Err(denied("invalid node certificate"));
         }
-        crate::personal::check_possession(&self.capability, identity)?;
         Ok(self.capability.subject)
     }
     pub fn claimed_node(&self) -> PublicKey {
         self.capability.subject
     }
 }
-fn node_shape(capability: &Capability) -> Result<(), Error> {
+fn check_node(capability: &Capability, identity: PublicKey) -> Result<(), Error> {
     let extended = capability.extended()?;
     let is_shared_node = extended.sequence.is_some();
     let is_personal_device = extended.personal.is_some();
@@ -62,7 +61,7 @@ fn node_shape(capability: &Capability) -> Result<(), Error> {
     {
         return Err(denied("invalid node certificate"));
     }
-    Ok(())
+    crate::possession::check(capability, identity)
 }
 
 #[derive(Clone)]
@@ -509,14 +508,29 @@ impl SignedCapability {
             _ => Purpose::Capability,
         };
         if capability.kind == PrincipalKind::Node {
-            node_shape(&capability)?;
+            check_node(&capability, signer.principal()?)?;
         }
+        Self::attest(capability, &signer, purpose)
+    }
+    fn attest(
+        capability: Capability,
+        signer: &Signer<'_>,
+        purpose: Purpose,
+    ) -> Result<Self, Error> {
         Ok(Self {
-            author_binding: crate::AuthorBinding::sign(&capability, &signer)?,
+            author_binding: crate::AuthorBinding::sign(&capability, signer)?,
             issuer: signer.principal()?,
             attestation: signer.attest(purpose, &signing_bytes(CAPABILITY_LABEL, &capability)?)?,
             capability,
         })
+    }
+    #[cfg(test)]
+    pub(crate) fn sign_unchecked_node(
+        capability: Capability,
+        identity: &dyn IdentityProvider,
+    ) -> Self {
+        Self::attest(capability, &Signer::Key(identity), Purpose::NodeCertificate)
+            .expect("an identity signs any capability")
     }
     pub fn id(&self) -> Result<Commitment, Error> {
         Ok(rocky_core::commitment(
@@ -984,7 +998,7 @@ impl CredentialChain {
             if capability.grants.iter().any(|grant| grant.fields.named() > 256 || matches!(&grant.rows, rocky_core::RowSelection::Only(rows) if rows.is_empty() || rows.len() > 256)) {
                 return Err(denied("credential resource quota"));
             }
-            Self::shape(capability, &extended)?;
+            Self::shape(capability, &extended, signed.issuer)?;
             if node {
                 self.check_personal(index)?;
             }
@@ -1095,14 +1109,14 @@ impl CredentialChain {
             .trusted_subject()?
             .is_some_and(|trusted| self.0[index].issuer == trusted))
     }
-    fn shape(capability: &Capability, extended: &Extended) -> Result<(), Error> {
+    fn shape(capability: &Capability, extended: &Extended, issuer: PublicKey) -> Result<(), Error> {
         if extended.families
             && (extended.issues || extended.trusted.is_some() || extended.claims.is_some())
         {
             return Err(denied("grant families apply only to collection authority"));
         }
         let valid = match capability.kind {
-            PrincipalKind::Node => node_shape(capability).is_ok(),
+            PrincipalKind::Node => check_node(capability, issuer).is_ok(),
             PrincipalKind::User => extended.node.is_none(),
             PrincipalKind::Deployment => {
                 extended.node.is_none()
@@ -1295,7 +1309,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let chain = crate::device_chain(root.clone(), user, node.public_key()).unwrap();
+        let chain = crate::device_chain(root.clone(), user, node).unwrap();
         (root, chain)
     }
 
@@ -1312,7 +1326,7 @@ mod tests {
         let mut earlier = root;
         earlier.attestation.signature =
             publisher.sign(&signing_bytes("rocky.capability.v2", &earlier.capability).unwrap());
-        let earlier = crate::device_chain(earlier, &user, node.public_key()).unwrap();
+        let earlier = crate::device_chain(earlier, &user, &node).unwrap();
         assert!(
             earlier
                 .verify(publisher.public_key(), node.public_key(), &revocations, 200)

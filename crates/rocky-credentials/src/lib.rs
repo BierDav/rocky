@@ -47,6 +47,7 @@ mod peer;
 mod peer_rpc;
 mod personal;
 mod phrase_key;
+mod possession;
 mod reset;
 mod revocation;
 mod root;
@@ -113,6 +114,7 @@ pub use personal::{
     PersonalCustodyRenewal, PersonalError, PersonalHello, PersonalLink, PersonalNamespace,
     PersonalPublication,
 };
+pub use possession::NodePossession;
 pub use reset::{
     FenceLog, FenceScope, MAX_FENCE_LOGS, MAX_RESET_BYTES, MAX_RESET_FOLLOWS, MAX_RESET_KEEP,
     Reset, ResetAdmission, ResetStanding, SignedResetAdmission,

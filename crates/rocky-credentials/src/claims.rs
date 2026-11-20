@@ -2,7 +2,7 @@ use crate::{
     Authority, CredentialChain, Error, Extended, IdentityProvider, PublicKey, RevocationSet,
     SignedCapability, denied,
 };
-use crate::{Capability, Extension, PeerId};
+use crate::{Capability, Extension};
 use rocky_core::{Commitment, PrincipalKind, Scope};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -123,7 +123,7 @@ impl CredentialChain {
     pub fn certify_claims(
         mut self,
         holder: &dyn IdentityProvider,
-        node: PublicKey,
+        node: &crate::PrivateKey,
     ) -> Result<Self, Error> {
         let key = holder.public_key()?;
         let parent = match self.0.last() {
@@ -135,21 +135,10 @@ impl CredentialChain {
             }
             _ => return Err(denied("the chain does not end at the holder's claim link")),
         };
-        let leaf = Capability {
-            subject: node,
-            kind: PrincipalKind::Node,
-            delegations: 0,
-            grants: Vec::new(),
-            extension: Extension::new(Extended {
-                node: Some(PeerId::of(node)),
-                sequence: Some(0),
-                database: Some(self.database_context(self.0[0].issuer)?),
-                ..Extended::default()
-            })?,
-            not_before: parent.not_before,
-            expires: crate::NEVER,
-        };
-        self.0.push(SignedCapability::sign(leaf, holder)?);
+        let database = self.database_context(self.0[0].issuer)?;
+        let leaf =
+            crate::issue::node_certificate(holder, node, database, parent.not_before, (0, None))?;
+        self.0.push(leaf);
         Ok(self)
     }
     pub fn claim_right(

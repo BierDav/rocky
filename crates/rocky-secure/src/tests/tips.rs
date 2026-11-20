@@ -921,10 +921,7 @@ async fn identity_replica_at(
     .unwrap();
     let identity_chain = CredentialChain(vec![root]);
     let mut config = f.config(node, f.full(), &[f.public]);
-    config.credentials = identity_chain
-        .clone()
-        .complete(identity, node.public_key())
-        .unwrap();
+    config.credentials = identity_chain.clone().complete(identity, node).unwrap();
     (
         EncryptedReplica::open(path, f.app(), config).await.unwrap(),
         identity_chain,
@@ -962,7 +959,7 @@ async fn returning_to_main_can_serve_a_checkpoint_signed_by_its_saved_branch_nod
             .clone()
             .certify_member(
                 &identity,
-                branch_node.public_key(),
+                &branch_node,
                 1,
                 replica
                     .revocations()
@@ -984,9 +981,7 @@ async fn returning_to_main_can_serve_a_checkpoint_signed_by_its_saved_branch_nod
         .await
         .unwrap();
     let mut config = f.config(&original, f.full(), &[f.public]);
-    config.credentials = identity_chain
-        .complete(&identity, original.public_key())
-        .unwrap();
+    config.credentials = identity_chain.complete(&identity, &original).unwrap();
     drop(replica);
     let replica = EncryptedReplica::open(&dir.path().join("checkpoint-lines.db"), f.app(), config)
         .await
@@ -1077,7 +1072,7 @@ async fn following_a_branch_requires_its_own_node_and_returns_to_the_main_node()
             credentials: identity_chain
                 .certify_member(
                     &identity,
-                    branch_node.public_key(),
+                    &branch_node,
                     1,
                     replica
                         .revocations()
@@ -1182,7 +1177,7 @@ async fn reopening_a_branch_waits_for_its_saved_line_node_and_returns_to_main() 
         credentials: identity_chain
             .certify_member(
                 &identity,
-                branch_node.public_key(),
+                &branch_node,
                 1,
                 replica
                     .revocations()
@@ -1532,7 +1527,7 @@ async fn two_branch_devices_sync_without_main_and_switching_back_drops_branch_fr
                     .clone()
                     .certify_member(
                         identity,
-                        node.public_key(),
+                        &node,
                         1,
                         replica
                             .revocations()
@@ -1578,7 +1573,7 @@ async fn two_branch_devices_sync_without_main_and_switching_back_drops_branch_fr
         .await
         .is_err()
     );
-    let c_credentials = c_chain.complete(&c_identity, c_key.public_key()).unwrap();
+    let c_credentials = c_chain.complete(&c_identity, &c_key).unwrap();
     b.admit_peer(c_key.public_key(), &c_credentials, dev)
         .await
         .unwrap();
@@ -1824,10 +1819,7 @@ async fn a_held_cut_refuses_and_prunes_what_follows_its_head() {
         .issue_trusted(trusted.public_key(), f.public.domain, now().unwrap())
         .unwrap(),
     ]);
-    let node_chain = chain
-        .clone()
-        .certify(&trusted, trusted.public_key())
-        .unwrap();
+    let node_chain = chain.clone().certify(&trusted, &trusted).unwrap();
     let linked = |name: &str, link| {
         let TipStatement::Bookmark(unsigned) = bookmark(&f, name, None, Some(genesis)) else {
             unreachable!()

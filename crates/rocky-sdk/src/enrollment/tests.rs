@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 fn member_chain(
     links: &CredentialChain,
     user: &PrivateKey,
-    node: PublicKey,
+    node: &PrivateKey,
 ) -> Result<CredentialChain, Failure> {
     Ok(links.clone().complete(user, node)?)
 }
@@ -88,7 +88,7 @@ fn revoking_an_identity_known_only_by_its_grant_ends_it_under_any_node_key() -> 
     let mut links = issuer_links.clone();
     links.0.push(capability.clone());
     let renew = |issuer: &Settings, node: &PrivateKey| -> Result<Vec<u8>, Failure> {
-        let chain = member_chain(&links, &user, node.public_key())?;
+        let chain = member_chain(&links, &user, node)?;
         let (request, _) = RenewRequest::sign(node, me, chain, now()?)?;
         Ok(issuer
             .renew(&vault, &request.to_bytes()?, &registry, None)?
@@ -248,7 +248,7 @@ fn a_granted_profile_reads_every_partition_as_an_enrolled_one_does() -> Result<(
         &Registry::default(),
     )?;
     let domain = issuer.domain()?;
-    let chain = member_chain(&supplied.credentials.chain(), &user, node.public_key())?;
+    let chain = member_chain(&supplied.credentials.chain(), &user, &node)?;
     let (_, selectors) = chain.verify_selectors(
         issuer.publisher,
         node.public_key(),
@@ -549,7 +549,7 @@ fn a_tombstoned_user_renews_at_no_issuer_also_after_its_statement_left_the_set()
                  root: &CredentialChain|
      -> Result<Vec<u8>, Failure> {
         let fresh = PrivateKey::new();
-        let chain = member_chain(root, user, fresh.public_key())?;
+        let chain = member_chain(root, user, &fresh)?;
         let (request, _) = RenewRequest::sign(&fresh, me, chain, now()?)?;
         Ok(issuer
             .renew(&vault, &request.to_bytes()?, registry, None)?
@@ -858,7 +858,7 @@ fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), 
     let chain = member_chain(
         &issuer.authority(&issuer_node)?.chain_of(capability),
         &user,
-        node.public_key(),
+        &node,
     )?;
     let issuer_node = PrivateKey::from_bytes(&vault.get("node")?).public_key();
     let (request, exchange) = RenewRequest::sign(&node, issuer_node, chain, now()?)?;
@@ -1105,7 +1105,7 @@ fn any_issuer_renews_a_recorded_claim_right_and_none_a_revoked_one() -> Result<(
     let mut b = issuer_that_granted_nothing(&a);
     let request = |user: &PrivateKey, root: &CredentialChain, time: u64| {
         let fresh = PrivateKey::new();
-        let chain = member_chain(root, user, fresh.public_key())?;
+        let chain = member_chain(root, user, &fresh)?;
         Ok::<_, Failure>(RenewRequest::sign(&fresh, me, chain, time)?.0.to_bytes()?)
     };
     let links = |grant: &crate::ClaimGrant| -> Result<CredentialChain, Failure> {

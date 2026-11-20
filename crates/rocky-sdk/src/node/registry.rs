@@ -142,36 +142,13 @@ impl Node {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        let mut seen = BTreeMap::new();
-        for certificate in known.certificates() {
-            let node = certificate.capability.subject;
-            let identity = certificate.issuer;
-            let last = self
-                .last_seen(node, time)
+        let seen = crate::membership::seen_devices(&known, &registry, |node| {
+            self.last_seen(node, time)
                 .into_iter()
                 .chain(met.get(&node).copied())
                 .chain(settings.contact_meta.get(&node).map(|meta| meta.learned))
-                .max();
-            if let Some(last) = last {
-                let registry_known = registry
-                    .records
-                    .get(&identity)
-                    .is_some_and(|record| record.admitted.is_some());
-                seen.insert(
-                    node,
-                    crate::SeenDevice {
-                        node: node.to_hex(),
-                        identity: identity.to_hex(),
-                        last_seen: last,
-                        registry_known,
-                        unknown_identity: !registry_known,
-                        revoked: known.revokes(&identity),
-                        unlinked: known
-                            .identity_unlinks(identity, rocky_credentials::PeerId::of(node)),
-                    },
-                );
-            }
-        }
+                .max()
+        });
         let links = self
             .link_requests
             .lock()
@@ -187,7 +164,7 @@ impl Node {
             .collect();
         Ok(crate::Discovered {
             pending,
-            seen: seen.into_values().collect(),
+            seen,
             links,
         })
     }

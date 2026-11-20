@@ -1,6 +1,6 @@
 use crate::{
     CredentialChain, DatabaseContext, Error, PeerId, PrivateKey, PublicKey, RevocationSet,
-    Signature, SignedCapability, encode, signing_bytes,
+    SignedCapability, encode,
 };
 use rocky_core::{ApplicationManifest, Commitment, DomainId, MeshId};
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,6 @@ const NAMESPACE_FORMAT: u32 = 1;
 const MAX_RP_ID: usize = 253;
 const MAX_PURPOSE: usize = 64;
 pub const MAX_PERSONAL_DEVICES: usize = crate::MAX_MEMBERSHIP_NODES;
-const POSSESSION: &str = "rocky.personal-device.possession.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "NamespaceRecord", into = "NamespaceRecord")]
@@ -239,47 +238,6 @@ impl From<PersonalError> for Error {
 pub struct PersonalBinding {
     pub grant: Commitment,
     pub descriptor: Commitment,
-    pub possession: Signature,
-}
-impl PersonalBinding {
-    fn message(
-        database: DatabaseContext,
-        owner: PublicKey,
-        node: PublicKey,
-        (grant, descriptor): (Commitment, Commitment),
-    ) -> Result<Vec<u8>, Error> {
-        signing_bytes(POSSESSION, &(database, owner, node, grant, descriptor))
-    }
-    pub(crate) fn sign(
-        database: DatabaseContext,
-        owner: PublicKey,
-        node: &PrivateKey,
-        (grant, descriptor): (Commitment, Commitment),
-    ) -> Result<Self, Error> {
-        let message = Self::message(database, owner, node.public_key(), (grant, descriptor))?;
-        Ok(Self {
-            grant,
-            descriptor,
-            possession: node.sign(&message),
-        })
-    }
-}
-
-pub(crate) fn check_possession(
-    capability: &crate::Capability,
-    owner: PublicKey,
-) -> Result<(), Error> {
-    let extended = capability.extended()?;
-    let (Some(binding), Some(database)) = (extended.personal, extended.database) else {
-        return Ok(());
-    };
-    let node = capability.subject;
-    let message =
-        PersonalBinding::message(database, owner, node, (binding.grant, binding.descriptor))?;
-    if !node.verify(&message, &binding.possession) {
-        return Err(PersonalError::Possession.into());
-    }
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -308,7 +266,7 @@ impl PersonalLink {
         {
             return Err(crate::denied("invalid device certificate"));
         }
-        check_possession(&certificate.capability, certificate.issuer)?;
+        crate::possession::check(&certificate.capability, certificate.issuer)?;
         Ok(Some(Self {
             database,
             owner: certificate.issuer,
@@ -360,7 +318,11 @@ impl CredentialChain {
         {
             return Err(PersonalError::WrongOwner.into());
         }
-        let binding = PersonalBinding::sign(database, owner, node, (grant.id()?, descriptor))?;
+        let binding = PersonalBinding {
+            grant: grant.id()?,
+            descriptor,
+        };
+        let possession = crate::NodePossession::sign(node, owner, database, Some(&binding))?;
         let last = self.holder(signer)?;
         let leaf = crate::Capability {
             subject: node.public_key(),
@@ -373,6 +335,7 @@ impl CredentialChain {
                 node: Some(PeerId::of(node.public_key())),
                 database: Some(database),
                 personal: Some(binding),
+                possession: Some(possession),
                 ..crate::Extended::default()
             })?,
         };

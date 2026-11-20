@@ -30,7 +30,7 @@ pub(crate) fn open<'a>(root: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
         identity: common::prepared_identity(root),
         directory: root,
-        schema: SCHEMA,
+        schema: crate::support::snapshot::schema(SCHEMA),
         secrets: Some(keys(root)),
         network: Some(Network::Owned(hub.connector(name))),
         coordination: None,

@@ -117,7 +117,7 @@ async fn a_sufficient_local_peer_is_the_only_dial_and_reports_the_skipped_issuer
                     .find(|peer| peer.node == key.to_hex())
                     .ok_or("local")?
                     .choice,
-                "selected_local"
+                crate::PeerChoice::SelectedLocal
             );
             assert_eq!(
                 peers
@@ -125,7 +125,7 @@ async fn a_sufficient_local_peer_is_the_only_dial_and_reports_the_skipped_issuer
                     .find(|peer| peer.is_issuer)
                     .ok_or("issuer")?
                     .choice,
-                "covered"
+                crate::PeerChoice::Covered
             );
             assert!(!b.reached()?.get(&key).ok_or("reached")?.held.is_empty());
             assert!(
@@ -171,7 +171,10 @@ async fn an_unreachable_contact_costs_no_dial_during_its_backoff() -> Result<(),
             assert_eq!(completed_peers(&report), 0);
             assert_eq!(report["peers"][0]["skip"], "backoff");
             assert_eq!(hub.dials_to("gone"), dials);
-            assert_eq!(a.observed_peers().await[0].choice, "backoff");
+            assert_eq!(
+                a.observed_peers().await[0].choice,
+                crate::PeerChoice::Backoff
+            );
             a.detach(None).await;
             Ok(())
         })

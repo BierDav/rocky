@@ -49,7 +49,11 @@ impl Schema {
         if version.format != rocky_core::DEFINITION_FORMAT {
             return Err("unsupported schema definition format".into());
         }
-        let mut schema: Self = serde_json::from_str(json)?;
+        let schema: Self = serde_json::from_str(json)?;
+        schema.validated()
+    }
+    pub(crate) fn validated(&self) -> Result<Self, Failure> {
+        let mut schema = self.clone();
         schema.validate()?;
         {
             let tables = &mut schema.tables;

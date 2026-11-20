@@ -50,10 +50,11 @@ impl Member {
     }
     pub(super) async fn start(&mut self, hub: &Arc<Hub>, install: Install) -> Result<(), Failure> {
         let secrets: Arc<dyn SecretStore> = self.keys.clone();
+        let schema = crate::Schema::parse(self.schema)?;
         let hosted = Database::host(
             Open {
                 directory: &self.directory,
-                schema: self.schema,
+                schema: &schema,
                 secrets: Some(secrets),
                 identity: self
                     .pending_join

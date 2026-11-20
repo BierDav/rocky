@@ -287,7 +287,7 @@ pub(crate) struct Node {
         >,
     >,
     sync_failures: std::sync::Mutex<BTreeMap<(PublicKey, ResourceScope), SyncFailure>>,
-    choices: std::sync::Mutex<BTreeMap<PublicKey, &'static str>>,
+    choices: std::sync::Mutex<BTreeMap<PublicKey, crate::PeerChoice>>,
     topics: watch::Sender<u64>,
     announcing: AtomicBool,
     #[cfg(test)]
@@ -789,7 +789,7 @@ impl Node {
             let (uri, node, routes) = settings.contact(&self.vault, transport).await?;
             Ok(crate::ContactInfo {
                 uri,
-                node: node.to_hex(),
+                node,
                 routes: routes
                     .into_iter()
                     .map(|route| crate::Route {
@@ -815,7 +815,7 @@ impl Node {
                     .as_ref()
                     .is_some_and(|admitted| admitted.invitation.as_deref() == Some(&id))
             })
-            .map(|(identity, _)| identity.to_hex());
+            .map(|(identity, _)| *identity);
         Ok(crate::InvitationState {
             id,
             expires_at_epoch_seconds: expires,
@@ -846,7 +846,7 @@ impl Node {
         Ok(())
     }
 
-    async fn add_peer(&self, contact: &str) -> Result<String, Failure> {
+    async fn add_peer(&self, contact: &str) -> Result<PublicKey, Failure> {
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let node = self
             .configure(|settings| {
@@ -862,7 +862,7 @@ impl Node {
             peer: (node).to_owned(),
         });
         self.wake_sync();
-        Ok(node.to_hex())
+        Ok(node)
     }
 
     async fn remove_peer(&self, node: PublicKey) -> Result<(), Failure> {
@@ -1381,7 +1381,7 @@ impl Node {
         let dropped = dropped
             .iter()
             .map(|(lane, head)| crate::DroppedStage {
-                node: lane.to_hex(),
+                node: *lane,
                 sequence: head.sequence,
                 head: HEXLOWER.encode(&head.id),
             })
@@ -1989,19 +1989,19 @@ impl Node {
         for (index, (node, _)) in targets.iter().enumerate() {
             let meta = settings.contact_meta.get(node);
             let reason = if waiting(node) {
-                "backoff"
+                crate::PeerChoice::Backoff
             } else if index >= crate::enrollment::MAX_DIALED {
-                "pass_limit"
+                crate::PeerChoice::PassLimit
             } else if meta.is_some_and(|meta| meta.local) {
-                "selected_local"
+                crate::PeerChoice::SelectedLocal
             } else if reached.get(node).is_some_and(|last| {
                 last.error.is_none() && needed.iter().any(|scope| last.held.contains(scope))
             }) {
-                "selected_holding"
+                crate::PeerChoice::SelectedHolding
             } else if settings.issuers.contains(node) || meta.is_some_and(|meta| meta.trusted) {
-                "selected_trusted"
+                crate::PeerChoice::SelectedTrusted
             } else {
-                "selected_probe"
+                crate::PeerChoice::SelectedProbe
             };
             choices.insert(*node, reason);
         }

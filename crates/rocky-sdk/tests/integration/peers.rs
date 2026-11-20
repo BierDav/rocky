@@ -93,7 +93,7 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
     assert_eq!(network["inbound"]["limit"], 32);
 
     assert_eq!(c.peer(&b.node().await).await["is_configured"], true);
-    snap::ok(b.session.remove_peer(&(snap::text(&(c.node().await))))).await;
+    snap::ok(b.session.remove_peer(snap::public_key(&(c.node().await)))).await;
     b.add(4, "Tea").await;
     assert!(
         common::exchange_failed(&b.sync().await),
@@ -115,7 +115,7 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
             .renewal_routes
             .is_empty()
     );
-    snap::ok(b.session.remove_peer(&(snap::text(&(creator_node))))).await;
+    snap::ok(b.session.remove_peer(snap::public_key(&(creator_node)))).await;
     assert!(
         b.session
             .status()
@@ -198,7 +198,7 @@ async fn a_revoked_peer_stays_denied_without_the_creator() -> Result<(), Failure
         .map_err(|e| e.to_string())?;
     snap::ok(
         a.session
-            .revoke_identity(&(snap::text(&(c.identity().await)))),
+            .revoke_identity(snap::public_key(&(c.identity().await))),
     )
     .await;
     assert_eq!(

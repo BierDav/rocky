@@ -31,7 +31,7 @@ fn open<'a>(directory: &'a Path, schema: &'a str, network: Option<Network>) -> O
     Open {
         identity: Some(common::external_identity(directory)),
         directory,
-        schema,
+        schema: crate::support::snapshot::schema(schema),
         secrets: None,
         network,
         coordination: None,

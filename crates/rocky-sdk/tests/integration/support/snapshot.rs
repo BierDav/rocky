@@ -16,6 +16,7 @@ serialized!(
     (),
     bool,
     String,
+    sdk::PublicKey,
     sdk::TipStatus,
     sdk::TipInspection,
     sdk::TipCompaction,
@@ -216,6 +217,23 @@ scalar!(
 );
 pub fn text(value: &impl Scalar) -> String {
     value.text()
+}
+pub fn public_key(value: &impl Scalar) -> sdk::PublicKey {
+    text(value).parse().expect("public key")
+}
+pub fn schema(json: &str) -> &'static sdk::Schema {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<String, &'static sdk::Schema>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let mut guard = cache.lock().expect("schema cache");
+    if let Some(parsed) = guard.get(json) {
+        return parsed;
+    }
+    let parsed: &'static sdk::Schema =
+        Box::leak(Box::new(sdk::Schema::parse(json).expect("test schema")));
+    guard.insert(json.to_owned(), parsed);
+    parsed
 }
 pub fn integer(value: &impl Scalar) -> i64 {
     value.text().parse().expect("integer fixture")

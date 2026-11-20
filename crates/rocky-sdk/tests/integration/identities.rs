@@ -18,7 +18,7 @@ fn open<'a>(
     Open {
         identity,
         directory,
-        schema: common::SCHEMA,
+        schema: crate::support::snapshot::schema(common::SCHEMA),
         secrets: None,
         network: Some(Network::Owned(hub.connector(name))),
         coordination: None,
@@ -214,7 +214,7 @@ async fn an_issuer_revokes_the_identity_never_one_of_its_nodes() -> Result<(), F
     for node in nodes {
         assert!(synced(node).await);
     }
-    snap::ok(owner.session.revoke_identity(&(snap::text(&(key))))).await;
+    snap::ok(owner.session.revoke_identity(snap::public_key(&(key)))).await;
     for node in nodes {
         let refused = node.sync().await.err().ok_or("a revoked identity synced")?;
         assert_eq!(
@@ -224,7 +224,7 @@ async fn an_issuer_revokes_the_identity_never_one_of_its_nodes() -> Result<(), F
     }
     let own = snap::ok(owner.session.info()).await["principal"].clone();
     assert!(
-        snap::observe(owner.session.revoke_identity(&(snap::text(&(own)))))
+        snap::observe(owner.session.revoke_identity(snap::public_key(&(own))))
             .await
             .is_err(),
         "the owner's own identity is never revoked"
@@ -249,7 +249,7 @@ async fn routine_issuer_calls_need_no_identity_and_do_not_retain_a_supplied_one(
     let member = IdentityKey::generate().public_key().to_hex();
     let session = database.session();
     session
-        .grant_claims(&member, rocky_sdk::ClaimCounters::Every, 1)
+        .grant_claims(member.parse()?, rocky_sdk::ClaimCounters::Every, 1)
         .await?;
     session.sync_once_with_identity(key).await?;
     assert!(
@@ -600,7 +600,7 @@ async fn approval_continuations_keep_identity_mode_and_phrase_until_admitted() -
         }
         session
             .admit(rocky_sdk::Admit {
-                node: listed[0].node.clone(),
+                node: listed[0].node,
                 code: pending.code.clone(),
                 profile: rocky_sdk::GrantProfile::Writer {
                     scopes: ["items".into()].into(),
@@ -816,7 +816,7 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
                 let grant = owner
                     .database
                     .session()
-                    .trust(&personal.public_key()?.to_hex(), root_a.clone())
+                    .trust(personal.public_key()?, root_a.clone())
                     .await?;
                 member
                     .database
@@ -953,7 +953,7 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
             snap::ok(
                 owners[1]
                     .session
-                    .revoke_identity(&(snap::text(&(person_key)))),
+                    .revoke_identity(snap::public_key(&(person_key))),
             )
             .await;
             for device in [&members[1], &siblings[1]] {
@@ -994,7 +994,7 @@ async fn a_person_links_and_unlinks_independently_in_two_databases() -> Result<(
             .database
             .session()
             .revoke_trusted(
-                &person_key,
+                person_key.parse()?,
                 rocky_sdk::RevocationMode::Compromised,
                 root_a.clone(),
             )
@@ -1076,7 +1076,7 @@ async fn linking_requires_both_codes_before_credentials_are_released() -> Result
             .await
             .is_err()
     );
-    assert!(session.confirm_link(&pending.node, wrong).await.is_err());
+    assert!(session.confirm_link(pending.node, wrong).await.is_err());
     assert!(
         config
             .confirm_link(&contact, key.clone(), pending.clone(), &pending.code)
@@ -1086,7 +1086,7 @@ async fn linking_requires_both_codes_before_credentials_are_released() -> Result
     );
     assert!(!path.join("identity.json").exists());
     assert!(!session.discovered().await?.links[0].confirmed);
-    session.confirm_link(&pending.node, &pending.code).await?;
+    session.confirm_link(pending.node, &pending.code).await?;
     assert!(
         config
             .confirm_link(&contact, key.clone(), pending.clone(), wrong)
@@ -1127,13 +1127,14 @@ async fn certified_seen_nodes_are_visible_without_issuer_authority() -> Result<(
     let seen = discovered
         .seen
         .iter()
-        .find(|seen| seen.node == sibling_node)
+        .find(|seen| seen.node.to_hex() == sibling_node)
         .ok_or("certified sibling not seen")?;
     assert_eq!(
         seen.identity,
         identity(household._root.path(), "m2")?["identity"]
             .as_str()
             .ok_or("identity")?
+            .parse::<rocky_sdk::PublicKey>()?
     );
     assert!(seen.last_seen > 0);
     assert!(!seen.registry_known);
@@ -1144,7 +1145,7 @@ async fn certified_seen_nodes_are_visible_without_issuer_authority() -> Result<(
     let issuer_seen = owner.database.session().discovered().await?.seen;
     let seen = issuer_seen
         .iter()
-        .find(|seen| seen.node == sibling_node)
+        .find(|seen| seen.node.to_hex() == sibling_node)
         .ok_or("issuer has no seen sibling")?;
     assert!(seen.registry_known && !seen.unknown_identity);
     member
@@ -1163,12 +1164,12 @@ async fn certified_seen_nodes_are_visible_without_issuer_authority() -> Result<(
             .await?
             .seen
             .iter()
-            .any(|seen| seen.node == sibling_node && seen.unlinked)
+            .any(|seen| seen.node.to_hex() == sibling_node && seen.unlinked)
     );
     snap::ok(
         owner
             .session
-            .revoke_identity(&(snap::text(&(seen.identity)))),
+            .revoke_identity(snap::public_key(&(seen.identity))),
     )
     .await;
     assert!(
@@ -1179,7 +1180,7 @@ async fn certified_seen_nodes_are_visible_without_issuer_authority() -> Result<(
             .await?
             .seen
             .iter()
-            .any(|seen| seen.node == sibling_node && seen.revoked)
+            .any(|seen| seen.node.to_hex() == sibling_node && seen.revoked)
     );
     owner.close().await;
     for node in household.nodes {
@@ -1234,7 +1235,7 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
     let grant = owner
         .database
         .session()
-        .trust(&person, root.clone())
+        .trust(person.parse()?, root.clone())
         .await?;
     first.database.session().install_trust(&grant.grant).await?;
     first.sync().await.map_err(|error| error.to_string())?;
@@ -1334,7 +1335,11 @@ async fn trusted_siblings_seal_and_observe_links_and_unlinks_durably() -> Result
     owner
         .database
         .session()
-        .revoke_trusted(&person, rocky_sdk::RevocationMode::Compromised, root)
+        .revoke_trusted(
+            person.parse()?,
+            rocky_sdk::RevocationMode::Compromised,
+            root,
+        )
         .await?;
     let saved = identity(path, "owner")?;
     let revocations: rocky_credentials::RevocationSet =

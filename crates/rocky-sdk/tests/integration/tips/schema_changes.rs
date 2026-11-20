@@ -18,7 +18,7 @@ fn schema(version: u32, migration: bool) -> String {
 fn open<'a>(directory: &'a Path, schema: &'a str) -> Open<'a> {
     Open {
         directory,
-        schema,
+        schema: crate::support::snapshot::schema(schema),
         identity: Some(common::external_identity(directory)),
         secrets: None,
         network: None,

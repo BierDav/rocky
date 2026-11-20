@@ -36,7 +36,12 @@ async fn trusted(
     .with_identity(common::external_identity(directory));
     introduce(owner, &device).await;
     let principal = snap::ok(device.session.info()).await["principal"].clone();
-    let grant = snap::ok(owner.session.trust(&snap::text(&principal), owner.root())).await;
+    let grant = snap::ok(
+        owner
+            .session
+            .trust(snap::public_key(&principal), owner.root()),
+    )
+    .await;
     snap::ok(device.session.install_trust(&snap::text(&grant["grant"]))).await;
     device.sync().await.expect("trusted sync");
     Ok(device)
@@ -579,7 +584,10 @@ async fn a_skipped_members_seal_raises_the_alert_and_leaves_the_revocation_compl
     for device in [&t, &a, &reader] {
         device.sync().await.expect("sync");
     }
-    let revoked = a.session.revoke_identity(&reader.identity().await).await?;
+    let revoked = a
+        .session
+        .revoke_identity(reader.identity().await.parse()?)
+        .await?;
     assert_eq!(revoked.revocations.statements, 1);
     t.sync().await.expect("trusted sync");
     assert_eq!(

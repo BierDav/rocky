@@ -21,7 +21,7 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>) -> Open<'a> {
     Open {
         identity: None,
         directory,
-        schema: SCHEMA,
+        schema: crate::support::snapshot::schema(SCHEMA),
         secrets: None,
         network: Some(Network::Owned(hub.connector(name))),
         coordination: None,
@@ -152,7 +152,7 @@ async fn rotate(issuer: &Device, directory: &Path, list: &str) -> Result<(), Fai
     snap::ok(
         issuer
             .session
-            .revoke_identity(&(snap::text(&(device.identity.to_string())))),
+            .revoke_identity(snap::public_key(&(device.identity.to_string()))),
     )
     .await;
     Ok(())
@@ -326,7 +326,7 @@ async fn a_revoked_trusted_node_gains_nothing_from_escrow_records() -> Result<()
     let grant = snap::ok(
         issuer
             .session
-            .trust(&(snap::text(&(t_identity))), (issuer.root()).clone()),
+            .trust(snap::public_key(&(t_identity)), (issuer.root()).clone()),
     )
     .await;
     snap::ok(t.session.install_trust(&(snap::text(&(grant["grant"]))))).await;
@@ -340,7 +340,7 @@ async fn a_revoked_trusted_node_gains_nothing_from_escrow_records() -> Result<()
     t.close().await;
     drop(t);
     snap::ok(issuer.session.revoke_identity_with_root(
-        &(snap::text(&(t_identity))),
+        snap::public_key(&(t_identity)),
         rocky_sdk::RevocationMode::Compromised,
         Some((issuer.root()).clone()),
         true,
@@ -476,7 +476,7 @@ async fn a_recovery_revokes_every_lost_trusted_identity_it_knows() -> Result<(),
     let grant = snap::ok(
         issuer
             .session
-            .trust(&(snap::text(&(second))), (issuer.root()).clone()),
+            .trust(snap::public_key(&(second)), (issuer.root()).clone()),
     )
     .await;
     snap::ok(
@@ -517,7 +517,7 @@ async fn a_recovery_revokes_every_lost_trusted_identity_it_knows() -> Result<(),
             .database
             .session()
             .revoke_trusted(
-                identity,
+                identity.parse()?,
                 rocky_sdk::RevocationMode::Compromised,
                 Arc::new(RootKey::from_phrase(&phrase)?),
             )
@@ -657,7 +657,7 @@ async fn a_recovery_ends_trusted_identities_its_backup_never_knew() -> Result<()
     let grant = snap::ok(
         issuer
             .session
-            .trust(&(snap::text(&(promoted))), (issuer.root()).clone()),
+            .trust(snap::public_key(&(promoted)), (issuer.root()).clone()),
     )
     .await;
     snap::ok(
@@ -706,7 +706,7 @@ async fn a_recovery_ends_trusted_identities_its_backup_never_knew() -> Result<()
     )?)?;
     let identity = principal(&trusted_after_recovery).await;
     let grant = snap::ok(device.session.trust(
-        &(snap::text(&(identity))),
+        snap::public_key(&(identity)),
         std::sync::Arc::new(rocky_sdk::RootKey::from_phrase(&snap::text(&(phrase))).expect("root")),
     ))
     .await;
@@ -824,7 +824,7 @@ async fn survivors_report_the_trusted_identities_a_recovery_ended() -> Result<()
     let grant = snap::ok(
         issuer
             .session
-            .trust(&(snap::text(&(second))), (issuer.root()).clone()),
+            .trust(snap::public_key(&(second)), (issuer.root()).clone()),
     )
     .await;
     snap::ok(
@@ -874,7 +874,7 @@ async fn survivors_report_the_trusted_identities_a_recovery_ended() -> Result<()
     )?)?;
     let identity = principal(&again).await;
     let grant = snap::ok(device.session.trust(
-        &(snap::text(&(identity))),
+        snap::public_key(&(identity)),
         std::sync::Arc::new(rocky_sdk::RootKey::from_phrase(&snap::text(&(phrase))).expect("root")),
     ))
     .await;

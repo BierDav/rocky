@@ -9,7 +9,7 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>) -> Open<'a> {
     Open {
         identity: common::prepared_identity(directory),
         directory,
-        schema: SCHEMA,
+        schema: crate::support::snapshot::schema(SCHEMA),
         secrets: None,
         network: Some(Network::Owned(hub.connector(name))),
         coordination: None,
@@ -191,7 +191,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     }))
     .await;
     let revoked =
-        snap::ok(session.revoke_identity(&(snap::text(&(device.identity.to_string()))))).await;
+        snap::ok(session.revoke_identity(snap::public_key(&(device.identity.to_string())))).await;
     assert_eq!(revoked["revocations"]["statements"], 1);
     let mut tx = db.transaction().await.unwrap();
     let id = tx.next_id("items", values("A")).await.unwrap();
@@ -218,7 +218,7 @@ async fn own_id_partitions_continue_the_table_log() {
     let options = || Open {
         identity: None,
         directory: root.path(),
-        schema,
+        schema: crate::support::snapshot::schema(schema),
         secrets: None,
         network: None,
         coordination: None,

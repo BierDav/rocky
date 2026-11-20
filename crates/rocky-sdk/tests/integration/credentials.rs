@@ -21,7 +21,7 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
         identity: common::prepared_identity(directory),
         directory,
-        schema: SCHEMA,
+        schema: crate::support::snapshot::schema(SCHEMA),
         secrets: None,
         network: Some(memory(hub, name)),
         coordination: None,
@@ -380,7 +380,7 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     }
     let revoked = snap::ok(
         a.session
-            .revoke_identity(&(snap::text(&(c.identity().await)))),
+            .revoke_identity(snap::public_key(&(c.identity().await))),
     )
     .await;
     assert_eq!(revoked["revocations"]["statements"], 1);

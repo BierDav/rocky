@@ -48,7 +48,7 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
         identity: Some(Arc::new(root().identity())),
         directory,
-        schema: common::SCHEMA,
+        schema: crate::support::snapshot::schema(common::SCHEMA),
         secrets: None,
         network: Some(Network::Owned(hub.connector(name))),
         coordination: None,
@@ -142,10 +142,13 @@ async fn a_personal_database_admits_only_custody_principals() -> Result<(), Fail
     }
     let stranger = rocky_sdk::IdentityKey::generate().public_key().to_hex();
     let root: Arc<dyn IdentityProvider> = Arc::new(root());
-    let error = session.trust(&stranger, root).await.expect_err("refused");
+    let error = session
+        .trust(stranger.parse()?, root)
+        .await
+        .expect_err("refused");
     assert_eq!(code(&error), "personal_owner_only");
     let error = session
-        .grant_claims(&stranger, rocky_sdk::ClaimCounters::Every, 1)
+        .grant_claims(stranger.parse()?, rocky_sdk::ClaimCounters::Every, 1)
         .await
         .expect_err("refused");
     assert_eq!(code(&error), "personal_owner_only");

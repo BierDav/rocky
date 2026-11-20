@@ -220,7 +220,7 @@ pub(crate) enum Request {
     Admit(crate::Admit, Reply<()>),
     Refuse(rocky_credentials::PublicKey, Reply<()>),
     Contact(Reply<crate::ContactInfo>),
-    AddPeer(String, Reply<String>),
+    AddPeer(String, Reply<PublicKey>),
     RemovePeer(rocky_credentials::PublicKey, Reply<()>),
     EnrollmentUpstream(Option<String>, Reply<()>),
     DeviceRevocationReceipt(

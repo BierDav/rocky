@@ -12,7 +12,7 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
         identity: common::prepared_identity(directory),
         directory,
-        schema: SCHEMA,
+        schema: crate::support::snapshot::schema(SCHEMA),
         secrets: None,
         network: Some(Network::Owned(hub.connector(name))),
         coordination: None,
@@ -190,7 +190,7 @@ async fn raw_grants_reach_a_device_that_is_not_an_issuer() -> Result<(), Failure
     );
     snap::ok(
         a.session
-            .revoke_identity(&(snap::text(&(keys.identity.to_hex())))),
+            .revoke_identity(snap::public_key(&(keys.identity.to_hex()))),
     )
     .await;
     assert!(

@@ -188,8 +188,8 @@ pub(crate) fn seen_devices(
             continue;
         };
         let device = crate::SeenDevice {
-            node: node.to_hex(),
-            identity: identity.to_hex(),
+            node,
+            identity,
             last_seen,
             registry_known: registry.admitted(&identity),
             unknown_identity: !registry.admitted(&identity),
@@ -368,21 +368,18 @@ mod tests {
             nodes: [own, shared, handed],
         } = shared_handed_and_own_nodes();
         let seen = seen_devices(&known, &crate::registry::Registry::default(), |_| Some(7));
-        let shown: BTreeMap<String, (String, bool)> = seen
+        let shown: BTreeMap<PublicKey, (PublicKey, bool)> = seen
             .into_iter()
             .map(|device| (device.node, (device.identity, device.unlinked)))
             .collect();
         assert!(
-            !shown.contains_key(&shared.public_key().to_hex()),
+            !shown.contains_key(&shared.public_key()),
             "a node two identities hold live certificates for is shown under neither"
         );
+        assert_eq!(shown[&own.public_key()], (a.public_key(), false));
         assert_eq!(
-            shown[&own.public_key().to_hex()],
-            (a.public_key().to_hex(), false)
-        );
-        assert_eq!(
-            shown[&handed.public_key().to_hex()],
-            (d.public_key().to_hex(), false),
+            shown[&handed.public_key()],
+            (d.public_key(), false),
             "a node its earlier identity unlinked is shown under the identity that holds it"
         );
     }

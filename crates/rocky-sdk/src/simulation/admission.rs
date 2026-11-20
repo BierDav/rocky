@@ -63,7 +63,7 @@ async fn a_requested_join_waits_for_admission_with_the_code_both_devices_show()
             assert_eq!(listed[0].name, "laptop");
             assert_eq!(listed[0].code, code.as_str());
             assert_eq!(listed[0].invitation, invitation.id);
-            let node = listed[0].node.clone();
+            let node = listed[0].node;
             assert_eq!(
                 events(&issuer, |event| matches!(
                     event,
@@ -76,7 +76,7 @@ async fn a_requested_join_waits_for_admission_with_the_code_both_devices_show()
 
             let wrong = format!("{:06}", (code.parse::<u32>()? + 1) % 1_000_000);
             let admit = |code: &str| crate::Admit {
-                node: node.clone(),
+                node,
                 code: code.into(),
                 profile: writer(),
                 label: None,
@@ -105,7 +105,7 @@ async fn a_requested_join_waits_for_admission_with_the_code_both_devices_show()
             issuer.open(&hub).await?;
             device.join(&hub, &uri).await?;
             let session = device.session()?.info().await?;
-            assert_eq!(session.node.to_hex(), node);
+            assert_eq!(session.node, node);
             assert_eq!(
                 events(&issuer, |event| matches!(
                     event,
@@ -118,8 +118,8 @@ async fn a_requested_join_waits_for_admission_with_the_code_both_devices_show()
 
             let mut refused = Member::new(root.path(), "phone", SCHEMA);
             awaiting(&mut refused, &hub, &uri).await?;
-            let node = pending(&issuer).await?[0].node.clone();
-            issuer.session()?.refuse(&node).await?;
+            let node = pending(&issuer).await?[0].node;
+            issuer.session()?.refuse(node).await?;
             let error = refused
                 .join(&hub, &uri)
                 .await

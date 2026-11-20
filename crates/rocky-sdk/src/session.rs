@@ -1,5 +1,5 @@
 use crate::request::Request;
-use crate::{Failure, GrantProfile, Session};
+use crate::{Failure, GrantProfile, PublicKey, Session};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Invitation {
@@ -11,7 +11,7 @@ pub struct Invitation {
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct JoinRequest {
-    pub node: String,
+    pub node: PublicKey,
     pub nonce: String,
     pub invitation: String,
     pub name: String,
@@ -27,8 +27,8 @@ pub struct Discovered {
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SeenDevice {
-    pub node: String,
-    pub identity: String,
+    pub node: PublicKey,
+    pub identity: PublicKey,
     pub last_seen: u64,
     pub registry_known: bool,
     pub unknown_identity: bool,
@@ -37,14 +37,14 @@ pub struct SeenDevice {
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LinkRequest {
-    pub node: String,
+    pub node: PublicKey,
     pub code: String,
     pub received: u64,
     pub confirmed: bool,
 }
 #[derive(Clone)]
 pub struct Admit {
-    pub node: String,
+    pub node: PublicKey,
     pub code: String,
     pub profile: GrantProfile,
     pub label: Option<Vec<u8>>,
@@ -54,13 +54,13 @@ pub struct InvitationState {
     pub id: String,
     pub expires_at_epoch_seconds: u64,
     pub open: bool,
-    pub enrolled: Option<String>,
+    pub enrolled: Option<PublicKey>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ContactInfo {
     pub uri: String,
-    pub node: String,
+    pub node: PublicKey,
     pub routes: Vec<crate::Route>,
 }
 
@@ -72,7 +72,7 @@ pub struct RevocationResult {
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DroppedStage {
-    pub node: String,
+    pub node: PublicKey,
     pub sequence: u64,
     pub head: String,
 }
@@ -209,16 +209,14 @@ impl Session {
     pub async fn discovered(&self) -> Result<Discovered, Failure> {
         self.send(Request::Discovered).await
     }
-    pub async fn confirm_link(&self, node: &str, code: &str) -> Result<(), Failure> {
-        let node = node.parse()?;
+    pub async fn confirm_link(&self, node: PublicKey, code: &str) -> Result<(), Failure> {
         self.send(|reply| Request::ConfirmLink(node, code.into(), reply))
             .await
     }
     pub async fn admit(&self, admit: Admit) -> Result<(), Failure> {
         self.send(|reply| Request::Admit(admit, reply)).await
     }
-    pub async fn refuse(&self, node: &str) -> Result<(), Failure> {
-        let node = node.parse()?;
+    pub async fn refuse(&self, node: PublicKey) -> Result<(), Failure> {
         self.send(|reply| Request::Refuse(node, reply)).await
     }
     pub async fn contact(&self) -> Result<String, Failure> {
@@ -227,12 +225,11 @@ impl Session {
     pub async fn contact_info(&self) -> Result<ContactInfo, Failure> {
         self.send(Request::Contact).await
     }
-    pub async fn add_peer(&self, contact: &str) -> Result<String, Failure> {
+    pub async fn add_peer(&self, contact: &str) -> Result<PublicKey, Failure> {
         self.send(|reply| Request::AddPeer(contact.into(), reply))
             .await
     }
-    pub async fn remove_peer(&self, node: &str) -> Result<(), Failure> {
-        let node = node.parse()?;
+    pub async fn remove_peer(&self, node: PublicKey) -> Result<(), Failure> {
         self.send(|reply| Request::RemovePeer(node, reply)).await
     }
     pub async fn set_enrollment_upstream(&self, contact: Option<&str>) -> Result<(), Failure> {

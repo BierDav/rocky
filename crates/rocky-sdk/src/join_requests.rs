@@ -83,7 +83,7 @@ impl Note {
 impl Request {
     pub fn view(&self, expires: u64) -> crate::JoinRequest {
         crate::JoinRequest {
-            node: self.node.to_hex(),
+            node: self.node,
             nonce: self.nonce.clone(),
             invitation: self.invitation.clone(),
             name: self.name.clone(),

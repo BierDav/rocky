@@ -34,11 +34,16 @@ pub struct Device {
     root: Option<String>,
     signer: Option<Arc<dyn rocky_sdk::IdentityProvider>>,
 }
+pub fn parsed_schema() -> &'static rocky_sdk::Schema {
+    static PARSED: std::sync::LazyLock<rocky_sdk::Schema> =
+        std::sync::LazyLock::new(|| rocky_sdk::Schema::parse(SCHEMA).unwrap());
+    &PARSED
+}
 fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
     Open {
         identity: prepared_identity(directory),
         directory,
-        schema: SCHEMA,
+        schema: parsed_schema(),
         secrets: None,
         network,
         coordination: None,
@@ -361,8 +366,7 @@ pub fn confirmed(open: Open<'_>) -> Result<Opened, Failure> {
 }
 
 pub async fn link(open: Open<'_>, contact: &str, responder: &Session) -> Result<Opened, Failure> {
-    let config =
-        rocky_sdk::Configuration::new(open.directory, &rocky_sdk::Schema::parse(open.schema)?)?;
+    let config = rocky_sdk::Configuration::new(open.directory, open.schema)?;
     let config = if let Some(store) = open.secrets {
         config.secrets(store)
     } else {
@@ -392,7 +396,7 @@ pub async fn link(open: Open<'_>, contact: &str, responder: &Session) -> Result<
         .ok_or("missing link request")?;
     assert_eq!(shown.code, pending.code);
     assert!(!shown.confirmed);
-    responder.confirm_link(&pending.node, &shown.code).await?;
+    responder.confirm_link(pending.node, &shown.code).await?;
     config
         .confirm_link(contact, identity, pending.clone(), &shown.code)
         .await

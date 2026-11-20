@@ -221,7 +221,7 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
     revoked.sync().await.expect("initial bootstrap");
     snap::ok(
         a.session
-            .revoke_identity(&(snap::text(&(revoked.identity().await)))),
+            .revoke_identity(snap::public_key(&(revoked.identity().await))),
     )
     .await;
     a.seal_and_compact().await;
@@ -536,7 +536,11 @@ async fn a_join_that_learns_a_revocation_before_meeting_its_inviter_still_waits_
     let c = Device::join(&c_path, &a.invite().await, Network::Borrowed(gate.clone()))?;
     c.close().await;
     gate.close().await;
-    snap::ok(a.session.revoke_identity(&snap::text(&d.identity().await))).await;
+    snap::ok(
+        a.session
+            .revoke_identity(snap::public_key(&d.identity().await)),
+    )
+    .await;
     a.add(2, "after enrolment").await;
     b.sync().await.expect("b learns the revocation from a");
     d.close().await;
@@ -599,7 +603,7 @@ async fn renewal_after_missed_key_epochs_uses_a_checkpoint_without_acquiring_old
         revoked.sync().await.expect("join");
         snap::ok(
             a.session
-                .revoke_identity(&(snap::text(&(revoked.identity().await)))),
+                .revoke_identity(snap::public_key(&(revoked.identity().await))),
         )
         .await;
         a.add(handle, title).await;
@@ -653,7 +657,7 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
         Open {
             identity: None,
             directory: &a_path,
-            schema,
+            schema: crate::support::snapshot::schema(schema),
             secrets: None,
             network: Some(Network::Owned(hub.connector("a"))),
             coordination: None,
@@ -696,7 +700,7 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
         Open {
             identity: None,
             directory: &path,
-            schema,
+            schema: crate::support::snapshot::schema(schema),
             secrets: None,
             network: Some(Network::Borrowed(gate.clone())),
             coordination: None,
@@ -719,7 +723,7 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
     let member = Device::new(Database::open(Open {
         identity: None,
         directory: &path,
-        schema,
+        schema: crate::support::snapshot::schema(schema),
         secrets: None,
         network: None,
         coordination: None,
@@ -768,7 +772,7 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
         Open {
             identity: None,
             directory: &a_path,
-            schema,
+            schema: crate::support::snapshot::schema(schema),
             secrets: None,
             network: Some(Network::Owned(hub.connector("a"))),
             coordination: None,
@@ -783,7 +787,7 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
         Open {
             identity: None,
             directory: &root.path().join("unmet"),
-            schema,
+            schema: crate::support::snapshot::schema(schema),
             secrets: None,
             network: Some(Network::Owned(hub.connector("unmet"))),
             coordination: None,
@@ -803,7 +807,7 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
         Open {
             identity: None,
             directory: &path,
-            schema,
+            schema: crate::support::snapshot::schema(schema),
             secrets: None,
             network: Some(Network::Owned(hub.connector("member"))),
             coordination: None,
@@ -822,7 +826,7 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
     let member = Device::new(Database::open(Open {
         identity: None,
         directory: &path,
-        schema,
+        schema: crate::support::snapshot::schema(schema),
         secrets: None,
         network: Some(Network::Owned(hub.connector("member"))),
         coordination: None,
@@ -839,7 +843,7 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
         "an intent naming an inviter the node has not met keeps the bootstrap pending"
     );
 
-    snap::ok(a.session.revoke_identity(&snap::text(&unmet_identity))).await;
+    snap::ok(a.session.revoke_identity(snap::public_key(&unmet_identity))).await;
     snap::ok(async {
         member.session.renew().await?;
         member.session.info().await

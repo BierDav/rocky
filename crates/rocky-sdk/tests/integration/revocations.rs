@@ -13,7 +13,7 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
         identity: None,
         directory,
-        schema: SCHEMA,
+        schema: crate::support::snapshot::schema(SCHEMA),
         secrets: None,
         network: Some(Network::Owned(hub.connector(name))),
         coordination: None,
@@ -125,8 +125,14 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
     let empty = revocations(&a).await;
     assert_eq!(empty.statements, 0);
 
-    let by_a = a.session().revoke_identity(&x.identity().await).await?;
-    let by_b = b.session().revoke_identity(&y.identity().await).await?;
+    let by_a = a
+        .session()
+        .revoke_identity(x.identity().await.parse()?)
+        .await?;
+    let by_b = b
+        .session()
+        .revoke_identity(y.identity().await.parse()?)
+        .await?;
     assert_ne!(by_a.statement, by_b.statement);
     assert_eq!(by_a.revocations.statements, 1);
     assert_eq!(by_b.revocations.statements, 1);
@@ -258,7 +264,10 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
             &invitation.uri,
         )?)?;
         let identity = issuer.identity().await;
-        let grant = a.session().trust(&identity, a.root_signer()?).await?;
+        let grant = a
+            .session()
+            .trust(identity.parse()?, a.root_signer()?)
+            .await?;
         issuer.session().install_trust(&grant.grant).await?;
         issuers.push(issuer);
     }
@@ -274,11 +283,11 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
 
     let lost = b
         .session()
-        .revoke_trusted(&creator, RevocationMode::Lost, root_signer.clone())
+        .revoke_trusted(creator.parse()?, RevocationMode::Lost, root_signer.clone())
         .await?;
     let compromised = c
         .session()
-        .revoke_trusted(&creator, RevocationMode::Compromised, root_signer)
+        .revoke_trusted(creator.parse()?, RevocationMode::Compromised, root_signer)
         .await?;
     assert_eq!(lost.revocations.statements, 1);
     assert_eq!(compromised.revocations.statements, 1);

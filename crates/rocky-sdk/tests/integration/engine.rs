@@ -45,7 +45,7 @@ impl OpenedDb {
         let open = Open {
             identity: None,
             directory,
-            schema,
+            schema: crate::support::snapshot::schema(schema),
             secrets,
             network: Some(network),
             coordination: None,
@@ -491,7 +491,7 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
             creator
                 .engine
                 .session()
-                .revoke_identity(&(snap::text(&(bob_identity))))
+                .revoke_identity(snap::public_key(&(bob_identity)))
         )
         .await["revocations"]["statements"],
         1

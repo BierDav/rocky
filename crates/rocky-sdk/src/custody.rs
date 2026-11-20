@@ -58,11 +58,10 @@ impl CustodyPeer {
                 return Err("custody enrollment requires a custody invitation".into());
             }
         }
-        let schema = serde_json::to_string(&config.schema)?;
         let open = Open {
             identity: None,
             directory,
-            schema: &schema,
+            schema: &config.schema,
             secrets: None,
             network: Some(Network::Owned(config.transport)),
             coordination: config.coordination,

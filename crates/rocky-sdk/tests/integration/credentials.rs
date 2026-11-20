@@ -106,6 +106,7 @@ async fn create_row(
     values: Value,
 ) -> Result<Value, Failure> {
     snap::observe(snap::mutate(
+        &device.database,
         &device.session,
         vec![handle; 32],
         snap::Action::Create {
@@ -131,13 +132,11 @@ async fn item(device: &Device, handle: u8, title: &str) -> Result<Value, Failure
     .await
 }
 async fn texts(device: &Device, sql: &str) -> Result<Vec<String>, Failure> {
-    let page = snap::observe(device.session.read(rocky_sdk::ReadQuery {
-        sql: snap::text(&(sql)),
-        values: vec![],
-        max_rows: 64,
-        max_bytes: None,
-        cursor: None,
-    }))
+    let page = snap::observe(snap::read(
+        &device.database,
+        &snap::text(&(sql)),
+        Vec::new(),
+    ))
     .await
     .map_err(|error| error.to_string())?;
     Ok(page["rows"]

@@ -315,7 +315,6 @@ impl Node {
             self.activity
                 .record(crate::ActivityKind::PartitionBootstrap { target });
         }
-        self.forget_readers().await;
         self.wake_sync();
         Ok(())
     }

@@ -64,10 +64,13 @@ fn reconciled_with(report: &ReconciliationReport, node: &str) -> bool {
     })
 }
 async fn synced_titles(device: &Device) -> Result<Vec<String>, Failure> {
-    let read = rocky_sdk::ReadQuery::new("SELECT title FROM items", 1);
     for _ in 0..4 {
         synced(device).await?;
-        match device.session().read(read.clone()).await {
+        match device
+            .database
+            .query("SELECT title FROM items", Vec::new())
+            .await
+        {
             Ok(_) => return Ok(device.titles().await),
             Err(_) => continue,
         }

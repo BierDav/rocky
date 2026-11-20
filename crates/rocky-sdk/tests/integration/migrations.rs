@@ -54,15 +54,7 @@ async fn generation(device: &Device) -> Value {
     snap::ok(device.session.generation()).await
 }
 async fn rows(device: &Device, sql: &str) -> Value {
-    snap::ok(device.session.read(rocky_sdk::ReadQuery {
-        sql: snap::text(&(sql)),
-        values: vec![],
-        max_rows: 1024,
-        max_bytes: None,
-        cursor: None,
-    }))
-    .await["rows"]
-        .clone()
+    snap::ok(snap::read(&device.database, sql, Vec::new())).await["rows"].clone()
 }
 fn text(value: &str) -> rocky_sdk::SqlValue {
     rocky_sdk::SqlValue::Text(snap::text(&(value)))
@@ -237,15 +229,15 @@ const POSITIONED_LISTS: &str = r#"{"format":6,"application":"lists","version":2,
 
 async fn list(device: &Device, title: &str) -> Result<String, Failure> {
     snap::ok(device.session.next_partition("lists")).await;
-    snap::ok(device.session.execute("BEGIN", Vec::new())).await;
-    let id = snap::ok(device.session.next_id("lists")).await["id"].clone();
-    snap::ok(device.session.execute(
-        &(snap::text(&(format!("INSERT INTO lists(id,title) VALUES(?,'{title}')")))),
-        vec![snap::row_id(&(id))],
-    ))
-    .await;
-    snap::ok(device.session.execute("COMMIT", Vec::new())).await;
-    Ok(id.as_str().ok_or("id")?.to_owned())
+    let mut tx = device.database.transaction().await?;
+    let id = tx.next_id("lists", Vec::new()).await?;
+    tx.execute(
+        &format!("INSERT INTO lists(id,title) VALUES(?,'{title}')"),
+        vec![id.sql()],
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(id.to_string())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -291,13 +283,11 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
         status["migration"],
         json!({"state": "full_access_required"})
     );
-    let query = snap::observe(a.session.read(rocky_sdk::ReadQuery {
-        sql: "SELECT position FROM lists".to_owned(),
-        values: vec![],
-        max_rows: 8,
-        max_bytes: None,
-        cursor: None,
-    }))
+    let query = snap::observe(snap::read(
+        &a.database,
+        "SELECT position FROM lists",
+        Vec::new(),
+    ))
     .await
     .err()
     .ok_or("a query on the new field answered")?;
@@ -559,16 +549,10 @@ async fn pull_member_fixture(fixture: MemberFixture) -> Result<(), Failure> {
     eprintln!("STAGE rows={large} member_open={member_open:?}");
     let clock = std::time::Instant::now();
     let mut syncs = 0;
-    while snap::observe(b.session.read(rocky_sdk::ReadQuery {
-        sql: snap::text(&(ready_query)),
-        values: vec![],
-        max_rows: 1,
-        max_bytes: None,
-        cursor: None,
-    }))
-    .await
-    .ok()
-    .map(|page| page["rows"].clone())
+    while snap::observe(snap::read(&b.database, ready_query, Vec::new()))
+        .await
+        .ok()
+        .map(|page| page["rows"].clone())
         != Some(ready_rows.clone())
     {
         syncs += 1;
@@ -675,13 +659,13 @@ async fn a_member_writes_its_shared_partition_after_following_a_migration() -> R
     sync(&b).await;
     assert_eq!(generation(&b).await["current"]["schema"], 2);
     assert_eq!(generation(&b).await["application"], "behind");
-    snap::ok(b.session.execute("BEGIN", Vec::new())).await;
-    snap::ok(b.session.execute(
-        &(snap::text(&(format!("UPDATE lists SET title='Monthly' WHERE id=X'{id}'")))),
+    let mut tx = b.database.transaction().await?;
+    tx.execute(
+        &format!("UPDATE lists SET title='Monthly' WHERE id=X'{id}'"),
         Vec::new(),
-    ))
-    .await;
-    snap::ok(b.session.execute("COMMIT", Vec::new())).await;
+    )
+    .await?;
+    tx.commit().await?;
     sync(&b).await;
     assert_eq!(
         rows(&a, "SELECT title, position FROM lists").await,

@@ -36,7 +36,14 @@ serialized!(
 pub async fn observe<T: Snapshot>(
     future: impl Future<Output = Result<T, sdk::Failure>>,
 ) -> Result<Value, Value> {
-    future.await.map(Snapshot::snapshot).map_err(|error| { let failure = sdk::CallFailure::from_failure(&error); json!({"code":failure.code(),"retryable":failure.retryable(),"message":failure.detail,"coordinator_time":failure.coordinator_time,"blockers":failure.blockers}) })
+    future.await.map(Snapshot::snapshot).map_err(|error| {
+        if let Some(sql) = error.downcast_ref::<sdk::SqlFailure>() {
+            let retryable = matches!(sql.code, 5 | 6);
+            return json!({"code": if retryable { "busy" } else { "rejected" }, "retryable": retryable, "message": sql.message, "coordinator_time": Value::Null, "blockers": []});
+        }
+        let failure = sdk::CallFailure::from_failure(&error);
+        json!({"code":failure.code(),"retryable":failure.retryable(),"message":failure.detail,"coordinator_time":failure.coordinator_time,"blockers":failure.blockers})
+    })
 }
 pub async fn ok<T: Snapshot>(future: impl Future<Output = Result<T, sdk::Failure>>) -> Value {
     observe(future)
@@ -59,15 +66,22 @@ pub fn cell(value: sdk::SqlValue) -> Value {
         sdk::SqlValue::Blob(value) => json!({"type":"blob","value":value}),
     }
 }
-impl Snapshot for sdk::ReadPage {
-    fn snapshot(self) -> Value {
-        json!({"scope":self.scope,"revision":self.revision.to_string(),"columns":self.columns,"rows":self.rows.into_iter().map(|row| row.into_iter().map(cell).collect::<Vec<_>>()).collect::<Vec<_>>(),"next":self.next,"next_kind":"offset"})
+pub async fn read(
+    database: &sdk::Database,
+    sql: &str,
+    values: Vec<sdk::SqlValue>,
+) -> Result<Value, sdk::Failure> {
+    let mut rows = database.query(sql, values).await?;
+    let columns = rows.columns().to_vec();
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let mut cells = Vec::with_capacity(columns.len());
+        for index in 0..columns.len() {
+            cells.push(cell(row.get_at::<sdk::SqlValue>(index)?));
+        }
+        out.push(cells);
     }
-}
-impl Snapshot for sdk::SessionRows {
-    fn snapshot(self) -> Value {
-        json!({"columns":self.columns,"rows":self.rows.into_iter().map(|row| row.into_iter().map(cell).collect::<Vec<_>>()).collect::<Vec<_>>(),"changes":self.changes.to_string(),"committed":self.committed.map(|commit|json!({"handle":data_encoding::HEXLOWER.encode(&commit.handle),"frames":commit.frames}))})
-    }
+    Ok(json!({"columns":columns,"rows":out}))
 }
 impl Snapshot for rocky_core::RowIdentity {
     fn snapshot(self) -> Value {
@@ -279,6 +293,7 @@ pub fn fields(values: Value) -> Vec<(String, sdk::SqlValue)> {
         .collect()
 }
 pub async fn mutate(
+    database: &sdk::Database,
     session: &sdk::Session,
     bytes: Vec<u8>,
     action: Action,
@@ -287,79 +302,91 @@ pub async fn mutate(
 ) -> Result<Value, sdk::Failure> {
     let handle = mutation_handle(session, &bytes, author.as_deref()).await?;
     let key = data_encoding::HEXLOWER.encode(&handle);
-    if session.mutation_committed(handle).await? {
-        return Ok(json!({"replayed":true,"handle":key}));
+    let valid = |name: &str| {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    };
+    if let Action::Create { table, .. } = &action {
+        if !valid(table) {
+            return Err("invalid fixture identifier".into());
+        }
+        if let Ok(mut rows) = database
+            .query(
+                &format!("SELECT 1 FROM \"{table}\" WHERE key=?"),
+                vec![sdk::SqlValue::Text(key.clone())],
+            )
+            .await
+            && rows.next().await?.is_some()
+        {
+            return Ok(json!({"replayed":true,"handle":key}));
+        }
     }
-    session.execute("BEGIN", Vec::new()).await?;
-    let result = async {
-        let valid = |name: &str| {
-            !name.is_empty()
-                && name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        };
-        let id = match action {
-            Action::Create { table, values } => {
-                if !valid(&table) || values.iter().any(|(name, _)| !valid(name)) {
-                    return Err("invalid fixture identifier".into());
-                }
-                let id = session.next_id(&table).await?;
-                let mut columns = vec!["key".to_owned(), "id".to_owned()];
-                let mut bound = vec![sdk::SqlValue::Text(key.clone()), id.sql()];
-                for (name, value) in values {
-                    columns.push(format!("\"{name}\""));
-                    bound.push(value);
-                }
-                let sql = format!(
-                    "INSERT INTO \"{table}\"({}) VALUES({})",
-                    columns.join(","),
-                    vec!["?"; columns.len()].join(",")
-                );
-                session.execute(&sql, bound).await?;
-                key.clone()
+    let mut tx = database.transaction().await?;
+    let id = match action {
+        Action::Create { table, values } => {
+            if !valid(&table) || values.iter().any(|(name, _)| !valid(name)) {
+                return Err("invalid fixture identifier".into());
             }
-            Action::Set {
-                table,
-                field,
-                value,
-            } => {
-                if !valid(&table) || !valid(&field) {
-                    return Err("invalid fixture identifier".into());
-                }
-                let id = entity.ok_or("missing fixture entity")?;
-                let changed = session
-                    .execute(
-                        &format!("UPDATE \"{table}\" SET \"{field}\"=? WHERE key=?"),
-                        vec![value, sdk::SqlValue::Text(id.clone())],
-                    )
-                    .await?;
-                if changed.changes == 0 {
-                    return Err(fixture_rejection("fixture entity not found"));
-                }
-                id
+            let id = tx.next_id(&table, Vec::new()).await?;
+            let mut columns = vec!["key".to_owned(), "id".to_owned()];
+            let mut bound = vec![sdk::SqlValue::Text(key.clone()), id.sql()];
+            for (name, value) in values {
+                columns.push(format!("\"{name}\""));
+                bound.push(value);
             }
-            Action::Delete { table } => {
-                if !valid(&table) {
-                    return Err("invalid fixture identifier".into());
-                }
-                let id = entity.ok_or("missing fixture entity")?;
-                session
-                    .execute(
-                        &format!("DELETE FROM \"{table}\" WHERE key=?"),
-                        vec![sdk::SqlValue::Text(id.clone())],
-                    )
-                    .await?;
-                id
+            let sql = format!(
+                "INSERT INTO \"{table}\"({}) VALUES({})",
+                columns.join(","),
+                vec!["?"; columns.len()].join(",")
+            );
+            tx.execute(&sql, bound).await?;
+            key.clone()
+        }
+        Action::Set {
+            table,
+            field,
+            value,
+        } => {
+            if !valid(&table) || !valid(&field) {
+                return Err("invalid fixture identifier".into());
             }
-        };
-        let committed = session.commit(handle).await?;
-        Ok(json!({"id":id,"handle":key,"frames":committed.committed.map(|commit|commit.frames)}))
-    }
-    .await;
-    if result.is_err() {
-        let _ = session.execute("ROLLBACK", Vec::new()).await;
-    }
-    result
+            let id = entity.ok_or("missing fixture entity")?;
+            let exists = tx
+                .query(
+                    &format!("SELECT 1 FROM \"{table}\" WHERE key=?"),
+                    vec![sdk::SqlValue::Text(id.clone())],
+                )
+                .await?
+                .next()
+                .await?
+                .is_some();
+            if !exists {
+                return Err(fixture_rejection("fixture entity not found"));
+            }
+            tx.execute(
+                &format!("UPDATE \"{table}\" SET \"{field}\"=? WHERE key=?"),
+                vec![value, sdk::SqlValue::Text(id.clone())],
+            )
+            .await?;
+            id
+        }
+        Action::Delete { table } => {
+            if !valid(&table) {
+                return Err("invalid fixture identifier".into());
+            }
+            let id = entity.ok_or("missing fixture entity")?;
+            tx.execute(
+                &format!("DELETE FROM \"{table}\" WHERE key=?"),
+                vec![sdk::SqlValue::Text(id.clone())],
+            )
+            .await?;
+            id
+        }
+    };
+    let committed = tx.commit().await?;
+    Ok(json!({"id":id,"handle":key,"frames":committed.map(|_| 1usize)}))
 }
 
 impl Snapshot for sdk::ActivityPage {

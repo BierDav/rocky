@@ -109,6 +109,7 @@ async fn a_backup_restores_into_a_fresh_identity_without_forking_or_resending()
     assert_ne!(c.node().await, lost, "a fresh signing identity");
     assert_eq!(c.titles().await, ["apples", unsent_before_loss]);
     let replayed = snap::ok(snap::mutate(
+        &c.database,
         &c.session,
         vec![2; 32],
         snap::Action::Create {

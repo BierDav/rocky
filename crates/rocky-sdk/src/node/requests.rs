@@ -262,35 +262,8 @@ impl Node {
             Request::Freshness(reply) => {
                 let _ = reply.send(self.freshness().await);
             }
-            Request::Execute(sql, values, handle, reply) => {
-                let _ = reply.send(self.execute_sql(&client, &sql, values, handle).await);
-            }
-            Request::NextId(table, values, reply) => {
-                let _ = reply.send(self.next_id(&client, &table, values).await);
-            }
-            Request::MutationCommitted(handle, reply) => {
-                let _ = reply.send(
-                    self.replica
-                        .handle_committed(secure_handle(&handle))
-                        .await
-                        .map_err(Into::into),
-                );
-            }
-            Request::Read(query, reply) => {
-                let _ = reply.send(self.read(&client, query).await);
-            }
-            Request::Subscribe(query, reply) => {
-                let _ = reply.send(self.subscribe(&client, query).await);
-            }
-            Request::Next(id, mut reply) => {
-                let result = tokio::select! { result = self.next(&client, id) => result, () = reply.closed() => return, };
-                let _ = reply.send(result);
-            }
-            Request::Unsubscribe(id, reply) => {
-                let _ = reply.send(self.unsubscribe(&client, id).await);
-            }
             Request::Info(reply) => {
-                let _ = reply.send(self.session_info(&client).await);
+                let _ = reply.send(self.session_info().await);
             }
             Request::Grant(device, profile, terms, delegate, reply) => {
                 let _ = reply.send(self.grant(device, profile, terms, delegate).await);

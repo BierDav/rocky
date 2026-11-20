@@ -74,19 +74,13 @@ impl Peer {
         Ok(())
     }
     async fn insert(&self, table: &str, list: Option<&str>, sql: &str) -> Result<String, Failure> {
-        snap::value(self.session.execute("BEGIN", Vec::new())).await?;
-        let id = match list {
-            Some(list) => self.session.next_partition_id(table, values(list)).await?,
-            None => self.session.next_id(table).await?,
-        }
-        .to_string();
-        snap::value(
-            self.session
-                .execute(&(snap::text(&(sql))), vec![snap::row_id(&(id))]),
-        )
-        .await?;
-        snap::value(self.session.execute("COMMIT", Vec::new())).await?;
-        Ok(id)
+        let mut tx = self.database.transaction().await?;
+        let id = tx
+            .next_id(table, list.map(values).unwrap_or_default())
+            .await?;
+        tx.execute(sql, vec![id.sql()]).await?;
+        tx.commit().await?;
+        Ok(id.to_string())
     }
     async fn create_list(&self, title: &str) -> Result<String, Failure> {
         snap::value(self.session.next_partition("lists")).await?;
@@ -114,36 +108,29 @@ impl Peer {
         .await
     }
     async fn move_item(&self, from: &str, id: &str, to: &str) -> Result<String, Failure> {
-        snap::value(self.session.execute("BEGIN", Vec::new())).await?;
-        let moved = snap::value(
-            self.session
-                .next_partition_id("items", (values(to)).clone()),
+        let mut tx = self.database.transaction().await?;
+        let moved = tx.next_id("items", values(to)).await?;
+        tx.execute(
+            &format!("INSERT INTO items(id,list,title,completed) SELECT ?,X'{to}',title,completed FROM items WHERE list=X'{from}' AND id=X'{id}'"),
+            vec![moved.sql()],
         )
-        .await?["id"]
-            .clone();
-        snap::value(self.session.execute(&(snap::text(&(format!("INSERT INTO items(id,list,title,completed) SELECT ?,X'{to}',title,completed FROM items WHERE list=X'{from}' AND id=X'{id}'")))), vec![snap::row_id(&(moved))]))
-            .await?;
-        self.execute(&format!(
-            "DELETE FROM items WHERE list=X'{from}' AND id=X'{id}'"
-        ))
         .await?;
-        snap::value(self.session.execute("COMMIT", Vec::new())).await?;
-        Ok(moved.as_str().ok_or("id")?.to_owned())
+        tx.execute(
+            &format!("DELETE FROM items WHERE list=X'{from}' AND id=X'{id}'"),
+            Vec::new(),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(moved.to_string())
     }
     async fn execute(&self, sql: &str) -> Result<(), Failure> {
-        snap::value(self.session.execute(&(snap::text(&(sql))), Vec::new()))
-            .await
-            .map(drop)
+        let mut tx = self.database.transaction().await?;
+        tx.execute(sql, Vec::new()).await?;
+        tx.commit().await?;
+        Ok(())
     }
     async fn rows(&self, sql: &str) -> Result<Vec<Vec<Value>>, Failure> {
-        let page = snap::value(self.session.read(rocky_sdk::ReadQuery {
-            sql: snap::text(&(sql)),
-            values: vec![],
-            max_rows: 256,
-            max_bytes: None,
-            cursor: None,
-        }))
-        .await?;
+        let page = snap::read(&self.database, sql, Vec::new()).await?;
         Ok(page["rows"]
             .as_array()
             .ok_or("rows")?

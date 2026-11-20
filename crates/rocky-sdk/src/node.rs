@@ -46,7 +46,7 @@ use rocky_core::{ResourceScope, SqlValue, TypedRows, commitment};
 use rocky_credentials::{IdentityEnrollment, IdentityReply, LinkEnrollment, Profile};
 use rocky_secure::{
     CredentialChain, EncryptedReplica, Error, KeyMaterial, PrivateKey, PublicKey, RevocationSet,
-    SecureSession, SecureSql, SqlError, SqlOptions, Unavailable, secure_node_id,
+    SecureSql, SqlError, SqlOptions, Unavailable, secure_node_id,
 };
 use serde::{Deserialize, Serialize};
 pub(crate) use shared::{SettingsCell, SettingsGuard, Shared};
@@ -61,9 +61,6 @@ use std::{
 };
 use tokio::sync::{Mutex, RwLock, Semaphore, watch};
 
-const MAX_ROWS: usize = 1024;
-const MAX_SQL: usize = 64 * 1024;
-const MAX_SUBSCRIPTIONS: usize = 64;
 const MAX_SESSIONS: usize = 64;
 const INBOUND: usize = 32;
 const MET: usize = 64;
@@ -87,23 +84,6 @@ fn named(error: Failure) -> Failure {
     } else {
         refused(error)
     }
-}
-
-use crate::ReadQuery as Query;
-
-#[derive(Clone)]
-struct Reader {
-    session: SecureSession<TypedRows>,
-    sql: Arc<SecureSql<TypedRows>>,
-}
-#[derive(Default)]
-struct CachedReader {
-    reader: Option<Reader>,
-    stale: bool,
-}
-struct Subscription {
-    query: Query,
-    delivered: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,24 +123,7 @@ impl SyncStatus {
 }
 
 pub(crate) struct Client {
-    reader: Mutex<CachedReader>,
-    cursor_key: [u8; 32],
-    subscriptions: std::sync::Mutex<BTreeMap<u64, Subscription>>,
-    next: AtomicU64,
     closing: watch::Sender<bool>,
-    subscriptions_changed: watch::Sender<()>,
-}
-impl Client {
-    async fn retire_reader(&self) {
-        self.reader.lock().await.stale = true;
-    }
-    fn subscriptions(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, BTreeMap<u64, Subscription>>, Failure> {
-        self.subscriptions
-            .lock()
-            .map_err(|_| "subscriptions poisoned".into())
-    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -514,14 +477,6 @@ impl Node {
             .collect()
     }
 
-    fn clients(&self) -> Vec<Arc<Client>> {
-        self.clients
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .values()
-            .cloned()
-            .collect()
-    }
     pub fn client(&self, id: u64) -> Result<Arc<Client>, Failure> {
         let mut clients = self.clients.lock().map_err(|_| "sessions poisoned")?;
         if let Some(client) = clients.get(&id) {
@@ -531,12 +486,7 @@ impl Node {
             return Err("session quota".into());
         }
         let client = Arc::new(Client {
-            reader: Mutex::new(CachedReader::default()),
-            cursor_key: rocky_platform::entropy::random(),
-            subscriptions: std::sync::Mutex::new(BTreeMap::new()),
-            next: AtomicU64::new(1),
             closing: watch::channel(false).0,
-            subscriptions_changed: watch::channel(()).0,
         });
         clients.insert(id, client.clone());
         Ok(client)
@@ -551,22 +501,6 @@ impl Node {
             client.closing.send_replace(true);
         }
     }
-    async fn reader(&self, client: &Client) -> Result<Reader, Failure> {
-        let mut cached = client.reader.lock().await;
-        if let Some(reader) = &cached.reader
-            && (reader.sql.in_transaction().await
-                || (!cached.stale && reader.session.status().await.is_ok()))
-        {
-            return Ok(reader.clone());
-        }
-        *cached = CachedReader::default();
-        let scopes = self.app_scopes();
-        let session = self.replica.session(scopes.into_iter().collect()).await?;
-        let sql = Arc::new(session.sql(SqlOptions::default()).await?);
-        let reader = Reader { session, sql };
-        cached.reader = Some(reader.clone());
-        Ok(reader)
-    }
     pub(crate) async fn sql_session(
         &self,
         options: SqlOptions,
@@ -574,16 +508,13 @@ impl Node {
         if self.lifecycle.lock().await.is_logged_out() {
             return Err(refused("this device logged out of the domain"));
         }
+        self.revocation_notice
+            .admit_personal(&self.settings.published())?;
         let session = self
             .replica
             .session(self.app_scopes().into_iter().collect())
             .await?;
         Ok(session.sql(options).await?)
-    }
-    async fn forget_readers(&self) {
-        for client in self.clients() {
-            client.retire_reader().await;
-        }
     }
 
     fn install(
@@ -965,10 +896,7 @@ impl Node {
         if self.lifecycle.lock().await.is_logged_out() && !kind.allowed_after_logout() {
             return Err(refused("this device logged out of the domain"));
         }
-        if matches!(
-            kind,
-            RequestKind::Sql | RequestKind::NextId | RequestKind::Tips
-        ) {
+        if matches!(kind, RequestKind::Tips) {
             self.revocation_notice
                 .admit_personal(&self.settings.published())?;
         }
@@ -1044,7 +972,6 @@ impl Node {
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? =
             settings.granted(&self.domain());
         drop(settings);
-        self.forget_readers().await;
         Ok(())
     }
     fn current(&self) -> Option<Arc<Link>> {
@@ -1083,9 +1010,12 @@ impl Node {
             checkpoint: status,
         })
     }
-    async fn session_info(&self, client: &Client) -> Result<crate::SessionInfo, Failure> {
-        let reader = self.reader(client).await?;
-        let status = reader.session.status().await?;
+    async fn session_info(&self) -> Result<crate::SessionInfo, Failure> {
+        let session = self
+            .replica
+            .session(self.app_scopes().into_iter().collect())
+            .await?;
+        let status = session.status().await?;
         let settings = self.settings.published();
         Ok(crate::SessionInfo {
             principal: status.principal,
@@ -1501,7 +1431,6 @@ impl Node {
         }
         let status = settings.revocation_status()?;
         drop(settings);
-        self.forget_readers().await;
         Box::pin(self.complete_revocation()).await?;
         if let Err(error) = self.push_revocations().await {
             self.activity
@@ -1660,7 +1589,6 @@ impl Node {
             settings.granted(&self.domain());
         drop(settings);
         self.refresh_importing().await?;
-        self.forget_readers().await;
         if self.settings.lock().await.issuer() {
             Box::pin(self.complete_revocation()).await?;
         }
@@ -1687,11 +1615,6 @@ impl Node {
         *self.lifecycle.lock().await = Lifecycle::LoggedOut {
             purge_on_close: purge,
         };
-        self.forget_readers().await;
-        for client in self.clients() {
-            client.subscriptions()?.clear();
-            client.subscriptions_changed.send_replace(());
-        }
         self.automatic.store(false, Ordering::SeqCst);
         self.wake_sync();
         self.vault.forget(settings.roles())?;
@@ -2738,234 +2661,8 @@ impl Node {
         }
         Ok(grant)
     }
-    async fn sql_reader(&self, client: &Client) -> Result<Reader, Failure> {
-        let cached = client.reader.lock().await;
-        if let Some(reader) = &cached.reader
-            && !cached.stale
-        {
-            return Ok(reader.clone());
-        }
-        drop(cached);
-        self.reader(client).await
-    }
-    async fn next_id(
-        &self,
-        client: &Client,
-        table: &str,
-        values: Option<Vec<SqlValue>>,
-    ) -> Result<rocky_core::RowIdentity, Failure> {
-        let reader = self.sql_reader(client).await?;
-        Ok(match values {
-            Some(values) => reader.sql.next_id_partition(table, &values).await?,
-            None => reader.sql.next_id(table).await?,
-        })
-    }
-    async fn execute_sql(
-        &self,
-        client: &Client,
-        sql: &str,
-        values: Vec<SqlValue>,
-        handle: Option<rocky_core::Commitment>,
-    ) -> Result<crate::SessionRows, Failure> {
-        if sql.len() > MAX_SQL || values.len() > 256 {
-            return Err(refused("SQL quota"));
-        }
-        if handle.is_some() && (!sql.trim().eq_ignore_ascii_case("COMMIT") || !values.is_empty()) {
-            return Err(refused(
-                "a commit handle requires COMMIT without parameters",
-            ));
-        }
-        let run = async |reader: Reader| -> Result<_, Failure> {
-            Ok(match handle {
-                Some(handle) => reader.sql.commit(secure_handle(&handle)).await?,
-                None => reader.sql.run(sql, values.clone()).await?,
-            })
-        };
-        let result = match run(self.sql_reader(client).await?).await {
-            Err(error)
-                if sql.trim().to_ascii_uppercase().starts_with("BEGIN") && is_authority(&error) =>
-            {
-                client.retire_reader().await;
-                run(self.sql_reader(client).await?).await?
-            }
-            other => other?,
-        };
-        Ok(crate::SessionRows {
-            columns: result.columns,
-            rows: result.rows,
-            changes: result.changes,
-            committed: result.committed.map(|commit| crate::CommitSummary {
-                handle: commit.handle,
-                frames: commit.frames.len(),
-            }),
-        })
-    }
-    async fn subscribe(&self, client: &Client, query: Query) -> Result<u64, Failure> {
-        let mut subscriptions = client.subscriptions()?;
-        if subscriptions.len() >= MAX_SUBSCRIPTIONS {
-            return Err(refused("subscription quota"));
-        }
-        let id = client.next.fetch_add(1, Ordering::Relaxed);
-        subscriptions.insert(
-            id,
-            Subscription {
-                query,
-                delivered: None,
-            },
-        );
-        Ok(id)
-    }
-    async fn unsubscribe(&self, client: &Client, id: u64) -> Result<(), Failure> {
-        client.subscriptions()?.remove(&id);
-        client.subscriptions_changed.send_replace(());
-        Ok(())
-    }
-    async fn read(&self, client: &Client, query: Query) -> Result<crate::ReadPage, Failure> {
-        match self.read_once(client, query.clone()).await {
-            Err(error) if is_authority(&error) => {
-                client.retire_reader().await;
-                self.read_once(client, query).await
-            }
-            other => other,
-        }
-    }
-    async fn read_once(&self, client: &Client, query: Query) -> Result<crate::ReadPage, Failure> {
-        let max_bytes = query.max_bytes.unwrap_or(rocky_storage::MAX_FRAME_BYTES);
-        if query.max_rows == 0
-            || query.max_rows > MAX_ROWS
-            || query.sql.len() > MAX_SQL
-            || query.values.len() > 256
-            || !(256..=rocky_storage::MAX_FRAME_BYTES).contains(&max_bytes)
-        {
-            return Err(refused("query quota"));
-        }
-        let settings = self.settings.published();
-        let authority = (settings.revocations.digest(now()?)?, settings.expires());
-        let mut descriptor = Vec::new();
-        descriptor.extend((query.sql.len() as u64).to_le_bytes());
-        descriptor.extend(query.sql.as_bytes());
-        descriptor.extend(query.max_rows.to_le_bytes());
-        descriptor.extend(max_bytes.to_le_bytes());
-        descriptor.extend((query.values.len() as u64).to_le_bytes());
-        for value in &query.values {
-            value.encode(&mut descriptor);
-        }
-        let token = |offset: usize| -> Result<String, Failure> {
-            let bytes = serde_json::to_vec(&(
-                client.cursor_key,
-                self.domain().manifest().hash(),
-                authority,
-                &descriptor,
-                offset,
-            ))?;
-            Ok(format!(
-                "page.v1:{offset}:{}",
-                HEXLOWER.encode(&commitment("rocky.sdk.cursor.v1", &bytes))
-            ))
-        };
-        let offset: usize = match &query.cursor {
-            Some(cursor) => {
-                let offset = cursor
-                    .strip_prefix("page.v1:")
-                    .and_then(|rest| rest.split_once(':'))
-                    .and_then(|(offset, _)| offset.parse().ok())
-                    .ok_or_else(|| refused("invalid cursor"))?;
-                if *cursor != token(offset)? {
-                    return Err(refused(
-                        "cursor belongs to another session, query or authority generation",
-                    ));
-                }
-                offset
-            }
-            None => 0,
-        };
-        let reader = self.reader(client).await?;
-        let revision = *self.replica.observe_revision().borrow();
-        let mut values = query.values;
-        values.push(SqlValue::Integer(i64::try_from(query.max_rows + 1)?));
-        values.push(SqlValue::Integer(i64::try_from(offset)?));
-        let sql = format!(
-            "SELECT * FROM ({}) LIMIT ? OFFSET ?",
-            query.sql.trim().trim_end_matches(';')
-        );
-        let mut result = reader.sql.run(&sql, values).await?;
-        let more = result.rows.len() > query.max_rows;
-        result.rows.truncate(query.max_rows);
-        let mut rows = Vec::new();
-        let mut used = std::mem::size_of::<crate::ReadPage>()
-            + result.columns.iter().map(String::len).sum::<usize>()
-            + token(usize::MAX)?.len();
-        let mut limited = false;
-        for row in result.rows {
-            let mut encoded = Vec::new();
-            for value in &row {
-                value.encode(&mut encoded);
-            }
-            let size = encoded.len();
-            if used + size > max_bytes {
-                if rows.is_empty() {
-                    return Err(refused("one row exceeds the page byte quota"));
-                }
-                limited = true;
-                break;
-            }
-            used += size;
-            rows.push(row);
-        }
-        let next = if more || limited {
-            Some(token(
-                offset
-                    .checked_add(rows.len())
-                    .ok_or_else(|| refused("cursor quota"))?,
-            )?)
-        } else {
-            None
-        };
-        Ok(crate::ReadPage {
-            scope: self.domain().scope,
-            revision,
-            columns: result.columns,
-            rows,
-            next,
-        })
-    }
-
-    async fn next(&self, client: &Client, id: u64) -> Result<crate::ReadPage, Failure> {
-        let mut revisions = self.replica.observe_revision();
-        let mut closing = client.closing.subscribe();
-        let mut subscriptions = client.subscriptions_changed.subscribe();
-        loop {
-            let (query, delivered) = {
-                let subscriptions = client.subscriptions()?;
-                let subscription = subscriptions
-                    .get(&id)
-                    .ok_or_else(|| refused("unknown subscription"))?;
-                (subscription.query.clone(), subscription.delivered.clone())
-            };
-            let current = revisions.borrow_and_update().to_string();
-            if delivered.as_deref() != Some(current.as_str()) {
-                let page = self.read(client, query).await?;
-                if let Some(subscription) = client.subscriptions()?.get_mut(&id) {
-                    subscription.delivered = Some(page.revision.to_string());
-                }
-                return Ok(page);
-            }
-            tokio::select! {
-                changed = revisions.changed() => {
-                    changed.map_err(|_| ServiceError::Closed("database"))?
-                }
-                _ = closing.wait_for(|closing| *closing) => {
-                    return Err(ServiceError::Closed("session").into());
-                }
-                _ = subscriptions.changed() => {}
-            }
-        }
-    }
 }
 
-fn secure_handle(handle: &[u8; 32]) -> rocky_core::Commitment {
-    commitment("rocky.sdk.mutation.v1", handle)
-}
 #[derive(Default)]
 pub(crate) struct Root(Option<crate::identities::Loan>);
 impl Root {
@@ -3004,16 +2701,6 @@ fn renewal_cannot_repair(error: &Failure) -> bool {
         _ => false,
     }
 }
-fn is_authority(error: &Failure) -> bool {
-    matches!(
-        error.downcast_ref::<Error>(),
-        Some(Error::Sql(SqlError::Unavailable {
-            reason: Unavailable::Revoked,
-            ..
-        }))
-    )
-}
-
 pub(crate) fn call_failure(error: &Failure) -> crate::CallFailure {
     if let Some(error) = error.downcast_ref::<crate::CallFailure>() {
         return error.clone();

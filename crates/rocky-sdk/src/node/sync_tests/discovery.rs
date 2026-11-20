@@ -1,5 +1,4 @@
 use super::*;
-use crate::test_snapshot as snap;
 
 const OUTLASTS_A_LOADED_CI_HOST: Duration = Duration::from_secs(30);
 
@@ -41,18 +40,15 @@ async fn announce(node: &Node) -> Result<(), Failure> {
     Ok(())
 }
 async fn titles(node: &Node) -> Result<Value, Failure> {
-    let page = snap::value(node.read(
-        &*node.client(1)?,
-        rocky_sdk::ReadQuery {
-            sql: "SELECT key FROM items ORDER BY key".to_owned(),
-            values: Vec::new(),
-            max_rows: 8,
-            max_bytes: None,
-            cursor: None,
-        },
+    let rows = read_rows(node, "SELECT key FROM items ORDER BY key").await?;
+    Ok(json!(
+        rows.into_iter()
+            .map(|row| row
+                .into_iter()
+                .map(|value| json!({"type":"text","value":value.to_text().unwrap_or_default()}))
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
     ))
-    .await?;
-    Ok(page["rows"].clone())
 }
 
 #[tokio::test]

@@ -110,13 +110,11 @@ async fn real_voters_release_a_private_migration_without_reopening_the_publisher
         let mut seen = Vec::new();
         for peer in [&a, &t] {
             assert_eq!(snap::value(peer.session.tip_status()).await?["tip"], target);
-            let rows = snap::value(peer.session.read(rocky_sdk::ReadQuery {
-                sql: "SELECT key,position FROM counts ORDER BY key".to_owned(),
-                values: vec![],
-                max_rows: 10,
-                max_bytes: None,
-                cursor: None,
-            }))
+            let rows = snap::read(
+                &peer.opened.database,
+                "SELECT key,position FROM counts ORDER BY key",
+                Vec::new(),
+            )
             .await?;
             let text = |value: &str| json!({"type":"text","value":value});
             let written_after_the_migration_keeps_the_default = text("");

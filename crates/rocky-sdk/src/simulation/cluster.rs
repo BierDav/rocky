@@ -126,6 +126,13 @@ impl Member {
             running.database.crash().await;
         }
     }
+    pub(super) fn database(&self) -> Result<&Database, Failure> {
+        Ok(&self
+            .running
+            .as_ref()
+            .ok_or("the node is not running")?
+            .database)
+    }
     pub(super) fn session(&self) -> Result<&Session, Failure> {
         Ok(&self
             .running
@@ -177,51 +184,36 @@ impl Member {
         table: &str,
         columns: &str,
         rows: &[Vec<SqlValue>],
-        handle: u64,
-        kind: u8,
+        _handle: u64,
+        _kind: u8,
     ) -> Result<(), Failure> {
-        self.session()?.execute("BEGIN", Vec::new()).await?;
-        let result = async {
-            for values in rows {
-                let id = self.session()?.next_id(table).await?;
-                let mut values = values.clone();
-                values.push(id.sql());
-                let places = vec!["?"; values.len()].join(", ");
-                self.session()?
-                    .execute(
-                        &format!("INSERT INTO {table}({columns}, id) VALUES({places})"),
-                        values,
-                    )
-                    .await?;
-            }
-            let mut bytes = [0u8; 32];
-            bytes[..8].copy_from_slice(&handle.to_be_bytes());
-            bytes[8] = kind;
-            self.session()?.commit(bytes).await
+        let mut tx = self.database()?.transaction().await?;
+        for values in rows {
+            let id = tx.next_id(table, Vec::new()).await?;
+            let mut values = values.clone();
+            values.push(id.sql());
+            let places = vec!["?"; values.len()].join(", ");
+            tx.execute(
+                &format!("INSERT INTO {table}({columns}, id) VALUES({places})"),
+                values,
+            )
+            .await?;
         }
-        .await;
-        if result.is_err() {
-            let _ = self.session()?.execute("ROLLBACK", Vec::new()).await;
-        }
-        result.map(drop)
+        tx.commit().await?;
+        Ok(())
     }
     pub(super) async fn keys(&self) -> Result<Vec<String>, Failure> {
-        let mut keys = Vec::new();
-        let mut after = String::new();
-        loop {
-            let mut query =
-                crate::ReadQuery::new("SELECT key FROM items WHERE key > ? ORDER BY key", 512);
-            query.values = vec![SqlValue::Text(after)];
-            let page = self.session()?.read(query).await?;
-            let rows = &page.rows;
-            for row in rows {
-                keys.push(row[0].to_text().ok_or("key")?);
-            }
-            match keys.last() {
-                Some(last) if rows.len() == 512 => after = last.clone(),
-                _ => return Ok(keys),
-            }
+        let rows = self
+            .database()?
+            .query("SELECT key FROM items ORDER BY key", Vec::new())
+            .await?
+            .collect()
+            .await?;
+        let mut keys = Vec::with_capacity(rows.len());
+        for row in rows {
+            keys.push(row.get_at(0)?);
         }
+        Ok(keys)
     }
     pub(super) async fn contact(&self) -> Result<String, Failure> {
         self.session()?.contact().await

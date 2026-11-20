@@ -1,7 +1,6 @@
 use common::{Device, Failure};
 use rocky_sdk::{
-    Database, GrantProfile, Network, Open, ReadQuery, RevocationStatus, SqlValue,
-    transport::memory::Hub,
+    Database, GrantProfile, Network, Open, RevocationStatus, SqlValue, transport::memory::Hub,
 };
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
@@ -53,35 +52,31 @@ const INSERT_ITEM: &str = "INSERT INTO items(key,id,title,completed) VALUES(?,?,
 const INSERT_NOTE: &str = "INSERT INTO notes(key,id,text) VALUES(?,?,?)";
 async fn create_row(device: &Device, handle: u8, table: &str, sql: &str, text: &str) {
     let handle = [handle; 32];
-    device
-        .session()
-        .execute("BEGIN", Vec::new())
-        .await
-        .expect("begin");
-    let id = device.session().next_id(table).await.expect("id");
-    device
-        .session()
-        .execute(
-            sql,
-            vec![
-                SqlValue::Text(data_encoding::HEXLOWER.encode(&handle)),
-                id.sql(),
-                SqlValue::Text(text.into()),
-            ],
-        )
-        .await
-        .expect("insert");
-    device.session().commit(handle).await.expect("commit");
+    let mut tx = device.database.transaction().await.expect("begin");
+    let id = tx.next_id(table, Vec::new()).await.expect("id");
+    tx.execute(
+        sql,
+        vec![
+            SqlValue::Text(data_encoding::HEXLOWER.encode(&handle)),
+            id.sql(),
+            SqlValue::Text(text.into()),
+        ],
+    )
+    .await
+    .expect("insert");
+    tx.commit().await.expect("commit");
 }
 async fn texts(device: &Device, sql: &str) -> Vec<String> {
     device
-        .session()
-        .read(ReadQuery::new(sql, 64))
+        .database
+        .query(sql, Vec::new())
         .await
         .expect("read")
-        .rows
+        .collect()
+        .await
+        .expect("collect")
         .into_iter()
-        .map(|row| row[0].to_text().expect("text"))
+        .map(|row| row.get_at::<String>(0).expect("text"))
         .collect()
 }
 

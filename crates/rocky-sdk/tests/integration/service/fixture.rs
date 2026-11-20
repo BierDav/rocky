@@ -181,38 +181,23 @@ impl Peer {
             .ok_or("invitation")?
             .to_owned())
     }
-    pub async fn write(&self, key: &str, handle: u32) -> Result<Value, Failure> {
-        snap::value(self.session.execute("BEGIN", Vec::new())).await?;
-        let result = self.insert_and_commit(key, handle).await;
-        if result.is_err() {
-            let _ = snap::value(self.session.execute("ROLLBACK", Vec::new())).await;
-        }
-        result
-    }
-    async fn insert_and_commit(&self, key: &str, handle: u32) -> Result<Value, Failure> {
-        let id = snap::value(self.session.next_id("counts")).await?["id"].clone();
-        snap::value(self.session.execute(
+    pub async fn write(&self, key: &str, _handle: u32) -> Result<Value, Failure> {
+        let mut tx = self.opened.database.transaction().await?;
+        let id = tx.next_id("counts", Vec::new()).await?;
+        tx.execute(
             "INSERT INTO counts(key,value,id) VALUES(?,5,?)",
-            vec![
-                rocky_sdk::SqlValue::Text(snap::text(&(key))),
-                snap::row_id(&(id)),
-            ],
-        ))
+            vec![rocky_sdk::SqlValue::Text(key.to_owned()), id.sql()],
+        )
         .await?;
-        snap::value(self.session.commit(rocky_core::commitment(
-            "fixture.service.handle",
-            &handle.to_le_bytes(),
-        )))
-        .await
+        let committed = tx.commit().await?;
+        Ok(json!({"committed": committed.map(|_| json!({"frames": 1}))}))
     }
     pub async fn keys(&self) -> Result<Value, Failure> {
-        Ok(snap::value(self.session.read(rocky_sdk::ReadQuery {
-            sql: "SELECT key FROM counts ORDER BY key".to_owned(),
-            values: vec![],
-            max_rows: 1024,
-            max_bytes: None,
-            cursor: None,
-        }))
+        Ok(snap::read(
+            &self.opened.database,
+            "SELECT key FROM counts ORDER BY key",
+            Vec::new(),
+        )
         .await?["rows"]
             .clone())
     }

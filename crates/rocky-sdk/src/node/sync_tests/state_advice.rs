@@ -1,5 +1,4 @@
 use super::*;
-use crate::test_snapshot as snap;
 
 #[tokio::test]
 async fn ordinary_sync_waits_for_the_shared_import_slot_without_a_bootstrap_marker()
@@ -344,32 +343,17 @@ async fn many_changed_scopes_reconcile_with_a_channel_left_for_publication() -> 
                 &schema,
             )
             .await?;
-            let client = a.client(1)?;
+            let sql = a.sql_session(SqlOptions::default()).await?;
             for (index, name) in names.iter().enumerate() {
-                snap::value(a.execute_sql(&client, "BEGIN", Vec::new(), None)).await?;
-                let id = snap::value(a.next_id(&client, &(snap::text(&(name))), None)).await?["id"]
-                    .clone();
-                snap::value(a.execute_sql(
-                    &client,
-                    &(snap::text(
-                        &(format!("INSERT INTO {name}(key,title,id) VALUES('1','Milk',?)")),
-                    )),
-                    vec![snap::row_id(&(id))],
-                    None,
-                ))
-                .await?;
-                snap::value(
-                    a.execute_sql(
-                        &client,
-                        "COMMIT",
-                        Vec::new(),
-                        Some(
-                            serde_json::from_value::<[u8; 32]>(json!(vec![index as u8 + 1; 32]))
-                                .expect("typed fixture"),
-                        ),
-                    ),
+                sql.run("BEGIN", Vec::new()).await?;
+                let id = sql.next_id(name).await?;
+                sql.run(
+                    &format!("INSERT INTO {name}(key,title,id) VALUES('1','Milk',?)"),
+                    vec![id.sql()],
                 )
                 .await?;
+                sql.commit(commitment("rocky.sdk.mutation.v1", &[index as u8 + 1; 32]))
+                    .await?;
             }
             let peer = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
             let contact = b

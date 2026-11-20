@@ -9,14 +9,15 @@ const POSITIONED_ITEMS: &str = r#"{"application":"shopping","version":2,"format"
   {"insert":"items","select":"SELECT 'copy-' || key AS key, 1 AS completed, title FROM items"}]}]}"#;
 
 async fn insert(device: &Device, key: &str, title: &str) {
-    snap::ok(device.session.execute("BEGIN", Vec::new())).await;
-    let id = snap::ok(device.session.next_id("items")).await["id"].clone();
-    snap::ok(device.session.execute(
+    let mut tx = device.database.transaction().await.expect("begin");
+    let id = tx.next_id("items", Vec::new()).await.expect("id");
+    tx.execute(
         "INSERT INTO items(key,completed,title,id) VALUES(?,0,?,?)",
-        vec![text(key), text(title), snap::row_id(&(id))],
-    ))
-    .await;
-    snap::ok(device.session.execute("COMMIT", Vec::new())).await;
+        vec![text(key), text(title), id.sql()],
+    )
+    .await
+    .expect("insert");
+    tx.commit().await.expect("commit");
 }
 
 const STATE: &str = "SELECT id, key, completed, position, title FROM items ORDER BY id";
@@ -204,16 +205,10 @@ impl Listed {
         let b = self.open("b", &schema)?;
         let expected = json!([[{"type": "integer", "value": rows.to_string()}, {"type": "integer", "value": rows.to_string()}]]);
         let mut syncs = 0;
-        while snap::observe(b.session.read(rocky_sdk::ReadQuery {
-            sql: snap::text(&(FILLED_COUNT)),
-            values: vec![],
-            max_rows: 1,
-            max_bytes: None,
-            cursor: None,
-        }))
-        .await
-        .ok()
-        .map(|page| page["rows"].clone())
+        while snap::observe(snap::read(&b.database, FILLED_COUNT, Vec::new()))
+            .await
+            .ok()
+            .map(|page| page["rows"].clone())
             != Some(expected.clone())
         {
             syncs += 1;

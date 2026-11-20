@@ -23,15 +23,7 @@ fn version(schema: &str, version: u32) -> String {
     schema.replace(r#""version":1"#, &format!(r#""version":{version}"#))
 }
 async fn rows(device: &Device, sql: &str) -> Value {
-    snap::ok(device.session.read(rocky_sdk::ReadQuery {
-        sql: snap::text(&(sql)),
-        values: vec![],
-        max_rows: 1024,
-        max_bytes: None,
-        cursor: None,
-    }))
-    .await["rows"]
-        .clone()
+    snap::ok(snap::read(&device.database, sql, Vec::new())).await["rows"].clone()
 }
 fn text(value: &str) -> rocky_sdk::SqlValue {
     rocky_sdk::SqlValue::Text(snap::text(&(value)))
@@ -41,6 +33,7 @@ async fn generation(device: &Device) -> Value {
 }
 async fn create(device: &Device, handle: u8, collection: &str, values: Value) -> String {
     let reply = snap::ok(snap::mutate(
+        &device.database,
         &device.session,
         vec![handle; 32],
         snap::Action::Create {
@@ -53,10 +46,10 @@ async fn create(device: &Device, handle: u8, collection: &str, values: Value) ->
     .await;
     reply["id"].as_str().unwrap_or_default().to_owned()
 }
-async fn write(device: &Device, _collection: &str, handle: u8, sql: &str) {
-    snap::ok(device.session.execute("BEGIN", Vec::new())).await;
-    snap::ok(device.session.execute(&(snap::text(&(sql))), Vec::new())).await;
-    snap::ok(device.session.commit([handle; 32])).await;
+async fn write(device: &Device, _collection: &str, _handle: u8, sql: &str) {
+    let mut tx = device.database.transaction().await.expect("begin");
+    tx.execute(sql, Vec::new()).await.expect("execute");
+    tx.commit().await.expect("commit");
 }
 fn schema_of(directory: &Path) -> Result<(Vec<String>, Vec<String>), Failure> {
     let file = rusqlite::Connection::open_with_flags(
@@ -137,13 +130,11 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
             "a frame sent before the removal keeps its authority after the signed schema opens"
         );
     }
-    let failed = snap::observe(b.session.read(rocky_sdk::ReadQuery {
-        sql: "SELECT category FROM items".to_owned(),
-        values: vec![],
-        max_rows: 8,
-        max_bytes: None,
-        cursor: None,
-    }))
+    let failed = snap::observe(snap::read(
+        &b.database,
+        "SELECT category FROM items",
+        Vec::new(),
+    ))
     .await
     .expect_err("removed column");
     assert!(
@@ -310,19 +301,19 @@ async fn an_unsent_change_naming_a_removed_table_drops_whole_in_the_successor()
     )
     .await;
     b.sync().await.expect("sync");
-    snap::ok(b.session.execute("BEGIN", Vec::new())).await;
-    snap::ok(b.session.execute(
+    let mut tx = b.database.transaction().await?;
+    tx.execute(
         "UPDATE items SET title='green apples' WHERE title='apples'",
         Vec::new(),
-    ))
-    .await;
-    let id = snap::ok(b.session.next_id("shelves")).await["id"].clone();
-    snap::ok(b.session.execute(
+    )
+    .await?;
+    let id = tx.next_id("shelves", Vec::new()).await?;
+    tx.execute(
         "INSERT INTO shelves(key,label,id) VALUES('cellar','cellar',?)",
-        vec![snap::row_id(&(id.to_string().trim_matches('"')))],
-    ))
-    .await;
-    snap::ok(b.session.commit([3; 32])).await;
+        vec![id.sql()],
+    )
+    .await?;
+    tx.commit().await?;
     assert_eq!(b.titles().await, ["bread", "green apples"]);
 
     a.close().await;
@@ -584,7 +575,7 @@ async fn an_impact_report_counts_the_live_rows_of_all_local_partitions() -> Resu
     let before = schema.to_string();
     let b = Device::new(Database::create(open(&b_dir, &before, None), None)?)?;
     b.follow_main_migrating().await;
-    for (handle, list) in [(1, "first"), (2, "second")] {
+    for (_handle, list) in [(1, "first"), (2, "second")] {
         snap::ok(
             b.session
                 .create_partition(rocky_sdk::PartitionTarget::Table {
@@ -594,24 +585,21 @@ async fn an_impact_report_counts_the_live_rows_of_all_local_partitions() -> Resu
         )
         .await;
 
-        snap::ok(b.session.execute("BEGIN", Vec::new())).await;
-        let id =
-            snap::ok(b.session.next_partition_id("items", vec![text(list)])).await["id"].clone();
-        snap::ok(b.session.execute(
-            &(snap::text(
-                &("INSERT INTO items(list,key,title,completed,note,id) VALUES(?,?,?,?,?,?)"),
-            )),
+        let mut tx = b.database.transaction().await?;
+        let id = tx.next_id("items", vec![text(list)]).await?;
+        tx.execute(
+            "INSERT INTO items(list,key,title,completed,note,id) VALUES(?,?,?,?,?,?)",
             vec![
                 text(list),
                 text("key"),
                 text(list),
                 rocky_sdk::SqlValue::Integer(0),
                 text("old"),
-                snap::row_id(&(id)),
+                id.sql(),
             ],
-        ))
-        .await;
-        snap::ok(b.session.commit([handle; 32])).await;
+        )
+        .await?;
+        tx.commit().await?;
     }
     b.close().await;
     schema["version"] = json!(2);

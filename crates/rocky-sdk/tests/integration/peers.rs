@@ -158,6 +158,7 @@ async fn edits_relayed_in_any_order_and_repeated_converge() -> Result<(), Failur
     d.add(4, "Eggs").await;
     let eggs = c.add(5, "Jam").await;
     snap::ok(snap::mutate(
+        &c.database,
         &c.session,
         vec![6u8; 32],
         snap::Action::Delete {

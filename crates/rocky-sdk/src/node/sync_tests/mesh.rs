@@ -1,5 +1,4 @@
 use super::*;
-use crate::test_snapshot as snap;
 use rocky_secure::network::{ContactHandler, ContactHint, ContactRequest, ContactResponse};
 
 async fn contact(from: &Node, to: &Node) -> Result<PublicKey, Failure> {
@@ -465,10 +464,11 @@ async fn a_needed_partition_reaches_its_keyless_custody_peer_within_two_passes()
         assert!(d.register_partition(&target, &crate::PartitionSelection::default()).await.is_err());
         let name = data_encoding::HEXLOWER.decode(created.name.as_bytes())?.try_into().map_err(|_| "partition name")?;
         d.register_partition(&target, &crate::PartitionSelection { name: Some(name), omit: Default::default() }).await?;
-        snap::value(Box::pin(a.execute_sql(&*a.client(1)?, "BEGIN", Vec::new(), None))).await?;
-        let id = snap::value(Box::pin(a.next_id(&*a.client(1)?, "items", Some(vec![SqlValue::Text("only-custody".into())])))).await?["id"].clone();
-        snap::value(Box::pin(a.execute_sql(&*a.client(1)?, "INSERT INTO items(list,key,title,id) VALUES('only-custody','k','custody row',?)", vec![snap::row_id(&(id))], None))).await?;
-        snap::value(Box::pin(a.execute_sql(&*a.client(1)?, "COMMIT", Vec::new(), None))).await?;
+        let sql = a.sql_session(SqlOptions::default()).await?;
+        sql.run("BEGIN", Vec::new()).await?;
+        let id = sql.next_id_partition("items", &[SqlValue::Text("only-custody".into())]).await?;
+        sql.run("INSERT INTO items(list,key,title,id) VALUES('only-custody','k','custody row',?)", vec![id.sql()]).await?;
+        sql.run("COMMIT", Vec::new()).await?;
         pass(&d).await?;
         a.detach(None).await;
         let d_key = contact(&b, &d).await?;
@@ -484,8 +484,8 @@ async fn a_needed_partition_reaches_its_keyless_custody_peer_within_two_passes()
         assert!(b.scopes().iter().filter(|scope| !b.domain().partitioned_table(scope)).all(|scope| held.contains(scope)));
         assert!(hub.dials_to("d") > 0);
         }
-        let page = snap::value(Box::pin(b.read(&*b.client(1)?, rocky_sdk::ReadQuery { sql: "SELECT title FROM items".to_owned(), values: Vec::new(), max_rows: 8, max_bytes: None, cursor: None }))).await?;
-        assert_eq!(page["rows"][0][0]["value"], "custody row");
+        let rows = read_rows(&b, "SELECT title FROM items").await?;
+        assert_eq!(rows[0][0], SqlValue::Text("custody row".into()));
         for node in [&a, &b, &c, &d] { node.detach(None).await; }
         Ok(())
     }).await

@@ -1,4 +1,3 @@
-use crate::test_snapshot as snap;
 use rocky_credentials::testing::MemoryKeys;
 mod bootstrap_intent;
 mod coordination;
@@ -187,112 +186,23 @@ async fn enable(node: &Node) -> Result<(), Failure> {
     Ok(())
 }
 
+async fn read_rows(node: &Node, sql: &str) -> Result<Vec<Vec<SqlValue>>, Failure> {
+    let session = node.sql_session(SqlOptions::default()).await?;
+    Ok(session.run(sql, Vec::new()).await?.rows)
+}
+
 async fn add(node: &Node, handle: u8) -> Result<(), Failure> {
-    let client = node.client(1)?;
-    snap::value(node.execute_sql(&client, "BEGIN", Vec::new(), None)).await?;
-    let id = snap::value(node.next_id(&client, "items", None)).await?["id"].clone();
-    snap::value(node.execute_sql(
-        &client,
+    let sql = node.sql_session(SqlOptions::default()).await?;
+    sql.run("BEGIN", Vec::new()).await?;
+    let id = sql.next_id("items").await?;
+    sql.run(
         "INSERT INTO items(key,title,id) VALUES(?,'Milk',?)",
-        vec![
-            rocky_sdk::SqlValue::Text(snap::text(&(handle.to_string()))),
-            snap::row_id(&(id)),
-        ],
-        None,
-    ))
+        vec![SqlValue::Text(handle.to_string()), id.sql()],
+    )
     .await?;
-    snap::value(node.execute_sql(&client, "COMMIT", Vec::new(), Some([handle; 32]))).await?;
+    sql.commit(commitment("rocky.sdk.mutation.v1", &[handle; 32]))
+        .await?;
     Ok(())
-}
-
-#[tokio::test]
-async fn forgetting_readers_keeps_an_open_transaction_and_refreshes_after_it() -> Result<(), Failure>
-{
-    tokio::task::LocalSet::new()
-        .run_until(async {
-            let root = tempfile::tempdir()?;
-            let hub = Arc::new(Hub::default());
-            let node = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-            let client = node.client(1)?;
-            snap::value(node.execute_sql(&client, "BEGIN", Vec::new(), None)).await?;
-            let transaction = Arc::downgrade(&node.sql_reader(&client).await?.sql);
-            node.forget_readers().await;
-            let id = snap::value(node.next_id(&client, "items", None)).await?["id"].clone();
-            snap::value(node.execute_sql(
-                &client,
-                "INSERT INTO items(key,title,id) VALUES('kept','Milk',?)",
-                vec![snap::row_id(&id)],
-                None,
-            ))
-            .await?;
-            node.forget_readers().await;
-            snap::value(node.execute_sql(&client, "COMMIT", Vec::new(), Some([1; 32]))).await?;
-            let current = node.sql_reader(&client).await?.sql;
-            assert!(
-                transaction
-                    .upgrade()
-                    .is_none_or(|forgotten| !Arc::ptr_eq(&forgotten, &current)),
-                "a reader forgotten during a transaction is replaced once it ends"
-            );
-            let rows = snap::value(node.read(
-                &client,
-                rocky_sdk::ReadQuery {
-                    sql: "SELECT key FROM items".to_owned(),
-                    values: Vec::new(),
-                    max_rows: 64,
-                    max_bytes: None,
-                    cursor: None,
-                },
-            ))
-            .await?;
-            assert_eq!(rows["rows"].as_array().map(Vec::len), Some(1));
-            node.detach(None).await;
-            Ok(())
-        })
-        .await
-}
-
-#[tokio::test]
-async fn forgetting_readers_keeps_an_aborted_transaction_until_it_is_rolled_back()
--> Result<(), Failure> {
-    tokio::task::LocalSet::new()
-        .run_until(async {
-            let root = tempfile::tempdir()?;
-            let hub = Arc::new(Hub::default());
-            let node = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-            let client = node.client(1)?;
-            snap::value(node.execute_sql(&client, "BEGIN", Vec::new(), None)).await?;
-            let id = snap::value(node.next_id(&client, "items", None)).await?["id"].clone();
-            node.sql_reader(&client).await?.sql.cancel().await;
-            node.forget_readers().await;
-            assert!(
-                node.execute_sql(
-                    &client,
-                    "INSERT INTO items(key,title,id) VALUES('orphan','Milk',?)",
-                    vec![snap::row_id(&id)],
-                    None,
-                )
-                .await
-                .is_err(),
-                "a statement after an aborted transaction fails instead of autocommitting"
-            );
-            snap::value(node.execute_sql(&client, "ROLLBACK", Vec::new(), None)).await?;
-            let rows = snap::value(node.read(
-                &client,
-                rocky_sdk::ReadQuery {
-                    sql: "SELECT key FROM items".to_owned(),
-                    values: Vec::new(),
-                    max_rows: 64,
-                    max_bytes: None,
-                    cursor: None,
-                },
-            ))
-            .await?;
-            assert_eq!(rows["rows"].as_array().map(Vec::len), Some(0));
-            node.detach(None).await;
-            Ok(())
-        })
-        .await
 }
 
 #[tokio::test]
@@ -350,19 +260,8 @@ async fn idle_has_no_poll_and_a_commit_reaches_the_peer_without_time_advancing()
             let mut revisions = b.replica.observe_revision();
             add(&a, 1).await?;
             tokio::time::timeout(Duration::from_secs(5), revisions.changed()).await??;
-            let client = b.client(1)?;
-            let page = snap::value(b.read(
-                &client,
-                rocky_sdk::ReadQuery {
-                    sql: "SELECT title FROM items".to_owned(),
-                    values: Vec::new(),
-                    max_rows: 64,
-                    max_bytes: None,
-                    cursor: None,
-                },
-            ))
-            .await?;
-            assert_eq!(page["rows"][0][0]["value"], "Milk");
+            let rows = read_rows(&b, "SELECT title FROM items").await?;
+            assert_eq!(rows[0][0], SqlValue::Text("Milk".into()));
             a.detach(None).await;
             b.detach(None).await;
             Ok(())
@@ -603,18 +502,19 @@ async fn consumer_sql_allocates_text_named_ids_of_its_writer() -> Result<(), Fai
         .start(true, Settings::route_secret(&vault)?)
         .await?;
     let node = node(root.path(), settings, vault, transport).await?;
-    let client = node.client(1)?;
-    snap::value(node.execute_sql(&client, "BEGIN", Vec::new(), None))
+    let sql = node.sql_session(SqlOptions::default()).await?;
+    sql.run("BEGIN", Vec::new()).await?;
+    let id = sql.next_id("items").await?;
+    let rows = sql
+        .run(
+            "INSERT INTO items(title,id) VALUES('first',?) RETURNING id",
+            vec![id.sql()],
+        )
         .await?;
-    let identity = snap::value(node.next_id(&client, "items", None))
-        .await?;
-    let id = identity["id"].as_str().ok_or("id is not a string")?;
-    let rows = snap::value(node.execute_sql(&client, "INSERT INTO items(title,id) VALUES('first',?) RETURNING id", vec![snap::row_id(&(id))], None)).await?;
-    assert_eq!(snap::cell_id(&rows["rows"][0][0]).to_string(), id);
-    snap::value(node.execute_sql(&client, "COMMIT", Vec::new(), None))
-        .await?;
-    let rows = snap::value(node.read(&client, rocky_sdk::ReadQuery { sql: "SELECT id FROM items".to_owned(), values: Vec::new(), max_rows: 64, max_bytes: None, cursor: None })).await?;
-    assert_eq!(snap::cell_id(&rows["rows"][0][0]).to_string(), id);
+    assert_eq!(rows.rows[0][0], id.sql());
+    sql.run("COMMIT", Vec::new()).await?;
+    let rows = read_rows(&node, "SELECT id FROM items").await?;
+    assert_eq!(rows[0][0], id.sql());
     node.detach(None).await;
     Ok(())
     }).await

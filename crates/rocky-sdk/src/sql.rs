@@ -99,6 +99,11 @@ impl std::error::Error for DecodeError {}
 pub trait FromSqlValue: Sized {
     fn from_sql_value(value: &SqlValue) -> Result<Self, DecodeError>;
 }
+impl FromSqlValue for SqlValue {
+    fn from_sql_value(value: &SqlValue) -> Result<Self, DecodeError> {
+        Ok(value.clone())
+    }
+}
 macro_rules! decode {
     ($ty:ty, $variant:ident) => {
         impl FromSqlValue for $ty {

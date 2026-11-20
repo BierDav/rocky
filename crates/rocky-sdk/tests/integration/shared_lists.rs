@@ -93,29 +93,16 @@ impl Peer {
         }
     }
     async fn insert(&self, table: &str, list: Option<&str>, sql: &str) -> Result<String, Failure> {
-        snap::value(self.session.execute("BEGIN", Vec::new())).await?;
-        let id = match list {
-            Some(list) => self.session.next_partition_id(table, values(list)).await?,
-            None => self.session.next_id(table).await?,
-        }
-        .to_string();
-        snap::value(
-            self.session
-                .execute(&(snap::text(&(sql))), vec![snap::row_id(&(id))]),
-        )
-        .await?;
-        snap::value(self.session.execute("COMMIT", Vec::new())).await?;
-        Ok(id)
+        let mut tx = self.database.transaction().await?;
+        let id = tx
+            .next_id(table, list.map(values).unwrap_or_default())
+            .await?;
+        tx.execute(sql, vec![id.sql()]).await?;
+        tx.commit().await?;
+        Ok(id.to_string())
     }
     async fn column(&self, sql: &str) -> Result<Vec<Value>, Failure> {
-        let page = snap::value(self.session.read(rocky_sdk::ReadQuery {
-            sql: snap::text(&(sql)),
-            values: vec![],
-            max_rows: 64,
-            max_bytes: None,
-            cursor: None,
-        }))
-        .await?;
+        let page = snap::read(&self.database, sql, Vec::new()).await?;
         Ok(page["rows"]
             .as_array()
             .ok_or("rows")?
@@ -186,10 +173,13 @@ async fn checkpoint_writer(
         writer.column("SELECT title FROM lists").await?,
         [json!("Base list")]
     );
-    snap::value(writer.session.execute("BEGIN", Vec::new()))
+    writer
+        .database
+        .transaction()
         .await
-        .map_err(|error| format!("before preparing a new partition: {error}"))?;
-    snap::value(writer.session.execute("ROLLBACK", Vec::new())).await?;
+        .map_err(|error| format!("before preparing a new partition: {error}"))?
+        .rollback()
+        .await?;
     Ok((issuer, writer))
 }
 
@@ -464,13 +454,13 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
         [json!(category)]
     );
 
-    snap::value(writer.session.execute(
-        &(snap::text(
-            &(format!("DELETE FROM categories WHERE list = X'{list}' AND id = X'{category}'")),
-        )),
+    let mut tx = writer.database.transaction().await?;
+    tx.execute(
+        &format!("DELETE FROM categories WHERE list = X'{list}' AND id = X'{category}'"),
         Vec::new(),
-    ))
+    )
     .await?;
+    tx.commit().await?;
     snap::value(writer.sync_once()).await?;
     for peer in [&writer, &issuer] {
         assert_eq!(
@@ -677,12 +667,10 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
             )
             .await?;
     }
-    snap::value(
-        issuer
-            .session
-            .execute("DELETE FROM items WHERE title='Eggs'", Vec::new()),
-    )
-    .await?;
+    let mut tx = issuer.database.transaction().await?;
+    tx.execute("DELETE FROM items WHERE title='Eggs'", Vec::new())
+        .await?;
+    tx.commit().await?;
     snap::value(writer.sync_once()).await?;
     let titles = format!("SELECT title FROM items WHERE list = X'{list}' ORDER BY title");
     assert_eq!(

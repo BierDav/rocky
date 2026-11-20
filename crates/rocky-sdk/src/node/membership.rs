@@ -149,7 +149,6 @@ impl Node {
             Ok(())
         })
         .await?;
-        self.forget_readers().await;
         self.observations.touch();
         self.wake_sync();
         self.deliver_unlinks().await?;
@@ -296,7 +295,6 @@ impl Node {
                 link.live
                     .close(rocky_secure::network::link::CloseReason::Authority);
             }
-            self.forget_readers().await;
             self.observations.touch();
             return Ok(known);
         }
@@ -317,7 +315,6 @@ impl Node {
         if rotated {
             Box::pin(self.complete_revocation()).await?;
         }
-        self.forget_readers().await;
         self.observations.touch();
         self.wake_sync();
         Ok(known)

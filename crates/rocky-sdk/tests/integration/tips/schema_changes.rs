@@ -69,13 +69,11 @@ async fn migration_closes_opens_a_new_line_and_commits_its_program_once() -> Res
             .with_identity(common::external_identity(root.path()));
         let status = snap::ok(a.session.generation()).await;
         assert_eq!(status["application"], "current", "{status}");
-        let rows = snap::ok(a.session.read(rocky_sdk::ReadQuery {
-            sql: "SELECT note FROM items".to_owned(),
-            values: vec![],
-            max_rows: 10,
-            max_bytes: None,
-            cursor: None,
-        }))
+        let rows = snap::ok(snap::read(
+            &a.database,
+            "SELECT note FROM items",
+            Vec::new(),
+        ))
         .await;
         assert_eq!(
             rows["rows"],
@@ -107,13 +105,11 @@ async fn a_migration_reads_its_frozen_parent_after_changing_the_live_rows() -> R
     let declared = declared.to_string();
     let a = Device::new(Database::open(open(root.path(), &declared))?)?
         .with_identity(common::external_identity(root.path()));
-    let rows = snap::ok(a.session.read(rocky_sdk::ReadQuery {
-        sql: "SELECT title,note FROM items".to_owned(),
-        values: vec![],
-        max_rows: 10,
-        max_bytes: None,
-        cursor: None,
-    }))
+    let rows = snap::ok(snap::read(
+        &a.database,
+        "SELECT title,note FROM items",
+        Vec::new(),
+    ))
     .await;
     assert_eq!(
         rows["rows"],

@@ -107,48 +107,42 @@ impl Device {
     pub async fn add(&self, handle: u8, title: &str) -> String {
         let handle = self.handle(handle).await;
         let key = data_encoding::HEXLOWER.encode(&handle);
-        if !self
-            .session
-            .mutation_committed(handle)
+        let exists = self
+            .database
+            .query(
+                "SELECT 1 FROM items WHERE key=?",
+                vec![rocky_sdk::SqlValue::Text(key.clone())],
+            )
             .await
-            .expect("committed")
-        {
-            self.session
-                .execute("BEGIN", Vec::new())
-                .await
-                .expect("begin");
-            let id = self.session.next_id("items").await.expect("id");
-            self.session
-                .execute(
-                    "INSERT INTO items(key,id,title,completed) VALUES(?,?,?,0)",
-                    vec![
-                        rocky_sdk::SqlValue::Text(key.clone()),
-                        id.sql(),
-                        rocky_sdk::SqlValue::Text(title.into()),
-                    ],
-                )
-                .await
-                .expect("insert");
-            self.session.commit(handle).await.expect("commit");
+            .expect("query")
+            .next()
+            .await
+            .expect("next")
+            .is_some();
+        if !exists {
+            let mut tx = self.database.transaction().await.expect("begin");
+            let id = tx.next_id("items", Vec::new()).await.expect("id");
+            tx.execute(
+                "INSERT INTO items(key,id,title,completed) VALUES(?,?,?,0)",
+                vec![
+                    rocky_sdk::SqlValue::Text(key.clone()),
+                    id.sql(),
+                    rocky_sdk::SqlValue::Text(title.into()),
+                ],
+            )
+            .await
+            .expect("insert");
+            tx.commit().await.expect("commit");
         }
         key
     }
-    pub async fn set(&self, handle: u8, id: &str, field: &str, value: Value) {
+    pub async fn set(&self, _handle: u8, id: &str, field: &str, value: Value) {
         use rocky_sdk::SqlValue;
         assert!(
             field
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
         );
-        let handle = self.handle(handle).await;
-        if self
-            .session
-            .mutation_committed(handle)
-            .await
-            .expect("committed")
-        {
-            return;
-        }
         let value = match value {
             Value::Null => SqlValue::Null,
             Value::Bool(value) => SqlValue::Integer(i64::from(value)),
@@ -156,58 +150,49 @@ impl Device {
             Value::String(value) => SqlValue::Text(value),
             _ => panic!("unsupported fixture value"),
         };
-        self.session
-            .execute("BEGIN", Vec::new())
-            .await
-            .expect("begin");
-        self.session
-            .execute(
-                &format!("UPDATE items SET \"{field}\"=? WHERE key=?"),
-                vec![value, SqlValue::Text(id.into())],
-            )
-            .await
-            .expect("update");
-        self.session.commit(handle).await.expect("commit");
+        let mut tx = self.database.transaction().await.expect("begin");
+        tx.execute(
+            &format!("UPDATE items SET \"{field}\"=? WHERE key=?"),
+            vec![value, SqlValue::Text(id.into())],
+        )
+        .await
+        .expect("update");
+        tx.commit().await.expect("commit");
     }
-    pub async fn remove(&self, handle: u8, id: &str) {
-        let handle = self.handle(handle).await;
-        if self
-            .session
-            .mutation_committed(handle)
-            .await
-            .expect("committed")
-        {
-            return;
-        }
-        self.session
-            .execute("BEGIN", Vec::new())
-            .await
-            .expect("begin");
-        self.session
-            .execute(
-                "DELETE FROM items WHERE key=?",
-                vec![rocky_sdk::SqlValue::Text(id.into())],
-            )
-            .await
-            .expect("delete");
-        self.session.commit(handle).await.expect("commit");
+    pub async fn remove(&self, _handle: u8, id: &str) {
+        let mut tx = self.database.transaction().await.expect("begin");
+        tx.execute(
+            "DELETE FROM items WHERE key=?",
+            vec![rocky_sdk::SqlValue::Text(id.into())],
+        )
+        .await
+        .expect("delete");
+        tx.commit().await.expect("commit");
     }
     pub async fn items(&self) -> Vec<String> {
-        let page = self
-            .session
-            .read(rocky_sdk::ReadQuery::new(
+        let rows = self
+            .database
+            .query(
                 "SELECT title, completed FROM items ORDER BY title",
-                1024,
-            ))
+                Vec::new(),
+            )
             .await
-            .expect("read");
-        page.rows
-            .into_iter()
+            .expect("read")
+            .collect()
+            .await
+            .expect("collect");
+        rows.into_iter()
             .map(|row| {
                 format!(
                     "{}/{}",
-                    row[0].to_text().expect("title"),
-                    row[1].to_text().expect("completed")
+                    row.get_at::<rocky_sdk::SqlValue>(0)
+                        .expect("title")
+                        .to_text()
+                        .expect("title"),
+                    row.get_at::<rocky_sdk::SqlValue>(1)
+                        .expect("completed")
+                        .to_text()
+                        .expect("completed")
                 )
             })
             .collect()

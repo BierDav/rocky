@@ -147,6 +147,7 @@ impl Db {
         id: Option<&str>,
     ) -> Result<Value, Value> {
         snap::observe(snap::mutate(
+            self.engine.database(),
             self.engine.session(),
             vec![handle; 32],
             payload,
@@ -173,13 +174,11 @@ impl Db {
         reply["id"].as_str().unwrap_or_default().to_owned()
     }
     async fn items(&self) -> Vec<(String, String, i64)> {
-        let page = snap::ok(self.engine.session().read(rocky_sdk::ReadQuery {
-            sql: "SELECT key, title, completed FROM items ORDER BY key".to_owned(),
-            values: vec![],
-            max_rows: 1024,
-            max_bytes: None,
-            cursor: None,
-        }))
+        let page = snap::ok(snap::read(
+            self.engine.database(),
+            "SELECT key, title, completed FROM items ORDER BY key",
+            Vec::new(),
+        ))
         .await;
         page["rows"]
             .as_array()
@@ -360,8 +359,6 @@ async fn mutations_are_durable_once_and_definite_rejections_are_final() -> Resul
         .await
         .map_err(|error| error.to_string())?;
     assert_eq!(replay["replayed"], json!(true));
-    let handle = snap::mutation_handle(db.engine.session(), &[9; 32], None).await?;
-    assert!(db.engine.session().mutation_committed(handle).await?);
     db.close().await;
     let db = Db::resume(root.path(), iroh())?;
     let replay = db
@@ -435,84 +432,12 @@ async fn mutations_are_durable_once_and_definite_rejections_are_final() -> Resul
     }
     for sql in ["SELECT * FROM secure_rows", "DELETE FROM items"] {
         assert!(
-            snap::observe(db.engine.session().read(rocky_sdk::ReadQuery {
-                sql: snap::text(&(sql)),
-                values: vec![],
-                max_rows: 10,
-                max_bytes: None,
-                cursor: None
-            }))
-            .await
-            .is_err(),
+            snap::observe(snap::read(db.engine.database(), sql, Vec::new()))
+                .await
+                .is_err(),
             "reads cannot reach protocol tables or write: {sql}"
         );
     }
-    db.close().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn pages_and_subscriptions_follow_committed_revisions() -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
-    let db = Db::create(root.path(), iroh())?;
-    for handle in 1..=5 {
-        db.add(handle, &format!("Item {handle}")).await;
-    }
-    let query = rocky_sdk::ReadQuery {
-        sql: "SELECT title FROM items ORDER BY title".to_owned(),
-        values: vec![],
-        max_rows: 2,
-        max_bytes: None,
-        cursor: None,
-    };
-    let mut titles = Vec::new();
-    let mut page = snap::ok(db.engine.session().read((query).clone())).await;
-    loop {
-        titles.extend(
-            page["rows"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|row| row[0]["value"].clone()),
-        );
-        let Some(cursor) = page["next"].as_str() else {
-            break;
-        };
-        let mut next = query.clone();
-        next.cursor = Some((cursor).to_string());
-        page = snap::ok(db.engine.session().read((next).clone())).await;
-    }
-    assert_eq!(titles.len(), 5);
-
-    let subscription = snap::ok(async {
-        let id = db.engine.session().subscribe((query).clone()).await?;
-        Ok(json!({"subscription":id.to_string()}))
-    })
-    .await["subscription"]
-        .clone();
-    let first = snap::ok(
-        db.engine
-            .session()
-            .next(snap::integer(&(subscription)) as u64),
-    )
-    .await;
-    let waiting = {
-        let engine = db.engine.clone();
-        let subscription = snap::integer(&subscription) as u64;
-        tokio::spawn(async move { engine.session().next(subscription).await })
-    };
-    tokio::task::yield_now().await;
-    assert!(!waiting.is_finished());
-    db.add(6, "A first").await;
-    let changed = waiting.await??;
-    assert_ne!(json!(changed.revision.to_string()), first["revision"]);
-    assert_eq!(changed.rows[0][0].to_text().ok_or("title")?, "A first");
-    snap::ok(
-        db.engine
-            .session()
-            .unsubscribe(snap::integer(&(subscription)) as u64),
-    )
-    .await;
     db.close().await;
     Ok(())
 }
@@ -607,15 +532,9 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
     );
     snap::ok(alice.engine.session().logout(true)).await;
     assert!(
-        snap::observe(alice.engine.session().read(rocky_sdk::ReadQuery {
-            sql: "SELECT 1".to_owned(),
-            values: vec![],
-            max_rows: 1,
-            max_bytes: None,
-            cursor: None
-        }))
-        .await
-        .is_err(),
+        snap::observe(snap::read(alice.engine.database(), "SELECT 1", Vec::new()))
+            .await
+            .is_err(),
         "a logged-out member reads nothing"
     );
     alice.close().await;

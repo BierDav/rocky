@@ -606,7 +606,6 @@ impl Node {
         }
         self.activity
             .record(crate::ActivityKind::RoleChanged { partial });
-        self.forget_readers().await;
         self.wake_sync();
         Ok(())
     }
@@ -632,7 +631,6 @@ impl Node {
             target: target.clone(),
             id: Some(id),
         });
-        self.forget_readers().await;
         self.wake_sync();
         Ok(crate::CreatedPartition {
             id,
@@ -698,7 +696,6 @@ impl Node {
         Ok(self.replica.table_complete(logical.table_id(table)).await?)
     }
     async fn partition_changed(&self) {
-        self.forget_readers().await;
         self.wake_sync();
     }
     pub(super) async fn create_partition(

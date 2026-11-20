@@ -142,17 +142,12 @@ mod device_actions {
         node.request(request(reply), node.client(1)).await;
         answer.await?
     }
-    async fn execute(node: &Node, sql: &str) -> Result<crate::SessionRows, Failure> {
-        ask(node, |reply| {
-            Request::Execute(sql.into(), Vec::new(), None, reply)
-        })
-        .await
-    }
     async fn within_a_transaction_while_apply_waits_holding_settings<T>(
         node: &Node,
         work: impl std::future::Future<Output = Result<T, Failure>>,
     ) -> Result<T, Failure> {
-        execute(node, "BEGIN").await?;
+        let sql = node.sql_session(SqlOptions::default()).await?;
+        sql.run("BEGIN", Vec::new()).await?;
         let held = node.settings.lock().await;
         let background = async {
             let mut held = held;
@@ -160,7 +155,7 @@ mod device_actions {
         };
         let transaction = async {
             let done = work.await;
-            let ended = execute(node, "COMMIT").await;
+            let ended = sql.run("COMMIT", Vec::new()).await.map_err(Failure::from);
             ended.and(done)
         };
         let (applied, finished) = tokio::join!(background, transaction);
@@ -240,55 +235,6 @@ mod device_actions {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn sql_in_an_open_transaction_proceeds_while_apply_holds_settings_for_the_replica()
-    -> Result<(), Failure> {
-        let directory = tempfile::tempdir()?;
-        let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
-        let node = personal(directory.path(), &store).await?;
-        within_a_transaction_while_apply_waits_holding_settings(
-            &node,
-            execute(&node, "SELECT title FROM notes"),
-        )
-        .await?;
-        Ok(())
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_paged_read_in_an_open_transaction_proceeds_while_apply_holds_settings()
-    -> Result<(), Failure> {
-        let directory = tempfile::tempdir()?;
-        let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
-        let node = personal(directory.path(), &store).await?;
-        for title in ["a", "b"] {
-            execute(&node, "BEGIN").await?;
-            let id = ask(&node, |reply| Request::NextId("notes".into(), None, reply)).await?;
-            ask(&node, |reply| {
-                Request::Execute(
-                    "INSERT INTO notes (id, title) VALUES (?, ?)".into(),
-                    vec![id.into(), crate::SqlValue::Text(title.into())],
-                    None,
-                    reply,
-                )
-            })
-            .await?;
-            execute(&node, "COMMIT").await?;
-        }
-        let paged = within_a_transaction_while_apply_waits_holding_settings(&node, async {
-            let first = ask(&node, |reply| {
-                Request::Read(crate::ReadQuery::new("SELECT title FROM notes", 1), reply)
-            })
-            .await?;
-            let mut next = crate::ReadQuery::new("SELECT title FROM notes", 1);
-            next.cursor = first.next.clone();
-            let second = ask(&node, |reply| Request::Read(next, reply)).await?;
-            Ok((first, second))
-        })
-        .await?;
-        assert_eq!(paged.0.rows.len() + paged.1.rows.len(), 2);
-        Ok(())
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn discovery_topics_in_an_open_transaction_proceed_while_apply_holds_settings()
     -> Result<(), Failure> {
         let directory = tempfile::tempdir()?;
@@ -308,14 +254,14 @@ mod device_actions {
         let directory = tempfile::tempdir()?;
         let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
         let node = personal(directory.path(), &store).await?;
-        execute(&node, "SELECT title FROM notes").await?;
+        ask(&node, Request::InspectTips).await?;
         let own = rocky_credentials::PeerId::of(Settings::node_key(&node.vault)?.public_key());
         node.revoke_personal_device(own, prf()).await?;
-        let refused = execute(&node, "SELECT title FROM notes").await;
+        let refused = ask(&node, Request::InspectTips).await;
         assert!(refused.is_err_and(|error| error.is::<crate::enrollment::Revoked>()));
         drop(node);
         let reopened = reopen(directory.path(), &store).await?;
-        let refused = execute(&reopened, "SELECT title FROM notes").await;
+        let refused = ask(&reopened, Request::InspectTips).await;
         assert!(
             refused.is_err_and(|error| error.is::<crate::enrollment::Revoked>()),
             "a reopened node enforces the notice it recorded before"
@@ -346,13 +292,13 @@ mod device_actions {
         let notice = directory.path().join("revoked.json");
         std::fs::write(&notice, b"not a notice")?;
         let node = reopen(directory.path(), &store).await?;
-        let refused = execute(&node, "SELECT title FROM notes").await;
+        let refused = ask(&node, Request::InspectTips).await;
         assert!(
             refused.is_err_and(|error| error.is::<serde_json::Error>()),
             "the refusal keeps the error kind of the unreadable notice"
         );
         std::fs::remove_file(&notice)?;
-        execute(&node, "SELECT title FROM notes").await?;
+        ask(&node, Request::InspectTips).await?;
         Ok(())
     }
 

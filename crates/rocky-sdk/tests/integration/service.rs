@@ -67,16 +67,16 @@ async fn a_registered_service_domain_commits_ordinary_rows_and_closes() -> Resul
     let registered = snap::value(register()).await?;
     assert_eq!(registered["tenant"], tenant.public_key().to_hex());
     assert_eq!(snap::value(register()).await?, registered);
-    snap::value(session.execute("BEGIN", Vec::new())).await?;
-    let id = snap::value(session.next_id("counts")).await?["id"].clone();
-    snap::value(session.execute(
-        "INSERT INTO counts(key,value,id) VALUES('total',5,?)",
-        vec![snap::row_id(&(id))],
-    ))
-    .await?;
-    let committed = snap::value(session.commit([2u8; 32])).await?;
-    assert!(!committed["committed"].is_null());
     let database = &opened.database;
+    let mut transaction = database.transaction().await?;
+    let id = transaction.next_id("counts", params![]).await?;
+    transaction
+        .execute(
+            "INSERT INTO counts(key,value,id) VALUES('total',5,?)",
+            params![id],
+        )
+        .await?;
+    assert!(transaction.commit().await?.is_some());
     let invoices = counters::Name::new("company-1/invoices")?;
     let pending = counters::Claim::fresh()?;
     let number = database.claim(invoices.clone(), pending).await?;

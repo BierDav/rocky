@@ -279,19 +279,16 @@ async fn exercise(count: usize, legacy: bool) -> Result<(), Failure> {
     }
     let table = format!("table_{:03}", count - 1);
     let writer = &members[0].0;
-    snap::ok(writer.session.execute("BEGIN", Vec::new())).await;
-    let id = snap::ok(writer.session.next_partition_id(
-        &(snap::text(&(table))),
-        vec![rocky_sdk::SqlValue::Text("A".to_owned())],
-    ))
-    .await["id"]
-        .clone();
-    snap::ok(writer.session.execute(
-        &(snap::text(&(format!("INSERT INTO {table}(id,book,title) VALUES(?,'A','written')")))),
-        vec![snap::row_id(&(id))],
-    ))
-    .await;
-    snap::ok(writer.session.execute("COMMIT", Vec::new())).await;
+    let mut tx = writer.database.transaction().await?;
+    let id = tx
+        .next_id(&table, vec![rocky_sdk::SqlValue::Text("A".to_owned())])
+        .await?;
+    tx.execute(
+        &format!("INSERT INTO {table}(id,book,title) VALUES(?,'A','written')"),
+        vec![id.sql()],
+    )
+    .await?;
+    tx.commit().await?;
     let writer_sync = writer.sync().await.map_err(|e| e.to_string())?;
     owner
         .add_peer(&writer.contact().await)
@@ -299,15 +296,15 @@ async fn exercise(count: usize, legacy: bool) -> Result<(), Failure> {
         .map_err(|e| e.to_string())?;
     let owner_sync = owner.sync().await.map_err(|e| e.to_string())?;
     let reader_sync = members[1].0.sync().await.map_err(|e| e.to_string())?;
-    let page = snap::ok(members[1].0.session.read(rocky_sdk::ReadQuery {
-        sql: snap::text(&(format!("SELECT title FROM {table}"))),
-        values: vec![],
-        max_rows: 2,
-        max_bytes: None,
-        cursor: None,
-    }))
-    .await;
-    if page["rows"][0][0]["value"] != "written" {
+    let rows = members[1]
+        .0
+        .database
+        .query(&format!("SELECT title FROM {table}"), Vec::new())
+        .await?
+        .collect()
+        .await?;
+    let title: Option<String> = rows.first().and_then(|row| row.get_at(0).ok());
+    if title.as_deref() != Some("written") {
         println!(
             "writer sync: {writer_sync}; owner sync: {owner_sync}; reader sync: {reader_sync}"
         );
@@ -334,17 +331,14 @@ async fn exercise(count: usize, legacy: bool) -> Result<(), Failure> {
             snap::ok(owner.session.activity(0)).await
         );
     }
-    assert_eq!(page["rows"][0][0]["value"], "written");
-    snap::ok(members[1].0.session.execute("BEGIN", Vec::new())).await;
+    assert_eq!(title.as_deref(), Some("written"));
+    let mut tx = members[1].0.database.transaction().await?;
     assert!(
-        snap::observe(members[1].0.session.execute(
-            &(snap::text(&(format!("UPDATE {table} SET title='forged'")))),
-            Vec::new()
-        ))
-        .await
-        .is_err()
+        tx.execute(&format!("UPDATE {table} SET title='forged'"), Vec::new())
+            .await
+            .is_err()
     );
-    snap::ok(members[1].0.session.execute("ROLLBACK", Vec::new())).await;
+    tx.rollback().await?;
     snap::ok(
         owner
             .session
@@ -409,29 +403,23 @@ async fn local_sql_sessions_cover_more_than_256_authorized_scopes() -> Result<()
             }),
     )
     .await;
-    snap::ok(device.session.execute("BEGIN", Vec::new())).await;
-    let id = snap::ok(
-        device
-            .session
-            .next_partition_id("table_159", vec![rocky_sdk::SqlValue::Text("A".to_owned())]),
-    )
-    .await["id"]
-        .clone();
-    snap::ok(device.session.execute(
+    let mut tx = device.database.transaction().await?;
+    let id = tx
+        .next_id("table_159", vec![rocky_sdk::SqlValue::Text("A".to_owned())])
+        .await?;
+    tx.execute(
         "INSERT INTO table_159(id,book,title) VALUES(?,'A','wide')",
-        vec![snap::row_id(&(id))],
-    ))
-    .await;
-    snap::ok(device.session.execute("COMMIT", Vec::new())).await;
-    let rows = snap::ok(device.session.read(rocky_sdk::ReadQuery {
-        sql: "SELECT title FROM table_159".to_owned(),
-        values: vec![],
-        max_rows: 2,
-        max_bytes: None,
-        cursor: None,
-    }))
-    .await;
-    assert_eq!(rows["rows"][0][0]["value"], "wide");
+        vec![id.sql()],
+    )
+    .await?;
+    tx.commit().await?;
+    let rows = device
+        .database
+        .query("SELECT title FROM table_159", Vec::new())
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(rows[0].get_at::<String>(0)?, "wide");
     device.database.close().await?;
     Ok(())
 }

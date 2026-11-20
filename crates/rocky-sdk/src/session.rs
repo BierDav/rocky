@@ -78,46 +78,6 @@ pub struct DroppedStage {
 }
 
 #[derive(Clone, Debug)]
-pub struct ReadQuery {
-    pub sql: String,
-    pub values: Vec<crate::SqlValue>,
-    pub max_rows: usize,
-    pub max_bytes: Option<usize>,
-    pub cursor: Option<String>,
-}
-impl ReadQuery {
-    pub fn new(sql: impl Into<String>, max_rows: usize) -> Self {
-        Self {
-            sql: sql.into(),
-            values: Vec::new(),
-            max_rows,
-            max_bytes: None,
-            cursor: None,
-        }
-    }
-}
-#[derive(Clone, Debug)]
-pub struct ReadPage {
-    pub scope: crate::Scope,
-    pub revision: u64,
-    pub columns: Vec<String>,
-    pub rows: Vec<Vec<crate::SqlValue>>,
-    pub next: Option<String>,
-}
-#[derive(Clone, Debug)]
-pub struct SessionRows {
-    pub columns: Vec<String>,
-    pub rows: Vec<Vec<crate::SqlValue>>,
-    pub changes: u64,
-    pub committed: Option<CommitSummary>,
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CommitSummary {
-    pub handle: rocky_core::Commitment,
-    pub frames: usize,
-}
-
-#[derive(Clone, Debug)]
 pub struct SessionInfo {
     pub principal: crate::credentials::PublicKey,
     pub node: crate::credentials::PublicKey,
@@ -214,51 +174,6 @@ impl Session {
     }
     pub async fn install_credentials(&self, supplied: crate::Supplied) -> Result<(), Failure> {
         self.send(|reply| Request::Install(Box::new(supplied), reply))
-            .await
-    }
-
-    pub async fn execute(
-        &self,
-        sql: &str,
-        values: Vec<crate::SqlValue>,
-    ) -> Result<SessionRows, Failure> {
-        self.send(|reply| Request::Execute(sql.into(), values, None, reply))
-            .await
-    }
-    pub async fn commit(&self, handle: rocky_core::Commitment) -> Result<SessionRows, Failure> {
-        self.send(|reply| Request::Execute("COMMIT".into(), Vec::new(), Some(handle), reply))
-            .await
-    }
-    pub async fn next_id(&self, table: &str) -> Result<rocky_core::RowIdentity, Failure> {
-        self.send(|reply| Request::NextId(table.into(), None, reply))
-            .await
-    }
-    pub async fn next_partition_id(
-        &self,
-        table: &str,
-        values: Vec<crate::SqlValue>,
-    ) -> Result<rocky_core::RowIdentity, Failure> {
-        self.send(|reply| Request::NextId(table.into(), Some(values), reply))
-            .await
-    }
-    pub async fn mutation_committed(
-        &self,
-        handle: rocky_core::Commitment,
-    ) -> Result<bool, Failure> {
-        self.send(|reply| Request::MutationCommitted(handle, reply))
-            .await
-    }
-    pub async fn read(&self, query: ReadQuery) -> Result<ReadPage, Failure> {
-        self.send(|reply| Request::Read(query, reply)).await
-    }
-    pub async fn subscribe(&self, query: ReadQuery) -> Result<u64, Failure> {
-        self.send(|reply| Request::Subscribe(query, reply)).await
-    }
-    pub async fn next(&self, subscription: u64) -> Result<ReadPage, Failure> {
-        self.send(|reply| Request::Next(subscription, reply)).await
-    }
-    pub async fn unsubscribe(&self, subscription: u64) -> Result<(), Failure> {
-        self.send(|reply| Request::Unsubscribe(subscription, reply))
             .await
     }
 

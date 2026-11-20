@@ -70,23 +70,17 @@ async fn create_partition(device: &Device) -> Value {
     .await
 }
 async fn write_group(device: &Device, prefix: &str) {
-    snap::ok(device.session.execute("BEGIN", Vec::new())).await;
+    let mut tx = device.database.transaction().await.expect("begin");
     for table in ["parts", "labels", "attachments"] {
-        let id = snap::ok(
-            device
-                .session
-                .next_partition_id(&(snap::text(&(table))), (values()).clone()),
+        let id = tx.next_id(table, values()).await.expect("id");
+        tx.execute(
+            &format!("INSERT INTO {table}(list,key,id) VALUES ('L', '{prefix}', ?)"),
+            vec![id.sql()],
         )
-        .await;
-        snap::ok(device.session.execute(
-            &(snap::text(
-                &(format!("INSERT INTO {table}(list,key,id) VALUES ('L', '{prefix}', ?)")),
-            )),
-            vec![snap::row_id(&(id["id"]))],
-        ))
-        .await;
+        .await
+        .expect("insert");
     }
-    snap::ok(device.session.execute("COMMIT", Vec::new())).await;
+    tx.commit().await.expect("commit");
 }
 async fn seal_each_issuer_apart(issuers: [&Device; 2]) {
     for issuer in issuers {
@@ -120,13 +114,11 @@ async fn sync_away_from_revoking_issuer(reader: &Device, revoking: &Device) -> R
 }
 
 async fn rows(device: &Device, table: &str) -> Vec<String> {
-    let page = snap::ok(device.session.read(rocky_sdk::ReadQuery {
-        sql: snap::text(&(format!("SELECT key FROM {table} WHERE list='L' ORDER BY key"))),
-        values: vec![],
-        max_rows: 16,
-        max_bytes: None,
-        cursor: None,
-    }))
+    let page = snap::ok(snap::read(
+        &device.database,
+        &format!("SELECT key FROM {table} WHERE list='L' ORDER BY key"),
+        Vec::new(),
+    ))
     .await;
     page["rows"]
         .as_array()
@@ -254,22 +246,15 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
 -> Result<(), Failure> {
     const LIST_SCHEMA: &str = r#"{"application":"exposure","version":1,"format":6,"tables":[{"name":"parts","class":"replayed","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
     async fn write(device: &Device, key: &str) {
-        snap::ok(device.session.execute("BEGIN", Vec::new())).await;
-        let id = snap::ok(
-            device
-                .session
-                .next_partition_id("parts", (values()).clone()),
-        )
-        .await;
-        snap::ok(device.session.execute(
+        let mut tx = device.database.transaction().await.expect("begin");
+        let id = tx.next_id("parts", values()).await.expect("id");
+        tx.execute(
             "INSERT INTO parts(list,key,id) VALUES ('L', ?, ?)",
-            vec![
-                rocky_sdk::SqlValue::Text(snap::text(&(key))),
-                snap::row_id(&(id["id"])),
-            ],
-        ))
-        .await;
-        snap::ok(device.session.execute("COMMIT", Vec::new())).await;
+            vec![rocky_sdk::SqlValue::Text(key.to_owned()), id.sql()],
+        )
+        .await
+        .expect("insert");
+        tx.commit().await.expect("commit");
     }
     let root = crate::support::small_directory()?;
     let root = root.path();

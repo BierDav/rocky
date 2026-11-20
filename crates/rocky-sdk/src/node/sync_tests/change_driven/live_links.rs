@@ -2199,14 +2199,14 @@ async fn publication_with_32_held_scopes_notifies_a_complete_contact_transaction
             let mut changes = b.replica.observe_tables(Some(&["contacts", "receipts", "versions"])).await?;
             let bytes_before = *hub.written().borrow();
             let messages_before = [hub.link_messages("a"), hub.link_messages("b")];
-            let client = a.client(1)?;
-            snap::value(a.execute_sql(&client, "BEGIN", Vec::new(), None)).await.map_err(|error| format!("source begin: {error}"))?;
+            let sql = a.sql_session(SqlOptions::default()).await?;
+            sql.run("BEGIN", Vec::new()).await.map_err(|error| format!("source begin: {error}"))?;
             for table in ["contacts", "receipts", "versions"] {
-                let id = snap::value(a.next_id(&client, &(snap::text(&(table))), None)).await.map_err(|error| format!("source allocation in {table}: {error}"))?["id"].clone();
-                snap::value(a.execute_sql(&client, &(snap::text(&(format!("INSERT INTO {table}(key,title,id) VALUES(?,'associated',?)")))), vec![rocky_sdk::SqlValue::Text(snap::text(&(version.to_string()))), snap::row_id(&(id))], None)).await?;
+                let id = sql.next_id(table).await.map_err(|error| format!("source allocation in {table}: {error}"))?;
+                sql.run(&format!("INSERT INTO {table}(key,title,id) VALUES(?,'associated',?)"), vec![rocky_sdk::SqlValue::Text(version.to_string()), id.sql()]).await?;
             }
             let commit = async {
-                snap::value(a.execute_sql(&client, "COMMIT", Vec::new(), Some([version; 32]))).await?;
+                sql.commit(commitment("rocky.sdk.mutation.v1", &[version; 32])).await?;
                 Ok::<_, Failure>(std::time::Instant::now())
             };
             let observe = async {
@@ -2214,17 +2214,17 @@ async fn publication_with_32_held_scopes_notifies_a_complete_contact_transaction
                 assert_eq!(change.tables, ["contacts", "receipts", "versions"].into_iter().map(str::to_owned).collect());
                 assert!(change.causes.contains(&rocky_storage::observe::Cause::Sync), "{change:?}");
                 let notified = std::time::Instant::now();
-                let snapshot = snap::value(b.read(&*b.client(1)?, rocky_sdk::ReadQuery { sql: "SELECT (SELECT count(*) FROM contacts),(SELECT count(*) FROM receipts),(SELECT count(*) FROM versions)".to_owned(), values: Vec::new(), max_rows: 1, max_bytes: None, cursor: None })).await.map_err(|error| format!("notification snapshot: {error}"))?;
+                let snapshot = read_rows(&b, "SELECT (SELECT count(*) FROM contacts),(SELECT count(*) FROM receipts),(SELECT count(*) FROM versions)").await.map_err(|error| format!("notification snapshot: {error}"))?;
                 Ok::<_, Failure>((notified, snapshot, std::time::Instant::now()))
             };
             let (committed, observed) = tokio::join!(commit, observe);
             let committed = committed?;
             let (notified, snapshot, read) = observed?;
-            assert_eq!(snapshot["rows"][0], json!([
-                {"type":"integer","value":version.to_string()},
-                {"type":"integer","value":version.to_string()},
-                {"type":"integer","value":version.to_string()}
-            ]));
+            assert_eq!(snapshot[0], vec![
+                SqlValue::Integer(i64::from(version)),
+                SqlValue::Integer(i64::from(version)),
+                SqlValue::Integer(i64::from(version)),
+            ]);
             until(|| !service_a.live.publishing_or_receiving() && !service_b.live.publishing_or_receiving()).await;
             settled(&a).await;
             settled(&b).await;
@@ -2391,38 +2391,30 @@ async fn a_peer_holding_more_than_one_frontier_batch_publishes_only_the_changed_
 }
 
 async fn count(node: &Node) -> Result<Value, Failure> {
-    let page = snap::value(node.read(
-        &*node.client(1)?,
-        rocky_sdk::ReadQuery {
-            sql: "SELECT count(*) FROM items".to_owned(),
-            values: Vec::new(),
-            max_rows: 1,
-            max_bytes: None,
-            cursor: None,
-        },
-    ))
-    .await?;
-    Ok(page["rows"][0][0]["value"].clone())
+    let rows = read_rows(node, "SELECT count(*) FROM items").await?;
+    let SqlValue::Integer(count) = rows[0][0] else {
+        return Err("expected integer count".into());
+    };
+    Ok(json!(count.to_string()))
 }
 
 async fn add_over_budget_burst(node: &Node) -> Result<(), Failure> {
     let title = "x".repeat(16 * 1024);
-    let client = node.client(1)?;
+    let sql = node.sql_session(SqlOptions::default()).await?;
     for key in 0..24u8 {
-        snap::value(node.execute_sql(&client, "BEGIN", Vec::new(), None)).await?;
-        let id = snap::value(node.next_id(&client, "items", None)).await?["id"].clone();
-        snap::value(node.execute_sql(
-            &client,
+        sql.run("BEGIN", Vec::new()).await?;
+        let id = sql.next_id("items").await?;
+        sql.run(
             "INSERT INTO items(key,title,id) VALUES(?,?,?)",
             vec![
-                rocky_sdk::SqlValue::Text(snap::text(&(format!("burst_{key}")))),
-                rocky_sdk::SqlValue::Text(snap::text(&(title))),
-                snap::row_id(&(id)),
+                rocky_sdk::SqlValue::Text(format!("burst_{key}")),
+                rocky_sdk::SqlValue::Text(title.clone()),
+                id.sql(),
             ],
-            None,
-        ))
+        )
         .await?;
-        snap::value(node.execute_sql(&client, "COMMIT", Vec::new(), Some([100 + key; 32]))).await?;
+        sql.commit(commitment("rocky.sdk.mutation.v1", &[100 + key; 32]))
+            .await?;
     }
     Ok(())
 }

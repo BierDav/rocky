@@ -316,23 +316,20 @@ async fn partition_custody_receipts_and_a_keyless_backup_restore_only_retained_d
     };
     for key in ["registry", "chat"] {
         owner.session.create_partition(target(key)).await?;
-        owner.session.execute("BEGIN", vec![]).await?;
-        let id = owner
-            .session
-            .next_partition_id("items", vec![SqlValue::Text(key.into())])
+        let mut tx = owner.database.transaction().await?;
+        let id = tx
+            .next_id("items", vec![SqlValue::Text(key.into())])
             .await?;
-        owner
-            .session
-            .execute(
-                "INSERT INTO items(key,id,title,completed) VALUES(?,?,?,0)",
-                vec![
-                    SqlValue::Text(key.into()),
-                    id.sql(),
-                    SqlValue::Text(format!("{key} confidential")),
-                ],
-            )
-            .await?;
-        owner.session.execute("COMMIT", vec![]).await?;
+        tx.execute(
+            "INSERT INTO items(key,id,title,completed) VALUES(?,?,?,0)",
+            vec![
+                SqlValue::Text(key.into()),
+                id.sql(),
+                SqlValue::Text(format!("{key} confidential")),
+            ],
+        )
+        .await?;
+        tx.commit().await?;
     }
     let invitation = owner
         .session
@@ -436,8 +433,8 @@ async fn partition_custody_receipts_and_a_keyless_backup_restore_only_retained_d
     );
     assert!(
         keeper
-            .session
-            .read(rocky_sdk::ReadQuery::new("SELECT title FROM items", 8))
+            .database
+            .query("SELECT title FROM items", Vec::new())
             .await
             .is_err()
     );
@@ -1635,7 +1632,7 @@ async fn a_passkey_revoke_is_precise_idempotent_durable_and_delivered_to_the_end
         Some(rocky_sdk::RevocationReason::Node)
     ));
     assert!(phone.sync().await.is_err());
-    assert!(phone.session.execute("BEGIN", Vec::new()).await.is_err());
+    assert!(phone.database.transaction().await.is_err());
     assert!(phone.session.seal(false).await.is_err());
     let repeated = owner.session.revoke_personal_device(target, prf()).await?;
     assert_eq!(repeated, receipt);
@@ -1859,7 +1856,7 @@ async fn a_self_unlink_retains_its_cause_and_receipt_after_restart() -> Result<(
             .map(|v| v.reason),
         Some(rocky_sdk::RevocationReason::Node)
     ));
-    assert!(owner.session.execute("BEGIN", Vec::new()).await.is_err());
+    assert!(owner.database.transaction().await.is_err());
     assert_eq!(
         owner.session.revoke_personal_device(target, prf()).await?,
         receipt
@@ -1880,7 +1877,7 @@ async fn a_self_unlink_retains_its_cause_and_receipt_after_restart() -> Result<(
             .map(|v| v.reason),
         Some(rocky_sdk::RevocationReason::Node)
     ));
-    assert!(owner.session.execute("BEGIN", Vec::new()).await.is_err());
+    assert!(owner.database.transaction().await.is_err());
     owner.close().await;
     Ok(())
 }

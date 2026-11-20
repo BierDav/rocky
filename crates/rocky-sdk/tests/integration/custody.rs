@@ -48,13 +48,11 @@ async fn devices_never_online_together_converge_via_keyless_custody() -> Result<
     a.add(1, "Milk").await;
     a.sync().await.expect("upload");
     assert!(
-        snap::observe(relay.session.read(rocky_sdk::ReadQuery {
-            sql: "SELECT * FROM items".to_owned(),
-            values: Vec::new(),
-            max_rows: 64,
-            max_bytes: None,
-            cursor: None
-        }))
+        snap::observe(snap::read(
+            &relay.database,
+            "SELECT * FROM items",
+            Vec::new(),
+        ))
         .await
         .is_err()
     );

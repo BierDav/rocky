@@ -107,6 +107,7 @@ async fn a_close_seal_makes_the_bookmark_read_only() -> Result<(), Failure> {
     let closed = snap::ok(a.session.seal(true)).await;
     assert_eq!(closed["tip"], tip);
     let write = snap::observe(snap::mutate(
+        &a.database,
         &a.session,
         vec![2; 32],
         snap::Action::Create {
@@ -1429,13 +1430,11 @@ mod races {
                     ready = false;
                     break;
                 }
-                let page = snap::observe(device.session.read(rocky_sdk::ReadQuery {
-                    sql: "SELECT title FROM items ORDER BY title".to_owned(),
-                    values: Vec::new(),
-                    max_rows: 64,
-                    max_bytes: None,
-                    cursor: None,
-                }))
+                let page = snap::observe(snap::read(
+                    &device.database,
+                    "SELECT title FROM items ORDER BY title",
+                    Vec::new(),
+                ))
                 .await;
                 let rows = page.as_ref().ok().and_then(|page| page["rows"].as_array());
                 let found: Option<Vec<&str>> = rows.map(|rows| {

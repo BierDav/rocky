@@ -27,23 +27,22 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>) -> Open<'a> {
     }
 }
 async fn write_note(device: &Device, key: &str) {
-    snap::ok(device.session.execute("BEGIN", Vec::new())).await;
-    let id = snap::ok(device.session.next_id("notes")).await;
-    snap::ok(device.session.execute(
+    let mut tx = device.database.transaction().await.expect("begin");
+    let id = tx.next_id("notes", Vec::new()).await.expect("id");
+    tx.execute(
         &format!("INSERT INTO notes(key,id) VALUES('{key}',?)"),
-        vec![snap::row_id(&id["id"])],
-    ))
-    .await;
-    snap::ok(device.session.execute("COMMIT", Vec::new())).await;
+        vec![id.sql()],
+    )
+    .await
+    .expect("insert");
+    tx.commit().await.expect("commit");
 }
 async fn notes(device: &Device) -> Vec<String> {
-    let read = snap::ok(device.session.read(rocky_sdk::ReadQuery {
-        sql: "SELECT key FROM notes ORDER BY key".into(),
-        values: vec![],
-        max_rows: 256,
-        max_bytes: None,
-        cursor: None,
-    }))
+    let read = snap::ok(snap::read(
+        &device.database,
+        "SELECT key FROM notes ORDER BY key",
+        Vec::new(),
+    ))
     .await;
     read["rows"]
         .as_array()
@@ -329,27 +328,17 @@ async fn devices_invited_after_a_reset_sync_and_write_and_a_signed_out_device_ad
             "kept devices refuse a device a signed-out one enrolled: {refused}"
         );
     }
-    let _ = snap::observe(async {
-        enrolled_by_signed_out_laptop
-            .session
-            .execute("BEGIN", Vec::new())
-            .await?;
-        let id = enrolled_by_signed_out_laptop
-            .session
-            .next_id("notes")
-            .await?;
-        enrolled_by_signed_out_laptop
-            .session
-            .execute(
-                "INSERT INTO notes(key,id) VALUES('stray',?)",
-                vec![id.sql()],
-            )
-            .await?;
-        enrolled_by_signed_out_laptop
-            .session
-            .execute("COMMIT", Vec::new())
-            .await
-    })
+    let _ = async {
+        let mut tx = enrolled_by_signed_out_laptop.database.transaction().await?;
+        let id = tx.next_id("notes", Vec::new()).await?;
+        tx.execute(
+            "INSERT INTO notes(key,id) VALUES('stray',?)",
+            vec![id.sql()],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok::<_, Failure>(())
+    }
     .await;
     common::introduce(&laptop, &enrolled_by_signed_out_laptop).await;
     let _ = enrolled_by_signed_out_laptop.sync().await;

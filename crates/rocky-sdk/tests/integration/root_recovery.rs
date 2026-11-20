@@ -30,72 +30,45 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>) -> Open<'a> {
 fn values(list: &str) -> Vec<rocky_sdk::SqlValue> {
     vec![rocky_sdk::SqlValue::Text(snap::text(&(list)))]
 }
-async fn sql(device: &Device, statement: String, id: Value) {
-    snap::ok(
-        device
-            .session
-            .execute(&(snap::text(&(statement))), vec![snap::row_id(&(id))]),
-    )
-    .await;
-}
 async fn write_item(device: &Device, list: &str, key: &str) {
-    let listed = snap::ok(device.session.read(rocky_sdk::ReadQuery {
-        sql: snap::text(&(format!("SELECT name FROM lists WHERE name='{list}'"))),
-        values: vec![],
-        max_rows: 1,
-        max_bytes: None,
-        cursor: None,
-    }))
+    let listed = snap::ok(snap::read(
+        &device.database,
+        &format!("SELECT name FROM lists WHERE name='{list}'"),
+        Vec::new(),
+    ))
     .await;
-    snap::ok(device.session.execute("BEGIN", Vec::new())).await;
+    let mut tx = device.database.transaction().await.expect("begin");
     if listed["rows"].as_array().is_none_or(Vec::is_empty) {
-        let id = snap::ok(
-            device
-                .session
-                .next_partition_id("lists", (values(list)).clone()),
+        let id = tx.next_id("lists", values(list)).await.expect("id");
+        tx.execute(
+            &format!("INSERT INTO lists(name,title,id) VALUES('{list}','{list}',?)"),
+            vec![id.sql()],
         )
-        .await;
-        sql(
-            device,
-            format!("INSERT INTO lists(name,title,id) VALUES('{list}','{list}',?)"),
-            id["id"].clone(),
-        )
-        .await;
+        .await
+        .expect("insert");
     }
-    let id = snap::ok(
-        device
-            .session
-            .next_partition_id("items", (values(list)).clone()),
+    let id = tx.next_id("items", values(list)).await.expect("id");
+    tx.execute(
+        &format!("INSERT INTO items(list,key,id) VALUES('{list}','{key}',?)"),
+        vec![id.sql()],
     )
-    .await;
-    sql(
-        device,
-        format!("INSERT INTO items(list,key,id) VALUES('{list}','{key}',?)"),
-        id["id"].clone(),
-    )
-    .await;
-    snap::ok(device.session.execute("COMMIT", Vec::new())).await;
+    .await
+    .expect("insert");
+    tx.commit().await.expect("commit");
 }
 async fn write_note(device: &Device, key: &str) {
-    snap::ok(device.session.execute("BEGIN", Vec::new())).await;
-    let id = snap::ok(device.session.next_id("notes")).await;
-    sql(
-        device,
-        format!("INSERT INTO notes(key,id) VALUES('{key}',?)"),
-        id["id"].clone(),
+    let mut tx = device.database.transaction().await.expect("begin");
+    let id = tx.next_id("notes", Vec::new()).await.expect("id");
+    tx.execute(
+        &format!("INSERT INTO notes(key,id) VALUES('{key}',?)"),
+        vec![id.sql()],
     )
-    .await;
-    snap::ok(device.session.execute("COMMIT", Vec::new())).await;
+    .await
+    .expect("insert");
+    tx.commit().await.expect("commit");
 }
 async fn column(device: &Device, query: &str) -> Vec<String> {
-    let read = snap::ok(device.session.read(rocky_sdk::ReadQuery {
-        sql: snap::text(&(query)),
-        values: vec![],
-        max_rows: 256,
-        max_bytes: None,
-        cursor: None,
-    }))
-    .await;
+    let read = snap::ok(snap::read(&device.database, query, Vec::new())).await;
     read["rows"]
         .as_array()
         .into_iter()

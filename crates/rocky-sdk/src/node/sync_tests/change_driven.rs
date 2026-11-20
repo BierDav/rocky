@@ -59,26 +59,13 @@ async fn settled(node: &Node) {
     until(|| !*node.worker_running.borrow()).await;
 }
 async fn rows(node: &Node) -> Result<Vec<String>, Failure> {
-    let page = snap::value(node.read(
-        &*node.client(1)?,
-        rocky_sdk::ReadQuery {
-            sql: "SELECT key,title FROM items ORDER BY key".to_owned(),
-            values: Vec::new(),
-            max_rows: 64,
-            max_bytes: None,
-            cursor: None,
-        },
-    ))
-    .await?;
-    page["rows"]
-        .as_array()
-        .ok_or("rows")?
-        .iter()
+    let rows = read_rows(node, "SELECT key,title FROM items ORDER BY key").await?;
+    rows.into_iter()
         .map(|row| {
-            if row[1]["value"] != "Milk" {
+            if row[1] != SqlValue::Text("Milk".into()) {
                 return Err("partial row".into());
             }
-            Ok(row[0]["value"].as_str().ok_or("key")?.to_string())
+            row[0].to_text().ok_or_else(|| "key".into())
         })
         .collect()
 }

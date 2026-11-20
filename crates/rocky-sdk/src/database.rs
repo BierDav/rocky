@@ -1,7 +1,3 @@
-#[cfg(test)]
-#[cfg(test)]
-#[cfg(test)]
-use crate::test_snapshot as snap;
 use crate::{
     Failure,
     bootstrap_intent::{BOOTSTRAP_INTENT_FILE, BootstrapIntentFile},
@@ -3150,58 +3146,42 @@ mod tests {
             coordination: None,
         };
         let database = Database::create(options(), None)?.database;
-        let session = database.session();
-        snap::value(session.execute("BEGIN", Vec::new())).await?;
-        let first = snap::value(session.next_id("items")).await?["id"]
-            .as_str()
-            .ok_or("missing id")?
-            .to_owned();
-        snap::value(session.execute(
+        let mut tx = database.transaction().await?;
+        let first_id = tx.next_id("items", Vec::new()).await?;
+        tx.execute(
             "INSERT INTO items(id,title) VALUES(?,'first')",
-            vec![snap::row_id(&(first))],
-        ))
+            vec![first_id.sql()],
+        )
         .await?;
-        snap::value(session.execute("COMMIT", Vec::new())).await?;
-        session.close().await;
+        tx.commit().await?;
         database.close().await?;
 
         let database = Database::open(options())?.database;
-        let session = database.session();
-        let rows = snap::value(session.read(rocky_sdk::ReadQuery {
-            sql: "SELECT id FROM items".to_owned(),
-            values: Vec::new(),
-            max_rows: 8,
-            max_bytes: None,
-            cursor: None,
-        }))
-        .await?;
-        assert_eq!(snap::cell_id(&rows["rows"][0][0]).to_string(), first);
-        snap::value(session.execute("BEGIN", Vec::new())).await?;
-        let second = snap::value(session.next_id("items")).await?["id"]
-            .as_str()
-            .ok_or("missing id")?
-            .to_owned();
-        let (first_id, second_id): (rocky_sdk::RowIdentity, rocky_sdk::RowIdentity) =
-            (first.parse()?, second.parse()?);
+        let rows = database
+            .query("SELECT id FROM items", Vec::new())
+            .await?
+            .collect()
+            .await?;
+        let stored: rocky_sdk::RowIdentity = rows[0].get_at(0)?;
+        assert_eq!(stored, first_id);
+        let mut tx = database.transaction().await?;
+        let second_id = tx.next_id("items", Vec::new()).await?;
         assert_eq!(second_id.writer(), first_id.writer());
         assert_eq!(second_id.sequence(), first_id.sequence() + 1);
-        snap::value(session.execute(
+        tx.execute(
             "INSERT INTO items(id,title) VALUES(?,'second')",
-            vec![snap::row_id(&(second))],
-        ))
+            vec![second_id.sql()],
+        )
         .await?;
-        snap::value(session.execute("COMMIT", Vec::new())).await?;
-        let rows = snap::value(session.read(rocky_sdk::ReadQuery {
-            sql: "SELECT id FROM items ORDER BY id".to_owned(),
-            values: Vec::new(),
-            max_rows: 8,
-            max_bytes: None,
-            cursor: None,
-        }))
-        .await?;
-        assert_eq!(rows["rows"].as_array().ok_or("missing rows")?.len(), 2);
-        assert_eq!(snap::cell_id(&rows["rows"][1][0]).to_string(), second);
-        session.close().await;
+        tx.commit().await?;
+        let rows = database
+            .query("SELECT id FROM items ORDER BY id", Vec::new())
+            .await?
+            .collect()
+            .await?;
+        assert_eq!(rows.len(), 2);
+        let stored_second: rocky_sdk::RowIdentity = rows[1].get_at(0)?;
+        assert_eq!(stored_second, second_id);
         database.close().await?;
         Ok(())
     }

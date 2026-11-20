@@ -33,13 +33,11 @@ async fn generation(device: &Device) -> Value {
     snap::ok(device.session.generation()).await
 }
 async fn rows(device: &Device, sql: &str) -> Value {
-    snap::ok(device.session.read(rocky_sdk::ReadQuery {
-        sql: snap::text(&(sql)),
-        values: vec![],
-        max_rows: 1024,
-        max_bytes: None,
-        cursor: None,
-    }))
+    snap::ok(snap::read(
+        &device.database,
+        &snap::text(&(sql)),
+        Vec::new(),
+    ))
     .await["rows"]
         .clone()
 }
@@ -52,6 +50,7 @@ async fn tip(device: &Device) -> Value {
 }
 async fn tag(device: &Device, handle: u8, label: &str) {
     snap::ok(snap::mutate(
+        &device.database,
         &device.session,
         vec![handle; 32],
         snap::Action::Create {
@@ -236,6 +235,7 @@ async fn a_table_granted_like_another_reaches_existing_members() -> Result<(), F
         "the sync after adopting asks the issuer for the grant of the table that follows `items`"
     );
     snap::ok(snap::mutate(
+        &b.database,
         &b.session,
         vec![5; 32],
         snap::Action::Create {
@@ -339,6 +339,7 @@ async fn an_old_device_offline_across_a_migration_has_its_late_write_replayed_in
     b.sync().await.expect("sync");
     assert_eq!(generation(&b).await["application"], "current");
     snap::ok(snap::mutate(
+        &b.database,
         &b.session,
         vec![5; 32],
         snap::Action::Create {
@@ -455,6 +456,7 @@ async fn requiring_a_field_rebuilds_tables_with_unique_indexes() -> Result<(), F
         ])
     );
     let duplicate = snap::observe(snap::mutate(
+        &a.database,
         &a.session,
         vec![3; 32],
         snap::Action::Create {
@@ -477,6 +479,7 @@ async fn requiring_a_field_rebuilds_tables_with_unique_indexes() -> Result<(), F
         "the rebuilt index still refuses a local duplicate: {duplicate}"
     );
     snap::ok(snap::mutate(
+        &a.database,
         &a.session,
         vec![4; 32],
         snap::Action::Create {

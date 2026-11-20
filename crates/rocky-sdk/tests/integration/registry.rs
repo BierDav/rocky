@@ -408,30 +408,24 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
     }
     for device in [&c, &r, &w] {
         assert!(snap::observe(device.session.identities()).await.is_err());
-        let query = rocky_sdk::ReadQuery {
-            sql: "SELECT * FROM issuer_registry".to_owned(),
-            values: vec![],
-            max_rows: 8,
-            max_bytes: None,
-            cursor: None,
-        };
         assert!(
-            snap::observe(device.session.read((query).clone()))
-                .await
-                .is_err()
+            snap::observe(snap::read(
+                &device.database,
+                "SELECT * FROM issuer_registry",
+                Vec::new(),
+            ))
+            .await
+            .is_err()
         );
     }
-    let query = rocky_sdk::ReadQuery {
-        sql: "SELECT * FROM issuer_registry".to_owned(),
-        values: vec![],
-        max_rows: 8,
-        max_bytes: None,
-        cursor: None,
-    };
     assert!(
-        snap::observe(a.session.read((query).clone()))
-            .await
-            .is_err(),
+        snap::observe(snap::read(
+            &a.database,
+            "SELECT * FROM issuer_registry",
+            Vec::new(),
+        ))
+        .await
+        .is_err(),
         "an issuer's application session does not open the registry"
     );
     assert!(registry_rows(&root.join("b"), "identity")? >= 6);

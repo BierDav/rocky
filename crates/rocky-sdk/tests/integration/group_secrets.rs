@@ -704,26 +704,20 @@ async fn a_table_joining_the_group_later_derives_its_key_from_the_held_secret() 
     assert_eq!(secrets, json!([1]));
     assert!(uniform(&tables, json!([1])), "{tables:?}");
     assert_eq!(issuer.store.group_secrets(), 1, "no new secret or envelope");
-    snap::ok(issuer.session.execute("BEGIN", Vec::new())).await;
-    let id = snap::ok(
-        issuer
-            .session
-            .next_partition_id("attachments", (values("A")).clone()),
-    )
-    .await;
-    snap::ok(issuer.session.execute(
+    let mut tx = issuer.database.transaction().await.unwrap();
+    let id = tx.next_id("attachments", values("A")).await.unwrap();
+    tx.execute(
         "INSERT INTO attachments(list,key,id) VALUES('A','photo',?)",
-        vec![snap::row_id(&(id["id"]))],
+        vec![id.sql()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let rows = snap::ok(snap::read(
+        &issuer.database,
+        "SELECT key FROM attachments WHERE list='A'",
+        Vec::new(),
     ))
-    .await;
-    snap::ok(issuer.session.execute("COMMIT", Vec::new())).await;
-    let rows = snap::ok(issuer.session.read(rocky_sdk::ReadQuery {
-        sql: "SELECT key FROM attachments WHERE list='A'".to_owned(),
-        values: vec![],
-        max_rows: 4,
-        max_bytes: None,
-        cursor: None,
-    }))
     .await;
     assert_eq!(
         rows["rows"][0][0]["value"], "photo",
@@ -833,49 +827,38 @@ async fn a_phone_holds_a_list_and_its_items_while_leaving_out_attachments() {
 }
 
 async fn write(peer: &Peer, table: &str, key: &str) {
-    snap::ok(peer.session.execute("BEGIN", Vec::new())).await;
+    let mut tx = peer.database.transaction().await.unwrap();
     let updates_the_one_row_per_list = table == "lists" && key != "before";
     if updates_the_one_row_per_list {
-        snap::ok(peer.session.execute(
-            &(snap::text(&(format!("UPDATE lists SET title='{key}' WHERE name='A'")))),
+        tx.execute(
+            &format!("UPDATE lists SET title='{key}' WHERE name='A'"),
             Vec::new(),
-        ))
-        .await;
-        snap::ok(peer.session.execute("COMMIT", Vec::new())).await;
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
         return;
     }
-    let id = snap::ok(
-        peer.session
-            .next_partition_id(&(snap::text(&(table))), (values("A")).clone()),
-    )
-    .await;
+    let id = tx.next_id(table, values("A")).await.unwrap();
     let sql = match table {
         "lists" => format!("INSERT INTO lists(name,title,id) VALUES('A','{key}',?)"),
         _ => format!("INSERT INTO {table}(list,key,id) VALUES('A','{key}',?)"),
     };
-    snap::ok(
-        peer.session
-            .execute(&(snap::text(&(sql))), vec![snap::row_id(&(id["id"]))]),
-    )
-    .await;
-    snap::ok(peer.session.execute("COMMIT", Vec::new())).await;
+    tx.execute(&sql, vec![id.sql()]).await.unwrap();
+    tx.commit().await.unwrap();
 }
 async fn rows(peer: &Peer) -> Vec<Vec<String>> {
     let mut all = Vec::new();
     for (table, column) in [("lists", "title"), ("items", "key"), ("attachments", "key")] {
         let column = if table == "lists" { column } else { "key" };
-        let read = snap::ok(peer.session.read(rocky_sdk::ReadQuery {
-            sql: snap::text(
-                &(format!(
-                    "SELECT {column} FROM {table} WHERE {} = 'A' ORDER BY {column}",
-                    if table == "lists" { "name" } else { "list" }
-                )),
+        let read = snap::ok(snap::read(
+            &peer.database,
+            &format!(
+                "SELECT {column} FROM {table} WHERE {} = 'A' ORDER BY {column}",
+                if table == "lists" { "name" } else { "list" }
             ),
-            values: vec![],
-            max_rows: 64,
-            max_bytes: None,
-            cursor: None,
-        }))
+            Vec::new(),
+        ))
         .await;
         all.push(
             read["rows"]
@@ -1045,19 +1028,15 @@ async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants(
     issuer.share("A", &[&device]).await.unwrap();
     snap::ok(writer.session.sync_once()).await;
     snap::ok(writer.session.sync_once()).await;
-    snap::ok(writer.session.execute("BEGIN", Vec::new())).await;
-    let id = snap::ok(
-        writer
-            .session
-            .next_partition_id("items", (values("A")).clone()),
-    )
-    .await;
-    snap::ok(writer.session.execute(
+    let mut tx = writer.database.transaction().await.unwrap();
+    let id = tx.next_id("items", values("A")).await.unwrap();
+    tx.execute(
         "INSERT INTO items(list,key,id) VALUES('A','writer',?)",
-        vec![snap::row_id(&(id["id"]))],
-    ))
-    .await;
-    snap::ok(writer.session.execute("COMMIT", Vec::new())).await;
+        vec![id.sql()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
     snap::ok(writer.session.sync_once()).await;
     assert_eq!(
         rows(&issuer).await,

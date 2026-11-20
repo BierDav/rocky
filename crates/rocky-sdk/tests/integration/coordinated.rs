@@ -43,38 +43,44 @@ async fn node_key(device: &Device) -> rocky_sdk::credentials::PublicKey {
         .expect("node key");
     rocky_sdk::credentials::PublicKey::from_bytes(&bytes).expect("node key")
 }
-async fn invoice(device: &Device, handle: u8) {
-    snap::ok(device.session.execute("BEGIN", Vec::new())).await;
-    let count = snap::ok(
-        device
-            .session
-            .execute("SELECT COUNT(*) FROM items", Vec::new()),
-    )
-    .await["rows"][0][0]["value"]
-        .as_str()
+async fn invoice(device: &Device, _handle: u8) {
+    let mut tx = device.database.transaction().await.expect("begin");
+    let count: i64 = tx
+        .query("SELECT COUNT(*) FROM items", Vec::new())
+        .await
         .expect("count")
-        .parse::<u64>()
+        .next()
+        .await
+        .expect("next")
+        .expect("row")
+        .get_at(0)
         .expect("count");
-    let id = snap::ok(device.session.next_id("items")).await["id"].clone();
-    snap::ok(device.session.execute(
+    let id = tx.next_id("items", Vec::new()).await.expect("id");
+    tx.execute(
         "INSERT INTO items(key,completed,title,id) VALUES(?,0,?,?)",
         vec![
-            rocky_sdk::SqlValue::Text(snap::text(&(format!("{:04}", count + 1)))),
-            rocky_sdk::SqlValue::Text(snap::text(&(format!("invoice {}", count + 1)))),
-            snap::row_id(&(id)),
+            rocky_sdk::SqlValue::Text(format!("{:04}", count + 1)),
+            rocky_sdk::SqlValue::Text(format!("invoice {}", count + 1)),
+            id.sql(),
         ],
-    ))
-    .await;
-    snap::ok(device.session.commit([handle; 32])).await;
+    )
+    .await
+    .expect("insert");
+    tx.commit().await.expect("commit");
 }
 async fn keys(device: &Device) -> Result<Vec<String>, Failure> {
-    let query = rocky_sdk::ReadQuery::new("SELECT key FROM items ORDER BY key", 1024);
     let changes = device.database.observe_tables(None).await?;
     let outlasts_a_loaded_ci_host = std::time::Duration::from_secs(30);
     let mut awaiting = None;
     let waited = tokio::time::timeout(outlasts_a_loaded_ci_host, async {
         loop {
-            match snap::observe(device.session.read(query.clone())).await {
+            match snap::observe(snap::read(
+                &device.database,
+                "SELECT key FROM items ORDER BY key",
+                Vec::new(),
+            ))
+            .await
+            {
                 Err(error) if error["code"] == "missing_dependencies" => {
                     awaiting = Some(error.to_string());
                     changes.next().await?;
@@ -207,13 +213,11 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
     assert_eq!(status["held"], 0, "{status}");
     let text = |value: &str| json!({"type": "text", "value": value});
     for device in [&a, &c] {
-        let rows = snap::ok(device.session.read(rocky_sdk::ReadQuery {
-            sql: "SELECT title, position FROM items ORDER BY title".to_owned(),
-            values: vec![],
-            max_rows: 8,
-            max_bytes: None,
-            cursor: None,
-        }))
+        let rows = snap::ok(snap::read(
+            &device.database,
+            "SELECT title, position FROM items ORDER BY title",
+            Vec::new(),
+        ))
         .await["rows"]
             .clone();
         assert_eq!(

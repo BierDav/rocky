@@ -126,9 +126,8 @@ pub use schema::{Column, Migration, MigrationStep, Schema, SchemaBuilder, Table}
 pub use secrets::{FileSecretStore, SecretStore};
 pub use service::{Network, ServiceError};
 pub use session::{
-    Admit, CommitSummary, ContactInfo, Discovered, DroppedStage, Invitation, InvitationState,
-    JoinRequest, LinkRequest, ReadPage, ReadQuery, RevocationResult, SeenDevice, SessionInfo,
-    SessionRows,
+    Admit, ContactInfo, Discovered, DroppedStage, Invitation, InvitationState, JoinRequest,
+    LinkRequest, RevocationResult, SeenDevice, SessionInfo,
 };
 pub use sql::{DecodeError, FromSqlValue, IntoSqlValue, Row, Rows, Timestamp, Transaction};
 pub use status::*;

@@ -44,15 +44,14 @@ async fn a_supplied_node_keeps_its_key_as_writer_across_reopen_and_renewal() -> 
         .to_owned();
     assert_eq!(before["node"].as_str(), Some(own.as_str()));
     writer.add(1, "first").await;
-    snap::ok(writer.session.execute("BEGIN", Vec::new())).await;
-    let note = snap::ok(writer.session.next_id("items")).await;
-    let id = note["id"].as_str().ok_or("id")?;
+    let mut tx = writer.database.transaction().await?;
+    let id = tx.next_id("items", Vec::new()).await?.to_string();
     assert_eq!(
         (id.len(), &id[..64]),
         (80, own.as_str()),
         "a row identity is the writer's key followed by its sequence"
     );
-    snap::ok(writer.session.execute("ROLLBACK", Vec::new())).await;
+    tx.rollback().await?;
     writer.close().await;
     let writer = Device::new(Database::open(open())?)?;
     assert_eq!(snap::ok(writer.session.info()).await["writer"], own);

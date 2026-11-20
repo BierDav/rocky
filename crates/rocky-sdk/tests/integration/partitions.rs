@@ -35,22 +35,22 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
         .await;
     }
     let mut ids = Vec::new();
-    for (name, amount) in [("A", "10"), ("B", "20")] {
-        snap::ok(session.execute("BEGIN", Vec::new())).await;
-        let id = snap::ok(session.next_partition_id("items", (values(name)).clone())).await["id"]
-            .clone();
-        ids.push(id.clone());
-        snap::ok(session.execute(
+    for (name, amount) in [("A", 10i64), ("B", 20i64)] {
+        let mut tx = db.transaction().await.unwrap();
+        let id = tx.next_id("items", values(name)).await.unwrap();
+        ids.push(id);
+        tx.execute(
             "INSERT INTO items(list,key,amount,id) VALUES(?,?,?,?)",
             vec![
-                rocky_sdk::SqlValue::Text(snap::text(&(name))),
+                rocky_sdk::SqlValue::Text(name.to_owned()),
                 rocky_sdk::SqlValue::Text("key".to_owned()),
-                rocky_sdk::SqlValue::Integer(snap::integer(&(amount))),
-                snap::row_id(&(id)),
+                rocky_sdk::SqlValue::Integer(amount),
+                id.sql(),
             ],
-        ))
-        .await;
-        snap::ok(session.execute("COMMIT", Vec::new())).await;
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
     }
     assert_ne!(ids[0], ids[1], "one creation log per author and table");
     let driver = db
@@ -88,13 +88,11 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
         .await
         .unwrap();
 
-    let data = snap::ok(session.read(rocky_sdk::ReadQuery {
-        sql: "SELECT SUM(amount) FROM partial_items".to_owned(),
-        values: vec![],
-        max_rows: 1,
-        max_bytes: None,
-        cursor: None,
-    }))
+    let data = snap::ok(snap::read(
+        &db,
+        "SELECT SUM(amount) FROM partial_items",
+        Vec::new(),
+    ))
     .await;
     assert_eq!(data["rows"][0][0]["value"], "30");
     let address = snap::ok(session.partition_address("items", (values("A")).clone())).await;
@@ -179,17 +177,14 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     db.close().await.unwrap();
     let db = Database::open(open(&path, &hub)).unwrap().database;
     let session = db.session();
-    snap::ok(session.execute("BEGIN", Vec::new())).await;
-    let id = snap::ok(session.next_partition_id("items", (values("A")).clone())).await;
-    let (id, first): (rocky_sdk::RowIdentity, rocky_sdk::RowIdentity) = (
-        id["id"].as_str().unwrap().parse().unwrap(),
-        ids[0].as_str().unwrap().parse().unwrap(),
-    );
+    let mut tx = db.transaction().await.unwrap();
+    let id = tx.next_id("items", values("A")).await.unwrap();
+    let first = ids[0];
     assert_eq!(
         (id.writer(), id.sequence()),
         (first.writer(), first.sequence() + 2)
     );
-    snap::ok(session.execute("ROLLBACK", Vec::new())).await;
+    tx.rollback().await.unwrap();
     snap::ok(session.create_partition(rocky_sdk::PartitionTarget::Table {
         table: "items".to_owned(),
         values: (values("C")).clone(),
@@ -198,14 +193,15 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     let revoked =
         snap::ok(session.revoke_identity(&(snap::text(&(device.identity.to_string()))))).await;
     assert_eq!(revoked["revocations"]["statements"], 1);
-    snap::ok(session.execute("BEGIN", Vec::new())).await;
-    let id = snap::ok(session.next_partition_id("items", (values("A")).clone())).await;
-    snap::ok(session.execute(
+    let mut tx = db.transaction().await.unwrap();
+    let id = tx.next_id("items", values("A")).await.unwrap();
+    tx.execute(
         "INSERT INTO items(list,key,amount,id) VALUES('A','next',7,?)",
-        vec![snap::row_id(&(id["id"]))],
-    ))
-    .await;
-    snap::ok(session.execute("COMMIT", Vec::new())).await;
+        vec![id.sql()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
     db.close().await.unwrap();
     Database::open(open(&path, &hub))
         .unwrap()
@@ -238,10 +234,9 @@ async fn own_id_partitions_continue_the_table_log() {
         }
         let session = db.session();
         let prepared = snap::ok(session.next_partition("lists")).await;
-        snap::ok(session.execute("BEGIN", Vec::new())).await;
-        let allocated = snap::ok(session.next_id("lists")).await;
-        assert_eq!(allocated["id"], prepared["id"]);
-        let id: rocky_sdk::RowIdentity = allocated["id"].as_str().unwrap().parse().unwrap();
+        let mut tx = db.transaction().await.unwrap();
+        let id = tx.next_id("lists", Vec::new()).await.unwrap();
+        assert_eq!(id.to_string(), prepared["id"].as_str().unwrap());
         if let Some(previous) = previous {
             assert_eq!(
                 id,
@@ -249,12 +244,13 @@ async fn own_id_partitions_continue_the_table_log() {
             );
         }
         previous = Some(id);
-        snap::ok(session.execute(
+        tx.execute(
             "INSERT INTO lists(id,title) VALUES(?,?)",
             vec![id.sql(), rocky_sdk::SqlValue::Text("list".to_owned())],
-        ))
-        .await;
-        snap::ok(session.execute("COMMIT", Vec::new())).await;
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
     }
     db.close().await.unwrap();
 }

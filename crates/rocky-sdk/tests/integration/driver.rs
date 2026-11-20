@@ -45,14 +45,12 @@ async fn create(open: Open<'_>, ttl: Option<u64>) -> Result<rocky_sdk::Opened, F
     let opened = Database::create(open, ttl)?;
     let database = &opened.database;
 
-    let session = database.session();
-    session.execute("BEGIN", Vec::new()).await?;
+    let mut tx = database.transaction().await?;
     for table in ["lists", "items"] {
-        let id = session.next_id(table).await?;
+        let id = tx.next_id(table, Vec::new()).await?;
         assert_eq!(id.sequence(), 1, "{table}");
     }
-    session.execute("ROLLBACK", Vec::new()).await?;
-    session.close().await;
+    tx.rollback().await?;
     Ok(opened)
 }
 fn expression(sql: &str) -> Expr {

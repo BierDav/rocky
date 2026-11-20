@@ -32,17 +32,20 @@ fn service(error: &Failure) -> Option<&ServiceError> {
 }
 
 struct Client {
+    database: Arc<Database>,
     session: Session,
 }
 impl Client {
     fn new(database: &Arc<Database>) -> Result<Self, Failure> {
         Ok(Self {
+            database: database.clone(),
             session: database.session(),
         })
     }
 
     async fn add(&self, handle: u8, title: &str) {
         snap::ok(snap::mutate(
+            &self.database,
             &self.session,
             vec![handle; 32],
             snap::Action::Create {
@@ -58,13 +61,11 @@ impl Client {
         .await;
     }
     async fn titles(&self) -> Vec<String> {
-        let page = snap::ok(self.session.read(rocky_sdk::ReadQuery {
-            sql: "SELECT title FROM items ORDER BY title".to_owned(),
-            values: vec![],
-            max_rows: 64,
-            max_bytes: None,
-            cursor: None,
-        }))
+        let page = snap::ok(snap::read(
+            &self.database,
+            "SELECT title FROM items ORDER BY title",
+            Vec::new(),
+        ))
         .await;
         page["rows"]
             .as_array()
@@ -279,35 +280,12 @@ async fn sessions_share_a_database_and_close_independently() -> Result<(), Failu
     let root = tempfile::tempdir()?;
     let Opened { database, .. } = Database::create(open(root.path(), None), None)?;
     let (first, second) = (Client::new(&database)?, Client::new(&database)?);
-    let query = rocky_sdk::ReadQuery {
-        sql: "SELECT title FROM items ORDER BY title".to_owned(),
-        values: vec![],
-        max_rows: 8,
-        max_bytes: None,
-        cursor: None,
-    };
-    let subscribe = async |client: &Client| {
-        let token = snap::ok(async {
-            let id = client.session.subscribe((query).clone()).await?;
-            Ok(json!({"subscription":id.to_string()}))
-        })
-        .await["subscription"]
-            .clone();
-        snap::ok(client.session.next(snap::integer(&(token)) as u64)).await;
-        token
-    };
-    let (first_token, second_token) = (subscribe(&first).await, subscribe(&second).await);
-    assert_eq!(
-        first_token, second_token,
-        "subscription tokens belong to their session"
-    );
+    let first_token = first.session.status().await?.token;
+    let second_token = second.session.status().await?.token;
     let first = Arc::new(first);
     let waiting = {
         let first = first.clone();
-        let token = first_token.clone();
-        tokio::spawn(async move {
-            snap::observe(first.session.next(snap::integer(&(token)) as u64)).await
-        })
+        tokio::spawn(async move { first.session.status_after(first_token).await })
     };
     tokio::task::yield_now().await;
     assert!(!waiting.is_finished());
@@ -316,18 +294,16 @@ async fn sessions_share_a_database_and_close_independently() -> Result<(), Failu
     first.session.close().await;
     let ended = waiting.await?.err().ok_or("the wait ends")?;
     assert_eq!(
-        ended["code"], "closed",
+        service(&ended),
+        Some(&ServiceError::Closed("session")),
         "closing a session ends its wait: {ended}"
     );
     let error = first.session.domain().await.err().ok_or("closed session")?;
     assert_eq!(service(&error), Some(&ServiceError::Closed("session")));
 
     second.add(1, "Milk").await;
-    let page = snap::ok(second.session.next(snap::integer(&(second_token)) as u64)).await;
-    assert_eq!(
-        page["rows"][0][0]["value"], "Milk",
-        "closing one session leaves the others' subscriptions"
-    );
+    let next = second.session.status_after(second_token).await?;
+    assert_ne!(next.token, "");
     let third = Client::new(&database)?;
     assert_eq!(third.titles().await, ["Milk"]);
 

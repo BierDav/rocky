@@ -52,13 +52,6 @@ pub(crate) enum Kind {
     Unlink,
     Backup,
     Revoke,
-    Sql,
-    NextId,
-    MutationProgress,
-    Read,
-    Subscribe,
-    Next,
-    Unsubscribe,
     Session,
     Grant,
     Install,
@@ -69,7 +62,7 @@ pub(crate) enum Kind {
 }
 impl Kind {
     pub(crate) fn waits(self) -> bool {
-        matches!(self, Self::Next | Self::StatusNext | Self::ActivityNext)
+        matches!(self, Self::StatusNext | Self::ActivityNext)
     }
     pub(crate) fn allowed_after_logout(self) -> bool {
         matches!(
@@ -261,22 +254,6 @@ pub(crate) enum Request {
         Reply<crate::ResetReceipt>,
     ),
     Freshness(Reply<crate::Freshness>),
-    Execute(
-        String,
-        Vec<crate::SqlValue>,
-        Option<rocky_core::Commitment>,
-        Reply<crate::SessionRows>,
-    ),
-    NextId(
-        String,
-        Option<Vec<crate::SqlValue>>,
-        Reply<rocky_core::RowIdentity>,
-    ),
-    MutationCommitted(rocky_core::Commitment, Reply<bool>),
-    Read(crate::ReadQuery, Reply<crate::ReadPage>),
-    Subscribe(crate::ReadQuery, Reply<u64>),
-    Next(u64, Reply<crate::ReadPage>),
-    Unsubscribe(u64, Reply<()>),
     Info(Reply<crate::SessionInfo>),
     Grant(
         crate::NodeKeys,
@@ -383,13 +360,6 @@ impl Request {
             Self::Backup(..) => Kind::Backup,
             Self::RevokeIdentity(..) | Self::SignOutEverywhereElse(..) => Kind::Revoke,
             Self::Freshness(..) => Kind::Status,
-            Self::Execute(..) => Kind::Sql,
-            Self::NextId(..) => Kind::NextId,
-            Self::MutationCommitted(..) => Kind::MutationProgress,
-            Self::Read(..) => Kind::Read,
-            Self::Subscribe(..) => Kind::Subscribe,
-            Self::Next(..) => Kind::Next,
-            Self::Unsubscribe(..) => Kind::Unsubscribe,
             Self::Info(..) => Kind::Session,
             Self::Grant(..) => Kind::Grant,
             Self::Install(..) => Kind::Install,
@@ -606,27 +576,6 @@ impl Request {
                 let _ = reply.send(Err(error));
             }
             Self::Freshness(reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::Execute(_, _, _, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::NextId(_, _, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::MutationCommitted(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::Read(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::Subscribe(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::Next(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::Unsubscribe(_, reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::Info(reply) => {

@@ -663,6 +663,7 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
     a.follow_main().await;
     a.add(1, "first scope").await;
     snap::ok(snap::mutate(
+        &a.database,
         &a.session,
         vec![2; 32],
         snap::Action::Create {
@@ -988,12 +989,14 @@ async fn a_cut_join_resumes_its_pages_and_keeps_edits_from_both_sides() -> Resul
         );
     }
     a.sync().await.expect("a pulls b's edit");
-    let edits = rocky_sdk::ReadQuery::new(
-        "SELECT title FROM items WHERE length(title) < 100 ORDER BY title",
-        16,
-    );
     for device in [&*b, &a] {
-        let rows = snap::ok(device.session.read(edits.clone())).await["rows"].clone();
+        let rows = snap::ok(snap::read(
+            &device.database,
+            "SELECT title FROM items WHERE length(title) < 100 ORDER BY title",
+            Vec::new(),
+        ))
+        .await["rows"]
+            .clone();
         let titles: Vec<_> = rows
             .as_array()
             .into_iter()

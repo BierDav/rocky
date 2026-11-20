@@ -43,6 +43,7 @@ async fn mutate(
     entity: Option<String>,
 ) -> Result<Value, Value> {
     snap::observe(snap::mutate(
+        &device.database,
         &device.session,
         vec![handle; 32],
         payload,
@@ -74,13 +75,11 @@ async fn set(
     mutate(device, handle, payload, Some(snap::text(id))).await
 }
 async fn rows(device: &Device, sql: &str) -> Vec<Vec<String>> {
-    let page = snap::observe(device.session.read(rocky_sdk::ReadQuery {
-        sql: snap::text(&(sql)),
-        values: vec![],
-        max_rows: 64,
-        max_bytes: None,
-        cursor: None,
-    }))
+    let page = snap::observe(snap::read(
+        &device.database,
+        &snap::text(&(sql)),
+        Vec::new(),
+    ))
     .await
     .unwrap_or_default();
     page["rows"]

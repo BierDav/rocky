@@ -1,4 +1,7 @@
-use rocky_sdk::{Engine, Network, credentials::testing::MemoryKeys, transport::memory::Hub};
+use rocky_sdk::{
+    Database, Network, NetworkService, Open, Opened, Session, credentials::testing::MemoryKeys,
+    transport::memory::Hub,
+};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 use support::snapshot as snap;
@@ -20,43 +23,91 @@ fn free_port() -> u16 {
     socket.local_addr().expect("addr").port()
 }
 
+enum OpenMode {
+    Create,
+    Join { invitation: String },
+    Resume,
+}
+
+struct OpenedDb {
+    database: Arc<Database>,
+    session: Session,
+    network: Option<NetworkService>,
+}
+impl OpenedDb {
+    fn open(
+        directory: &Path,
+        mode: OpenMode,
+        schema: &str,
+        network: Network,
+        secrets: Option<Arc<dyn rocky_sdk::SecretStore>>,
+    ) -> Result<Arc<Self>, Failure> {
+        let open = Open {
+            identity: None,
+            directory,
+            schema,
+            secrets,
+            network: Some(network),
+            coordination: None,
+        };
+        let Opened {
+            database, network, ..
+        } = match mode {
+            OpenMode::Create => Database::create(open, None)?,
+            OpenMode::Join { invitation } => Database::join(open, &invitation)?,
+            OpenMode::Resume => Database::open(open)?,
+        };
+        Ok(Arc::new(Self {
+            session: database.session(),
+            database,
+            network,
+        }))
+    }
+    fn scope(&self) -> rocky_sdk::Scope {
+        self.database.scope()
+    }
+    fn session(&self) -> &Session {
+        &self.session
+    }
+    async fn close(&self) -> Result<(), Failure> {
+        if let Some(network) = &self.network {
+            network.close().await;
+        }
+        self.database.close().await
+    }
+}
+
 struct Db {
-    engine: Arc<Engine>,
+    engine: Arc<OpenedDb>,
     scope: rocky_sdk::Scope,
 }
 impl Db {
     fn open(
         directory: &Path,
-        mode: rocky_sdk::EngineMode,
+        mode: OpenMode,
         transport: rocky_iroh::Options,
     ) -> Result<Self, Failure> {
         Self::with_secrets(directory, mode, transport, None)
     }
     fn with_secrets(
         directory: &Path,
-        mode: rocky_sdk::EngineMode,
+        mode: OpenMode,
         transport: rocky_iroh::Options,
         secrets: Option<Arc<dyn rocky_sdk::SecretStore>>,
     ) -> Result<Self, Failure> {
-        let options = rocky_sdk::EngineOptions {
-            directory: directory.to_path_buf(),
-            transport: Arc::new(transport),
+        let engine = OpenedDb::open(
+            directory,
             mode,
-        };
-        let engine = Engine::open(options, &rocky_sdk::Schema::parse(SCHEMA)?, secrets)?;
+            SCHEMA,
+            Network::Owned(Arc::new(transport)),
+            secrets,
+        )?;
         let scope = engine.scope();
 
         Ok(Self { engine, scope })
     }
     fn create(directory: &Path, transport: rocky_iroh::Options) -> Result<Self, Failure> {
-        Self::open(
-            directory,
-            rocky_sdk::EngineMode::Create {
-                credential_ttl: None,
-                root: None,
-            },
-            transport,
-        )
+        Self::open(directory, OpenMode::Create, transport)
     }
     fn join(
         directory: &Path,
@@ -65,14 +116,14 @@ impl Db {
     ) -> Result<Self, Failure> {
         Self::open(
             directory,
-            rocky_sdk::EngineMode::Join {
+            OpenMode::Join {
                 invitation: snap::text(&(invitation)),
             },
             transport,
         )
     }
     fn resume(directory: &Path, transport: rocky_iroh::Options) -> Result<Self, Failure> {
-        Self::open(directory, rocky_sdk::EngineMode::Resume, transport)
+        Self::open(directory, OpenMode::Resume, transport)
     }
     async fn invite(&self) -> String {
         snap::ok(self.engine.session().invite(
@@ -164,10 +215,7 @@ async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
     let b_keys = Arc::new(MemoryKeys::default());
     let creator = Db::with_secrets(
         &root.path().join("a"),
-        rocky_sdk::EngineMode::Create {
-            credential_ttl: None,
-            root: None,
-        },
+        OpenMode::Create,
         transport(),
         Some(a_keys.clone()),
     )?;
@@ -177,7 +225,7 @@ async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
     );
     let member = Db::with_secrets(
         &root.path().join("b"),
-        rocky_sdk::EngineMode::Join {
+        OpenMode::Join {
             invitation: snap::text(&(creator.invite().await)),
         },
         at(0),
@@ -263,13 +311,13 @@ async fn converge(at: fn(u16) -> rocky_iroh::Options) -> Result<(), Failure> {
     tokio::join!(member.close(), creator.close());
     let creator = Db::with_secrets(
         &root.path().join("a"),
-        rocky_sdk::EngineMode::Resume,
+        OpenMode::Resume,
         transport(),
         Some(a_keys),
     )?;
     let member = Db::with_secrets(
         &root.path().join("b"),
-        rocky_sdk::EngineMode::Resume,
+        OpenMode::Resume,
         at(0),
         Some(b_keys),
     )?;
@@ -475,16 +523,18 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
     let creator = Db::create(&root.path().join("a"), iroh())?;
     let alice = Db::join(&root.path().join("b"), &creator.invite().await, iroh())?;
     let invitation = creator.invite().await;
-    let wrong = rocky_sdk::EngineOptions {
-        directory: root.path().join("wrong"),
-        transport: Arc::new(iroh()),
-        mode: rocky_sdk::EngineMode::Join {
-            invitation: invitation.clone(),
-        },
-    };
-    let other = rocky_sdk::Schema::parse(&SCHEMA.replace("shopping", "other"))?;
+    let other = SCHEMA.replace("shopping", "other");
     assert!(
-        Engine::open(wrong, &other, None).is_err(),
+        OpenedDb::open(
+            &root.path().join("wrong"),
+            OpenMode::Join {
+                invitation: invitation.clone(),
+            },
+            &other,
+            Network::Owned(Arc::new(iroh())),
+            None,
+        )
+        .is_err(),
         "a wrong application schema is refused"
     );
     let bob = Db::join(&root.path().join("c"), &invitation, iroh())
@@ -589,32 +639,19 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
 async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let open =
-        |directory: &str, mode: rocky_sdk::EngineMode, name: &'static str| -> Result<Db, Failure> {
-            let options = rocky_sdk::EngineOptions {
-                directory: root.path().join(directory),
-                transport: Arc::new(rocky_iroh::Options::default()),
-                mode,
-            };
-            let network = Network::Owned(hub.connector(name));
-            let engine = Engine::open_with(
-                options,
-                &rocky_sdk::Schema::parse(SCHEMA)?,
-                None,
-                Some(network),
-            )?;
-            let scope = engine.scope();
+    let open = |directory: &str, mode: OpenMode, name: &'static str| -> Result<Db, Failure> {
+        let engine = OpenedDb::open(
+            &root.path().join(directory),
+            mode,
+            SCHEMA,
+            Network::Owned(hub.connector(name)),
+            None,
+        )?;
+        let scope = engine.scope();
 
-            Ok(Db { engine, scope })
-        };
-    let creator = open(
-        "a",
-        rocky_sdk::EngineMode::Create {
-            credential_ttl: None,
-            root: None,
-        },
-        "a",
-    )?;
+        Ok(Db { engine, scope })
+    };
+    let creator = open("a", OpenMode::Create, "a")?;
     assert_eq!(
         snap::ok(creator.engine.session().domain()).await["transport"],
         "memory"
@@ -626,7 +663,7 @@ async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Fa
     );
     let member = open(
         "b",
-        rocky_sdk::EngineMode::Join {
+        OpenMode::Join {
             invitation: snap::text(&(invitation)),
         },
         "b",
@@ -639,8 +676,8 @@ async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Fa
 
     member.close().await;
     creator.close().await;
-    let creator = open("a", rocky_sdk::EngineMode::Resume, "a")?;
-    let member = open("b", rocky_sdk::EngineMode::Resume, "b")?;
+    let creator = open("a", OpenMode::Resume, "a")?;
+    let member = open("b", OpenMode::Resume, "b")?;
     creator.add(3, "Jam").await;
     assert!(support::reconciled(&member.sync().await));
     assert_eq!(

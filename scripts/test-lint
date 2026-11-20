@@ -180,13 +180,11 @@ fn doc() {}
 
     def test_cargo_workspaces_outside_the_root_one_hold_no_comments_except_upstream(self):
         result = self.run_workspace({'crates/a': ''}, files={
-            'benchmarks/chaos/src/main.rs': '\n// chaos\n',
             'benchmarks/engine-scale/crates/harness/src/lib.rs': '/// harness\n',
             'benchmarks/engine-scale/turso-patched/src/main.rs': '//! patched\n',
             'benchmarks/engine-scale/turso-patched/vendor/turso_core/lib.rs': '// upstream\n'})
         self.assertEqual(result.returncode, 1)
-        for path in ('benchmarks/chaos/src/main.rs:2:',
-                     'benchmarks/engine-scale/crates/harness/src/lib.rs:1:',
+        for path in ('benchmarks/engine-scale/crates/harness/src/lib.rs:1:',
                      'benchmarks/engine-scale/turso-patched/src/main.rs:1:'):
             self.assertIn(path, result.stderr)
         self.assertNotIn('turso_core', result.stderr)

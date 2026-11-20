@@ -168,17 +168,7 @@ impl VoterService {
             },
             &self.key,
         )?;
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            self.raft.client_write(Proposal {
-                time: now()?,
-                request,
-            }),
-        )
-        .await
-        .map_err(|_| CoordinationError::Unavailable)?
-        .map_err(|_| CoordinationError::Unavailable)?
-        .data;
+        let result = self.propose(request).await?.data;
         if result.is_ok() {
             let mut acks = self.acknowledgments.lock().await;
             if acks.get(&log).is_some_and(|a| a.pending == pending) {

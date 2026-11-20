@@ -3,4 +3,4 @@ mod raft_store;
 mod service;
 mod transport;
 
-pub use service::{Backup, Fence, VoterService, backup, restore};
+pub use service::{Backup, Fence, ServeError, VoterService, backup, restore};

@@ -21,10 +21,26 @@ use openraft::{
     raft::*,
 };
 
+#[cfg(test)]
+mod mesh;
+#[cfg(test)]
+pub(crate) use mesh::Mesh;
+
+#[derive(Clone)]
+pub(crate) enum Route {
+    Tcp,
+    #[cfg(test)]
+    Mesh {
+        mesh: std::sync::Arc<Mesh>,
+        from: u64,
+    },
+}
+
 #[derive(Clone)]
 pub(crate) struct Network {
     pub genesis: CertifiedGenesis,
     pub key: PrivateKey,
+    pub route: Route,
 }
 pub(crate) struct Connection {
     network: Network,
@@ -57,19 +73,23 @@ impl Connection {
         &self,
         message: Message,
     ) -> Result<T, RPCError<u64, BasicNode, E>> {
-        exchange(
-            self.voter.as_ref().ok_or_else(|| {
-                RPCError::Network(NetworkError::new(&CoordinationError::Configuration))
-            })?,
-            self.network
-                .genesis
-                .id()
-                .map_err(|e| RPCError::Network(NetworkError::new(&e)))?,
-            &self.network.key,
-            message,
-        )
-        .await
-        .map_err(|e| RPCError::Network(NetworkError::new(&e)))
+        let voter = self.voter.as_ref().ok_or_else(|| {
+            RPCError::Network(NetworkError::new(&CoordinationError::Configuration))
+        })?;
+        let genesis = self
+            .network
+            .genesis
+            .id()
+            .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+        let reply = match &self.network.route {
+            Route::Tcp => exchange(voter, genesis, &self.network.key, message).await,
+            #[cfg(test)]
+            Route::Mesh { mesh, from } => {
+                mesh.exchange(*from, voter, genesis, &self.network.key, message)
+                    .await
+            }
+        };
+        reply.map_err(|e| RPCError::Network(NetworkError::new(&e)))
     }
 }
 impl RaftNetwork<Types> for Connection {

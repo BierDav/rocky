@@ -386,7 +386,7 @@ impl Metadata {
         limits: Limits,
     ) -> Result<Self, CoordinationError> {
         limits.validate()?;
-        let mut result = Self {
+        Ok(Self {
             desired_voters: genesis.genesis.initial_voters.clone(),
             membership_revision: 0,
             genesis,
@@ -394,11 +394,7 @@ impl Metadata {
             state: State::new(limits),
             retained: Vec::new(),
             tenants: Vec::new(),
-        };
-        if let Some(directory) = result.genesis.genesis.directory.clone() {
-            result.control(directory)?;
-        }
-        Ok(result)
+        })
     }
     pub fn time(&self) -> u64 {
         self.state.time

@@ -51,8 +51,6 @@ impl Fixture {
                     .collect(),
                 initial_voters: [1, 2, 3].into(),
                 membership_authority: owner.public_key(),
-                directory_definition: [6; 32],
-                directory: Some(certificate),
                 authorities: vec![Authority {
                     scope,
                     issuer: owner.public_key(),
@@ -63,7 +61,8 @@ impl Fixture {
             &root,
         )
         .unwrap();
-        let state = Metadata::with_limits(genesis, limits).unwrap();
+        let mut state = Metadata::with_limits(genesis, limits).unwrap();
+        state.control(certificate).unwrap();
         let mut fixture = Self {
             state,
             owner,

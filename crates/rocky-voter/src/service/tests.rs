@@ -46,8 +46,6 @@ impl Cluster {
                     .collect(),
                 initial_voters: (1..=GENESIS_VOTERS).collect(),
                 membership_authority: admin.public_key(),
-                directory_definition: NO_DIRECTORY_DEFINITION,
-                directory: None,
                 authorities: Vec::new(),
                 max_control_lifetime: 86_400,
                 public: Some(PublicService {

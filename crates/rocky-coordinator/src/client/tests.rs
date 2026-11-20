@@ -119,8 +119,6 @@ fn genesis(key: &PrivateKey) -> CertifiedGenesis {
                 .collect(),
             initial_voters: [1, 2, 3].into(),
             membership_authority: PrivateKey::new().public_key(),
-            directory_definition: NO_DIRECTORY_DEFINITION,
-            directory: None,
             authorities: Vec::new(),
             max_control_lifetime: DAY,
             public: Some(PublicService {

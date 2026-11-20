@@ -44,7 +44,7 @@ wasm-bindgen-test = "0.3"
 tokio = { version = "1", features = ["macros", "rt"] }
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
-rocky-coordinator = { path = "../rocky-coordinator" }
+rocky-coordinator = { path = "../rocky-coordinator", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["net", "rt-multi-thread", "test-util"] }
 

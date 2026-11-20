@@ -550,6 +550,7 @@ impl Logs {
             .find(|(id, _)| *id == tip)
             .map(|(_, log)| log)
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn get_mut(&mut self, tip: TipId) -> Option<&mut Log> {
         self.logs
             .iter_mut()
@@ -859,12 +860,15 @@ impl Head {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
 pub struct MemoryLog {
     state: std::sync::Arc<std::sync::Mutex<MemoryLogs>>,
     identity: rocky_core::CoordinatorIdentity,
 }
+#[cfg(any(test, feature = "test-support"))]
 const MEMORY_BUNDLE_LABEL: &[u8] = b"rocky.memory-log.v1";
+#[cfg(any(test, feature = "test-support"))]
 impl Default for MemoryLog {
     fn default() -> Self {
         let root = *p2panda_core::PrivateKey::new().public_key().as_bytes();
@@ -878,7 +882,9 @@ impl Default for MemoryLog {
         }
     }
 }
+#[cfg(any(test, feature = "test-support"))]
 type Acknowledged = std::collections::BTreeMap<TipId, Vec<PublicKey>>;
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
 struct MemoryLogs {
     domains: std::collections::BTreeMap<Scope, (Logs, Acknowledged)>,
@@ -888,6 +894,7 @@ struct MemoryLogs {
     counters: std::collections::BTreeMap<Scope, crate::counters::Counters>,
     revocations: std::collections::BTreeMap<Scope, rocky_credentials::RevocationSet>,
 }
+#[cfg(any(test, feature = "test-support"))]
 impl MemoryLog {
     pub fn new() -> Self {
         Self::default()
@@ -988,10 +995,12 @@ impl MemoryLog {
         })
     }
 }
+#[cfg(any(test, feature = "test-support"))]
 pub struct MemoryLogClient {
     logs: MemoryLog,
     key: PublicKey,
 }
+#[cfg(any(test, feature = "test-support"))]
 impl rocky_core::DomainLog for MemoryLogClient {
     fn pending_status(
         &self,
@@ -1169,6 +1178,7 @@ impl rocky_core::DomainLog for MemoryLogClient {
         })
     }
 }
+#[cfg(any(test, feature = "test-support"))]
 fn committed(
     result: Result,
     acknowledged: &mut Vec<PublicKey>,
@@ -1188,6 +1198,7 @@ fn committed(
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl rocky_credentials::CoordinatorConnector for MemoryLog {
     fn connect(
         &self,
@@ -1202,6 +1213,7 @@ impl rocky_credentials::CoordinatorConnector for MemoryLog {
         Ok(std::sync::Arc::new(self.client(key)))
     }
 }
+#[cfg(any(test, feature = "test-support"))]
 impl rocky_credentials::Coordinator for MemoryLogClient {
     fn bundle(
         &self,

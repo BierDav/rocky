@@ -10,6 +10,7 @@ license-file.workspace = true
 
 [features]
 qualification = ["rocky-core/qualification", "rocky-secure/qualification"]
+test-support = []
 default = []
 
 [dependencies]
@@ -35,7 +36,8 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "signal"] }
 
 [dev-dependencies]
-rocky-coordinator.workspace = true
+rocky-sdk = { path = ".", features = ["test-support"] }
+rocky-coordinator = { workspace = true, features = ["test-support"] }
 rocky-credentials = { workspace = true, features = ["test-support"] }
 # Browser fixtures supply their own transport as applications do.
 rocky-iroh.workspace = true

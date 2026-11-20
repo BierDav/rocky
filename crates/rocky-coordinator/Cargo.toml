@@ -9,15 +9,12 @@ repository.workspace = true
 license-file.workspace = true
 
 [features]
-default = ["iroh"]
-# Certified iroh client endpoints.
-iroh = ["dep:rocky-iroh"]
+test-support = []
 
 # The protocol, the state machine and the client, on every target.
 [dependencies]
 tracing.workspace = true
 rocky-core.workspace = true
-rocky-iroh = { workspace = true, optional = true }
 rocky-credentials.workspace = true
 rocky-platform.workspace = true
 p2panda-core = "=0.5.2"

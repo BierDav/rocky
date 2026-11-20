@@ -1,17 +1,23 @@
+#[cfg(any(test, feature = "test-support"))]
 mod faults;
 use super::{
     BoxFuture, Connected, Connector, Discovery, Failure, Found, Incoming, LOCAL_PATH, PathState,
     Protocol, Stream, TOPIC_PATH, Transport,
 };
+#[cfg(any(test, feature = "test-support"))]
 pub use faults::{Draws, LinkFaults};
+#[cfg(any(test, feature = "test-support"))]
+use std::collections::HashSet;
+#[cfg(any(test, feature = "test-support"))]
+use std::task::ready;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     pin::Pin,
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    task::{Context, Poll, Waker, ready},
+    task::{Context, Poll, Waker},
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
@@ -52,9 +58,12 @@ pub struct Hub {
     pub starts: AtomicUsize,
     pub dials: AtomicUsize,
     pub closes: AtomicUsize,
+    #[cfg(any(test, feature = "test-support"))]
     pub stalled: AtomicBool,
     pub capacity: AtomicUsize,
+    #[cfg(any(test, feature = "test-support"))]
     cut: Mutex<CutGate>,
+    #[cfg(any(test, feature = "test-support"))]
     stalled_peers: Mutex<HashSet<String>>,
     peer_dials: Mutex<HashMap<String, usize>>,
     protocol_dials: Mutex<HashMap<(String, String, Protocol), usize>>,
@@ -62,6 +71,7 @@ pub struct Hub {
     links: Mutex<Vec<OpenPipe>>,
     dial_events: tokio::sync::watch::Sender<()>,
     written: tokio::sync::watch::Sender<usize>,
+    #[cfg(any(test, feature = "test-support"))]
     pub hold_cut: AtomicBool,
     connectivity: tokio::sync::watch::Sender<()>,
     admissions: tokio::sync::watch::Sender<()>,
@@ -69,12 +79,18 @@ pub struct Hub {
     pub discovery: AtomicBool,
     announced: Mutex<BTreeMap<String, Announcement>>,
     announcements: tokio::sync::watch::Sender<()>,
+    #[cfg(any(test, feature = "test-support"))]
     seed: u64,
+    #[cfg(any(test, feature = "test-support"))]
     faults: Mutex<HashMap<[String; 2], LinkFaults>>,
+    #[cfg(any(test, feature = "test-support"))]
     down: Mutex<HashSet<[String; 2]>>,
+    #[cfg(any(test, feature = "test-support"))]
     ordinals: Mutex<HashMap<(String, String, Protocol), u64>>,
+    #[cfg(any(test, feature = "test-support"))]
     events: Mutex<Vec<String>>,
 }
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
 struct CutGate {
     budget: Option<usize>,
@@ -94,9 +110,12 @@ impl Default for Hub {
             starts: AtomicUsize::new(0),
             dials: AtomicUsize::new(0),
             closes: AtomicUsize::new(0),
+            #[cfg(any(test, feature = "test-support"))]
             stalled: AtomicBool::new(false),
             capacity: AtomicUsize::new(64 * 1024),
+            #[cfg(any(test, feature = "test-support"))]
             cut: Mutex::default(),
+            #[cfg(any(test, feature = "test-support"))]
             stalled_peers: Mutex::default(),
             peer_dials: Mutex::default(),
             protocol_dials: Mutex::default(),
@@ -104,6 +123,7 @@ impl Default for Hub {
             links: Mutex::default(),
             dial_events: tokio::sync::watch::channel(()).0,
             written: tokio::sync::watch::channel(0).0,
+            #[cfg(any(test, feature = "test-support"))]
             hold_cut: AtomicBool::new(false),
             connectivity: tokio::sync::watch::channel(()).0,
             admissions: tokio::sync::watch::channel(()).0,
@@ -111,10 +131,15 @@ impl Default for Hub {
             discovery: AtomicBool::new(false),
             announced: Mutex::default(),
             announcements: tokio::sync::watch::channel(()).0,
+            #[cfg(any(test, feature = "test-support"))]
             seed: 0,
+            #[cfg(any(test, feature = "test-support"))]
             faults: Mutex::default(),
+            #[cfg(any(test, feature = "test-support"))]
             down: Mutex::default(),
+            #[cfg(any(test, feature = "test-support"))]
             ordinals: Mutex::default(),
+            #[cfg(any(test, feature = "test-support"))]
             events: Mutex::default(),
         }
     }
@@ -125,18 +150,21 @@ fn pair(a: &str, b: &str) -> [String; 2] {
     pair
 }
 impl Hub {
+    #[cfg(any(test, feature = "test-support"))]
     pub fn seeded(seed: u64) -> Self {
         Self {
             seed,
             ..Self::default()
         }
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_faults(&self, a: &str, b: &str, faults: LinkFaults) {
         self.faults
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(pair(a, b), faults);
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_down(&self, a: &str, b: &str, down: bool) {
         let link = pair(a, b);
         let changed = {
@@ -159,18 +187,21 @@ impl Hub {
             self.sever(|nodes, _| *nodes == link);
         }
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn is_down(&self, a: &str, b: &str) -> bool {
         self.down
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .contains(&pair(a, b))
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn events(&self) -> Vec<String> {
         self.events
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+    #[cfg(any(test, feature = "test-support"))]
     fn event(&self, line: String) {
         self.events
             .lock()
@@ -278,6 +309,7 @@ impl Hub {
         names.sort();
         names
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn stall_peer(&self, address: &str, stalled: bool) {
         let mut peers = self
             .stalled_peers
@@ -343,11 +375,13 @@ impl Hub {
     pub fn counts(&self) -> [usize; 3] {
         [&self.starts, &self.dials, &self.closes].map(|count| count.load(Ordering::SeqCst))
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn sever_links(&self, node: &str) {
         self.sever(|nodes, protocol| {
             protocol == Protocol::Link && nodes.iter().any(|name| name == node)
         });
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn cut_after(&self, bytes: Option<usize>) {
         let waiters: Vec<_> = {
             let mut gate = self.cut.lock().unwrap_or_else(PoisonError::into_inner);
@@ -358,6 +392,7 @@ impl Hub {
             waker.wake();
         }
     }
+    #[cfg(any(test, feature = "test-support"))]
     fn allow_or_block(&self, wanted: usize, cx: &Context<'_>) -> Poll<std::io::Result<usize>> {
         let mut gate = self.cut.lock().unwrap_or_else(PoisonError::into_inner);
         match gate.budget {
@@ -376,9 +411,12 @@ impl Hub {
         }
     }
     fn spend(&self, written: usize) {
-        let mut gate = self.cut.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(left) = &mut gate.budget {
-            *left = left.saturating_sub(written);
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let mut gate = self.cut.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(left) = &mut gate.budget {
+                *left = left.saturating_sub(written);
+            }
         }
         self.written.send_modify(|total| *total += written);
     }
@@ -388,21 +426,25 @@ impl Hub {
 struct Severed {
     set: AtomicBool,
     wakers: Mutex<Vec<Waker>>,
+    #[cfg(any(test, feature = "test-support"))]
     budget: Mutex<Option<usize>>,
 }
 impl Severed {
+    #[cfg(any(test, feature = "test-support"))]
     fn with_budget(budget: Option<usize>) -> Self {
         Self {
             budget: Mutex::new(budget),
             ..Self::default()
         }
     }
+    #[cfg(any(test, feature = "test-support"))]
     fn allow(&self, wanted: usize) -> usize {
         self.budget
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .map_or(wanted, |left| wanted.min(left))
     }
+    #[cfg(any(test, feature = "test-support"))]
     fn carry(&self, carried: usize) -> bool {
         let mut budget = self.budget.lock().unwrap_or_else(PoisonError::into_inner);
         match &mut *budget {
@@ -478,10 +520,15 @@ struct Pipe {
     taps: Vec<Tap>,
     from: String,
     protocol: Protocol,
+    #[cfg(any(test, feature = "test-support"))]
     faults: LinkFaults,
+    #[cfg(any(test, feature = "test-support"))]
     draws: Draws,
+    #[cfg(any(test, feature = "test-support"))]
     label: String,
+    #[cfg(any(test, feature = "test-support"))]
     delay: Option<Pin<Box<rocky_platform::time::Sleep>>>,
+    #[cfg(any(test, feature = "test-support"))]
     paced: bool,
 }
 fn cut() -> std::io::Error {
@@ -493,6 +540,7 @@ impl AsyncRead for Pipe {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
+        #[cfg(any(test, feature = "test-support"))]
         let _ = ready!(self.hub.allow_or_block(1, cx))?;
         self.severed.check(cx)?;
         Pin::new(&mut self.io).poll_read(cx, buf)
@@ -505,31 +553,44 @@ impl AsyncWrite for Pipe {
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         self.severed.check(cx)?;
-        if !self.paced && self.faults.delays() {
-            let faults = self.faults;
-            let (delay, stalled) = self.draws.delay(&faults, buf.len());
-            if stalled {
-                self.hub
-                    .event(format!("stall {} {}us", self.label, delay.as_micros()));
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            if !self.paced && self.faults.delays() {
+                let faults = self.faults;
+                let (delay, stalled) = self.draws.delay(&faults, buf.len());
+                if stalled {
+                    self.hub
+                        .event(format!("stall {} {}us", self.label, delay.as_micros()));
+                }
+                self.delay =
+                    (!delay.is_zero()).then(|| Box::pin(rocky_platform::time::sleep(delay)));
+                self.paced = true;
             }
-            self.delay = (!delay.is_zero()).then(|| Box::pin(rocky_platform::time::sleep(delay)));
-            self.paced = true;
+            if let Some(delay) = &mut self.delay {
+                ready!(delay.as_mut().poll(cx));
+                self.delay = None;
+            }
         }
-        if let Some(delay) = &mut self.delay {
-            ready!(delay.as_mut().poll(cx));
-            self.delay = None;
-        }
-        let allowed = ready!(self.hub.allow_or_block(buf.len(), cx))?;
-        let allowed = self.severed.allow(allowed);
-        if allowed == 0 && !buf.is_empty() {
-            return Poll::Ready(Err(cut()));
-        }
+        #[cfg(any(test, feature = "test-support"))]
+        let allowed = {
+            let allowed = ready!(self.hub.allow_or_block(buf.len(), cx))?;
+            let allowed = self.severed.allow(allowed);
+            if allowed == 0 && !buf.is_empty() {
+                return Poll::Ready(Err(cut()));
+            }
+            allowed
+        };
+        #[cfg(not(any(test, feature = "test-support")))]
+        let allowed = buf.len();
         let written = Pin::new(&mut self.io).poll_write(cx, &buf[..allowed]);
         if let Poll::Ready(Ok(written)) = &written {
-            self.paced = false;
-            if self.severed.carry(*written) {
-                self.hub.event(format!("cut {}", self.label));
-                self.severed.sever();
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                self.paced = false;
+                if self.severed.carry(*written) {
+                    self.hub.event(format!("cut {}", self.label));
+                    self.severed.sever();
+                }
             }
             self.hub.spend(*written);
             if self.protocol == Protocol::Link {
@@ -726,6 +787,7 @@ impl Transport for Node {
                 .entry(address.into())
                 .or_default() += 1;
             self.hub.dial_events.send_replace(());
+            #[cfg(any(test, feature = "test-support"))]
             if self.hub.stalled.load(Ordering::SeqCst)
                 || self
                     .hub
@@ -736,35 +798,40 @@ impl Transport for Node {
             {
                 std::future::pending::<()>().await;
             }
-            let ordinal = {
-                let mut ordinals = self.hub.ordinals.lock().map_err(|_| "hub poisoned")?;
-                let next = ordinals
-                    .entry((self.name.clone(), address.into(), protocol))
-                    .or_default();
-                *next += 1;
-                *next - 1
+            #[cfg(any(test, feature = "test-support"))]
+            let (label, faults, mut draws, budget) = {
+                let ordinal = {
+                    let mut ordinals = self.hub.ordinals.lock().map_err(|_| "hub poisoned")?;
+                    let next = ordinals
+                        .entry((self.name.clone(), address.into(), protocol))
+                        .or_default();
+                    *next += 1;
+                    *next - 1
+                };
+                let label = format!("{}>{} {protocol:?} #{ordinal}", self.name, address);
+                if self.hub.is_down(&self.name, address) {
+                    self.hub.event(format!("unreachable {label}"));
+                    return Err("unreachable".into());
+                }
+                let faults = self
+                    .hub
+                    .faults
+                    .lock()
+                    .map_err(|_| "hub poisoned")?
+                    .get(&pair(&self.name, address))
+                    .copied()
+                    .unwrap_or_default();
+                let mut draws =
+                    Draws::stream(self.hub.seed, &self.name, address, protocol, ordinal);
+                if draws.chance(faults.refusals) {
+                    self.hub.event(format!("refuse {label}"));
+                    return Err("refused".into());
+                }
+                let budget = draws
+                    .chance(faults.cuts)
+                    .then(|| draws.below(faults.cut_within as u64) as usize + 1);
+                (label, faults, draws, budget)
             };
-            let label = format!("{}>{} {protocol:?} #{ordinal}", self.name, address);
-            if self.hub.is_down(&self.name, address) {
-                self.hub.event(format!("unreachable {label}"));
-                return Err("unreachable".into());
-            }
-            let faults = self
-                .hub
-                .faults
-                .lock()
-                .map_err(|_| "hub poisoned")?
-                .get(&pair(&self.name, address))
-                .copied()
-                .unwrap_or_default();
-            let mut draws = Draws::stream(self.hub.seed, &self.name, address, protocol, ordinal);
-            if draws.chance(faults.refusals) {
-                self.hub.event(format!("refuse {label}"));
-                return Err("refused".into());
-            }
-            let budget = draws
-                .chance(faults.cuts)
-                .then(|| draws.below(faults.cut_within as u64) as usize + 1);
             let listener = self
                 .hub
                 .listeners
@@ -802,12 +869,19 @@ impl Transport for Node {
                 .map_err(|_| "hub poisoned")?
                 .entry((self.name.clone(), address.into(), protocol))
                 .or_default() += 1;
+            #[cfg(any(test, feature = "test-support"))]
             let severed = Arc::new(Severed::with_budget(budget));
+            #[cfg(not(any(test, feature = "test-support")))]
+            let severed = Arc::new(Severed::default());
             self.hub.links.lock().map_err(|_| "hub poisoned")?.push((
                 pair(&self.name, address),
                 protocol,
                 Arc::downgrade(&severed),
             ));
+            #[cfg_attr(
+                not(any(test, feature = "test-support")),
+                expect(unused_mut, reason = "only mutates draws when test-support is enabled")
+            )]
             let mut pipe = |io, from: &str| Pipe {
                 messages: Default::default(),
                 severed: severed.clone(),
@@ -816,10 +890,15 @@ impl Transport for Node {
                 taps: taps.clone(),
                 from: from.into(),
                 protocol,
+                #[cfg(any(test, feature = "test-support"))]
                 faults,
+                #[cfg(any(test, feature = "test-support"))]
                 draws: draws.fork(),
+                #[cfg(any(test, feature = "test-support"))]
                 label: format!("{label} {from}"),
+                #[cfg(any(test, feature = "test-support"))]
                 delay: None,
+                #[cfg(any(test, feature = "test-support"))]
                 paced: false,
             };
             let (near, far) = (pipe(near, &self.name), pipe(far, address));
@@ -838,6 +917,7 @@ impl Transport for Node {
                     .try_send(Incoming::Stream(protocol, Stream::new(far)))
                     .map_err(|_| "unreachable or busy")?;
             }
+            #[cfg(any(test, feature = "test-support"))]
             self.hub.event(match budget {
                 Some(bytes) => format!("open {label} cut at {bytes}"),
                 None => format!("open {label}"),
@@ -902,10 +982,15 @@ impl Wrapped {
             taps: vec![],
             from: self.name.clone(),
             protocol,
+            #[cfg(any(test, feature = "test-support"))]
             faults: LinkFaults::default(),
+            #[cfg(any(test, feature = "test-support"))]
             draws: Draws::new(0),
+            #[cfg(any(test, feature = "test-support"))]
             label: self.name.clone(),
+            #[cfg(any(test, feature = "test-support"))]
             delay: None,
+            #[cfg(any(test, feature = "test-support"))]
             paced: false,
         };
         Stream::new(pipe).with_lanes(lanes)
@@ -950,6 +1035,7 @@ impl Transport for Wrapped {
                 .entry(address.into())
                 .or_default() += 1;
             self.hub.dial_events.send_replace(());
+            #[cfg(any(test, feature = "test-support"))]
             if self.hub.stalled.load(Ordering::SeqCst)
                 || self
                     .hub

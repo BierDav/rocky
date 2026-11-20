@@ -13,7 +13,7 @@ fn open<'a>(directory: &'a std::path::Path, network: Option<Network>) -> Open<'a
     Open {
         identity: Some(common::external_identity(directory)),
         directory,
-        schema: common::SCHEMA,
+        schema: crate::support::snapshot::schema(common::SCHEMA),
         secrets: None,
         network,
         coordination: None,
@@ -112,7 +112,7 @@ fn reopen_owner_positioned(
     network: Option<Network>,
 ) -> Result<Device, Failure> {
     Ok(Device::new(Database::open(Open {
-        schema: POSITIONED,
+        schema: crate::support::snapshot::schema(POSITIONED),
         coordination: Some(rocky_sdk::CoordinatorSlot::Client(Arc::new(
             log.client(node),
         ))),
@@ -155,7 +155,7 @@ async fn an_offline_migration_is_released_by_the_exact_close_s_finality() -> Res
     let principal = snap::ok(c.session.info()).await["principal"].clone();
     let grant = snap::ok(
         a.session
-            .trust(&(snap::text(&(principal))), (a.root()).clone()),
+            .trust(snap::public_key(&(principal)), (a.root()).clone()),
     )
     .await;
     snap::ok(c.session.install_trust(&(snap::text(&(grant["grant"]))))).await;

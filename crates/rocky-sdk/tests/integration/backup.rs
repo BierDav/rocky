@@ -9,7 +9,7 @@ fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
     Open {
         identity: None,
         directory,
-        schema: SCHEMA,
+        schema: crate::support::snapshot::schema(SCHEMA),
         secrets: None,
         network,
         coordination: None,

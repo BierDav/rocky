@@ -213,7 +213,7 @@ async fn configured_peers_enroll_and_sync_through_the_rust_api() -> Result<(), F
     assert_eq!(rows[0].get::<String>("body")?, "from issuer");
     let contact = member_session.contact().await?;
     let peer = session.add_peer(&contact).await?;
-    assert!(!peer.is_empty());
+    assert_eq!(peer, member_session.info().await?.node);
     member.close().await?;
     let reopened = member_configuration.open().await?.database;
     assert_eq!(
@@ -281,7 +281,7 @@ async fn a_due_seal_a_trusted_node_cannot_make_is_an_alert() -> Result<(), Failu
     let db = Database::create(
         Open {
             directory: directory.path(),
-            schema: &schema,
+            schema: crate::support::snapshot::schema(&schema),
             secrets: None,
             identity: None,
             network: Some(Network::Owned(hub.connector("owner"))),

@@ -12,7 +12,7 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
         identity: common::prepared_identity(directory),
         directory,
-        schema: common::SCHEMA,
+        schema: crate::support::snapshot::schema(common::SCHEMA),
         secrets: None,
         network: Some(Network::Owned(hub.connector(name))),
         coordination: None,
@@ -114,7 +114,10 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         &a.session().invitation_with(GrantProfile::Issuer).await?.uri,
     )?;
     let principal = session(&b).await.principal.to_hex();
-    let grant = a.session().trust(&principal, a.root_signer()?).await?;
+    let grant = a
+        .session()
+        .trust(principal.parse()?, a.root_signer()?)
+        .await?;
     b.session().install_trust(&grant.grant).await?;
     let root_key = a.root_signer()?;
     let (a_node, b_node) = (a.node().await, b.node().await);
@@ -168,7 +171,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
 
     let error = b
         .session()
-        .revoke_identity(&b_identity)
+        .revoke_identity(b_identity.parse()?)
         .await
         .err()
         .ok_or("revoked itself")?;
@@ -179,7 +182,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
     );
     let error = b
         .session()
-        .revoke_identity(&a_identity)
+        .revoke_identity(a_identity.parse()?)
         .await
         .err()
         .ok_or("revoked a trusted node without the root")?;
@@ -190,7 +193,7 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
     );
     let revoked = b
         .session()
-        .revoke_trusted(&a_identity, mode, root_key)
+        .revoke_trusted(a_identity.parse()?, mode, root_key)
         .await?;
     assert_eq!(
         revoked.revocations.statements, 1,
@@ -398,7 +401,10 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
         &a.session().invitation_with(GrantProfile::Issuer).await?.uri,
     )?;
     let t_identity = session(&t).await.principal.to_hex();
-    let grant = a.session().trust(&t_identity, a.root_signer()?).await?;
+    let grant = a
+        .session()
+        .trust(t_identity.parse()?, a.root_signer()?)
+        .await?;
     t.session().install_trust(&grant.grant).await?;
     let (a_node, t_node) = (a.node().await, t.node().await);
     a.add(1, "Milk").await;
@@ -419,7 +425,7 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
 
     let error = a
         .session()
-        .revoke_identity(&t_identity)
+        .revoke_identity(t_identity.parse()?)
         .await
         .err()
         .ok_or("revoked a trusted identity without the root")?;
@@ -429,7 +435,11 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
         "only the root revokes a trusted identity: {error}"
     );
     a.session()
-        .revoke_trusted(&t_identity, RevocationMode::Compromised, a.root_signer()?)
+        .revoke_trusted(
+            t_identity.parse()?,
+            RevocationMode::Compromised,
+            a.root_signer()?,
+        )
         .await?;
 
     let _ = enrolled_by_t.sync().await;
@@ -477,7 +487,7 @@ async fn direct_identity_revocation_reports_identity_rather_than_node_or_cascade
     let owner = create(directory.path(), &hub, "owner")?;
     let member = join(directory.path(), &hub, "member", &owner.invite().await)?;
     let identity = member.session().info().await?.principal;
-    owner.session().revoke_identity(&identity.to_hex()).await?;
+    owner.session().revoke_identity(identity).await?;
     let _ = member.sync().await;
     let _ = member.session().renew().await;
     assert_eq!(

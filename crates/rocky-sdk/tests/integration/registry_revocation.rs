@@ -51,7 +51,7 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
     let old_chain: CredentialChain =
         serde_json::from_value(identity(root, "m")?["credentials"].clone())?;
     a.close().await;
-    let revocation = snap::ok(b.session.revoke_identity(&(snap::text(&(member))))).await;
+    let revocation = snap::ok(b.session.revoke_identity(snap::public_key(&(member)))).await;
     let state = identity(root, "b")?;
     assert_eq!(
         state["keys"],
@@ -117,13 +117,13 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
 
     assert_eq!(listed(&b, &member).await["revoked"], true);
     assert!(
-        snap::observe(b.session.revoke_identity(&(snap::text(&(node)))))
+        snap::observe(b.session.revoke_identity(snap::public_key(&(node))))
             .await
             .is_err(),
         "an issuer never revokes a node"
     );
     assert!(
-        snap::observe(b.session.revoke_identity(&(snap::text(&(member)))))
+        snap::observe(b.session.revoke_identity(snap::public_key(&(member))))
             .await
             .is_err(),
         "an issuer never revokes an identity twice"
@@ -207,7 +207,7 @@ async fn a_partition_only_record_rotates_its_group_and_no_other_scope() -> Resul
     let before = identity(root, "b")?["keys"].clone();
     snap::ok(
         b.session
-            .revoke_identity(&(snap::text(&(keys.identity.to_hex())))),
+            .revoke_identity(snap::public_key(&(keys.identity.to_hex()))),
     )
     .await;
     assert_eq!(identity(root, "b")?["keys"], before);
@@ -260,7 +260,7 @@ async fn an_unrecorded_delegate_uses_full_rotation_fallback_without_revoking_its
     assert_eq!(listed(&b, &delegate.identity.to_hex()).await, Value::Null);
     snap::ok(
         b.session
-            .revoke_identity(&(snap::text(&(delegate.identity.to_hex())))),
+            .revoke_identity(snap::public_key(&(delegate.identity.to_hex()))),
     )
     .await;
     for epochs in identity(root, "b")?["keys"]
@@ -313,20 +313,20 @@ async fn revoking_an_issuer_rotates_the_registry_and_refuses_its_new_key_at_rema
     let Domain { a, b } = Domain::new(root, &hub).await?;
     let grant = snap::ok(
         a.session
-            .trust(&(snap::text(&(b.identity().await))), (a.root()).clone()),
+            .trust(snap::public_key(&(b.identity().await)), (a.root()).clone()),
     )
     .await;
     snap::ok(b.session.install_trust(&(snap::text(&(grant["grant"]))))).await;
     sync(&b).await?;
     let refused = snap::observe(
         b.session
-            .revoke_identity(&(snap::text(&(a.identity().await)))),
+            .revoke_identity(snap::public_key(&(a.identity().await))),
     )
     .await
     .expect_err("revoking the creating device's trusted node needs the root");
     assert_eq!(refused["code"], "publisher_required", "{refused}");
     snap::ok(b.session.revoke_identity_with_root(
-        &(snap::text(&(a.identity().await))),
+        snap::public_key(&(a.identity().await)),
         rocky_sdk::RevocationMode::Compromised,
         Some((a.root()).clone()),
         true,
@@ -379,12 +379,12 @@ async fn two_issuers_revoking_the_same_non_reader_leave_two_statements_and_one_t
     let before_b = identity(root, "b")?["keys"].clone();
     let by_a = snap::ok(
         a.session
-            .revoke_identity(&(snap::text(&(keys.identity.to_hex())))),
+            .revoke_identity(snap::public_key(&(keys.identity.to_hex()))),
     )
     .await;
     let by_b = snap::ok(
         b.session
-            .revoke_identity(&(snap::text(&(keys.identity.to_hex())))),
+            .revoke_identity(snap::public_key(&(keys.identity.to_hex()))),
     )
     .await;
     assert_ne!(by_a["statement"], by_b["statement"]);

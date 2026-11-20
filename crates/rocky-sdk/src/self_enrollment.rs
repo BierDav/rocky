@@ -53,7 +53,7 @@ impl Bundle {
 
 pub struct AwaitingLink {
     pub code: String,
-    pub node: String,
+    pub node: rocky_credentials::PublicKey,
     pub(crate) request: IdentityRequest,
     pub(crate) secret: rocky_credentials::Exchange,
 }
@@ -211,7 +211,7 @@ impl Settings {
                     IdentityRequest::sign(&*provider, &node, record.node, now()?, record.database)?;
                 Some(AwaitingLink {
                     code: request.confirmation_code()?,
-                    node: node.public_key().to_hex(),
+                    node: node.public_key(),
                     request,
                     secret,
                 })

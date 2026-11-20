@@ -171,7 +171,7 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
         identity: None,
         directory,
-        schema: SCHEMA,
+        schema: crate::support::snapshot::schema(SCHEMA),
         secrets: None,
         network: Some(Network::Owned(hub.connector(name))),
         coordination: None,

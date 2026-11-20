@@ -111,8 +111,8 @@ pub use rocky_credentials as credentials;
 pub use rocky_credentials::Profile as GrantProfile;
 pub use rocky_credentials::{
     DatabaseKind, DiscoveryCapability, FileIdentityProvider, IdentityKey, IdentityProvider, PeerId,
-    PersonalAccount, PersonalError, PersonalLocator, PersonalNamespace, PrfInput, Purpose,
-    RevocationMode, RootKey, VerifiedPasskeyPrf,
+    PersonalAccount, PersonalError, PersonalLocator, PersonalNamespace, PrfInput, PublicKey,
+    Purpose, RevocationMode, RootKey, VerifiedPasskeyPrf,
 };
 pub use rocky_secure::{
     CheckpointStatus, CurrentValue, HeldChange, HeldField, HeldKind, HeldRow, Holding,

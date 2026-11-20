@@ -702,7 +702,7 @@ mod coordinated {
         let identity = snap::ok(b.session.info()).await["principal"].clone();
         let grant = snap::ok(
             a.session
-                .trust(&(snap::text(&(identity))), (a.root()).clone()),
+                .trust(snap::public_key(&(identity)), (a.root()).clone()),
         )
         .await;
         snap::ok(b.session.install_trust(&(snap::text(&(grant["grant"]))))).await;
@@ -1072,7 +1072,7 @@ mod trusted {
     }
     async fn trust(owner: &Device, device: &Device) -> Value {
         let granted = snap::ok(owner.session.trust(
-            &(snap::text(&(identity(device).await))),
+            snap::public_key(&(identity(device).await)),
             (owner.root()).clone(),
         ))
         .await;
@@ -1262,7 +1262,7 @@ mod trusted {
         let granted = trust(owner, t).await;
         assert!(
             snap::observe(t.session.trust(
-                &(snap::text(&(identity(owner).await))),
+                snap::public_key(&(identity(owner).await)),
                 std::sync::Arc::new(rocky_sdk::RootKey::generate())
             ))
             .await
@@ -1281,7 +1281,7 @@ mod trusted {
         );
         snap::ok(
             owner.session.revoke_identity_with_root(
-                &(owner
+                owner
                     .session
                     .identities()
                     .await?
@@ -1293,8 +1293,7 @@ mod trusted {
                         })
                     })
                     .ok_or("unknown trust")?
-                    .identity
-                    .to_hex()),
+                    .identity,
                 rocky_sdk::RevocationMode::Compromised,
                 Some((owner.root()).clone()),
                 true,
@@ -1368,7 +1367,7 @@ mod races {
             let granted = snap::ok(
                 owner
                     .session
-                    .trust(&(snap::text(&(identity))), (owner.root()).clone()),
+                    .trust(snap::public_key(&(identity)), (owner.root()).clone()),
             )
             .await;
             snap::ok(
@@ -1492,7 +1491,7 @@ mod races {
         let without_cut = false;
         snap::ok(
             owner.session.revoke_identity_with_root(
-                &(owner
+                owner
                     .session
                     .identities()
                     .await?
@@ -1504,8 +1503,7 @@ mod races {
                         })
                     })
                     .ok_or("unknown trust")?
-                    .identity
-                    .to_hex()),
+                    .identity,
                 rocky_sdk::RevocationMode::Compromised,
                 Some((owner.root()).clone()),
                 without_cut,
@@ -1569,7 +1567,7 @@ mod races {
         let creator = snap::ok(owner.session.info()).await["principal"].clone();
         let (t0, t1) = (&house.trusted[0], &house.trusted[1]);
         snap::ok(t0.session.revoke_identity_with_root(
-            &(snap::text(&(creator))),
+            snap::public_key(&(creator)),
             rocky_sdk::RevocationMode::Compromised,
             Some((owner.root()).clone()),
             true,
@@ -1620,7 +1618,7 @@ mod races {
         assert_eq!(bookmarks(t1).await, ["late", "main"]);
         let creator = snap::ok(owner.session.info()).await["principal"].clone();
         snap::ok(t0.session.revoke_identity_with_root(
-            &(snap::text(&(creator))),
+            snap::public_key(&(creator)),
             rocky_sdk::RevocationMode::Compromised,
             Some((owner.root()).clone()),
             true,
@@ -1726,7 +1724,7 @@ async fn a_deferred_branch_switch_pulls_a_kept_seal_and_survives_reopen() -> Res
     let identity = snap::ok(b.session.info()).await["principal"].clone();
     let grant = snap::ok(
         a.session
-            .trust(&(snap::text(&(identity))), (a.root()).clone()),
+            .trust(snap::public_key(&(identity)), (a.root()).clone()),
     )
     .await["grant"]
         .clone();

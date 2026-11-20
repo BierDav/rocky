@@ -486,10 +486,11 @@ async fn stop_at(
     );
     let vault = node.vault.clone();
     drop(node);
+    let schema = crate::Schema::parse(SCHEMA)?;
     let open = || crate::Open {
         identity: None,
         directory: root.path(),
-        schema: SCHEMA,
+        schema: &schema,
         secrets: Some(store.clone()),
         network: None,
         coordination: None,
@@ -638,10 +639,11 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
             "before table {passed}: {error}"
         );
         drop(node);
+        let schema = crate::Schema::parse(SCHEMA)?;
         let database = crate::Database::open(crate::Open {
             identity: None,
             directory: root.path(),
-            schema: SCHEMA,
+            schema: &schema,
             secrets: Some(store),
             network: None,
             coordination: None,

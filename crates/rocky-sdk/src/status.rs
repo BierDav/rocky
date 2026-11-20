@@ -262,13 +262,50 @@ pub struct RetryStatus {
     pub reconciliation_retry_at_epoch_millis: Option<u64>,
     pub link_retry_at_epoch_millis: Option<u64>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerSource {
+    Application,
+    Enrollment,
+    Session,
+    Link,
+    Discovery,
+    Handover,
+    Request,
+}
+impl PeerSource {
+    pub(crate) fn from_str_or_default(source: &str) -> Self {
+        match source {
+            "application" => Self::Application,
+            "enrollment" => Self::Enrollment,
+            "session" => Self::Session,
+            "link" => Self::Link,
+            "discovery" => Self::Discovery,
+            "handover" => Self::Handover,
+            "request" => Self::Request,
+            _ => Self::Enrollment,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerChoice {
+    NotConsidered,
+    Backoff,
+    PassLimit,
+    SelectedLocal,
+    SelectedHolding,
+    SelectedTrusted,
+    SelectedProbe,
+    Covered,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Peer {
     pub node: String,
     pub is_issuer: bool,
     pub is_configured: bool,
-    pub source: String,
-    pub choice: String,
+    pub source: PeerSource,
+    pub choice: PeerChoice,
     pub routes: Vec<Route>,
     pub is_local: bool,
     pub link: PeerLink,

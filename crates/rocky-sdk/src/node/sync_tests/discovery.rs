@@ -108,8 +108,12 @@ async fn members_converge_with_discovery_as_their_only_source_of_contacts() -> R
                 .find(|peer| peer.node == c_key.to_hex())
                 .ok_or("found peer")?;
             assert_eq!(
-                (found.source.as_str(), found.is_local, found.choice.as_str()),
-                ("discovery", true, "selected_local")
+                (found.source, found.is_local, found.choice),
+                (
+                    crate::PeerSource::Discovery,
+                    true,
+                    crate::PeerChoice::SelectedLocal
+                )
             );
             let status = serde_json::to_value(b.observed_status().await?.network.discovery)?;
             assert_eq!(status["announcing"], true);

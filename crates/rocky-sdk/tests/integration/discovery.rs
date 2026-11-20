@@ -53,7 +53,7 @@ async fn enrolled(root: &Path) -> Result<(), Failure> {
     assert!(b.titles().await.is_empty());
     let node = issuer.node().await;
     for member in [&a, &b] {
-        snap::ok(member.session.remove_peer(&(snap::text(&(node))))).await;
+        snap::ok(member.session.remove_peer(snap::public_key(&(node)))).await;
         let peers = snap::ok(async {
             let network = member.session.network().await?;
             Ok(json!({"peers":network.peers,"discovery":network.discovery}))
@@ -150,7 +150,7 @@ async fn simulator_peer() -> Result<(), Failure> {
         Open {
             identity: None,
             directory: &root.join("host"),
-            schema: &schema,
+            schema: crate::support::snapshot::schema(&schema),
             secrets: None,
             network: Some(starter(None, true)),
             coordination: None,

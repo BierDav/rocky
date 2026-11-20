@@ -152,7 +152,11 @@ mod native {
                     continue;
                 }
                 session
-                    .grant_claims(&member, rocky_sdk::ClaimCounters::Named(&[b"invoices"]), 1)
+                    .grant_claims(
+                        member.parse()?,
+                        rocky_sdk::ClaimCounters::Named(&[b"invoices"]),
+                        1,
+                    )
                     .await?;
                 let mut tx = db.transaction().await?;
                 let id = tx.next_id("notes", vec![]).await?;

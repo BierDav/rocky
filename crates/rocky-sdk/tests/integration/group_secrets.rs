@@ -80,7 +80,7 @@ fn open<'a>(directory: &'a Path, schema: &'a str, store: &Arc<Store>, hub: &Arc<
     Open {
         identity: common::prepared_identity(directory),
         directory,
-        schema,
+        schema: crate::support::snapshot::schema(schema),
         secrets: Some(store.clone() as Arc<dyn SecretStore>),
         network: Some(Network::Owned(hub.connector(name))),
         coordination: None,
@@ -442,7 +442,7 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
     let revoked = snap::ok(
         issuer
             .session
-            .revoke_identity(&(snap::text(&(removed_device.identity.to_string())))),
+            .revoke_identity(snap::public_key(&(removed_device.identity.to_string()))),
     )
     .await;
     assert_eq!(
@@ -582,7 +582,7 @@ async fn a_partition_granted_after_enrollment_rotates_with_its_device() {
     snap::ok(
         issuer
             .session
-            .revoke_identity(&(snap::text(&(device.identity.to_string())))),
+            .revoke_identity(snap::public_key(&(device.identity.to_string()))),
     )
     .await;
     let (secrets, tables) = issuer.epochs("A").await;
@@ -633,7 +633,7 @@ async fn an_interrupted_rotation_resumes_to_one_epoch_across_the_group() {
         let revoked = snap::string(
             issuer
                 .session
-                .revoke_identity(&(snap::text(&(device.identity.to_string())))),
+                .revoke_identity(snap::public_key(&(device.identity.to_string()))),
         )
         .await;
         issuer.store.limit(None);
@@ -930,7 +930,7 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
     snap::ok(
         issuer
             .session
-            .revoke_identity(&(snap::text(&(removed_device.identity.to_string())))),
+            .revoke_identity(snap::public_key(&(removed_device.identity.to_string()))),
     )
     .await;
     for table in TABLES {

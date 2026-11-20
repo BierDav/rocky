@@ -84,7 +84,12 @@ fn schema(count: usize) -> String {
         .collect();
     json!({"format":6,"application":"wide_grants","version":1,"tables":tables}).to_string()
 }
-fn open<'a>(directory: &'a Path, schema: &'a str, hub: &Arc<Hub>, name: &str) -> Open<'a> {
+fn open<'a>(
+    directory: &'a Path,
+    schema: &'a crate::Schema,
+    hub: &Arc<Hub>,
+    name: &str,
+) -> Open<'a> {
     Open {
         directory,
         schema,
@@ -139,8 +144,8 @@ async fn assert_epochs(device: &Device, count: usize, expected: &[u64]) {
 }
 async fn exercise(count: usize, legacy: bool) -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let schema = schema(count);
-    assert_eq!(Schema::parse(&schema)?.tables.len(), count);
+    let schema = Schema::parse(&schema(count))?;
+    assert_eq!(schema.tables.len(), count);
     let hub = Arc::new(Hub::default());
     let owner_dir = root.path().join("owner");
     let mut owner = Device::new(Database::create(
@@ -339,12 +344,7 @@ async fn exercise(count: usize, legacy: bool) -> Result<(), Failure> {
             .is_err()
     );
     tx.rollback().await?;
-    snap::ok(
-        owner
-            .session
-            .revoke_identity(&(snap::text(&(members[0].1.identity)))),
-    )
-    .await;
+    snap::ok(owner.session.revoke_identity(members[0].1.identity)).await;
     members[1].0.sync().await.map_err(|e| e.to_string())?;
     assert_epochs(&members[1].0, count, &[1, 2]).await;
     assert_epochs(&members[0].0, count, &[1]).await;
@@ -382,7 +382,7 @@ async fn per_table_credentials_reopen_share_and_renew_into_families() -> Result<
 #[tokio::test]
 async fn local_sql_sessions_cover_more_than_256_authorized_scopes() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
-    let schema = schema(160);
+    let schema = crate::Schema::parse(&schema(160))?;
     let device = Device::new(Database::create(
         Open {
             directory: directory.path(),

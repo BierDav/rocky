@@ -35,7 +35,7 @@ fn open<'a>(directory: &'a Path, network: Option<Network>) -> Open<'a> {
     Open {
         identity: None,
         directory,
-        schema: SHOPPING,
+        schema: crate::support::snapshot::schema(SHOPPING),
         secrets: Some(support::secrets::keys(directory)),
         network,
         coordination: None,
@@ -818,7 +818,7 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
     let setup = |directory, name| Open {
         identity: None,
         directory,
-        schema: &schema,
+        schema: crate::support::snapshot::schema(&schema),
         secrets: None,
         network: Some(Network::Owned(hub.connector(name))),
         coordination: None,

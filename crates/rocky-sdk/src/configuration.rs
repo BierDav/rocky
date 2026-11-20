@@ -6,7 +6,7 @@ const DEFAULT_SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs
 #[derive(Clone)]
 pub struct Configuration {
     directory: PathBuf,
-    schema: String,
+    schema: Schema,
     secrets: Option<Arc<dyn SecretStore>>,
     identity: Option<Arc<dyn IdentityProvider>>,
     network: Option<Network>,
@@ -17,8 +17,7 @@ pub struct Configuration {
 impl Configuration {
     pub const BOOKMARK: &'static str = "main";
     pub fn new(directory: impl Into<PathBuf>, schema: &Schema) -> Result<Self, Failure> {
-        let schema = serde_json::to_string(schema)?;
-        Schema::parse(&schema)?;
+        let schema = schema.validated()?;
         Ok(Self {
             directory: directory.into(),
             schema,
@@ -171,11 +170,7 @@ impl Configuration {
                 let locator = account.locator();
                 let database = rocky_credentials::DatabaseContext {
                     publisher: locator.publisher,
-                    scope: locator.scope(
-                        &Schema::parse(&self.schema)
-                            .map_err(Refused::Failed)?
-                            .application,
-                    ),
+                    scope: locator.scope(&self.schema.application),
                 };
                 backup.check(&account, &database)?;
             }

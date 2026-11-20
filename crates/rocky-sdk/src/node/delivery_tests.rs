@@ -38,11 +38,16 @@ struct Device {
     name: String,
     hub: Arc<Hub>,
 }
+fn parsed_schema() -> &'static crate::Schema {
+    static PARSED: std::sync::LazyLock<crate::Schema> =
+        std::sync::LazyLock::new(|| crate::Schema::parse(SCHEMA).unwrap());
+    &PARSED
+}
 fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
         identity: None,
         directory,
-        schema: SCHEMA,
+        schema: parsed_schema(),
         secrets: Some(keys(directory)),
         network: Some(crate::Network::Owned(hub.connector(name))),
         coordination: None,
@@ -321,7 +326,7 @@ async fn a_share_and_a_rotation_reach_an_offline_recipient_through_custody_alone
     share(a, &[&node, &third.node().await?, &removed_node]).await?;
     snap::value(
         a.session
-            .revoke_identity(&(snap::text(&(removed.identity().await?)))),
+            .revoke_identity(removed.identity().await?.parse()?),
     )
     .await?;
     assert_eq!(a.state(&node).await?, "pending");
@@ -481,7 +486,7 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
     let before = a.events("envelopes_delivered").await?.len();
     snap::value(
         a.session
-            .revoke_identity(&(snap::text(&(removed.identity().await?)))),
+            .revoke_identity(removed.identity().await?.parse()?),
     )
     .await?;
     relay(&a, &b).await?;
@@ -574,11 +579,7 @@ async fn a_recipient_revoked_after_the_deposit_gets_nothing_and_the_deposit_is_r
         1,
         "a restarted mailbox keeps the deposit"
     );
-    snap::value(
-        a.session
-            .revoke_identity(&(snap::text(&(b.identity().await?)))),
-    )
-    .await?;
+    snap::value(a.session.revoke_identity(b.identity().await?.parse()?)).await?;
     assert_eq!(a.state(&node).await?, Value::Null, "the sender dropped it");
     snap::value(a.session.sync_once()).await?;
     assert_eq!(

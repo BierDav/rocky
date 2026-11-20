@@ -23,7 +23,7 @@ fn open<'a>(directory: &'a Path, schema: &'a str, network: Option<Network>) -> O
     Open {
         identity: Some(common::external_identity(directory)),
         directory,
-        schema,
+        schema: crate::support::snapshot::schema(schema),
         secrets: None,
         network,
         coordination: None,
@@ -863,7 +863,7 @@ async fn a_member_fetches_a_required_schema_from_another_member_with_no_issuer_r
     let principal = snap::ok(b.session.info()).await["principal"].clone();
     let trusted = snap::ok(
         a.session
-            .trust(&(snap::text(&(principal))), (a.root()).clone()),
+            .trust(snap::public_key(&(principal)), (a.root()).clone()),
     )
     .await;
     snap::ok(b.session.install_trust(&(snap::text(&(trusted["grant"]))))).await;

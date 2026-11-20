@@ -315,7 +315,11 @@ impl Simulation {
                     .root
                     .clone()
                     .ok_or("member 0 holds no root")?;
-                let grant = self.database(0)?.session().trust(&identity, root).await?;
+                let grant = self
+                    .database(0)?
+                    .session()
+                    .trust(identity.parse()?, root)
+                    .await?;
                 let creator = self.database(0)?.session().status().await?;
                 for (member, identity) in
                     [(0, creator.authority.principal), (*node, identity.clone())]
@@ -527,7 +531,7 @@ impl Simulation {
                 let identity = self.running(*node)?.session()?.info().await?.principal;
                 self.running(0)?
                     .session()?
-                    .revoke_identity(&identity.to_hex())
+                    .revoke_identity(identity)
                     .await?;
                 self.members[*node].revoked = true;
                 self.members[*node].close().await?;

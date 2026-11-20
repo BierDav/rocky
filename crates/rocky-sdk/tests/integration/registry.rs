@@ -30,7 +30,7 @@ fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
     Open {
         identity: common::prepared_identity(directory),
         directory,
-        schema: SCHEMA,
+        schema: crate::support::snapshot::schema(SCHEMA),
         secrets: None,
         network,
         coordination: None,
@@ -231,7 +231,7 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
     )
     .await;
     snap::ok(a.session.set_identity_label(
-        snap::key(&(m_identity)),
+        snap::public_key(&(m_identity)),
         serde_json::from_value::<Vec<u8>>(json!([7, 8, 9])).expect("typed fixture"),
     ))
     .await;
@@ -316,7 +316,7 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
     );
     assert_eq!(record["expires"], after["expires"]);
 
-    snap::ok(m.session.remove_peer(&(snap::text(&(a_node))))).await;
+    snap::ok(m.session.remove_peer(snap::public_key(&(a_node)))).await;
     assert!(
         !m.session
             .status()
@@ -367,8 +367,8 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
     synced(&r).await?;
     synced(&w).await?;
     let (a_node, b_node) = (a.node().await, b.node().await);
-    snap::ok(a.session.remove_peer(&(snap::text(&(b_node))))).await;
-    snap::ok(b.session.remove_peer(&(snap::text(&(a_node))))).await;
+    snap::ok(a.session.remove_peer(snap::public_key(&(b_node)))).await;
+    snap::ok(b.session.remove_peer(snap::public_key(&(a_node)))).await;
     introduce(&a, &c).await;
     introduce(&b, &c).await;
     let keys = common::node_keys(&root.join("d"), None)?;
@@ -771,7 +771,7 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
             assert_eq!(pending[0].invitation, invitation.id);
             session
                 .admit(rocky_sdk::Admit {
-                    node: pending[0].node.clone(),
+                    node: pending[0].node,
                     code: awaiting.code.clone(),
                     profile: rocky_sdk::GrantProfile::Writer {
                         scopes: ["items".into()].into_iter().collect(),
@@ -1097,7 +1097,7 @@ async fn a_revoked_identity_cannot_retry_an_admitted_join_after_a_lost_answer()
     let pending = session.discovered().await?.pending;
     session
         .admit(rocky_sdk::Admit {
-            node: pending[0].node.clone(),
+            node: pending[0].node,
             code: awaiting.code.clone(),
             profile: rocky_sdk::GrantProfile::Writer {
                 scopes: ["items".into()].into_iter().collect(),
@@ -1117,7 +1117,12 @@ async fn a_revoked_identity_cannot_retry_an_admitted_join_after_a_lost_answer()
     let records = identities(&issuer).await;
     assert_eq!(records.len(), 1);
     let identity = records.keys().next().ok_or("missing admitted identity")?;
-    snap::ok(issuer.session.revoke_identity(&(snap::text(&(identity))))).await;
+    snap::ok(
+        issuer
+            .session
+            .revoke_identity(snap::public_key(&(identity))),
+    )
+    .await;
     let error = join(
         &directory,
         faulty(&hub, "joining", &faults),

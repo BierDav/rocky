@@ -118,7 +118,7 @@ impl Node {
         let pending = pending
             .iter()
             .map(|request| crate::JoinRequest {
-                node: request.node.to_hex(),
+                node: request.node,
                 nonce: request.nonce.clone(),
                 invitation: request.invitation.clone(),
                 name: request.name.clone(),
@@ -156,7 +156,7 @@ impl Node {
             .iter()
             .filter(|(_, held)| time.saturating_sub(held.received) < 300)
             .map(|(node, held)| crate::LinkRequest {
-                node: node.to_hex(),
+                node: *node,
                 code: held.code.clone(),
                 received: held.received,
                 confirmed: held.confirmed,
@@ -170,7 +170,7 @@ impl Node {
     }
 
     pub(super) async fn admit(&self, admit: crate::Admit) -> Result<(), Failure> {
-        let node = admit.node.parse().map_err(refused)?;
+        let node = admit.node;
         if !self.settings.lock().await.issuer() {
             return Err(refused("only an issuer admits devices"));
         }

@@ -91,7 +91,7 @@ impl Peer {
         let opened = tokio::task::spawn_blocking(move || {
             let open = Open {
                 directory: &directory,
-                schema: &schema,
+                schema: crate::support::snapshot::schema(&schema),
                 identity: Some(startup_identity),
                 secrets: None,
                 network: Some(Network::Owned(Arc::new(starter()))),
@@ -258,10 +258,10 @@ pub(super) async fn household_reaching(
     for identity in [&owner, &trusted] {
         assert_ne!(identity["principal"], identity["node"]);
     }
-    let grant = snap::value(
-        a.session
-            .trust(&(snap::text(&(trusted["principal"]))), (a.root()).clone()),
-    )
+    let grant = snap::value(a.session.trust(
+        snap::public_key(&(trusted["principal"])),
+        (a.root()).clone(),
+    ))
     .await?;
     snap::value(t.session.install_trust(&(snap::text(&(grant["grant"]))))).await?;
     let tenant = PrivateKey::new();

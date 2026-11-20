@@ -60,7 +60,7 @@ async fn a_member_admits_a_peer_without_a_contact_and_refuses_one_revoked_this_r
 
     snap::ok(
         a.session
-            .revoke_identity(&(snap::text(&(d.identity().await)))),
+            .revoke_identity(snap::public_key(&(d.identity().await))),
     )
     .await;
     a.sync().await.map_err(|error| error.to_string())?;

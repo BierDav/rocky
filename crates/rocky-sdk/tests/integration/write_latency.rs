@@ -22,7 +22,7 @@ fn open<'a>(directory: &'a Path, network: Option<Network>) -> Open<'a> {
     Open {
         identity: None,
         directory,
-        schema: SCHEMA,
+        schema: crate::support::snapshot::schema(SCHEMA),
         secrets: None,
         network,
         coordination: None,

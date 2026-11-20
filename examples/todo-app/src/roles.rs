@@ -122,18 +122,19 @@ impl Todos {
         if node == self.node().await? {
             return Err("a device cannot remove itself; reset it instead".into());
         }
+        let node_key = node.parse()?;
         let session = self.database.session();
         let identity = session
-            .identity_for_node(node.parse()?)
+            .identity_for_node(node_key)
             .await?
             .ok_or("the node is not linked to a recorded identity")?;
-        session.revoke_identity(&identity.to_hex()).await?;
+        session.revoke_identity(identity).await?;
         let mut transaction = self.database.transaction().await?;
         transaction
             .execute("DELETE FROM devices WHERE node=?", params![node])
             .await?;
         transaction.commit().await?;
-        let _ = self.database.session().remove_peer(node).await;
+        let _ = self.database.session().remove_peer(node_key).await;
         Ok(())
     }
     pub async fn role(&self) -> Result<Option<Role>, Failure> {

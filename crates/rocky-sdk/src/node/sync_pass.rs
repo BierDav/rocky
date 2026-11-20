@@ -506,7 +506,7 @@ impl Node {
                 owed.push(target);
                 continue;
             }
-            choices.insert(target.peer, "covered");
+            choices.insert(target.peer, crate::PeerChoice::Covered);
             Self::add_peer_report(
                 report,
                 Self::skipped_peer(target.peer.to_hex(), SkipReason::Covered),

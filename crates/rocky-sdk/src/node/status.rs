@@ -59,30 +59,25 @@ impl Node {
                     node: node.clone(),
                     is_issuer: settings.issuers.contains(&key),
                     is_configured: contact.is_some(),
-                    source: settings
-                        .contact_meta
-                        .get(&key)
-                        .map_or_else(
-                            || {
-                                if contact.is_some() {
-                                    "enrollment"
-                                } else if met.contains_key(&key) {
-                                    "session"
-                                } else {
-                                    "link"
-                                }
-                            },
-                            |meta| meta.source.as_str(),
-                        )
-                        .into(),
+                    source: settings.contact_meta.get(&key).map_or_else(
+                        || {
+                            if contact.is_some() {
+                                PeerSource::Enrollment
+                            } else if met.contains_key(&key) {
+                                PeerSource::Session
+                            } else {
+                                PeerSource::Link
+                            }
+                        },
+                        |meta| PeerSource::from_str_or_default(&meta.source),
+                    ),
                     choice: self
                         .choices
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .get(&key)
                         .copied()
-                        .unwrap_or("not_considered")
-                        .into(),
+                        .unwrap_or(PeerChoice::NotConsidered),
                     routes: contact
                         .into_iter()
                         .flat_map(|contact| &contact.routes)

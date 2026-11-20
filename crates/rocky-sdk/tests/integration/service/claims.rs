@@ -109,7 +109,11 @@ async fn a_member_claims_through_its_claim_right_until_it_is_revoked() -> Result
 
     let grant = a
         .session
-        .grant_claims(&member, rocky_sdk::ClaimCounters::Named(&[b"invoices"]), 1)
+        .grant_claims(
+            member.parse()?,
+            rocky_sdk::ClaimCounters::Named(&[b"invoices"]),
+            1,
+        )
         .await?;
     assert_eq!(grant.identity, member);
     m.session.install_claims(&grant).await?;
@@ -136,7 +140,7 @@ async fn a_member_claims_through_its_claim_right_until_it_is_revoked() -> Result
         ),
         "a right names one counter"
     );
-    a.session.revoke_claims(&member).await?;
+    a.session.revoke_claims(member.parse()?).await?;
     assert!(
         denied(&member_db.claim(invoices.clone(), first).await.unwrap_err()),
         "revoking the right reaches the service at once and even a retry is refused"
@@ -176,7 +180,7 @@ async fn granting_again_revokes_the_previous_grant() -> Result<(), Failure> {
     );
     let wide = a
         .session
-        .grant_claims(&member, rocky_sdk::ClaimCounters::Every, 1)
+        .grant_claims(member.parse()?, rocky_sdk::ClaimCounters::Every, 1)
         .await?;
     m.session.install_claims(&wide).await?;
     assert_eq!(
@@ -189,7 +193,11 @@ async fn granting_again_revokes_the_previous_grant() -> Result<(), Failure> {
 
     let narrow = a
         .session
-        .grant_claims(&member, rocky_sdk::ClaimCounters::Named(&[b"invoices"]), 1)
+        .grant_claims(
+            member.parse()?,
+            rocky_sdk::ClaimCounters::Named(&[b"invoices"]),
+            1,
+        )
         .await?;
     assert!(
         denied(
@@ -283,7 +291,11 @@ async fn another_issuer_renews_a_right_after_its_granting_issuer_is_gone() -> Re
 
     let grant = a
         .session
-        .grant_claims(&member, rocky_sdk::ClaimCounters::Named(&[b"invoices"]), 1)
+        .grant_claims(
+            member.parse()?,
+            rocky_sdk::ClaimCounters::Named(&[b"invoices"]),
+            1,
+        )
         .await?;
     m.session.install_claims(&grant).await?;
     assert_eq!(
@@ -352,7 +364,11 @@ async fn a_revocation_pushed_while_the_service_was_down_reaches_it_at_a_later_sy
     let invoices = counters::Name::new("invoices")?;
     let grant = b
         .session
-        .grant_claims(&member, rocky_sdk::ClaimCounters::Named(&[b"invoices"]), 1)
+        .grant_claims(
+            member.parse()?,
+            rocky_sdk::ClaimCounters::Named(&[b"invoices"]),
+            1,
+        )
         .await?;
     m.session.install_claims(&grant).await?;
     assert_eq!(
@@ -365,11 +381,15 @@ async fn a_revocation_pushed_while_the_service_was_down_reaches_it_at_a_later_sy
 
     a.session.set_networking_enabled(false).await?;
     gate.store(false, Ordering::SeqCst);
-    snap::value(a.session.revoke_identity(&(snap::text(&(admin))))).await?;
+    snap::value(a.session.revoke_identity(snap::public_key(&(admin)))).await?;
     assert!(unpushed(&a).await?);
     let fresh_from_dismissed_issuer = b
         .session
-        .grant_claims(&member, rocky_sdk::ClaimCounters::Named(&[b"invoices"]), 1)
+        .grant_claims(
+            member.parse()?,
+            rocky_sdk::ClaimCounters::Named(&[b"invoices"]),
+            1,
+        )
         .await?;
     m.session
         .install_claims(&fresh_from_dismissed_issuer)
@@ -419,7 +439,11 @@ async fn an_unpushed_revocation_survives_a_restart() -> Result<(), Failure> {
     let invoices = counters::Name::new("invoices")?;
     let grant = a
         .session
-        .grant_claims(&member, rocky_sdk::ClaimCounters::Named(&[b"invoices"]), 1)
+        .grant_claims(
+            member.parse()?,
+            rocky_sdk::ClaimCounters::Named(&[b"invoices"]),
+            1,
+        )
         .await?;
     m.session.install_claims(&grant).await?;
     let first = counters::Claim::fresh()?;
@@ -428,7 +452,7 @@ async fn an_unpushed_revocation_survives_a_restart() -> Result<(), Failure> {
     a.session.set_networking_enabled(false).await?;
 
     gate.store(false, Ordering::SeqCst);
-    a.session.revoke_claims(&member).await?;
+    a.session.revoke_claims(member.parse()?).await?;
     assert!(unpushed(&a).await?);
     a.close().await?;
 

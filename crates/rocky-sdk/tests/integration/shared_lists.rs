@@ -121,7 +121,7 @@ fn at<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str, schema: &'a str) -> O
     Open {
         identity: Some(identity(directory)),
         directory,
-        schema,
+        schema: crate::support::snapshot::schema(schema),
         secrets: Some(secrets::keys(directory)),
         network: Some(Network::Owned(hub.connector(name))),
         coordination: None,
@@ -135,7 +135,7 @@ async fn checkpoint_writer(
 ) -> Result<(Peer, Peer), Failure> {
     let issuer_path = root.join("issuer");
     let mut options = open(&issuer_path, hub, "issuer");
-    options.schema = schema;
+    options.schema = crate::support::snapshot::schema(schema);
     let issuer = Peer::new(Database::create(options, None)?.database)?;
     issuer.session.create_bookmark("main", None).await?;
     issuer.follow("main").await?;
@@ -163,7 +163,7 @@ async fn checkpoint_writer(
     .await?;
     let writer_path = root.join("writer");
     let mut options = open(&writer_path, hub, "writer");
-    options.schema = schema;
+    options.schema = crate::support::snapshot::schema(schema);
     let writer =
         Peer::new(Database::join(options, invite["uri"].as_str().ok_or("uri")?)?.database)?;
     let writer_node = snap::value(writer.session.info()).await?["node"].clone();

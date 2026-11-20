@@ -28,7 +28,7 @@ async fn a_supplied_node_keeps_its_key_as_writer_across_reopen_and_renewal() -> 
     let open = || Open {
         identity: common::prepared_identity(&path),
         directory: &path,
-        schema: common::SCHEMA,
+        schema: crate::support::snapshot::schema(common::SCHEMA),
         secrets: None,
         network: None,
         coordination: None,

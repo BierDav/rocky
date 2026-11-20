@@ -23,7 +23,7 @@ mod residence;
 
 pub struct Open<'a> {
     pub directory: &'a Path,
-    pub schema: &'a str,
+    pub schema: &'a Schema,
     pub secrets: Option<Arc<dyn SecretStore>>,
     pub identity: Option<Arc<dyn crate::IdentityProvider>>,
     pub network: Option<Network>,
@@ -619,7 +619,7 @@ impl Database {
             crate::enrollment::Invite::parse(invitation)?;
         }
         let setup = Setup {
-            schema: Schema::parse(open.schema)?,
+            schema: open.schema.validated()?,
             secrets: open
                 .secrets
                 .unwrap_or_else(|| Arc::new(FileSecretStore::new(directory.join("secrets")))),
@@ -1213,10 +1213,9 @@ impl Session {
     }
     pub async fn trust(
         &self,
-        identity: &str,
+        identity: rocky_credentials::PublicKey,
         root: Arc<dyn crate::IdentityProvider>,
     ) -> Result<crate::TrustGrant, Failure> {
-        let identity = identity.parse()?;
         self.send_rooted(Some(root), |root, reply| {
             crate::request::Request::Trust(identity, root, reply)
         })
@@ -1224,7 +1223,7 @@ impl Session {
     }
     pub async fn revoke_trusted(
         &self,
-        identity: &str,
+        identity: rocky_credentials::PublicKey,
         mode: rocky_credentials::RevocationMode,
         root: Arc<dyn crate::IdentityProvider>,
     ) -> Result<crate::RevocationResult, Failure> {
@@ -1246,7 +1245,7 @@ impl Session {
     }
     pub async fn revoke_identity(
         &self,
-        identity: &str,
+        identity: rocky_credentials::PublicKey,
     ) -> Result<crate::RevocationResult, Failure> {
         self.revoke_identity_with_root(
             identity,
@@ -1258,12 +1257,11 @@ impl Session {
     }
     pub async fn revoke_identity_with_root(
         &self,
-        identity: &str,
+        identity: rocky_credentials::PublicKey,
         mode: rocky_credentials::RevocationMode,
         root: Option<Arc<dyn crate::IdentityProvider>>,
         keep: bool,
     ) -> Result<crate::RevocationResult, Failure> {
-        let identity = identity.parse()?;
         self.send_rooted(root, |root, reply| {
             crate::request::Request::RevokeIdentity(identity, mode, root, keep, reply)
         })
@@ -1280,11 +1278,10 @@ impl Session {
     }
     pub async fn grant_claims(
         &self,
-        identity: &str,
+        identity: rocky_credentials::PublicKey,
         counters: crate::ClaimCounters<'_>,
         delegations: u8,
     ) -> Result<crate::ClaimGrant, Failure> {
-        let identity = identity.parse()?;
         let counters = counters.names();
         self.send(|reply| {
             crate::request::Request::GrantClaims(identity, counters, delegations, reply)
@@ -1298,8 +1295,10 @@ impl Session {
     pub async fn held_claims(&self) -> Result<Option<crate::ClaimGrant>, Failure> {
         self.send(crate::request::Request::HeldClaims).await
     }
-    pub async fn revoke_claims(&self, identity: &str) -> Result<(), Failure> {
-        let identity = identity.parse()?;
+    pub async fn revoke_claims(
+        &self,
+        identity: rocky_credentials::PublicKey,
+    ) -> Result<(), Failure> {
         self.send(|reply| crate::request::Request::RevokeClaims(identity, reply))
             .await
     }
@@ -2666,14 +2665,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_create_that_cannot_publish_its_settings_leaves_no_database() -> Result<(), Failure> {
         let directory = rocky_platform::fs::Scratch::new().await;
-        let schema = serde_json::to_string(
-            &crate::Schema::builder("settled", 1)
-                .table(
-                    crate::Table::replayed("items")
-                        .column(crate::Column::new("title", crate::Affinity::Text)),
-                )
-                .build()?,
-        )?;
+        let schema = crate::Schema::builder("settled", 1)
+            .table(
+                crate::Table::replayed("items")
+                    .column(crate::Column::new("title", crate::Affinity::Text)),
+            )
+            .build()?;
         let log = rocky_coordinator::coordinated::MemoryLog::new();
         let options = || Open {
             directory: directory.path(),
@@ -2729,7 +2726,6 @@ mod tests {
                     .column(crate::Column::new("title", crate::Affinity::Text)),
             )
             .build()?;
-        let schema = serde_json::to_string(&schema)?;
         let (reached, reaching) = oneshot::channel();
         let (release, released) = std::sync::mpsc::channel();
         HOLD_END.with(|hold| *hold.borrow_mut() = Some((reached, released)));
@@ -2760,7 +2756,12 @@ mod tests {
     }
 
     #[cfg(not(target_family = "wasm"))]
-    const HELD_SCHEMA: &str = r#"{"application":"held","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+    fn held_schema() -> &'static Schema {
+        static PARSED: std::sync::LazyLock<Schema> = std::sync::LazyLock::new(|| {
+            Schema::parse(r#"{"application":"held","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#).unwrap()
+        });
+        &PARSED
+    }
 
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test]
@@ -2770,7 +2771,7 @@ mod tests {
         let hub = Arc::new(crate::transport::memory::Hub::default());
         let open = || Open {
             directory: directory.path(),
-            schema: HELD_SCHEMA,
+            schema: held_schema(),
             secrets: None,
             identity: None,
             network: Some(Network::Owned(hub.connector("held"))),
@@ -2817,7 +2818,7 @@ mod tests {
         fn open(directory: &Path) -> Open<'_> {
             Open {
                 directory,
-                schema: HELD_SCHEMA,
+                schema: held_schema(),
                 secrets: None,
                 identity: None,
                 network: None,
@@ -3050,7 +3051,6 @@ mod tests {
             )
             .await?;
         session.close().await;
-        let schema = serde_json::to_string(&schema)?;
         let install = || {
             Database::install(
                 Open {
@@ -3075,7 +3075,9 @@ mod tests {
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn old_database_is_refused_before_enrollment_or_database_writes() -> Result<(), Failure> {
-        const SCHEMA: &str = r#"{"format":6,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+        let schema = Schema::parse(
+            r#"{"format":6,"application":"refusal","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
+        )?;
         for format in [0, 1, 2, 3, 5] {
             let directory = rocky_platform::fs::Scratch::new().await;
             let path = directory.path().join("rocky.sqlite");
@@ -3099,7 +3101,7 @@ mod tests {
                 let options = Open {
                     identity: None,
                     directory: directory.path(),
-                    schema: SCHEMA,
+                    schema: &schema,
                     secrets: None,
                     network: None,
                     coordination: None,
@@ -3135,12 +3137,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn populated_consumer_continues_its_writer_sequence_after_reopen() -> Result<(), Failure>
     {
-        const SCHEMA: &str = r#"{"format":6,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+        let schema = Schema::parse(
+            r#"{"format":6,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
+        )?;
         let directory = rocky_platform::fs::Scratch::new().await;
         let options = || Open {
             identity: None,
             directory: directory.path(),
-            schema: SCHEMA,
+            schema: &schema,
             secrets: None,
             network: None,
             coordination: None,
@@ -3190,11 +3194,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn saturated_waits_cannot_block_session_shutdown() -> Result<(), Failure> {
         let directory = rocky_platform::fs::Scratch::new().await;
+        let schema = Schema::parse(
+            r#"{"application":"saturation","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
+        )?;
         let opened = Database::create(
             Open {
                 identity: None,
                 directory: directory.path(),
-                schema: r#"{"application":"saturation","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
+                schema: &schema,
                 secrets: None,
                 network: None,
                 coordination: None,

@@ -14,7 +14,7 @@ fn open<'a>(root: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
         identity: None,
         directory: root,
-        schema: SCHEMA,
+        schema: crate::support::snapshot::schema(SCHEMA),
         secrets: Some(fixture::keys(root)),
         network: Some(Network::Owned(hub.connector(name))),
         coordination: None,
@@ -31,7 +31,7 @@ async fn join(
     let invitation = a.invite_as(profile).await;
     let directory = root.join(name);
     let mut options = open(&directory, hub, name);
-    options.schema = schema;
+    options.schema = crate::support::snapshot::schema(schema);
     let device = Device::new(Database::join(options, &invitation)?)?;
     fixture::settle(&device).await;
     Ok(device)
@@ -102,7 +102,7 @@ async fn sync_away_from_revoking_issuer(reader: &Device, revoking: &Device) -> R
     snap::ok(
         reader
             .session
-            .remove_peer(&(snap::text(&(revoking.node().await)))),
+            .remove_peer(snap::public_key(&(revoking.node().await))),
     )
     .await;
     reader
@@ -174,7 +174,7 @@ async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_re
     let hub = Arc::new(Hub::default());
     let directory = root.join("a");
     let mut options = open(&directory, &hub, "a");
-    options.schema = common::SCHEMA;
+    options.schema = crate::support::snapshot::schema(common::SCHEMA);
     let a = Device::new(Database::create(options, None)?)?;
     let b = join(
         root,
@@ -199,7 +199,7 @@ async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_re
         snap::ok(
             device
                 .session
-                .revoke_identity(&(PrivateKey::new().public_key().to_hex())),
+                .revoke_identity(PrivateKey::new().public_key()),
         )
         .await;
     }
@@ -226,7 +226,7 @@ async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_re
     }
     let directory = root.join("offline");
     let mut options = open(&directory, &hub, "offline");
-    options.schema = common::SCHEMA;
+    options.schema = crate::support::snapshot::schema(common::SCHEMA);
     let offline = Device::new(Database::open(options)?)?;
     snap::ok(async {
         offline.session.renew().await?;
@@ -261,7 +261,7 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
     let hub = Arc::new(Hub::default());
     let directory = root.join("a");
     let mut options = open(&directory, &hub, "a");
-    options.schema = LIST_SCHEMA;
+    options.schema = crate::support::snapshot::schema(LIST_SCHEMA);
     let a = Device::new(Database::create(options, None)?)?;
     a.follow_main().await;
     create_partition(&a).await;
@@ -281,18 +281,18 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
         snap::ok(
             device
                 .session
-                .remove_peer(&(snap::text(&(original.node().await)))),
+                .remove_peer(snap::public_key(&(original.node().await))),
         )
         .await;
     }
     snap::ok(
         a.session
-            .revoke_identity(&(snap::text(&(carol.identity().await)))),
+            .revoke_identity(snap::public_key(&(carol.identity().await))),
     )
     .await;
     snap::ok(
         b.session
-            .revoke_identity(&(snap::text(&(dave.identity().await)))),
+            .revoke_identity(snap::public_key(&(dave.identity().await))),
     )
     .await;
     write(&a, "a").await;

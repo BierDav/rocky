@@ -185,7 +185,7 @@ enum Command {
     ReactorMeasurements(oneshot::Sender<Option<crate::ReactorMeasurements>>),
     Observe(
         Option<Vec<String>>,
-        oneshot::Sender<Result<rocky_runtime::TableObserver, Failure>>,
+        oneshot::Sender<Result<rocky_storage::observe::TableObserver, Failure>>,
     ),
     Outcome(
         rocky_core::TransactionToken,

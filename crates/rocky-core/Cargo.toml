@@ -1,6 +1,6 @@
 [package]
 name = "rocky-core"
-description = "Shared Rocky identities, operation envelopes, versions and protocol errors"
+description = "Shared Rocky identities, schema definitions, manifests and protocol errors"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

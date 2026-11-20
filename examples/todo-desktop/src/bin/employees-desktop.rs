@@ -32,7 +32,7 @@ fn App() -> Element {
                 .and_then(|fields| fields.get(&demo.app().field("salary")))
                 .map(|bytes| String::from_utf8_lossy(bytes).to_string())
                 .unwrap_or_else(|| "Unavailable".into());
-            Ok::<_, rocky_runtime::Error>((name, salary, confirmed.complete))
+            Ok::<_, rocky_secure::Error>((name, salary, confirmed.complete))
         }
     });
     let admin = demo.clone();

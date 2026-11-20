@@ -1,6 +1,6 @@
 # Keep the container build context to the workspace Cargo needs. The workspace
-# members are `crates/*`, `examples/*` and `benchmarks/runtime-scaling`; the
-# rest of the repository is documentation, tooling or excluded sub-workspaces.
+# members are `crates/*`, `examples/*` and `vendor/rocky-sqlite*`; the rest of
+# the repository is documentation, tooling or excluded sub-workspaces.
 
 target
 .jj
@@ -17,8 +17,7 @@ kotlin.bat
 project.yaml
 
 # Excluded from the Cargo workspace, so the build never reads them.
-benchmarks/engine-comparison
-benchmarks/engine-scale
+benchmarks
 examples/shoppinglist-app
 
 # Local data and secrets.

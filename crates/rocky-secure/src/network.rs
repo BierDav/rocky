@@ -122,7 +122,7 @@ impl std::error::Error for RequestRefusal {}
 impl RequestRefusal {
     fn of(error: &Error) -> Self {
         match error {
-            Error::Quota { .. } | Error::Backpressure | Error::Retention { .. } => Self::OverBudget,
+            Error::Quota { .. } | Error::Backpressure => Self::OverBudget,
             Error::Conflict | Error::Incompatible(_) => Self::WrongTip,
             Error::Protocol(_) | Error::Corrupt(_) => Self::Malformed,
             Error::Rejected(reason) if reason.contains("quota") || reason.contains("budget") => {

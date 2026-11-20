@@ -13,14 +13,11 @@ kind(test)
     | (package(rocky-secure) & test(/^network::(holdings|contacts)::tests::/))
     | (package(rocky-secure) & test(/^network::link::integration_tests::/))
     | (package(rocky-secure) & test(/^network::budgets::/))
-    | (package(rocky-runtime) & !test(/^(read|checkpoint)::tests::/))
-    | (package(rocky-runtime) & test(=read::tests::pages_through_null_ordering_values_cover_the_result_once))
     | (package(rocky-coordinator) & test(/^(client::tests|native_tests|machine::(public_tests|coordinated_tests|tip_tests))::/))
     | (package(rocky-voter) & test(/^raft_store::tests::/))
     | (package(rocky-sdk) & test(/^(database|enrollment|mesh|node|simulation)::/))
     | (package(rocky-storage) & test(/^(cursor|database|sqlite)::tests::/))
     | (package(rocky-credentials) & (test(/^keys::tests::/) | test(=revocation::tests::every_interleaving_of_merges_yields_one_digest)))
-    | (package(runtime-scaling) & (test(/^(soak|wide)::tests::/) | test(=attribution::tests::storage_facts_read_the_sqlite_header)))
     | (package(todo-desktop) & test(/^secure_demo::/))
 '''
 
@@ -43,12 +40,6 @@ filter = '''
     | (binary_id(rocky-voter::integration) & (
           test(=public::a_completely_restored_service_stays_fenced)
         | test(=public::outages_and_restarts_keep_state_and_restore_is_fenced)
-    ))
-    | (binary_id(rocky-runtime) & (
-          test(=audit_tests::observer_and_retained_history_quotas_preserve_existing_work)
-        | test(=instrumentation_tests::checkpoint_intervals_are_recorded_in_monotonic_order_when_instrumented)
-        | test(=retention_tests::death_inside_any_step_leaves_a_file_that_opens_and_audits)
-        | test(=stored_state_tests::open_does_not_replay_and_a_domain_outgrows_the_former_quota)
     ))
     | (binary_id(rocky-sdk::integration) & (
           test(=bootstrap::join_restores_large_rows_across_checkpoint_pages)

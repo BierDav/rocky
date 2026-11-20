@@ -1,6 +1,4 @@
-use crate::{
-    AppId, Commitment, DomainId, EngineIdentity, Envelope, OperationId, Scope, Versions, commitment,
-};
+use crate::{AppId, Commitment, DomainId, EngineIdentity, commitment};
 
 pub const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_MANIFEST_ITEMS: usize = 32_768;
@@ -35,28 +33,6 @@ pub struct DomainRule {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthorLogScope {
     Domain,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ScopedOperationId {
-    pub scope: Scope,
-    pub operation: OperationId,
-}
-impl Envelope {
-    pub fn scoped_id(&self) -> ScopedOperationId {
-        ScopedOperationId {
-            scope: self.scope,
-            operation: self.id,
-        }
-    }
-    pub fn scoped_dependencies(&self) -> Vec<ScopedOperationId> {
-        self.dependencies
-            .iter()
-            .map(|operation| ScopedOperationId {
-                scope: self.scope,
-                operation: *operation,
-            })
-            .collect()
-    }
 }
 impl ApplicationManifest {
     pub fn app_id(publisher: [u8; 32], name: &str) -> AppId {
@@ -209,12 +185,6 @@ impl ApplicationManifest {
     }
     pub fn hash(&self) -> Commitment {
         commitment("rocky.manifest.body.v1", &self.canonical_body())
-    }
-    pub fn supports(&self, scope: Scope, versions: Versions, projection: u32) -> bool {
-        self.app == scope.app
-            && self.schema == versions.schema
-            && self.projection == projection
-            && self.domains.iter().any(|rule| rule.domain == scope.domain)
     }
 }
 pub fn definition_item_id(publisher: [u8; 32], app: AppId, kind: &str, name: &str) -> Commitment {

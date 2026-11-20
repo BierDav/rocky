@@ -6,7 +6,6 @@ use rocky_core::{ProtocolError, SqlValue};
 pub enum FailureReason {
     Denial,
     UnsupportedGeneration,
-    MissingDependencies,
     Quota,
     Corruption,
     Conflict,
@@ -51,14 +50,6 @@ pub enum Error {
     Blocked(Vec<rocky_core::Blocker>),
     RetryExhausted,
     Conflict,
-    Retention {
-        retained: usize,
-        limit: usize,
-    },
-    Pruned {
-        node: rocky_core::NodeId,
-        sequence: u64,
-    },
     Closed,
     Rollback {
         cause: String,
@@ -85,8 +76,6 @@ impl Error {
             Self::Blocked(_) => "blocked",
             Self::RetryExhausted => "retry_exhausted",
             Self::Conflict => "conflict",
-            Self::Retention { .. } => "retention",
-            Self::Pruned { .. } => "pruned",
             Self::Closed => "closed",
             Self::Rollback { .. } => "rollback",
             Self::Sql(_) => "sql",
@@ -101,18 +90,10 @@ impl Error {
             | Self::Blocked(_)
             | Self::Sql(crate::sql::SqlError::Denied)
             | Self::Coordination(rocky_core::CoordinationError::Denied) => FailureReason::Denial,
-            Self::Protocol(ProtocolError::UnsupportedVersion { .. }) | Self::Incompatible(_) => {
-                FailureReason::UnsupportedGeneration
-            }
-            Self::Protocol(ProtocolError::NotReady(_)) => FailureReason::MissingDependencies,
-            Self::Quota { .. } | Self::Backpressure | Self::Retention { .. } => {
-                FailureReason::Quota
-            }
+            Self::Incompatible(_) => FailureReason::UnsupportedGeneration,
+            Self::Quota { .. } | Self::Backpressure => FailureReason::Quota,
             Self::Corrupt(_) | Self::Rollback { .. } => FailureReason::Corruption,
-            Self::Conflict
-            | Self::Pruned { .. }
-            | Self::Protocol(ProtocolError::IdentityConflict(_))
-            | Self::Coordination(rocky_core::CoordinationError::RequestConflict) => {
+            Self::Conflict | Self::Coordination(rocky_core::CoordinationError::RequestConflict) => {
                 FailureReason::Conflict
             }
             Self::Closed => FailureReason::Closed,
@@ -130,7 +111,6 @@ impl Error {
             || matches!(
                 self,
                 Self::Backpressure
-                    | Self::Retention { .. }
                     | Self::RetryExhausted
                     | Self::Coordination(
                         rocky_core::CoordinationError::Unavailable
@@ -144,7 +124,7 @@ impl std::fmt::Display for Error {
         match self {
             Self::Io(e) => write!(f, "I/O: {e}"),
             Self::Storage(e) => write!(f, "SQLite storage: {e}"),
-            Self::Protocol(e) => write!(f, "operation protocol: {e}"),
+            Self::Protocol(e) => write!(f, "protocol: {e}"),
             Self::Application(e) => write!(f, "application rejected request: {e}"),
             Self::Incompatible(e) => write!(f, "incompatible replica file: {e}"),
             Self::Corrupt(e) => write!(f, "replica consistency check failed: {e}"),
@@ -159,14 +139,6 @@ impl std::fmt::Display for Error {
             Self::Conflict => write!(
                 f,
                 "the operation conflicts with a concurrent change or an earlier submission of the same identity; retry against the current state"
-            ),
-            Self::Retention { retained, limit } => write!(
-                f,
-                "retained history holds {retained} of {limit} bytes; waiting for a checkpoint and delivery acknowledgments"
-            ),
-            Self::Pruned { sequence, .. } => write!(
-                f,
-                "already committed as sequence {sequence}, which has been pruned; not executed again"
             ),
             Self::RetryExhausted => write!(
                 f,
@@ -222,19 +194,6 @@ pub fn backoff(attempt: usize) -> std::time::Duration {
     std::time::Duration::from_millis(
         FIRST_BACKOFF_MILLIS << attempt.min(BACKOFF_DOUBLINGS_BEFORE_PLATEAU),
     )
-}
-pub const READ_TRANSACTION_BOUND: std::time::Duration = std::time::Duration::from_millis(500);
-
-pub fn group_lost() -> Error {
-    Error::Storage(sqlite::Error::Group("the engine ended the transaction".into()).into())
-}
-pub fn group_error(error: &Error) -> Error {
-    match error {
-        Error::RetryExhausted => Error::RetryExhausted,
-        Error::Closed => Error::Closed,
-        error if retryable(error) => Error::RetryExhausted,
-        error => Error::Storage(sqlite::Error::Group(error.to_string()).into()),
-    }
 }
 
 pub async fn rows(conn: &Connection, sql: &str) -> Result<Vec<Vec<SqlValue>>, Error> {

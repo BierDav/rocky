@@ -1,7 +1,6 @@
 pub mod capture;
 pub mod cursor;
 pub mod database;
-pub mod digest;
 pub mod exact;
 pub mod files;
 pub mod observe;

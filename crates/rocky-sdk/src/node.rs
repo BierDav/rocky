@@ -2830,12 +2830,12 @@ impl Node {
         }
     }
     async fn read_once(&self, client: &Client, query: Query) -> Result<crate::ReadPage, Failure> {
-        let max_bytes = query.max_bytes.unwrap_or(rocky_runtime::MAX_FRAME_BYTES);
+        let max_bytes = query.max_bytes.unwrap_or(rocky_storage::MAX_FRAME_BYTES);
         if query.max_rows == 0
             || query.max_rows > MAX_ROWS
             || query.sql.len() > MAX_SQL
             || query.values.len() > 256
-            || !(256..=rocky_runtime::MAX_FRAME_BYTES).contains(&max_bytes)
+            || !(256..=rocky_storage::MAX_FRAME_BYTES).contains(&max_bytes)
         {
             return Err(refused("query quota"));
         }

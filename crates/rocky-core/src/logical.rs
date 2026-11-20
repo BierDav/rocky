@@ -260,21 +260,6 @@ impl std::fmt::Display for ValueError {
 impl std::error::Error for ValueError {}
 
 impl Affinity {
-    pub fn of_declared(declared: &str) -> Self {
-        let declared = declared.to_ascii_uppercase();
-        let has = |part: &str| declared.contains(part);
-        if has("INT") {
-            Self::Integer
-        } else if has("CHAR") || has("CLOB") || has("TEXT") {
-            Self::Text
-        } else if has("BLOB") || declared.trim().is_empty() {
-            Self::Blob
-        } else if has("REAL") || has("FLOA") || has("DOUB") {
-            Self::Real
-        } else {
-            Self::Numeric
-        }
-    }
     pub fn store(self, value: SqlValue) -> Result<SqlValue, ValueError> {
         const EXACT: i64 = 1 << 53;
         match (self, value) {
@@ -1654,17 +1639,5 @@ mod tests {
                 ("c".to_string(), "rtrim".to_string())
             ]
         );
-    }
-    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn affinity_follows_the_declared_type() {
-        for (declared, affinity) in [
-            ("INTEGER", Affinity::Integer),
-            ("VARCHAR(10)", Affinity::Text),
-            ("", Affinity::Blob),
-            ("DOUBLE", Affinity::Real),
-            ("DECIMAL", Affinity::Numeric),
-        ] {
-            assert_eq!(Affinity::of_declared(declared), affinity);
-        }
     }
 }

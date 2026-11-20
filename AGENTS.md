@@ -22,8 +22,8 @@
   adapters. Networking is optional; shutdown never closes application-owned
   infrastructure.
 - Protocol types stay independent of storage, transport and UI. The coordinator
-  owns generic metadata only; applications own reducers and business rules; the
-  runtime owns transactions, operation storage and observation.
+  owns generic metadata only; applications own reducers and business rules;
+  rocky-secure owns transactions, operation storage and observation.
 - Commit projection, operation, outbox and revision changes atomically; publish
   and notify only after commit; keep external calls outside DB transactions.
 - Use precise operations with stable identities and safe retries.

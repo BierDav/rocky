@@ -385,8 +385,8 @@ impl Transaction {
         params: Vec<SqlValue>,
     ) -> Result<Rows<'_>, SqlFailure> {
         if !matches!(
-            rocky_runtime::classify_sql(sql),
-            Ok(rocky_runtime::SqlControl::Statement)
+            rocky_storage::sql::classify(sql),
+            Ok(rocky_storage::sql::Control::Statement)
         ) {
             return Err(crate::connection::failure(
                 crate::connection::code::MISUSE,

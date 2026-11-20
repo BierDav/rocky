@@ -3294,13 +3294,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inventory-app"
-version = "0.1.0"
-dependencies = [
- "rocky-core",
-]
-
-[[package]]
 name = "ipconfig"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6125,23 +6118,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rocky-runtime"
-version = "0.1.0"
-dependencies = [
- "inventory-app",
- "rocky-core",
- "rocky-platform",
- "rocky-storage",
- "runtime-todo-app",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "wasm-bindgen-test",
- "web-time",
-]
-
-[[package]]
 name = "rocky-sdk"
 version = "0.1.0"
 dependencies = [
@@ -6155,7 +6131,6 @@ dependencies = [
  "rocky-credentials",
  "rocky-iroh",
  "rocky-platform",
- "rocky-runtime",
  "rocky-secure",
  "rocky-storage",
  "rocky-voter",
@@ -6246,7 +6221,6 @@ name = "rocky-voter"
 version = "0.1.0"
 dependencies = [
  "directory-app",
- "inventory-app",
  "iroh-relay",
  "openraft",
  "p2panda-core",
@@ -6254,7 +6228,6 @@ dependencies = [
  "rocky-core",
  "rocky-credentials",
  "rocky-iroh",
- "rocky-runtime",
  "rocky-secure",
  "serde",
  "serde_json",
@@ -6271,27 +6244,6 @@ checksum = "c51c9ae4df8a7fba42103df5c621fa3c37eccf3a3c650879e90fc48b11cc192c"
 dependencies = [
  "hashbrown 0.16.1",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "runtime-scaling"
-version = "0.1.0"
-dependencies = [
- "employees-app",
- "inventory-app",
- "rocky-coordinator",
- "rocky-core",
- "rocky-runtime",
- "rocky-secure",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "runtime-todo-app"
-version = "0.1.0"
-dependencies = [
- "rocky-core",
 ]
 
 [[package]]
@@ -7469,7 +7421,6 @@ dependencies = [
  "employees-app",
  "rocky-core",
  "rocky-iroh",
- "rocky-runtime",
  "rocky-sdk",
  "rocky-secure",
  "tempfile",

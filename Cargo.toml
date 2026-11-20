@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*", "examples/*", "benchmarks/runtime-scaling", "vendor/rocky-sqlite", "vendor/rocky-sqlite-opfs"]
+members = ["crates/*", "examples/*", "vendor/rocky-sqlite", "vendor/rocky-sqlite-opfs"]
 exclude = ["benchmarks/engine-comparison", "benchmarks/engine-scale", "vendor/apple-libc", "vendor/netdev", "vendor/netwatch"]
 resolver = "3"
 
@@ -15,7 +15,6 @@ publish = false
 [workspace.dependencies]
 rocky-core = { path = "crates/rocky-core", version = "=0.1.0" }
 rocky-credentials = { path = "crates/rocky-credentials", version = "=0.1.0" }
-rocky-runtime = { path = "crates/rocky-runtime", version = "=0.1.0" }
 rocky-secure = { path = "crates/rocky-secure", version = "=0.1.0" }
 rocky-storage = { path = "crates/rocky-storage", version = "=0.1.0" }
 rocky-coordinator = { path = "crates/rocky-coordinator", version = "=0.1.0" }

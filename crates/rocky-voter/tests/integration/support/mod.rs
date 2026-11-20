@@ -92,7 +92,7 @@ impl Cluster {
         let mesh = MeshId([0x91; 16]);
         let scope = Scope {
             mesh,
-            app: inventory_app::app_id(),
+            app: rocky_core::ApplicationManifest::app_id([0x81; 32], "inventory"),
             domain: DomainId([1; 16]),
         };
         let directory_app = directory_app::DirectoryApp {

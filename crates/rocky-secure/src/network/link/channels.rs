@@ -91,7 +91,7 @@ struct Slot {
     ended: bool,
     finished: bool,
     progress: u64,
-    deferred: bool,
+    end_unwritten: bool,
 }
 impl Slot {
     fn new(
@@ -111,7 +111,7 @@ impl Slot {
             ended: false,
             finished: false,
             progress: 0,
-            deferred: false,
+            end_unwritten: false,
         }
     }
 }
@@ -129,13 +129,18 @@ struct State {
     flushed_reconcile: Option<u64>,
     slots: BTreeMap<(bool, u16), Slot>,
     deferred: Vec<Frame>,
+    #[cfg(test)]
+    after_end_queued: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
 }
 impl State {
     fn release(&mut self, key: (bool, u16)) -> bool {
         if self
             .slots
             .get(&key)
-            .is_some_and(|slot| slot.closed && slot.ended && !slot.deferred)
+            .is_some_and(|slot| slot.closed && slot.ended && !slot.end_unwritten)
         {
             self.slots.remove(&key);
             return true;
@@ -481,19 +486,53 @@ impl Handle {
     }
     fn queue(&self, frame: Frame) -> bool {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        self.queue_locked(&mut state, frame)
+    }
+    fn queue_locked(&self, state: &mut State, frame: Frame) -> bool {
         let Err(mpsc::error::TrySendError::Full(frame)) = self.send.try_send(frame) else {
             return true;
         };
-        if let Message::Channel(Packet::End { generation }) = frame.message
-            && let Some(slot) = state
-                .slots
-                .get_mut(&(frame.direction, frame.channel))
-                .filter(|slot| slot.generation == generation)
-        {
-            slot.deferred = true;
-        }
         state.deferred.push(frame);
         false
+    }
+    fn end(&self, key: (bool, u16), generation: u64) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(slot) = state
+            .slots
+            .get_mut(&key)
+            .filter(|slot| slot.generation == generation)
+        {
+            slot.closed = true;
+            slot.end_unwritten = true;
+            slot.receive.take();
+            slot.bytes.clear();
+        }
+        self.queue_locked(
+            &mut state,
+            Frame {
+                channel: key.1,
+                through: Vec::new(),
+                direction: key.0,
+                message: Message::Channel(Packet::End { generation }),
+            },
+        );
+    }
+    fn writing(&self, frame: &Frame) {
+        let Message::Channel(Packet::End { generation }) = frame.message else {
+            return;
+        };
+        let key = (frame.direction, frame.channel);
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(slot) = state
+            .slots
+            .get_mut(&key)
+            .filter(|slot| slot.generation == generation)
+        {
+            slot.end_unwritten = false;
+            if state.release(key) {
+                self.events.send_replace(());
+            }
+        }
     }
     pub async fn write(
         &self,
@@ -515,6 +554,7 @@ impl Handle {
             } => Some(generation),
             _ => None,
         };
+        self.writing(&frame);
         writer.send(frame).await?;
         if let Some(generation) = finished {
             self.flushed_reconcile(generation);
@@ -528,31 +568,47 @@ impl Handle {
         }
         let frames = std::mem::take(&mut state.deferred);
         for frame in &frames {
-            match frame.message {
-                Message::Channel(Packet::End { generation }) => {
-                    let key = (frame.direction, frame.channel);
-                    if let Some(slot) = state
-                        .slots
-                        .get_mut(&key)
-                        .filter(|slot| slot.generation == generation)
-                    {
-                        slot.deferred = false;
-                        state.release(key);
-                    }
-                }
-                Message::Reconcile {
-                    generation,
-                    started: false,
-                } if state.reconciling.get(&frame.direction) == Some(&generation) => {
-                    state.reconciling.remove(&frame.direction);
-                }
-                _ => {}
+            if let Message::Reconcile {
+                generation,
+                started: false,
+            } = frame.message
+                && state.reconciling.get(&frame.direction) == Some(&generation)
+            {
+                state.reconciling.remove(&frame.direction);
             }
         }
         if !frames.is_empty() {
             self.events.send_replace(());
         }
         frames
+    }
+    #[cfg(test)]
+    fn pause_after_end_queued(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (reached, reaching) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .after_end_queued = Some((reached, released));
+        (reaching, release)
+    }
+    #[cfg(test)]
+    async fn hold_after_end_queued(&self) {
+        let held = self
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .after_end_queued
+            .take();
+        if let Some((reached, released)) = held {
+            let _ = reached.send(());
+            let _ = released.await;
+        }
     }
     pub fn retired_frames(&self) -> u64 {
         self.state
@@ -881,15 +937,8 @@ impl Io {
     }
     pub(crate) fn retire(&mut self) {
         if !self.closed {
-            self.handle.queue(Frame {
-                channel: self.key.1,
-                through: Vec::new(),
-                direction: self.key.0,
-                message: Message::Channel(Packet::End {
-                    generation: self.generation,
-                }),
-            });
-            self.mark_closed();
+            self.closed = true;
+            self.handle.end(self.key, self.generation);
         }
     }
 
@@ -972,15 +1021,12 @@ impl Io {
     }
     pub async fn close(&mut self) -> Result<(), Error> {
         if !self.closed {
-            self.handle
-                .send_frame(
-                    self.key,
-                    Packet::End {
-                        generation: self.generation,
-                    },
-                )
-                .await?;
-            self.mark_closed();
+            if self.handle.is_closed() {
+                return Err(denied("link ended"));
+            }
+            self.retire();
+            #[cfg(test)]
+            self.handle.hold_after_end_queued().await;
         }
         let mut events = self.handle.events.subscribe();
         timeout(TIMEOUT, async {
@@ -1002,26 +1048,6 @@ impl Io {
         })
         .await
         .map_err(|_| timed_out("link channel close timeout"))?
-    }
-    fn mark_closed(&mut self) {
-        self.closed = true;
-        let mut state = self
-            .handle
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(slot) = state
-            .slots
-            .get_mut(&self.key)
-            .filter(|slot| slot.generation == self.generation)
-        {
-            slot.closed = true;
-            slot.receive.take();
-            slot.bytes.clear();
-            if state.release(self.key) {
-                self.handle.events.send_replace(());
-            }
-        }
     }
 }
 impl Drop for Io {
@@ -1282,6 +1308,9 @@ pub(crate) mod tests {
             written.push(frame);
         }
         written.extend(channels.handle.take_deferred(&channels.outgoing));
+        for frame in &written {
+            channels.handle.writing(frame);
+        }
         written
     }
     fn ends(frames: &[Frame]) -> Vec<(bool, u16, u64)> {
@@ -1316,7 +1345,7 @@ pub(crate) mod tests {
         channels
             .accept(frame(2, Packet::End { generation: 0 }))
             .unwrap();
-        assert!(channels.handle.state.lock().unwrap().slots[&(true, 2)].deferred);
+        assert!(channels.handle.state.lock().unwrap().slots[&(true, 2)].end_unwritten);
         assert!(
             channels.handle.take_deferred(&channels.outgoing).is_empty(),
             "a deferred End never overtakes frames queued before it"
@@ -1348,6 +1377,38 @@ pub(crate) mod tests {
         assert!(
             channels.handle.open_publication(8).await.is_ok(),
             "an opener's publication slot frees once its End is written and the peer's arrives"
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn a_peer_reopening_a_channel_as_soon_as_it_reads_our_end_is_accepted() {
+        let mut channels = channels();
+        let mut session = channels
+            .accept(frame(2, Packet::Open { generation: 0 }))
+            .unwrap()
+            .unwrap();
+        channels
+            .accept(frame(2, Packet::End { generation: 0 }))
+            .unwrap();
+        let (queued, resume) = channels.handle.pause_after_end_queued();
+        let closing = async {
+            let SessionIo::Channel(io) = &mut session.stream else {
+                panic!("channel");
+            };
+            io.close().await
+        };
+        let peer = async {
+            queued.await.unwrap();
+            assert_eq!(ends(&drain(&mut channels)), [(true, 2, 0)]);
+            let reopened = channels.accept(frame(2, Packet::Open { generation: 1 }));
+            resume.send(()).unwrap();
+            reopened
+        };
+        let (closed, reopened) = tokio::join!(closing, peer);
+        closed.unwrap();
+        assert!(
+            reopened.unwrap().is_some(),
+            "the slot is closed before the peer can read its End, so the peer's next Open on that channel is not a quota violation"
         );
     }
 
@@ -1447,7 +1508,7 @@ pub(crate) mod tests {
     #[cfg(not(target_family = "wasm"))]
     #[tokio::test(start_paused = true)]
     async fn a_timed_out_generation_discards_late_fragments_then_reuses_its_slot() {
-        let channels = channels();
+        let mut channels = channels();
         let mut session = channels
             .accept(frame(2, Packet::Open { generation: 0 }))
             .unwrap()
@@ -1470,6 +1531,7 @@ pub(crate) mod tests {
                 .unwrap();
         }
         assert_eq!(channels.handle.retired_frames(), 2);
+        assert_eq!(ends(&drain(&mut channels)), [(true, 2, 0)]);
         channels
             .accept(frame(2, Packet::End { generation: 0 }))
             .unwrap();
@@ -1519,7 +1581,7 @@ pub(crate) mod tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
     async fn dropping_a_receiver_retires_its_partial_message() {
-        let channels = channels();
+        let mut channels = channels();
         let session = channels
             .accept(frame(2, Packet::Open { generation: 0 }))
             .unwrap()
@@ -1545,6 +1607,7 @@ pub(crate) mod tests {
                 },
             ))
             .unwrap();
+        assert_eq!(ends(&drain(&mut channels)), [(true, 2, 0)]);
         channels
             .accept(frame(2, Packet::End { generation: 0 }))
             .unwrap();
@@ -1656,10 +1719,16 @@ pub(crate) mod tests {
         channels
             .accept(frame(2, Packet::End { generation: 0 }))
             .unwrap();
-        session.close().await.unwrap();
+        let (outgoing, handle) = (&mut channels.outgoing, &channels.handle);
+        let (closed, written) = tokio::join!(session.close(), async {
+            let frame = outgoing.recv().await.unwrap();
+            handle.writing(&frame);
+            frame
+        });
+        closed.unwrap();
         assert!(channels.handle.state.lock().unwrap().slots.is_empty());
         assert!(matches!(
-            channels.outgoing.recv().await.unwrap().message,
+            written.message,
             Message::Channel(Packet::End { generation: 0 })
         ));
         assert!(

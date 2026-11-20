@@ -54,8 +54,7 @@ pub struct Hub {
     pub closes: AtomicUsize,
     pub stalled: AtomicBool,
     pub capacity: AtomicUsize,
-    cut: Mutex<Option<usize>>,
-    cut_waiters: Mutex<Vec<Waker>>,
+    cut: Mutex<CutGate>,
     stalled_peers: Mutex<HashSet<String>>,
     peer_dials: Mutex<HashMap<String, usize>>,
     protocol_dials: Mutex<HashMap<(String, String, Protocol), usize>>,
@@ -76,6 +75,11 @@ pub struct Hub {
     ordinals: Mutex<HashMap<(String, String, Protocol), u64>>,
     events: Mutex<Vec<String>>,
 }
+#[derive(Default)]
+struct CutGate {
+    budget: Option<usize>,
+    waiters: Vec<Waker>,
+}
 struct Announcement {
     node: [u8; 32],
     topics: Vec<[u8; 32]>,
@@ -92,8 +96,7 @@ impl Default for Hub {
             closes: AtomicUsize::new(0),
             stalled: AtomicBool::new(false),
             capacity: AtomicUsize::new(64 * 1024),
-            cut: Mutex::new(None),
-            cut_waiters: Mutex::default(),
+            cut: Mutex::default(),
             stalled_peers: Mutex::default(),
             peer_dials: Mutex::default(),
             protocol_dials: Mutex::default(),
@@ -346,41 +349,38 @@ impl Hub {
         });
     }
     pub fn cut_after(&self, bytes: Option<usize>) {
-        *self.cut.lock().unwrap_or_else(PoisonError::into_inner) = bytes;
-        for waker in self
-            .cut_waiters
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .drain(..)
-        {
+        let waiters: Vec<_> = {
+            let mut gate = self.cut.lock().unwrap_or_else(PoisonError::into_inner);
+            gate.budget = bytes;
+            std::mem::take(&mut gate.waiters)
+        };
+        for waker in waiters {
             waker.wake();
         }
     }
-    fn blocked(&self, cx: &Context<'_>) -> Poll<std::io::Result<()>> {
-        if !self.hold_cut.load(Ordering::SeqCst) {
-            return Poll::Ready(Err(cut()));
-        }
-        let mut waiters = self
-            .cut_waiters
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if !waiters.iter().any(|waker| waker.will_wake(cx.waker())) {
-            waiters.push(cx.waker().clone());
-        }
-        Poll::Pending
-    }
-    fn allow(&self, wanted: usize) -> Option<usize> {
-        match *self.cut.lock().unwrap_or_else(PoisonError::into_inner) {
-            None => Some(wanted),
-            Some(0) => None,
-            Some(left) => Some(wanted.min(left)),
+    fn allow_or_block(&self, wanted: usize, cx: &Context<'_>) -> Poll<std::io::Result<usize>> {
+        let mut gate = self.cut.lock().unwrap_or_else(PoisonError::into_inner);
+        match gate.budget {
+            None => Poll::Ready(Ok(wanted)),
+            Some(left) if left > 0 => Poll::Ready(Ok(wanted.min(left))),
+            Some(0) => {
+                if !self.hold_cut.load(Ordering::SeqCst) {
+                    return Poll::Ready(Err(cut()));
+                }
+                if !gate.waiters.iter().any(|waker| waker.will_wake(cx.waker())) {
+                    gate.waiters.push(cx.waker().clone());
+                }
+                Poll::Pending
+            }
+            Some(_) => unreachable!(),
         }
     }
     fn spend(&self, written: usize) {
-        self.written.send_modify(|total| *total += written);
-        if let Some(left) = &mut *self.cut.lock().unwrap_or_else(PoisonError::into_inner) {
+        let mut gate = self.cut.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(left) = &mut gate.budget {
             *left = left.saturating_sub(written);
         }
+        self.written.send_modify(|total| *total += written);
     }
 }
 
@@ -493,9 +493,7 @@ impl AsyncRead for Pipe {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        if self.hub.allow(1).is_none() {
-            return self.hub.blocked(cx);
-        }
+        let _ = ready!(self.hub.allow_or_block(1, cx))?;
         self.severed.check(cx)?;
         Pin::new(&mut self.io).poll_read(cx, buf)
     }
@@ -521,9 +519,7 @@ impl AsyncWrite for Pipe {
             ready!(delay.as_mut().poll(cx));
             self.delay = None;
         }
-        let Some(allowed) = self.hub.allow(buf.len()) else {
-            return self.hub.blocked(cx).map_ok(|()| 0);
-        };
+        let allowed = ready!(self.hub.allow_or_block(buf.len(), cx))?;
         let allowed = self.severed.allow(allowed);
         if allowed == 0 && !buf.is_empty() {
             return Poll::Ready(Err(cut()));

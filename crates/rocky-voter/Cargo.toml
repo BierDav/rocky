@@ -24,7 +24,6 @@ tokio = { version = "1", features = ["io-util", "sync", "rt-multi-thread", "macr
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
-rocky-secure = { path = "../rocky-secure" }
 
 [lints]
 workspace = true

@@ -390,7 +390,6 @@ pub(super) enum Rebuilding {
     TipSwitch,
     LostSeal,
     Rebootstrap,
-    Withdrawal,
     FullRebuild,
 }
 impl BrokenReference {
@@ -401,7 +400,6 @@ impl BrokenReference {
             Rebuilding::TipSwitch => "switching tips would replay rows",
             Rebuilding::LostSeal => "reopening a lost finalized seal would replay rows",
             Rebuilding::Rebootstrap => "the rebootstrap would replay rows",
-            Rebuilding::Withdrawal => "withdrawing the schema switch would replay rows",
             Rebuilding::FullRebuild => "the full rebuild would replay rows",
         };
         Error::Incompatible(format!("{refused} that break a foreign key: {}", self.0))

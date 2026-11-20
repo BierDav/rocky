@@ -17,7 +17,6 @@ pub struct ProjectionPlan {
 pub(super) enum PlanCause {
     Install,
     Switch,
-    Withdrawal,
 }
 
 struct Record {
@@ -123,13 +122,9 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
         };
-        let change = match cause {
-            PlanCause::Withdrawal => rocky_core::classify_withdrawal(&installed, schema, carried),
-            PlanCause::Install | PlanCause::Switch => {
-                rocky_core::classify_carrying(&installed, schema, carried)
-            }
-        };
-        match change.map_err(|refusal| incompatible(refusal.to_string()))? {
+        match rocky_core::classify_carrying(&installed, schema, carried)
+            .map_err(|refusal| incompatible(refusal.to_string()))?
+        {
             SchemaChange::Unchanged if cause == PlanCause::Install => return Ok(()),
             SchemaChange::Unchanged | SchemaChange::Local | SchemaChange::Replicated => {}
         }
@@ -248,39 +243,12 @@ impl<A: RowApplication> Inner<A> {
         let previous = self.workspace.typed.replace(projected.clone());
         let mut broken = None;
         let switched = transaction!(self, |inner| {
-            let switching = match &previous {
-                Some(old) => inner.begin_switch_history(old, &projected).await?,
-                None => None,
-            };
-            let removed = removed_replayed(&installed, &record.schema)
-                .next()
-                .is_some();
-            for table in removed_replayed(&installed, &record.schema) {
-                inner.touch(&table.sql_name);
-                inner
-                    .conn
-                    .execute(
-                        format!("DROP TABLE IF EXISTS {}", quoted(&table.sql_name)),
-                        (),
-                    )
-                    .await?;
-            }
-            inner.record_projection_access(&projected).await?;
-            let mut replayed = Vec::new();
-            for table in record.schema.tables.iter().filter(|table| {
-                table.class == TableClass::LocalOnly || projected.by_name(&table.sql_name).is_some()
-            }) {
-                inner.touch(&table.sql_name);
-                match table.class {
-                    TableClass::Replayed => replayed.push(table),
-                    TableClass::LocalOnly => inner.replace_indexes(&installed, table).await?,
-                }
-            }
             if let Err(refused) = inner
-                .rebuild_replayed(
+                .install_projection(
                     &installed,
                     &record.schema,
-                    &replayed,
+                    previous.as_deref(),
+                    &projected,
                     fields_on_switch_path.as_ref(),
                 )
                 .await?
@@ -288,15 +256,6 @@ impl<A: RowApplication> Inner<A> {
                 broken = Some(refused.clone());
                 return Err(refused.refuses(Rebuilding::SchemaProjection));
             }
-            inner.install_delete_triggers(&projected).await?;
-            inner
-                .reshape_undo(&installed, &record.schema, fields_on_switch_path.as_ref())
-                .await?;
-            if removed {
-                inner.redo_removed_writes(now()?).await?;
-            }
-            inner.install_history().await?;
-            inner.end_switch_history(&projected, switching).await?;
             #[cfg(test)]
             if std::mem::take(&mut inner.switch_fault) {
                 return Err(Error::Incompatible(
@@ -326,6 +285,75 @@ impl<A: RowApplication> Inner<A> {
             transaction!(self, |inner| inner.discard_plan().await)?;
         }
         Ok(finished)
+    }
+    pub(super) async fn install_projection(
+        &self,
+        installed: &LogicalSchema,
+        schema: &LogicalSchema,
+        previous: Option<&Typed>,
+        projected: &Typed,
+        carried: Option<&super::schemas::PathFields>,
+    ) -> Result<Result<(), BrokenReference>, Error> {
+        let switching = match previous {
+            Some(old) => self.begin_switch_history(old, projected).await?,
+            None => None,
+        };
+        let removed = removed_replayed(installed, schema).next().is_some();
+        for table in removed_replayed(installed, schema) {
+            self.touch(&table.sql_name);
+            self.conn
+                .execute(
+                    format!("DROP TABLE IF EXISTS {}", quoted(&table.sql_name)),
+                    (),
+                )
+                .await?;
+        }
+        self.record_projection_access(projected).await?;
+        let mut replayed = Vec::new();
+        for table in schema.tables.iter().filter(|table| {
+            table.class == TableClass::LocalOnly || projected.by_name(&table.sql_name).is_some()
+        }) {
+            self.touch(&table.sql_name);
+            match table.class {
+                TableClass::Replayed => replayed.push(table),
+                TableClass::LocalOnly => self.replace_indexes(installed, table).await?,
+            }
+        }
+        if let Err(refused) = self
+            .rebuild_replayed(installed, schema, &replayed, carried)
+            .await?
+        {
+            return Ok(Err(refused));
+        }
+        self.install_delete_triggers(projected).await?;
+        self.reshape_undo(installed, schema, carried).await?;
+        if removed {
+            self.redo_removed_writes(now()?).await?;
+        }
+        self.install_history().await?;
+        self.end_switch_history(projected, switching).await?;
+        Ok(Ok(()))
+    }
+    pub(super) async fn store_typed(
+        &self,
+        schema: &LogicalSchema,
+        domain: Scope,
+        readers: &BTreeMap<String, Commitment>,
+    ) -> Result<(), Error> {
+        let descriptor = schema
+            .canonical()
+            .map_err(|error| Error::Incompatible(error.to_string()))?;
+        self.conn
+            .execute(
+                "UPDATE secure_typed SET descriptor=?,domain=?,readers=? WHERE id=1",
+                bindings(vec![
+                    SqlValue::Blob(descriptor),
+                    SqlValue::Blob(encode(&domain)?),
+                    SqlValue::Blob(encode(readers)?),
+                ]),
+            )
+            .await?;
+        Ok(())
     }
     async fn replace_indexes(
         &self,
@@ -363,19 +391,7 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
     async fn finish_switch(&mut self, record: &Record) -> Result<(), Error> {
-        let descriptor = record
-            .schema
-            .canonical()
-            .map_err(|error| Error::Incompatible(error.to_string()))?;
-        self.conn
-            .execute(
-                "UPDATE secure_typed SET descriptor=?,domain=?,readers=? WHERE id=1",
-                bindings(vec![
-                    SqlValue::Blob(descriptor),
-                    SqlValue::Blob(encode(&record.domain)?),
-                    SqlValue::Blob(encode(&record.readers)?),
-                ]),
-            )
+        self.store_typed(&record.schema, record.domain, &record.readers)
             .await?;
         self.conn
             .execute("DELETE FROM secure_projection_plan", ())

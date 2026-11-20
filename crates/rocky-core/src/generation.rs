@@ -74,12 +74,6 @@ pub fn removed(old: &LogicalSchema, new: &LogicalSchema) -> Removed {
     removed
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ExistingRows {
-    WrittenUnderOld,
-    WrittenUnderNew,
-}
-
 pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange, Unsupported> {
     classify_carrying(old, new, |_, _| true)
 }
@@ -87,21 +81,6 @@ pub fn classify_carrying(
     old: &LogicalSchema,
     new: &LogicalSchema,
     carried: impl Fn(&LogicalTable, Option<&LogicalColumn>) -> bool,
-) -> Result<SchemaChange, Unsupported> {
-    judge(old, new, carried, ExistingRows::WrittenUnderOld)
-}
-pub fn classify_withdrawal(
-    old: &LogicalSchema,
-    new: &LogicalSchema,
-    carried: impl Fn(&LogicalTable, Option<&LogicalColumn>) -> bool,
-) -> Result<SchemaChange, Unsupported> {
-    judge(old, new, carried, ExistingRows::WrittenUnderNew)
-}
-fn judge(
-    old: &LogicalSchema,
-    new: &LogicalSchema,
-    carried: impl Fn(&LogicalTable, Option<&LogicalColumn>) -> bool,
-    rows: ExistingRows,
 ) -> Result<SchemaChange, Unsupported> {
     if old.publisher != new.publisher || old.application != new.application {
         return Err(Unsupported::Application);
@@ -177,9 +156,6 @@ fn judge(
                     .column(name)
                     .is_some_and(|column| column.not_null && defaulted(column))
         };
-        if rows == ExistingRows::WrittenUnderNew {
-            continue;
-        }
         for key in &after.foreign_keys {
             if key.columns.iter().any(starts_empty) {
                 continue;
@@ -438,32 +414,6 @@ mod tests {
             classify(&fresh, &linked_items),
             Ok(SchemaChange::Replicated),
             "a new table may reference any table"
-        );
-    }
-
-    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-    fn a_withdrawal_restores_references_its_rows_were_written_under() {
-        let unlinked = linked(&["item"], Vec::new());
-        let linked_items = linked(
-            &["item"],
-            vec![reference("item", "items", crate::DELETE_CASCADE, false)],
-        );
-        let everything = |_: &LogicalTable, _: Option<&LogicalColumn>| true;
-        assert_eq!(
-            classify(&unlinked, &linked_items),
-            Err(Unsupported::AddedReference("tags(item) -> items".into()))
-        );
-        assert_eq!(
-            classify_withdrawal(&unlinked, &linked_items, everything),
-            Ok(SchemaChange::Replicated),
-            "withdrawing a schema that dropped a reference returns to the schema its rows satisfied"
-        );
-        let mut required = linked_items.clone();
-        required.tables[2].columns.push(column("label", true));
-        assert_eq!(
-            classify_withdrawal(&unlinked, &required, everything),
-            Err(Unsupported::RequiredField("tags.label".into())),
-            "a withdrawal still judges its fields"
         );
     }
 

@@ -1225,6 +1225,20 @@ impl<A: RowApplication> Inner<A> {
         self.workspace.bulk.switching.store(true, Ordering::SeqCst);
         Ok(Some(Switching { copied }))
     }
+    pub(super) async fn drop_unprojected_history(
+        &self,
+        old: &Typed,
+        new: &Typed,
+    ) -> Result<(), Error> {
+        for history in History::of(old) {
+            if new.by_name(&history.name()).is_none() {
+                self.conn
+                    .execute(format!("DROP TABLE IF EXISTS {}", history.history), ())
+                    .await?;
+            }
+        }
+        Ok(())
+    }
     pub(super) fn abandon_switch_history(&self) {
         self.workspace.bulk.switching.store(false, Ordering::SeqCst);
     }

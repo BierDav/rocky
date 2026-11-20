@@ -10,8 +10,6 @@ fn leave_only_the_pruned_issuer_to_serve_c(hub: &Hub) {
     hub.set_down("b", "c", true);
 }
 
-const INTENT_NEWER_THAN_IDENTITY: &[u8] = b"2";
-
 async fn retry_after_restoring_authority(device: &Device) {
     snap::ok(device.session.set_networking_enabled(true)).await;
 }
@@ -501,6 +499,80 @@ async fn a_join_stays_pending_until_it_meets_its_inviter() -> Result<(), Failure
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_join_that_learns_a_revocation_before_meeting_its_inviter_still_waits_for_it()
+-> Result<(), Failure> {
+    use rocky_sdk::transport::{Connector, Transport};
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a_path = root.path().join("a");
+    let a = Device::create(&a_path, Some(Network::Owned(hub.connector("a"))))?;
+    let inviter = a.node().await;
+    a.add(1, "base").await;
+    let b = Device::join(
+        &root.path().join("b"),
+        &a.invite().await,
+        Network::Owned(hub.connector("b")),
+    )?;
+    b.sync().await.expect("b joins");
+    let d = Device::join(
+        &root.path().join("d"),
+        &a.invite().await,
+        Network::Owned(hub.connector("d")),
+    )?;
+    d.sync().await.expect("d joins");
+    let gate = Arc::new(Gate {
+        inner: hub
+            .connector("gated")
+            .start(false, [11; 32])
+            .await?
+            .transport,
+        allowed: tokio::sync::watch::channel(true).0,
+        attempts: tokio::sync::watch::channel(0).0,
+        refuse: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        max_attempts: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+        pause_on_attempt: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+    });
+    let c_path = root.path().join("c");
+    let c = Device::join(&c_path, &a.invite().await, Network::Borrowed(gate.clone()))?;
+    c.close().await;
+    gate.close().await;
+    snap::ok(a.session.revoke_identity(&snap::text(&d.identity().await))).await;
+    a.add(2, "after enrolment").await;
+    b.sync().await.expect("b learns the revocation from a");
+    d.close().await;
+    a.close().await;
+
+    let c = Device::open(&c_path, Some(Network::Owned(hub.connector("c"))))?;
+    c.add_peer(&b.contact().await).await.expect("c knows b");
+    let _ = c.sync().await;
+    assert_eq!(
+        c.session.info().await?.revocations.statements,
+        1,
+        "c learns the revocation from b before it meets its inviter"
+    );
+    let status = snap::ok(c.session.status()).await;
+    assert_eq!(
+        status["data"]["bootstrap_pending"], true,
+        "a revocation learned from b must not end the wait for the inviter: {status}"
+    );
+    let intent: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(c_path.join("bootstrap.json"))?)?;
+    assert_eq!(intent["inviter"], inviter, "{intent}");
+
+    let a = Device::open(&a_path, Some(Network::Owned(hub.connector("a"))))?;
+    c.sync().await.expect("c meets its inviter");
+    assert_eq!(
+        snap::ok(c.session.status()).await["data"]["bootstrap_pending"],
+        false
+    );
+    assert_eq!(c.titles().await, ["after enrolment", "base"]);
+    for device in [c, b, a] {
+        device.close().await;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn renewal_after_missed_key_epochs_uses_a_checkpoint_without_acquiring_old_keys()
 -> Result<(), Failure> {
     let root = crate::support::small_directory()?;
@@ -634,7 +706,7 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
     assert!(common::exchange_failed(&member.sync().await));
     let progress: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path.join("bootstrap.json"))?)?;
-    let pending = progress["pending"]
+    let pending = progress["imports"]["scopes"]
         .as_array()
         .expect("pending scopes")
         .clone();
@@ -658,7 +730,7 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
     let reopened: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path.join("bootstrap.json"))?)?;
     assert_eq!(
-        reopened["pending"].as_array(),
+        reopened["imports"]["scopes"].as_array(),
         Some(&pending),
         "the interrupted scopes stay pending across an offline reopen"
     );
@@ -684,11 +756,9 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Failure> {
-    use rocky_sdk::{
-        Database, Open,
-        transport::{Connector, Transport},
-    };
+async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_that_inviter_is_revoked()
+-> Result<(), Failure> {
+    use rocky_sdk::{Database, Open};
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let schema = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"body","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
@@ -705,19 +775,25 @@ async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Fa
         None,
     )?)?;
     a.add(1, "base").await;
-    let gate = Arc::new(Gate {
-        inner: hub
-            .connector("member")
-            .start(false, [10; 32])
-            .await?
-            .transport,
-        allowed: tokio::sync::watch::channel(true).0,
-        attempts: tokio::sync::watch::channel(0).0,
-        refuse: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        max_attempts: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
-        pause_on_attempt: Arc::new(std::sync::atomic::AtomicU64::new(2)),
-    });
-    let mut attempts = gate.attempts.subscribe();
+    let invitation = a
+        .invite_as(json!({"kind": "reader", "scopes": ["notes"]}))
+        .await;
+    let c = Device::new(Database::join(
+        Open {
+            identity: None,
+            directory: &root.path().join("unmet"),
+            schema,
+            secrets: None,
+            network: Some(Network::Owned(hub.connector("unmet"))),
+            coordination: None,
+        },
+        &invitation,
+    )?)?;
+    c.sync().await.expect("join");
+    let unmet_inviter = c.node().await;
+    let unmet_identity = c.identity().await;
+    c.close().await;
+
     let path = root.path().join("member");
     let invitation = a
         .invite_as(json!({"kind": "writer", "scopes": ["items", "notes"]}))
@@ -728,44 +804,41 @@ async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Fa
             directory: &path,
             schema,
             secrets: None,
-            network: Some(Network::Borrowed(gate.clone())),
+            network: Some(Network::Owned(hub.connector("member"))),
             coordination: None,
         },
         &invitation,
     )?)?;
-    attempts.wait_for(|count| *count >= 2).await?;
-    rocky_credentials::write_private(&path.join("bootstrap.json"), INTENT_NEWER_THAN_IDENTITY)?;
-    gate.allowed.send_replace(true);
-    assert!(common::exchange_failed(&member.sync().await));
+    member.sync().await.expect("join");
+    member.close().await;
+    let intent_awaiting_an_unmet_inviter = format!(
+        r#"{{"version":1,"imports":{{"scopes":[]}},"totals":[],"inviter":"{unmet_inviter}"}}"#
+    );
+    rocky_credentials::write_private(
+        &path.join("bootstrap.json"),
+        intent_awaiting_an_unmet_inviter.as_bytes(),
+    )?;
+    let member = Device::new(Database::open(Open {
+        identity: None,
+        directory: &path,
+        schema,
+        secrets: None,
+        network: Some(Network::Owned(hub.connector("member"))),
+        coordination: None,
+    })?)?;
+    let _ = member.sync().await;
     assert_eq!(
-        std::fs::read(path.join("bootstrap.json"))?,
-        INTENT_NEWER_THAN_IDENTITY
+        std::fs::read_to_string(path.join("bootstrap.json")).ok(),
+        Some(intent_awaiting_an_unmet_inviter),
+        "a bootstrap that completes without meeting the named inviter keeps waiting for it"
     );
     assert_eq!(
         snap::ok(member.session.status()).await["data"]["bootstrap_pending"],
-        true
+        true,
+        "an intent naming an inviter the node has not met keeps the bootstrap pending"
     );
-    let c_path = root.path().join("revoked");
-    let invitation = a
-        .invite_as(json!({"kind": "reader", "scopes": ["notes"]}))
-        .await;
-    let c = Device::new(Database::join(
-        Open {
-            identity: None,
-            directory: &c_path,
-            schema,
-            secrets: None,
-            network: Some(Network::Owned(hub.connector("revoked"))),
-            coordination: None,
-        },
-        &invitation,
-    )?)?;
-    c.sync().await.expect("join");
-    snap::ok(
-        a.session
-            .revoke_identity(&(snap::text(&(c.identity().await)))),
-    )
-    .await;
+
+    snap::ok(a.session.revoke_identity(&snap::text(&unmet_identity))).await;
     snap::ok(async {
         member.session.renew().await?;
         member.session.info().await
@@ -776,12 +849,10 @@ async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Fa
     assert_eq!(
         snap::ok(member.session.status()).await["data"]["bootstrap_pending"],
         false,
-        "once the issuer supplies epoch 2, renewal resets all scopes and catches up"
+        "once the unmet inviter is revoked, renewal resets all scopes and the bootstrap clears"
     );
     assert_eq!(member.titles().await, ["base"]);
     member.close().await;
-    c.close().await;
-    gate.close().await;
     a.close().await;
     Ok(())
 }
@@ -792,7 +863,7 @@ async fn an_intent_without_offers_reports_no_progress() -> Result<(), Failure> {
     Device::create(root.path(), None)?.close().await;
     rocky_credentials::write_private(
         &root.path().join("bootstrap.json"),
-        br#"{"intent":true,"pending":[],"totals":[]}"#,
+        br#"{"version":1,"imports":{"scopes":[]},"totals":[],"inviter":null}"#,
     )?;
     let device = Device::open(root.path(), None)?;
     let status = snap::ok(device.session.status()).await;

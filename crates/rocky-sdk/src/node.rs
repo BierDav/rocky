@@ -30,6 +30,7 @@ mod tip_nodes;
 mod tips;
 use crate::{
     Failure,
+    bootstrap_intent::{BootstrapIntent, BootstrapIntentFile, Finished, Imports},
     domain::Domain,
     enrollment::{Contact, Settings, Terms, exchange, now},
     peer::{PeerReply, PeerRequest},
@@ -48,7 +49,6 @@ use rocky_secure::{
     SecureSession, SecureSql, SqlError, SqlOptions, Unavailable, secure_node_id,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 pub(crate) use shared::{SettingsCell, SettingsGuard, Shared};
 use std::{
     collections::BTreeMap,
@@ -276,6 +276,7 @@ pub(crate) struct Node {
     clients: std::sync::Mutex<BTreeMap<u64, Arc<Client>>>,
     syncing: Mutex<()>,
     bootstrap: Mutex<()>,
+    pub(crate) bootstrap_intent: BootstrapIntentFile,
     retry_seed: u64,
     retries: std::sync::Mutex<BTreeMap<PublicKey, PeerRetry>>,
     backoff_tip: std::sync::Mutex<Option<rocky_core::TipId>>,
@@ -359,6 +360,7 @@ impl Node {
         vault: Vault,
         settings: Settings,
         path: PathBuf,
+        bootstrap_intent: BootstrapIntentFile,
     ) -> Self {
         let settings_schema = settings.schema.clone();
         let revocation_notice = crate::enrollment::RevocationNotice::open(&settings, &path);
@@ -405,6 +407,7 @@ impl Node {
             clients: std::sync::Mutex::new(BTreeMap::new()),
             syncing: Mutex::new(()),
             bootstrap: Mutex::new(()),
+            bootstrap_intent,
             retry_seed: rocky_platform::entropy::random_u64(),
             retries: std::sync::Mutex::new(BTreeMap::new()),
             backoff_tip: std::sync::Mutex::new(None),
@@ -1111,25 +1114,16 @@ impl Node {
         })
     }
     async fn bootstrap_progress(&self) -> Result<Option<crate::BootstrapProgress>, Failure> {
-        let intent: Value =
-            match rocky_platform::fs::read(self.path.with_file_name("bootstrap.json")) {
-                Ok(bytes) => serde_json::from_slice(&bytes)?,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Ok(None);
-                }
-                Err(error) => return Err(error.into()),
-            };
-        let Some(totals) = intent.get("totals") else {
+        let Some(intent) = self.bootstrap_intent.load()? else {
             return Ok(None);
         };
-        let totals: Vec<sync::Planned> = serde_json::from_value(totals.clone())?;
+        let totals = intent.totals();
         if totals.is_empty() {
             return Ok(None);
         }
-        let pending: Vec<ResourceScope> = serde_json::from_value(intent["pending"].clone())?;
         let (mut rows_done, mut scopes_done) = (0, 0);
-        for planned in &totals {
-            if pending.contains(&planned.scope) {
+        for planned in totals {
+            if intent.imports().includes(&planned.scope) {
                 rows_done += self
                     .replica
                     .imported_rows(planned.scope, planned.checkpoint)
@@ -1629,7 +1623,7 @@ impl Node {
         let restores_revoked_authors =
             (!epochs_only || !settings.issuer()) && settings.lacks(&renewed.revocations)?;
         if restores_revoked_authors {
-            self.request_checkpoint_import()?;
+            self.bootstrap_intent.request_checkpoint_import()?;
         }
         if epochs_only {
             renewed.chain = settings.credentials.clone();
@@ -2046,7 +2040,7 @@ impl Node {
         Ok((report, outcome.retry))
     }
     #[cfg(test)]
-    async fn sync(&self, transport: &dyn Transport) -> Result<(Value, bool), Failure> {
+    async fn sync(&self, transport: &dyn Transport) -> Result<(serde_json::Value, bool), Failure> {
         let (report, retry) = self.sync_optional(Some(transport)).await?;
         Ok((crate::test_snapshot::Snapshot::snapshot(report), retry))
     }
@@ -2131,7 +2125,7 @@ impl Node {
                 self.learned.store(true, Ordering::SeqCst);
             }
             if !draft.issuer() && !added.is_empty() {
-                self.request_checkpoint_import()?;
+                self.bootstrap_intent.request_checkpoint_import()?;
             }
         }
         if let Some(statement) = revoking
@@ -2163,14 +2157,13 @@ impl Node {
         self.refresh_importing().await?;
         self.sweep_deliveries().await
     }
-    async fn bootstrap_pending(&self, intent: &Value) -> Result<Vec<ResourceScope>, Failure> {
-        let token = intent.get("intent").unwrap_or(intent);
-        if token != &json!(true) {
-            return Err(refused("invalid bootstrap authority intent"));
-        }
-        let pending: Vec<ResourceScope> = match intent.get("pending") {
-            Some(pending) => serde_json::from_value(pending.clone())?,
-            None => self.scopes(),
+    async fn bootstrap_pending(
+        &self,
+        intent: &BootstrapIntent,
+    ) -> Result<Vec<ResourceScope>, Failure> {
+        let pending = match intent.imports() {
+            Imports::Granted => self.scopes(),
+            Imports::Scopes(scopes) => scopes.clone(),
         };
         if pending.iter().any(|scope| !self.scopes().contains(scope)) {
             return Err(refused("bootstrap intent names an ungranted scope"));
@@ -2189,10 +2182,6 @@ impl Node {
             None => Ok(()),
         }
     }
-    fn request_checkpoint_import(&self) -> Result<(), Failure> {
-        rocky_credentials::write_private(&self.path.with_file_name("bootstrap.json"), b"true")?;
-        Ok(())
-    }
     async fn awaits_rotated_keys(&self) -> bool {
         self.learned.load(Ordering::SeqCst) || self.awaits_key_epoch().await
     }
@@ -2209,39 +2198,16 @@ impl Node {
             })
         })
     }
-    fn awaited_inviter(&self) -> Option<PublicKey> {
-        let bytes = rocky_platform::fs::read(self.path.with_file_name("bootstrap.json")).ok()?;
-        serde_json::from_slice::<Value>(&bytes)
-            .ok()?
-            .get("inviter")?
-            .as_str()?
-            .parse()
-            .ok()
-    }
-    async fn awaits_inviter(
-        &self,
-        peer: PublicKey,
-        intent: &[u8],
-    ) -> Result<Option<Vec<u8>>, Failure> {
-        let mut intent: Value = serde_json::from_slice(intent)?;
-        let Some(inviter) = intent.get("inviter").and_then(Value::as_str) else {
-            return Ok(None);
-        };
-        let inviter: PublicKey = inviter.parse()?;
-        if inviter == peer || self.settings.lock().await.revocations.revokes(&inviter) {
-            return Ok(None);
-        }
-        intent["pending"] = json!([]);
-        Ok(Some(serde_json::to_vec(&intent)?))
+    fn awaited_inviter(&self) -> Result<Option<PublicKey>, Failure> {
+        Ok(self
+            .bootstrap_intent
+            .load()?
+            .and_then(|intent| intent.inviter()))
     }
     pub(crate) async fn refresh_importing(&self) -> Result<(), Failure> {
-        let pending = match rocky_platform::fs::read(self.path.with_file_name("bootstrap.json")) {
-            Ok(bytes) => match serde_json::from_slice(&bytes) {
-                Ok(intent) => self.bootstrap_pending(&intent).await.unwrap_or_default(),
-                Err(_) => Vec::new(),
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => return Err(error.into()),
+        let pending = match self.bootstrap_intent.load()? {
+            Some(intent) => self.bootstrap_pending(&intent).await.unwrap_or_default(),
+            None => Vec::new(),
         };
         self.replica
             .set_importing(pending.into_iter().collect())
@@ -3154,15 +3120,14 @@ pub(crate) fn call_failure(error: &Failure) -> crate::CallFailure {
     }
 }
 #[cfg(test)]
-pub(crate) fn error(error: &Failure) -> Value {
+pub(crate) fn error(error: &Failure) -> serde_json::Value {
     let failure = call_failure(error);
-    let mut value =
-        json!({"code": failure.code, "retryable": failure.retryable, "message": failure.detail});
+    let mut value = serde_json::json!({"code": failure.code, "retryable": failure.retryable, "message": failure.detail});
     if let Some(time) = failure.coordinator_time {
-        value["coordinator_time"] = json!(time);
+        value["coordinator_time"] = serde_json::json!(time);
     }
     if !failure.blockers.is_empty() {
-        value["blockers"] = json!(failure.blockers);
+        value["blockers"] = serde_json::json!(failure.blockers);
     }
     value
 }

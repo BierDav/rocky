@@ -166,8 +166,8 @@ impl Node {
         first: NativeSession,
         transfer: &mut sync::Transfer,
     ) -> Result<Bootstrap, Failure> {
-        let marker = self.path.with_file_name("bootstrap.json");
-        if !rocky_platform::fs::exists(&marker) {
+        let file = &self.bootstrap_intent;
+        if !file.exists() {
             return Ok(Bootstrap::NotPending {
                 first: Box::new(first),
             });
@@ -175,10 +175,8 @@ impl Node {
         self.sync_state
             .send_replace(SyncActivityState::Bootstrapping);
         self.acquire_schemas(transport).await?;
-        let expected = rocky_platform::fs::read(&marker)?;
-        let pending = self
-            .bootstrap_pending(&serde_json::from_slice(&expected)?)
-            .await?;
+        let expected = file.load()?.ok_or("the bootstrap intent disappeared")?;
+        let pending = self.bootstrap_pending(&expected).await?;
         self.replica
             .set_importing(pending.iter().copied().collect())
             .await;
@@ -191,7 +189,7 @@ impl Node {
             &self.replica,
             upstream,
             &pending,
-            &marker,
+            file,
             expected,
             transfer,
             Some(first),
@@ -201,39 +199,34 @@ impl Node {
         .flatten();
         match completed {
             Some(completed) => {
-                self.finish_bootstrap(peer, &marker, &completed).await?;
+                self.finish_bootstrap(peer, &completed).await?;
                 Ok(Bootstrap::Finished)
             }
             None => Ok(Bootstrap::Interrupted {
-                importing: self
-                    .bootstrap_pending(&serde_json::from_slice(&rocky_platform::fs::read(
-                        &marker,
-                    )?)?)
-                    .await?,
+                importing: match file.load()? {
+                    Some(intent) => self.bootstrap_pending(&intent).await?,
+                    None => Vec::new(),
+                },
             }),
         }
     }
     async fn finish_bootstrap(
         &self,
         peer: PublicKey,
-        marker: &std::path::Path,
-        completed: &[u8],
+        completed: &BootstrapIntent,
     ) -> Result<(), Failure> {
         self.replica.flush().await?;
-        if rocky_platform::fs::read(marker)? != completed {
-            return Err("bootstrap authority changed; retry with the new intent".into());
-        }
+        let finished = self.bootstrap_intent.finish(
+            completed,
+            peer,
+            &self.settings.lock().await.revocations,
+        )?;
         self.replica
             .set_importing(std::collections::BTreeSet::new())
             .await;
-        if let Some(waiting) = self.awaits_inviter(peer, completed).await? {
-            rocky_credentials::write_private(marker, &waiting)?;
+        if finished == Finished::AwaitingInviter {
             return Ok(());
         }
-        rocky_platform::fs::remove_file(marker)?;
-        #[cfg(unix)]
-        std::fs::File::open(marker.parent().ok_or("bootstrap marker has no directory")?)?
-            .sync_all()?;
         self.activity
             .record(crate::ActivityKind::BootstrapFinished {
                 peer: (peer).to_owned(),

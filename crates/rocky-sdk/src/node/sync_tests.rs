@@ -1,5 +1,6 @@
 use crate::test_snapshot as snap;
 use rocky_credentials::testing::MemoryKeys;
+mod bootstrap_intent;
 mod coordination;
 mod state_advice;
 mod status;
@@ -9,6 +10,7 @@ use crate::{
     schema::Schema,
     transport::{Connector, memory::Hub},
 };
+use serde_json::{Value, json};
 
 const SCHEMA: &str = r#"{"application":"sync","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
@@ -110,6 +112,7 @@ async fn node_on(
         vault,
         settings,
         root.join("identity.json"),
+        BootstrapIntentFile::in_directory(root),
     ));
     node.link(transport, true).await?;
     Ok(node)

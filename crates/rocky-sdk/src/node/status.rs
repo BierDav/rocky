@@ -187,9 +187,8 @@ impl Node {
                 pages_complete: staging.map(|(_, _, complete)| complete),
             });
         }
-        let bootstrap_pending =
-            rocky_platform::fs::exists(self.path.with_file_name("bootstrap.json"))
-                || imports.iter().any(|scope| scope.checkpoint.is_some());
+        let bootstrap_pending = self.bootstrap_intent.exists()
+            || imports.iter().any(|scope| scope.checkpoint.is_some());
         let renewal_routes = settings.renewal_routes();
         let revision = *self.replica.observe_revision().borrow();
         let mut status = DatabaseStatus {
@@ -388,16 +387,11 @@ impl Node {
                 since: failure.since,
             });
         }
-        let marker = self.path.with_file_name("bootstrap.json");
-        let intent: Value = match rocky_platform::fs::read(&marker) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(blockers),
-            Err(error) => return Err(error.into()),
+        let file = &self.bootstrap_intent;
+        let Some(intent) = file.load()? else {
+            return Ok(blockers);
         };
-        let since = rocky_platform::fs::modified(&marker)
-            .ok()
-            .and_then(|time| time.duration_since(web_time::UNIX_EPOCH).ok())
-            .map(|elapsed| elapsed.as_secs());
+        let since = file.recorded_at_epoch_seconds();
         for scope in self.bootstrap_pending(&intent).await.unwrap_or_default() {
             blockers.push(Blocker {
                 scope: scope_label(&scope),
@@ -406,15 +400,12 @@ impl Node {
                 since,
             });
         }
-        if let Some(inviter) = intent.get("inviter").and_then(Value::as_str)
-            && let Ok(key) = inviter.parse::<PublicKey>()
-            && !self.settings.lock().await.revocations.revokes(&key)
-        {
+        if let Some(inviter) = intent.awaited_inviter(&self.settings.lock().await.revocations) {
             blockers.push(Blocker {
                 scope: domain_label(&self.domain().scope),
                 kind: BlockerKind::AwaitingInviter,
                 clears_by: ClearsBy::Peer {
-                    node: inviter.to_owned(),
+                    node: inviter.to_hex(),
                 },
                 since,
             });

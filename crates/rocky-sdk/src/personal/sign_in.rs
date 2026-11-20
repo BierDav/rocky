@@ -4,6 +4,7 @@ use super::{
 };
 use crate::{
     Failure, Freshness,
+    bootstrap_intent::{BOOTSTRAP_INTENT_FILE, BootstrapIntentFile},
     enrollment::{Settings, exchange, now},
     escrow::{Archived, Recovered},
     groups::{GroupRecord, NAMING_ROLE, record_key, secret_role},
@@ -61,7 +62,7 @@ pub(crate) fn prepare_sign_in(
             "rocky.sqlite-wal",
             "rocky.sqlite-shm",
             "revoked.json",
-            "bootstrap.json",
+            BOOTSTRAP_INTENT_FILE,
             "mailbox.json",
             crate::backup::MARKER,
         ] {
@@ -133,6 +134,7 @@ struct Candidate {
 pub(crate) async fn install(
     path: &Path,
     directory: &Path,
+    bootstrap_intent: &BootstrapIntentFile,
     secrets: &Arc<dyn SecretStore>,
     schema: &crate::Schema,
     sign_in: &SignIn,
@@ -175,6 +177,7 @@ pub(crate) async fn install(
             let (transport, owned) = network.start(true, route_secret).await?;
             let installed = discovered(
                 (path, directory),
+                bootstrap_intent,
                 secrets,
                 schema,
                 &account,
@@ -362,6 +365,7 @@ async fn fetch(
 
 async fn discovered(
     (path, directory): (&Path, &Path),
+    bootstrap_intent: &BootstrapIntentFile,
     secrets: &Arc<dyn SecretStore>,
     schema: &crate::Schema,
     account: &PersonalAccount,
@@ -479,7 +483,7 @@ async fn discovered(
             false,
             now()?,
         )?;
-        rocky_credentials::write_private(&directory.join("bootstrap.json"), b"true")?;
+        bootstrap_intent.request_checkpoint_import()?;
         installing.installed(&vault, &coverage)?;
         settings.save(path)?;
         return Ok((settings, coverage, freshness));

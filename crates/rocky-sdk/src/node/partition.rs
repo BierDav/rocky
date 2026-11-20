@@ -401,12 +401,12 @@ impl Node {
             return Ok(false);
         }
         if bootstrap {
-            self.save_bootstrap(
-                partition
+            self.bootstrap_intent.add_scopes(
+                &partition
                     .members
                     .iter()
                     .map(|member| member.scope)
-                    .collect(),
+                    .collect::<Vec<_>>(),
             )?;
         }
         crate::delivery::fault::check(
@@ -879,25 +879,6 @@ impl Node {
                 .map(|member| member.scope)
                 .collect()
         };
-        self.save_bootstrap(added)
-    }
-    fn save_bootstrap(&self, added: Vec<ResourceScope>) -> Result<(), Failure> {
-        let marker = self.path.with_file_name("bootstrap.json");
-        let mut intent = if rocky_platform::fs::exists(&marker) {
-            serde_json::from_slice::<Value>(&rocky_platform::fs::read(&marker)?)?
-        } else {
-            json!({"intent": true, "pending": []})
-        };
-        let Some(pending) = intent.get_mut("pending").and_then(Value::as_array_mut) else {
-            return Ok(());
-        };
-        for scope in &added {
-            let scope = serde_json::to_value(scope)?;
-            if !pending.contains(&scope) {
-                pending.push(scope);
-            }
-        }
-        rocky_credentials::write_private(&marker, &serde_json::to_vec(&intent)?)?;
-        Ok(())
+        self.bootstrap_intent.add_scopes(&added)
     }
 }

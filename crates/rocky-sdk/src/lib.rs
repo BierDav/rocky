@@ -9,6 +9,7 @@
 )]
 mod activity;
 mod backup;
+mod bootstrap_intent;
 mod claims;
 mod configuration;
 mod connection;
@@ -30,6 +31,7 @@ mod membership;
 mod mesh;
 mod node;
 mod partitions;
+mod pause;
 mod peer;
 mod personal;
 mod reactor;

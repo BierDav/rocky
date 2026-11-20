@@ -1,5 +1,4 @@
 use crate::{Error, PrivateKey, PublicKey, Signature};
-use rocky_core::ResourceScope;
 use rocky_platform::fs;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -11,29 +10,7 @@ pub struct Publisher(pub PublicKey);
 pub struct Identity(pub PublicKey);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct SigningDevice(pub PublicKey);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct TransportEndpoint(pub [u8; 32]);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ReaderScope {
-    pub scope: ResourceScope,
-    pub epoch: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CoordinatorControl(pub PublicKey);
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExternalLogin {
-    pub provider: String,
-    pub subject: String,
-}
-
-pub trait LoginProvider: Send + Sync {
-    fn verify(&self, assertion: &[u8], time: u64) -> Result<ExternalLogin, Error>;
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purpose {

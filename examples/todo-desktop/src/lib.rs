@@ -1,4 +1,3 @@
-pub mod secure_demo;
 mod status;
 
 use dioxus::prelude::*;

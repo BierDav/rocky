@@ -7418,12 +7418,8 @@ name = "todo-desktop"
 version = "0.1.0"
 dependencies = [
  "dioxus",
- "employees-app",
- "rocky-core",
  "rocky-iroh",
  "rocky-sdk",
- "rocky-secure",
- "tempfile",
  "todo-app",
  "tokio",
 ]

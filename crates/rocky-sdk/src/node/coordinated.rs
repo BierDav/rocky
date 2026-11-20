@@ -8,8 +8,10 @@ impl Node {
                 && named.identity != client.identity()
             {
                 return Err(coordination_refusal(
-                    rocky_secure::COORDINATOR_MISMATCH,
-                    "this coordinator is not the one the database's owner-signed settings name",
+                    rocky_secure::Refusal::CoordinatorMismatch(
+                        "this coordinator is not the one the database's owner-signed settings name"
+                            .into(),
+                    ),
                 ));
             }
             let settings = self.settings.lock().await;
@@ -74,8 +76,9 @@ impl Node {
             let client = connector.connect(&bundle)?;
             if client.identity() != bundle.identity {
                 return Err(coordination_refusal(
-                    rocky_secure::COORDINATOR_MISMATCH,
-                    "the connector reached another coordinator than the settings name",
+                    rocky_secure::Refusal::CoordinatorMismatch(
+                        "the connector reached another coordinator than the settings name".into(),
+                    ),
                 ));
             }
             self.coordinate(Some(client)).await?;
@@ -112,18 +115,17 @@ impl Node {
             && client.identity() != named.identity
         {
             return Err(coordination_refusal(
-                rocky_secure::COORDINATOR_MISMATCH,
-                "this coordinator is not the one the database's owner-signed settings name",
+                rocky_secure::Refusal::CoordinatorMismatch(
+                    "this coordinator is not the one the database's owner-signed settings name"
+                        .into(),
+                ),
             ));
         }
         Ok(())
     }
 }
-pub(super) fn coordination_refusal(code: &'static str, message: &str) -> Failure {
-    Box::new(Error::Application(Box::new(rocky_secure::Refusal {
-        code,
-        message: message.to_owned(),
-    })))
+pub(super) fn coordination_refusal(refusal: rocky_secure::Refusal) -> Failure {
+    Box::new(Error::Application(Box::new(refusal)))
 }
 impl Node {
     pub(super) fn coordinator(&self) -> Option<Arc<dyn Coordinator>> {

@@ -13,13 +13,13 @@ const MAX_PENDING_RECEIVED: usize = 32;
 enum Ending {
     Ended,
     Lost,
-    Refused(&'static str, String),
-    Unconfirmed { code: &'static str, reason: String },
+    Refused(Refusal),
+    Unconfirmed(Refusal),
 }
 pub(super) enum Entry {
     Won,
     Lost,
-    Waiting { code: &'static str, reason: String },
+    Waiting(Refusal),
 }
 pub(in crate::replica) struct Coordinated {
     pub kept: Vec<TipStatement>,
@@ -72,10 +72,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .is_none()
                 {
                     if strict {
-                        return Err(refusal(
-                            "genesis_minimum_missing",
-                            "the owner must provision the genesis line's signed minimum",
-                        ));
+                        return Err(refusal(Refusal::GenesisMinimumMissing(
+                            "the owner must provision the genesis line's signed minimum".into(),
+                        )));
                     }
                     deferred.insert(statement.id()?);
                     continue;
@@ -88,10 +87,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 }
                 let ending = match usable {
                     Some(coordinator) => self.end_log(seal, coordinator, own).await?,
-                    None => Ending::Unconfirmed {
-                        code: "recovery_pending",
-                        reason: "recovery needs its line's trusted acknowledgments".into(),
-                    },
+                    None => Ending::Unconfirmed(Refusal::RecoveryPending(
+                        "recovery needs its line's trusted acknowledgments".into(),
+                    )),
                 };
                 if matches!(ending, Ending::Ended)
                     && let Some(coordinator) = usable
@@ -101,13 +99,23 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     continue;
                 }
                 match ending {
-                    Ending::Refused(code, reason) if strict => return Err(refusal(code, &reason)),
-                    Ending::Refused(..) => { dropped.insert(statement.id()?); }
-                    Ending::Unconfirmed { code, reason, .. } if strict => return Err(Error::Application(Box::new(Unconfirmed { code, message: reason }))),
-                    _ if strict => return Err(Error::Application(Box::new(Unconfirmed {
-                        code: "recovery_pending", message: "the signed recovery is durable and waiting for its line's trusted acknowledgments".into(),
-                    }))),
-                    _ => { deferred.insert(statement.id()?); }
+                    Ending::Refused(reason) if strict => return Err(refusal(reason)),
+                    Ending::Refused(..) => {
+                        dropped.insert(statement.id()?);
+                    }
+                    Ending::Unconfirmed(reason) if strict => {
+                        return Err(Error::Application(Box::new(Unconfirmed(reason))));
+                    }
+                    _ if strict => {
+                        return Err(Error::Application(Box::new(Unconfirmed(
+                            Refusal::RecoveryPending(
+                                "the signed recovery is durable and waiting for its line's trusted acknowledgments".into(),
+                            ),
+                        ))));
+                    }
+                    _ => {
+                        deferred.insert(statement.id()?);
+                    }
                 }
                 continue;
             }
@@ -117,7 +125,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
             if own && another_seal_is_final(graph, seal)? {
                 if strict {
-                    return Err(refusal("sealed", "another seal of the tip is final"));
+                    return Err(refusal(Refusal::Sealed(
+                        "another seal of the tip is final".into(),
+                    )));
                 }
                 dropped.insert(statement.id()?);
                 continue;
@@ -137,10 +147,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             match self.entry_standing(graph, seal, coordinator).await? {
                 Entry::Won => {}
                 Entry::Lost if strict => {
-                    return Err(refusal(
-                        "sealed",
-                        "the seal that leads into the tip lost its own log: the tip is on a losing branch",
-                    ));
+                    return Err(refusal(Refusal::Sealed(
+                        "the seal that leads into the tip lost its own log: the tip is on a losing branch".into(),
+                    )));
                 }
                 Entry::Lost => {
                     if own {
@@ -148,13 +157,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     }
                     continue;
                 }
-                Entry::Waiting { code, reason } if strict => {
-                    return Err(Error::Application(Box::new(Unconfirmed {
-                        code,
-                        message: reason,
-                    })));
+                Entry::Waiting(reason) if strict => {
+                    return Err(Error::Application(Box::new(Unconfirmed(reason))));
                 }
-                Entry::Waiting { .. } => {
+                Entry::Waiting(_) => {
                     deferred.insert(statement.id()?);
                     continue;
                 }
@@ -162,28 +168,24 @@ impl<A: RowApplication> EncryptedReplica<A> {
             match self.end_log(seal, coordinator, own).await? {
                 Ending::Ended => {}
                 Ending::Lost if strict => {
-                    return Err(refusal(
-                        "sealed",
-                        "another seal ended the tip's coordinated log first",
-                    ));
+                    return Err(refusal(Refusal::Sealed(
+                        "another seal ended the tip's coordinated log first".into(),
+                    )));
                 }
                 Ending::Lost if own => {
                     dropped.insert(statement.id()?);
                 }
                 Ending::Lost => {}
-                Ending::Refused(code, reason) if strict => return Err(refusal(code, &reason)),
+                Ending::Refused(reason) if strict => return Err(refusal(reason)),
                 Ending::Refused(..) => {
                     dropped.insert(statement.id()?);
                 }
-                Ending::Unconfirmed { code, reason } if strict => {
-                    return Err(Error::Application(Box::new(Unconfirmed {
-                        code,
-                        message: format!(
-                            "the tip's coordinated log did not confirm the seal: {reason}"
-                        ),
-                    })));
+                Ending::Unconfirmed(reason) if strict => {
+                    return Err(Error::Application(Box::new(Unconfirmed(
+                        reason.with_prefix("the tip's coordinated log did not confirm the seal: "),
+                    ))));
                 }
-                Ending::Unconfirmed { .. } => {
+                Ending::Unconfirmed(_) => {
                     deferred.insert(statement.id()?);
                 }
             }
@@ -236,14 +238,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(match self.domain_log() {
             Some(log) if graph_names(graph, log.as_ref())? => None,
-            Some(_) => Some(refusal(
-                COORDINATOR_MISMATCH,
-                "this node's coordinated log is not the coordinator the owner's database settings name",
-            )),
-            None => Some(refusal(
-                COORDINATOR_REQUIRED,
-                "the owner's database settings name a coordinator: compose this node's coordinated log before it seals a tip, moves a bookmark off one or publishes a schema",
-            )),
+            Some(_) => Some(refusal(Refusal::CoordinatorMismatch(
+                "this node's coordinated log is not the coordinator the owner's database settings name".into(),
+            ))),
+            None => Some(refusal(Refusal::CoordinatorRequired(
+                "the owner's database settings name a coordinator: compose this node's coordinated log before it seals a tip, moves a bookmark off one or publishes a schema".into(),
+            ))),
         })
     }
     pub(super) async fn batch_graph(
@@ -282,15 +282,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ok(head) => match head.terminal {
                 Some(terminal) if terminal.digest == entered => Entry::Won,
                 Some(_) => Entry::Lost,
-                None => Entry::Waiting {
-                    code: "entry_pending",
-                    reason: "the seal that leads into the tip has not ended its own log yet".into(),
-                },
+                None => Entry::Waiting(Refusal::EntryPending(
+                    "the seal that leads into the tip has not ended its own log yet".into(),
+                )),
             },
-            Err(error) => Entry::Waiting {
-                code: "coordinator_unavailable",
-                reason: format!("the tip's coordinated log did not confirm the seal: {error}"),
-            },
+            Err(error) => Entry::Waiting(Refusal::CoordinatorUnavailable(format!(
+                "the tip's coordinated log did not confirm the seal: {error}"
+            ))),
         })
     }
     async fn end_log(
@@ -308,9 +306,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             continuation: seal.successor().map_err(credential)?,
             confirms: false,
         };
-        let unavailable = |error: CoordinationError| Ending::Unconfirmed {
-            code: "coordinator_unavailable",
-            reason: error.to_string(),
+        let unavailable = |error: CoordinationError| {
+            Ending::Unconfirmed(Refusal::CoordinatorUnavailable(error.to_string()))
         };
         let head = match coordinator.log_head(log).await {
             Ok(head) => head,
@@ -343,19 +340,19 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 Err(error) => Ok(unavailable(error)),
             },
             Err(CoordinationError::StaleHead) if seal.statement.recovery.is_some() => {
-                Ok(Ending::Refused(
-                    "stale_recovery",
+                Ok(Ending::Refused(Refusal::StaleRecovery(
                     "the log moved since the owner signed the recovery; collect and sign again"
                         .into(),
-                ))
+                )))
             }
-            Err(CoordinationError::Denied) if seal.statement.recovery.is_some() => Ok(
-                Ending::Refused("denied", "the coordinator refused the recovery".into()),
-            ),
-            Err(CoordinationError::Denied) => Ok(Ending::Unconfirmed {
-                code: "behind",
-                reason: "this node is not in the tip's in-sync set".into(),
-            }),
+            Err(CoordinationError::Denied) if seal.statement.recovery.is_some() => {
+                Ok(Ending::Refused(Refusal::Denied(
+                    "the coordinator refused the recovery".into(),
+                )))
+            }
+            Err(CoordinationError::Denied) => Ok(Ending::Unconfirmed(Refusal::Behind(
+                "this node is not in the tip's in-sync set".into(),
+            ))),
             Err(error) => Ok(unavailable(error)),
         }
     }
@@ -377,18 +374,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
                             terminal.digest,
                         ))
             {
-                return Ok(Ending::Refused(
-                    "stale_recovery",
+                return Ok(Ending::Refused(Refusal::StaleRecovery(
                     "the terminal does not bind the recovery's replaced head".into(),
-                ));
+                )));
             }
             return Ok(Ending::Ended);
         }
         if seal.statement.recovery.is_some() {
-            return Ok(Ending::Refused(
-                "sealed",
+            return Ok(Ending::Refused(Refusal::Sealed(
                 "another terminal entry ended the tip's log; the recovery never committed".into(),
-            ));
+            )));
         }
         let another_terminal_seal_wins =
             ended.digest != terminal.digest && (own || self.holds_statement(ended.digest).await?);
@@ -702,10 +697,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             if let Some(previous) = statement.chain_place().and_then(|(_, link)| link.previous)
                 && staged.contains(previous.as_slice())
             {
-                return Err(refusal(
-                    "migration_pending",
-                    "a staged schema switch must finish or be withdrawn before this node signs again",
-                ));
+                return Err(refusal(Refusal::MigrationPending(
+                    "a staged schema switch must finish or be withdrawn before this node signs again".into(),
+                )));
             }
         }
         Ok(())
@@ -940,32 +934,102 @@ fn dependents(
     }
 }
 
-#[derive(Debug)]
-pub struct Unconfirmed {
-    pub code: &'static str,
-    pub message: String,
-}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unconfirmed(pub Refusal);
 impl std::fmt::Display for Unconfirmed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
 impl std::error::Error for Unconfirmed {}
 
-#[derive(Debug)]
-pub struct Refusal {
-    pub code: &'static str,
-    pub message: String,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    CoordinatorRequired(String),
+    CoordinatorMismatch(String),
+    CoordinatorUnavailable(String),
+    Sealed(String),
+    SealPending(String),
+    ChainPending(String),
+    EntryPending(String),
+    RecoveryPending(String),
+    Behind(String),
+    StaleRecovery(String),
+    Denied(String),
+    GenesisMinimumMissing(String),
+    MigrationPending(String),
+}
+impl Refusal {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::CoordinatorRequired(_) => COORDINATOR_REQUIRED,
+            Self::CoordinatorMismatch(_) => COORDINATOR_MISMATCH,
+            Self::CoordinatorUnavailable(_) => "coordinator_unavailable",
+            Self::Sealed(_) => "sealed",
+            Self::SealPending(_) => "seal_pending",
+            Self::ChainPending(_) => "chain_pending",
+            Self::EntryPending(_) => "entry_pending",
+            Self::RecoveryPending(_) => "recovery_pending",
+            Self::Behind(_) => "behind",
+            Self::StaleRecovery(_) => "stale_recovery",
+            Self::Denied(_) => "denied",
+            Self::GenesisMinimumMissing(_) => "genesis_minimum_missing",
+            Self::MigrationPending(_) => "migration_pending",
+        }
+    }
+    pub fn retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::CoordinatorUnavailable(_)
+                | Self::Behind(_)
+                | Self::RecoveryPending(_)
+                | Self::ChainPending(_)
+                | Self::SealPending(_)
+                | Self::EntryPending(_)
+        )
+    }
+    pub fn message(&self) -> &str {
+        match self {
+            Self::CoordinatorRequired(message)
+            | Self::CoordinatorMismatch(message)
+            | Self::CoordinatorUnavailable(message)
+            | Self::Sealed(message)
+            | Self::SealPending(message)
+            | Self::ChainPending(message)
+            | Self::EntryPending(message)
+            | Self::RecoveryPending(message)
+            | Self::Behind(message)
+            | Self::StaleRecovery(message)
+            | Self::Denied(message)
+            | Self::GenesisMinimumMissing(message)
+            | Self::MigrationPending(message) => message,
+        }
+    }
+    pub(super) fn with_prefix(self, prefix: &str) -> Self {
+        let format = |message: String| format!("{prefix}{message}");
+        match self {
+            Self::CoordinatorRequired(message) => Self::CoordinatorRequired(format(message)),
+            Self::CoordinatorMismatch(message) => Self::CoordinatorMismatch(format(message)),
+            Self::CoordinatorUnavailable(message) => Self::CoordinatorUnavailable(format(message)),
+            Self::Sealed(message) => Self::Sealed(format(message)),
+            Self::SealPending(message) => Self::SealPending(format(message)),
+            Self::ChainPending(message) => Self::ChainPending(format(message)),
+            Self::EntryPending(message) => Self::EntryPending(format(message)),
+            Self::RecoveryPending(message) => Self::RecoveryPending(format(message)),
+            Self::Behind(message) => Self::Behind(format(message)),
+            Self::StaleRecovery(message) => Self::StaleRecovery(format(message)),
+            Self::Denied(message) => Self::Denied(format(message)),
+            Self::GenesisMinimumMissing(message) => Self::GenesisMinimumMissing(format(message)),
+            Self::MigrationPending(message) => Self::MigrationPending(format(message)),
+        }
+    }
 }
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
+        write!(f, "{}: {}", self.code(), self.message())
     }
 }
 impl std::error::Error for Refusal {}
-pub(in crate::replica) fn refusal(code: &'static str, message: &str) -> Error {
-    Error::Application(Box::new(Refusal {
-        code,
-        message: message.into(),
-    }))
+pub(in crate::replica) fn refusal(refusal: Refusal) -> Error {
+    Error::Application(Box::new(refusal))
 }

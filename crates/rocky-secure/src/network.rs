@@ -99,6 +99,24 @@ struct SignedMessage {
     bytes: Vec<u8>,
     signature: Signature,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CheckpointPageUnavailable;
+impl std::fmt::Display for CheckpointPageUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("checkpoint page unavailable")
+    }
+}
+impl std::error::Error for CheckpointPageUnavailable {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CheckpointSuperseded(pub &'static str);
+impl std::fmt::Display for CheckpointSuperseded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for CheckpointSuperseded {}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RequestRefusal {
     NotPermitted,
@@ -120,8 +138,15 @@ impl std::fmt::Display for RequestRefusal {
 }
 impl std::error::Error for RequestRefusal {}
 impl RequestRefusal {
-    fn of(error: &Error) -> Self {
+    pub(crate) fn of(error: &Error) -> Self {
         match error {
+            Error::Application(cause) => {
+                if let Some(refusal) = cause.downcast_ref::<Self>() {
+                    *refusal
+                } else {
+                    Self::Unavailable
+                }
+            }
             Error::Quota { .. } | Error::Backpressure => Self::OverBudget,
             Error::Conflict | Error::Incompatible(_) => Self::WrongTip,
             Error::Protocol(_) | Error::Corrupt(_) => Self::Malformed,
@@ -830,6 +855,17 @@ mod tests {
             "a peer whose own link timed out does not refuse as not permitted"
         );
         assert_eq!(start.elapsed(), TIMEOUT * 3);
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn missing_checkpoint_page_is_unavailable_not_not_permitted() {
+        let error = Error::Application(Box::new(CheckpointPageUnavailable));
+        assert_eq!(
+            RequestRefusal::of(&error),
+            RequestRefusal::Unavailable,
+            "a missing checkpoint page must not surface as a permission refusal"
+        );
+        assert_ne!(RequestRefusal::of(&error), RequestRefusal::NotPermitted);
     }
 
     #[cfg(not(target_family = "wasm"))]

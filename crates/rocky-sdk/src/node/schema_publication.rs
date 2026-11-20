@@ -99,10 +99,10 @@ impl Node {
         if !migrates && self.replica.domain_log().is_some() {
             match self.replica.publish_tip_statements(&statements).await {
                 Ok(_) => {}
-                Err(error)
-                    if error.to_string().contains("unconfirmed")
-                        || error.to_string().contains("behind:")
-                        || error.to_string().contains("coordinator_unavailable") =>
+                Err(rocky_secure::Error::Application(inner))
+                    if inner
+                        .downcast_ref::<rocky_secure::Refusal>()
+                        .is_some_and(rocky_secure::Refusal::retryable) =>
                 {
                     return Ok(());
                 }

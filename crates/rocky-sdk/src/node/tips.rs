@@ -957,8 +957,9 @@ impl Node {
             .is_some_and(|named| named.identity != bundle.identity)
         {
             return Err(super::coordinated::coordination_refusal(
-                rocky_secure::COORDINATOR_MISMATCH,
-                "the database's settings name another coordinator; changing it is not supported",
+                rocky_secure::Refusal::CoordinatorMismatch(
+                    "the database's settings name another coordinator; changing it is not supported".into(),
+                ),
             ));
         }
         if graph.coordinator()?.is_none()
@@ -968,8 +969,9 @@ impl Node {
                 .any(|named| *named != bundle.identity)
         {
             return Err(super::coordinated::coordination_refusal(
-                rocky_secure::COORDINATOR_MISMATCH,
-                "the database's finality records name another coordinator; compose and name that one",
+                rocky_secure::Refusal::CoordinatorMismatch(
+                    "the database's finality records name another coordinator; compose and name that one".into(),
+                ),
             ));
         }
         let Some(statement) = graph.next_settings(Coordination::Coordinated { bundle })? else {

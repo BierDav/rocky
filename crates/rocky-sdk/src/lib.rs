@@ -19,6 +19,7 @@ mod database;
 mod delivery;
 mod domain;
 mod enrollment;
+mod error;
 mod escrow;
 mod generation;
 mod groups;
@@ -70,6 +71,7 @@ pub use enrollment::{
     AwaitingAdmission, JoinRefused, NodeKeys, PublisherRequired, Supplied, Terms as GrantTerms,
     route_enrollment,
 };
+pub use error::{Error, ErrorKind};
 pub use inspection::*;
 pub use join_requests::Dropped as JoinRequestDropReason;
 pub use partitions::*;

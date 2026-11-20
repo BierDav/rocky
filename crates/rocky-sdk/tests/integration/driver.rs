@@ -1,7 +1,6 @@
 use crate::support;
 use rocky_sdk::{
-    Connection, ConnectionOptions, Database, Network, Open, Page, Profile, SqlValue,
-    transport::memory::Hub,
+    Connection, ConnectionOptions, Database, Network, Open, Page, SqlValue, transport::memory::Hub,
 };
 use serde_json::{Value, json};
 use sqlparser::{
@@ -9,7 +8,7 @@ use sqlparser::{
     dialect::SQLiteDialect,
     parser::Parser,
 };
-use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 use support::snapshot as snap;
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
@@ -137,14 +136,12 @@ fn text(value: &str) -> SqlValue {
 const WRITER: ConnectionOptions = ConnectionOptions {
     read_only: false,
     durability: rocky_sdk::Durability::Buffered,
-    profile: None,
     transaction_timeout: None,
     binding: None,
 };
 const READER: ConnectionOptions = ConnectionOptions {
     read_only: true,
     durability: rocky_sdk::Durability::Buffered,
-    profile: None,
     transaction_timeout: None,
     binding: None,
 };
@@ -340,7 +337,7 @@ async fn a_writer_transaction_is_one_bundle_and_savepoints_nest() -> Result<(), 
             .map_err(|_| "code")?;
         assert_eq!(
             error.code, SQLITE_AUTH,
-            "the engine catalog and pragmas stay denied without a profile: {sql}: {error}"
+            "the engine catalog and pragmas stay denied: {sql}: {error}"
         );
     }
     writer.close().await;
@@ -655,6 +652,12 @@ async fn readers_page_snapshots_and_never_hold_the_writer() -> Result<(), Failur
             "readers refuse writes with SQLite's read-only code: {sql}: {error}"
         );
     }
+    assert_eq!(
+        all(&reader, "PRAGMA query_only", Vec::new()).await?,
+        vec![vec![SqlValue::Integer(1)]],
+        "a reader reports `query_only`"
+    );
+    run(&reader, "PRAGMA query_only = 1").await?;
     run(&writer, "PRAGMA query_only = 1").await?;
     let flag = all(&writer, "PRAGMA query_only", Vec::new()).await?;
     assert_eq!(flag, vec![vec![SqlValue::Integer(1)]]);
@@ -676,6 +679,28 @@ async fn readers_page_snapshots_and_never_hold_the_writer() -> Result<(), Failur
     for connection in [writer, reader, transaction] {
         connection.close().await;
     }
+    database.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_deferred_transaction_opens_on_the_session_renewed_after_its_begin() -> Result<(), Failure>
+{
+    let root = tempfile::tempdir()?;
+    let database = create(open(root.path(), None), None).await?.database;
+    let writer = database.connect(WRITER).await?;
+    run(&writer, "BEGIN DEFERRED TRANSACTION").await?;
+    snap::value(async {
+        database.session().renew().await?;
+        database.session().info().await
+    })
+    .await?;
+    let first_real_statement = count(&writer, "items")
+        .await
+        .map_err(|error| format!("the first real statement uses the renewed session: {error}"))?;
+    assert_eq!(first_real_statement, 0);
+    run(&writer, "ROLLBACK").await?;
+    writer.close().await;
     database.close().await?;
     Ok(())
 }
@@ -774,367 +799,6 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
     Ok(())
 }
 
-fn engine_pragma(directory: &Path, pragma: &str) -> Result<Vec<Vec<SqlValue>>, Failure> {
-    let file = rusqlite::Connection::open_with_flags(
-        directory.join("rocky.sqlite"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
-    let mut statement = file.prepare(pragma)?;
-    let columns = statement.column_count();
-    let rows = statement.query_map([], |row| {
-        (0..columns)
-            .map(|index| {
-                Ok(match row.get_ref(index)? {
-                    rusqlite::types::ValueRef::Null => SqlValue::Null,
-                    rusqlite::types::ValueRef::Integer(value) => SqlValue::Integer(value),
-                    rusqlite::types::ValueRef::Real(value) => {
-                        SqlValue::real(value).unwrap_or(SqlValue::Null)
-                    }
-                    rusqlite::types::ValueRef::Text(bytes) => text(&String::from_utf8_lossy(bytes)),
-                    rusqlite::types::ValueRef::Blob(blob) => SqlValue::Blob(blob.to_vec()),
-                })
-            })
-            .collect::<Result<Vec<_>, rusqlite::Error>>()
-    })?;
-    Ok(rows.collect::<Result<_, _>>()?)
-}
-
-#[tokio::test]
-async fn room_schema_reads_refresh_authority_before_a_deferred_transaction_uses_the_file()
--> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
-    let database = create(open(root.path(), None), None).await?.database;
-    let writer = database
-        .connect(ConnectionOptions {
-            profile: Some(Profile::Room284),
-            ..WRITER
-        })
-        .await?;
-    run(&writer, "BEGIN DEFERRED TRANSACTION").await?;
-    snap::value(async {
-        database.session().renew().await?;
-        database.session().info().await
-    })
-    .await?;
-    assert!(
-        !all(&writer, "PRAGMA table_info(`items`)", vec![])
-            .await?
-            .is_empty()
-    );
-    assert!(
-        !all(&writer, "PRAGMA index_list(`items`)", vec![])
-            .await?
-            .is_empty()
-    );
-    run(&writer, "ROLLBACK").await?;
-    run(&writer, "BEGIN DEFERRED TRANSACTION").await?;
-    snap::value(async {
-        database.session().renew().await?;
-        database.session().info().await
-    })
-    .await?;
-    let first_real_statement = count(&writer, "items")
-        .await
-        .map_err(|error| format!("the first real statement uses the refreshed session: {error}"))?;
-    assert_eq!(first_real_statement, 0);
-    run(&writer, "ROLLBACK").await?;
-    writer.close().await;
-    database.close().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn room_housekeeping_is_answered_from_the_catalog_and_the_file() -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
-    let database = create(open(root.path(), None), None).await?.database;
-    assert!("room-2.7.0".parse::<Profile>().is_err());
-    let room = ConnectionOptions {
-        profile: Some("room-2.8.4".parse()?),
-        ..WRITER
-    };
-    let writer = database.connect(room.clone()).await?;
-    let reader = database
-        .connect(ConnectionOptions {
-            read_only: true,
-            durability: rocky_sdk::Durability::Buffered,
-            ..room.clone()
-        })
-        .await?;
-    let one = |rows: Vec<Vec<SqlValue>>| {
-        rows.into_iter()
-            .next()
-            .and_then(|row| row.into_iter().next())
-    };
-    let failure = |error: Failure| {
-        error
-            .downcast::<rocky_sdk::SqlFailure>()
-            .map(|failure| *failure)
-    };
-
-    assert_eq!(
-        one(all(&writer, "PRAGMA journal_mode = WAL", vec![]).await?),
-        Some(text("wal"))
-    );
-    run(&writer, "PRAGMA synchronous = NORMAL").await?;
-    assert_eq!(
-        one(all(&writer, "PRAGMA busy_timeout", vec![]).await?),
-        Some(SqlValue::Integer(5000))
-    );
-    assert_eq!(
-        one(all(&writer, "PRAGMA query_only", vec![]).await?),
-        Some(SqlValue::Integer(0))
-    );
-    run(&reader, "PRAGMA query_only = 1").await?;
-    assert_eq!(
-        one(all(&reader, "PRAGMA query_only", vec![]).await?),
-        Some(SqlValue::Integer(1))
-    );
-    assert_eq!(
-        one(all(&writer, "PRAGMA user_version", vec![]).await?),
-        Some(SqlValue::Integer(3)),
-        "the schema's version is Room's database version"
-    );
-    run(&writer, "PRAGMA user_version = 3").await?;
-    let moved = failure(
-        all(&writer, "PRAGMA user_version = 4", vec![])
-            .await
-            .err()
-            .ok_or("version")?,
-    )
-    .map_err(|_| "code")?;
-    assert!(
-        moved.message.contains("application's schema version 3"),
-        "{moved}"
-    );
-
-    let exists = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'room_master_table'";
-    assert!(
-        all(&writer, exists, vec![]).await?.is_empty(),
-        "Room's identity table lives with the connection, created after validation"
-    );
-    run(&writer, "BEGIN EXCLUSIVE TRANSACTION").await?;
-    run(
-        &writer,
-        "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-    )
-    .await?;
-    run(
-        &writer,
-        "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'abc123')",
-    )
-    .await?;
-    run(&writer, "END TRANSACTION").await?;
-    assert_eq!(all(&writer, exists, vec![]).await?.len(), 1);
-    assert_eq!(
-        one(all(
-            &writer,
-            "SELECT identity_hash FROM room_master_table WHERE id = 42 LIMIT 1",
-            vec![]
-        )
-        .await?),
-        Some(text("abc123"))
-    );
-    run(
-        &writer,
-        "CREATE TABLE IF NOT EXISTS `items` (`key` TEXT NOT NULL, `id` INTEGER NOT NULL, PRIMARY KEY(`key`))",
-    )
-    .await
-    .map_err(|error| format!("Room's statement for an installed table changes nothing: {error}"))?;
-    for (sql, reason) in [
-        (
-            "CREATE TABLE IF NOT EXISTS `items` (`key` TEXT NOT NULL, `note` TEXT, PRIMARY KEY(`key`, `note`))",
-            "must declare Rocky's id",
-        ),
-        (
-            "CREATE TABLE IF NOT EXISTS `items` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL)",
-            "autoGenerate = true is refused",
-        ),
-    ] {
-        let refused =
-            failure(all(&writer, sql, vec![]).await.err().ok_or(sql)?).map_err(|_| "code")?;
-        assert_eq!(refused.code, SQLITE_ERROR, "{sql}");
-        assert!(
-            refused.message.contains(reason),
-            "an entity carries Rocky's id field and leaves its ids to Rocky: {refused}"
-        );
-    }
-    run(
-        &writer,
-        "CREATE INDEX IF NOT EXISTS `items_by_list` ON `items` (`list`, `title` DESC)",
-    )
-    .await
-    .map_err(|error| format!("Room's statement for an installed index changes nothing: {error}"))?;
-    for sql in [
-        "CREATE TABLE IF NOT EXISTS `extra` (`id` TEXT NOT NULL, PRIMARY KEY(`id`))",
-        "CREATE INDEX IF NOT EXISTS `index_items_title` ON `items` (`title`)",
-    ] {
-        let refused =
-            failure(all(&writer, sql, vec![]).await.err().ok_or(sql)?).map_err(|_| "code")?;
-        assert_eq!(refused.code, SQLITE_ERROR, "{sql}");
-        assert!(
-            refused.message.contains("installed Rocky schema"),
-            "{refused}"
-        );
-    }
-
-    for (asked, engine) in [
-        ("PRAGMA table_info(`items`)", "PRAGMA table_info(\"items\")"),
-        ("PRAGMA index_list(`items`)", "PRAGMA index_list(\"items\")"),
-        (
-            "PRAGMA index_xinfo(`items_by_list`)",
-            "PRAGMA index_xinfo(\"items_by_list\")",
-        ),
-        (
-            "PRAGMA foreign_key_list(`items`)",
-            "PRAGMA foreign_key_list(\"items\")",
-        ),
-    ] {
-        let answered = all(&reader, asked, vec![]).await?;
-        assert_eq!(
-            answered,
-            engine_pragma(root.path(), engine)?,
-            "schema validation reads the real table's answers from the file: {asked}"
-        );
-    }
-    let columns = all(&reader, "PRAGMA table_info(`items`)", vec![]).await?;
-    assert_eq!(columns.len(), 6);
-    assert_eq!(
-        columns[0][1..],
-        [
-            text("key"),
-            text("TEXT"),
-            SqlValue::Integer(1),
-            SqlValue::Null,
-            SqlValue::Integer(1)
-        ]
-    );
-    let id = columns
-        .iter()
-        .find(|row| row[1] == text("id"))
-        .ok_or("id")?;
-    assert_eq!(id[2], text("BLOB"));
-    assert_eq!(id[3], SqlValue::Integer(1));
-    let indexes = all(&reader, "PRAGMA index_list(`items`)", vec![]).await?;
-    assert!(
-        indexes
-            .iter()
-            .any(|row| row[1] == text("items_by_list") && row[3] == text("c")),
-        "{indexes:?}"
-    );
-    assert!(
-        all(&reader, "PRAGMA table_info(`secure_operations`)", vec![])
-            .await?
-            .is_empty(),
-        "protocol tables answer nothing"
-    );
-    assert!(
-        all(
-            &reader,
-            "PRAGMA index_xinfo(`sqlite_autoindex_items_1`)",
-            vec![]
-        )
-        .await?
-        .is_empty(),
-        "unknown names answer nothing"
-    );
-    assert!(
-        all(
-            &writer,
-            "SELECT name FROM sqlite_master WHERE type = 'trigger'",
-            vec![]
-        )
-        .await?
-        .is_empty()
-    );
-    for sql in [
-        "PRAGMA foreign_keys = OFF",
-        "PRAGMA wal_checkpoint(TRUNCATE)",
-        "SELECT * FROM sqlite_master",
-    ] {
-        assert_eq!(
-            failure(all(&writer, sql, vec![]).await.err().ok_or(sql)?)
-                .map_err(|_| "code")?
-                .code,
-            SQLITE_AUTH,
-            "anything Room 2.8.4 does not send stays denied: {sql}"
-        );
-    }
-    writer.close().await;
-    reader.close().await;
-    database.close().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn room_reads_each_reference_action_when_references_share_a_partition_column()
--> Result<(), Failure> {
-    const GROUPED: &str = r#"{"format":6,"application":"grouped","version":1,"tables":[
- {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],
-  "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
- {"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true}],
-  "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list"},
- {"name":"items","class":"replayed","columns":[
-   {"name":"list","type":"blob","not_null":true},{"name":"category","type":"blob"}],
-  "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
-  "foreign_keys":[{"columns":["list","category"],"table":"categories","on_delete":"set_null"},
-   {"columns":["list"],"table":"lists","on_delete":"cascade"}]}
-]}"#;
-    let root = tempfile::tempdir()?;
-    let database = Database::create(
-        Open {
-            identity: None,
-            directory: root.path(),
-            schema: GROUPED,
-            secrets: None,
-            network: None,
-            coordination: None,
-        },
-        None,
-    )?
-    .database;
-    let reader = database
-        .connect(ConnectionOptions {
-            profile: Some("room-2.8.4".parse()?),
-            ..READER
-        })
-        .await?;
-    let mut keys = BTreeMap::<i64, (SqlValue, Vec<SqlValue>, SqlValue)>::new();
-    for row in all(&reader, "PRAGMA foreign_key_list(`items`)", vec![]).await? {
-        let [
-            SqlValue::Integer(id),
-            _seq,
-            table,
-            from,
-            _to,
-            _on_update,
-            on_delete,
-            _match,
-        ] = &row[..]
-        else {
-            return Err(format!("a foreign key row: {row:?}").into());
-        };
-        let key = keys
-            .entry(*id)
-            .or_insert_with(|| (table.clone(), Vec::new(), on_delete.clone()));
-        key.1.push(from.clone());
-    }
-    let mut keys: Vec<_> = keys.into_values().collect();
-    keys.sort_by_key(|(table, _, _)| format!("{table:?}"));
-    assert_eq!(
-        keys,
-        [
-            (
-                text("categories"),
-                vec![text("list"), text("category")],
-                text("SET NULL")
-            ),
-            (text("lists"), vec![text("list")], text("CASCADE")),
-        ]
-    );
-    database.close().await?;
-    Ok(())
-}
-
 #[tokio::test]
 async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -1209,78 +873,6 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
     reader.close().await;
     b.close().await?;
     a.close().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn an_older_room_application_validates_the_schema_it_declares() -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
-    let created = create(open(root.path(), None), None).await?.database;
-    created.session().create_bookmark("main", None).await?;
-    created.session().follow("main").await?;
-    created.close().await?;
-    let next_version_adding_a_nullable_rank = SHOPPING
-        .replace(r#""version":3"#, r#""version":4"#)
-        .replace(
-            r#"{"name":"note","type":"blob"}"#,
-            r#"{"name":"note","type":"blob"},{"name":"rank","type":"integer"}"#,
-        );
-    let database = Database::open(Open {
-        schema: &next_version_adding_a_nullable_rank,
-        ..open(root.path(), None)
-    })?
-    .database;
-    let room = ConnectionOptions {
-        profile: Some("room-2.8.4".parse()?),
-        ..WRITER
-    };
-    let columns = |rows: Vec<Vec<SqlValue>>| -> Vec<String> {
-        rows.into_iter()
-            .filter_map(|row| match row.get(1) {
-                Some(SqlValue::Text(name)) => Some(name.clone()),
-                _ => None,
-            })
-            .collect()
-    };
-    let writer = database.connect(room.clone()).await?;
-    let current = columns(all(&writer, "PRAGMA table_info(items)", vec![]).await?);
-    assert!(current.contains(&"rank".to_string()), "{current:?}");
-    let indexes = all(&writer, "PRAGMA index_list(items)", vec![]).await?;
-    writer.close().await;
-    database.close().await?;
-
-    let database = Database::open(open(root.path(), None))?.database;
-    assert_eq!(
-        snap::value(database.session().generation()).await?["application"],
-        "behind"
-    );
-    let writer = database.connect(room.clone()).await?;
-    assert_eq!(
-        all(&writer, "PRAGMA user_version", vec![]).await?,
-        vec![vec![SqlValue::Integer(3)]],
-        "a version 3 application on a version 4 database sees its own version"
-    );
-    let declared = columns(all(&writer, "PRAGMA table_info(items)", vec![]).await?);
-    assert_eq!(
-        declared,
-        current
-            .iter()
-            .filter(|name| *name != "rank")
-            .cloned()
-            .collect::<Vec<_>>(),
-        "an older application sees its tables as it declares them"
-    );
-    assert_eq!(
-        all(&writer, "PRAGMA index_list(items)", vec![]).await?,
-        indexes
-    );
-    assert!(
-        !columns(all(&writer, "PRAGMA table_info(lists)", vec![]).await?).is_empty(),
-        "an unchanged table is the installed one"
-    );
-    assert_eq!(count(&writer, "items").await?, 0);
-    writer.close().await;
-    database.close().await?;
     Ok(())
 }
 

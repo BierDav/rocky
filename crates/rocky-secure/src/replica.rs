@@ -150,7 +150,6 @@ use p2panda_store::operations::LocalOperationStore;
 #[cfg(feature = "qualification")]
 pub use publication::CHUNK_PAGES;
 pub use publication::{PUBLICATION_CHUNK_BUNDLES, Publication};
-pub use queries::Describe;
 use rocky_core::{
     Blocker, BlockerKind, ClearsBy, Commitment, MAX_CLOCK_AHEAD, ResourceScope, Right,
     RowApplication, RowChange, RowFields, RowSelection, RowWrite, SqlValue, TipId, WaitReason,

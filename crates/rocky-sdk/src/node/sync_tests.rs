@@ -626,8 +626,8 @@ mod discovery;
 mod mesh;
 
 #[tokio::test]
-async fn a_room_write_commits_while_a_renewal_waits_for_the_replica() -> Result<(), Failure> {
-    use crate::connection::{Call, ConnectionOptions, Profile, Registry, Reply, serve};
+async fn a_connection_write_commits_while_a_renewal_waits_for_the_replica() -> Result<(), Failure> {
+    use crate::connection::{Call, ConnectionOptions, Registry, Reply, serve};
     tokio::task::LocalSet::new().run_until(async {
         let root = tempfile::tempdir()?;
         let hub = Arc::new(Hub::default());
@@ -637,7 +637,6 @@ async fn a_room_write_commits_while_a_renewal_waits_for_the_replica() -> Result<
         let options = ConnectionOptions {
             read_only: false,
             durability: crate::Durability::Buffered,
-            profile: Some(Profile::Room284),
             transaction_timeout: Some(Duration::from_secs(1)),
             binding: None,
         };
@@ -701,7 +700,6 @@ async fn the_write_lease_times_out_and_aborts_until_acknowledged() -> Result<(),
                         ConnectionOptions {
                             read_only: false,
                             durability: crate::Durability::Buffered,
-                            profile: None,
                             transaction_timeout: Some(timeout),
                             binding: None,
                         },

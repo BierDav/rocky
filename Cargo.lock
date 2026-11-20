@@ -1888,15 +1888,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "directory-app"
-version = "0.1.0"
-dependencies = [
- "rocky-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "dirs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6220,7 +6211,6 @@ dependencies = [
 name = "rocky-voter"
 version = "0.1.0"
 dependencies = [
- "directory-app",
  "iroh-relay",
  "openraft",
  "p2panda-core",

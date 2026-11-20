@@ -378,8 +378,6 @@ fn certify_plan(plan: &Plan, root: &PrivateKey, out: &Path) -> Result<(), Failur
                 .collect(),
             initial_voters: plan.voters.iter().map(|v| v.id).collect(),
             membership_authority: plan.membership_authority,
-            directory_definition: NO_DIRECTORY_DEFINITION,
-            directory: None,
             authorities: Vec::new(),
             max_control_lifetime: plan.max_control_lifetime,
             public: Some(PublicService {

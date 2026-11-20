@@ -24,7 +24,6 @@ impl Mesh {
         let executor = PrivateKey::new();
         let time = 1_900_000_000;
         let scopes: Vec<_> = (1..=domains).map(scope).collect();
-        let directory = control(&authority, &executor, scopes[0], 1, time);
         Self {
             genesis: CertifiedGenesis::sign(
                 Genesis {
@@ -39,8 +38,6 @@ impl Mesh {
                         .collect(),
                     initial_voters: [1, 2, 3].into(),
                     membership_authority: authority.public_key(),
-                    directory_definition: [1; 32],
-                    directory: Some(directory),
                     authorities: scopes
                         .iter()
                         .map(|scope| Authority {
@@ -107,7 +104,9 @@ impl Mesh {
         }
     }
     fn open(&self, limits: Limits) -> Metadata {
-        Metadata::with_limits(self.genesis.clone(), limits).unwrap()
+        let mut metadata = Metadata::with_limits(self.genesis.clone(), limits).unwrap();
+        metadata.control(self.control(self.scopes[0], 1)).unwrap();
+        metadata
     }
 }
 fn control(

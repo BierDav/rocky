@@ -111,8 +111,6 @@ impl Service {
                 configuration: [5; 16],
                 initial_voters: [1, 2, 3].into(),
                 membership_authority: PrivateKey::new().public_key(),
-                directory_definition: NO_DIRECTORY_DEFINITION,
-                directory: None,
                 authorities: Vec::new(),
                 max_control_lifetime: 366 * DAY,
                 public: Some(PublicService {
@@ -565,7 +563,7 @@ fn a_public_genesis_needs_disjoint_budgets() {
     assert_eq!(
         CertifiedGenesis::sign(genesis, &root).err(),
         Some(CoordinationError::Denied),
-        "a mesh genesis needs its Directory and authorities"
+        "a genesis needs authorities or a public service"
     );
 }
 

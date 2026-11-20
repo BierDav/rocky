@@ -53,14 +53,12 @@ pub struct Cluster {
     pub dir: TempDir,
     pub genesis: CertifiedGenesis,
     pub admin: PrivateKey,
-    pub directory_key: PrivateKey,
     pub executor: PrivateKey,
     pub alternate: PrivateKey,
     pub user: PrivateKey,
     pub phone: PrivateKey,
     pub issuer: PrivateKey,
     pub scope: Scope,
-    pub directory_scope: Scope,
     keys: Vec<PrivateKey>,
     children: Vec<Option<Child>>,
 }
@@ -69,7 +67,6 @@ impl Cluster {
         let dir = TempDir::new().unwrap();
         let root = PrivateKey::new();
         let admin = PrivateKey::new();
-        let directory_key = PrivateKey::new();
         let executor = PrivateKey::new();
         let alternate = PrivateKey::new();
         let user = PrivateKey::new();
@@ -95,36 +92,6 @@ impl Cluster {
             app: rocky_core::ApplicationManifest::app_id([0x81; 32], "inventory"),
             domain: DomainId([1; 16]),
         };
-        let directory_app = directory_app::DirectoryApp {
-            publisher: *directory_key.public_key().as_bytes(),
-            domain: DomainId([2; 16]),
-            bootstrap_registrar: directory_app::principal(*admin.public_key().as_bytes()),
-            initial_ownership: vec![directory_app::Ownership {
-                scope,
-                owner: directory_app::principal(*user.public_key().as_bytes()),
-            }],
-        };
-        let directory_scope = Scope {
-            mesh,
-            app: directory_app.manifest().app,
-            domain: directory_app.domain,
-        };
-        let directory = ControlCertificate::sign(
-            DomainControl {
-                scope: directory_scope,
-                configuration: [7; 16],
-                revision: 1,
-                trusted: vec![directory_key.public_key()],
-                publisher: None,
-                not_before: 0,
-                expires: u64::MAX,
-            },
-            &directory_key,
-        )
-        .unwrap();
-        let directory =
-            ControlCertificate::sign(with_finite_lifetime(directory.control), &directory_key)
-                .unwrap();
         let genesis = CertifiedGenesis::sign(
             Genesis {
                 mesh,
@@ -132,18 +99,10 @@ impl Cluster {
                 voters,
                 initial_voters: BTreeSet::from([1, 2, 3]),
                 membership_authority: admin.public_key(),
-                directory_definition: directory_app.manifest().hash(),
-                directory: Some(directory),
-                authorities: vec![
-                    Authority {
-                        scope: directory_scope,
-                        issuer: directory_key.public_key(),
-                    },
-                    Authority {
-                        scope,
-                        issuer: issuer.public_key(),
-                    },
-                ],
+                authorities: vec![Authority {
+                    scope,
+                    issuer: issuer.public_key(),
+                }],
                 max_control_lifetime: 86400,
                 public: None,
             },
@@ -157,14 +116,12 @@ impl Cluster {
             dir,
             genesis,
             admin,
-            directory_key,
             executor,
             alternate,
             user,
             phone,
             issuer,
             scope,
-            directory_scope,
             keys,
             children: (0..3).map(|_| None).collect(),
         };
@@ -345,12 +302,6 @@ pub async fn append(
         duration: 30,
         sequence,
     }
-}
-
-fn with_finite_lifetime(mut control: DomainControl) -> DomainControl {
-    control.not_before = timestamp() - 1;
-    control.expires = timestamp() + 3600;
-    control
 }
 
 pub async fn membership_after_election(

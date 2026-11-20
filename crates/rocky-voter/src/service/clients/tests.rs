@@ -154,8 +154,6 @@ async fn public_voter() -> PublicVoter {
                 .collect(),
             initial_voters: BTreeSet::from([1, 2, 3]),
             membership_authority: admin.public_key(),
-            directory_definition: [0; 32],
-            directory: None,
             authorities: Vec::new(),
             max_control_lifetime: 86_400,
             public: Some(PublicService {

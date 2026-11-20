@@ -17,20 +17,6 @@ fn certified() -> (CertifiedGenesis, PrivateKey, Scope, PrivateKey) {
         app: AppId([2; 16]),
         domain: DomainId([3; 16]),
     };
-    let time = now().unwrap();
-    let control = ControlCertificate::sign(
-        DomainControl {
-            scope,
-            configuration: [4; 16],
-            revision: 1,
-            trusted: vec![executor.public_key()],
-            publisher: None,
-            not_before: time - 1,
-            expires: time + 7200,
-        },
-        &directory,
-    )
-    .unwrap();
     let genesis = CertifiedGenesis::sign(
         Genesis {
             mesh: scope.mesh,
@@ -44,8 +30,6 @@ fn certified() -> (CertifiedGenesis, PrivateKey, Scope, PrivateKey) {
                 .collect(),
             initial_voters: BTreeSet::from([1, 2, 3]),
             membership_authority: directory.public_key(),
-            directory_definition: [6; 32],
-            directory: Some(control),
             authorities: vec![Authority {
                 scope,
                 issuer: directory.public_key(),

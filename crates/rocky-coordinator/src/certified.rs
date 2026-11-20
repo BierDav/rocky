@@ -96,7 +96,6 @@ pub struct PublicService {
     pub tenant_lanes: u32,
 }
 pub const CLIENT_LANES: u32 = 64;
-pub const NO_DIRECTORY_DEFINITION: Commitment = [0; 32];
 impl PublicService {
     pub(crate) fn validate(&self, voters: &[Voter]) -> Result<(), CoordinationError> {
         self.limits.validate()?;
@@ -141,9 +140,6 @@ pub struct Genesis {
     pub voters: Vec<Voter>,
     pub initial_voters: BTreeSet<u64>,
     pub membership_authority: PublicKey,
-    pub directory_definition: Commitment,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub directory: Option<ControlCertificate>,
     pub authorities: Vec<Authority>,
     pub max_control_lifetime: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,8 +170,6 @@ impl CertifiedGenesis {
             || g.initial_voters.len() < 3
             || (g.authorities.is_empty() && g.public.is_none())
             || g.authorities.len() > 64
-            || (g.directory_definition == NO_DIRECTORY_DEFINITION) != g.directory.is_none()
-            || (g.directory.is_none() && g.public.is_none())
             || g.configuration == [0; 16]
             || g.max_control_lifetime == 0
             || g.max_control_lifetime > 366 * 86400
@@ -206,10 +200,7 @@ impl CertifiedGenesis {
         if let Some(public) = &g.public {
             public.validate(&g.voters)?;
         }
-        match &g.directory {
-            Some(directory) => directory.verify(g, directory.control.not_before),
-            None => Ok(()),
-        }
+        Ok(())
     }
     pub fn limits(&self) -> crate::Limits {
         self.genesis

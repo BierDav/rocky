@@ -14,7 +14,7 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parent.parent
-OUTSIDE_THE_WORKSPACE = ('benchmarks/chaos', 'benchmarks/engine-comparison',
+OUTSIDE_THE_WORKSPACE = ('benchmarks/engine-comparison',
                          'benchmarks/engine-scale')
 UPSTREAM = ('benchmarks/engine-scale/turso-patched/vendor',)
 SKIPPED_DIRECTORIES = ('target', 'node_modules')

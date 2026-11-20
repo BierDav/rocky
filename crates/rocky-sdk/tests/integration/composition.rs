@@ -1,5 +1,5 @@
 use rocky_sdk::{
-    Database, Engine, Network, NetworkService, Open, Opened, ServiceError, Session,
+    Database, Network, NetworkService, Open, Opened, ServiceError, Session,
     transport::{
         Connector,
         memory::{Hub, Memory},
@@ -181,39 +181,37 @@ async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result
 async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let engine =
-        |directory: &str, mode: rocky_sdk::EngineMode, name| -> Result<Arc<Engine>, Failure> {
-            let options = rocky_sdk::EngineOptions {
-                directory: root.path().join(directory),
-                transport: Arc::new(rocky_iroh::Options::default()),
-                mode,
-            };
-            Engine::open_with(
-                options,
-                &rocky_sdk::Schema::parse(SCHEMA)?,
-                None,
-                Some(Network::Owned(memory(&hub, name))),
-            )
-        };
-    let creator = engine(
-        "a",
-        rocky_sdk::EngineMode::Create {
-            credential_ttl: None,
-            root: None,
-        },
-        "a",
+    let creator = Database::create(
+        open(
+            &root.path().join("a"),
+            Some(Network::Owned(memory(&hub, "a"))),
+        ),
+        None,
     )?;
     let invitation = creator
+        .database
         .session()
         .invitation_with(rocky_sdk::GrantProfile::Writer {
             scopes: ["items".into()].into(),
         })
         .await?
         .uri;
-    let member = engine("b", rocky_sdk::EngineMode::Join { invitation }, "b")?;
-    member.session().sync_once().await?;
-    member.close().await?;
-    creator.close().await?;
+    let member = Database::join(
+        open(
+            &root.path().join("b"),
+            Some(Network::Owned(memory(&hub, "b"))),
+        ),
+        &invitation,
+    )?;
+    member.database.session().sync_once().await?;
+    if let Some(network) = member.network {
+        network.close().await;
+    }
+    member.database.close().await?;
+    if let Some(network) = creator.network {
+        network.close().await;
+    }
+    creator.database.close().await?;
     let enrolled = hub.counts();
     assert_eq!(
         enrolled,

@@ -18,8 +18,6 @@ mod custody;
 mod database;
 mod delivery;
 mod domain;
-#[cfg(not(target_family = "wasm"))]
-mod engine;
 mod enrollment;
 mod escrow;
 mod generation;
@@ -68,8 +66,6 @@ pub use connection::{
 pub use custody::{CustodyConfiguration, CustodyPeer};
 pub use database::{Connection, CoordinatorSlot, Database, NetworkService, Open, Opened, Session};
 pub use delivery::State as DeliveryState;
-#[cfg(not(target_family = "wasm"))]
-pub use engine::{Engine, EngineMode, EngineOptions};
 pub use enrollment::{
     AwaitingAdmission, JoinRefused, NodeKeys, PublisherRequired, Supplied, Terms as GrantTerms,
     route_enrollment,

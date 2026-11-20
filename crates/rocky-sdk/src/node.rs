@@ -2693,81 +2693,89 @@ fn replica_refusal(error: &Failure) -> Option<&rocky_secure::Refusal> {
 fn renewal_cannot_repair(error: &Failure) -> bool {
     match error.downcast_ref::<Error>() {
         Some(Error::Io(_)) => true,
+        Some(Error::Application(cause))
+            if cause.is::<rocky_secure::network::CheckpointSuperseded>() =>
+        {
+            true
+        }
         Some(Error::Rejected(reason)) => {
-            reason.starts_with("link ")
-                || reason.ends_with(" timeout")
-                || reason.starts_with("checkpoint superseded")
+            reason.starts_with("link ") || reason.ends_with(" timeout")
         }
         _ => false,
     }
 }
-pub(crate) fn call_failure(error: &Failure) -> crate::CallFailure {
-    if let Some(error) = error.downcast_ref::<crate::CallFailure>() {
+pub(crate) fn typed_error(error: &Failure) -> crate::Error {
+    if let Some(error) = error.downcast_ref::<crate::Error>() {
         return error.clone();
     }
+    if let Some(error) = error.downcast_ref::<crate::CallFailure>() {
+        return crate::Error {
+            kind: crate::ErrorKind::Other(error.code.clone()),
+            retryable: error.retryable,
+            detail: error.detail.clone(),
+            coordinator_time: error.coordinator_time,
+            blockers: error.blockers.clone(),
+        };
+    }
     if let Some(peer) = error.downcast_ref::<crate::peer::PeerError>() {
-        return crate::CallFailure {
-            code: peer.code.clone(),
+        return crate::Error {
+            kind: crate::ErrorKind::Other(peer.code.clone()),
             retryable: peer.retryable,
             detail: peer.message.clone(),
             coordinator_time: None,
             blockers: Vec::new(),
         };
     }
-    let (code, retryable) = if error.is::<crate::enrollment::Revoked>() {
-        ("revoked", false)
+    let (kind, retryable) = if error.is::<crate::enrollment::Revoked>() {
+        (crate::ErrorKind::Revoked, false)
     } else if error.is::<crate::enrollment::PublisherRequired>() {
-        ("publisher_required", false)
+        (crate::ErrorKind::PublisherRequired, false)
     } else if error.is::<crate::registry::RegistryFull>() {
-        ("registry_full", false)
+        (crate::ErrorKind::RegistryFull, false)
     } else if error.is::<crate::enrollment::RevocationSetFull>() {
-        ("revocation_set_full", false)
+        (crate::ErrorKind::RevocationSetFull, false)
     } else if error.is::<Refused>() {
-        ("rejected", false)
+        (crate::ErrorKind::Rejected, false)
     } else if let Some(reset) = error.downcast_ref::<crate::ResetRefused>() {
-        (reset.code(), false)
+        (crate::ErrorKind::Reset(reset.code().to_owned()), false)
     } else if let Some(refusal) = replica_refusal(error) {
-        (
-            refusal.code,
-            matches!(
-                refusal.code,
-                "coordinator_unavailable"
-                    | "behind"
-                    | "recovery_pending"
-                    | "chain_pending"
-                    | "seal_pending"
-                    | "entry_pending"
-            ),
-        )
+        (crate::ErrorKind::from_refusal(refusal), refusal.retryable())
     } else if let Some(coordination) = error.downcast_ref::<rocky_core::CoordinationError>() {
-        coordination_code(coordination)
+        coordination_kind(coordination)
     } else if let Some(service) = error.downcast_ref::<ServiceError>() {
-        (service.code(), service.retryable())
+        (
+            crate::ErrorKind::Service(service.code().to_owned()),
+            service.retryable(),
+        )
     } else if let Some(credentials) = error.downcast_ref::<rocky_credentials::Error>() {
         match credentials {
-            rocky_credentials::Error::Provider(_) => ("storage", false),
-            rocky_credentials::Error::Personal(personal) => (personal.code(), false),
-            _ => ("denied", false),
+            rocky_credentials::Error::Provider(_) => (crate::ErrorKind::Storage, false),
+            rocky_credentials::Error::Personal(personal) => {
+                (crate::ErrorKind::Personal(personal.clone()), false)
+            }
+            _ => (crate::ErrorKind::Denied, false),
         }
     } else {
         match error.downcast_ref::<Error>() {
-            Some(Error::Rejected(_) | Error::Protocol(_)) => ("rejected", false),
-            Some(Error::Blocked(_)) => ("blocked", true),
-            Some(Error::Incompatible(_)) => ("unsupported_generation", false),
-            Some(Error::Sql(SqlError::Denied)) => ("denied", false),
+            Some(Error::Rejected(_) | Error::Protocol(_)) => (crate::ErrorKind::Rejected, false),
+            Some(Error::Blocked(_)) => (crate::ErrorKind::Blocked, true),
+            Some(Error::Incompatible(_)) => (crate::ErrorKind::UnsupportedGeneration, false),
+            Some(Error::Sql(SqlError::Denied)) => (crate::ErrorKind::Denied, false),
             Some(Error::Sql(
                 SqlError::Capture(_) | SqlError::Statement { .. } | SqlError::Unsupported(_),
-            )) => ("rejected", false),
+            )) => (crate::ErrorKind::Rejected, false),
             Some(Error::Sql(SqlError::Unavailable { reason, .. })) => match reason {
-                Unavailable::Incomplete | Unavailable::KeyMissing => ("missing_dependencies", true),
-                Unavailable::NotHeld => ("rejected", false),
-                Unavailable::Revoked => ("authority_changed", true),
-                Unavailable::Released => ("rejected", false),
+                Unavailable::Incomplete | Unavailable::KeyMissing => {
+                    (crate::ErrorKind::MissingDependencies, true)
+                }
+                Unavailable::NotHeld => (crate::ErrorKind::Rejected, false),
+                Unavailable::Revoked => (crate::ErrorKind::AuthorityChanged, true),
+                Unavailable::Released => (crate::ErrorKind::Rejected, false),
             },
-            Some(Error::Conflict) => ("conflict", true),
-            Some(Error::Backpressure) => ("quota", true),
-            Some(Error::Coordination(coordination)) => coordination_code(coordination),
-            _ => ("storage", true),
+            Some(Error::Conflict) => (crate::ErrorKind::Conflict, true),
+            Some(Error::Backpressure) => (crate::ErrorKind::Quota, true),
+            Some(Error::Coordination(coordination)) => coordination_kind(coordination),
+            _ => (crate::ErrorKind::Storage, true),
         }
     };
     let clock = match error
@@ -2785,13 +2793,16 @@ pub(crate) fn call_failure(error: &Failure) -> crate::CallFailure {
         Some(Error::Blocked(blockers)) => blockers.clone(),
         _ => Vec::new(),
     };
-    crate::CallFailure {
-        code: code.into(),
+    crate::Error {
+        kind,
         retryable,
         detail: error.to_string(),
         coordinator_time: clock,
         blockers,
     }
+}
+pub(crate) fn call_failure(error: &Failure) -> crate::CallFailure {
+    typed_error(error).into()
 }
 #[cfg(test)]
 pub(crate) fn error(error: &Failure) -> serde_json::Value {
@@ -2805,15 +2816,15 @@ pub(crate) fn error(error: &Failure) -> serde_json::Value {
     }
     value
 }
-fn coordination_code(error: &rocky_core::CoordinationError) -> (&'static str, bool) {
+fn coordination_kind(error: &rocky_core::CoordinationError) -> (crate::ErrorKind, bool) {
     use rocky_core::CoordinationError::{Backpressure, Denied, Sealed, Unavailable};
     match error {
-        Unavailable => ("coordinator_unavailable", true),
-        rocky_core::CoordinationError::ClockSkew { .. } => ("clock_skew", false),
-        Backpressure => ("quota", true),
-        Denied => ("denied", false),
-        Sealed => ("sealed", false),
-        _ => ("rejected", false),
+        Unavailable => (crate::ErrorKind::CoordinatorUnavailable, true),
+        rocky_core::CoordinationError::ClockSkew { .. } => (crate::ErrorKind::ClockSkew, false),
+        Backpressure => (crate::ErrorKind::Quota, true),
+        Denied => (crate::ErrorKind::Denied, false),
+        Sealed => (crate::ErrorKind::Sealed, false),
+        _ => (crate::ErrorKind::Rejected, false),
     }
 }
 
@@ -2832,11 +2843,8 @@ mod error_tests {
             value["retryable"].as_bool().unwrap_or_default(),
         )
     }
-    fn refusal(code: &'static str) -> Failure {
-        Box::new(Error::Application(Box::new(rocky_secure::Refusal {
-            code,
-            message: "refused".into(),
-        })))
+    fn refusal(refusal: rocky_secure::Refusal) -> Failure {
+        Box::new(Error::Application(Box::new(refusal)))
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
@@ -2862,11 +2870,28 @@ mod error_tests {
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
     fn replica_refusals_keep_their_codes() {
-        assert_eq!(code(refusal("sealed")), ("sealed".into(), false));
+        let sealed_refusal = refusal(rocky_secure::Refusal::Sealed("refused".into()));
+        let typed_sealed = crate::Error::from_failure(&sealed_refusal);
+        assert_eq!(typed_sealed.kind(), &crate::ErrorKind::Sealed);
+        assert_eq!(typed_sealed.code(), "sealed");
+        assert!(!typed_sealed.retryable());
+        assert_eq!(code(sealed_refusal), ("sealed".into(), false));
+
+        let unavailable_refusal = refusal(rocky_secure::Refusal::CoordinatorUnavailable(
+            "refused".into(),
+        ));
+        let typed_unavailable = crate::Error::from_failure(&unavailable_refusal);
         assert_eq!(
-            code(refusal("coordinator_unavailable")),
+            typed_unavailable.kind(),
+            &crate::ErrorKind::CoordinatorUnavailable
+        );
+        assert_eq!(typed_unavailable.code(), "coordinator_unavailable");
+        assert!(typed_unavailable.retryable());
+        assert_eq!(
+            code(unavailable_refusal),
             ("coordinator_unavailable".into(), true)
         );
+
         let sealed: Failure = Box::new(rocky_core::CoordinationError::Sealed);
         assert_eq!(code(sealed), ("sealed".into(), false));
     }

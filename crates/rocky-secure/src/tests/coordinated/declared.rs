@@ -8,7 +8,9 @@ use rocky_credentials::{
 
 pub(super) fn refusal_code(error: &Error) -> Option<&'static str> {
     match error {
-        Error::Application(inner) => inner.downcast_ref::<crate::Refusal>().map(|r| r.code),
+        Error::Application(inner) => inner
+            .downcast_ref::<crate::Refusal>()
+            .map(crate::Refusal::code),
         _ => None,
     }
 }

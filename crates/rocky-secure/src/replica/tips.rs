@@ -2127,18 +2127,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 tracing::debug!(%error, "settling earlier statements failed");
             }
             if self.reseals_waiting_tip(statements).await? {
-                return Err(coordinated::refusal(
-                    "seal_pending",
-                    "this node's earlier seal of the tip waits for its coordinated log entry; the tip is not sealed again meanwhile",
-                ));
+                return Err(coordinated::refusal(coordinated::Refusal::SealPending(
+                    "this node's earlier seal of the tip waits for its coordinated log entry; the tip is not sealed again meanwhile".into(),
+                )));
             }
             if self.after_pending(statements).await? {
                 self.check_statements_over(statements, true).await?;
                 self.journal_tips(statements, true).await?;
-                return Err(coordinated::refusal(
-                    "chain_pending",
-                    "an earlier statement of this node waits for its coordinated log entry; this one is journaled after it",
-                ));
+                return Err(coordinated::refusal(coordinated::Refusal::ChainPending(
+                    "an earlier statement of this node waits for its coordinated log entry; this one is journaled after it".into(),
+                )));
             }
         }
         let journaled = match self.domain_log().is_some()
@@ -2170,9 +2168,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     self.forget_own_batch(batch).await?;
                 }
                 return Err(match unconfirmed {
-                    Some(unconfirmed) => {
-                        coordinated::refusal(unconfirmed.code, &unconfirmed.message)
-                    }
+                    Some(unconfirmed) => coordinated::refusal(unconfirmed.0.clone()),
                     None => error,
                 });
             }

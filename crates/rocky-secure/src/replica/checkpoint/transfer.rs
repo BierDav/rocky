@@ -1176,7 +1176,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             offered => match inner.served_seal_checkpoint(scope, checkpoint).await? {
                 Some(found) => found,
                 None if offered.is_some() => {
-                    return Err(denied("checkpoint superseded; restart the rebootstrap"));
+                    return Err(Error::Application(Box::new(
+                        crate::network::CheckpointSuperseded(
+                            "checkpoint superseded; restart the rebootstrap",
+                        ),
+                    )));
                 }
                 None => return Err(denied("no checkpoint to transfer")),
             },
@@ -1219,12 +1223,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let signer = inner.checkpoint_key(&signed);
         let stored = match signer {
             Some(_) => None,
-            None => Some(
-                inner
-                    .page_record(id, after)
-                    .await?
-                    .ok_or_else(|| denied("checkpoint page unavailable"))?,
-            ),
+            None => Some(inner.page_record(id, after).await?.ok_or_else(|| {
+                Error::Application(Box::new(crate::network::CheckpointPageUnavailable))
+            })?),
         };
         let through = stored.as_ref().and_then(|(next, _)| *next);
         let replayed = inner.replayed_scope(scope);
@@ -1503,7 +1504,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 plain.next = next;
                 signature
             }
-            (None, None) => return Err(denied("checkpoint page unavailable")),
+            (None, None) => {
+                return Err(Error::Application(Box::new(
+                    crate::network::CheckpointPageUnavailable,
+                )));
+            }
         };
         let page = CheckpointPage {
             scope,

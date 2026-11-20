@@ -27,7 +27,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await
             .map_err(Error::Coordination)?;
         if head.terminal.is_some() {
-            return Err(refusal("sealed", "a terminal entry ended the tip's log"));
+            return Err(refusal(Refusal::Sealed(
+                "a terminal entry ended the tip's log".into(),
+            )));
         }
         let point = LogPoint {
             position: head.commit,

@@ -176,8 +176,9 @@ impl<A: RowApplication> Inner<A> {
             && !graph.is_final(proof.seal).map_err(credential)?
         {
             return Err(super::coordinated::refusal(
-                super::coordinated::COORDINATOR_MISMATCH,
-                "the staged close's finality was acknowledged at another coordinator than the database's settings name: the close is not final",
+                super::coordinated::Refusal::CoordinatorMismatch(
+                    "the staged close's finality was acknowledged at another coordinator than the database's settings name: the close is not final".into(),
+                ),
             ));
         }
         for statement in &stage.statements {
@@ -344,8 +345,9 @@ pub(super) fn refuse_uncoordinated_stage(
 ) -> Result<(), Error> {
     if !stage.coordinated && graph.coordinator().map_err(credential)?.is_some() {
         return Err(super::coordinated::refusal(
-            super::coordinated::COORDINATOR_REQUIRED,
-            "the owner's database settings name a coordinator: a schema stage made without its log is never released unended",
+            super::coordinated::Refusal::CoordinatorRequired(
+                "the owner's database settings name a coordinator: a schema stage made without its log is never released unended".into(),
+            ),
         ));
     }
     Ok(())

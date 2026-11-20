@@ -147,7 +147,7 @@ impl Db {
         id: Option<&str>,
     ) -> Result<Value, Value> {
         snap::observe(snap::mutate(
-            self.engine.database(),
+            &self.engine.database,
             self.engine.session(),
             vec![handle; 32],
             payload,
@@ -175,7 +175,7 @@ impl Db {
     }
     async fn items(&self) -> Vec<(String, String, i64)> {
         let page = snap::ok(snap::read(
-            self.engine.database(),
+            &self.engine.database,
             "SELECT key, title, completed FROM items ORDER BY key",
             Vec::new(),
         ))
@@ -432,7 +432,7 @@ async fn mutations_are_durable_once_and_definite_rejections_are_final() -> Resul
     }
     for sql in ["SELECT * FROM secure_rows", "DELETE FROM items"] {
         assert!(
-            snap::observe(snap::read(db.engine.database(), sql, Vec::new()))
+            snap::observe(snap::read(&db.engine.database, sql, Vec::new()))
                 .await
                 .is_err(),
             "reads cannot reach protocol tables or write: {sql}"
@@ -532,7 +532,7 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
     );
     snap::ok(alice.engine.session().logout(true)).await;
     assert!(
-        snap::observe(snap::read(alice.engine.database(), "SELECT 1", Vec::new()))
+        snap::observe(snap::read(&alice.engine.database, "SELECT 1", Vec::new()))
             .await
             .is_err(),
         "a logged-out member reads nothing"

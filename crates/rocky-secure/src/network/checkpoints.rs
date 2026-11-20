@@ -560,7 +560,9 @@ impl NativeSession {
                 || signed.statement.seal != Some(advice.seal)
                 || signed.statement.rows.count != advice.rows)
         {
-            return Err(denied("checkpoint superseded since state advice"));
+            return Err(Error::Application(Box::new(super::CheckpointSuperseded(
+                "checkpoint superseded since state advice",
+            ))));
         }
         if signed.statement.seal.is_none() && replica.owns_checkpoint_signer(&signed).await {
             return Ok(None);

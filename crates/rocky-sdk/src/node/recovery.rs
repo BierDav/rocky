@@ -77,8 +77,13 @@ impl Node {
                 >= rocky_secure::ROUTINE_SEAL_TRANSACTIONS
             {
                 match self.seal_followed(scope, false).await {
-                    Err(error) if call_failure(&error).code == "sealed" => {}
-                    Err(error) if call_failure(&error).code == "seal_pending" => {
+                    Err(error)
+                        if crate::Error::from_failure(&error).kind()
+                            == &crate::ErrorKind::Sealed => {}
+                    Err(error)
+                        if crate::Error::from_failure(&error).kind()
+                            == &crate::ErrorKind::SealPending =>
+                    {
                         return Ok(Some(crate::SealSkip::SealPending(error.to_string())));
                     }
                     sealed => sealed?,

@@ -198,7 +198,7 @@ impl<A: RowApplication> Inner<A> {
         let state = self.take_oracle_state();
         let actual = async {
             if self.replayed_scope(scope) {
-                self.replay_from_frames(now()?)
+                self.replay_for_audit(now()?)
                     .await?
                     .map_err(|broken| broken.refuses(Rebuilding::FullRebuild))?;
             } else {

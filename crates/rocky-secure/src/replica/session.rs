@@ -110,24 +110,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner
             .line_nodes
             .insert(rocky_credentials::genesis_tip(root), original.clone());
-        if inner
-            .node_author
-            .as_ref()
-            .is_none_or(|author| author.key.public_key() == inner.config.node.public_key())
-        {
-            let on_genesis = match &inner.workspace.followed {
-                Some((domain, _)) => inner
-                    .graph_for(*domain)
-                    .and_then(|graph| {
-                        graph
-                            .author_line_root(inner.workspace.tip)
-                            .map_err(credential)
-                            .map(|line| line == graph.genesis())
-                    })
-                    .unwrap_or(true),
-                None => true,
-            };
-            if on_genesis {
+        match inner.workspace.followed.clone() {
+            Some((domain, _)) => {
+                let tip = inner.workspace.tip;
+                if inner.graph_for(domain)?.schema(tip).is_ok() {
+                    inner.select_line(domain, tip).await?;
+                } else {
+                    inner.node_author = None;
+                }
+            }
+            None => {
                 inner.node_author = Some(original);
             }
         }

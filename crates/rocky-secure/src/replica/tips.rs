@@ -1031,7 +1031,7 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    async fn select_line(&mut self, scope: Scope, target: TipId) -> Result<(), Error> {
+    pub(super) async fn select_line(&mut self, scope: Scope, target: TipId) -> Result<(), Error> {
         let root = self
             .graph_for(scope)?
             .line_root(target)
@@ -1040,7 +1040,7 @@ impl<A: RowApplication> Inner<A> {
             .graph_for(scope)?
             .author_line_root(target)
             .map_err(credential)?;
-        let lookup = async |line: TipId| -> Result<Option<identity::NodeAuthor>, Error> {
+        let lookup = async |line: TipId| -> Result<(bool, Option<identity::NodeAuthor>), Error> {
             let records = collect_rows(
                 self.conn
                     .query(
@@ -1051,22 +1051,25 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
             Ok(match records.first().map(Vec::as_slice) {
-                Some([SqlValue::Blob(node)]) => self
-                    .line_nodes
-                    .get(&line)
-                    .filter(|author| author.key.public_key().as_bytes().as_slice() == node)
-                    .cloned(),
+                Some([SqlValue::Blob(node)]) => (
+                    true,
+                    self.line_nodes
+                        .get(&line)
+                        .filter(|author| author.key.public_key().as_bytes().as_slice() == node)
+                        .cloned(),
+                ),
                 None if line
                     == rocky_credentials::genesis_tip(self.graph_for(scope)?.genesis_schema) =>
                 {
-                    Some(identity::NodeAuthor::new(&self.config)?)
+                    (false, Some(identity::NodeAuthor::new(&self.config)?))
                 }
-                _ => None,
+                _ => (false, None),
             })
         };
-        let mut selected = lookup(root).await?;
+        let (has_binding, mut selected) = lookup(root).await?;
         let mut bound_root = root;
-        if selected.is_none()
+        if !has_binding
+            && selected.is_none()
             && author_root != root
             && self.schema_switch_intent().await?.is_none()
             && rows(
@@ -1076,7 +1079,7 @@ impl<A: RowApplication> Inner<A> {
             .await?
             .is_empty()
         {
-            selected = lookup(author_root).await?;
+            selected = lookup(author_root).await?.1;
             bound_root = author_root;
         }
         if selected

@@ -85,6 +85,24 @@ pub struct SecureSql<A: RowApplication> {
     parents: BTreeMap<String, String>,
     migration: bool,
 }
+impl<A: RowApplication> SecureSql<A> {
+    pub fn reset_for_reuse(&self) -> bool {
+        let Ok(mut lease) = self.lease.try_lock() else {
+            return false;
+        };
+        if lease.held.is_some() {
+            return false;
+        }
+        lease.savepoints.clear();
+        lease.implicit = false;
+        lease.aborted = None;
+        lease.observed = sqlite::Observed::default();
+        lease.identities.clear();
+        lease.intents.clear();
+        self.cancelled.store(false, Ordering::Release);
+        true
+    }
+}
 impl<A: RowApplication> Drop for SecureSql<A> {
     fn drop(&mut self) {
         if let Ok(mut lease) = self.lease.try_lock() {

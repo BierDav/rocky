@@ -3407,6 +3407,31 @@ mod tests {
         .await?;
         tx.commit().await?;
 
+        let fresh = database
+            .connect(ConnectionOptions {
+                read_only: false,
+                durability: Durability::Buffered,
+                transaction_timeout: None,
+                binding: None,
+            })
+            .await?;
+        let counters = fresh
+            .execute(
+                fresh.statement(),
+                "SELECT changes(), total_changes(), last_insert_rowid()".into(),
+                Vec::new(),
+            )
+            .await?;
+        assert_eq!(
+            counters.rows,
+            vec![vec![
+                SqlValue::Integer(0),
+                SqlValue::Integer(0),
+                SqlValue::Integer(0),
+            ]]
+        );
+        fresh.close().await;
+
         database.close().await?;
         Ok(())
     }

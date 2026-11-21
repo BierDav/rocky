@@ -98,30 +98,44 @@ impl<A: RowApplication> EncryptedReplica<A> {
             now()?,
         )?;
         identity::check_node_chain(&credentials)?;
-        inner.chain = Chain::new(credentials.clone())?;
-        inner.config.credentials = credentials;
-        let original = identity::NodeAuthor::new(&inner.config)?;
+        let chain = Chain::new(credentials.clone())?;
         let root = inner
             .config
             .manifest
             .verify_historic(inner.config.publisher)
             .map_err(credential)?
             .hash();
-        inner
-            .line_nodes
-            .insert(rocky_credentials::genesis_tip(root), original.clone());
-        match inner.workspace.followed.clone() {
-            Some((domain, _)) => {
-                let tip = inner.workspace.tip;
-                if inner.graph_for(domain)?.schema(tip).is_ok() {
-                    inner.select_line(domain, tip).await?;
-                } else {
-                    inner.node_author = None;
+        let previous_chain = std::mem::replace(&mut inner.chain, chain);
+        let previous_credentials = std::mem::replace(&mut inner.config.credentials, credentials);
+        let previous_line_nodes = inner.line_nodes.clone();
+        let previous_author = inner.node_author.clone();
+        let update = async {
+            let original = identity::NodeAuthor::new(&inner.config)?;
+            inner
+                .line_nodes
+                .insert(rocky_credentials::genesis_tip(root), original.clone());
+            match inner.workspace.followed.clone() {
+                Some((domain, _)) => {
+                    let tip = inner.workspace.tip;
+                    if inner.graph_for(domain)?.schema(tip).is_ok() {
+                        inner.select_line(domain, tip).await?;
+                    } else {
+                        inner.node_author = None;
+                    }
+                }
+                None => {
+                    inner.node_author = Some(original);
                 }
             }
-            None => {
-                inner.node_author = Some(original);
-            }
+            Ok::<(), Error>(())
+        }
+        .await;
+        if let Err(error) = update {
+            inner.chain = previous_chain;
+            inner.config.credentials = previous_credentials;
+            inner.line_nodes = previous_line_nodes;
+            inner.node_author = previous_author;
+            return Err(error);
         }
         let readable =
             |key: &KeyMaterial| grants.iter().any(|grant| readable_grant(grant, key.scope));

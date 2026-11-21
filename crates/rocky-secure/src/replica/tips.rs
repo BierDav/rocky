@@ -2086,10 +2086,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 "a node author log cannot cross a fork; enroll another node",
             ));
         }
-        let root = inner
+        let roots = inner
             .graph_for(*scope)?
-            .line_root(inner.workspace.tip)
+            .author_line_roots(inner.workspace.tip)
             .map_err(credential)?;
+        let root = *roots
+            .first()
+            .ok_or_else(|| Error::Corrupt("author line root missing".into()))?;
         let owner = inner
             .config
             .credentials
@@ -2110,7 +2113,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             credentials: node.credentials,
             key: node.key,
         };
-        transaction!(inner, |inner| {
+        let bound_root = transaction!(inner, |inner| {
             identity::check_node_chain(&selected.credentials)?;
             let existing = collect_rows(
                 inner
@@ -2122,14 +2125,26 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .await?,
             )
             .await?;
-            let expected = vec![SqlValue::Blob(encode(&root)?)];
-            if existing.iter().any(|row| row != &expected) {
-                return Err(denied("a node author log belongs to one line"));
-            }
-            inner.conn.execute("INSERT INTO secure_line_nodes VALUES(?,?) ON CONFLICT(line) DO UPDATE SET node=excluded.node",[encode(&root)?,selected.key.public_key().as_bytes().to_vec()]).await?;
-            Ok(())
+            let bound = match existing.as_slice() {
+                [] => {
+                    inner.conn.execute("INSERT INTO secure_line_nodes VALUES(?,?) ON CONFLICT(line) DO UPDATE SET node=excluded.node",[encode(&root)?,selected.key.public_key().as_bytes().to_vec()]).await?;
+                    root
+                }
+                [record] => match record.as_slice() {
+                    [SqlValue::Blob(bytes)] => {
+                        let existing_line: TipId = decode(bytes)?;
+                        if !roots.contains(&existing_line) {
+                            return Err(denied("a node author log belongs to one line"));
+                        }
+                        existing_line
+                    }
+                    _ => return Err(Error::Corrupt("line node".into())),
+                },
+                _ => return Err(denied("a node author log belongs to one line")),
+            };
+            Ok(bound)
         })?;
-        inner.line_nodes.insert(root, selected.clone());
+        inner.line_nodes.insert(bound_root, selected.clone());
         inner.node_author = Some(selected);
         flush_guard(inner, &self.inner).await.map(|_| ())
     }

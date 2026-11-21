@@ -161,7 +161,7 @@ const OPEN_ERA: &str = "(SELECT COALESCE(MAX(depth),0) FROM secure_finalized WHE
 
 pub(super) const KEY_WAITS: &str = "a rewound transaction waits for its partition key";
 
-const REPLAY_CAPTURE: (usize, usize) = (MAX_BUNDLE_ROWS, MAX_BUNDLE_BYTES);
+const REPLAY_CAPTURE: (usize, usize) = (usize::MAX, usize::MAX);
 
 pub(super) fn stamp(header: &p2panda_core::Header<Extensions>) -> Stamp {
     Stamp {

@@ -120,7 +120,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .graph_for(*domain)
                     .and_then(|graph| {
                         graph
-                            .line_root(inner.workspace.tip)
+                            .author_line_root(inner.workspace.tip)
                             .map_err(credential)
                             .map(|line| line == graph.genesis())
                     })

@@ -1036,28 +1036,49 @@ impl<A: RowApplication> Inner<A> {
             .graph_for(scope)?
             .line_root(target)
             .map_err(credential)?;
-        let records = collect_rows(
-            self.conn
-                .query(
-                    "SELECT node FROM secure_line_nodes WHERE line=?",
-                    [encode(&root)?],
-                )
-                .await?,
-        )
-        .await?;
-        let mut selected = match records.first().map(Vec::as_slice) {
-            Some([SqlValue::Blob(node)]) => self
-                .line_nodes
-                .get(&root)
-                .filter(|author| author.key.public_key().as_bytes().as_slice() == node)
-                .cloned(),
-            None if root
-                == rocky_credentials::genesis_tip(self.graph_for(scope)?.genesis_schema) =>
-            {
-                Some(identity::NodeAuthor::new(&self.config)?)
-            }
-            _ => None,
+        let author_root = self
+            .graph_for(scope)?
+            .author_line_root(target)
+            .map_err(credential)?;
+        let lookup = async |line: TipId| -> Result<Option<identity::NodeAuthor>, Error> {
+            let records = collect_rows(
+                self.conn
+                    .query(
+                        "SELECT node FROM secure_line_nodes WHERE line=?",
+                        [encode(&line)?],
+                    )
+                    .await?,
+            )
+            .await?;
+            Ok(match records.first().map(Vec::as_slice) {
+                Some([SqlValue::Blob(node)]) => self
+                    .line_nodes
+                    .get(&line)
+                    .filter(|author| author.key.public_key().as_bytes().as_slice() == node)
+                    .cloned(),
+                None if line
+                    == rocky_credentials::genesis_tip(self.graph_for(scope)?.genesis_schema) =>
+                {
+                    Some(identity::NodeAuthor::new(&self.config)?)
+                }
+                _ => None,
+            })
         };
+        let mut selected = lookup(root).await?;
+        let mut bound_root = root;
+        if selected.is_none()
+            && author_root != root
+            && self.schema_switch_intent().await?.is_none()
+            && rows(
+                &self.conn,
+                "SELECT 1 FROM secure_staged_schema WHERE state!='released'",
+            )
+            .await?
+            .is_empty()
+        {
+            selected = lookup(author_root).await?;
+            bound_root = author_root;
+        }
         if selected
             .as_ref()
             .is_some_and(|author| author.key.public_key() == self.config.node.public_key())
@@ -1075,10 +1096,13 @@ impl<A: RowApplication> Inner<A> {
             self.conn
                 .execute(
                     "INSERT OR IGNORE INTO secure_line_nodes VALUES(?,?)",
-                    [encode(&root)?, author.key.public_key().as_bytes().to_vec()],
+                    [
+                        encode(&bound_root)?,
+                        author.key.public_key().as_bytes().to_vec(),
+                    ],
                 )
                 .await?;
-            self.line_nodes.insert(root, author.clone());
+            self.line_nodes.insert(bound_root, author.clone());
         }
         self.node_author = selected;
         Ok(())
@@ -1152,7 +1176,7 @@ impl<A: RowApplication> Inner<A> {
                 Ok(previous == target
                     || self
                         .graph_for(scope)?
-                        .continues(previous, target)
+                        .succeeds(previous, target)
                         .unwrap_or(false))
             }
             _ => Err(Error::Corrupt("node tip".into())),

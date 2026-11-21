@@ -81,6 +81,12 @@ Applications select a connector explicitly: add `rocky-iroh` and supply its
 supplies optional discovery and network-change events through `Network::Attached`.
 One attachment routes RPC and replication streams to independent database scopes.
 Endpoint diagnostics and lifecycle controls belong to the iroh attachment.
+On a network that already routes and encrypts between peers, such as a
+WireGuard mesh, `rocky-tcp` is the plain-TCP connector instead (native only):
+`rocky_tcp::Options::new(bind).advertise("host:port")` through `Network::Owned`,
+or `Options::start` for an attachment the application keeps. Routes are
+`host:port`; it has no discovery or relays, and Rocky's own encryption and
+authorization apply on top as with any transport.
 Coordination is an application-owned slot: supply `Arc<dyn rocky_sdk::Coordinator>`
 with `Configuration::coordination` (or the engine/custody equivalents).
 For voters, construct `rocky_coordinator::Client::connect(&bundle, transport)`

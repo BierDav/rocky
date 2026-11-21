@@ -20,6 +20,7 @@ rocky-storage = { path = "crates/rocky-storage", version = "=0.1.0" }
 rocky-coordinator = { path = "crates/rocky-coordinator", version = "=0.1.0" }
 rocky-voter = { path = "crates/rocky-voter" }
 rocky-iroh = { path = "crates/rocky-iroh", version = "=0.1.0" }
+rocky-tcp = { path = "crates/rocky-tcp", version = "=0.1.0" }
 rocky-platform = { path = "crates/rocky-platform", version = "=0.1.0" }
 rocky-sqlite = { path = "vendor/rocky-sqlite", version = "=0.1.0" }
 rocky-sqlite-opfs = { path = "vendor/rocky-sqlite-opfs", version = "=0.1.0" }

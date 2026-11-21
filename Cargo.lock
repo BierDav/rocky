@@ -6124,6 +6124,7 @@ dependencies = [
  "rocky-sdk",
  "rocky-secure",
  "rocky-storage",
+ "rocky-tcp",
  "rocky-voter",
  "rusqlite",
  "serde",
@@ -6205,6 +6206,18 @@ dependencies = [
  "tokio",
  "wasm-bindgen-test",
  "web-time",
+]
+
+[[package]]
+name = "rocky-tcp"
+version = "0.1.0"
+dependencies = [
+ "rocky-core",
+ "rocky-credentials",
+ "rocky-platform",
+ "serde",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

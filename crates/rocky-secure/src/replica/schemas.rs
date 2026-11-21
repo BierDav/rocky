@@ -1421,6 +1421,7 @@ impl<A: RowApplication> Inner<A> {
         self.conn
             .execute("DELETE FROM secure_schema_switch WHERE id=1", ())
             .await?;
+        self.select_line(scope, self.workspace.tip).await?;
         Ok(())
     }
 }

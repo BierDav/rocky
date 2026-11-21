@@ -1800,6 +1800,32 @@ impl TipGraph {
         }
         Err(denied("cyclic tip graph"))
     }
+    pub fn author_line_roots(&self, tip: TipId) -> Result<Vec<TipId>, Error> {
+        self.schema(tip)?;
+        let mut roots = Vec::new();
+        let mut cursor = self.line_root(tip)?;
+        let mut visited = std::collections::BTreeSet::new();
+        while visited.insert(cursor) {
+            roots.push(cursor);
+            let mut parent = None;
+            for opening in &self.openings {
+                if opening.statement.scope == self.scope
+                    && opening.tip()? == cursor
+                    && self.migration_opening(opening, true)?
+                {
+                    parent = Some(
+                        self.line_root(self.seal_by_id(opening.statement.seal)?.statement.tip)?,
+                    );
+                    break;
+                }
+            }
+            match parent {
+                Some(next) => cursor = next,
+                None => return Ok(roots),
+            }
+        }
+        Err(denied("cyclic tip graph"))
+    }
     fn line_root_any(&self, tip: TipId) -> Result<TipId, Error> {
         self.schema_any(tip)?;
         let mut cursor = tip;

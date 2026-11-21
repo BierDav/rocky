@@ -1031,33 +1031,97 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    async fn select_line(&mut self, scope: Scope, target: TipId) -> Result<(), Error> {
-        let root = self
-            .graph_for(scope)?
-            .line_root(target)
-            .map_err(credential)?;
-        let records = collect_rows(
-            self.conn
-                .query(
-                    "SELECT node FROM secure_line_nodes WHERE line=?",
-                    [encode(&root)?],
-                )
-                .await?,
-        )
-        .await?;
-        let mut selected = match records.first().map(Vec::as_slice) {
-            Some([SqlValue::Blob(node)]) => self
-                .line_nodes
-                .get(&root)
-                .filter(|author| author.key.public_key().as_bytes().as_slice() == node)
-                .cloned(),
-            None if root
-                == rocky_credentials::genesis_tip(self.graph_for(scope)?.genesis_schema) =>
-            {
-                Some(identity::NodeAuthor::new(&self.config)?)
+    async fn can_inherit_ancestor_line_node(&self) -> Result<bool, Error> {
+        Ok(self.schema_switch_intent().await?.is_none()
+            && rows(
+                &self.conn,
+                "SELECT 1 FROM secure_staged_schema WHERE state!='released'",
+            )
+            .await?
+            .is_empty())
+    }
+    async fn nearest_bound_ancestor(&self, ancestors: &[TipId]) -> Result<Option<TipId>, Error> {
+        for &ancestor in ancestors {
+            let bound = !collect_rows(
+                self.conn
+                    .query(
+                        "SELECT 1 FROM secure_line_nodes WHERE line=?",
+                        [encode(&ancestor)?],
+                    )
+                    .await?,
+            )
+            .await?
+            .is_empty();
+            if bound {
+                return Ok(Some(ancestor));
             }
-            _ => None,
+        }
+        Ok(None)
+    }
+    pub(super) async fn select_line(&mut self, scope: Scope, target: TipId) -> Result<(), Error> {
+        let roots = self
+            .graph_for(scope)?
+            .author_line_roots(target)
+            .map_err(credential)?;
+        let root = *roots
+            .first()
+            .ok_or_else(|| Error::Corrupt("author line root missing".into()))?;
+        let lookup = async |line: TipId| -> Result<(bool, Option<identity::NodeAuthor>), Error> {
+            let records = collect_rows(
+                self.conn
+                    .query(
+                        "SELECT node FROM secure_line_nodes WHERE line=?",
+                        [encode(&line)?],
+                    )
+                    .await?,
+            )
+            .await?;
+            Ok(match records.first().map(Vec::as_slice) {
+                Some([SqlValue::Blob(node)]) => (
+                    true,
+                    self.line_nodes
+                        .get(&line)
+                        .filter(|author| author.key.public_key().as_bytes().as_slice() == node)
+                        .cloned(),
+                ),
+                None if line
+                    == rocky_credentials::genesis_tip(self.graph_for(scope)?.genesis_schema) =>
+                {
+                    (false, Some(identity::NodeAuthor::new(&self.config)?))
+                }
+                _ => (false, None),
+            })
         };
+        let (has_binding, mut selected) = lookup(root).await?;
+        let mut bound_root = root;
+        if !has_binding
+            && selected.is_none()
+            && roots.len() > 1
+            && self.can_inherit_ancestor_line_node().await?
+        {
+            for &ancestor in &roots[1..] {
+                let (ancestor_bound, candidate) = lookup(ancestor).await?;
+                if let Some(mut author) = candidate {
+                    if author.key.public_key() == self.config.node.public_key() {
+                        author = identity::NodeAuthor::new(&self.config)?;
+                    }
+                    if self
+                        .verify_chain(&author.credentials, author.key.public_key(), now()?)
+                        .is_ok()
+                        && self
+                            .node_continues(scope, target, author.key.public_key())
+                            .await?
+                    {
+                        selected = Some(author);
+                        bound_root = ancestor;
+                        break;
+                    }
+                }
+                if ancestor_bound {
+                    break;
+                }
+            }
+        }
         if selected
             .as_ref()
             .is_some_and(|author| author.key.public_key() == self.config.node.public_key())
@@ -1075,10 +1139,13 @@ impl<A: RowApplication> Inner<A> {
             self.conn
                 .execute(
                     "INSERT OR IGNORE INTO secure_line_nodes VALUES(?,?)",
-                    [encode(&root)?, author.key.public_key().as_bytes().to_vec()],
+                    [
+                        encode(&bound_root)?,
+                        author.key.public_key().as_bytes().to_vec(),
+                    ],
                 )
                 .await?;
-            self.line_nodes.insert(root, author.clone());
+            self.line_nodes.insert(bound_root, author.clone());
         }
         self.node_author = selected;
         Ok(())
@@ -1152,7 +1219,7 @@ impl<A: RowApplication> Inner<A> {
                 Ok(previous == target
                     || self
                         .graph_for(scope)?
-                        .continues(previous, target)
+                        .succeeds(previous, target)
                         .unwrap_or(false))
             }
             _ => Err(Error::Corrupt("node tip".into())),
@@ -2020,6 +2087,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         identity::check_node_chain(&author.credentials)?;
         inner.line_nodes.insert(root, author);
+        if let Some((scope, _)) = inner.workspace.followed
+            && inner.node_author.is_none()
+        {
+            let target = inner.workspace.tip;
+            if inner.graph_for(scope)?.schema(target).is_ok() {
+                inner.select_line(scope, target).await?;
+            }
+        }
         Ok(())
     }
     pub async fn register_line_node(&self, node: LineNode) -> Result<(), Error> {
@@ -2037,10 +2112,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 "a node author log cannot cross a fork; enroll another node",
             ));
         }
-        let root = inner
+        let roots = inner
             .graph_for(*scope)?
-            .line_root(inner.workspace.tip)
+            .author_line_roots(inner.workspace.tip)
             .map_err(credential)?;
+        let root = *roots
+            .first()
+            .ok_or_else(|| Error::Corrupt("author line root missing".into()))?;
         let owner = inner
             .config
             .credentials
@@ -2061,7 +2139,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             credentials: node.credentials,
             key: node.key,
         };
-        transaction!(inner, |inner| {
+        let bound_root = transaction!(inner, |inner| {
             identity::check_node_chain(&selected.credentials)?;
             let existing = collect_rows(
                 inner
@@ -2073,14 +2151,42 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .await?,
             )
             .await?;
-            let expected = vec![SqlValue::Blob(encode(&root)?)];
-            if existing.iter().any(|row| row != &expected) {
-                return Err(denied("a node author log belongs to one line"));
-            }
-            inner.conn.execute("INSERT INTO secure_line_nodes VALUES(?,?) ON CONFLICT(line) DO UPDATE SET node=excluded.node",[encode(&root)?,selected.key.public_key().as_bytes().to_vec()]).await?;
-            Ok(())
+            let bound = match existing.as_slice() {
+                [] => {
+                    inner.conn.execute("INSERT INTO secure_line_nodes VALUES(?,?) ON CONFLICT(line) DO UPDATE SET node=excluded.node",[encode(&root)?,selected.key.public_key().as_bytes().to_vec()]).await?;
+                    root
+                }
+                [record] => match record.as_slice() {
+                    [SqlValue::Blob(bytes)] => {
+                        let existing_line: TipId = decode(bytes)?;
+                        let target_unbound = collect_rows(
+                            inner
+                                .conn
+                                .query(
+                                    "SELECT 1 FROM secure_line_nodes WHERE line=?",
+                                    [encode(&root)?],
+                                )
+                                .await?,
+                        )
+                        .await?
+                        .is_empty();
+                        let allows_ancestor = existing_line != root
+                            && target_unbound
+                            && inner.can_inherit_ancestor_line_node().await?
+                            && inner.nearest_bound_ancestor(&roots[1..]).await?
+                                == Some(existing_line);
+                        if existing_line != root && !allows_ancestor {
+                            return Err(denied("a node author log belongs to one line"));
+                        }
+                        existing_line
+                    }
+                    _ => return Err(Error::Corrupt("line node".into())),
+                },
+                _ => return Err(denied("a node author log belongs to one line")),
+            };
+            Ok(bound)
         })?;
-        inner.line_nodes.insert(root, selected.clone());
+        inner.line_nodes.insert(bound_root, selected.clone());
         inner.node_author = Some(selected);
         flush_guard(inner, &self.inner).await.map(|_| ())
     }

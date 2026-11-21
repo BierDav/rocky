@@ -527,12 +527,20 @@ impl<A: RowApplication> Inner<A> {
         self.replay_from(time, None).await
     }
 
+    pub(in crate::replica) async fn replay_for_audit(
+        &self,
+        time: u64,
+    ) -> Result<Result<(), BrokenReference>, Error> {
+        self.replay_unchecked(time, None, false).await?;
+        Ok(self.broken_reference(None).await?.map_or(Ok(()), Err))
+    }
+
     pub(in crate::replica) async fn replay_from(
         &self,
         time: u64,
         kept: Option<&history::Rewind>,
     ) -> Result<Result<(), BrokenReference>, Error> {
-        self.replay_unchecked(time, kept).await?;
+        self.replay_unchecked(time, kept, true).await?;
         Ok(self.broken_reference(None).await?.map_or(Ok(()), Err))
     }
 
@@ -540,6 +548,7 @@ impl<A: RowApplication> Inner<A> {
         &self,
         time: u64,
         kept: Option<&history::Rewind>,
+        publish_outcomes: bool,
     ) -> Result<(), Error> {
         let corrupt = || Error::Corrupt("replayed history".into());
         let Some(typed) = self.workspace.typed.as_ref() else {
@@ -699,7 +708,8 @@ impl<A: RowApplication> Inner<A> {
                 }),
             }
         }
-        self.redo_recorded(redo, time, Some(&recorded)).await?;
+        self.redo_recorded(redo, time, Some(&recorded), publish_outcomes)
+            .await?;
         for (id, bound) in bounds {
             self.seal_replayed(id, bound).await?;
         }

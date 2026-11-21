@@ -127,6 +127,17 @@ fn at<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str, schema: &'a str) -> O
         coordination: None,
     }
 }
+fn at_without_identity<'a>(
+    directory: &'a Path,
+    hub: &Arc<Hub>,
+    name: &str,
+    schema: &'a str,
+) -> Open<'a> {
+    Open {
+        identity: None,
+        ..at(directory, hub, name, schema)
+    }
+}
 
 async fn checkpoint_writer(
     root: &Path,
@@ -1219,6 +1230,272 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         "grants that never named item_categories follow items"
     );
     for peer in [writer, issuer] {
+        peer.database.close().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_invited_writer_without_identity_writes_after_the_migration() -> Result<(), Failure> {
+    const POSITIONED: &str = r#"{"format":6,"application":"lists","version":2,"tables":[
+ {"name":"lists","class":"replayed","columns":[{"name":"title","type":"text","not_null":true}],
+  "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
+ {"name":"categories","class":"replayed","columns":[{"name":"list","type":"blob","not_null":true},{"name":"name","type":"text","not_null":true}],
+  "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
+  "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"}]},
+ {"name":"items","class":"replayed","columns":[
+   {"name":"list","type":"blob","not_null":true},{"name":"title","type":"text","not_null":true},{"name":"category","type":"blob"},
+   {"name":"position","type":"text","not_null":true,"default":""}],
+  "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
+  "indexes":[{"name":"index_items_list_title","unique":true,"columns":[{"name":"list","descending":false},{"name":"title","descending":false}]}],
+  "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"},
+   {"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}
+],
+"migrations":[{"version":2,"statements":[
+  "UPDATE items SET position = printf('%09d5', (SELECT count(*) FROM items AS earlier WHERE earlier.list = items.list AND earlier.id < items.id))"]}]}"#;
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let (a, b) = (root.path().join("a"), root.path().join("b"));
+    let issuer =
+        Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
+    issuer.session.create_bookmark("main", None).await?;
+    issuer.follow("main").await?;
+    let inherited_by_migration_openings = 1;
+    snap::value(
+        issuer
+            .session
+            .set_genesis_minimum(inherited_by_migration_openings),
+    )
+    .await?;
+    let invitation = snap::value(issuer.session.invite(
+        Some(rocky_sdk::GrantProfile::Writer {
+            scopes: TABLES.map(String::from).into(),
+        }),
+        None,
+    ))
+    .await?["uri"]
+        .as_str()
+        .ok_or("uri")?
+        .to_owned();
+    let writer = Peer::new(
+        Database::join(at_without_identity(&b, &hub, "b", SCHEMA), &invitation)?.database,
+    )?;
+    snap::value(issuer.session.next_partition("lists")).await?;
+    let list = issuer
+        .insert(
+            "lists",
+            None,
+            "INSERT INTO lists(id,title) VALUES(?,'Weekly')",
+        )
+        .await?;
+    let dairy = issuer
+        .insert(
+            "categories",
+            Some(&list),
+            &format!("INSERT INTO categories(id,list,name) VALUES(?,X'{list}','Dairy')"),
+        )
+        .await?;
+    for (title, category) in [
+        ("Milk", format!("X'{dairy}'")),
+        ("Bread", "NULL".to_owned()),
+    ] {
+        issuer
+            .insert(
+                "items",
+                Some(&list),
+                &format!("INSERT INTO items(id,list,title,category) VALUES(?,X'{list}','{title}',{category})"),
+            )
+            .await?;
+    }
+    let node = snap::value(writer.session.info()).await?["node"].clone();
+    snap::value(issuer.session.share_partition(
+        rocky_sdk::PartitionTarget::Group {
+            group: "list".to_owned(),
+            values: (values(&list)).clone(),
+        },
+        serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(
+            json!([node]),
+        )
+        .expect("typed fixture"),
+        None,
+    ))
+    .await?;
+    snap::value(writer.sync_once()).await?;
+    writer
+        .insert(
+            "items",
+            Some(&list),
+            &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Butter')"),
+        )
+        .await?;
+    snap::value(writer.sync_once()).await?;
+    for peer in [writer, issuer] {
+        peer.database.close().await?;
+    }
+
+    let issuer =
+        Peer::new(Database::open(at(&a, &hub, "a", POSITIONED))?.database)?.with_identity(&a);
+
+    let older_application =
+        Peer::new(Database::open(at_without_identity(&b, &hub, "b", SCHEMA))?.database)?;
+    snap::value(older_application.sync_once()).await?;
+    older_application.session.renew().await?;
+    older_application
+        .insert(
+            "items",
+            Some(&list),
+            &format!("INSERT INTO items(id,list,title) VALUES(?,X'{list}','Jam')"),
+        )
+        .await?;
+    snap::value(older_application.sync_once()).await?;
+    assert_eq!(
+        issuer
+            .column(&format!(
+                "SELECT title FROM items WHERE list = X'{list}' ORDER BY title"
+            ))
+            .await?,
+        [json!("Bread"), json!("Butter"), json!("Jam"), json!("Milk")],
+        "an invited writer without identity on an older application writes after the migration and renewal"
+    );
+    older_application.database.close().await?;
+
+    let writer =
+        Peer::new(Database::open(at_without_identity(&b, &hub, "b", POSITIONED))?.database)?;
+    snap::value(writer.sync_once()).await?;
+    writer.session.renew().await?;
+    writer
+        .insert(
+            "items",
+            Some(&list),
+            &format!("INSERT INTO items(id,list,title,position) VALUES(?,X'{list}','Eggs','9')"),
+        )
+        .await?;
+    snap::value(writer.sync_once()).await?;
+    assert_eq!(
+        issuer
+            .column(&format!(
+                "SELECT title FROM items WHERE list = X'{list}' ORDER BY title"
+            ))
+            .await?,
+        [
+            json!("Bread"),
+            json!("Butter"),
+            json!("Eggs"),
+            json!("Jam"),
+            json!("Milk")
+        ],
+        "an invited writer without identity writes after upgrading and renewing"
+    );
+    for peer in [writer, issuer] {
+        peer.database.close().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicates()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let (a, b) = (root.path().join("a"), root.path().join("b"));
+    let issuer =
+        Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?.with_identity(&a);
+    issuer.session.create_bookmark("main", None).await?;
+    issuer.follow("main").await?;
+    snap::value(issuer.session.set_genesis_minimum(1)).await?;
+    let grants_naming_every_table: Vec<Value> = TABLES
+        .iter()
+        .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
+        .collect();
+    let invitation = snap::value(
+        issuer.session.invite(
+            Some(rocky_sdk::GrantProfile::Grants {
+                grants: serde_json::from_value::<Vec<rocky_sdk::credentials::Grant>>(json!(
+                    grants_naming_every_table
+                ))
+                .expect("typed fixture"),
+            }),
+            None,
+        ),
+    )
+    .await?["uri"]
+        .as_str()
+        .ok_or("uri")?
+        .to_owned();
+    let member = Peer::new(Database::join(open(&b, &hub, "b"), &invitation)?.database)?;
+    snap::value(issuer.session.next_partition("lists")).await?;
+    let list = issuer
+        .insert(
+            "lists",
+            None,
+            "INSERT INTO lists(id,title) VALUES(?,'Bulk')",
+        )
+        .await?;
+    let total = 2_053usize;
+    let list_bytes = data_encoding::HEXLOWER_PERMISSIVE.decode(list.as_bytes())?;
+    for chunk_start in (0..total).step_by(200) {
+        let chunk_end = (chunk_start + 200).min(total);
+        let mut transaction = issuer.database.transaction().await?;
+        for index in chunk_start..chunk_end {
+            let id = transaction
+                .next_id("items", rocky_sdk::params![list_bytes.clone()])
+                .await?;
+            transaction
+                .execute(
+                    "INSERT INTO items(id,list,title) VALUES(?,?,?)",
+                    rocky_sdk::params![id, list_bytes.clone(), format!("Item {index:04}")],
+                )
+                .await?;
+        }
+        transaction.commit().await?;
+    }
+    let node = snap::value(member.session.info()).await?["node"].clone();
+    snap::value(issuer.session.share_partition(
+        rocky_sdk::PartitionTarget::Group {
+            group: "list".to_owned(),
+            values: (values(&list)).clone(),
+        },
+        serde_json::from_value::<std::collections::BTreeSet<rocky_sdk::credentials::PublicKey>>(
+            json!([node]),
+        )
+        .expect("typed fixture"),
+        None,
+    ))
+    .await?;
+    snap::value(member.sync_once()).await?;
+    for peer in [member, issuer] {
+        peer.database.close().await?;
+    }
+
+    let issuer = Peer::new(Database::open(at(&a, &hub, "a", ORDERED))?.database)?.with_identity(&a);
+    let check_sql = format!(
+        "SELECT COUNT(*) || ':' || COUNT(DISTINCT position) FROM items WHERE list = X'{list}' AND position > ''"
+    );
+    let expected_summary = [json!(format!("{total}:{total}"))];
+    assert_eq!(
+        issuer.column(&check_sql).await?,
+        expected_summary,
+        "migration UPDATE over more than 2048 rows must assign distinct non-empty positions on issuer"
+    );
+    let all_rows_sql = format!(
+        "SELECT title || ':' || position FROM items WHERE list = X'{list}' ORDER BY position"
+    );
+    let issuer_rows = issuer.column(&all_rows_sql).await?;
+    assert_eq!(issuer_rows.len(), total);
+
+    let member = Peer::new(Database::open(at_without_identity(&b, &hub, "b", ORDERED))?.database)?;
+    snap::value(member.sync_once()).await?;
+    assert_eq!(
+        member.column(&check_sql).await?,
+        expected_summary,
+        "migration UPDATE over more than 2048 rows must replicate distinct non-empty positions to member"
+    );
+    assert_eq!(
+        member.column(&all_rows_sql).await?,
+        issuer_rows,
+        "member (title, position) pairs must match issuer across all 2053 rows"
+    );
+    for peer in [member, issuer] {
         peer.database.close().await?;
     }
     Ok(())

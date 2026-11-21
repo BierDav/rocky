@@ -35,6 +35,7 @@ pub(super) const SCHEMA: &[&str] = &[
     REPLAYED_STUCK_TABLE,
 ];
 
+const MIGRATION_CAPTURE: (usize, usize) = (usize::MAX, usize::MAX);
 const OUTCOME_MEMBERS: &str = "SELECT dropped,sealed,violated,0 FROM secure_replayed WHERE txn=?1 UNION ALL SELECT k.dropped,k.sealed,k.violated,k.based FROM secure_kept_outcomes k WHERE k.txn=?1 AND NOT EXISTS(SELECT 1 FROM secure_replayed r WHERE r.hash=k.hash)";
 
 pub(super) struct Undo {
@@ -1313,6 +1314,7 @@ impl<A: RowApplication> Inner<A> {
         intents: &[Replaying<'_>],
         era: Option<i64>,
         time: u64,
+        publish_outcomes: bool,
     ) -> Result<(), Error> {
         if members > 1 {
             let held: Vec<u16> = intents.iter().map(|(.., member)| *member).collect();
@@ -1380,7 +1382,7 @@ impl<A: RowApplication> Inner<A> {
                 self.touch(&table.sql_name);
             }
         }
-        if members > 1 {
+        if members > 1 && publish_outcomes {
             let mut others = Vec::new();
             for record in collect_rows(
                 self.conn
@@ -1453,7 +1455,7 @@ impl<A: RowApplication> Inner<A> {
             .position(|redo| redo.transaction == transaction.0)
             .map(|index| redo.remove(index))
         else {
-            self.replay_transaction(transaction, intents, era, time)
+            self.replay_transaction(transaction, intents, era, time, true)
                 .await?;
             return self.redo(redo, time).await;
         };
@@ -1501,7 +1503,7 @@ impl<A: RowApplication> Inner<A> {
                 .map(|operation| stamp(&operation.header))
                 .ok()
         });
-        self.replay_transaction(transaction, &joined, era, time)
+        self.replay_transaction(transaction, &joined, era, time, true)
             .await?;
         self.redo(redo, time).await
     }
@@ -1570,13 +1572,14 @@ impl<A: RowApplication> Inner<A> {
     }
 
     async fn redo(&self, redo: Vec<Redo>, time: u64) -> Result<(), Error> {
-        self.redo_recorded(redo, time, None).await
+        self.redo_recorded(redo, time, None, true).await
     }
     async fn redo_recorded(
         &self,
         redo: Vec<Redo>,
         time: u64,
         recorded: Option<&BTreeMap<Hash, bool>>,
+        publish_outcomes: bool,
     ) -> Result<(), Error> {
         for (index, redo) in redo.into_iter().enumerate() {
             #[cfg(any(test, feature = "qualification"))]
@@ -1638,7 +1641,7 @@ impl<A: RowApplication> Inner<A> {
                     (*frame, *intent, grants.as_deref().unwrap_or(&[]), *member)
                 })
                 .collect();
-            self.replay_transaction(transaction, &intents, era, time)
+            self.replay_transaction(transaction, &intents, era, time, publish_outcomes)
                 .await?;
         }
         Ok(())
@@ -1775,10 +1778,15 @@ impl<A: RowApplication> Inner<A> {
         let capture = conn.capture()?;
         let state = conn.session()?;
         let poisoned = || Error::Corrupt("capture poisoned".into());
+        let capture_limits = if frame.migration.is_some() {
+            MIGRATION_CAPTURE
+        } else {
+            REPLAY_CAPTURE
+        };
         capture
             .lock()
             .map_err(|_| poisoned())?
-            .arm(plan.clone(), REPLAY_CAPTURE);
+            .arm(plan.clone(), capture_limits);
         let ran = (|| {
             for copy in copies {
                 state

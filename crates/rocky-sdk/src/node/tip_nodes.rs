@@ -70,12 +70,15 @@ impl Node {
         let Some((scope, _)) = self.replica.followed_bookmark().await else {
             return Ok(());
         };
-        let line = self
+        let lines: Vec<String> = self
             .replica
             .tip_graph(scope)
             .await?
-            .line_root(self.replica.followed_tip().await)?;
-        let line = HEXLOWER.encode(&line.0);
+            .author_line_roots(self.replica.followed_tip().await)?
+            .into_iter()
+            .map(|root| HEXLOWER.encode(&root.0))
+            .collect();
+        let line = lines.first().cloned().ok_or("author line root missing")?;
         let mut saved = match self.vault.load_bytes(ROLE)? {
             Some(bytes) => serde_json::from_slice::<SavedNodes>(&bytes)?,
             None => SavedNodes {
@@ -106,15 +109,14 @@ impl Node {
             settings.save(&self.replica).await?;
         }
         self.replica.learn_revocations(&known).await?;
-        let grants = |chain: &CredentialChain| -> Result<_, Failure> {
-            let held = chain.held().ok_or("line node has no identity capability")?;
-            let extended = held.extended()?;
-            Ok((held.grants.clone(), extended.partitions, extended.families))
-        };
-        let indexes: Vec<_> = (0..saved.nodes.len())
-            .rev()
-            .filter(|index| saved.nodes[*index].line == line)
-            .collect();
+        let mut indexes = Vec::new();
+        for candidate in &lines {
+            indexes.extend(
+                (0..saved.nodes.len())
+                    .rev()
+                    .filter(|index| saved.nodes[*index].line == *candidate),
+            );
+        }
         for index in indexes {
             let key = PrivateKey::from_bytes(&saved.nodes[index].key);
             if saved.nodes[index].credentials.certificate().is_some() {
@@ -130,7 +132,7 @@ impl Node {
                 ) else {
                     continue;
                 };
-                if grants(&current)? != grants(&saved.nodes[index].credentials)? {
+                if current != saved.nodes[index].credentials {
                     saved.nodes[index].credentials = current;
                     self.save_line_nodes(&saved)?;
                 }

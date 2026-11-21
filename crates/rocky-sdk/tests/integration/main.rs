@@ -80,6 +80,8 @@ mod sqlite_contract;
 #[cfg(not(target_family = "wasm"))]
 mod support;
 #[cfg(not(target_family = "wasm"))]
+mod tcp;
+#[cfg(not(target_family = "wasm"))]
 mod tips;
 #[cfg(not(target_family = "wasm"))]
 mod write_latency;

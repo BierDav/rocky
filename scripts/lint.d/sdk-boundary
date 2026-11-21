@@ -9,9 +9,9 @@ import subprocess
 metadata = json.loads(subprocess.check_output(
     ["cargo", "metadata", "--offline", "--locked", "--no-deps", "--format-version", "1"], text=True))
 sdk = next(package for package in metadata["packages"] if package["name"] == "rocky-sdk")
-if any(dependency["name"] in {"rocky-iroh", "rocky-coordinator"} and dependency["kind"] != "dev"
+if any(dependency["name"] in {"rocky-iroh", "rocky-tcp", "rocky-coordinator"} and dependency["kind"] != "dev"
        for dependency in sdk["dependencies"]):
-    raise SystemExit("sdk-boundary: coordinator clients and iroh connectors belong to applications; rocky-sdk normal dependencies must exclude rocky-coordinator and rocky-iroh")
+    raise SystemExit("sdk-boundary: coordinator clients and iroh connectors belong to applications; rocky-sdk normal dependencies must exclude rocky-coordinator, rocky-iroh and rocky-tcp")
 if "iroh" in sdk["features"]:
     raise SystemExit("sdk-boundary: coordinator and transport composition must not require an SDK iroh feature")
 if sdk["features"].get("default"):
@@ -28,7 +28,7 @@ for target in (None, "wasm32-unknown-unknown"):
         raise SystemExit(f"sdk-boundary: cannot inspect {label} normal dependencies; "
                          "run cargo fetch --locked first.\n" + result.stderr)
     packages = {line.split()[0] for line in result.stdout.splitlines() if line.strip()}
-    forbidden = packages & {"rocky-voter", "rocky-coordinator", "openraft", "rocky-iroh", "iroh"}
+    forbidden = packages & {"rocky-voter", "rocky-coordinator", "openraft", "rocky-iroh", "rocky-tcp", "iroh"}
     if forbidden:
         raise SystemExit(f"sdk-boundary: rocky-sdk normal dependencies for {label} include "
                          f"server or default transport packages: {', '.join(sorted(forbidden))}. "

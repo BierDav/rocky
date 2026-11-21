@@ -1,0 +1,25 @@
+[package]
+name = "rocky-tcp"
+description = "Rocky's network port on plain TCP for networks that already route and encrypt between peers, such as a WireGuard mesh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = ["crates-io"]
+repository.workspace = true
+license-file.workspace = true
+
+[dependencies]
+tracing.workspace = true
+rocky-core.workspace = true
+rocky-credentials.workspace = true
+rocky-platform.workspace = true
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+tokio = { version = "1", features = ["rt", "sync", "time", "io-util", "macros", "net"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+
+[lints]
+workspace = true

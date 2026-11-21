@@ -81,7 +81,7 @@ impl Peer {
                 )
             });
         let application = rocky_sdk::Schema::parse(&schema)?.application;
-        let settings_path = directory.join("identity.json");
+        let settings_dir = directory.clone();
         let identity: Arc<dyn rocky_sdk::IdentityProvider> =
             Arc::new(rocky_sdk::IdentityKey::from_secret(rocky_core::commitment(
                 "fixture.service.identity",
@@ -104,7 +104,7 @@ impl Peer {
             }
         })
         .await??;
-        let settings: Value = serde_json::from_slice(&std::fs::read(settings_path)?)?;
+        let settings = crate::common::authority_json(&settings_dir, "identity")?;
         let publisher = serde_json::from_value(settings["publisher"].clone())?;
         Ok(Self {
             control,

@@ -167,7 +167,7 @@ impl Node {
         transfer: &mut sync::Transfer,
     ) -> Result<Bootstrap, Failure> {
         let file = &self.bootstrap_intent;
-        if !file.exists() {
+        if !file.exists().await {
             return Ok(Bootstrap::NotPending {
                 first: Box::new(first),
             });
@@ -175,7 +175,10 @@ impl Node {
         self.sync_state
             .send_replace(SyncActivityState::Bootstrapping);
         self.acquire_schemas(transport).await?;
-        let expected = file.load()?.ok_or("the bootstrap intent disappeared")?;
+        let expected = file
+            .load()
+            .await?
+            .ok_or("the bootstrap intent disappeared")?;
         let pending = self.bootstrap_pending(&expected).await?;
         self.replica
             .set_importing(pending.iter().copied().collect())
@@ -203,7 +206,7 @@ impl Node {
                 Ok(Bootstrap::Finished)
             }
             None => Ok(Bootstrap::Interrupted {
-                importing: match file.load()? {
+                importing: match file.load().await? {
                     Some(intent) => self.bootstrap_pending(&intent).await?,
                     None => Vec::new(),
                 },
@@ -216,11 +219,10 @@ impl Node {
         completed: &BootstrapIntent,
     ) -> Result<(), Failure> {
         self.replica.flush().await?;
-        let finished = self.bootstrap_intent.finish(
-            completed,
-            peer,
-            &self.settings.lock().await.revocations,
-        )?;
+        let finished = self
+            .bootstrap_intent
+            .finish(completed, peer, &self.settings.lock().await.revocations)
+            .await?;
         self.replica
             .set_importing(std::collections::BTreeSet::new())
             .await;

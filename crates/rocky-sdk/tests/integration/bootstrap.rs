@@ -237,9 +237,8 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
         .await
         .expect("checkpoint join under current policy");
     assert_eq!(member.titles().await, ["before revocation"]);
-    assert!(!member_path.join("bootstrap.json").exists());
-    let identity: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(member_path.join("identity.json"))?)?;
+    assert!(common::authority_bytes(&member_path, "bootstrap")?.is_none());
+    let identity = common::authority_json(&member_path, "identity")?;
     assert_eq!(
         identity["keys"]["items"]
             .as_array()
@@ -266,8 +265,7 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
         member.session.info().await
     })
     .await;
-    let renewed: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(member_path.join("identity.json"))?)?;
+    let renewed = common::authority_json(&member_path, "identity")?;
     assert_eq!(
         renewed["keys"]["items"]
             .as_array()
@@ -559,8 +557,7 @@ async fn a_join_that_learns_a_revocation_before_meeting_its_inviter_still_waits_
         status["data"]["bootstrap_pending"], true,
         "a revocation learned from b must not end the wait for the inviter: {status}"
     );
-    let intent: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(c_path.join("bootstrap.json"))?)?;
+    let intent = common::authority_json(&c_path, "bootstrap")?;
     assert_eq!(intent["inviter"], inviter, "{intent}");
 
     let a = Device::open(&a_path, Some(Network::Owned(hub.connector("a"))))?;
@@ -619,8 +616,7 @@ async fn renewal_after_missed_key_epochs_uses_a_checkpoint_without_acquiring_old
         snap::ok(b.session.status()).await["data"]["bootstrap_pending"],
         true
     );
-    let identity: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(b_path.join("identity.json"))?)?;
+    let identity = common::authority_json(&b_path, "identity")?;
     assert_eq!(
         identity["keys"]["items"]
             .as_array()
@@ -709,8 +705,7 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
     )?)?;
     attempts.wait_for(|count| *count >= 2).await?;
     assert!(common::exchange_failed(&member.sync().await));
-    let progress: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(path.join("bootstrap.json"))?)?;
+    let progress = common::authority_json(&path, "bootstrap")?;
     let pending = progress["imports"]["scopes"]
         .as_array()
         .expect("pending scopes")
@@ -732,8 +727,7 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
         snap::ok(member.session.status()).await["data"]["bootstrap_pending"],
         true
     );
-    let reopened: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(path.join("bootstrap.json"))?)?;
+    let reopened = common::authority_json(&path, "bootstrap")?;
     assert_eq!(
         reopened["imports"]["scopes"].as_array(),
         Some(&pending),
@@ -752,7 +746,7 @@ async fn interrupted_parallel_join_preserves_pending_scopes_after_reopen() -> Re
         false,
         "resume report: {resumed:?}"
     );
-    assert!(!path.join("bootstrap.json").exists());
+    assert!(common::authority_bytes(&path, "bootstrap")?.is_none());
     assert_eq!(member.titles().await, ["first scope"]);
     member.close().await;
     gate.close().await;
@@ -819,10 +813,12 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
     let intent_awaiting_an_unmet_inviter = format!(
         r#"{{"version":1,"imports":{{"scopes":[]}},"totals":[],"inviter":"{unmet_inviter}"}}"#
     );
-    rocky_credentials::write_private(
-        &path.join("bootstrap.json"),
+    common::write_authority(
+        &path,
+        "bootstrap",
         intent_awaiting_an_unmet_inviter.as_bytes(),
-    )?;
+    )
+    .await?;
     let member = Device::new(Database::open(Open {
         identity: None,
         directory: &path,
@@ -833,7 +829,9 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
     })?)?;
     let _ = member.sync().await;
     assert_eq!(
-        std::fs::read_to_string(path.join("bootstrap.json")).ok(),
+        common::authority_bytes(&path, "bootstrap")?
+            .map(String::from_utf8)
+            .transpose()?,
         Some(intent_awaiting_an_unmet_inviter),
         "a bootstrap that completes without meeting the named inviter keeps waiting for it"
     );
@@ -866,10 +864,12 @@ async fn an_intent_naming_an_unmet_inviter_keeps_the_bootstrap_pending_until_tha
 async fn an_intent_without_offers_reports_no_progress() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     Device::create(root.path(), None)?.close().await;
-    rocky_credentials::write_private(
-        &root.path().join("bootstrap.json"),
+    common::write_authority(
+        root.path(),
+        "bootstrap",
         br#"{"version":1,"imports":{"scopes":[]},"totals":[],"inviter":null}"#,
-    )?;
+    )
+    .await?;
     let device = Device::open(root.path(), None)?;
     let status = snap::ok(device.session.status()).await;
     assert_eq!(status["data"]["bootstrap_pending"], true);

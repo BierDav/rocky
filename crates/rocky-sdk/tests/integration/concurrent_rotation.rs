@@ -37,7 +37,7 @@ async fn join(
     Ok(device)
 }
 fn identity(root: &Path, name: &str) -> Value {
-    serde_json::from_slice(&std::fs::read(root.join(name).join("identity.json")).unwrap()).unwrap()
+    common::authority_json(&root.join(name), "identity").unwrap()
 }
 fn winner(root: &Path, name: &str, collection: &str) -> rocky_core::KeyEpoch {
     let epochs: Vec<rocky_core::KeyEpoch> =

@@ -100,7 +100,7 @@ fn open<'a>(
     }
 }
 fn settings(directory: &Path) -> Settings {
-    serde_json::from_slice(&std::fs::read(directory.join("identity.json")).unwrap()).unwrap()
+    Settings::load(&directory.join("rocky.sqlite")).unwrap()
 }
 fn grant_count(chain: &CredentialChain) -> usize {
     chain
@@ -182,7 +182,7 @@ async fn exercise(count: usize, legacy: bool) -> Result<(), Failure> {
             crate::enrollment::now()?,
         )?;
         held.credentials = links;
-        held.save(&owner_dir.join("identity.json"))?;
+        held.save(&owner_dir.join("rocky.sqlite")).await?;
         owner = Device::new(Database::open(open(&owner_dir, &schema, &hub, "owner"))?)?;
     }
     let label = format!(

@@ -54,14 +54,16 @@ async fn a_reimport_requested_by_a_revocation_while_an_import_step_records_progr
                 checkpoint: [7; 32],
                 rows: 3,
             }];
-            c.bootstrap_intent.join(inviter)?;
+            c.bootstrap_intent.join(inviter).await?;
             let joined = c
                 .bootstrap_intent
-                .load()?
+                .load()
+                .await?
                 .ok_or("the join records an intent")?;
             let importing = c
                 .bootstrap_intent
-                .record_progress(&joined, &[scope], &totals)?;
+                .record_progress(&joined, &[scope], &totals)
+                .await?;
             c.replica
                 .learn_revocations(&RevocationSet::try_from(vec![revocation_by(&a).await?])?)
                 .await?;
@@ -69,9 +71,10 @@ async fn a_reimport_requested_by_a_revocation_while_an_import_step_records_progr
             let (loaded, release_import_step) = pause::arm(&c_root, Point::BootstrapIntentLoaded);
             let import_step = {
                 let c = c.clone();
-                tokio::task::spawn_blocking(move || {
+                tokio::spawn(async move {
                     c.bootstrap_intent
                         .record_progress(&importing, &[], &totals)
+                        .await
                         .map_err(|error| error.to_string())
                 })
             };
@@ -99,7 +102,8 @@ async fn a_reimport_requested_by_a_revocation_while_an_import_step_records_progr
 
             let intent = c
                 .bootstrap_intent
-                .load()?
+                .load()
+                .await?
                 .ok_or("the requested re-import keeps an intent")?;
             assert_eq!(
                 intent.imports(),

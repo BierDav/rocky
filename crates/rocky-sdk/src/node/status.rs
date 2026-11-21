@@ -182,7 +182,7 @@ impl Node {
                 pages_complete: staging.map(|(_, _, complete)| complete),
             });
         }
-        let bootstrap_pending = self.bootstrap_intent.exists()
+        let bootstrap_pending = self.bootstrap_intent.exists().await
             || imports.iter().any(|scope| scope.checkpoint.is_some());
         let renewal_routes = settings.renewal_routes();
         let revision = *self.replica.observe_revision().borrow();
@@ -201,7 +201,8 @@ impl Node {
                 logged_out: self.lifecycle.lock().await.is_logged_out() || settings.logged_out,
                 verified_revocation: self
                     .revocation_notice
-                    .revoked(&settings)?
+                    .revoked(&settings)
+                    .await?
                     .map(|notice| {
                         let node = self
                             .node_identity
@@ -383,10 +384,10 @@ impl Node {
             });
         }
         let file = &self.bootstrap_intent;
-        let Some(intent) = file.load()? else {
+        let Some(intent) = file.load().await? else {
             return Ok(blockers);
         };
-        let since = file.recorded_at_epoch_seconds();
+        let since = file.recorded_at_epoch_seconds().await;
         for scope in self.bootstrap_pending(&intent).await.unwrap_or_default() {
             blockers.push(Blocker {
                 scope: scope_label(&scope),
@@ -510,7 +511,11 @@ impl Node {
             self.deliver_unlinks().await?;
         }
         let _syncing = self.syncing.lock().await;
-        if let Some(statement) = self.revocation_notice.revoked(&self.settings.published())? {
+        if let Some(statement) = self
+            .revocation_notice
+            .revoked(&self.settings.published())
+            .await?
+        {
             return Err(Box::new(crate::enrollment::Revoked(statement)));
         }
         let started_at_epoch_millis = epoch_millis();

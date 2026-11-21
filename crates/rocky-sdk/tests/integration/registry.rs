@@ -54,9 +54,7 @@ fn join(directory: &Path, network: Network, invitation: &str) -> Result<Device, 
     Device::new(Database::join(options, invitation)?)
 }
 fn identity(directory: &Path) -> Result<Value, Failure> {
-    Ok(serde_json::from_slice(&std::fs::read(
-        directory.join("identity.json"),
-    )?)?)
+    common::authority_json(directory, "identity")
 }
 fn issuer() -> Value {
     json!({"kind": "issuer"})
@@ -928,7 +926,7 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
     assert_eq!(identities(&a).await.len(), 255);
 
     let before = (
-        std::fs::read(root.join("a/identity.json"))?,
+        common::authority_bytes(&root.join("a"), "identity")?,
         registry_rows(&root.join("a"), "%")?,
     );
     let refused = snap::observe(
@@ -961,7 +959,7 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
     .ok_or("invited a 257th device")?;
     assert_eq!(refused["code"], "registry_full", "{refused}");
     let after = (
-        std::fs::read(root.join("a/identity.json"))?,
+        common::authority_bytes(&root.join("a"), "identity")?,
         registry_rows(&root.join("a"), "%")?,
     );
     assert_eq!(before, after);

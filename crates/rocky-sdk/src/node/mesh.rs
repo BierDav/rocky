@@ -57,7 +57,7 @@ impl Node {
             } => settings.discovery_exchange(&self.vault, root, values, after)?,
         };
         if changed {
-            settings.save(&self.path)?;
+            settings.save(&self.replica).await?;
         }
         Ok(response)
     }

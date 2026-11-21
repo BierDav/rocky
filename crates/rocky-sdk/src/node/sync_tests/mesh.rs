@@ -318,7 +318,13 @@ async fn revoked_peers_receive_no_contact_or_discovery_material_and_are_unknown_
                 })?;
             assert!(!dump.contains("discovery"));
             assert!(!dump.contains("contact_meta"));
-            assert!(!std::fs::read_to_string(&b.path)?.contains("discovery"));
+            assert!(
+                !rocky_secure::read_authority_entry(
+                    &b.path,
+                    crate::enrollment::AUTHORITY_IDENTITY_KEY,
+                )?
+                .is_some_and(|(bytes, _)| String::from_utf8_lossy(&bytes).contains("discovery"))
+            );
             let state: Value = serde_json::from_slice(
                 &b.vault.load_bytes("discovery")?.ok_or("discovery state")?,
             )?;
@@ -339,6 +345,9 @@ async fn revoked_peers_receive_no_contact_or_discovery_material_and_are_unknown_
                 .query_map([], |row| row.get::<_, String>(0))?
             {
                 let table = table?;
+                if table == "secure_authority_state" {
+                    continue;
+                }
                 let mut statement =
                     db.prepare(&format!("SELECT * FROM \"{}\"", table.replace('"', "\"\"")))?;
                 let columns = statement.column_count();

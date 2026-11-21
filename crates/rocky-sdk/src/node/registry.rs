@@ -72,7 +72,7 @@ impl Node {
             draft.bootstrap = Some(bootstrap);
             let answer = draft.pair(&self.vault, request, &registry);
             draft.bootstrap = None;
-            settings.commit(draft, &self.path)?;
+            settings.commit(draft, &self.replica).await?;
             answer?
         };
         self.commit(changes).await?;

@@ -50,7 +50,7 @@ struct PublicConfiguration {
 }
 
 fn public_configuration(directory: &Path) -> Result<PublicConfiguration, Failure> {
-    let settings: Value = serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)?;
+    let settings = crate::common::authority_json(directory, "identity")?;
     let chain: rocky_sdk::credentials::CredentialChain =
         serde_json::from_value(settings["credentials"].clone())?;
     let node = chain
@@ -239,14 +239,14 @@ pub(super) fn capture(
     drop(statement);
     transaction.rollback()?;
     output["snapshot_finished_unix_ms"] = json!(now());
-    let marker = directory.join("bootstrap.json");
-    output["bootstrap_intent_later"] = match std::fs::read(marker) {
-        Ok(bytes) => {
+    output["bootstrap_intent_later"] = match crate::common::authority_bytes(directory, "bootstrap")
+    {
+        Ok(Some(bytes)) => {
             let intent: Value = serde_json::from_slice(&bytes)?;
             json!({"bytes":digest(&bytes),"imports":intent.get("imports"),
                 "totals":intent.get("totals"),"inviter":intent.get("inviter")})
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Null,
+        Ok(None) => Value::Null,
         Err(error) => json!({"diagnostic_error":error.to_string()}),
     };
     Ok(output)

@@ -25,7 +25,7 @@ use rocky_secure::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
 };
 
@@ -33,6 +33,10 @@ mod rotation_epoch;
 pub(crate) use rotation_epoch::RotationEpoch;
 
 pub const VERSION: u32 = 37;
+pub(crate) const REPLICA_FILE: &str = "rocky.sqlite";
+pub(crate) const AUTHORITY_IDENTITY_KEY: &str = "identity";
+pub(crate) const AUTHORITY_REVOKED_KEY: &str = "revoked";
+pub(crate) const AUTHORITY_BOOTSTRAP_KEY: &str = "bootstrap";
 const INVITE_VERSION: u32 = 7;
 const ANSWER_FORMAT: u32 = 8;
 const CONTACT_VERSION: u32 = 3;
@@ -180,13 +184,8 @@ enum Recorded {
     Revoked(Box<SignedRevocation>),
 }
 impl Recorded {
-    fn read(settings: &Settings, path: &Path) -> Result<Self, Failure> {
-        let bytes = match rocky_platform::fs::read(path.with_file_name("revoked.json")) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self::Absent),
-            Err(error) => return Err(error.into()),
-        };
-        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    fn parse(settings: &Settings, bytes: &[u8]) -> Result<Self, Failure> {
+        let value: serde_json::Value = serde_json::from_slice(bytes)?;
         if value["version"].as_u64() != Some(u64::from(NOTICE_VERSION)) {
             return Err("unsupported device revocation notice".into());
         }
@@ -197,19 +196,24 @@ impl Recorded {
         }
         Ok(Self::Revoked(Box::new(notice.statement)))
     }
-    fn write(settings: &Settings, path: &Path, statement: SignedRevocation) -> Result<(), Failure> {
+    fn encode(settings: &Settings, statement: SignedRevocation) -> Result<Vec<u8>, Failure> {
         let set = RevocationSet::try_from(vec![statement.clone()])?;
         if settings.revoking(&set)?.is_none() {
             return Err("the statement does not revoke this device".into());
         }
-        write_private(
-            &path.with_file_name("revoked.json"),
-            &serde_json::to_vec(&Notice {
-                version: NOTICE_VERSION,
-                statement,
-            })?,
-        )?;
-        Ok(())
+        Ok(serde_json::to_vec(&Notice {
+            version: NOTICE_VERSION,
+            statement,
+        })?)
+    }
+    async fn read(
+        settings: &Settings,
+        replica: &rocky_secure::EncryptedReplica<rocky_core::TypedRows>,
+    ) -> Result<Self, Failure> {
+        let Some((bytes, _)) = replica.get_authority_state(AUTHORITY_REVOKED_KEY).await? else {
+            return Ok(Self::Absent);
+        };
+        Self::parse(settings, &bytes)
     }
     fn statement(&self) -> Option<&SignedRevocation> {
         match self {
@@ -220,69 +224,76 @@ impl Recorded {
 }
 
 pub(crate) struct RevocationNotice {
-    path: PathBuf,
-    recorded: std::sync::Mutex<Option<Recorded>>,
+    replica: rocky_secure::EncryptedReplica<rocky_core::TypedRows>,
+    recorded: tokio::sync::Mutex<Option<Recorded>>,
 }
 impl RevocationNotice {
-    pub(crate) fn open(settings: &Settings, path: &Path) -> Self {
+    pub(crate) fn open(replica: rocky_secure::EncryptedReplica<rocky_core::TypedRows>) -> Self {
         Self {
-            path: path.to_owned(),
-            recorded: std::sync::Mutex::new(Recorded::read(settings, path).ok()),
+            replica,
+            recorded: tokio::sync::Mutex::new(None),
         }
     }
-    fn recorded(&self) -> std::sync::MutexGuard<'_, Option<Recorded>> {
-        self.recorded
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    pub(crate) fn encode(
+        settings: &Settings,
+        statement: SignedRevocation,
+    ) -> Result<Vec<u8>, Failure> {
+        Recorded::encode(settings, statement)
     }
-    fn known(
+    pub(crate) async fn refresh(&self, settings: &Settings) {
+        let mut recorded = self.recorded.lock().await;
+        *recorded = Recorded::read(settings, &self.replica).await.ok();
+    }
+    async fn known(
         &self,
         recorded: &mut Option<Recorded>,
         settings: &Settings,
     ) -> Result<Option<SignedRevocation>, Failure> {
         let known = match recorded {
             Some(known) => known,
-            None => recorded.insert(Recorded::read(settings, &self.path)?),
+            None => recorded.insert(Recorded::read(settings, &self.replica).await?),
         };
         Ok(known.statement().cloned())
     }
-    fn write(
+    async fn write(
         &self,
         recorded: &mut Option<Recorded>,
         settings: &Settings,
         statement: SignedRevocation,
     ) -> Result<(), Failure> {
-        let written = Recorded::write(settings, &self.path, statement);
-        *recorded = Recorded::read(settings, &self.path).ok();
+        let bytes = Recorded::encode(settings, statement)?;
+        let written = self
+            .replica
+            .put_authority_state(AUTHORITY_REVOKED_KEY, &bytes, now()?)
+            .await
+            .map_err(Failure::from);
+        *recorded = Recorded::read(settings, &self.replica).await.ok();
         written
     }
-    pub(crate) fn revoked(&self, settings: &Settings) -> Result<Option<SignedRevocation>, Failure> {
-        self.known(&mut self.recorded(), settings)
-    }
-    pub(crate) fn record(
+    pub(crate) async fn revoked(
         &self,
         settings: &Settings,
-        statement: SignedRevocation,
-    ) -> Result<(), Failure> {
-        self.write(&mut self.recorded(), settings, statement)
+    ) -> Result<Option<SignedRevocation>, Failure> {
+        let mut recorded = self.recorded.lock().await;
+        self.known(&mut recorded, settings).await
     }
-    pub(crate) fn record_unless_revoked(
+    pub(crate) async fn record_unless_revoked(
         &self,
         settings: &Settings,
         statement: SignedRevocation,
     ) -> Result<bool, Failure> {
-        let mut recorded = self.recorded();
-        if self.known(&mut recorded, settings)?.is_some() {
+        let mut recorded = self.recorded.lock().await;
+        if self.known(&mut recorded, settings).await?.is_some() {
             return Ok(false);
         }
-        self.write(&mut recorded, settings, statement)?;
+        self.write(&mut recorded, settings, statement).await?;
         Ok(true)
     }
-    pub(crate) fn admit_personal(&self, settings: &Settings) -> Result<(), Failure> {
+    pub(crate) async fn admit_personal(&self, settings: &Settings) -> Result<(), Failure> {
         if !settings.kind()?.is_personal() {
             return Ok(());
         }
-        match self.revoked(settings)? {
+        match self.revoked(settings).await? {
             Some(statement) => Err(Box::new(Revoked(statement))),
             None => Ok(()),
         }
@@ -600,11 +611,14 @@ pub(crate) struct Intent {
 }
 impl Intent {
     pub(crate) fn path(identity: &Path, supplied: bool) -> std::path::PathBuf {
-        identity.with_extension(if supplied {
-            "install.json"
-        } else {
-            "join.json"
-        })
+        identity
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(if supplied {
+                "identity.install.json"
+            } else {
+                "identity.join.json"
+            })
     }
     pub(crate) fn resume(
         path: &Path,
@@ -908,8 +922,8 @@ impl Settings {
         Ok(false)
     }
 
-    pub fn load(path: &Path) -> Result<Self, Failure> {
-        let value: serde_json::Value = serde_json::from_slice(&rocky_platform::fs::read(path)?)?;
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Failure> {
+        let value: serde_json::Value = serde_json::from_slice(bytes)?;
         if value["version"].as_u64() != Some(u64::from(VERSION)) {
             return Err("unsupported identity version; reinstall the domain".into());
         }
@@ -964,12 +978,29 @@ impl Settings {
         settings.check_deliveries()?;
         Ok(settings)
     }
-    pub fn save(&self, path: &Path) -> Result<(), Failure> {
-        {
-            let saved = self.with_saved_contacts();
-            saved.validate_saved_contacts()?;
-            write_private(path, &serde_json::to_vec(&saved)?)
-        }
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Failure> {
+        let saved = self.with_saved_contacts();
+        saved.validate_saved_contacts()?;
+        Ok(serde_json::to_vec(&saved)?)
+    }
+    pub fn exists(path: &Path) -> Result<bool, Failure> {
+        Ok(rocky_secure::read_authority_entry(path, AUTHORITY_IDENTITY_KEY)?.is_some())
+    }
+    pub fn load(path: &Path) -> Result<Self, Failure> {
+        let Some((bytes, _)) = rocky_secure::read_authority_entry(path, AUTHORITY_IDENTITY_KEY)?
+        else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no identity in replica",
+            )
+            .into());
+        };
+        Self::from_bytes(&bytes)
+    }
+    pub async fn save(&self, path: &Path) -> Result<(), Failure> {
+        let bytes = self.to_bytes()?;
+        rocky_secure::write_authority_entry(path, AUTHORITY_IDENTITY_KEY, &bytes, now()?).await?;
+        Ok(())
     }
     pub fn vault(&self, store: &std::sync::Arc<dyn crate::SecretStore>) -> Vault {
         Vault::new(store.clone(), &self.installation)
@@ -2085,9 +2116,8 @@ impl Settings {
             })
             .collect()
     }
-    pub async fn invite(
+    pub(crate) async fn prepare_invite(
         &mut self,
-        path: &Path,
         vault: &Vault,
         transport: &dyn Transport,
         (profile, label): (Option<Profile>, Option<Vec<u8>>),
@@ -2133,7 +2163,6 @@ impl Settings {
         issuing.invitation = Some(invitation);
         issuing.claimed = None;
         let notes = issuing.requests.end(Dropped::Replaced);
-        self.save(path)?;
         Ok((uri, expires, notes))
     }
     fn check_profile(&self, profile: &Profile) -> Result<(), Failure> {
@@ -2946,7 +2975,7 @@ impl Settings {
             node: PrivateKey::from_bytes(&vault.get("node")?).public_key(),
         })
     }
-    pub fn install(
+    pub async fn install(
         path: &Path,
         schema: &Schema,
         store: &std::sync::Arc<dyn crate::SecretStore>,
@@ -3056,7 +3085,7 @@ impl Settings {
                 settings.issuers.push(node);
             }
         }
-        settings.save(path)?;
+        settings.save(path).await?;
         Ok(settings)
     }
     pub(crate) fn hold(
@@ -3375,7 +3404,7 @@ impl Joining {
         }
         crate::escrow::keep_naming(&mut settings, enrollment.naming_escrow)?;
         settings.learn_issuers(&vault, &enrollment.issuers);
-        settings.save(path)?;
+        settings.save(path).await?;
         rocky_platform::fs::remove_file(Intent::path(path, false))?;
         Ok(settings)
     }
@@ -3762,12 +3791,11 @@ impl Settings {
             && (same(&held_grants) || same(&profile_grants))
             && renewed.extended()?.issues == held.extended()?.issues)
     }
-    pub fn adopt(
-        &mut self,
-        path: &Path,
+    pub(crate) fn adopt_into(
+        &self,
         vault: &Vault,
         renewed: &Renewed,
-    ) -> Result<(Vec<NewKey>, bool), Failure> {
+    ) -> Result<(Self, Vec<NewKey>, bool), Failure> {
         let mut draft = self.clone();
         let mut held = Vec::new();
         for (name, epoch, key) in &renewed.keys {
@@ -3801,8 +3829,17 @@ impl Settings {
             draft.profile = profile.clone();
         }
         let changed = !draft.persisted_eq(self);
+        Ok((draft, held, changed))
+    }
+    pub async fn adopt(
+        &mut self,
+        path: &Path,
+        vault: &Vault,
+        renewed: &Renewed,
+    ) -> Result<(Vec<NewKey>, bool), Failure> {
+        let (draft, held, changed) = self.adopt_into(vault, renewed)?;
         if changed {
-            draft.save(path)?;
+            draft.save(path).await?;
         }
         *self = draft;
         Ok((held, changed))

@@ -1,15 +1,16 @@
 use crate::{
     Failure,
-    enrollment::{NewKey, Renewed, Settings},
+    enrollment::{AUTHORITY_IDENTITY_KEY, NewKey, Renewed, Settings, now},
     join_requests::Note,
     registry::Registry,
     secrets::Vault,
     transport::Transport,
 };
-use rocky_credentials::Profile;
+use rocky_core::TypedRows;
+use rocky_credentials::{Profile, RevocationSet, SignedRevocation};
+use rocky_secure::EncryptedReplica;
 use std::{
     ops::{Deref, DerefMut},
-    path::Path,
     sync::{Arc, PoisonError},
 };
 
@@ -75,42 +76,90 @@ impl SettingsGuard<'_> {
             .write()
             .unwrap_or_else(PoisonError::into_inner) = self.held.clone();
     }
-    pub fn save(&mut self, path: &Path) -> Result<(), Failure> {
-        self.held.save(path)?;
+    pub async fn save(&mut self, replica: &EncryptedReplica<TypedRows>) -> Result<(), Failure> {
+        let bytes = self.held.to_bytes()?;
+        replica
+            .put_authority_state(AUTHORITY_IDENTITY_KEY, &bytes, now()?)
+            .await?;
         self.publish();
         Ok(())
     }
-    pub fn commit(&mut self, draft: Shared<Settings>, path: &Path) -> Result<(), Failure> {
-        draft.save(path)?;
+    pub async fn commit(
+        &mut self,
+        draft: Shared<Settings>,
+        replica: &EncryptedReplica<TypedRows>,
+    ) -> Result<(), Failure> {
+        let bytes = draft.to_bytes()?;
+        replica
+            .put_authority_state(AUTHORITY_IDENTITY_KEY, &bytes, now()?)
+            .await?;
         *self.held = draft;
         self.publish();
         Ok(())
     }
-    pub fn adopt(
+    pub async fn commit_with_revocations(
         &mut self,
-        path: &Path,
+        draft: Shared<Settings>,
+        replica: &EncryptedReplica<TypedRows>,
+        revocations: &RevocationSet,
+    ) -> Result<Vec<SignedRevocation>, Failure> {
+        let bytes = draft.to_bytes()?;
+        let added = replica
+            .commit_authority_state(
+                &[(AUTHORITY_IDENTITY_KEY, Some(bytes.as_slice()))],
+                now()?,
+                Some(revocations),
+            )
+            .await?;
+        *self.held = draft;
+        self.publish();
+        Ok(added)
+    }
+    pub async fn commit_with_entries(
+        &mut self,
+        draft: Shared<Settings>,
+        replica: &EncryptedReplica<TypedRows>,
+        extra: &[(&str, Option<&[u8]>)],
+        revocations: Option<&RevocationSet>,
+    ) -> Result<Vec<SignedRevocation>, Failure> {
+        let bytes = draft.to_bytes()?;
+        let mut entries = Vec::with_capacity(extra.len() + 1);
+        entries.push((AUTHORITY_IDENTITY_KEY, Some(bytes.as_slice())));
+        entries.extend_from_slice(extra);
+        let added = replica
+            .commit_authority_state(&entries, now()?, revocations)
+            .await?;
+        *self.held = draft;
+        self.publish();
+        Ok(added)
+    }
+    pub async fn adopt(
+        &mut self,
+        replica: &EncryptedReplica<TypedRows>,
         vault: &Vault,
         renewed: &Renewed,
     ) -> Result<(Vec<NewKey>, bool), Failure> {
-        let adopted = self.held.adopt(path, vault, renewed)?;
-        if adopted.1 {
-            self.publish();
+        let (draft, held, changed) = self.held.adopt_into(vault, renewed)?;
+        if changed {
+            self.commit(Shared::new(draft), replica).await?;
+        } else {
+            *self.held = Shared::new(draft);
         }
-        Ok(adopted)
+        Ok((held, changed))
     }
     pub async fn invite(
         &mut self,
-        path: &Path,
+        replica: &EncryptedReplica<TypedRows>,
         vault: &Vault,
         transport: &dyn Transport,
         offer: (Option<Profile>, Option<Vec<u8>>),
         registry: &Registry,
     ) -> Result<(String, u64, Vec<Note>), Failure> {
-        let invited = self
-            .held
-            .invite(path, vault, transport, offer, registry)
+        let mut draft = self.held.clone();
+        let invited = draft
+            .prepare_invite(vault, transport, offer, registry)
             .await?;
-        self.publish();
+        self.commit(draft, replica).await?;
         Ok(invited)
     }
 }

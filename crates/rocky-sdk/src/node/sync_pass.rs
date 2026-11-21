@@ -471,8 +471,9 @@ impl Node {
                 break;
             }
             if progress.covers(&pass.needed) {
-                batch =
-                    self.skip_covered(batch.into_iter().chain(remaining.by_ref()), pass.report)?;
+                batch = self
+                    .skip_covered(batch.into_iter().chain(remaining.by_ref()), pass.report)
+                    .await?;
                 if batch.is_empty() {
                     break;
                 }
@@ -493,12 +494,12 @@ impl Node {
         }
         Ok(())
     }
-    fn skip_covered(
+    async fn skip_covered(
         &self,
         targets: impl Iterator<Item = Target>,
         report: &std::sync::Mutex<Vec<PeerReconciliation>>,
     ) -> Result<Vec<Target>, Failure> {
-        let inviter = self.awaited_inviter()?;
+        let inviter = self.awaited_inviter().await?;
         let mut choices = self.choices.lock().unwrap_or_else(PoisonError::into_inner);
         let mut owed = Vec::new();
         for target in targets {
@@ -520,7 +521,15 @@ impl Node {
         target: &Target,
     ) -> Result<Exchanged, Failure> {
         let peer = target.peer;
-        let result = self.reconcile(transport, peer, &target.contact).await;
+        let mut result = self.reconcile(transport, peer, &target.contact).await;
+        if result.as_ref().is_err_and(|error| {
+            matches!(
+                error.downcast_ref::<rocky_secure::Error>(),
+                Some(rocky_secure::Error::Conflict)
+            )
+        }) {
+            result = self.reconcile(transport, peer, &target.contact).await;
+        }
         let settings = self.settings.lock().await.clone();
         let sources = settings.epoch_sources()?;
         let owes_epochs = settings.issuer()

@@ -1130,7 +1130,7 @@ impl Simulation {
                 continue;
             };
             let blockers: Vec<Blocker> = running.blockers().await.unwrap_or_default();
-            let keeps_bootstrap_intent = running.bootstrap_intent.exists();
+            let keeps_bootstrap_intent = running.bootstrap_intent.exists().await;
             drop(running);
             for blocker in blockers {
                 stuck.add(

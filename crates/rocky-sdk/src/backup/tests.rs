@@ -47,9 +47,8 @@ fn staged(directory: &Path) -> Result<Vec<String>, Failure> {
         .collect())
 }
 fn identity(directory: &Path) -> Result<serde_json::Value, Failure> {
-    let saved: serde_json::Value =
-        serde_json::from_slice(&rocky_platform::fs::read(directory.join("identity.json"))?)?;
-    Ok(saved["identity"].clone())
+    let saved = crate::enrollment::Settings::load(&directory.join("rocky.sqlite"))?;
+    Ok(serde_json::to_value(saved.identity)?)
 }
 struct Lost {
     owner: Arc<Database>,

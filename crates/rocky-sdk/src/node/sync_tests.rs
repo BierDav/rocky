@@ -110,7 +110,7 @@ async fn node_on(
         domain,
         vault,
         settings,
-        root.join("identity.json"),
+        root.join("rocky.sqlite"),
         BootstrapIntentFile::in_directory(root),
     ));
     node.link(transport, true).await?;
@@ -133,7 +133,7 @@ async fn enrolled_schema(
 ) -> Result<Arc<Node>, Failure> {
     std::fs::create_dir_all(root)?;
     let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
-    let path = root.join("identity.json");
+    let path = root.join("rocky.sqlite");
     if let Some((issuer, profile)) = issuer {
         let link = issuer.network.read().await;
         let registry = issuer.registry(&*issuer.settings_snapshot().await).await?;
@@ -142,7 +142,7 @@ async fn enrolled_schema(
             .lock()
             .await
             .invite(
-                &issuer.path,
+                &issuer.replica,
                 &issuer.vault,
                 &*link.as_ref().ok_or("link")?.transport,
                 (Some(profile), None),
@@ -165,7 +165,7 @@ async fn enrolled_schema(
             None,
             &rocky_credentials::RootKey::generate(),
         )?;
-        settings.save(&path)?;
+        settings.save(&path).await?;
         let vault = settings.vault(&store);
         let transport = hub
             .connector(name)

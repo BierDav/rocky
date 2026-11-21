@@ -6,7 +6,6 @@ struct Fixture {
     settings: [Settings; 2],
     vaults: [Vault; 2],
     databases: [PathBuf; 2],
-    identities: [PathBuf; 2],
 }
 
 pub(super) async fn run(exhaustive: bool) -> Result<(), Failure> {
@@ -48,12 +47,6 @@ pub(super) async fn run(exhaustive: bool) -> Result<(), Failure> {
             );
             frozen(a.replica.backup_into(&a_copy)).await?;
             frozen(b.replica.backup_into(&b_copy)).await?;
-            let (a_identity, b_identity) = (
-                root.path().join("a-copy.json"),
-                root.path().join("b-copy.json"),
-            );
-            a_settings.save(&a_identity)?;
-            b_settings.save(&b_identity)?;
             let before = *hub.written().borrow();
             frozen(a.sync(&*transport(&a).await?)).await?;
             let bytes = *hub.written().borrow() - before;
@@ -66,7 +59,6 @@ pub(super) async fn run(exhaustive: bool) -> Result<(), Failure> {
                 settings: [(*a_settings).clone(), (*b_settings).clone()],
                 vaults: [a_vault, b_vault],
                 databases: [a_copy, b_copy],
-                identities: [a_identity, b_identity],
             };
             let offsets: Vec<_> = if exhaustive {
                 (0..=bytes).collect()
@@ -163,20 +155,16 @@ async fn trial(fixture: &Fixture, offset: usize) -> Result<(), Failure> {
         settings,
         vaults,
         databases,
-        identities,
     } = fixture;
     let [a_settings, b_settings] = settings;
     let [a_vault, b_vault] = vaults;
     let [a_copy, b_copy] = databases;
-    let [a_identity, b_identity] = identities;
     let hub = Arc::new(Hub::default());
     let trial = root.join("trial").join(offset.to_string());
     let (a_dir, b_dir) = (trial.join("a"), trial.join("b"));
-    for (directory, copy, identity) in [(&a_dir, a_copy, a_identity), (&b_dir, b_copy, b_identity)]
-    {
+    for (directory, copy) in [(&a_dir, a_copy), (&b_dir, b_copy)] {
         std::fs::create_dir_all(directory)?;
         std::fs::copy(copy, directory.join("rocky.sqlite"))?;
-        std::fs::copy(identity, directory.join("identity.json"))?;
     }
     let a = node(
         &a_dir,

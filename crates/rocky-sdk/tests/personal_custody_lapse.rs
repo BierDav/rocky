@@ -34,8 +34,10 @@ fn config(directory: &Path, hub: &Arc<Hub>, name: &str) -> Result<Configuration,
     )
 }
 fn custody_link(directory: &Path) -> Result<rocky_credentials::SignedCapability, Failure> {
-    let saved: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)?;
+    let bytes = rocky_secure::read_authority_entry(&directory.join("rocky.sqlite"), "identity")?
+        .ok_or("identity")?
+        .0;
+    let saved: serde_json::Value = serde_json::from_slice(&bytes)?;
     let chain: rocky_credentials::CredentialChain =
         serde_json::from_value(saved["credentials"].clone())?;
     let links = chain.capabilities();

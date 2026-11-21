@@ -28,9 +28,7 @@ fn person(directory: &Path) -> Result<Arc<dyn IdentityProvider>, Failure> {
     Ok(Arc::new(FileIdentityProvider::open(directory)?))
 }
 fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
-    Ok(serde_json::from_slice(&std::fs::read(
-        root.join(name).join("identity.json"),
-    )?)?)
+    common::authority_json(&root.join(name), "identity")
 }
 fn holds(root: &Path, name: &str, role: &str) -> Result<bool, Failure> {
     let installation = identity(root, name)?["installation"]
@@ -416,7 +414,7 @@ async fn a_root_signed_call_returns_only_after_the_database_released_its_root()
 }
 
 fn no_identity_secret(directory: &std::path::Path, secrets: &[[u8; 32]]) -> Result<(), Failure> {
-    let settings = std::fs::read(directory.join("identity.json"))?;
+    let settings = common::authority_bytes(directory, "identity")?.ok_or("identity")?;
     let value: Value = serde_json::from_slice(&settings)?;
     assert!(value.get("stored_identity").is_none());
     for entry in std::fs::read_dir(directory.join("secrets"))? {

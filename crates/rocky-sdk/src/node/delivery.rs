@@ -141,7 +141,7 @@ impl Node {
             if settings.drops_revoked_deliveries() {
                 let mut draft = settings.clone();
                 draft.drop_revoked_deliveries();
-                settings.commit(draft, &self.path)?;
+                settings.commit(draft, &self.replica).await?;
             }
             settings.revocations.clone()
         };
@@ -218,7 +218,7 @@ impl Node {
             }
         }
         if reserved {
-            settings.commit(draft, &self.path)?;
+            settings.commit(draft, &self.replica).await?;
         }
         Ok(outgoing)
     }
@@ -378,7 +378,7 @@ impl Node {
                 pending.mailboxes.push(rocky_credentials::PeerId::of(peer));
             }
         }
-        settings.commit(draft, &self.path)?;
+        settings.commit(draft, &self.replica).await?;
         Ok(())
     }
     async fn held(&self, peer: PublicKey, budget: usize) -> Result<Held, Failure> {
@@ -461,7 +461,7 @@ impl Node {
             }
             if delivered > 0 {
                 fault::check(own, Stage::Receipts)?;
-                settings.commit(draft, &self.path)?;
+                settings.commit(draft, &self.replica).await?;
                 if serving {
                     self.record_delivery(
                         peer,

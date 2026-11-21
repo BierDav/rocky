@@ -1,6 +1,6 @@
 use crate::{
     Failure,
-    bootstrap_intent::{BOOTSTRAP_INTENT_FILE, BootstrapIntentFile},
+    bootstrap_intent::BootstrapIntentFile,
     connection::{self, ConnectionOptions, Page, SqlFailure, TableEvents},
     enrollment::{DEFAULT_TTL, NodeKeys, Settings, Supplied, now},
     node::{self, Node},
@@ -459,8 +459,8 @@ impl Database {
         identity: Option<Arc<dyn crate::IdentityProvider>>,
     ) -> Result<NodeKeys, Failure> {
         rocky_platform::fs::create_dir_all(directory)?;
-        let path = directory.join("identity.json");
-        if rocky_platform::fs::exists(&path) {
+        let path = directory.join(crate::enrollment::REPLICA_FILE);
+        if Settings::exists(&path)? {
             return Err("a domain exists in this directory: open it instead".into());
         }
         let secrets =
@@ -1365,7 +1365,7 @@ async fn identity(
         install,
         ..
     } = setup;
-    let exists = rocky_platform::fs::exists(path);
+    let exists = Settings::exists(path)?;
     let resuming = install.resumes_interrupted(directory)?;
     if exists && !matches!(install, Install::Installed) && !resuming {
         return Err("a domain exists in this directory: open it instead".into());
@@ -1373,15 +1373,19 @@ async fn identity(
     if !exists && matches!(install, Install::Installed) {
         return Err("no domain in this directory: create or join one".into());
     }
-    if exists && !resuming && !rocky_platform::fs::exists(directory.join("rocky.sqlite")) {
-        return Err(
-            if rocky_platform::fs::exists(directory.join(crate::backup::MARKER)) {
-                "a restore is unfinished in this directory: restore again with its backup"
-            } else {
-                "existing identity has no runtime database; recovery is required"
-            }
-            .into(),
-        );
+    if exists && !resuming && rocky_platform::fs::exists(directory.join(crate::backup::MARKER)) {
+        let conn = rocky_storage::sqlite::Connection::open_read_only(path)?;
+        let placed = !conn
+            .rows(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'secure_metadata'",
+                (),
+            )?
+            .is_empty();
+        if !placed {
+            return Err(
+                "a restore is unfinished in this directory: restore again with its backup".into(),
+            );
+        }
     }
     match install {
         Install::Create {
@@ -1534,7 +1538,7 @@ async fn identity(
         }
         Install::Supplied(supplied) => {
             let settings =
-                Settings::install(path, schema, secrets, supplied, setup.identity.clone())?;
+                Settings::install(path, schema, secrets, supplied, setup.identity.clone()).await?;
             let Some(network) = network else {
                 return Ok((settings, None));
             };
@@ -1596,7 +1600,7 @@ async fn identity(
                 && settings.schema != *schema
             {
                 settings.schema = schema.clone();
-                settings.save(path)?;
+                settings.save(path).await?;
             }
             Ok((settings, link))
         }
@@ -1796,7 +1800,7 @@ async fn restore(
             })?,
         )?;
     }
-    let (settings, link) = if rocky_platform::fs::exists(path) {
+    let (settings, link) = if Settings::exists(path)? {
         let settings = Settings::load(path)?;
         let vault = settings.vault(secrets);
         let key = Settings::route_secret(&vault)?;
@@ -1816,7 +1820,7 @@ async fn restore(
                     &opened.identity,
                     &[node.public_key(), opened.inventory.node],
                 );
-                settings.save(path)?;
+                settings.save(path).await?;
                 (settings, (transport, owned))
             }
             Err(error) => {
@@ -1827,15 +1831,17 @@ async fn restore(
             }
         }
     };
-    let placed = (|| -> Result<(), Failure> {
+    let placed = async {
         if (settings.mesh, settings.domain) != (opened.identity.mesh, opened.identity.domain) {
             return Err("the enrolled domain differs from the backup's".into());
         }
         crate::recovery::fault::check(directory, crate::recovery::fault::Stage::Enrolled)?;
         crate::backup::place(&opened, directory)?;
+        settings.save(path).await?;
         rocky_platform::fs::remove_dir_all(&staging)?;
-        Ok(())
-    })();
+        Ok::<_, Failure>(())
+    }
+    .await;
     if let Err(error) = placed {
         if link.1 {
             link.0.close().await;
@@ -1902,7 +1908,7 @@ async fn adopt_committed_pending_schema(
     settings.engine = record.engine;
     settings.prepare_schema(vault, &domain)?;
     settings.pending = None;
-    settings.save(path)?;
+    settings.save(path).await?;
     Ok(())
 }
 
@@ -1988,32 +1994,33 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     } = serving;
     let directory = setup.directory.clone();
     predecessor.departed(&directory).await?;
-    if matches!(setup.install, Install::Installed)
-        && rocky_platform::fs::exists(directory.join("identity.json"))
-    {
-        Settings::load(&directory.join("identity.json"))?;
+    let replica_path = directory.join(crate::enrollment::REPLICA_FILE);
+    if matches!(setup.install, Install::Installed) && Settings::exists(&replica_path)? {
+        Settings::load(&replica_path)?;
     }
-    rocky_secure::check_replica_format(&directory.join("rocky.sqlite")).await?;
+    rocky_secure::check_replica_format(&replica_path).await?;
     if matches!(setup.install, Install::Installed) {
-        if !rocky_platform::fs::exists(directory.join("identity.json")) {
-            return Err(if rocky_platform::fs::exists(directory.join("identity.join.json")) {
-                "a join in this directory is unfinished: join again with its or a newer invitation"
-            } else {
-                "no domain in this directory: create or join one"
-            }
-            .into());
+        if !Settings::exists(&replica_path)? {
+            return Err(
+                if rocky_platform::fs::exists(directory.join("identity.join.json")) {
+                    "a join in this directory is unfinished: join again with its or a newer invitation"
+                } else {
+                    "no domain in this directory: create or join one"
+                }
+                .into(),
+            );
         }
-        Settings::load(&directory.join("identity.json"))?;
+        Settings::load(&replica_path)?;
     }
     rocky_platform::fs::create_dir_all(&directory)?;
     let _lock = rocky_platform::fs::Owner::acquire(&directory.join("sdk"))
         .await
         .map_err(|_| "data directory is already in use")?;
-    rocky_secure::check_replica_format(&directory.join("rocky.sqlite")).await?;
+    rocky_secure::check_replica_format(&replica_path).await?;
     let bootstrap_intent = BootstrapIntentFile::in_directory(&directory);
-    let path = directory.join("identity.json");
-    if setup.install.bootstraps_from_checkpoint() && !rocky_platform::fs::exists(&path) {
-        bootstrap_intent.request_checkpoint_import()?;
+    let path = replica_path;
+    if setup.install.bootstraps_from_checkpoint() && !Settings::exists(&path)? {
+        bootstrap_intent.request_checkpoint_import().await?;
     }
     if !matches!(setup.install, Install::Recover { .. }) {
         crate::recovery::refuse_unfinished(&directory)?;
@@ -2021,21 +2028,21 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     if matches!(setup.install, Install::Installed) {
         confirm_removals(&setup, &directory, &path).await?;
     }
-    let fresh = setup.install.unwinds_on_failure() && !rocky_platform::fs::exists(&path);
+    let fresh = setup.install.unwinds_on_failure() && !Settings::exists(&path)?;
     let (mut settings, link) = match identity(&path, &setup, &bootstrap_intent, network).await {
         Ok(installed) => installed,
         Err(error) if fresh => return Err(unwind(&directory, None, error)),
         Err(error) => return Err(error),
     };
     if let (Install::Join { .. }, Some(inviter)) = (&setup.install, settings.issuers.first()) {
-        bootstrap_intent.join(*inviter)?;
+        bootstrap_intent.join(*inviter).await?;
     }
     let startup_identity = setup.identity.take();
     let vault = settings.vault(&setup.secrets);
     let opened = async {
         let completed_interrupted_revocation = settings.rotate(&vault)?.is_some();
         if completed_interrupted_revocation {
-            settings.save(&path)?;
+            settings.save(&path).await?;
         }
         let credentials_expired = settings.expires() <= now()?;
         if credentials_expired {
@@ -2046,12 +2053,12 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
             let renewed = settings
                 .request_renewal(&vault, transport, false, None)
                 .await?;
-            if rocky_platform::fs::exists(&path) {
+            if Settings::exists(&path)? {
                 let revokes_new_authors = settings.lacks(&renewed.revocations)?;
                 if revokes_new_authors {
-                    bootstrap_intent.request_checkpoint_import()?;
+                    bootstrap_intent.request_checkpoint_import().await?;
                 }
-                settings.adopt(&path, &vault, &renewed)?;
+                settings.adopt(&path, &vault, &renewed).await?;
             } else {
                 settings.learn_revocations(&renewed.revocations)?;
                 settings.credentials = renewed.chain;
@@ -2100,7 +2107,13 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
             .await?
         };
         if attach(&replica, &mut settings, &vault, &domain).await? {
-            settings.save(&path)?;
+            replica
+                .put_authority_state(
+                    crate::enrollment::AUTHORITY_IDENTITY_KEY,
+                    &settings.to_bytes()?,
+                    now()?,
+                )
+                .await?;
         }
         crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Attached)?;
         let mut newest_first = keys_awaiting_tables;
@@ -2146,7 +2159,13 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
             client.bind(key, certificate).map_err(Failure::from)
         })
         .transpose()?;
-        settings.save(&path)?;
+        replica
+            .put_authority_state(
+                crate::enrollment::AUTHORITY_IDENTITY_KEY,
+                &settings.to_bytes()?,
+                now()?,
+            )
+            .await?;
         Ok::<_, Failure>((domain, replica, coordinator))
     }
     .await;
@@ -2263,7 +2282,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     if personal && let Err(error) = crate::personal::finish(&directory) {
         tracing::warn!(%error, "the finished personal install intent could not be removed");
     }
-    let bootstrapping = (node.bootstrap_intent.exists() && network.is_some())
+    let bootstrapping = (node.bootstrap_intent.exists().await && network.is_some())
     .then(|| {
         let joining = node.clone();
         let held = directory.clone();
@@ -2555,15 +2574,8 @@ fn purge_directory(directory: &Path) -> Result<(), Failure> {
         _ => Ok(()),
     }
 }
-const INSTALLATION_IDENTITY_FILE: &str = "identity.json";
-const INSTALLATION_DATA_FILES: [&str; 6] = [
-    "rocky.sqlite",
-    "rocky.sqlite-wal",
-    "rocky.sqlite-shm",
-    "revoked.json",
-    BOOTSTRAP_INTENT_FILE,
-    "mailbox.json",
-];
+const INSTALLATION_IDENTITY_FILE: &str = "rocky.sqlite";
+const INSTALLATION_DATA_FILES: [&str; 3] = ["rocky.sqlite-wal", "rocky.sqlite-shm", "mailbox.json"];
 fn remove_if_present(path: &Path) -> Result<(), Failure> {
     match rocky_platform::fs::remove_file(path) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
@@ -2790,7 +2802,9 @@ mod tests {
                     .database
                     .close()
                     .await?;
-                BootstrapIntentFile::in_directory(directory.path()).request_checkpoint_import()?;
+                BootstrapIntentFile::in_directory(directory.path())
+                    .request_checkpoint_import()
+                    .await?;
                 let (bootstrapping, _never_released) =
                     pause::arm(directory.path(), pause::Point::Bootstrap);
                 let database = Database::launch_local(open(), Install::Installed)
@@ -2968,12 +2982,9 @@ mod tests {
     fn purge_leaves_no_installation_state_for_a_later_join() -> Result<(), Failure> {
         let directory = tempfile::tempdir()?;
         for name in [
-            "identity.json",
             "rocky.sqlite",
             "rocky.sqlite-wal",
             "rocky.sqlite-shm",
-            "revoked.json",
-            BOOTSTRAP_INTENT_FILE,
             "mailbox.json",
         ] {
             std::fs::write(directory.path().join(name), b"{}")?;
@@ -3119,7 +3130,7 @@ mod tests {
                 for name in [
                     "sdk.lock",
                     "identity.json",
-                    BOOTSTRAP_INTENT_FILE,
+                    "bootstrap.json",
                     "secrets",
                     "rocky.sqlite-wal",
                 ] {

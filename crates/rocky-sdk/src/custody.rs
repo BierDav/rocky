@@ -29,8 +29,8 @@ impl CustodyPeer {
             return Err("custody peer quota".into());
         }
         let directory = Path::new(&config.directory);
-        let identity = directory.join("identity.json");
-        let existing = rocky_platform::fs::exists(&identity);
+        let identity = directory.join(crate::enrollment::REPLICA_FILE);
+        let existing = Settings::exists(&identity)?;
         if existing {
             let settings = Settings::load(&identity)?;
             if !matches!(settings.profile, Profile::Custody { .. })

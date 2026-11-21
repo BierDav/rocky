@@ -103,7 +103,7 @@ impl Node {
         }
         if settings.lacks(&known)? {
             settings.learn_revocations(&known)?;
-            settings.save(&self.path)?;
+            settings.save(&self.replica).await?;
         }
         self.replica.learn_revocations(&known).await?;
         let grants = |chain: &CredentialChain| -> Result<_, Failure> {
@@ -190,7 +190,7 @@ impl Node {
         });
         self.save_line_nodes(&saved)?;
         settings.learn_revocations(&known)?;
-        settings.save(&self.path)?;
+        settings.save(&self.replica).await?;
         self.replica.learn_revocations(&known).await?;
         self.replica.register_line_node(node).await?;
         Ok(())

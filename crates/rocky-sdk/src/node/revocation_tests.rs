@@ -89,8 +89,14 @@ async fn issuer_with_root(
     replica
         .install_readable_tables(domain.logical().clone(), domain.scope, domain.readers())
         .await?;
-    let path = directory.join("identity.json");
-    settings.save(&path)?;
+    let path = directory.join("rocky.sqlite");
+    replica
+        .put_authority_state(
+            crate::enrollment::AUTHORITY_IDENTITY_KEY,
+            &settings.to_bytes()?,
+            now()?,
+        )
+        .await?;
     let node = Node::new(
         replica,
         domain,
@@ -106,7 +112,7 @@ async fn reload(
     directory: &std::path::Path,
     store: Arc<dyn crate::SecretStore>,
 ) -> Result<Node, Failure> {
-    let path = directory.join("identity.json");
+    let path = directory.join("rocky.sqlite");
     let settings = Settings::load(&path)?;
     let vault = settings.vault(&store);
     let domain = settings.domain()?;
@@ -192,7 +198,13 @@ async fn a_saved_root_revocation_preserves_its_mode_and_cascade_targets() -> Res
             (&registry, &membership),
             Some(&root),
         )?;
-        settings.save(&node.path)?;
+        node.replica
+            .put_authority_state(
+                crate::enrollment::AUTHORITY_IDENTITY_KEY,
+                &settings.to_bytes()?,
+                now()?,
+            )
+            .await?;
         let mut saved = Settings::load(&node.path)?;
         let intent = saved
             .authority
@@ -293,7 +305,7 @@ async fn discovery_topics_keep_a_value_minted_for_a_statement_under_the_settings
         crate::mesh::holds_value(&node.vault, &statement)?,
         "a topics request keeps a value minted for a statement not yet committed"
     );
-    held.commit(draft, &node.path)?;
+    held.commit(draft, &node.replica).await?;
     topics().await?;
     assert!(
         crate::mesh::holds_value(&node.vault, &statement)?,
@@ -496,7 +508,7 @@ async fn stop_at(
         coordination: None,
     };
     let reopened = crate::Database::open(open())?.database;
-    let completed = Settings::load(&root.path().join("identity.json"))?;
+    let completed = Settings::load(&root.path().join("rocky.sqlite"))?;
     let session = reopened.session();
     for list in ["L", "M"] {
         let status = session.partition_status(list_partition(list)).await?;
@@ -553,7 +565,7 @@ async fn stop_at(
     let again = crate::Database::open(open())?.database;
     assert_eq!(tombstones(root.path(), revoked)?, 1);
     assert_eq!(
-        Settings::load(&root.path().join("identity.json"))?.keys,
+        Settings::load(&root.path().join("rocky.sqlite"))?.keys,
         completed.keys
     );
     for (role, key) in roles.iter().zip(final_keys) {
@@ -649,7 +661,7 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
             coordination: None,
         })?
         .database;
-        let settings = Settings::load(&root.path().join("identity.json"))?;
+        let settings = Settings::load(&root.path().join("rocky.sqlite"))?;
         let epochs = &settings.groups.values().next().ok_or("group")?.epochs;
         assert_eq!(epochs.len(), 2);
         assert!(epochs.contains(&rocky_core::KeyEpoch::new(1, &secret)));
@@ -741,11 +753,12 @@ async fn unlinking_the_last_node_keeps_the_identity_and_allows_relinking() -> Re
     )
     .await?;
     let settings = node.settings.lock().await;
-    assert!(node.revocation_notice.revoked(&settings)?.is_some());
+    assert!(node.revocation_notice.revoked(&settings).await?.is_some());
     assert!(!settings.revocations.revokes(&settings.identity));
     let ended = node
         .revocation_notice
-        .revoked(&settings)?
+        .revoked(&settings)
+        .await?
         .ok_or("revocation")?;
     assert!(RevocationSet::try_from(vec![ended])?.ends_node(own, true));
     let membership = settings.revocations.membership()?;

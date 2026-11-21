@@ -64,9 +64,7 @@ fn owned(hub: &Arc<Hub>, name: &str) -> Option<Network> {
     Some(Network::Owned(hub.connector(name)))
 }
 fn saved(directory: &Path) -> Result<Value, Failure> {
-    Ok(serde_json::from_slice(&std::fs::read(
-        directory.join("identity.json"),
-    )?)?)
+    common::authority_json(directory, "identity")
 }
 fn known(directory: &Path) -> Result<rocky_credentials::RevocationSet, Failure> {
     Ok(serde_json::from_value(
@@ -516,10 +514,7 @@ async fn a_custodian_without_the_naming_record_reports_it_and_nothing_replaces_i
     let table: String = connection.query_row("SELECT name FROM sqlite_schema WHERE type='table' AND name LIKE '%secure_custody_metadata'", [], |row| row.get(0))?;
     connection.execute(&format!("DELETE FROM [{table}]"), [])?;
     drop(connection);
-    std::fs::write(
-        custodian_path.join("identity.json"),
-        serde_json::to_vec(&held)?,
-    )?;
+    common::write_authority(&custodian_path, "identity", &serde_json::to_vec(&held)?).await?;
     std::fs::remove_dir_all(&owner_path)?;
     let custodian = Device::new(
         config(&custodian_path)?
@@ -629,7 +624,7 @@ async fn a_wrong_passkey_or_namespace_finds_nothing_and_touches_nothing() -> Res
     let owner_path = directory.path().join("owner");
     let owner = create(&owner_path, &hub, "owner").await?;
     owner.add(1, "mine").await;
-    let before = files(&owner_path)?;
+    let before = common::authority_bytes(&owner_path, "identity")?;
     let devices = known(&owner_path)?.personal_devices(identity_key())?;
     let other = PersonalNamespace::new("shopping.example", "other root")?;
     for (name, prf, namespace) in [
@@ -655,10 +650,9 @@ async fn a_wrong_passkey_or_namespace_finds_nothing_and_touches_nothing() -> Res
         devices
     );
     owner.close().await;
-    let after = files(&owner_path)?;
+    let after = common::authority_bytes(&owner_path, "identity")?;
     assert_eq!(
-        before.get(&owner_path.join("identity.json")),
-        after.get(&owner_path.join("identity.json")),
+        before, after,
         "only the owner's own writes changed its store"
     );
     Ok(())

@@ -119,8 +119,8 @@ fn revoking_an_identity_known_only_by_its_grant_ends_it_under_any_node_key() -> 
     Ok(())
 }
 
-#[test]
-fn revoking_the_identity_of_a_configured_contact_keeps_the_settings_reopenable()
+#[tokio::test]
+async fn revoking_the_identity_of_a_configured_contact_keeps_the_settings_reopenable()
 -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
@@ -163,8 +163,8 @@ fn revoking_the_identity_of_a_configured_contact_keeps_the_settings_reopenable()
         None,
     )?;
     issuer.rotate(&vault)?;
-    let path = directory.path().join("identity.json");
-    issuer.save(&path)?;
+    let path = directory.path().join("rocky.sqlite");
+    issuer.save(&path).await?;
     let reopened = Settings::load(&path)?;
     assert!(!reopened.peers.contains_key(&node));
     assert!(!reopened.contact_meta.contains_key(&node));
@@ -327,7 +327,7 @@ fn registry_grants_follow_only_the_issuer_and_custody_profiles() -> Result<(), F
 
 const TWO: &str = r#"{"format":6,"application":"two","version":1,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"replayed","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
-fn issuer_at(
+async fn issuer_at(
     schema: &str,
     directory: &Path,
 ) -> Result<(Settings, Vault, std::path::PathBuf), Failure> {
@@ -341,13 +341,13 @@ fn issuer_at(
         &rocky_credentials::RootKey::generate(),
     )?;
     let vault = issuer.vault(&store);
-    let path = directory.join("identity.json");
-    issuer.save(&path)?;
+    let path = directory.join("rocky.sqlite");
+    issuer.save(&path).await?;
     Ok((issuer, vault, path))
 }
 
-#[test]
-fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
+#[tokio::test]
+async fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
 -> Result<(), Failure> {
     use fault::Stage;
     let stops = [
@@ -360,14 +360,14 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
     ];
     for stop in stops {
         let directory = tempfile::tempdir()?;
-        let (mut issuer, vault, path) = issuer_at(TWO, directory.path())?;
+        let (mut issuer, vault, path) = issuer_at(TWO, directory.path()).await?;
         let identity = PrivateKey::new().public_key();
         issuer.begin_revocation(
             Revoke::Identity(identity),
             known(&Registry::default()),
             None,
         )?;
-        issuer.save(&path)?;
+        issuer.save(&path).await?;
         let intent = issuer
             .authority
             .as_ref()
@@ -408,7 +408,7 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
         changes.revoked(&identity)?;
         let completed = Registry::merged(&mut rows, &changes)?;
         reopened.complete_revocation(&vault, &domain, known(&completed))?;
-        reopened.save(&path)?;
+        reopened.save(&path).await?;
         assert_eq!(reopened.revocations.len(), 1, "{stop:?}");
         assert!(
             reopened.revocations.get(&intent.statement.id()?).is_some(),
@@ -440,10 +440,10 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
     Ok(())
 }
 
-#[test]
-fn the_1025th_live_statement_is_refused_by_name_and_rotates_nothing() -> Result<(), Failure> {
+#[tokio::test]
+async fn the_1025th_live_statement_is_refused_by_name_and_rotates_nothing() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
-    let (mut issuer, vault, _) = issuer_at(TWO, directory.path())?;
+    let (mut issuer, vault, _) = issuer_at(TWO, directory.path()).await?;
     let publisher = issuer.identity;
     let links = issuer.issuer_links();
     let credentials = issuer.credentials.clone();
@@ -495,11 +495,11 @@ fn the_1025th_live_statement_is_refused_by_name_and_rotates_nothing() -> Result<
     Ok(())
 }
 
-#[test]
-fn a_tombstoned_user_renews_at_no_issuer_also_after_its_statement_left_the_set()
+#[tokio::test]
+async fn a_tombstoned_user_renews_at_no_issuer_also_after_its_statement_left_the_set()
 -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
-    let (mut a, vault, _) = issuer_at(TWO, directory.path())?;
+    let (mut a, vault, _) = issuer_at(TWO, directory.path()).await?;
     let me = PrivateKey::from_bytes(&vault.get("node")?).public_key();
     let mut rows = BTreeMap::new();
     let mut registry = Registry::default();
@@ -562,8 +562,8 @@ fn a_tombstoned_user_renews_at_no_issuer_also_after_its_statement_left_the_set()
     Ok(())
 }
 
-#[test]
-fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_stop_rotating()
+#[tokio::test]
+async fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_stop_rotating()
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(MemoryKeys::default());
@@ -688,8 +688,8 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
     for round in 0..EXCHANGE_ROUNDS {
         let (a_before, b_before) = (a.clone(), b.clone());
         for (source, source_vault, target, target_vault, path) in [
-            (&a_before, &av, &mut b, &bv, root.path().join("b.json")),
-            (&b_before, &bv, &mut a, &av, root.path().join("a.json")),
+            (&a_before, &av, &mut b, &bv, root.path().join("b.sqlite")),
+            (&b_before, &bv, &mut a, &av, root.path().join("a.sqlite")),
         ] {
             let target_node = PrivateKey::from_bytes(&target_vault.get("node")?);
             let issuer = PrivateKey::from_bytes(&source_vault.get("node")?).public_key();
@@ -710,22 +710,24 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
                         .map(move |(epoch, key)| Ok((name.clone(), *epoch, hex32(key)?)))
                 })
                 .collect::<Result<Vec<_>, Failure>>()?;
-            target.adopt(
-                &path,
-                target_vault,
-                &Renewed {
-                    contacted: None,
-                    revocations: reply.revocations,
-                    chain: target.credentials.clone(),
-                    keys,
-                    groups: sealed.groups,
-                    epoch_statements: sealed.epoch_statements,
-                    profile: None,
-                    issuers: Vec::new(),
-                    claims: None,
-                    naming: None,
-                },
-            )?;
+            *target = target
+                .adopt_into(
+                    target_vault,
+                    &Renewed {
+                        contacted: None,
+                        revocations: reply.revocations,
+                        chain: target.credentials.clone(),
+                        keys,
+                        groups: sealed.groups,
+                        epoch_statements: sealed.epoch_statements,
+                        profile: None,
+                        issuers: Vec::new(),
+                        claims: None,
+                        naming: None,
+                    },
+                )?
+                .0;
+            target.save(&path).await?;
             assert!(
                 !target.begin_exposure_rotation(&registry)?,
                 "round {round}: a sealed renewal of both current siblings creates no generation 4"
@@ -759,8 +761,8 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
     Ok(())
 }
 
-#[test]
-fn saved_contacts_keep_routes_and_flags_without_foreign_node_keys() -> Result<(), Failure> {
+#[tokio::test]
+async fn saved_contacts_keep_routes_and_flags_without_foreign_node_keys() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
         crate::FileSecretStore::new(directory.path().join("secrets")),
@@ -791,9 +793,10 @@ fn saved_contacts_keep_routes_and_flags_without_foreign_node_keys() -> Result<()
         BASE64URL_NOPAD.encode(&serde_json::to_vec(&record)?)
     );
     settings.add_peer(&vault, &uri)?;
-    let path = directory.path().join("identity.json");
-    settings.save(&path)?;
-    let bytes = std::fs::read(&path)?;
+    let path = directory.path().join("rocky.sqlite");
+    settings.save(&path).await?;
+    let (bytes, _) = rocky_secure::read_authority_entry(&path, AUTHORITY_IDENTITY_KEY)?
+        .ok_or("saved identity")?;
     assert!(
         !bytes
             .windows(node.to_hex().len())
@@ -802,7 +805,7 @@ fn saved_contacts_keep_routes_and_flags_without_foreign_node_keys() -> Result<()
     let mut reopened = Settings::load(&path)?;
     assert!(reopened.peers.is_empty());
     assert_eq!(reopened.unresolved_contacts().len(), 1);
-    reopened.save(&path)?;
+    reopened.save(&path).await?;
     reopened = Settings::load(&path)?;
     reopened.bind_saved_contact(PrivateKey::new().public_key());
     assert!(reopened.peers.is_empty());
@@ -810,7 +813,7 @@ fn saved_contacts_keep_routes_and_flags_without_foreign_node_keys() -> Result<()
     assert_eq!(reopened.peers[&node].routes[0].address, "127.0.0.1:9000");
     assert_eq!(reopened.issuers, [node]);
     reopened.remove_peer(node)?;
-    reopened.save(&path)?;
+    reopened.save(&path).await?;
     assert!(Settings::load(&path)?.unresolved_contacts().is_empty());
     Ok(())
 }
@@ -1063,10 +1066,10 @@ fn an_issuer_without_the_key_of_a_known_partition_may_not_migrate() -> Result<()
     Ok(())
 }
 
-#[test]
-fn any_issuer_renews_a_recorded_claim_right_and_none_a_revoked_one() -> Result<(), Failure> {
+#[tokio::test]
+async fn any_issuer_renews_a_recorded_claim_right_and_none_a_revoked_one() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
-    let (mut a, vault, _) = issuer_at(TWO, directory.path())?;
+    let (mut a, vault, _) = issuer_at(TWO, directory.path()).await?;
     let me = PrivateKey::from_bytes(&vault.get("node")?).public_key();
     let owner = a.identity;
     let owner_links = a.issuer_links();

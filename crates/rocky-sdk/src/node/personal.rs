@@ -165,7 +165,7 @@ impl Node {
         let context = settings
             .personal()?
             .ok_or_else(|| refused("this database is not a personal one"))?;
-        if settings.logged_out || self.revocation_notice.revoked(&settings)?.is_some() {
+        if settings.logged_out || self.revocation_notice.revoked(&settings).await?.is_some() {
             return Err(refused("this device was revoked or logged out"));
         }
         Ok((
@@ -382,14 +382,17 @@ impl Node {
         if added {
             let mut draft = current.clone();
             draft.learn_revocations(&known)?;
-            current.commit(draft, &self.path)?;
+            current
+                .commit_with_revocations(draft, &self.replica, &known)
+                .await?;
             tracing::debug!(
                 node = %node.to_hex(),
                 publication = %data_encoding::HEXLOWER.encode(&publication_id),
                 "personal device certificate recorded"
             );
+        } else {
+            self.replica.learn_revocations(&known).await?;
         }
-        self.replica.learn_revocations(&known).await?;
         drop(current);
         if added {
             self.observations.touch();
@@ -419,7 +422,7 @@ impl Node {
             unwitnessed: false,
             ..device
         });
-        current.commit(draft, &self.path)?;
+        current.commit(draft, &self.replica).await?;
         tracing::debug!(peer = %peer.to_hex(), "an owner device witnessed this device");
         Ok(())
     }
@@ -487,7 +490,7 @@ impl Node {
             claims: None,
             naming: None,
         };
-        current.adopt(&self.path, &self.vault, &renewed)?;
+        current.adopt(&self.replica, &self.vault, &renewed).await?;
         self.apply(&mut current, Vec::new()).await?;
         drop(current);
         tracing::debug!("custody grant renewed under the owner");

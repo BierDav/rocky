@@ -350,7 +350,7 @@ impl Settings {
             vault.forget(settings.roles())?;
             return Err("the membership link is void; retry to link a fresh node".into());
         }
-        settings.save(path)?;
+        settings.save(path).await?;
         rocky_platform::fs::remove_file(Intent::path(path, false))?;
         Ok(settings)
     }

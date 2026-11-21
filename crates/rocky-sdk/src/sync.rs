@@ -260,12 +260,7 @@ pub(crate) async fn bootstrap(
         }
     }
     planned.sort_by_key(|plan| (plan.rows == 0, plan.rows));
-    let record =
-        |pending: &[ResourceScope], expected: &mut BootstrapIntent| -> Result<(), Failure> {
-            *expected = file.record_progress(expected, pending, &totals)?;
-            Ok(())
-        };
-    record(&pending, &mut expected)?;
+    expected = file.record_progress(&expected, &pending, &totals).await?;
     replica
         .set_importing(pending.iter().copied().collect())
         .await;
@@ -325,7 +320,7 @@ pub(crate) async fn bootstrap(
         match imported {
             Ok(()) => {
                 pending.retain(|known| *known != scope);
-                record(&pending, &mut expected)?;
+                expected = file.record_progress(&expected, &pending, &totals).await?;
                 replica
                     .set_importing(pending.iter().copied().collect())
                     .await;

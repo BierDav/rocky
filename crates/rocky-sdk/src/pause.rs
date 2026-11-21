@@ -60,22 +60,12 @@ pub(crate) async fn at(directory: &Path, point: Point) {
 }
 
 #[cfg(test)]
-pub(crate) fn blocking_at(directory: &Path, point: Point) {
-    if let Some(released) = reach(directory, point) {
-        let _ = released.blocking_recv();
-    }
-}
-
-#[cfg(test)]
 pub(crate) fn passing(directory: &Path, point: Point) {
     let _ = reach(directory, point);
 }
 
 #[cfg(not(test))]
 pub(crate) async fn at(_: &Path, _: Point) {}
-
-#[cfg(not(test))]
-pub(crate) fn blocking_at(_: &Path, _: Point) {}
 
 #[cfg(not(test))]
 pub(crate) fn passing(_: &Path, _: Point) {}

@@ -55,9 +55,7 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     }
 }
 fn saved(directory: &Path) -> Result<Value, Failure> {
-    Ok(serde_json::from_slice(&std::fs::read(
-        directory.join("identity.json"),
-    )?)?)
+    common::authority_json(directory, "identity")
 }
 fn code(error: &Failure) -> String {
     CallFailure::from_failure(error).code().to_owned()
@@ -494,7 +492,7 @@ async fn an_older_identity_format_is_refused() -> Result<(), Failure> {
     personal.opened.database.close().await?;
     let mut identity = saved(&path)?;
     identity["version"] = Value::from(33);
-    std::fs::write(path.join("identity.json"), serde_json::to_vec(&identity)?)?;
+    common::write_authority(&path, "identity", &serde_json::to_vec(&identity)?).await?;
     let before = files(&path)?;
     let error = refusal(
         config(&path)?

@@ -649,15 +649,17 @@ fn with_pending(identity: &[u8], tip: &Value, manifest: &Value) -> Result<Vec<u8
     saved["pending"] = json!({"tip": bytes(tip)?, "manifest": bytes(manifest)?});
     Ok(serde_json::to_vec(&saved)?)
 }
-fn stop_after_saving_switch_intent(
+async fn stop_after_saving_switch_intent(
     directory: &Path,
     identity: &[u8],
     target: &(Value, Value),
 ) -> Result<(), Failure> {
-    std::fs::write(
-        directory.join("identity.json"),
-        with_pending(identity, &target.0, &target.1)?,
-    )?;
+    common::write_authority(
+        directory,
+        "identity",
+        &with_pending(identity, &target.0, &target.1)?,
+    )
+    .await?;
     Ok(())
 }
 
@@ -685,7 +687,7 @@ async fn a_crash_on_either_side_of_the_switch_resumes_on_the_followed_schema() -
     let before_meeting_published_schema = root.path().join("saved");
     std::fs::create_dir(&before_meeting_published_schema)?;
     copy_replica(&b_dir, &before_meeting_published_schema)?;
-    let identity = std::fs::read(b_dir.join("identity.json"))?;
+    let identity = common::authority_bytes(&b_dir, "identity")?.ok_or("identity")?;
     let b = reopen(open(&b_dir, NOTED, network("b")))?;
     b.sync().await.expect("sync");
     assert_eq!(generation(&b).await["current"]["schema"], 2);
@@ -694,7 +696,7 @@ async fn a_crash_on_either_side_of_the_switch_resumes_on_the_followed_schema() -
     std::fs::create_dir(&switched)?;
     copy_replica(&b_dir, &switched)?;
 
-    stop_after_saving_switch_intent(&b_dir, &identity, &target)?;
+    stop_after_saving_switch_intent(&b_dir, &identity, &target).await?;
     let b = reopen(open(&b_dir, SCHEMA, None))?;
     let status = generation(&b).await;
     assert_eq!(
@@ -710,7 +712,7 @@ async fn a_crash_on_either_side_of_the_switch_resumes_on_the_followed_schema() -
     b.close().await;
 
     copy_replica(&before_meeting_published_schema, &b_dir)?;
-    stop_after_saving_switch_intent(&b_dir, &identity, &target)?;
+    stop_after_saving_switch_intent(&b_dir, &identity, &target).await?;
     let b = reopen(open(&b_dir, SCHEMA, network("b")))?;
     assert_eq!(
         generation(&b).await["current"]["schema"],
@@ -757,7 +759,7 @@ async fn a_crash_after_the_switch_and_a_same_schema_advance_reopens_on_the_targe
     a.close().await;
     let a = reopen(open(&a_dir, NOTED, network("a")))?;
     let target = (tip(&a).await, generation(&a).await["manifest"].clone());
-    let identity = std::fs::read(b_dir.join("identity.json"))?;
+    let identity = common::authority_bytes(&b_dir, "identity")?.ok_or("identity")?;
     let b = reopen(open(&b_dir, NOTED, network("b")))?;
     b.sync().await.expect("sync");
     assert_eq!(tip(&b).await, target.0);
@@ -772,7 +774,7 @@ async fn a_crash_after_the_switch_and_a_same_schema_advance_reopens_on_the_targe
     );
     b.close().await;
 
-    stop_after_saving_switch_intent(&b_dir, &identity, &target)?;
+    stop_after_saving_switch_intent(&b_dir, &identity, &target).await?;
     let b = reopen(open(&b_dir, SCHEMA, None))?;
     let status = generation(&b).await;
     assert_eq!(
@@ -830,7 +832,7 @@ async fn an_older_application_joins_at_the_households_generation() -> Result<(),
 }
 
 fn chain(directory: &Path) -> Result<Value, Failure> {
-    let identity: Value = serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)?;
+    let identity = common::authority_json(directory, "identity")?;
     Ok(identity["credentials"].clone())
 }
 
@@ -1004,8 +1006,7 @@ async fn issuers_that_publish_one_schema_apart_end_on_one_tip() -> Result<(), Fa
     a.close().await;
     b.close().await;
     let tags = |directory: &Path| -> Result<Value, Failure> {
-        let identity: Value =
-            serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)?;
+        let identity = common::authority_json(directory, "identity")?;
         Ok(identity["keys"]["tags"].clone())
     };
     assert_eq!(

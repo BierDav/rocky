@@ -28,9 +28,7 @@ fn join(root: &Path, hub: &Arc<Hub>, name: &str, invitation: &str) -> Result<Dev
     )?)
 }
 fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
-    Ok(serde_json::from_slice(&std::fs::read(
-        root.join(name).join("identity.json"),
-    )?)?)
+    common::authority_json(&root.join(name), "identity")
 }
 fn peer_id(node: &str) -> Result<String, Failure> {
     Ok(rocky_credentials::PeerId::of(node.parse()?).to_hex())

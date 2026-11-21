@@ -84,7 +84,7 @@ pub(crate) async fn recover(
                 },
             )?;
             fault::check(directory, fault::Stage::Marked)?;
-            settings.save(path)?;
+            settings.save(store).await?;
             (settings, Some(Recovery::Placing))
         }
     };

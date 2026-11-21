@@ -326,7 +326,8 @@ impl Node {
         bootstrap_intent: BootstrapIntentFile,
     ) -> Self {
         let settings_schema = settings.schema.clone();
-        let revocation_notice = crate::enrollment::RevocationNotice::open(&settings, &path);
+        bootstrap_intent.attach_replica(replica.clone());
+        let revocation_notice = crate::enrollment::RevocationNotice::open(replica.clone());
         let observations = crate::status::Observations::default();
         Self {
             #[cfg(test)]
@@ -509,7 +510,8 @@ impl Node {
             return Err(refused("this device logged out of the domain"));
         }
         self.revocation_notice
-            .admit_personal(&self.settings.published())?;
+            .admit_personal(&self.settings.published())
+            .await?;
         let session = self
             .replica
             .session(self.app_scopes().into_iter().collect())
@@ -740,7 +742,7 @@ impl Node {
                 .lock()
                 .await
                 .invite(
-                    &self.path,
+                    &self.replica,
                     &self.vault,
                     transport,
                     (profile.clone(), label),
@@ -898,7 +900,8 @@ impl Node {
         }
         if matches!(kind, RequestKind::Tips) {
             self.revocation_notice
-                .admit_personal(&self.settings.published())?;
+                .admit_personal(&self.settings.published())
+                .await?;
         }
         Ok(())
     }
@@ -918,7 +921,7 @@ impl Node {
         if draft.persisted_eq(&settings) {
             *settings = draft;
         } else {
-            settings.commit(draft, &self.path)?;
+            settings.commit(draft, &self.replica).await?;
         }
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? =
             settings.granted(&self.domain());
@@ -950,15 +953,15 @@ impl Node {
             .map_err(refused)?;
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let mut settings = self.settings.lock().await;
-        let (mut keys, _) = settings.adopt(&self.path, &self.vault, &renewed)?;
+        let (mut keys, _) = settings.adopt(&self.replica, &self.vault, &renewed).await?;
         if settings.begin_exposure_rotation(&registry)? {
-            settings.save(&self.path)?;
+            settings.save(&self.replica).await?;
             keys.extend(
                 settings
                     .rotate(&self.vault)?
                     .ok_or("exposure rotation intent disappeared")?,
             );
-            settings.save(&self.path)?;
+            settings.save(&self.replica).await?;
         }
         let fresh = keys.len();
         self.apply(&mut settings, keys).await?;
@@ -1031,7 +1034,7 @@ impl Node {
         })
     }
     async fn bootstrap_progress(&self) -> Result<Option<crate::BootstrapProgress>, Failure> {
-        let Some(intent) = self.bootstrap_intent.load()? else {
+        let Some(intent) = self.bootstrap_intent.load().await? else {
             return Ok(None);
         };
         let totals = intent.totals();
@@ -1326,7 +1329,7 @@ impl Node {
         if !draft.revoke_before_recovery(root.signer(), cut)? {
             return Ok(());
         }
-        settings.commit(draft, &self.path)?;
+        settings.commit(draft, &self.replica).await?;
         self.apply(&mut settings, Vec::new()).await?;
         drop(settings);
 
@@ -1407,7 +1410,7 @@ impl Node {
                     refused(error)
                 }
             })?;
-        settings.commit(draft.clone(), &self.path)?;
+        settings.commit(draft.clone(), &self.replica).await?;
         let rotation = draft
             .authority
             .as_ref()
@@ -1415,7 +1418,7 @@ impl Node {
             .ok_or("the revocation was not begun")?;
         let keys = draft.rotate(&self.vault)?.unwrap_or_default();
         draft.drop_revoked_deliveries();
-        settings.commit(draft, &self.path)?;
+        settings.commit(draft, &self.replica).await?;
         self.apply(&mut settings, keys).await?;
         let rotated: Vec<_> = settings
             .partitions(&self.domain())?
@@ -1522,7 +1525,8 @@ impl Node {
                 if let Some(revoked) = error.downcast_ref::<crate::enrollment::Revoked>() {
                     if self
                         .revocation_notice
-                        .record_unless_revoked(&current, revoked.0.clone())?
+                        .record_unless_revoked(&current, revoked.0.clone())
+                        .await?
                     {
                         self.record_ended(&revoked.0, current.identity)?;
                     }
@@ -1539,12 +1543,12 @@ impl Node {
         let restores_revoked_authors =
             (!epochs_only || !settings.issuer()) && settings.lacks(&renewed.revocations)?;
         if restores_revoked_authors {
-            self.bootstrap_intent.request_checkpoint_import()?;
+            self.bootstrap_intent.request_checkpoint_import().await?;
         }
         if epochs_only {
             renewed.chain = settings.credentials.clone();
         }
-        let (keys, adopted) = settings.adopt(&self.path, &self.vault, &renewed)?;
+        let (keys, adopted) = settings.adopt(&self.replica, &self.vault, &renewed).await?;
         let mut changed = !epochs_only || adopted;
         if changed {
             let readable = self
@@ -1562,7 +1566,7 @@ impl Node {
                 if crate::database::attach(&self.replica, &mut widened, &self.vault, &domain)
                     .await?
                 {
-                    settings.commit(Shared::new(widened), &self.path)?;
+                    settings.commit(Shared::new(widened), &self.replica).await?;
                 }
             }
         }
@@ -1572,11 +1576,11 @@ impl Node {
             settings = self.settings.lock().await;
             if settings.begin_exposure_rotation(&registry)? {
                 changed = true;
-                settings.save(&self.path)?;
+                settings.save(&self.replica).await?;
                 let keys = settings
                     .rotate(&self.vault)?
                     .ok_or("exposure rotation intent disappeared")?;
-                settings.save(&self.path)?;
+                settings.save(&self.replica).await?;
                 self.apply(&mut settings, keys).await?;
                 self.hold_keys(&settings, &settings.partitions(&self.domain())?)
                     .await?;
@@ -1611,7 +1615,7 @@ impl Node {
         }
         self.replica.logout().await;
         settings.logged_out = true;
-        settings.save(&self.path)?;
+        settings.save(&self.replica).await?;
         *self.lifecycle.lock().await = Lifecycle::LoggedOut {
             purge_on_close: purge,
         };
@@ -2035,13 +2039,14 @@ impl Node {
                 self.learned.store(true, Ordering::SeqCst);
             }
             if !draft.issuer() && !added.is_empty() {
-                self.bootstrap_intent.request_checkpoint_import()?;
+                self.bootstrap_intent.request_checkpoint_import().await?;
             }
         }
         if let Some(statement) = revoking
             && self
                 .revocation_notice
-                .record_unless_revoked(&draft, statement.clone())?
+                .record_unless_revoked(&draft, statement.clone())
+                .await?
         {
             self.record_ended(&statement, draft.identity)?;
         }
@@ -2049,13 +2054,13 @@ impl Node {
             Some(registry) => resumes || draft.begin_exposure_rotation(&registry)?,
             None => false,
         };
-        settings.commit(draft, &self.path)?;
+        settings.commit(draft, &self.replica).await?;
         if rotated {
             let mut rotation = (*settings).clone();
             let keys = rotation
                 .rotate(&self.vault)?
                 .ok_or("missing exposure rotation")?;
-            settings.commit(rotation, &self.path)?;
+            settings.commit(rotation, &self.replica).await?;
             self.apply(&mut settings, keys).await?;
             self.hold_keys(&settings, &settings.partitions(&self.domain())?)
                 .await?;
@@ -2087,7 +2092,11 @@ impl Node {
         Ok(pending.into_iter().filter(imports_checkpoint).collect())
     }
     async fn ensure_not_revoked(&self) -> Result<(), Failure> {
-        match self.revocation_notice.revoked(&self.settings.published())? {
+        match self
+            .revocation_notice
+            .revoked(&self.settings.published())
+            .await?
+        {
             Some(statement) => Err(Box::new(crate::enrollment::Revoked(statement))),
             None => Ok(()),
         }
@@ -2108,14 +2117,15 @@ impl Node {
             })
         })
     }
-    fn awaited_inviter(&self) -> Result<Option<PublicKey>, Failure> {
+    async fn awaited_inviter(&self) -> Result<Option<PublicKey>, Failure> {
         Ok(self
             .bootstrap_intent
-            .load()?
+            .load()
+            .await?
             .and_then(|intent| intent.inviter()))
     }
     pub(crate) async fn refresh_importing(&self) -> Result<(), Failure> {
-        let pending = match self.bootstrap_intent.load()? {
+        let pending = match self.bootstrap_intent.load().await? {
             Some(intent) => self.bootstrap_pending(&intent).await.unwrap_or_default(),
             None => Vec::new(),
         };
@@ -2455,7 +2465,8 @@ impl Node {
             PeerRequest::Unlink(_) | PeerRequest::Policy | PeerRequest::Resolve(_)
         ) {
             self.revocation_notice
-                .admit_personal(&self.settings.published())?;
+                .admit_personal(&self.settings.published())
+                .await?;
         }
         let is_enrollment = matches!(
             request,
@@ -2498,7 +2509,8 @@ impl Node {
                 if let Some(statement) = current.revoking(&request.revocations)? {
                     if self
                         .revocation_notice
-                        .record_unless_revoked(&current, statement.clone())?
+                        .record_unless_revoked(&current, statement.clone())
+                        .await?
                     {
                         self.record_ended(&statement, current.identity)?;
                     }
@@ -2507,7 +2519,7 @@ impl Node {
                 let mut draft = current.clone();
                 let added = draft.learn_revocations(&request.revocations)?;
                 if !added.is_empty() {
-                    current.commit(draft, &self.path)?;
+                    current.commit(draft, &self.replica).await?;
                     self.apply(&mut current, Vec::new()).await?;
                     self.hold_keys(&current, &current.partitions(&self.domain())?)
                         .await?;
@@ -2521,7 +2533,7 @@ impl Node {
                 let mut settings = self.settings.lock().await.clone();
                 settings.learn_revocations(&self.replica.revocations().await)?;
                 let mut known = settings.revocations.clone();
-                if let Some(ended) = self.revocation_notice.revoked(&settings)? {
+                if let Some(ended) = self.revocation_notice.revoked(&settings).await? {
                     known.merge_in(
                         &RevocationSet::try_from(vec![ended])?,
                         settings.database_context()?,
@@ -2560,7 +2572,7 @@ impl Node {
                 let settings = self.settings.lock().await;
                 let database = settings.database_context()?;
                 let mut committed = settings.revocations.clone();
-                if let Some(ended) = self.revocation_notice.revoked(&settings)? {
+                if let Some(ended) = self.revocation_notice.revoked(&settings).await? {
                     committed.merge_in(&RevocationSet::try_from(vec![ended])?, database, now()?)?;
                 }
                 Ok(PeerReply::Unlink(Box::new(

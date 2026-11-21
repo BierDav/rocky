@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     Failure, Freshness,
-    bootstrap_intent::{BOOTSTRAP_INTENT_FILE, BootstrapIntentFile},
+    bootstrap_intent::BootstrapIntentFile,
     enrollment::{Settings, exchange, now},
     escrow::{Archived, Recovered},
     groups::{GroupRecord, NAMING_ROLE, record_key, secret_role},
@@ -61,8 +61,6 @@ pub(crate) fn prepare_sign_in(
             "rocky.sqlite",
             "rocky.sqlite-wal",
             "rocky.sqlite-shm",
-            "revoked.json",
-            BOOTSTRAP_INTENT_FILE,
             "mailbox.json",
             crate::backup::MARKER,
         ] {
@@ -483,9 +481,9 @@ async fn discovered(
             false,
             now()?,
         )?;
-        bootstrap_intent.request_checkpoint_import()?;
+        bootstrap_intent.request_checkpoint_import().await?;
         installing.installed(&vault, &coverage)?;
-        settings.save(path)?;
+        settings.save(path).await?;
         return Ok((settings, coverage, freshness));
     }
     if capacity {
@@ -933,10 +931,11 @@ async fn from_backup(
             recovery: None,
         },
     )?;
+    rocky_secure::remove_authority_entry(store, crate::enrollment::AUTHORITY_IDENTITY_KEY).await?;
     crate::backup::place(&opened, directory)?;
     super::fault::check(directory, super::fault::Stage::Placed)?;
     installing.installed(&vault, &coverage)?;
-    settings.save(path)?;
+    settings.save(path).await?;
     rocky_platform::fs::remove_dir_all(&staging)?;
     Ok((settings, coverage))
 }

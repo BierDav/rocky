@@ -42,7 +42,7 @@ async fn ordinary_sync_waits_for_the_shared_import_slot_without_a_bootstrap_mark
                 .receive_tip_statements(&a.replica.tip_statements(None, 32).await?)
                 .await?;
             c.replica.follow_bookmark(a.domain().scope, "main").await?;
-            assert!(!c.bootstrap_intent.exists());
+            assert!(!c.bootstrap_intent.exists().await);
             let key = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
             let contact = c
                 .settings

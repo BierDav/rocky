@@ -388,8 +388,7 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
     a.add(1, "retained").await;
     a.close().await;
     let directory = root.path().join("a");
-    let path = directory.join("identity.json");
-    let original = std::fs::read(&path)?;
+    let original = common::authority_bytes(&directory, "identity")?.ok_or("identity")?;
     let database = std::fs::read(directory.join("rocky.sqlite"))?;
     fn files(
         directory: &Path,
@@ -411,7 +410,7 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
         let mut identity: Value = serde_json::from_slice(&original)?;
         identity["version"] = json!(version);
         let bytes = serde_json::to_vec(&identity)?;
-        std::fs::write(&path, &bytes)?;
+        common::write_authority(&directory, "identity", &bytes).await?;
         let before = files(&directory)?;
         let opened = Device::open(&directory, None);
         let error = match opened {
@@ -434,11 +433,13 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
                 path.display()
             );
         }
-        assert_eq!(std::fs::read(&path)?, bytes);
-        assert_eq!(std::fs::read(directory.join("rocky.sqlite"))?, database);
+        assert_eq!(
+            common::authority_bytes(&directory, "identity")?,
+            Some(bytes)
+        );
     }
     assert!(errors.iter().all(|error| error == &errors[0]));
-    std::fs::write(&path, original)?;
+    std::fs::write(directory.join("rocky.sqlite"), database)?;
     let a = Device::open(&directory, None)?;
     assert_eq!(a.titles().await, ["retained"]);
     a.close().await;

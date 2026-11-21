@@ -1032,14 +1032,13 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
     pub(super) async fn select_line(&mut self, scope: Scope, target: TipId) -> Result<(), Error> {
-        let root = self
+        let roots = self
             .graph_for(scope)?
-            .line_root(target)
+            .author_line_roots(target)
             .map_err(credential)?;
-        let author_root = self
-            .graph_for(scope)?
-            .author_line_root(target)
-            .map_err(credential)?;
+        let root = *roots
+            .first()
+            .ok_or_else(|| Error::Corrupt("author line root missing".into()))?;
         let lookup = async |line: TipId| -> Result<(bool, Option<identity::NodeAuthor>), Error> {
             let records = collect_rows(
                 self.conn
@@ -1070,7 +1069,7 @@ impl<A: RowApplication> Inner<A> {
         let mut bound_root = root;
         if !has_binding
             && selected.is_none()
-            && author_root != root
+            && roots.len() > 1
             && self.schema_switch_intent().await?.is_none()
             && rows(
                 &self.conn,
@@ -1079,8 +1078,25 @@ impl<A: RowApplication> Inner<A> {
             .await?
             .is_empty()
         {
-            selected = lookup(author_root).await?.1;
-            bound_root = author_root;
+            for &ancestor in &roots[1..] {
+                let (ancestor_bound, candidate) = lookup(ancestor).await?;
+                if let Some(mut author) = candidate {
+                    if author.key.public_key() == self.config.node.public_key() {
+                        author = identity::NodeAuthor::new(&self.config)?;
+                    }
+                    if self
+                        .node_continues(scope, target, author.key.public_key())
+                        .await?
+                    {
+                        selected = Some(author);
+                        bound_root = ancestor;
+                        break;
+                    }
+                }
+                if ancestor_bound {
+                    break;
+                }
+            }
         }
         if selected
             .as_ref()
@@ -2047,6 +2063,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         identity::check_node_chain(&author.credentials)?;
         inner.line_nodes.insert(root, author);
+        if let Some((scope, _)) = inner.workspace.followed
+            && inner.node_author.is_none()
+        {
+            let target = inner.workspace.tip;
+            inner.select_line(scope, target).await?;
+        }
         Ok(())
     }
     pub async fn register_line_node(&self, node: LineNode) -> Result<(), Error> {

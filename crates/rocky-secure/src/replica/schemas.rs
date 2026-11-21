@@ -1409,9 +1409,6 @@ impl<A: RowApplication> Inner<A> {
                 self.clear_seal_anchor(*id).await?;
             }
         }
-        self.conn
-            .execute("DELETE FROM secure_schema_switch WHERE id=1", ())
-            .await?;
         self.invalidate_context();
         self.workspace.tip = source;
         self.switch_tip(scope, bookmark, target).await?;
@@ -1421,6 +1418,10 @@ impl<A: RowApplication> Inner<A> {
             self.switch_tip(scope, bookmark, followed).await?;
         }
         self.rebuild_voided_in_transaction().await?;
+        self.conn
+            .execute("DELETE FROM secure_schema_switch WHERE id=1", ())
+            .await?;
+        self.select_line(scope, self.workspace.tip).await?;
         Ok(())
     }
 }

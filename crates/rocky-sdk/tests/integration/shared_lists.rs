@@ -1267,14 +1267,12 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
             .set_genesis_minimum(inherited_by_migration_openings),
     )
     .await?;
-    let invitation = snap::value(
-        issuer.session.invite(
-            Some(rocky_sdk::GrantProfile::Writer {
-                scopes: TABLES.map(String::from).into(),
-            }),
-            None,
-        ),
-    )
+    let invitation = snap::value(issuer.session.invite(
+        Some(rocky_sdk::GrantProfile::Writer {
+            scopes: TABLES.map(String::from).into(),
+        }),
+        None,
+    ))
     .await?["uri"]
         .as_str()
         .ok_or("uri")?

@@ -40,8 +40,7 @@ fn reopen(root: &Path, hub: &Arc<Hub>, name: &str) -> Result<Device, Failure> {
     Device::new(Database::open(open(&root.join(name), hub, name))?)
 }
 fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
-    let mut identity: Value =
-        serde_json::from_slice(&std::fs::read(root.join(name).join("identity.json"))?)?;
+    let mut identity = common::authority_json(&root.join(name), "identity")?;
     for epochs in identity["keys"].as_object_mut().ok_or("keys")?.values_mut() {
         for epoch in epochs.as_array_mut().ok_or("epochs")? {
             *epoch = epoch["generation"].clone();
@@ -50,8 +49,7 @@ fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
     Ok(identity)
 }
 fn secret(root: &Path, name: &str, role: &str) -> Result<Option<[u8; 32]>, Failure> {
-    let state: Value =
-        serde_json::from_slice(&std::fs::read(root.join(name).join("identity.json"))?)?;
+    let state = common::authority_json(&root.join(name), "identity")?;
     let role = if let Some(reader) = role.strip_prefix("reader.") {
         let (collection, generation) = reader
             .split_once('.')
@@ -448,19 +446,19 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
         !snap::ok(reopened.session.status()).await["authority"]["verified_revocation"].is_null()
     );
     reopened.close().await;
-    let notice = root.join("c/revoked.json");
-    let original = std::fs::read(&notice)?;
+    let c_dir = root.join("c");
+    let original = common::authority_bytes(&c_dir, "revoked")?.ok_or("revoked notice")?;
     let mut tampered: Value = serde_json::from_slice(&original)?;
     assert_eq!(tampered["version"], 3);
     tampered["statement"]["statement"]["time"] = json!(999);
-    std::fs::write(&notice, serde_json::to_vec(&tampered)?)?;
+    common::write_authority(&c_dir, "revoked", &serde_json::to_vec(&tampered)?).await?;
     let reopened = reopen(root, &hub, "c")?;
     assert!(
         snap::observe(reopened.session.status()).await.is_err(),
         "a local file cannot forge a publisher's revocation notice"
     );
     reopened.close().await;
-    std::fs::write(&notice, original)?;
+    common::write_authority(&c_dir, "revoked", &original).await?;
 
     let before = secrets(root, "b")?;
     let role = before
@@ -502,8 +500,8 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     for device in [&a, &b, &c] {
         device.close().await;
     }
-    let path = root.join("a/identity.json");
-    let mut saved: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    let a_dir = root.join("a");
+    let mut saved = common::authority_json(&a_dir, "identity")?;
     let manifest = SignedManifest::from_bytes(
         &data_encoding::HEXLOWER.decode(saved["genesis"].as_str().ok_or("genesis")?.as_bytes())?,
     )?;
@@ -541,7 +539,7 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
         "groups": {},
         "statements": [statement_id],
     });
-    std::fs::write(&path, saved.to_string())?;
+    common::write_authority(&a_dir, "identity", saved.to_string().as_bytes()).await?;
     let installation = saved["installation"].as_str().ok_or("installation")?;
     let made_before_the_device_stopped = [7; 32];
     std::fs::write(

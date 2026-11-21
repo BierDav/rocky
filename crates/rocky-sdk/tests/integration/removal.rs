@@ -410,7 +410,7 @@ async fn removing_open_changes_nothing_and_only_the_current_report_can_sign() ->
     )
     .await;
     a.close().await;
-    let identity = std::fs::read(directory.join("identity.json"))?;
+    let identity = common::authority_bytes(directory, "identity")?;
     let database = std::fs::read(directory.join("rocky.sqlite"))?;
     let before = files(directory)?;
     let network = Arc::new(NeverStarts(std::sync::atomic::AtomicBool::new(false)));
@@ -442,7 +442,7 @@ async fn removing_open_changes_nothing_and_only_the_current_report_can_sign() ->
             },
         ]
     );
-    assert_eq!(std::fs::read(directory.join("identity.json"))?, identity);
+    assert_eq!(common::authority_bytes(directory, "identity")?, identity);
     assert_eq!(std::fs::read(directory.join("rocky.sqlite"))?, database);
     let changed = UNSHELVED.replace(r#""version":2"#, r#""version":3"#);
     let stale = confirmation(Database::open_confirmed(
@@ -451,7 +451,7 @@ async fn removing_open_changes_nothing_and_only_the_current_report_can_sign() ->
     ));
     assert!(stale.mismatch);
     assert_ne!(stale.report.digest, required.report.digest);
-    assert_eq!(std::fs::read(directory.join("identity.json"))?, identity);
+    assert_eq!(common::authority_bytes(directory, "identity")?, identity);
     assert_eq!(std::fs::read(directory.join("rocky.sqlite"))?, database);
     let a = Device::new(Database::open(open(directory, SHELVED, None))?)?;
     create(

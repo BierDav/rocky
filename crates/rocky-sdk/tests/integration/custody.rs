@@ -19,8 +19,7 @@ async fn devices_never_online_together_converge_via_keyless_custody() -> Result<
         &invitation,
         net("relay").ok_or("network")?,
     )?;
-    let identity: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(root.path().join("relay/identity.json"))?)?;
+    let identity = common::authority_json(&root.path().join("relay"), "identity")?;
     assert_eq!(identity["keys"], json!({}));
     assert_eq!(identity["authority"], json!(null));
     assert_eq!(identity["profile"]["kind"], "custody");
@@ -302,8 +301,7 @@ async fn custody_forwards_pairing_and_renewal_to_an_explicit_issuer_with_creator
         device.session.info().await
     })
     .await;
-    let identity: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(root.path().join("relay/identity.json"))?)?;
+    let identity = common::authority_json(&root.path().join("relay"), "identity")?;
     assert_eq!(
         identity["keys"],
         json!({}),

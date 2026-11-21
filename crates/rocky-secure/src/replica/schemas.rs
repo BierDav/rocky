@@ -47,6 +47,15 @@ pub async fn installed_tip_schema(
         None,
         SCHEMA,
     );
+    let has_table = !rows(
+        &conn,
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='secure_followed_tip'",
+    )
+    .await?
+    .is_empty();
+    if !has_table {
+        return Ok(None);
+    }
     let records = rows(
         &conn,
         "SELECT scope,tip FROM secure_followed_tip WHERE id=1",

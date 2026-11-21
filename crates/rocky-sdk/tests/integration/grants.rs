@@ -22,8 +22,7 @@ fn create(root: &Path, hub: &Arc<Hub>, name: &str) -> Result<Device, Failure> {
     Device::new(Database::create(open(&root.join(name), hub, name), None)?)
 }
 fn secret(root: &Path, name: &str, role: &str) -> Result<bool, Failure> {
-    let identity: Value =
-        serde_json::from_slice(&std::fs::read(root.join(name).join("identity.json"))?)?;
+    let identity = common::authority_json(&root.join(name), "identity")?;
     let installation = identity["installation"].as_str().ok_or("installation")?;
     Ok(
         std::fs::read_dir(root.join(name).join("secrets"))?.any(|entry| {

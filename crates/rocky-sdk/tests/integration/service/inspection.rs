@@ -29,7 +29,7 @@ pub(super) async fn head(
     tip: &Value,
 ) -> Result<rocky_coordinator::coordinated::Head, Failure> {
     use rocky_sdk::credentials::{CredentialChain, Vault};
-    let settings: Value = serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)?;
+    let settings = crate::common::authority_json(directory, "identity")?;
     let vault = Vault::new(
         Arc::new(rocky_sdk::FileSecretStore::new(directory.join("secrets"))),
         settings["installation"].as_str().ok_or("installation")?,

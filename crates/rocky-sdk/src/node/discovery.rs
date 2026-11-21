@@ -16,7 +16,9 @@ impl Node {
         }
         let public = !self.replica.private_schema().await.unwrap_or(true);
         let settings = self.settings.lock().await;
-        if settings.logged_out || !matches!(self.revocation_notice.revoked(&settings), Ok(None)) {
+        if settings.logged_out
+            || !matches!(self.revocation_notice.revoked(&settings).await, Ok(None))
+        {
             return Vec::new();
         }
         let personal = self

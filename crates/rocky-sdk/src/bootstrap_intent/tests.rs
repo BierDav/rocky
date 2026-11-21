@@ -25,19 +25,22 @@ fn planned(table: u8) -> Planned {
     }
 }
 
-fn loaded(file: &BootstrapIntentFile) -> Result<BootstrapIntent, Failure> {
-    file.load()?.ok_or_else(|| "no bootstrap intent".into())
+async fn loaded(file: &BootstrapIntentFile) -> Result<BootstrapIntent, Failure> {
+    file.load()
+        .await?
+        .ok_or_else(|| "no bootstrap intent".into())
 }
 
-#[test]
-fn a_checkpoint_import_requested_after_a_join_keeps_its_inviter() -> Result<(), Failure> {
+#[tokio::test]
+async fn a_checkpoint_import_requested_after_a_join_keeps_its_inviter() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let file = BootstrapIntentFile::in_directory(directory.path());
-    file.join(key(1))?;
-    let started = loaded(&file)?;
-    file.record_progress(&started, &[scope(5)], &[planned(5)])?;
-    file.request_checkpoint_import()?;
-    let intent = loaded(&file)?;
+    file.join(key(1)).await?;
+    let started = loaded(&file).await?;
+    file.record_progress(&started, &[scope(5)], &[planned(5)])
+        .await?;
+    file.request_checkpoint_import().await?;
+    let intent = loaded(&file).await?;
     assert_eq!(
         intent.inviter(),
         Some(key(1)),
@@ -48,170 +51,191 @@ fn a_checkpoint_import_requested_after_a_join_keeps_its_inviter() -> Result<(), 
     Ok(())
 }
 
-#[test]
-fn a_checkpoint_import_without_an_intent_imports_every_granted_scope() -> Result<(), Failure> {
+#[tokio::test]
+async fn a_checkpoint_import_without_an_intent_imports_every_granted_scope() -> Result<(), Failure>
+{
     let directory = tempfile::tempdir()?;
     let file = BootstrapIntentFile::in_directory(directory.path());
-    assert!(file.load()?.is_none());
-    file.request_checkpoint_import()?;
-    let intent = loaded(&file)?;
+    assert!(file.load().await?.is_none());
+    file.request_checkpoint_import().await?;
+    let intent = loaded(&file).await?;
     assert_eq!(intent.imports(), &Imports::Granted);
     assert_eq!(intent.inviter(), None);
     Ok(())
 }
 
-#[test]
-fn a_join_imports_every_granted_scope_and_waits_for_its_inviter() -> Result<(), Failure> {
+#[tokio::test]
+async fn a_join_imports_every_granted_scope_and_waits_for_its_inviter() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let file = BootstrapIntentFile::in_directory(directory.path());
-    file.add_scopes(&[scope(5)])?;
-    file.join(key(2))?;
-    let intent = loaded(&file)?;
+    file.add_scopes(&[scope(5)]).await?;
+    file.join(key(2)).await?;
+    let intent = loaded(&file).await?;
     assert_eq!(intent.imports(), &Imports::Granted);
     assert_eq!(intent.inviter(), Some(key(2)));
     Ok(())
 }
 
-#[test]
-fn added_scopes_join_the_listed_imports_and_keep_the_inviter() -> Result<(), Failure> {
+#[tokio::test]
+async fn added_scopes_join_the_listed_imports_and_keep_the_inviter() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let file = BootstrapIntentFile::in_directory(directory.path());
-    file.join(key(1))?;
-    let started = loaded(&file)?;
-    file.record_progress(&started, &[scope(5)], &[planned(5)])?;
-    file.add_scopes(&[scope(5), scope(6)])?;
-    let intent = loaded(&file)?;
+    file.join(key(1)).await?;
+    let started = loaded(&file).await?;
+    file.record_progress(&started, &[scope(5)], &[planned(5)])
+        .await?;
+    file.add_scopes(&[scope(5), scope(6)]).await?;
+    let intent = loaded(&file).await?;
     assert_eq!(intent.imports(), &Imports::Scopes(vec![scope(5), scope(6)]));
     assert_eq!(intent.totals(), &[planned(5)]);
     assert_eq!(intent.inviter(), Some(key(1)));
     Ok(())
 }
 
-#[test]
-fn added_scopes_leave_an_import_of_every_granted_scope_unchanged() -> Result<(), Failure> {
+#[tokio::test]
+async fn added_scopes_leave_an_import_of_every_granted_scope_unchanged() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let file = BootstrapIntentFile::in_directory(directory.path());
-    file.request_checkpoint_import()?;
-    let before = loaded(&file)?;
-    file.add_scopes(&[scope(5)])?;
-    assert_eq!(loaded(&file)?, before);
+    file.request_checkpoint_import().await?;
+    let before = loaded(&file).await?;
+    file.add_scopes(&[scope(5)]).await?;
+    assert_eq!(loaded(&file).await?, before);
     Ok(())
 }
 
-#[test]
-fn added_scopes_without_an_intent_import_only_those_scopes() -> Result<(), Failure> {
+#[tokio::test]
+async fn added_scopes_without_an_intent_import_only_those_scopes() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let file = BootstrapIntentFile::in_directory(directory.path());
-    file.add_scopes(&[scope(5)])?;
-    let intent = loaded(&file)?;
+    file.add_scopes(&[scope(5)]).await?;
+    let intent = loaded(&file).await?;
     assert_eq!(intent.imports(), &Imports::Scopes(vec![scope(5)]));
     assert_eq!(intent.inviter(), None);
     Ok(())
 }
 
-#[test]
-fn recorded_progress_keeps_the_inviter() -> Result<(), Failure> {
+#[tokio::test]
+async fn recorded_progress_keeps_the_inviter() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let file = BootstrapIntentFile::in_directory(directory.path());
-    file.join(key(1))?;
-    let started = loaded(&file)?;
-    let recorded = file.record_progress(&started, &[scope(5)], &[planned(5), planned(6)])?;
-    assert_eq!(loaded(&file)?, recorded);
+    file.join(key(1)).await?;
+    let started = loaded(&file).await?;
+    let recorded = file
+        .record_progress(&started, &[scope(5)], &[planned(5), planned(6)])
+        .await?;
+    assert_eq!(loaded(&file).await?, recorded);
     assert_eq!(recorded.imports(), &Imports::Scopes(vec![scope(5)]));
     assert_eq!(recorded.totals(), &[planned(5), planned(6)]);
     assert_eq!(recorded.inviter(), Some(key(1)));
     Ok(())
 }
 
-#[test]
-fn progress_is_refused_once_a_newer_intent_replaced_the_expected_one() -> Result<(), Failure> {
+#[tokio::test]
+async fn progress_is_refused_once_a_newer_intent_replaced_the_expected_one() -> Result<(), Failure>
+{
     let directory = tempfile::tempdir()?;
     let file = BootstrapIntentFile::in_directory(directory.path());
-    file.add_scopes(&[scope(5)])?;
-    let started = loaded(&file)?;
-    file.request_checkpoint_import()?;
-    let newer = loaded(&file)?;
-    assert!(file.record_progress(&started, &[], &[]).is_err());
+    file.add_scopes(&[scope(5)]).await?;
+    let started = loaded(&file).await?;
+    file.request_checkpoint_import().await?;
+    let newer = loaded(&file).await?;
+    assert!(file.record_progress(&started, &[], &[]).await.is_err());
     assert!(
         file.finish(&started, key(1), &RevocationSet::new())
+            .await
             .is_err()
     );
-    assert_eq!(loaded(&file)?, newer);
+    assert_eq!(loaded(&file).await?, newer);
     Ok(())
 }
 
-#[test]
-fn a_finished_import_keeps_waiting_for_an_inviter_it_has_not_met() -> Result<(), Failure> {
+#[tokio::test]
+async fn a_finished_import_keeps_waiting_for_an_inviter_it_has_not_met() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let file = BootstrapIntentFile::in_directory(directory.path());
-    file.join(key(1))?;
-    let started = loaded(&file)?;
-    let completed = file.record_progress(&started, &[], &[])?;
+    file.join(key(1)).await?;
+    let started = loaded(&file).await?;
+    let completed = file.record_progress(&started, &[], &[]).await?;
     assert_eq!(
-        file.finish(&completed, key(2), &RevocationSet::new())?,
+        file.finish(&completed, key(2), &RevocationSet::new())
+            .await?,
         Finished::AwaitingInviter
     );
-    assert_eq!(loaded(&file)?, completed);
+    assert_eq!(loaded(&file).await?, completed);
     Ok(())
 }
 
-#[test]
-fn a_finished_import_clears_once_it_meets_its_inviter() -> Result<(), Failure> {
+#[tokio::test]
+async fn a_finished_import_clears_once_it_meets_its_inviter() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let file = BootstrapIntentFile::in_directory(directory.path());
-    file.join(key(1))?;
-    let started = loaded(&file)?;
-    let completed = file.record_progress(&started, &[], &[])?;
+    file.join(key(1)).await?;
+    let started = loaded(&file).await?;
+    let completed = file.record_progress(&started, &[], &[]).await?;
     assert_eq!(
-        file.finish(&completed, key(1), &RevocationSet::new())?,
+        file.finish(&completed, key(1), &RevocationSet::new())
+            .await?,
         Finished::Cleared
     );
-    assert!(!file.exists());
+    assert!(!file.exists().await);
     Ok(())
 }
 
-#[test]
-fn a_finished_import_without_an_inviter_clears_on_any_peer() -> Result<(), Failure> {
+#[tokio::test]
+async fn a_finished_import_without_an_inviter_clears_on_any_peer() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let file = BootstrapIntentFile::in_directory(directory.path());
-    file.request_checkpoint_import()?;
-    let started = loaded(&file)?;
-    let completed = file.record_progress(&started, &[], &[])?;
+    file.request_checkpoint_import().await?;
+    let started = loaded(&file).await?;
+    let completed = file.record_progress(&started, &[], &[]).await?;
     assert_eq!(
-        file.finish(&completed, key(2), &RevocationSet::new())?,
+        file.finish(&completed, key(2), &RevocationSet::new())
+            .await?,
         Finished::Cleared
     );
-    assert!(!file.exists());
+    assert!(!file.exists().await);
     Ok(())
 }
 
-#[test]
-fn an_intent_in_another_format_is_rejected() -> Result<(), Failure> {
+#[tokio::test]
+async fn an_intent_in_another_format_is_rejected() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let file = BootstrapIntentFile::in_directory(directory.path());
-    let path = directory.path().join(BOOTSTRAP_INTENT_FILE);
+    let database = directory.path().join(REPLICA_FILE);
     for other in [
         &b"true"[..],
         br#"{"intent":true,"inviter":"00"}"#,
         br#"{"version":2,"imports":"granted","totals":[],"inviter":null}"#,
         br#"{"version":1,"imports":"granted","totals":[],"inviter":null,"pending":[]}"#,
     ] {
-        rocky_credentials::write_private(&path, other)?;
-        assert!(file.load().is_err(), "{}", String::from_utf8_lossy(other));
-        assert!(file.request_checkpoint_import().is_err());
-        assert_eq!(std::fs::read(&path)?, other);
+        rocky_secure::write_authority_entry(&database, AUTHORITY_BOOTSTRAP_KEY, other, 1).await?;
+        assert!(
+            file.load().await.is_err(),
+            "{}",
+            String::from_utf8_lossy(other)
+        );
+        assert!(file.request_checkpoint_import().await.is_err());
+        assert_eq!(
+            rocky_secure::read_authority_entry(&database, AUTHORITY_BOOTSTRAP_KEY)?
+                .map(|(bytes, _)| bytes),
+            Some(other.to_vec())
+        );
     }
     Ok(())
 }
 
-#[test]
-fn the_persisted_intent_has_one_shape() -> Result<(), Failure> {
+#[tokio::test]
+async fn the_persisted_intent_has_one_shape() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let file = BootstrapIntentFile::in_directory(directory.path());
-    file.request_checkpoint_import()?;
-    let written: serde_json::Value = serde_json::from_slice(&std::fs::read(
-        directory.path().join(BOOTSTRAP_INTENT_FILE),
-    )?)?;
+    file.request_checkpoint_import().await?;
+    assert!(!directory.path().join("bootstrap.json").exists());
+    let (bytes, _) = rocky_secure::read_authority_entry(
+        &directory.path().join(REPLICA_FILE),
+        AUTHORITY_BOOTSTRAP_KEY,
+    )?
+    .ok_or("missing bootstrap intent")?;
+    let written: serde_json::Value = serde_json::from_slice(&bytes)?;
     assert_eq!(
         written,
         serde_json::json!({"version": 1, "imports": "granted", "totals": [], "inviter": null})

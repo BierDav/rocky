@@ -5,6 +5,22 @@ use std::{path::Path, sync::Arc};
 
 pub type Failure = Box<dyn std::error::Error + Send + Sync>;
 
+pub fn authority_bytes(directory: &Path, key: &str) -> Result<Option<Vec<u8>>, Failure> {
+    Ok(
+        rocky_secure::read_authority_entry(&directory.join("rocky.sqlite"), key)?
+            .map(|(bytes, _)| bytes),
+    )
+}
+pub fn authority_json(directory: &Path, key: &str) -> Result<Value, Failure> {
+    let bytes =
+        authority_bytes(directory, key)?.ok_or_else(|| format!("missing authority entry {key}"))?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+pub async fn write_authority(directory: &Path, key: &str, bytes: &[u8]) -> Result<(), Failure> {
+    rocky_secure::write_authority_entry(&directory.join("rocky.sqlite"), key, bytes, 1).await?;
+    Ok(())
+}
+
 pub const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 pub fn external_identity(directory: &Path) -> Arc<dyn rocky_sdk::IdentityProvider> {

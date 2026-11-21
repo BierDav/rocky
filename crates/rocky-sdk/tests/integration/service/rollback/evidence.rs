@@ -20,7 +20,7 @@ pub(super) struct Original {
 }
 
 pub(super) fn endpoint(directory: &Path) -> Result<Endpoint, Failure> {
-    let settings: Value = serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)?;
+    let settings = crate::common::authority_json(directory, "identity")?;
     let chain: rocky_sdk::credentials::CredentialChain =
         serde_json::from_value(settings["credentials"].clone())?;
     let node = chain.0.last().ok_or("node certificate")?.capability.subject;

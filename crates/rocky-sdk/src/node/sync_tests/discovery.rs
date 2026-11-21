@@ -121,7 +121,11 @@ async fn members_converge_with_discovery_as_their_only_source_of_contacts() -> R
             assert_eq!(status["topic"]["state"], "unavailable");
             assert!(status["topic"]["reason"].is_string());
             assert!(
-                std::fs::read_to_string(&b.path)?.contains(c_route),
+                rocky_secure::read_authority_entry(
+                    &b.path,
+                    crate::enrollment::AUTHORITY_IDENTITY_KEY,
+                )?
+                .is_some_and(|(bytes, _)| String::from_utf8_lossy(&bytes).contains(c_route)),
                 "a found route stays in the identity file"
             );
             let db = rusqlite::Connection::open(root.path().join("b/rocky.sqlite"))?;
@@ -131,6 +135,9 @@ async fn members_converge_with_discovery_as_their_only_source_of_contacts() -> R
                 .collect::<Result<_, _>>()?;
             assert!(!tables.is_empty());
             for table in tables {
+                if table == "secure_authority_state" {
+                    continue;
+                }
                 let mut statement =
                     db.prepare(&format!("SELECT * FROM \"{}\"", table.replace('"', "\"\"")))?;
                 let columns = statement.column_count();

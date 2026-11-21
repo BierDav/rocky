@@ -103,8 +103,14 @@ mod device_actions {
         replica
             .install_readable_tables(domain.logical().clone(), domain.scope, domain.readers())
             .await?;
-        let path = directory.join("identity.json");
-        settings.save(&path)?;
+        let path = directory.join("rocky.sqlite");
+        replica
+            .put_authority_state(
+                crate::enrollment::AUTHORITY_IDENTITY_KEY,
+                &settings.to_bytes()?,
+                crate::enrollment::now()?,
+            )
+            .await?;
         let node = Node::new(
             replica,
             domain,
@@ -166,21 +172,19 @@ mod device_actions {
         directory: &Path,
         store: &Arc<dyn crate::SecretStore>,
     ) -> Result<Node, Failure> {
-        let settings = Settings::load(&directory.join("identity.json"))?;
+        let path = directory.join("rocky.sqlite");
+        let settings = Settings::load(&path)?;
         let vault = settings.vault(store);
         let domain = settings.domain()?;
-        let replica = EncryptedReplica::open(
-            directory.join("rocky.sqlite"),
-            domain.app.clone(),
-            settings.config(&vault, &domain)?,
-        )
-        .await?;
+        let replica =
+            EncryptedReplica::open(&path, domain.app.clone(), settings.config(&vault, &domain)?)
+                .await?;
         Ok(Node::new(
             replica,
             domain,
             vault,
             settings,
-            directory.join("identity.json"),
+            path,
             BootstrapIntentFile::in_directory(directory),
         ))
     }
@@ -198,7 +202,7 @@ mod device_actions {
             before,
             "an unsaved change stays unpublished"
         );
-        held.save(&node.path)?;
+        held.save(&node.replica).await?;
         assert_eq!(
             node.settings.published().ttl,
             before + 1,
@@ -212,14 +216,20 @@ mod device_actions {
         let directory = tempfile::tempdir()?;
         let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
         let node = personal(directory.path(), &store).await?;
-        let unwritable = directory.path().join("missing").join("identity.json");
+        let conn = rocky_storage::sqlite::Connection::open(&node.path)?;
+        conn.execute(
+            "CREATE TRIGGER fail_authority BEFORE INSERT ON secure_authority_state BEGIN SELECT RAISE(ABORT, 'injected'); END",
+            (),
+        )
+        .await?;
+        drop(conn);
         let before = node.settings.published().ttl;
         let mut held = node.settings.lock().await;
         held.ttl = before + 1;
-        assert!(held.save(&unwritable).is_err());
+        assert!(held.save(&node.replica).await.is_err());
         let mut draft = held.clone();
         draft.ttl = before + 2;
-        assert!(held.commit(draft, &unwritable).is_err());
+        assert!(held.commit(draft, &node.replica).await.is_err());
         assert_eq!(
             held.ttl,
             before + 1,
@@ -289,15 +299,23 @@ mod device_actions {
         let directory = tempfile::tempdir()?;
         let store: Arc<dyn crate::SecretStore> = Arc::new(MemoryKeys::default());
         drop(personal(directory.path(), &store).await?);
-        let notice = directory.path().join("revoked.json");
-        std::fs::write(&notice, b"not a notice")?;
+        let replica_path = directory.path().join("rocky.sqlite");
+        rocky_secure::write_authority_entry(
+            &replica_path,
+            crate::enrollment::AUTHORITY_REVOKED_KEY,
+            b"not a notice",
+            1,
+        )
+        .await?;
         let node = reopen(directory.path(), &store).await?;
         let refused = ask(&node, Request::InspectTips).await;
         assert!(
             refused.is_err_and(|error| error.is::<serde_json::Error>()),
             "the refusal keeps the error kind of the unreadable notice"
         );
-        std::fs::remove_file(&notice)?;
+        node.replica
+            .delete_authority_state(crate::enrollment::AUTHORITY_REVOKED_KEY)
+            .await?;
         ask(&node, Request::InspectTips).await?;
         Ok(())
     }
@@ -380,7 +398,7 @@ mod device_actions {
                 .await?;
             assert_eq!(resumed.statement, receipt.statement, "{stage:?}");
             assert!(resumed.local);
-            let completed = Settings::load(&directory.path().join("identity.json"))?;
+            let completed = Settings::load(&directory.path().join("rocky.sqlite"))?;
             assert!(
                 completed
                     .authority
@@ -462,7 +480,11 @@ mod device_actions {
             database,
         )?;
         let extra_id = extra.id()?;
-        let ended = node.revocation_notice.revoked(&settings)?.ok_or("cause")?;
+        let ended = node
+            .revocation_notice
+            .revoked(&settings)
+            .await?
+            .ok_or("cause")?;
         let update = RevocationSet::try_from(vec![ended, extra])?;
         let PeerReply::Unlink(reply) = node.answer_peer(PeerRequest::Unlink(update)).await? else {
             return Err("unlink reply".into());

@@ -68,7 +68,7 @@ async fn an_interrupted_create_resumes_under_the_same_node_and_publication() -> 
 
     let created = config.create_personal(prf(1), namespace()).await?;
     created.opened.database.close().await?;
-    let settings = Settings::load(&directory.path().join("identity.json"))?;
+    let settings = Settings::load(&directory.path().join("rocky.sqlite"))?;
     assert_eq!(settings.installation, interrupted.installation);
     assert_eq!(settings.keys, *epochs);
     assert_eq!(created.restored.readers, *epochs);

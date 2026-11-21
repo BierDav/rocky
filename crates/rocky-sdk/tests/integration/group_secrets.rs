@@ -986,13 +986,17 @@ async fn an_identity_file_older_than_the_replica_recovers_its_groups() {
         .unwrap();
     let reader = install(&directory, store, supplied, &issuer.hub);
     introduce(&issuer, &reader).await;
-    let older = std::fs::read(directory.join("identity.json")).unwrap();
+    let older = common::authority_bytes(&directory, "identity")
+        .unwrap()
+        .unwrap();
     issuer.share("A", &[&device]).await.unwrap();
     snap::ok(reader.session.sync_once()).await;
     let expected = vec![vec!["before".to_owned()]; 3];
     assert_eq!(rows(&reader).await, expected);
     reader.database.close().await.unwrap();
-    std::fs::write(directory.join("identity.json"), older).unwrap();
+    common::write_authority(&directory, "identity", &older)
+        .await
+        .unwrap();
     let reader = Peer::reopen(&directory, SCHEMA, reader.store.clone(), reader.hub.clone());
     assert_eq!(rows(&reader).await, expected);
     assert_eq!(reader.epochs("A").await.0, json!([1]));
@@ -1048,9 +1052,7 @@ async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants(
 }
 
 fn pair_field_rights(issuer_directory: &std::path::Path, grants: &mut Value) {
-    let identity: Value =
-        serde_json::from_slice(&std::fs::read(issuer_directory.join("identity.json")).unwrap())
-            .unwrap();
+    let identity = common::authority_json(issuer_directory, "identity").unwrap();
     let credentials: rocky_sdk::credentials::CredentialChain =
         serde_json::from_value(identity["credentials"].clone()).unwrap();
     for grant in grants.as_array_mut().unwrap() {

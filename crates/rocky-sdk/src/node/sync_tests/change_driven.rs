@@ -165,7 +165,7 @@ async fn a_joined_member_receives_later_writes_without_a_poll_or_contact_copy()
                 let settings = issuer.settings.lock().await;
                 assert!(settings.peers.contains_key(&member_key));
                 assert!(!settings.issuers.contains(&member_key));
-                let saved: Settings = serde_json::from_slice(&std::fs::read(&issuer.path)?)?;
+                let saved = Settings::load(&issuer.path)?;
                 assert!(
                     saved
                         .unresolved_contacts()
@@ -231,7 +231,7 @@ async fn peer_signals(bootstrap: bool) -> Result<(), Failure> {
             targets(&a, &peers).await?;
             add(&a, 1).await?;
             if bootstrap {
-                a.bootstrap_intent.request_checkpoint_import()?;
+                a.bootstrap_intent.request_checkpoint_import().await?;
             }
             hub.stall_peer("d", true);
             let before = tokio::time::Instant::now();
@@ -602,15 +602,27 @@ async fn an_unchanged_identity_is_not_rewritten() -> Result<(), Failure> {
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-            std::fs::remove_file(&a.path)?;
+            a.replica
+                .delete_authority_state(crate::enrollment::AUTHORITY_IDENTITY_KEY)
+                .await?;
             a.configure(|_| Ok(())).await?;
-            assert!(!a.path.exists());
+            assert!(
+                a.replica
+                    .get_authority_state(crate::enrollment::AUTHORITY_IDENTITY_KEY)
+                    .await?
+                    .is_none()
+            );
             a.configure(|settings| {
                 settings.ttl += 1;
                 Ok(())
             })
             .await?;
-            assert!(a.path.exists());
+            assert!(
+                a.replica
+                    .get_authority_state(crate::enrollment::AUTHORITY_IDENTITY_KEY)
+                    .await?
+                    .is_some()
+            );
             a.detach(None).await;
             Ok(())
         }))

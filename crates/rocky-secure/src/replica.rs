@@ -15,6 +15,8 @@ pub use lock::{HolderMeasurements, Measurements, with_measurement_connection};
 pub(crate) use wal::{Hold, Passive};
 mod apply;
 mod author;
+mod authority;
+pub use authority::{read_authority_entry, remove_authority_entry, write_authority_entry};
 mod backup;
 mod blockers;
 mod bulk;
@@ -765,6 +767,7 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         bulk::SCHEMA,
         positions::SCHEMA,
         quarantine::SCHEMA,
+        authority::SCHEMA,
     ]
     .into_iter()
     .flat_map(|schema| schema.iter().map(|sql| (*sql).to_owned()))
@@ -783,7 +786,11 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
         "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
     )
     .await?;
-    if tables.is_empty() {
+    if tables.is_empty()
+        || tables
+            .iter()
+            .all(|row| row == &[SqlValue::Text(authority::TABLE.into())])
+    {
         return Ok(());
     }
     if !tables.contains(&vec![SqlValue::Text("secure_metadata".into())]) {
@@ -1192,7 +1199,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
             )
             .await?;
-            if tables.is_empty() {
+            let fresh = tables.is_empty()
+                || tables
+                    .iter()
+                    .all(|row| row == &[SqlValue::Text(authority::TABLE.into())]);
+            if fresh {
                 for sql in SCHEMA {
                     inner.conn.execute(sql, ()).await?;
                 }
@@ -1207,7 +1218,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     )
                     .await?;
             }
-            if tables.is_empty() {
+            if fresh {
                 for sql in protocol_schema() {
                     inner.conn.execute(sql, ()).await?;
                 }
@@ -1220,7 +1231,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .await?;
                 inner.create_admission_context().await?;
             }
-            if tables.is_empty() {
+            if fresh {
                 if inner.manifest != genesis.hash() && bootstrap.is_none() {
                     return Err(denied(
                         "a new replica must install its authenticated genesis first",

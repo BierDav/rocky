@@ -676,9 +676,13 @@ async fn sweep(direct: bool, at: At, stage: fault::Stage) -> Result<(), Failure>
                 restarted = true;
                 let device = devices[index].take().ok_or("stopped device")?;
                 if stage == fault::Stage::Deposited {
-                    let saved: Value = serde_json::from_slice(&std::fs::read(
-                        device.directory.join("identity.json"),
-                    )?)?;
+                    let bytes = rocky_secure::read_authority_entry(
+                        &device.directory.join("rocky.sqlite"),
+                        crate::enrollment::AUTHORITY_IDENTITY_KEY,
+                    )?
+                    .ok_or("identity")?
+                    .0;
+                    let saved: Value = serde_json::from_slice(&bytes)?;
                     let pending = saved["deliveries"].as_object().ok_or("outbox")?;
                     assert!(
                         pending.values().any(|entry| entry["targets"]

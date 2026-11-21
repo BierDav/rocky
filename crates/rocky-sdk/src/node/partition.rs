@@ -319,7 +319,7 @@ impl Node {
             .epoch_statements
             .entry(secret_role(&record.address, epoch))
             .or_insert(ids);
-        settings.commit(draft, &self.path)?;
+        settings.commit(draft, &self.replica).await?;
         let granted = settings.granted(&self.domain());
         let partition = GroupPartition::of(&self.domain(), &record)?;
         self.hold_keys(&settings, std::slice::from_ref(&partition))
@@ -401,13 +401,15 @@ impl Node {
             return Ok(false);
         }
         if bootstrap {
-            self.bootstrap_intent.add_scopes(
-                &partition
-                    .members
-                    .iter()
-                    .map(|member| member.scope)
-                    .collect::<Vec<_>>(),
-            )?;
+            self.bootstrap_intent
+                .add_scopes(
+                    &partition
+                        .members
+                        .iter()
+                        .map(|member| member.scope)
+                        .collect::<Vec<_>>(),
+                )
+                .await?;
         }
         crate::delivery::fault::check(
             PrivateKey::from_bytes(&self.vault.get("node")?).public_key(),
@@ -429,7 +431,7 @@ impl Node {
         draft
             .epoch_statements
             .insert(role, envelope.statements().to_vec());
-        settings.commit(draft, &self.path)?;
+        settings.commit(draft, &self.replica).await?;
         let granted = settings.granted(&self.domain());
         let partition = GroupPartition::of(&self.domain(), &record)?;
         self.hold_keys(&settings, std::slice::from_ref(&partition))
@@ -520,7 +522,7 @@ impl Node {
             )?;
             draft.queue(*recipient, &record, epoch, &delivery, true)?;
         }
-        settings.commit(draft, &self.path)?;
+        settings.commit(draft, &self.replica).await?;
         Ok(crate::PartitionShare {
             epoch,
             recipients,
@@ -876,6 +878,6 @@ impl Node {
                 .map(|member| member.scope)
                 .collect()
         };
-        self.bootstrap_intent.add_scopes(&added)
+        self.bootstrap_intent.add_scopes(&added).await
     }
 }

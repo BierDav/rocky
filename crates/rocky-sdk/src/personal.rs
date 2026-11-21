@@ -245,10 +245,10 @@ impl Intent {
         account: (PublicKey, PublicKey, &PersonalNamespace),
         secrets: &Arc<dyn SecretStore>,
     ) -> Result<Option<Finished>, PersonalSignInError> {
-        let identity = directory.join("identity.json");
+        let identity = directory.join(crate::enrollment::REPLICA_FILE);
         if self.origin != Origin::SignIn
             || !self.names(account)
-            || !rocky_platform::fs::exists(&identity)
+            || !Settings::exists(&identity).map_err(PersonalSignInError::Failed)?
         {
             return Ok(None);
         }
@@ -301,8 +301,8 @@ pub(crate) fn check_installed(
 ) -> Result<(), PersonalSignInError> {
     let locator = account.locator();
     let names = (locator.publisher, locator.owner, account.namespace());
-    let identity = directory.join("identity.json");
-    if !rocky_platform::fs::exists(&identity) {
+    let identity = directory.join(crate::enrollment::REPLICA_FILE);
+    if !Settings::exists(&identity).map_err(PersonalSignInError::Failed)? {
         return Ok(());
     }
     let settings = load_settings(&identity)?;
@@ -346,15 +346,19 @@ pub(crate) fn check_empty(
 }
 
 fn load_settings(path: &Path) -> Result<Settings, PersonalSignInError> {
-    let bytes = rocky_platform::fs::read(path)
-        .map_err(|error| PersonalSignInError::Failed(error.into()))?;
+    let Some((bytes, _)) =
+        rocky_secure::read_authority_entry(path, crate::enrollment::AUTHORITY_IDENTITY_KEY)
+            .map_err(|error| PersonalSignInError::Failed(error.into()))?
+    else {
+        return Err(PersonalSignInError::Failed("no identity in replica".into()));
+    };
     let version = serde_json::from_slice::<serde_json::Value>(&bytes)
         .ok()
         .and_then(|value| value["version"].as_u64());
     if version != Some(u64::from(crate::enrollment::VERSION)) {
         return Err(PersonalSignInError::UnsupportedFormat);
     }
-    Settings::load(path).map_err(PersonalSignInError::Failed)
+    Settings::from_bytes(&bytes).map_err(PersonalSignInError::Failed)
 }
 
 pub(crate) struct Create {
@@ -692,7 +696,7 @@ pub(crate) struct Finished {
 
 pub(crate) fn unfinished(directory: &Path) -> bool {
     rocky_platform::fs::exists(Intent::path(directory))
-        && !rocky_platform::fs::exists(directory.join("identity.json"))
+        && !Settings::exists(&directory.join(crate::enrollment::REPLICA_FILE)).unwrap_or(false)
 }
 
 pub(crate) mod fault {

@@ -369,7 +369,13 @@ impl Node {
             tip: stage.source,
             manifest,
         });
-        draft.save(&self.path)?;
+        self.replica
+            .put_authority_state(
+                crate::enrollment::AUTHORITY_IDENTITY_KEY,
+                &draft.to_bytes()?,
+                now()?,
+            )
+            .await?;
         draft.schema = record.schema;
         draft.generation = record.generation;
         draft.engine = record.engine;
@@ -387,7 +393,7 @@ impl Node {
         crate::database::attach(&self.replica, &mut draft, &self.vault, &domain).await?;
         crate::database::retain(&self.replica, &draft, &domain).await?;
         draft.pending = None;
-        settings.commit(Shared::new(draft), &self.path)?;
+        settings.commit(Shared::new(draft), &self.replica).await?;
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = settings.granted(&domain);
         *self.domain.write().map_err(|_| "domain catalog poisoned")? = Arc::new(domain);
         drop(settings);

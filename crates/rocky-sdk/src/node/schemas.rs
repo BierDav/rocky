@@ -317,7 +317,9 @@ impl Node {
             tip: pending.tip,
             manifest: pending.manifest,
         });
-        settings.commit(Shared::new(intent.clone()), &self.path)?;
+        settings
+            .commit(Shared::new(intent.clone()), &self.replica)
+            .await?;
         let mut draft = intent;
         draft.schema = record.schema;
         draft.generation = record.generation;
@@ -336,7 +338,7 @@ impl Node {
         crate::database::attach(&self.replica, &mut draft, &self.vault, &domain).await?;
         crate::database::retain(&self.replica, &draft, &domain).await?;
         draft.pending = None;
-        settings.commit(Shared::new(draft), &self.path)?;
+        settings.commit(Shared::new(draft), &self.replica).await?;
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = settings.granted(&domain);
         *self.domain.write().map_err(|_| "domain catalog poisoned")? = Arc::new(domain);
         drop(settings);

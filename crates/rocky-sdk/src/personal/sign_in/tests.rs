@@ -98,9 +98,7 @@ mod installs {
             .collect::<Result<_, _>>()?)
     }
     fn known(directory: &Path) -> Result<rocky_credentials::RevocationSet, Failure> {
-        let saved: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)?;
-        Ok(serde_json::from_value(saved["revocations"].clone())?)
+        Ok(crate::enrollment::Settings::load(&directory.join("rocky.sqlite"))?.revocations)
     }
     fn config(directory: &Path, network: Option<&Arc<Hub>>) -> Result<Configuration, Failure> {
         let name = directory
@@ -315,7 +313,7 @@ mod installs {
         .err()
         .ok_or("signed in past the crash")?;
         assert!(error.to_string().contains("injected crash"));
-        let saved = crate::enrollment::Settings::load(&directory.join("identity.json"))?;
+        let saved = crate::enrollment::Settings::load(&directory.join("rocky.sqlite"))?;
         assert!(saved.personal.ok_or("device")?.unwitnessed);
         let database = config(&directory, None)?.open().await?.database;
         assert_eq!(
@@ -344,7 +342,7 @@ mod installs {
             FORGED_SCHEMA
                 .lock()
                 .map_err(|_| "forged")?
-                .push((owner_path.join("identity.json"), forged()?));
+                .push((owner_path.join("rocky.sqlite"), forged()?));
             Ok(())
         };
         forge()?;

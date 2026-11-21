@@ -37,8 +37,7 @@ pub(crate) fn open<'a>(root: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     }
 }
 pub(crate) fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
-    let mut identity: Value =
-        serde_json::from_slice(&std::fs::read(root.join(name).join("identity.json"))?)?;
+    let mut identity = common::authority_json(&root.join(name), "identity")?;
     for epochs in identity["keys"].as_object_mut().ok_or("keys")?.values_mut() {
         for epoch in epochs.as_array_mut().ok_or("epochs")? {
             *epoch = epoch["generation"].clone();

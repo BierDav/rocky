@@ -56,12 +56,12 @@ async fn grant(database: &crate::Database, directory: &Path) -> Result<(), Failu
     Ok(())
 }
 fn slot(directory: &Path) -> Result<Option<Value>, Failure> {
-    let path = directory.join("identity.json");
-    if !rocky_platform::fs::exists(&path) {
+    let path = directory.join("rocky.sqlite");
+    if !crate::enrollment::Settings::exists(&path)? {
         return Ok(None);
     }
-    let saved: Value = serde_json::from_slice(&rocky_platform::fs::read(path)?)?;
-    Ok(Some(saved["identity"].clone()))
+    let saved = crate::enrollment::Settings::load(&path)?;
+    Ok(Some(serde_json::to_value(saved.identity)?))
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -127,7 +127,7 @@ async fn a_recovery_stopped_at_any_step_finishes_when_recovered_again_in_one_slo
         }
         write(&opened.database, "notes", "recovered").await?;
         opened.database.close().await?;
-        let settings = crate::enrollment::Settings::load(&directory.join("identity.json"))?;
+        let settings = crate::enrollment::Settings::load(&directory.join("rocky.sqlite"))?;
         let kept = settings
             .revocations
             .recovery()

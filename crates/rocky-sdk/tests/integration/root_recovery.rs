@@ -82,9 +82,7 @@ async fn everything(device: &Device) -> Vec<String> {
     rows
 }
 fn identity(directory: &Path) -> Result<Value, Failure> {
-    Ok(serde_json::from_slice(&std::fs::read(
-        directory.join("identity.json"),
-    )?)?)
+    common::authority_json(directory, "identity")
 }
 fn escrow(directory: &Path) -> Result<Vec<(String, RootEscrow)>, Failure> {
     assert!(identity(directory)?.get("escrow").is_none());

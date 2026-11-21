@@ -1349,6 +1349,7 @@ impl<A: RowApplication> Inner<A> {
         };
         if dropped.is_some() {
             self.conn.execute("ROLLBACK TO intents", ()).await?;
+            self.clear_applied_cache();
             replayed.clear();
         }
         self.conn.execute("RELEASE intents", ()).await?;
@@ -1684,6 +1685,13 @@ impl<A: RowApplication> Inner<A> {
                 ]),
             )
             .await?;
+        let mut latest = self
+            .latest_replayed_clock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(clock) = latest.as_mut() {
+            *clock = (*clock).max(stamp.clock);
+        }
         Ok(())
     }
 

@@ -373,6 +373,9 @@ mod byte_fields {
             .collect())
     }
 }
+type AppliedHead = (Hash, p2panda_core::Header<Extensions>);
+type AppliedHeads = HashMap<ResourceScope, (TipId, Vec<AppliedHead>)>;
+
 pub(super) struct Inner<A> {
     pub(super) conn: Arc<ScopedConnection>,
     pub(super) app: Arc<A>,
@@ -383,6 +386,8 @@ pub(super) struct Inner<A> {
     families: rocky_credentials::GrantFamilies,
     decoded_checkpoints: std::sync::Mutex<DecodedCheckpoints>,
     tip_frontiers: std::sync::Mutex<frontiers::Frontiers>,
+    applied_heads: std::sync::Mutex<AppliedHeads>,
+    latest_replayed_clock: std::sync::Mutex<Option<u64>>,
     pub(crate) readiness: blockers::Readiness,
     metadata: metadata::Metadata,
     held_refresh: std::sync::Mutex<BTreeMap<ResourceScope, Commitment>>,
@@ -1050,6 +1055,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             crypto: Default::default(),
             decoded_checkpoints: Default::default(),
             tip_frontiers: Default::default(),
+            applied_heads: Default::default(),
+            latest_replayed_clock: Default::default(),
             readiness,
             metadata,
             held_refresh: Default::default(),

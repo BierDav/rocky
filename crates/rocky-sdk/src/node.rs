@@ -502,16 +502,19 @@ impl Node {
             client.closing.send_replace(true);
         }
     }
-    pub(crate) async fn sql_session(
-        &self,
-        options: SqlOptions,
-    ) -> Result<SecureSql<TypedRows>, Failure> {
+    pub(crate) async fn admit_sql(&self) -> Result<(), Failure> {
         if self.lifecycle.lock().await.is_logged_out() {
             return Err(refused("this device logged out of the domain"));
         }
         self.revocation_notice
             .admit_personal(&self.settings.published())
-            .await?;
+            .await
+    }
+    pub(crate) async fn sql_session(
+        &self,
+        options: SqlOptions,
+    ) -> Result<SecureSql<TypedRows>, Failure> {
+        self.admit_sql().await?;
         let session = self
             .replica
             .session(self.app_scopes().into_iter().collect())

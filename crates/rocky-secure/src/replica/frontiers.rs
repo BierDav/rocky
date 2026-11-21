@@ -26,6 +26,16 @@ impl<A> Inner<A> {
         drop(cache);
         self.readiness.invalidate();
     }
+    pub(crate) fn clear_applied_cache(&self) {
+        self.applied_heads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        *self
+            .latest_replayed_clock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
     pub(crate) fn invalidate_context(&self) {
         self.context_epoch.fetch_add(1, Ordering::Relaxed);
         self.invalidate_frontiers();
@@ -39,6 +49,11 @@ impl<A> Inner<A> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+        self.chains
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.clear_applied_cache();
     }
     pub(crate) fn invalidate_held_refresh(&self) {
         self.held_refresh

@@ -252,6 +252,7 @@ impl<A: RowApplication> Inner<A> {
                     [operation.hash.as_bytes().to_vec()],
                 )
                 .await?;
+            self.clear_applied_cache();
             self.note_settled(operation.hash);
             self.conn
                 .execute(

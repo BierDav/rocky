@@ -85,6 +85,24 @@ pub struct SecureSql<A: RowApplication> {
     parents: BTreeMap<String, String>,
     migration: bool,
 }
+impl<A: RowApplication> SecureSql<A> {
+    pub fn reset_for_reuse(&self) -> bool {
+        let Ok(mut lease) = self.lease.try_lock() else {
+            return false;
+        };
+        if lease.held.is_some() {
+            return false;
+        }
+        lease.savepoints.clear();
+        lease.implicit = false;
+        lease.aborted = None;
+        lease.observed = sqlite::Observed::default();
+        lease.identities.clear();
+        lease.intents.clear();
+        self.cancelled.store(false, Ordering::Release);
+        true
+    }
+}
 impl<A: RowApplication> Drop for SecureSql<A> {
     fn drop(&mut self) {
         if let Ok(mut lease) = self.lease.try_lock() {
@@ -337,38 +355,25 @@ impl<A: RowApplication> SecureSql<A> {
                 .insert(allocation, (number, identity.sequence()));
             return Ok(identity);
         }
+        let time = now()?;
+        let verified =
+            inner.verified_chain(&author.credentials, &inner.config.revocations, time)?;
         let grants = match &tuple {
-            Some(tuple) => author
-                .credentials
-                .verified_with_families(
-                    inner.config.publisher,
-                    &inner.config.revocations,
-                    now()?,
-                    inner.grant_families(),
-                )
-                .map_err(credential)?
+            Some(tuple) => verified
                 .partition_author(
                     author.key.public_key(),
                     scope,
                     tuple,
                     &inner.config.revocations,
-                    now()?,
+                    time,
                 )
                 .map_err(credential)?,
-            None => author
-                .credentials
-                .verified_with_families(
-                    inner.config.publisher,
-                    &inner.config.revocations,
-                    now()?,
-                    inner.grant_families(),
-                )
-                .map_err(credential)?
+            None => verified
                 .author(
                     author.key.public_key(),
                     table.scope.table,
                     &inner.config.revocations,
-                    now()?,
+                    time,
                 )
                 .map_err(credential)?,
         };

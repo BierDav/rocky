@@ -234,6 +234,7 @@ impl<A: RowApplication> Inner<A> {
                 ] {
                     inner.conn.execute(sql, [hash.clone()]).await?;
                 }
+                inner.clear_applied_cache();
                 inner
                     .conn
                     .execute(

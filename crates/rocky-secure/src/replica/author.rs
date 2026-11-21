@@ -96,14 +96,8 @@ impl<A: RowApplication> Inner<A> {
         let credentials = signer.map_or(&self.config.credentials, |author| &author.credentials);
         let chain = signer.map_or(&self.chain, |author| &author.chain).clone();
         let grants = match signer {
-            Some(_) if partition.is_some() => credentials
-                .verified_with_families(
-                    self.config.publisher,
-                    &self.config.revocations,
-                    time,
-                    self.grant_families(),
-                )
-                .map_err(credential)?
+            Some(_) if partition.is_some() => self
+                .verified_chain(credentials, &self.config.revocations, time)?
                 .partition_author(
                     signing_key.public_key(),
                     scope,
@@ -114,14 +108,8 @@ impl<A: RowApplication> Inner<A> {
                     time,
                 )
                 .map_err(credential)?,
-            Some(_) => credentials
-                .verified_with_families(
-                    self.config.publisher,
-                    &self.config.revocations,
-                    time,
-                    self.grant_families(),
-                )
-                .map_err(credential)?
+            Some(_) => self
+                .verified_chain(credentials, &self.config.revocations, time)?
                 .author(
                     signing_key.public_key(),
                     scope.table,

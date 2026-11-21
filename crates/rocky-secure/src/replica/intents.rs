@@ -138,16 +138,9 @@ impl<A: RowApplication> Inner<A> {
             .as_ref()
             .ok_or_else(|| denied("a replayed table's log needs a table author"))?;
         let signing_key = &signer.key;
+        let verified = self.verified_chain(&signer.credentials, &self.config.revocations, time)?;
         match &partition {
-            Some(tuple) => signer
-                .credentials
-                .verified_with_families(
-                    self.config.publisher,
-                    &self.config.revocations,
-                    time,
-                    self.grant_families(),
-                )
-                .map_err(credential)?
+            Some(tuple) => verified
                 .partition_author(
                     signing_key.public_key(),
                     scope,
@@ -156,15 +149,7 @@ impl<A: RowApplication> Inner<A> {
                     time,
                 )
                 .map_err(credential)?,
-            None => signer
-                .credentials
-                .verified_with_families(
-                    self.config.publisher,
-                    &self.config.revocations,
-                    time,
-                    self.grant_families(),
-                )
-                .map_err(credential)?
+            None => verified
                 .author(
                     signing_key.public_key(),
                     scope.table,
@@ -212,23 +197,42 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         base.sort();
-        let latest_replayed_clock = match collect_rows(
-            self.conn
-                .query("SELECT COALESCE(MAX(clock),0) FROM secure_replayed", ())
-                .await?,
-        )
-        .await?
-        .first()
-        .map(Vec::as_slice)
-        {
-            Some([SqlValue::Integer(clock)]) => u64::try_from(*clock).ok(),
-            _ => None,
-        }
-        .ok_or_else(|| Error::Corrupt("replayed clock".into()))?;
+        let latest_replayed_clock = {
+            let cached = *self
+                .latest_replayed_clock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match cached {
+                Some(clock) => clock,
+                None => {
+                    let queried = match collect_rows(
+                        self.conn
+                            .query("SELECT COALESCE(MAX(clock),0) FROM secure_replayed", ())
+                            .await?,
+                    )
+                    .await?
+                    .first()
+                    .map(Vec::as_slice)
+                    {
+                        Some([SqlValue::Integer(clock)]) => u64::try_from(*clock).ok(),
+                        _ => None,
+                    }
+                    .ok_or_else(|| Error::Corrupt("replayed clock".into()))?;
+                    *self
+                        .latest_replayed_clock
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(queried);
+                    queried
+                }
+            }
+        };
         let clock = next_clock(clock.max(latest_replayed_clock))?;
         let author_sequence = self
             .reserve_author_sequence(signing_key.public_key())
             .await?;
+        let witnessed = RowPayload::witness(payload(sequence, base)?, Vec::new())?;
+        let compacted = RowPayload::compact(&witnessed, &self.definition, scope)?;
+        let opened_payload = RowPayload::decode_source(&compacted, &self.definition, scope)?;
         let frame = author(
             signing_key,
             crate::wire::FrameDraft {
@@ -247,11 +251,7 @@ impl<A: RowApplication> Inner<A> {
                 log: (sequence, backlink, clock),
                 previous: previous.into_iter().collect(),
                 partition: partition.as_ref(),
-                plaintext: &RowPayload::compact(
-                    &RowPayload::witness(payload(sequence, base)?, Vec::new())?,
-                    &self.definition,
-                    scope,
-                )?,
+                plaintext: &compacted,
             },
         )?;
         self.verify_frame(&frame, time)?;
@@ -268,17 +268,17 @@ impl<A: RowApplication> Inner<A> {
         .await?;
         self.keep_chain(frame.chain()?).await?;
         self.no_frames_intake(&operation.header).await?;
-        TransactionStore(self.conn.clone())
-            .insert_operation(
-                operation.hash,
-                &operation.header,
-                operation.body.as_ref(),
-                frame.header_bytes(),
-                &scope,
-            )
+        let inserted = TransactionStore(self.conn.clone())
+            .insert_applied_operation(&frame, &scope)
             .await?;
-        self.write_materialized(&frame, Vec::new(), Default::default(), None)
-            .await?;
+        self.write_materialized_status(
+            &frame,
+            Vec::new(),
+            Default::default(),
+            Some(&opened_payload),
+            inserted,
+        )
+        .await?;
         self.conn
             .execute(
                 "INSERT INTO secure_outbox VALUES(?)",
@@ -297,10 +297,74 @@ impl<A: RowApplication> Inner<A> {
         blockers::refuse(blocked)
     }
 
+    pub(super) fn note_applied_head(
+        &self,
+        scope: ResourceScope,
+        hash: Hash,
+        header: &p2panda_core::Header<Extensions>,
+    ) -> Result<(), Error> {
+        let mut cache = self
+            .applied_heads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some((tip, heads)) = cache.get_mut(&scope) else {
+            return Ok(());
+        };
+        if *tip != self.workspace.tip {
+            cache.remove(&scope);
+            return Ok(());
+        }
+        let Ok(graph) = self.graph_for(scope.domain) else {
+            cache.remove(&scope);
+            return Ok(());
+        };
+        let extension = &header.extensions;
+        let visible = match extension.author(&header.public_key) {
+            Some(author) => match self.visible_frame(
+                graph,
+                extension.tip,
+                author,
+                extension.author_sequence,
+                self.workspace.tip,
+            ) {
+                Ok(visible) => visible,
+                Err(_) => {
+                    cache.remove(&scope);
+                    return Ok(());
+                }
+            },
+            None => false,
+        };
+        if !visible {
+            cache.remove(&scope);
+            return Ok(());
+        }
+        if let Some(entry) = heads
+            .iter_mut()
+            .find(|(_, existing)| existing.public_key == header.public_key)
+        {
+            if header.seq_num >= entry.1.seq_num {
+                *entry = (hash, header.clone());
+            }
+        } else {
+            heads.push((hash, header.clone()));
+        }
+        Ok(())
+    }
+
     async fn applied_heads(
         &self,
         scope: ResourceScope,
     ) -> Result<Vec<(Hash, p2panda_core::Header<Extensions>)>, Error> {
+        if let Some((tip, heads)) = self
+            .applied_heads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&scope)
+            && *tip == self.workspace.tip
+        {
+            return Ok(heads.clone());
+        }
         let corrupt = || Error::Corrupt("applied head".into());
         let decoded =
             |row: &[SqlValue]| -> Result<(Hash, p2panda_core::Header<Extensions>), Error> {
@@ -367,6 +431,10 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
         }
+        self.applied_heads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(scope, (self.workspace.tip, heads.clone()));
         Ok(heads)
     }
 }

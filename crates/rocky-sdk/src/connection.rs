@@ -652,11 +652,32 @@ impl State {
                         error => error.into(),
                     }
                 };
-                if let Some(reading) = &mut self.reading {
-                    if reading.snapshot.is_none() {
-                        reading.snapshot = Some(opened.snapshot(limits).await?);
+                if self.reading.is_some() {
+                    let needs_snapshot = self
+                        .reading
+                        .as_ref()
+                        .is_some_and(|reading| reading.snapshot.is_none());
+                    if needs_snapshot {
+                        let snapshot = match opened.snapshot(limits).await {
+                            Err(Error::Sql(SqlError::Unavailable {
+                                reason: Unavailable::Revoked,
+                                ..
+                            })) => {
+                                self.opened = None;
+                                self.sql().await?.snapshot(limits).await
+                            }
+                            other => other,
+                        }?;
+                        if let Some(reading) = &mut self.reading {
+                            reading.snapshot = Some(snapshot);
+                        }
                     }
-                    let snapshot = reading.snapshot.as_mut().ok_or("no snapshot")?;
+                    let opened = self.opened.as_ref().ok_or("connection has no session")?;
+                    let snapshot = self
+                        .reading
+                        .as_mut()
+                        .and_then(|reading| reading.snapshot.as_mut())
+                        .ok_or("no snapshot")?;
                     let rows = opened
                         .snapshot_rows(snapshot, sql, params)
                         .await
@@ -681,17 +702,84 @@ impl State {
     }
 }
 
+const MAX_IDLE_CONNECTIONS: usize = 4;
+
+type IdlePool = BTreeMap<(bool, bool), Vec<Arc<Mutex<State>>>>;
+
+impl State {
+    fn recycle(&mut self) -> bool {
+        if self.active() || !self.results.is_empty() {
+            return false;
+        }
+        if let Some(opened) = &self.opened
+            && !opened.reset_for_reuse()
+        {
+            return false;
+        }
+        self.committed = None;
+        self.handle = None;
+        self.read_only = self.options.read_only;
+        true
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Registry {
     connections: StdMutex<BTreeMap<u64, Arc<Mutex<State>>>>,
+    idle: StdMutex<IdlePool>,
+    closed: std::sync::atomic::AtomicBool,
     next: std::sync::atomic::AtomicU64,
 }
 impl Registry {
+    fn pool_key(options: &ConnectionOptions) -> Option<(bool, bool)> {
+        if options.binding.is_none() && options.transaction_timeout.is_none() {
+            Some((options.read_only, options.durability == Durability::Flushed))
+        } else {
+            None
+        }
+    }
+    fn return_idle(&self, key: (bool, bool), entry: Arc<Mutex<State>>) {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        if let Ok(mut idle) = self.idle.lock() {
+            if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            let bucket = idle.entry(key).or_default();
+            if bucket.len() < MAX_IDLE_CONNECTIONS {
+                bucket.push(entry);
+            }
+        }
+    }
+    fn insert_connection(&self, id: u64, entry: Arc<Mutex<State>>) -> Result<(), Failure> {
+        let mut connections = self
+            .connections
+            .lock()
+            .map_err(|_| "connections poisoned")?;
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(failure(code::MISUSE, "the connection is closed").into());
+        }
+        connections.insert(id, entry);
+        Ok(())
+    }
     pub(crate) async fn connect(
         &self,
         node: Arc<Node>,
         options: ConnectionOptions,
     ) -> Result<u64, Failure> {
+        if let Some(key) = Self::pool_key(&options)
+            && let Some(reused) = self
+                .idle
+                .lock()
+                .ok()
+                .and_then(|mut idle| idle.get_mut(&key).and_then(Vec::pop))
+        {
+            node.admit_sql().await?;
+            let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            self.insert_connection(id, reused)?;
+            return Ok(id);
+        }
         #[cfg(feature = "qualification")]
         let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let creating = State::new(node, options);
@@ -700,11 +788,56 @@ impl Registry {
         let state = creating.await?;
         #[cfg(not(feature = "qualification"))]
         let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        self.connections
-            .lock()
-            .map_err(|_| "connections poisoned")?
-            .insert(id, Arc::new(Mutex::new(state)));
+        self.insert_connection(id, Arc::new(Mutex::new(state)))?;
         Ok(id)
+    }
+    pub(crate) async fn query_once(
+        &self,
+        node: Arc<Node>,
+        sql: String,
+        params: Vec<SqlValue>,
+    ) -> Result<(Page, Option<u64>), Failure> {
+        let key = (true, false);
+        let entry = match self
+            .idle
+            .lock()
+            .ok()
+            .and_then(|mut idle| idle.get_mut(&key).and_then(Vec::pop))
+        {
+            Some(reused) => {
+                node.admit_sql().await?;
+                reused
+            }
+            None => {
+                let options = ConnectionOptions {
+                    read_only: true,
+                    durability: Durability::Buffered,
+                    transaction_timeout: None,
+                    binding: None,
+                };
+                Arc::new(Mutex::new(State::new(node, options).await?))
+            }
+        };
+        let (page, return_to_pool) = {
+            let mut state = entry.lock().await;
+            let result = state.execute(1, &sql, params).await;
+            match result {
+                Ok(page) if page.done && state.recycle() => (Ok(page), true),
+                Ok(page) => (Ok(page), false),
+                Err(error) => {
+                    let reusable = state.recycle();
+                    (Err(Failure::from(sql_failure(error))), reusable)
+                }
+            }
+        };
+        if return_to_pool {
+            self.return_idle(key, entry);
+            return Ok((page?, None));
+        }
+        let page = page?;
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        self.insert_connection(id, entry)?;
+        Ok((page, Some(id)))
     }
     pub(crate) fn get(&self, id: u64) -> Result<Arc<Mutex<State>>, Failure> {
         self.connections
@@ -715,10 +848,37 @@ impl Registry {
             .ok_or_else(|| failure(code::MISUSE, "the connection is closed").into())
     }
     pub(crate) fn close(&self, id: Option<u64>) {
-        if let Ok(mut connections) = self.connections.lock() {
+        let removed = if let Ok(mut connections) = self.connections.lock() {
             match id {
-                Some(id) => drop(connections.remove(&id)),
-                None => connections.clear(),
+                Some(id) => connections.remove(&id),
+                None => {
+                    self.closed
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    connections.clear();
+                    if let Ok(mut idle) = self.idle.lock() {
+                        idle.clear();
+                    }
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(entry) = removed
+            && Arc::strong_count(&entry) == 1
+        {
+            let key = {
+                if let Ok(mut state) = entry.try_lock()
+                    && let Some(key) = Self::pool_key(&state.options)
+                    && state.recycle()
+                {
+                    Some(key)
+                } else {
+                    None
+                }
+            };
+            if let Some(key) = key {
+                self.return_idle(key, entry);
             }
         }
     }

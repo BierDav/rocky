@@ -652,11 +652,32 @@ impl State {
                         error => error.into(),
                     }
                 };
-                if let Some(reading) = &mut self.reading {
-                    if reading.snapshot.is_none() {
-                        reading.snapshot = Some(opened.snapshot(limits).await?);
+                if self.reading.is_some() {
+                    let needs_snapshot = self
+                        .reading
+                        .as_ref()
+                        .is_some_and(|reading| reading.snapshot.is_none());
+                    if needs_snapshot {
+                        let snapshot = match opened.snapshot(limits).await {
+                            Err(Error::Sql(SqlError::Unavailable {
+                                reason: Unavailable::Revoked,
+                                ..
+                            })) => {
+                                self.opened = None;
+                                self.sql().await?.snapshot(limits).await
+                            }
+                            other => other,
+                        }?;
+                        if let Some(reading) = &mut self.reading {
+                            reading.snapshot = Some(snapshot);
+                        }
                     }
-                    let snapshot = reading.snapshot.as_mut().ok_or("no snapshot")?;
+                    let opened = self.opened.as_ref().ok_or("connection has no session")?;
+                    let snapshot = self
+                        .reading
+                        .as_mut()
+                        .and_then(|reading| reading.snapshot.as_mut())
+                        .ok_or("no snapshot")?;
                     let rows = opened
                         .snapshot_rows(snapshot, sql, params)
                         .await
@@ -726,6 +747,17 @@ impl Registry {
             }
         }
     }
+    fn insert_connection(&self, id: u64, entry: Arc<Mutex<State>>) -> Result<(), Failure> {
+        let mut connections = self
+            .connections
+            .lock()
+            .map_err(|_| "connections poisoned")?;
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(failure(code::MISUSE, "the connection is closed").into());
+        }
+        connections.insert(id, entry);
+        Ok(())
+    }
     pub(crate) async fn connect(
         &self,
         node: Arc<Node>,
@@ -740,10 +772,7 @@ impl Registry {
         {
             node.admit_sql().await?;
             let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            self.connections
-                .lock()
-                .map_err(|_| "connections poisoned")?
-                .insert(id, reused);
+            self.insert_connection(id, reused)?;
             return Ok(id);
         }
         #[cfg(feature = "qualification")]
@@ -754,10 +783,7 @@ impl Registry {
         let state = creating.await?;
         #[cfg(not(feature = "qualification"))]
         let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        self.connections
-            .lock()
-            .map_err(|_| "connections poisoned")?
-            .insert(id, Arc::new(Mutex::new(state)));
+        self.insert_connection(id, Arc::new(Mutex::new(state)))?;
         Ok(id)
     }
     pub(crate) async fn query_once(
@@ -795,7 +821,7 @@ impl Registry {
                 Ok(page) => (Ok(page), false),
                 Err(error) => {
                     let reusable = state.recycle();
-                    (Err(error), reusable)
+                    (Err(Failure::from(sql_failure(error))), reusable)
                 }
             }
         };
@@ -805,10 +831,7 @@ impl Registry {
         }
         let page = page?;
         let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        self.connections
-            .lock()
-            .map_err(|_| "connections poisoned")?
-            .insert(id, entry);
+        self.insert_connection(id, entry)?;
         Ok((page, Some(id)))
     }
     pub(crate) fn get(&self, id: u64) -> Result<Arc<Mutex<State>>, Failure> {

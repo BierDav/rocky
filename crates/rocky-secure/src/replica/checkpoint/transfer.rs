@@ -2761,6 +2761,7 @@ impl<A: RowApplication> Inner<A> {
                 }
             }
         }
+        self.clear_applied_cache();
         self.conn
             .execute(
                 "UPDATE secure_retained SET records=records-?,bytes=bytes-?",

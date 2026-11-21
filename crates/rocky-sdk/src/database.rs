@@ -3315,4 +3315,99 @@ mod tests {
         database.close().await?;
         Ok(())
     }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pooled_queries_preserve_sql_errors_and_reset_query_only() -> Result<(), Failure> {
+        use crate::{Durability, SqlFailure, SqlValue};
+        let directory = rocky_platform::fs::Scratch::new().await;
+        let schema = Schema::parse(
+            r#"{"application":"poolcheck","version":1,"format":6,"tables":[{"name":"items","class":"replayed","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
+        )?;
+        let opened = Database::create(
+            Open {
+                identity: None,
+                directory: directory.path(),
+                schema: &schema,
+                secrets: None,
+                network: None,
+                coordination: None,
+            },
+            None,
+        )?;
+        let database = opened.database;
+        let mut tx = database.transaction().await?;
+        let first_id = tx.next_id("items", Vec::new()).await?;
+        tx.execute(
+            "INSERT INTO items(id, key, title) VALUES (?, ?, ?)",
+            vec![
+                first_id.sql(),
+                SqlValue::Text("a".into()),
+                SqlValue::Text("first".into()),
+            ],
+        )
+        .await?;
+        tx.commit().await?;
+
+        let rows = database
+            .query(
+                "SELECT title FROM items WHERE key = ?",
+                vec![SqlValue::Text("a".into())],
+            )
+            .await?
+            .collect()
+            .await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get_at::<String>(0)?, "first");
+
+        let err = database
+            .query("SELECT * FROM no_such_table", Vec::new())
+            .await
+            .err()
+            .expect("invalid table should fail");
+        assert!(err.downcast_ref::<SqlFailure>().is_some());
+
+        let rows = database
+            .query(
+                "SELECT title FROM items WHERE key = ?",
+                vec![SqlValue::Text("a".into())],
+            )
+            .await?
+            .collect()
+            .await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get_at::<String>(0)?, "first");
+
+        let conn = database
+            .connect(ConnectionOptions {
+                read_only: false,
+                durability: Durability::Buffered,
+                transaction_timeout: None,
+                binding: None,
+            })
+            .await?;
+        conn.execute(
+            conn.statement(),
+            "PRAGMA query_only = ON".into(),
+            Vec::new(),
+        )
+        .await?;
+        conn.close().await;
+
+        let mut tx = database.transaction().await?;
+        let second_id = tx.next_id("items", Vec::new()).await?;
+        tx.execute(
+            "INSERT INTO items(id, key, title) VALUES (?, ?, ?)",
+            vec![
+                second_id.sql(),
+                SqlValue::Text("b".into()),
+                SqlValue::Text("second".into()),
+            ],
+        )
+        .await?;
+        tx.commit().await?;
+
+        database.close().await?;
+        Ok(())
+    }
 }

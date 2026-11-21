@@ -39,6 +39,18 @@ impl<A> Inner<A> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+        self.chains
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.applied_heads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        *self
+            .latest_replayed_clock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
     pub(crate) fn invalidate_held_refresh(&self) {
         self.held_refresh

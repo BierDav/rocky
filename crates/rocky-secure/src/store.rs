@@ -9,6 +9,71 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub(crate) struct TransactionStore(pub Arc<ScopedConnection>);
+impl TransactionStore {
+    pub(crate) async fn insert_applied_operation(
+        &mut self,
+        operation: &p2panda_core::Operation<Extensions>,
+        header_bytes: &[u8],
+        log: &ResourceScope,
+    ) -> Result<bool, Error> {
+        if self.0.is_autocommit()? {
+            return Err(denied("operation writes require a framework transaction"));
+        }
+        let body = operation
+            .body
+            .as_ref()
+            .ok_or_else(|| denied("payload retention is required"))?;
+        if operation.header.extensions.scope != *log {
+            return Err(denied("operation store binding mismatch"));
+        }
+        if self.has_operation(operation.hash).await? {
+            return Ok(false);
+        }
+        let chain = operation.header.extensions.chain.to_vec();
+        if !self.keeps_chain(chain.clone()).await? {
+            return Err(denied(crate::wire::INCOMPLETE_FRAME));
+        }
+        let encoded_scope = encode(log)?;
+        let fork = self
+            .0
+            .query(
+                "SELECT hash FROM secure_operations WHERE author=? AND scope=? AND sequence=?",
+                bindings(vec![
+                    SqlValue::Blob(operation.header.public_key.as_bytes().to_vec()),
+                    SqlValue::Blob(encoded_scope.clone()),
+                    SqlValue::Integer(operation.header.seq_num as i64),
+                ]),
+            )
+            .await?;
+        if !collect_rows(fork).await?.is_empty() {
+            return Err(denied("author log fork"));
+        }
+        let body_bytes = body.to_bytes();
+        let stored_len = (header_bytes.len() + body_bytes.len()) as i64;
+        self.0
+            .execute(
+                "INSERT INTO secure_operations(hash,author,scope,sequence,header,body,status,chain) VALUES(?,?,?,?,?,?, 'applied',?)",
+                bindings(vec![
+                    SqlValue::Blob(operation.hash.as_bytes().to_vec()),
+                    SqlValue::Blob(operation.header.public_key.as_bytes().to_vec()),
+                    SqlValue::Blob(encoded_scope),
+                    SqlValue::Integer(operation.header.seq_num as i64),
+                    SqlValue::Blob(header_bytes.to_vec()),
+                    SqlValue::Blob(body_bytes),
+                    SqlValue::Blob(chain),
+                ]),
+            )
+            .await?;
+        crate::replica::positions::insert(&self.0, &operation.header, 0, true, false).await?;
+        self.0
+            .execute(
+                "UPDATE secure_retained SET records=records+1,bytes=bytes+?",
+                [stored_len],
+            )
+            .await?;
+        Ok(true)
+    }
+}
 impl LocalOperationStore<ResourceScope, Extensions> for TransactionStore {
     type Error = Error;
     async fn insert_operation(

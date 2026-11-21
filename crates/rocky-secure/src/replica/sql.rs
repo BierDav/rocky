@@ -337,38 +337,25 @@ impl<A: RowApplication> SecureSql<A> {
                 .insert(allocation, (number, identity.sequence()));
             return Ok(identity);
         }
+        let time = now()?;
+        let verified =
+            inner.verified_chain(&author.credentials, &inner.config.revocations, time)?;
         let grants = match &tuple {
-            Some(tuple) => author
-                .credentials
-                .verified_with_families(
-                    inner.config.publisher,
-                    &inner.config.revocations,
-                    now()?,
-                    inner.grant_families(),
-                )
-                .map_err(credential)?
+            Some(tuple) => verified
                 .partition_author(
                     author.key.public_key(),
                     scope,
                     tuple,
                     &inner.config.revocations,
-                    now()?,
+                    time,
                 )
                 .map_err(credential)?,
-            None => author
-                .credentials
-                .verified_with_families(
-                    inner.config.publisher,
-                    &inner.config.revocations,
-                    now()?,
-                    inner.grant_families(),
-                )
-                .map_err(credential)?
+            None => verified
                 .author(
                     author.key.public_key(),
                     table.scope.table,
                     &inner.config.revocations,
-                    now()?,
+                    time,
                 )
                 .map_err(credential)?,
         };

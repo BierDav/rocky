@@ -2133,7 +2133,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 [record] => match record.as_slice() {
                     [SqlValue::Blob(bytes)] => {
                         let existing_line: TipId = decode(bytes)?;
-                        if !roots.contains(&existing_line) {
+                        let allows_ancestor = existing_line != root
+                            && roots.contains(&existing_line)
+                            && inner.schema_switch_intent().await?.is_none()
+                            && rows(
+                                &inner.conn,
+                                "SELECT 1 FROM secure_staged_schema WHERE state!='released'",
+                            )
+                            .await?
+                            .is_empty();
+                        if existing_line != root && !allows_ancestor {
                             return Err(denied("a node author log belongs to one line"));
                         }
                         existing_line

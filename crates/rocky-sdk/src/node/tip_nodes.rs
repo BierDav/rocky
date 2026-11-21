@@ -109,11 +109,6 @@ impl Node {
             settings.save(&self.replica).await?;
         }
         self.replica.learn_revocations(&known).await?;
-        let grants = |chain: &CredentialChain| -> Result<_, Failure> {
-            let held = chain.held().ok_or("line node has no identity capability")?;
-            let extended = held.extended()?;
-            Ok((held.grants.clone(), extended.partitions, extended.families))
-        };
         let mut indexes = Vec::new();
         for candidate in &lines {
             indexes.extend(
@@ -137,7 +132,7 @@ impl Node {
                 ) else {
                     continue;
                 };
-                if grants(&current)? != grants(&saved.nodes[index].credentials)? {
+                if current != saved.nodes[index].credentials {
                     saved.nodes[index].credentials = current;
                     self.save_line_nodes(&saved)?;
                 }

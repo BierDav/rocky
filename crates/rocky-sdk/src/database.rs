@@ -154,6 +154,12 @@ enum Command {
         queued: web_time::Instant,
         reply: oneshot::Sender<Result<Connection, Failure>>,
     },
+    Query {
+        sql: String,
+        params: Vec<crate::SqlValue>,
+        shared: Arc<Shared>,
+        reply: oneshot::Sender<Result<(Page, Option<Connection>), Failure>>,
+    },
     Sql {
         connection: u64,
         call: connection::Call,
@@ -740,6 +746,20 @@ impl Database {
                 shared: self.shared.clone(),
                 #[cfg(feature = "qualification")]
                 queued: web_time::Instant::now(),
+                reply,
+            })
+            .await?
+    }
+    pub(crate) async fn query_once(
+        &self,
+        sql: String,
+        params: Vec<crate::SqlValue>,
+    ) -> Result<(Page, Option<Connection>), Failure> {
+        self.shared
+            .request(|reply| Command::Query {
+                sql,
+                params,
+                shared: self.shared.clone(),
                 reply,
             })
             .await?
@@ -2359,6 +2379,30 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
                 shutdown = Some(reply);
                 break;
             }
+            Command::Query {
+                sql,
+                params,
+                shared,
+                reply,
+            } => {
+                let connections = connections.clone();
+                crate::reactor::spawn_in(&mut tasks, "query", async move {
+                    let result = connections.query_once(node, sql, params).await.map(
+                        |(page, connection)| {
+                            let connection = connection.map(|id| Connection {
+                                shared,
+                                id,
+                                statements: AtomicU64::new(2),
+                                closed: AtomicBool::new(false),
+                            });
+                            (page, connection)
+                        },
+                    );
+                    if let Err(Ok((_, Some(unread_connection)))) = reply.send(result) {
+                        drop(unread_connection);
+                    }
+                });
+            }
             Command::Connect {
                 options,
                 shared,
@@ -2542,20 +2586,46 @@ async fn close_file(replica: EncryptedReplica<rocky_core::TypedRows>) -> Result<
     replica.close().await;
     flushed
 }
+const SETTLE_QUIET: web_time::Duration = web_time::Duration::from_millis(5);
+const SETTLE_MAX_WAIT: web_time::Duration = web_time::Duration::from_millis(25);
+
 async fn settle_commits(replica: EncryptedReplica<rocky_core::TypedRows>) {
     let mut revisions = replica.observe_revision();
     revisions.mark_changed();
     let mut retry = crate::scheduling::Retry::default();
     loop {
         let deadline = retry.deadline();
-        tokio::select! {
-            changed = revisions.changed() => if changed.is_err() { break },
+        let triggered_by_change = tokio::select! {
+            changed = revisions.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                true
+            }
             () = async {
                 match deadline {
                     Some(deadline) => rocky_platform::time::sleep_until(deadline).await,
                     None => std::future::pending().await,
                 }
-            } => {},
+            } => false,
+        };
+        if triggered_by_change {
+            let max_deadline = rocky_platform::time::Instant::now() + SETTLE_MAX_WAIT;
+            loop {
+                let quiet_deadline =
+                    (rocky_platform::time::Instant::now() + SETTLE_QUIET).min(max_deadline);
+                tokio::select! {
+                    changed = revisions.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        if rocky_platform::time::Instant::now() >= max_deadline {
+                            break;
+                        }
+                    }
+                    () = rocky_platform::time::sleep_until(quiet_deadline) => break,
+                }
+            }
         }
         match replica.flush().await {
             Ok(_) if replica.maintain().await => retry.reset(),

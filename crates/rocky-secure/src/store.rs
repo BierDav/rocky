@@ -64,7 +64,7 @@ impl TransactionStore {
                 ]),
             )
             .await?;
-        crate::replica::positions::insert(&self.0, &operation.header, 0, true, false).await?;
+        crate::replica::positions::insert(&self.0, &operation.header, 0, false, true).await?;
         self.0
             .execute(
                 "UPDATE secure_retained SET records=records+1,bytes=bytes+?",

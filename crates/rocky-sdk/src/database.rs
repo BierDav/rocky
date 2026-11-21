@@ -2593,12 +2593,12 @@ async fn settle_commits(replica: EncryptedReplica<rocky_core::TypedRows>) {
     let mut revisions = replica.observe_revision();
     revisions.mark_changed();
     let mut retry = crate::scheduling::Retry::default();
-    loop {
+    'settle: loop {
         let deadline = retry.deadline();
         let triggered_by_change = tokio::select! {
             changed = revisions.changed() => {
                 if changed.is_err() {
-                    break;
+                    break 'settle;
                 }
                 true
             }
@@ -2617,7 +2617,7 @@ async fn settle_commits(replica: EncryptedReplica<rocky_core::TypedRows>) {
                 tokio::select! {
                     changed = revisions.changed() => {
                         if changed.is_err() {
-                            return;
+                            break 'settle;
                         }
                         if rocky_platform::time::Instant::now() >= max_deadline {
                             break;

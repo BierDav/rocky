@@ -12,10 +12,11 @@ pub(crate) struct TransactionStore(pub Arc<ScopedConnection>);
 impl TransactionStore {
     pub(crate) async fn insert_applied_operation(
         &mut self,
-        operation: &p2panda_core::Operation<Extensions>,
-        header_bytes: &[u8],
+        frame: &EncryptedFrame,
         log: &ResourceScope,
     ) -> Result<bool, Error> {
+        let operation = frame.operation_ref()?;
+        let header_bytes = frame.header_bytes();
         if self.0.is_autocommit()? {
             return Err(denied("operation writes require a framework transaction"));
         }

@@ -268,15 +268,15 @@ impl<A: RowApplication> Inner<A> {
         .await?;
         self.keep_chain(frame.chain()?).await?;
         self.no_frames_intake(&operation.header).await?;
-        TransactionStore(self.conn.clone())
-            .insert_applied_operation(operation, frame.header_bytes(), &scope)
+        let inserted = TransactionStore(self.conn.clone())
+            .insert_applied_operation(&frame, &scope)
             .await?;
         self.write_materialized_status(
             &frame,
             Vec::new(),
             Default::default(),
             Some(&opened_payload),
-            true,
+            inserted,
         )
         .await?;
         self.conn
@@ -314,16 +314,25 @@ impl<A: RowApplication> Inner<A> {
             cache.remove(&scope);
             return Ok(());
         }
-        let graph = self.graph_for(scope.domain)?;
+        let Ok(graph) = self.graph_for(scope.domain) else {
+            cache.remove(&scope);
+            return Ok(());
+        };
         let extension = &header.extensions;
         let visible = match extension.author(&header.public_key) {
-            Some(author) => self.visible_frame(
+            Some(author) => match self.visible_frame(
                 graph,
                 extension.tip,
                 author,
                 extension.author_sequence,
                 self.workspace.tip,
-            )?,
+            ) {
+                Ok(visible) => visible,
+                Err(_) => {
+                    cache.remove(&scope);
+                    return Ok(());
+                }
+            },
             None => false,
         };
         if !visible {

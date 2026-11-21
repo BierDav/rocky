@@ -681,12 +681,27 @@ impl State {
     }
 }
 
+const MAX_IDLE_CONNECTIONS: usize = 4;
+
 type IdlePool = BTreeMap<(bool, bool), Vec<Arc<Mutex<State>>>>;
+
+impl State {
+    fn recycle(&mut self) -> bool {
+        if self.active() || !self.results.is_empty() {
+            return false;
+        }
+        self.committed = None;
+        self.handle = None;
+        self.read_only = self.options.read_only;
+        true
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct Registry {
     connections: StdMutex<BTreeMap<u64, Arc<Mutex<State>>>>,
     idle: StdMutex<IdlePool>,
+    closed: std::sync::atomic::AtomicBool,
     next: std::sync::atomic::AtomicU64,
 }
 impl Registry {
@@ -695,6 +710,20 @@ impl Registry {
             Some((options.read_only, options.durability == Durability::Flushed))
         } else {
             None
+        }
+    }
+    fn return_idle(&self, key: (bool, bool), entry: Arc<Mutex<State>>) {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        if let Ok(mut idle) = self.idle.lock() {
+            if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            let bucket = idle.entry(key).or_default();
+            if bucket.len() < MAX_IDLE_CONNECTIONS {
+                bucket.push(entry);
+            }
         }
     }
     pub(crate) async fn connect(
@@ -709,6 +738,7 @@ impl Registry {
                 .ok()
                 .and_then(|mut idle| idle.get_mut(&key).and_then(Vec::pop))
         {
+            node.admit_sql().await?;
             let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             self.connections
                 .lock()
@@ -743,7 +773,10 @@ impl Registry {
             .ok()
             .and_then(|mut idle| idle.get_mut(&key).and_then(Vec::pop))
         {
-            Some(reused) => reused,
+            Some(reused) => {
+                node.admit_sql().await?;
+                reused
+            }
             None => {
                 let options = ConnectionOptions {
                     read_only: true,
@@ -758,31 +791,16 @@ impl Registry {
             let mut state = entry.lock().await;
             let result = state.execute(1, &sql, params).await;
             match result {
-                Ok(page) if page.done && !state.active() && state.results.is_empty() => {
-                    state.committed = None;
-                    state.handle = None;
-                    state.read_only = state.options.read_only;
-                    (Ok(page), true)
-                }
+                Ok(page) if page.done && state.recycle() => (Ok(page), true),
                 Ok(page) => (Ok(page), false),
                 Err(error) => {
-                    let reusable = !state.active() && state.results.is_empty();
-                    if reusable {
-                        state.committed = None;
-                        state.handle = None;
-                        state.read_only = state.options.read_only;
-                    }
+                    let reusable = state.recycle();
                     (Err(error), reusable)
                 }
             }
         };
         if return_to_pool {
-            if let Ok(mut idle) = self.idle.lock() {
-                let bucket = idle.entry(key).or_default();
-                if bucket.len() < 4 {
-                    bucket.push(entry);
-                }
-            }
+            self.return_idle(key, entry);
             return Ok((page?, None));
         }
         let page = page?;
@@ -806,6 +824,8 @@ impl Registry {
             match id {
                 Some(id) => connections.remove(&id),
                 None => {
+                    self.closed
+                        .store(true, std::sync::atomic::Ordering::Release);
                     connections.clear();
                     if let Ok(mut idle) = self.idle.lock() {
                         idle.clear();
@@ -816,28 +836,21 @@ impl Registry {
         } else {
             None
         };
-        if let Some(entry) = removed {
+        if let Some(entry) = removed
+            && Arc::strong_count(&entry) == 1
+        {
             let key = {
                 if let Ok(mut state) = entry.try_lock()
-                    && !state.active()
-                    && state.results.is_empty()
                     && let Some(key) = Self::pool_key(&state.options)
+                    && state.recycle()
                 {
-                    state.committed = None;
-                    state.handle = None;
-                    state.read_only = state.options.read_only;
                     Some(key)
                 } else {
                     None
                 }
             };
-            if let Some(key) = key
-                && let Ok(mut idle) = self.idle.lock()
-            {
-                let bucket = idle.entry(key).or_default();
-                if bucket.len() < 4 {
-                    bucket.push(entry);
-                }
+            if let Some(key) = key {
+                self.return_idle(key, entry);
             }
         }
     }

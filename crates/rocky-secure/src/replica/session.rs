@@ -113,7 +113,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let original = identity::NodeAuthor::new(&inner.config)?;
             inner
                 .line_nodes
-                .insert(rocky_credentials::genesis_tip(root), original.clone());
+                .entry(rocky_credentials::genesis_tip(root))
+                .or_insert_with(|| original.clone());
             match inner.workspace.followed.clone() {
                 Some((domain, _)) => {
                     let tip = inner.workspace.tip;

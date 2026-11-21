@@ -35,6 +35,7 @@ pub(super) const SCHEMA: &[&str] = &[
     REPLAYED_STUCK_TABLE,
 ];
 
+const MIGRATION_CAPTURE: (usize, usize) = (usize::MAX, usize::MAX);
 const OUTCOME_MEMBERS: &str = "SELECT dropped,sealed,violated,0 FROM secure_replayed WHERE txn=?1 UNION ALL SELECT k.dropped,k.sealed,k.violated,k.based FROM secure_kept_outcomes k WHERE k.txn=?1 AND NOT EXISTS(SELECT 1 FROM secure_replayed r WHERE r.hash=k.hash)";
 
 pub(super) struct Undo {
@@ -1778,7 +1779,7 @@ impl<A: RowApplication> Inner<A> {
         let state = conn.session()?;
         let poisoned = || Error::Corrupt("capture poisoned".into());
         let capture_limits = if frame.migration.is_some() {
-            (usize::MAX, usize::MAX)
+            MIGRATION_CAPTURE
         } else {
             REPLAY_CAPTURE
         };

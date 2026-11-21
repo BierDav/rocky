@@ -1031,6 +1031,33 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
+    async fn can_inherit_ancestor_line_node(&self) -> Result<bool, Error> {
+        Ok(self.schema_switch_intent().await?.is_none()
+            && rows(
+                &self.conn,
+                "SELECT 1 FROM secure_staged_schema WHERE state!='released'",
+            )
+            .await?
+            .is_empty())
+    }
+    async fn nearest_bound_ancestor(&self, ancestors: &[TipId]) -> Result<Option<TipId>, Error> {
+        for &ancestor in ancestors {
+            let bound = !collect_rows(
+                self.conn
+                    .query(
+                        "SELECT 1 FROM secure_line_nodes WHERE line=?",
+                        [encode(&ancestor)?],
+                    )
+                    .await?,
+            )
+            .await?
+            .is_empty();
+            if bound {
+                return Ok(Some(ancestor));
+            }
+        }
+        Ok(None)
+    }
     pub(super) async fn select_line(&mut self, scope: Scope, target: TipId) -> Result<(), Error> {
         let roots = self
             .graph_for(scope)?
@@ -1070,13 +1097,7 @@ impl<A: RowApplication> Inner<A> {
         if !has_binding
             && selected.is_none()
             && roots.len() > 1
-            && self.schema_switch_intent().await?.is_none()
-            && rows(
-                &self.conn,
-                "SELECT 1 FROM secure_staged_schema WHERE state!='released'",
-            )
-            .await?
-            .is_empty()
+            && self.can_inherit_ancestor_line_node().await?
         {
             for &ancestor in &roots[1..] {
                 let (ancestor_bound, candidate) = lookup(ancestor).await?;
@@ -2070,7 +2091,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             && inner.node_author.is_none()
         {
             let target = inner.workspace.tip;
-            inner.select_line(scope, target).await?;
+            if inner.graph_for(scope)?.schema(target).is_ok() {
+                inner.select_line(scope, target).await?;
+            }
         }
         Ok(())
     }
@@ -2149,14 +2172,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         .is_empty();
                         let allows_ancestor = existing_line != root
                             && target_unbound
-                            && roots.contains(&existing_line)
-                            && inner.schema_switch_intent().await?.is_none()
-                            && rows(
-                                &inner.conn,
-                                "SELECT 1 FROM secure_staged_schema WHERE state!='released'",
-                            )
-                            .await?
-                            .is_empty();
+                            && inner.can_inherit_ancestor_line_node().await?
+                            && inner.nearest_bound_ancestor(&roots[1..]).await?
+                                == Some(existing_line);
                         if existing_line != root && !allows_ancestor {
                             return Err(denied("a node author log belongs to one line"));
                         }

@@ -1348,6 +1348,7 @@ impl<A: RowApplication> Inner<A> {
         };
         if dropped.is_some() {
             self.conn.execute("ROLLBACK TO intents", ()).await?;
+            self.clear_applied_cache();
             replayed.clear();
         }
         self.conn.execute("RELEASE intents", ()).await?;

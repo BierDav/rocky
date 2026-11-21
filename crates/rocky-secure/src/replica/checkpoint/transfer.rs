@@ -840,6 +840,7 @@ impl<A: RowApplication> Inner<A> {
                 [id],
             )
             .await?;
+        self.clear_applied_cache();
         for sql in [
             "DELETE FROM secure_row_records WHERE scope=?",
             "DELETE FROM secure_move_rows WHERE scope=?",

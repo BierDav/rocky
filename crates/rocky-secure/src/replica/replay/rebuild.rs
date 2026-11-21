@@ -250,6 +250,7 @@ impl<A: RowApplication> Inner<A> {
         let undo = async || -> Result<(), Error> {
             self.conn.execute("ROLLBACK TO rederive", ()).await?;
             self.conn.execute("RELEASE rederive", ()).await?;
+            self.clear_applied_cache();
             Ok(())
         };
         match rebuilt {

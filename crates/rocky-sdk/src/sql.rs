@@ -342,11 +342,17 @@ impl<'a> Rows<'a> {
             if self.done {
                 return Ok(None);
             }
-            self.done = true;
             let Some(connection) = self.source.connection() else {
+                self.done = true;
                 return Ok(None);
             };
-            let page = connection.next(self.statement).await?;
+            let page = match connection.next(self.statement).await {
+                Ok(page) => page,
+                Err(error) => {
+                    self.done = true;
+                    return Err(error);
+                }
+            };
             self.page(page);
         }
     }

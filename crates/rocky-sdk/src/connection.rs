@@ -711,6 +711,11 @@ impl State {
         if self.active() || !self.results.is_empty() {
             return false;
         }
+        if let Some(opened) = &self.opened
+            && !opened.reset_for_reuse()
+        {
+            return false;
+        }
         self.committed = None;
         self.handle = None;
         self.read_only = self.options.read_only;

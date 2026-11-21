@@ -681,17 +681,41 @@ impl State {
     }
 }
 
+type IdlePool = BTreeMap<(bool, bool), Vec<Arc<Mutex<State>>>>;
+
 #[derive(Default)]
 pub(crate) struct Registry {
     connections: StdMutex<BTreeMap<u64, Arc<Mutex<State>>>>,
+    idle: StdMutex<IdlePool>,
     next: std::sync::atomic::AtomicU64,
 }
 impl Registry {
+    fn pool_key(options: &ConnectionOptions) -> Option<(bool, bool)> {
+        if options.binding.is_none() && options.transaction_timeout.is_none() {
+            Some((options.read_only, options.durability == Durability::Flushed))
+        } else {
+            None
+        }
+    }
     pub(crate) async fn connect(
         &self,
         node: Arc<Node>,
         options: ConnectionOptions,
     ) -> Result<u64, Failure> {
+        if let Some(key) = Self::pool_key(&options)
+            && let Some(reused) = self
+                .idle
+                .lock()
+                .ok()
+                .and_then(|mut idle| idle.get_mut(&key).and_then(Vec::pop))
+        {
+            let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            self.connections
+                .lock()
+                .map_err(|_| "connections poisoned")?
+                .insert(id, reused);
+            return Ok(id);
+        }
         #[cfg(feature = "qualification")]
         let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let creating = State::new(node, options);
@@ -715,10 +739,42 @@ impl Registry {
             .ok_or_else(|| failure(code::MISUSE, "the connection is closed").into())
     }
     pub(crate) fn close(&self, id: Option<u64>) {
-        if let Ok(mut connections) = self.connections.lock() {
+        let removed = if let Ok(mut connections) = self.connections.lock() {
             match id {
-                Some(id) => drop(connections.remove(&id)),
-                None => connections.clear(),
+                Some(id) => connections.remove(&id),
+                None => {
+                    connections.clear();
+                    if let Ok(mut idle) = self.idle.lock() {
+                        idle.clear();
+                    }
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(entry) = removed {
+            let key = {
+                if let Ok(mut state) = entry.try_lock()
+                    && !state.active()
+                    && state.results.is_empty()
+                    && let Some(key) = Self::pool_key(&state.options)
+                {
+                    state.committed = None;
+                    state.handle = None;
+                    state.read_only = state.options.read_only;
+                    Some(key)
+                } else {
+                    None
+                }
+            };
+            if let Some(key) = key
+                && let Ok(mut idle) = self.idle.lock()
+            {
+                let bucket = idle.entry(key).or_default();
+                if bucket.len() < 4 {
+                    bucket.push(entry);
+                }
             }
         }
     }

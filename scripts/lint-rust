@@ -15,7 +15,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTSIDE_THE_WORKSPACE = ('benchmarks/engine-comparison',
-                         'benchmarks/engine-scale')
+                         'benchmarks/engine-scale',
+                         'benchmarks/mesh')
 UPSTREAM = ('benchmarks/engine-scale/turso-patched/vendor',)
 SKIPPED_DIRECTORIES = ('target', 'node_modules')
 ALLOW_GUIDANCE = '#[allow(...)] is forbidden; use #[expect(lint, reason = "...")] instead'

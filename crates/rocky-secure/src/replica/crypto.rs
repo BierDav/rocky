@@ -111,6 +111,19 @@ impl<A: RowApplication> Inner<A> {
         revocations: &RevocationSet,
         time: u64,
     ) -> Result<rocky_credentials::VerifiedChain, Error> {
+        let families = self.grant_families();
+        let digest = rocky_core::commitment("rocky.credential-chain.v1", &encode(chain)?);
+        let rev_fp = revocations.fingerprint().map_err(credential)?;
+        let key = (digest, self.config.publisher, rev_fp, families.digest());
+        if let Some(verified) = self
+            .crypto
+            .chains
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+        {
+            return Ok(verified.clone());
+        }
         chain
             .verify_database(
                 self.config
@@ -119,13 +132,23 @@ impl<A: RowApplication> Inner<A> {
                     .map_err(credential)?,
             )
             .map_err(credential)?;
-        self.crypto.verify(
+        let verified = self.crypto.verify(
             chain,
             self.config.publisher,
             revocations,
             time,
-            Some(self.grant_families()),
-        )
+            Some(families),
+        )?;
+        let mut cache = self
+            .crypto
+            .chains
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert(key, verified.clone());
+        Ok(verified)
     }
 }
 

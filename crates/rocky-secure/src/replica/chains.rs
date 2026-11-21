@@ -8,16 +8,32 @@ pub(super) const SCHEMA: &[&str] = &[
 
 impl<A: RowApplication> Inner<A> {
     pub(super) async fn keep_chain(&self, chain: &Chain) -> Result<(), Error> {
-        identity::check_node_chain(chain.credentials())?;
-        if self.chain_kept(chain.digest()).await? {
+        let digest = chain.digest();
+        if self
+            .chains
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&digest)
+        {
             return Ok(());
         }
-        self.conn
-            .execute(
-                "INSERT INTO secure_chains VALUES(?,?)",
-                [chain.digest().to_vec(), encode(chain.credentials())?],
-            )
-            .await?;
+        identity::check_node_chain(chain.credentials())?;
+        if !self.chain_kept(digest).await? {
+            self.conn
+                .execute(
+                    "INSERT INTO secure_chains VALUES(?,?)",
+                    [digest.to_vec(), encode(chain.credentials())?],
+                )
+                .await?;
+        }
+        let mut cached = self
+            .chains
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cached.len() >= CACHED_CHAINS {
+            cached.clear();
+        }
+        cached.insert(digest, chain.clone());
         Ok(())
     }
     pub(super) async fn chain_kept(&self, digest: Commitment) -> Result<bool, Error> {
@@ -94,6 +110,7 @@ impl<A: RowApplication> Inner<A> {
                 .await?,
         )
         .await?;
+        let mut removed = false;
         for record in unnamed {
             let [SqlValue::Blob(digest)] = record.as_slice() else {
                 return Err(Error::Corrupt("stored credential chain".into()));
@@ -104,6 +121,13 @@ impl<A: RowApplication> Inner<A> {
             self.conn
                 .execute("DELETE FROM secure_chains WHERE digest=?", [digest.clone()])
                 .await?;
+            removed = true;
+        }
+        if removed {
+            self.chains
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
         }
         Ok(())
     }

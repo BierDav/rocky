@@ -468,6 +468,17 @@ impl<A: RowApplication> Inner<A> {
         admission: Admission,
         opened_payload: Option<&RowPayload>,
     ) -> Result<(), Error> {
+        self.write_materialized_status(frame, materialized, admission, opened_payload, false)
+            .await
+    }
+    pub(super) async fn write_materialized_status(
+        &self,
+        frame: &EncryptedFrame,
+        materialized: Vec<MergedRow>,
+        admission: Admission,
+        opened_payload: Option<&RowPayload>,
+        already_applied: bool,
+    ) -> Result<(), Error> {
         self.rows_written
             .fetch_add(materialized.len() as u64, Ordering::Relaxed);
         self.frames_written.fetch_add(1, Ordering::Relaxed);
@@ -555,12 +566,15 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         self.note_applied(id, operation).await?;
         self.note_row_positions(id, frame, payload).await?;
-        self.conn
-            .execute(
-                "UPDATE secure_operations SET status='applied' WHERE hash=?",
-                [frame.id()?.as_bytes().to_vec()],
-            )
-            .await?;
+        if !already_applied {
+            self.conn
+                .execute(
+                    "UPDATE secure_operations SET status='applied' WHERE hash=?",
+                    [frame.id()?.as_bytes().to_vec()],
+                )
+                .await?;
+        }
+        self.note_applied_head(scope, operation.hash, &operation.header)?;
         self.conn
             .execute(
                 "UPDATE secure_metadata SET revision=revision+1 WHERE id=1",

@@ -730,6 +730,69 @@ impl Registry {
             .insert(id, Arc::new(Mutex::new(state)));
         Ok(id)
     }
+    pub(crate) async fn query_once(
+        &self,
+        node: Arc<Node>,
+        sql: String,
+        params: Vec<SqlValue>,
+    ) -> Result<(Page, Option<u64>), Failure> {
+        let key = (true, false);
+        let entry = match self
+            .idle
+            .lock()
+            .ok()
+            .and_then(|mut idle| idle.get_mut(&key).and_then(Vec::pop))
+        {
+            Some(reused) => reused,
+            None => {
+                let options = ConnectionOptions {
+                    read_only: true,
+                    durability: Durability::Buffered,
+                    transaction_timeout: None,
+                    binding: None,
+                };
+                Arc::new(Mutex::new(State::new(node, options).await?))
+            }
+        };
+        let (page, return_to_pool) = {
+            let mut state = entry.lock().await;
+            let result = state.execute(1, &sql, params).await;
+            match result {
+                Ok(page) if page.done && !state.active() && state.results.is_empty() => {
+                    state.committed = None;
+                    state.handle = None;
+                    state.read_only = state.options.read_only;
+                    (Ok(page), true)
+                }
+                Ok(page) => (Ok(page), false),
+                Err(error) => {
+                    let reusable = !state.active() && state.results.is_empty();
+                    if reusable {
+                        state.committed = None;
+                        state.handle = None;
+                        state.read_only = state.options.read_only;
+                    }
+                    (Err(error), reusable)
+                }
+            }
+        };
+        if return_to_pool {
+            if let Ok(mut idle) = self.idle.lock() {
+                let bucket = idle.entry(key).or_default();
+                if bucket.len() < 4 {
+                    bucket.push(entry);
+                }
+            }
+            return Ok((page?, None));
+        }
+        let page = page?;
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        self.connections
+            .lock()
+            .map_err(|_| "connections poisoned")?
+            .insert(id, entry);
+        Ok((page, Some(id)))
+    }
     pub(crate) fn get(&self, id: u64) -> Result<Arc<Mutex<State>>, Failure> {
         self.connections
             .lock()

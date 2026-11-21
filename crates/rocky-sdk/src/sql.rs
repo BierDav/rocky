@@ -270,14 +270,16 @@ impl Row {
 }
 
 enum Source<'a> {
+    Done,
     Owned(Connection),
     Borrowed(&'a Connection),
 }
 impl Source<'_> {
-    fn connection(&self) -> &Connection {
+    fn connection(&self) -> Option<&Connection> {
         match self {
-            Self::Owned(c) => c,
-            Self::Borrowed(c) => c,
+            Self::Done => None,
+            Self::Owned(c) => Some(c),
+            Self::Borrowed(c) => Some(c),
         }
     }
 }
@@ -290,7 +292,10 @@ pub struct Rows<'a> {
 }
 impl<'a> Rows<'a> {
     async fn new(source: Source<'a>, sql: &str, params: Vec<SqlValue>) -> Result<Self, SqlFailure> {
-        let statement = source.connection().statement();
+        let statement = source
+            .connection()
+            .ok_or_else(|| crate::connection::failure(crate::connection::code::MISUSE, "closed"))?
+            .statement();
         let mut rows = Self {
             source,
             statement,
@@ -301,10 +306,22 @@ impl<'a> Rows<'a> {
         let page = rows
             .source
             .connection()
+            .ok_or_else(|| crate::connection::failure(crate::connection::code::MISUSE, "closed"))?
             .execute(statement, sql.into(), params)
             .await?;
         rows.page(page);
         Ok(rows)
+    }
+    fn from_page(source: Source<'a>, statement: u64, page: Page) -> Self {
+        let mut rows = Self {
+            source,
+            statement,
+            columns: Arc::default(),
+            pending: VecDeque::new(),
+            done: false,
+        };
+        rows.page(page);
+        rows
     }
     fn page(&mut self, page: Page) {
         self.columns = Arc::new(page.columns);
@@ -326,7 +343,10 @@ impl<'a> Rows<'a> {
                 return Ok(None);
             }
             self.done = true;
-            let page = self.source.connection().next(self.statement).await?;
+            let Some(connection) = self.source.connection() else {
+                return Ok(None);
+            };
+            let page = connection.next(self.statement).await?;
             self.page(page);
         }
     }
@@ -340,7 +360,11 @@ impl<'a> Rows<'a> {
 }
 impl Drop for Rows<'_> {
     fn drop(&mut self) {
-        self.source.connection().discard(self.statement);
+        if !self.done
+            && let Some(connection) = self.source.connection()
+        {
+            connection.discard(self.statement);
+        }
     }
 }
 
@@ -354,8 +378,12 @@ fn options(read_only: bool, durability: Durability) -> ConnectionOptions {
 }
 impl Database {
     pub async fn query(&self, sql: &str, params: Vec<SqlValue>) -> Result<Rows<'static>, Failure> {
-        let connection = self.connect(options(true, Durability::Buffered)).await?;
-        Ok(Rows::new(Source::Owned(connection), sql, params).await?)
+        let (page, connection) = self.query_once(sql.into(), params).await?;
+        let source = match connection {
+            Some(connection) => Source::Owned(connection),
+            None => Source::Done,
+        };
+        Ok(Rows::from_page(source, 1, page))
     }
     pub async fn transaction(&self) -> Result<Transaction, Failure> {
         self.transaction_with(Durability::Buffered).await
@@ -382,7 +410,13 @@ impl Transaction {
     }
     pub async fn execute(&mut self, sql: &str, params: Vec<SqlValue>) -> Result<(), SqlFailure> {
         let rows = self.query(sql, params).await?;
-        rows.source.connection().finish(rows.statement).await
+        if rows.done {
+            return Ok(());
+        }
+        match rows.source.connection() {
+            Some(connection) => connection.finish(rows.statement).await,
+            None => Ok(()),
+        }
     }
     pub async fn query(
         &mut self,

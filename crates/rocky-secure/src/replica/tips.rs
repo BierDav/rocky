@@ -1085,8 +1085,11 @@ impl<A: RowApplication> Inner<A> {
                         author = identity::NodeAuthor::new(&self.config)?;
                     }
                     if self
-                        .node_continues(scope, target, author.key.public_key())
-                        .await?
+                        .verify_chain(&author.credentials, author.key.public_key(), now()?)
+                        .is_ok()
+                        && self
+                            .node_continues(scope, target, author.key.public_key())
+                            .await?
                     {
                         selected = Some(author);
                         bound_root = ancestor;
@@ -2133,7 +2136,19 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 [record] => match record.as_slice() {
                     [SqlValue::Blob(bytes)] => {
                         let existing_line: TipId = decode(bytes)?;
+                        let target_unbound = collect_rows(
+                            inner
+                                .conn
+                                .query(
+                                    "SELECT 1 FROM secure_line_nodes WHERE line=?",
+                                    [encode(&root)?],
+                                )
+                                .await?,
+                        )
+                        .await?
+                        .is_empty();
                         let allows_ancestor = existing_line != root
+                            && target_unbound
                             && roots.contains(&existing_line)
                             && inner.schema_switch_intent().await?.is_none()
                             && rows(

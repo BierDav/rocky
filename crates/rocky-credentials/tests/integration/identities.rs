@@ -516,9 +516,13 @@ async fn a_new_node_proves_its_identity_to_a_node_of_the_same_identity() {
             )
             .is_err()
     );
+    assert!(
+        request.answer(&node, b"bundle").is_err(),
+        "only the node a request names answers it"
+    );
     let answer = IdentityAnswer::from_bytes(
         &request
-            .answer(b"bundle")
+            .answer(&answering, b"bundle")
             .expect("answer")
             .to_bytes()
             .expect("bytes"),
@@ -528,6 +532,23 @@ async fn a_new_node_proves_its_identity_to_a_node_of_the_same_identity() {
         answer.open(&request, &secret).expect("opened"),
         b"bundle",
         "the answer opens only with the request's one-time key"
+    );
+    let mut forged = serde_json::to_value(&answer).expect("answer");
+    forged["signature"] =
+        serde_json::to_value(request.answer(&answering, b"other bundle").expect("answer"))
+            .expect("answer")["signature"]
+            .clone();
+    let forged: IdentityAnswer = serde_json::from_value(forged).expect("answer");
+    assert!(
+        forged.open(&request, &secret).is_err(),
+        "the answering node's signature covers the sealed payload"
+    );
+    let mut unsigned = serde_json::to_value(&answer).expect("answer");
+    unsigned["signature"] = serde_json::to_value(node.sign(b"bundle")).expect("signature");
+    let unsigned: IdentityAnswer = serde_json::from_value(unsigned).expect("answer");
+    assert!(
+        unsigned.open(&request, &secret).is_err(),
+        "a payload sealed to the request's exchange opens only when its node signed it"
     );
     let (_, other) = IdentityRequest::sign(
         &identity.provider,

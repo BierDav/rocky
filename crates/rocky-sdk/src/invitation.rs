@@ -409,8 +409,9 @@ impl Settings {
         }
         wire.verify_binding()?;
         let request = wire.request;
+        let answering = Self::node_key(vault)?;
         request.verify(
-            Self::node_key(vault)?.public_key(),
+            answering.public_key(),
             request.identity,
             (time, SKEW),
             self.database_context()?,
@@ -426,7 +427,7 @@ impl Settings {
             self.enrollment_for(vault, device, admission, Some(id), registry)?;
         Ok(Redeemed {
             answer: request
-                .answer(&serde_json::to_vec(&enrollment)?)?
+                .answer(&answering, &serde_json::to_vec(&enrollment)?)?
                 .to_bytes()?,
             changes,
             id,

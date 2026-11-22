@@ -498,6 +498,7 @@ impl Sealed {
 }
 
 impl ProvisioningBundle {
+    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn profile(&self) -> &Profile {
         &self.enrollment.profile
     }

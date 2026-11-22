@@ -2621,7 +2621,7 @@ impl Node {
         let (target, peer) = match request {
             PeerRequest::Identity(IdentityEnrollment::Invited(invited)) => {
                 let issuer = invited.request.audience();
-                if issuer != upstream && !settings.issuers.contains(&issuer) {
+                if !settings.issuers.contains(&issuer) {
                     return Err(refused(
                         "the invitation names an issuer this relay does not know",
                     ));

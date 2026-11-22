@@ -980,17 +980,22 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
             time,
         )
     };
+    let wider: Profile = serde_json::from_value(
+        serde_json::json!({"kind": "writer", "scopes": ["items", "notes"]}),
+    )?;
     let issued = open(&mut book, profile.clone())?;
     let spare = open(&mut book, profile.clone())?;
+    let conflicting = open(&mut book, wider.clone())?;
     node.replica
         .put_authority_state(AUTHORITY_INVITATIONS_KEY, &book.to_bytes()?, time)
         .await?;
     let audience = Settings::node_key(&node.vault)?.public_key();
     let database = settings.database_context()?;
-    let ask = |key: &PrivateKey| -> Result<InvitedEnrollmentRequest, Failure> {
+    let ask_for = |key: &PrivateKey, invitation: crate::InvitationId| {
         let (request, _) = IdentityRequest::sign(&person, key, audience, now()?, database)?;
-        Ok(InvitedEnrollmentRequest::sign(request, issued.id.0, key)?)
+        Ok::<_, Failure>(InvitedEnrollmentRequest::sign(request, invitation.0, key)?)
     };
+    let ask = |key: &PrivateKey| ask_for(key, issued.id);
     let joiner = PrivateKey::new();
     let mut substituted = ask(&joiner)?;
     substituted.invitation = spare.id.0;
@@ -1016,6 +1021,12 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
         other.downcast_ref::<crate::InvitationRefusal>(),
         Some(&crate::InvitationRefusal::Used)
     );
+    assert!(
+        node.answer_invitation(ask_for(&PrivateKey::new(), conflicting.id)?)
+            .await
+            .is_err(),
+        "an invitation issued before the identity was admitted keeps the admitted profile"
+    );
     let held = Book::read(&node.replica).await?.listed(now()?);
     let redeemer = |id: crate::InvitationId| {
         held.iter()
@@ -1024,6 +1035,7 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
     };
     assert_eq!(redeemer(issued.id), Some(Some(joiner.public_key())));
     assert_eq!(redeemer(spare.id), Some(None));
+    assert_eq!(redeemer(conflicting.id), Some(None));
     let snapshot = node.settings_snapshot().await;
     let recorded = node.registry(&snapshot).await?;
     let admitted = recorded
@@ -1032,9 +1044,6 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
         .ok_or("the invited identity is not admitted")?;
     assert_eq!(admitted.invitation, Some(issued.id));
     assert_eq!(admitted.profile, Some(profile));
-    let wider: Profile = serde_json::from_value(
-        serde_json::json!({"kind": "writer", "scopes": ["items", "notes"]}),
-    )?;
     assert!(
         settings
             .invite(

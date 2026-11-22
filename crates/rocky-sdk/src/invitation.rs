@@ -316,6 +316,20 @@ impl Invite {
         Ok(invite)
     }
 }
+fn keeps_recorded_profile(
+    registry: &Registry,
+    identity: &PublicKey,
+    profile: &Profile,
+) -> Result<(), Failure> {
+    if registry
+        .get(identity)
+        .and_then(crate::registry::IdentityRecord::profile)
+        .is_some_and(|held| held != profile)
+    {
+        return Err("the identity already holds another profile in this database".into());
+    }
+    Ok(())
+}
 pub(crate) fn check_uri(uri: &str) -> Result<(), Failure> {
     Invite::parse(uri).map(drop)
 }
@@ -358,13 +372,7 @@ impl Settings {
         if self.revoked_identity(&identity, registry) {
             return Err("the identity was revoked".into());
         }
-        if registry
-            .get(&identity)
-            .and_then(crate::registry::IdentityRecord::profile)
-            .is_some_and(|held| *held != profile)
-        {
-            return Err("the identity already holds another profile in this database".into());
-        }
+        keeps_recorded_profile(registry, &identity, &profile)?;
         if identity == self.identity || registry.trusted.contains_key(&identity) {
             return Err(
                 "a trusted identity links its nodes instead of accepting an invitation".into(),
@@ -413,6 +421,7 @@ impl Settings {
             node: request.node,
         };
         let admission = book.redeem(id, device, time)?;
+        keeps_recorded_profile(registry, &device.identity, &admission.0)?;
         let (enrollment, changes) =
             self.enrollment_for(vault, device, admission, Some(id), registry)?;
         Ok(Redeemed {

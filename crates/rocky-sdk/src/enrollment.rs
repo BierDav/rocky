@@ -454,9 +454,15 @@ pub(crate) struct ProvisioningBundle {
     identity_key: String,
     enrollment: Box<Enrollment>,
 }
+pub(crate) struct EnrollingIssuer {
+    pub(crate) publisher: PublicKey,
+    pub(crate) database: rocky_credentials::DatabaseContext,
+    pub(crate) routes: Vec<Route>,
+    pub(crate) via_custody: bool,
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Enrollment {
+pub(crate) struct Enrollment {
     mesh: MeshId,
     domain: DomainId,
     record: crate::tip_schemas::Record,
@@ -2042,9 +2048,41 @@ impl Settings {
         vault: &Vault,
         routes: Vec<Route>,
         via_custody: bool,
-        (profile, label): (Profile, Option<Vec<u8>>),
+        admission: (Profile, Option<Vec<u8>>),
         registry: &Registry,
     ) -> Result<((String, PublicKey, PublicKey), Changes), Failure> {
+        let provisioned_node = PrivateKey::from_bytes(&rocky_platform::entropy::random());
+        let provisioned_identity = IdentityKey::from_secret(rocky_platform::entropy::random());
+        let device = NodeKeys {
+            identity: provisioned_identity.public_key(),
+            node: provisioned_node.public_key(),
+        };
+        let (enrollment, changes) =
+            self.enrollment_for(vault, device, admission, None, registry)?;
+        let bundle = ProvisioningBundle {
+            v: PROVISION_VERSION,
+            routes,
+            publisher: self.publisher,
+            database: self.database_context()?,
+            via_custody,
+            node_key: HEXLOWER.encode(provisioned_node.as_bytes()),
+            identity_key: HEXLOWER.encode(&provisioned_identity.secret()),
+            enrollment: Box::new(enrollment),
+        };
+        let uri = format!(
+            "rocky://provision/{}",
+            BASE64URL_NOPAD.encode(&serde_json::to_vec(&bundle)?)
+        );
+        Ok(((uri, device.node, device.identity), changes))
+    }
+    pub(crate) fn enrollment_for(
+        &mut self,
+        vault: &Vault,
+        device: NodeKeys,
+        (profile, label): (Profile, Option<Vec<u8>>),
+        invitation: Option<String>,
+        registry: &Registry,
+    ) -> Result<(Enrollment, Changes), Failure> {
         if label
             .as_ref()
             .is_some_and(|label| label.len() > registry::MAX_LABEL)
@@ -2053,13 +2091,13 @@ impl Settings {
         }
         self.check_profile(&profile)?;
         self.issuing("provisions devices")?;
-        if registry.identities() >= registry::MAX_IDENTITIES {
+        if self.revoked_node(&device, registry) {
+            return Err("the node or its identity was revoked".into());
+        }
+        if registry.full_for(&device.identity) {
             return Err(Box::new(RegistryFull));
         }
-        let provisioned_node = PrivateKey::from_bytes(&rocky_platform::entropy::random());
-        let provisioned_node_pub = provisioned_node.public_key();
-        let provisioned_identity = IdentityKey::from_secret(rocky_platform::entropy::random());
-        let provisioned_identity_pub = provisioned_identity.public_key();
+        let known = registry.get(&device.identity);
         let domain = self.domain()?;
         let issuer = PrivateKey::from_bytes(&vault.get("node")?).public_key();
         let node = Self::node_key(vault)?;
@@ -2070,13 +2108,16 @@ impl Settings {
         let issued = self.issue(
             &authority,
             &domain,
-            provisioned_identity_pub,
+            device.identity,
             grants.clone(),
             profile.issues(),
         )?;
         let mut changes = Changes::default();
+        let other_profile_replaces_record = known
+            .and_then(registry::IdentityRecord::profile)
+            .is_some_and(|known| *known != profile);
         changes.admitted(
-            &provisioned_identity_pub,
+            &device.identity,
             &registry::Admitted {
                 kind: registry::Kind::Paired,
                 profile: Some(profile.clone()),
@@ -2087,32 +2128,27 @@ impl Settings {
                     .origin
                     .map(|origin| origin.identity),
                 enrolled: time,
-                invitation: None,
+                invitation,
                 single_use: false,
             },
-            false,
+            other_profile_replaces_record,
         )?;
         if let Some(label) = &label {
-            changes.label(&provisioned_identity_pub, label)?;
+            changes.label(&device.identity, label)?;
         }
         changes.capability(
-            &provisioned_identity_pub,
+            &device.identity,
             registry::Capability {
                 id: issued.id()?,
                 expires: issued.capability.expires,
             },
-            None,
+            known,
         )?;
         let keys = self.keys_for(vault, &domain, &grants)?;
         let database = self.database_context()?;
-        crate::reset::admit_after_resets(
-            &mut self.revocations,
-            &node,
-            database,
-            provisioned_node_pub,
-        )?;
+        crate::reset::admit_after_resets(&mut self.revocations, &node, database, device.node)?;
         let enrollment = Enrollment {
-            groups: self.groups_for(vault, provisioned_node_pub, &issued.capability, false)?,
+            groups: self.groups_for(vault, device.node, &issued.capability, false)?,
             naming: naming_for(vault, &profile)?,
             naming_escrow: match profile {
                 Profile::Custody { .. } if self.kind()?.is_personal() => {
@@ -2139,26 +2175,9 @@ impl Settings {
             chain: links.clone(),
             ttl: self.ttl,
             profile,
-            issuers: self.issuer_contacts(&[provisioned_node_pub])?,
+            issuers: self.issuer_contacts(&[device.node])?,
         };
-        let bundle = ProvisioningBundle {
-            v: PROVISION_VERSION,
-            routes,
-            publisher: self.publisher,
-            database,
-            via_custody,
-            node_key: HEXLOWER.encode(provisioned_node.as_bytes()),
-            identity_key: HEXLOWER.encode(&provisioned_identity.secret()),
-            enrollment: Box::new(enrollment),
-        };
-        let uri = format!(
-            "rocky://provision/{}",
-            BASE64URL_NOPAD.encode(&serde_json::to_vec(&bundle)?)
-        );
-        Ok((
-            (uri, provisioned_node_pub, provisioned_identity_pub),
-            changes,
-        ))
+        Ok((enrollment, changes))
     }
     fn check_profile(&self, profile: &Profile) -> Result<(), Failure> {
         let domain = self.domain()?;
@@ -2837,27 +2856,47 @@ impl Settings {
         single_use: bool,
     ) -> Result<(Self, Vault, Option<String>), Failure> {
         let bundle = ProvisioningBundle::parse(provisioning)?;
-        let enrollment = *bundle.enrollment;
+        let installation = HEXLOWER.encode(&rocky_platform::entropy::random::<32>());
+        let vault = Vault::new(store.clone(), &installation);
+        vault.put("node", &hex32(&bundle.node_key)?)?;
+        vault.put("transport", &rocky_platform::entropy::random::<32>())?;
+        let identity_key = IdentityKey::from_secret(hex32(&bundle.identity_key)?);
+        let phrase = (!single_use).then(|| identity_key.phrase());
+        let settings = Self::install_enrollment(
+            schema,
+            (installation, &vault),
+            EnrollingIssuer {
+                publisher: bundle.publisher,
+                database: bundle.database,
+                routes: bundle.routes,
+                via_custody: bundle.via_custody,
+            },
+            *bundle.enrollment,
+            (Arc::new(identity_key), single_use),
+        )?;
+        Ok((settings, vault, phrase))
+    }
+    pub(crate) fn install_enrollment(
+        schema: &Schema,
+        (installation, vault): (String, &Vault),
+        issuing: EnrollingIssuer,
+        enrollment: Enrollment,
+        (provider, single_use): (Arc<dyn IdentityProvider>, bool),
+    ) -> Result<Self, Failure> {
         enrollment.record.bytes()?;
-        if enrollment.mesh != bundle.database.scope.mesh
-            || enrollment.domain != bundle.database.scope.domain
+        if enrollment.mesh != issuing.database.scope.mesh
+            || enrollment.domain != issuing.database.scope.domain
         {
             return Err("enrollment belongs to another database".into());
         }
-        if context(schema, bundle.database) != context(&enrollment.record.schema, bundle.database) {
+        if context(schema, issuing.database) != context(&enrollment.record.schema, issuing.database)
+        {
             return Err("application mismatch".into());
         }
-        enrollment.revocations.verify_in(bundle.database)?;
-        let installation = HEXLOWER.encode(&rocky_platform::entropy::random::<32>());
-        let vault = Vault::new(store.clone(), &installation);
-        let node_secret = hex32(&bundle.node_key)?;
-        vault.put("node", &node_secret)?;
-        vault.put("transport", &rocky_platform::entropy::random::<32>())?;
-        let identity_key = IdentityKey::from_secret(hex32(&bundle.identity_key)?);
-        let identity = identity_key.public_key();
-        let phrase = (!single_use).then(|| identity_key.phrase());
+        enrollment.revocations.verify_in(issuing.database)?;
+        let identity = provider.public_key()?;
         let issuer = Contact {
-            routes: bundle.routes,
+            routes: issuing.routes,
         };
         let mut settings = Settings {
             version: VERSION,
@@ -2870,7 +2909,7 @@ impl Settings {
             bootstrap: Some(enrollment.bootstrap),
             mesh: enrollment.mesh,
             domain: enrollment.domain,
-            publisher: bundle.publisher,
+            publisher: issuing.publisher,
             identity,
             single_use,
             genesis: enrollment.genesis,
@@ -2889,13 +2928,13 @@ impl Settings {
             contact_meta: BTreeMap::new(),
             peers: BTreeMap::from([(
                 enrollment.issuer,
-                if bundle.via_custody {
+                if issuing.via_custody {
                     Contact::default()
                 } else {
                     issuer.clone()
                 },
             )]),
-            enrollment_routes: if bundle.via_custody {
+            enrollment_routes: if issuing.via_custody {
                 BTreeMap::from([(enrollment.issuer, issuer)])
             } else {
                 BTreeMap::new()
@@ -2936,17 +2975,15 @@ impl Settings {
         }
         let mut links = enrollment.chain.clone();
         links.0.push(enrollment.capability.clone());
-        let provider: Arc<dyn IdentityProvider> = Arc::new(identity_key);
-        settings.credentials = crate::identities::with_identity(provider, || {
-            settings.certify(&vault, links, &domain)
-        })?;
+        settings.credentials =
+            crate::identities::with_identity(provider, || settings.certify(vault, links, &domain))?;
         for (name, scope) in domain.scopes() {
             if !reads(&grants, scope) {
                 continue;
             }
             let epochs = enrollment.keys.get(name).ok_or("missing reader key")?;
             for (epoch, key) in epochs {
-                settings.hold(&vault, name, *epoch, &hex32(key)?)?;
+                settings.hold(vault, name, *epoch, &hex32(key)?)?;
             }
             if !settings.keys.contains_key(name) {
                 return Err("missing reader key".into());
@@ -2954,10 +2991,10 @@ impl Settings {
         }
         if settings.profile.issues() {
             settings.authority = Some(Issuing::default());
-            hold_naming(&vault, enrollment.naming.as_deref())?;
+            hold_naming(vault, enrollment.naming.as_deref())?;
             settings.tombstone_held_statements()?;
         }
-        settings.adopt_groups(&vault, &enrollment.groups)?;
+        settings.adopt_groups(vault, &enrollment.groups)?;
         if let Some(topic) = &enrollment.discovery {
             if !matches!(settings.profile, Profile::Custody { .. })
                 || !settings.kind()?.is_personal()
@@ -2967,8 +3004,8 @@ impl Settings {
             vault.put(crate::personal::DISCOVERY_ROLE, &hex32(topic)?)?;
         }
         crate::escrow::keep_naming(&mut settings, enrollment.naming_escrow)?;
-        settings.learn_issuers(&vault, &enrollment.issuers);
-        Ok((settings, vault, phrase))
+        settings.learn_issuers(vault, &enrollment.issuers);
+        Ok(settings)
     }
 }
 impl Settings {

@@ -179,6 +179,22 @@ impl Session {
         self.send(|reply| Request::Provision(profile, label, reply))
             .await
     }
+    pub async fn invite(
+        &self,
+        identity: PublicKey,
+        profile: GrantProfile,
+        terms: crate::InviteTerms,
+    ) -> Result<crate::Invitation, Failure> {
+        self.send(|reply| Request::Invite(identity, profile, terms, reply))
+            .await
+    }
+    pub async fn withdraw_invitation(&self, id: crate::InvitationId) -> Result<(), Failure> {
+        self.send(|reply| Request::WithdrawInvitation(id, reply))
+            .await
+    }
+    pub async fn open_invitations(&self) -> Result<Vec<crate::OpenInvitation>, Failure> {
+        self.send(Request::OpenInvitations).await
+    }
     pub async fn renew(&self) -> Result<(), Failure> {
         self.send(Request::Renew).await
     }

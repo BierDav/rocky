@@ -39,6 +39,7 @@ pub(crate) enum Kind {
     Tips,
     Claims,
     Provision,
+    Invitations,
     Renew,
     Discovered,
     ConfirmLink,
@@ -210,6 +211,14 @@ pub(crate) enum Request {
         Option<Vec<u8>>,
         Reply<crate::Provisioning>,
     ),
+    Invite(
+        rocky_credentials::PublicKey,
+        crate::GrantProfile,
+        crate::InviteTerms,
+        Reply<crate::Invitation>,
+    ),
+    WithdrawInvitation(crate::InvitationId, Reply<()>),
+    OpenInvitations(Reply<Vec<crate::OpenInvitation>>),
     Renew(Reply<()>),
     Discovered(Reply<crate::Discovered>),
     ConfirmLink(rocky_credentials::PublicKey, String, Reply<()>),
@@ -336,6 +345,9 @@ impl Request {
             Self::HeldClaims(..) => Kind::Claims,
             Self::RevokeClaims(..) => Kind::Claims,
             Self::Provision(..) => Kind::Provision,
+            Self::Invite(..) | Self::WithdrawInvitation(..) | Self::OpenInvitations(..) => {
+                Kind::Invitations
+            }
             Self::Renew(..) => Kind::Renew,
             Self::Discovered(..) => Kind::Discovered,
             Self::ConfirmLink(..) => Kind::ConfirmLink,
@@ -507,6 +519,15 @@ impl Request {
                 let _ = reply.send(Err(error));
             }
             Self::Provision(_, _, reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::Invite(_, _, _, reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::WithdrawInvitation(_, reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::OpenInvitations(reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::Renew(reply) => {

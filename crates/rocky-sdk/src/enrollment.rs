@@ -380,7 +380,7 @@ pub struct Contact {
     pub routes: Vec<Route>,
 }
 impl Contact {
-    fn checked(routes: Vec<Route>) -> Result<Self, Failure> {
+    pub(crate) fn checked(routes: Vec<Route>) -> Result<Self, Failure> {
         let valid = |route: &Route| {
             (1..=32).contains(&route.transport.len())
                 && (1..=MAX_ADDRESS).contains(&route.address.len())
@@ -482,6 +482,11 @@ pub(crate) struct Enrollment {
     ttl: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     issuers: Vec<String>,
+}
+impl Enrollment {
+    pub(crate) fn issuer(&self) -> PublicKey {
+        self.issuer
+    }
 }
 type Keys = BTreeMap<String, Vec<(rocky_core::KeyEpoch, String)>>;
 #[derive(Serialize, Deserialize)]
@@ -2080,7 +2085,7 @@ impl Settings {
         vault: &Vault,
         device: NodeKeys,
         (profile, label): (Profile, Option<Vec<u8>>),
-        invitation: Option<String>,
+        invitation: Option<crate::InvitationId>,
         registry: &Registry,
     ) -> Result<(Enrollment, Changes), Failure> {
         if label
@@ -2179,7 +2184,7 @@ impl Settings {
         };
         Ok((enrollment, changes))
     }
-    fn check_profile(&self, profile: &Profile) -> Result<(), Failure> {
+    pub(crate) fn check_profile(&self, profile: &Profile) -> Result<(), Failure> {
         let domain = self.domain()?;
         profile.grants(&domain.resources())?;
         grants_of(profile, &domain)?;

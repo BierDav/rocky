@@ -9,6 +9,7 @@ mod exchange;
 use exchange::{Exchanged, PeerWork};
 mod health;
 mod held;
+mod invitations;
 mod linking;
 mod live_links;
 mod membership;
@@ -79,7 +80,7 @@ fn refused(error: impl std::fmt::Display) -> Failure {
     Box::new(Refused(error.to_string()))
 }
 fn named(error: Failure) -> Failure {
-    if error.is::<crate::registry::RegistryFull>() {
+    if error.is::<crate::registry::RegistryFull>() || error.is::<crate::InvitationRefusal>() {
         error
     } else {
         refused(error)
@@ -733,17 +734,7 @@ impl Node {
             return Err(refused("device label exceeds 256 bytes"));
         }
         self.settings.lock().await.admits(Some(&profile))?;
-        let attached = self.network.read().await;
-        let routes = match attached.as_deref() {
-            Some(link) => match link.transport.address().await {
-                Ok(address) if !address.is_empty() => vec![crate::enrollment::Route {
-                    transport: link.transport.kind().into(),
-                    address,
-                }],
-                _ => Vec::new(),
-            },
-            None => Vec::new(),
-        };
+        let routes = self.own_routes().await;
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let bootstrap = self.enrollment_bootstrap().await?;
         let held = self.replica.revocations().await;
@@ -780,6 +771,20 @@ impl Node {
             profile,
             sequence,
         })
+    }
+
+    async fn own_routes(&self) -> Vec<crate::enrollment::Route> {
+        let attached = self.network.read().await;
+        match attached.as_deref() {
+            Some(link) => match link.transport.address().await {
+                Ok(address) if !address.is_empty() => vec![crate::enrollment::Route {
+                    transport: link.transport.kind().into(),
+                    address,
+                }],
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        }
     }
 
     async fn renew_now(&self) -> Result<(), Failure> {
@@ -2524,6 +2529,9 @@ impl Node {
                 settings.learn_revocations(&self.replica.revocations().await)?;
                 Ok(PeerReply::Identity(self.answer_link(&settings, request)?))
             }
+            PeerRequest::Identity(IdentityEnrollment::Invited(request)) => Ok(PeerReply::Identity(
+                Box::pin(self.answer_invitation(request)).await?,
+            )),
             PeerRequest::Identity(IdentityEnrollment::PersonalHello(hello)) => {
                 Ok(PeerReply::Identity(IdentityReply::PersonalChallenge(
                     Box::new(self.answer_personal_hello(hello).await?),
@@ -2720,6 +2728,8 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
         (crate::ErrorKind::PublisherRequired, false)
     } else if error.is::<crate::registry::RegistryFull>() {
         (crate::ErrorKind::RegistryFull, false)
+    } else if let Some(refusal) = error.downcast_ref::<crate::InvitationRefusal>() {
+        (crate::ErrorKind::Invitation(*refusal), false)
     } else if error.is::<crate::enrollment::RevocationSetFull>() {
         (crate::ErrorKind::RevocationSetFull, false)
     } else if error.is::<Refused>() {

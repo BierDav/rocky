@@ -94,10 +94,10 @@ pub use passkey::{
 };
 pub use peer::PeerId;
 pub use peer_rpc::{
-    EpochRequest, IdentityEnrollment, IdentityEnrollmentRequest, IdentityReply, LinkEnrollment,
-    MAX_MESSAGE as MAX_PEER_RPC_MESSAGE, PeerAdmission, PeerError, PeerReply, PeerReplyFrame,
-    PeerRequest, PeerRequestFrame, PeerResolutionProof, PeerResolutionRequest, PeerTrust,
-    StagedCloseStatus, UnlinkReply, VERSION as PEER_RPC_VERSION,
+    EpochRequest, IdentityEnrollment, IdentityEnrollmentRequest, IdentityReply,
+    InvitedEnrollmentRequest, LinkEnrollment, MAX_MESSAGE as MAX_PEER_RPC_MESSAGE, PeerAdmission,
+    PeerError, PeerReply, PeerReplyFrame, PeerRequest, PeerRequestFrame, PeerResolutionProof,
+    PeerResolutionRequest, PeerTrust, StagedCloseStatus, UnlinkReply, VERSION as PEER_RPC_VERSION,
 };
 pub use personal::{
     DatabaseKind, MAX_PERSONAL_DEVICES, PersonalAct, PersonalAnswer, PersonalAudience,

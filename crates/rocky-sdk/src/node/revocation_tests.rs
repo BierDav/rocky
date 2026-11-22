@@ -949,3 +949,79 @@ fn revocation_keys_and_their_copy_each_meet_the_key_provider_contract() -> Resul
     rocky_credentials::testing::key_provider_contract(&keys.copy()?);
     Ok(())
 }
+
+#[tokio::test]
+async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_can()
+-> Result<(), Failure> {
+    use crate::invitation::{AUTHORITY_INVITATIONS_KEY, Book};
+    use rocky_credentials::{IdentityKey, IdentityRequest, InvitedEnrollmentRequest};
+    let directory = tempfile::tempdir()?;
+    let node = issuer(directory.path(), Arc::new(Keys::default())).await?;
+    let person = IdentityKey::generate();
+    let settings = node.settings.lock().await.clone();
+    let registry = node.registry(&settings).await?;
+    let profile: Profile =
+        serde_json::from_value(serde_json::json!({"kind": "writer", "scopes": ["items"]}))?;
+    let mut book = Book::read(&node.replica).await?;
+    let time = now()?;
+    let issued = settings.invite(
+        (
+            &node.vault,
+            vec![crate::enrollment::Route {
+                transport: "memory".into(),
+                address: "issuer".into(),
+            }],
+        ),
+        &mut book,
+        (
+            person.public_key(),
+            profile.clone(),
+            &crate::InviteTerms::default(),
+        ),
+        &registry,
+        time,
+    )?;
+    node.replica
+        .put_authority_state(AUTHORITY_INVITATIONS_KEY, &book.to_bytes()?, time)
+        .await?;
+    let audience = Settings::node_key(&node.vault)?.public_key();
+    let database = settings.database_context()?;
+    let ask = |key: &PrivateKey| -> Result<InvitedEnrollmentRequest, Failure> {
+        let (request, _) = IdentityRequest::sign(&person, key, audience, now()?, database)?;
+        Ok(InvitedEnrollmentRequest {
+            request,
+            invitation: issued.id.0,
+        })
+    };
+    let joiner = PrivateKey::new();
+    for attempt in ["first answer", "the answer the joiner lost, again"] {
+        assert!(
+            matches!(
+                node.answer_invitation(ask(&joiner)?).await?,
+                IdentityReply::Enrolled(_)
+            ),
+            "{attempt}"
+        );
+    }
+    let other = node
+        .answer_invitation(ask(&PrivateKey::new())?)
+        .await
+        .err()
+        .ok_or("a second node redeemed the invitation")?;
+    assert_eq!(
+        other.downcast_ref::<crate::InvitationRefusal>(),
+        Some(&crate::InvitationRefusal::Used)
+    );
+    let held = Book::read(&node.replica).await?.listed(now()?);
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].redeemed_by, Some(joiner.public_key()));
+    let snapshot = node.settings_snapshot().await;
+    let recorded = node.registry(&snapshot).await?;
+    let admitted = recorded
+        .get(&person.public_key())
+        .and_then(|record| record.admitted.as_ref())
+        .ok_or("the invited identity is not admitted")?;
+    assert_eq!(admitted.invitation, Some(issued.id));
+    assert_eq!(admitted.profile, Some(profile));
+    Ok(())
+}

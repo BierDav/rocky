@@ -196,6 +196,15 @@ impl Node {
             Request::Provision(profile, label, reply) => {
                 let _ = reply.send(self.provision(profile, label).await);
             }
+            Request::Invite(identity, profile, terms, reply) => {
+                let _ = reply.send(self.invite(identity, profile, terms).await);
+            }
+            Request::WithdrawInvitation(id, reply) => {
+                let _ = reply.send(self.withdraw_invitation(id).await);
+            }
+            Request::OpenInvitations(reply) => {
+                let _ = reply.send(self.open_invitations().await);
+            }
             Request::Renew(reply) => {
                 let _ = reply.send(self.renew_now().await);
             }

@@ -25,6 +25,7 @@ mod generation;
 mod groups;
 mod identities;
 mod inspection;
+mod invitation;
 mod membership;
 mod mesh;
 mod node;
@@ -93,6 +94,10 @@ impl std::fmt::Display for CoordinatorNotConfigured {
     }
 }
 impl std::error::Error for CoordinatorNotConfigured {}
+pub use invitation::{
+    DEFAULT_INVITATION_VALIDITY, Invitation, InvitationId, InvitationRefusal, InviteTerms,
+    MAX_OPEN_INVITATIONS, OpenInvitation,
+};
 pub use rocky_core::CoordinationError;
 pub use rocky_core::replay::{DropReason, TransactionOutcome};
 pub use rocky_core::{

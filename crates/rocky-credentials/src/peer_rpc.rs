@@ -19,6 +19,12 @@ pub struct IdentityEnrollmentRequest {
     pub code: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvitedEnrollmentRequest {
+    pub request: IdentityRequest,
+    pub invitation: Commitment,
+}
+#[derive(Serialize, Deserialize)]
 #[expect(
     clippy::large_enum_variant,
     reason = "one request per RPC, the shared one as large as its siblings"
@@ -27,6 +33,7 @@ pub enum IdentityEnrollment {
     Shared(IdentityEnrollmentRequest),
     PersonalHello(PersonalHello),
     Personal(Box<PersonalAuthorization>),
+    Invited(InvitedEnrollmentRequest),
 }
 #[derive(Serialize, Deserialize)]
 pub enum LinkEnrollment {
@@ -160,7 +167,7 @@ pub enum StagedCloseStatus {
     },
 }
 
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 pub const MAX_MESSAGE: usize = 3 * crate::MAX_REVOCATION_SET_BYTES;
 
 #[derive(Serialize, Deserialize)]
@@ -179,6 +186,7 @@ pub enum PeerRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PeerTrust {
     Public,
+    Invitation,
     Enrolled,
     Identity,
     Root,
@@ -194,6 +202,9 @@ impl PeerRequest {
     pub fn requirements(&self) -> (PeerTrust, PeerAdmission) {
         match self {
             Self::Renew(_) | Self::Epochs(_) => (PeerTrust::Enrolled, PeerAdmission::Enrollment),
+            Self::Identity(IdentityEnrollment::Invited(_)) => {
+                (PeerTrust::Invitation, PeerAdmission::Enrollment)
+            }
             Self::Identity(IdentityEnrollment::Personal(_))
             | Self::LinkEnroll(LinkEnrollment::Personal(_) | LinkEnrollment::PersonalCustody(_)) => {
                 (PeerTrust::Root, PeerAdmission::Membership)
@@ -219,6 +230,10 @@ impl PeerRequest {
                     PeerReply::Identity(
                         IdentityReply::ConfirmationRequired | IdentityReply::Enrolled(_)
                     )
+                )
+                | (
+                    Self::Identity(IdentityEnrollment::Invited(_)),
+                    PeerReply::Identity(IdentityReply::Enrolled(_))
                 )
                 | (
                     Self::Identity(IdentityEnrollment::PersonalHello(_)),
@@ -572,5 +587,47 @@ mod tests {
             assert_eq!(error.message, "peer refused");
             assert_eq!(error.retryable, retryable);
         }
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn an_invited_enrollment_is_an_invitation_admission_answered_only_by_an_enrollment() {
+        let identity = PrivateKey::from_bytes(&[5; 32]);
+        let node = PrivateKey::from_bytes(&[6; 32]);
+        let issuer = PrivateKey::from_bytes(&[7; 32]);
+        let database = crate::DatabaseContext {
+            publisher: issuer.public_key(),
+            scope: rocky_core::Scope {
+                mesh: rocky_core::MeshId([1; 16]),
+                app: rocky_core::AppId([2; 16]),
+                domain: rocky_core::DomainId([3; 16]),
+            },
+        };
+        let (signed, _) =
+            IdentityRequest::sign(&identity, &node, issuer.public_key(), 1_000, database).unwrap();
+        let request =
+            PeerRequest::Identity(IdentityEnrollment::Invited(InvitedEnrollmentRequest {
+                request: signed,
+                invitation: [9; 32],
+            }));
+        assert_eq!(
+            request.requirements(),
+            (PeerTrust::Invitation, PeerAdmission::Enrollment)
+        );
+        assert!(request.accepts(&PeerReply::Identity(IdentityReply::Enrolled(Vec::new()))));
+        assert!(!request.accepts(&PeerReply::Identity(IdentityReply::ConfirmationRequired)));
+        let frame = PeerRequestFrame::from_bytes(&request.to_bytes().unwrap()).unwrap();
+        let PeerRequest::Identity(IdentityEnrollment::Invited(carried)) = frame.request else {
+            panic!("the invited enrollment changed kind on the wire");
+        };
+        assert_eq!(carried.invitation, [9; 32]);
+        carried
+            .request
+            .verify(
+                issuer.public_key(),
+                identity.public_key(),
+                (1_000, 0),
+                database,
+            )
+            .unwrap();
     }
 }

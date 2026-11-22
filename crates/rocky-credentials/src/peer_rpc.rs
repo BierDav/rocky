@@ -1,5 +1,5 @@
 use crate::{
-    Error, IdentityRequest, PairRequest, PersonalAnswer, PersonalAuthorization, PersonalChallenge,
+    Error, IdentityRequest, PersonalAnswer, PersonalAuthorization, PersonalChallenge,
     PersonalHello, PersonalPublication, PrivateKey, PublicKey, RenewRequest, RevocationSet,
     SealFinality, Signature, SignedCapability, SignedSeal, denied, signing_bytes,
 };
@@ -160,12 +160,11 @@ pub enum StagedCloseStatus {
     },
 }
 
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 pub const MAX_MESSAGE: usize = 3 * crate::MAX_REVOCATION_SET_BYTES;
 
 #[derive(Serialize, Deserialize)]
 pub enum PeerRequest {
-    Pair(PairRequest),
     Renew(RenewRequest),
     Epochs(EpochRequest),
     Policy,
@@ -180,7 +179,6 @@ pub enum PeerRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PeerTrust {
     Public,
-    Invitation,
     Enrolled,
     Identity,
     Root,
@@ -195,7 +193,6 @@ pub enum PeerAdmission {
 impl PeerRequest {
     pub fn requirements(&self) -> (PeerTrust, PeerAdmission) {
         match self {
-            Self::Pair(_) => (PeerTrust::Invitation, PeerAdmission::Enrollment),
             Self::Renew(_) | Self::Epochs(_) => (PeerTrust::Enrolled, PeerAdmission::Enrollment),
             Self::Identity(IdentityEnrollment::Personal(_))
             | Self::LinkEnroll(LinkEnrollment::Personal(_) | LinkEnrollment::PersonalCustody(_)) => {
@@ -214,8 +211,7 @@ impl PeerRequest {
     pub fn accepts(&self, reply: &PeerReply) -> bool {
         matches!(
             (self, reply),
-            (Self::Pair(_), PeerReply::Pair(_))
-                | (Self::Renew(_), PeerReply::Renew(_))
+            (Self::Renew(_), PeerReply::Renew(_))
                 | (Self::Epochs(_), PeerReply::Epochs(_))
                 | (Self::Policy, PeerReply::Policy(_))
                 | (
@@ -250,7 +246,6 @@ pub enum IdentityReply {
 }
 #[derive(Serialize, Deserialize)]
 pub enum PeerReply {
-    Pair(#[serde(with = "serde_bytes")] Vec<u8>),
     Renew(#[serde(with = "serde_bytes")] Vec<u8>),
     Epochs(#[serde(with = "serde_bytes")] Vec<u8>),
     Policy(RevocationSet),

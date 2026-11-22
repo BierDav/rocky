@@ -1,8 +1,7 @@
 use crate::{
     Attestation, Authority, Capability, CredentialChain, Error, IdentityProvider,
-    MAX_CREDENTIAL_BYTES, MAX_ENDORSEMENT_BYTES, MAX_REVOCATION_SET_BYTES, PrivateKey, Profile,
-    PublicKey, Purpose, RevocationSet, SignedCapability, decode_bounded, denied, encode,
-    signing_bytes,
+    MAX_CREDENTIAL_BYTES, MAX_ENDORSEMENT_BYTES, MAX_REVOCATION_SET_BYTES, PrivateKey, PublicKey,
+    Purpose, RevocationSet, SignedCapability, decode_bounded, denied, encode, signing_bytes,
 };
 use chacha20poly1305::{
     ChaCha20Poly1305, KeyInit,
@@ -13,11 +12,6 @@ use p2panda_core::Signature;
 use rocky_core::{Commitment, commitment};
 use serde::{Deserialize, Serialize};
 
-const WRONG_TOKENS_BEFORE_LOCK: u8 = 10;
-
-fn equal(left: &[u8], right: &[u8]) -> bool {
-    left.len() == right.len() && left.iter().zip(right).fold(0, |all, (a, b)| all | (a ^ b)) == 0
-}
 const NONCE_BYTES: usize = 12;
 const AEAD_TAG_BYTES: usize = 16;
 pub(crate) const SEAL_OVERHEAD: usize = NONCE_BYTES + AEAD_TAG_BYTES;
@@ -44,160 +38,6 @@ pub(crate) fn open(key: Commitment, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>
     ChaCha20Poly1305::new(&key.into())
         .decrypt(&nonce.into(), Payload { msg: sealed, aad })
         .map_err(|_| denied("the message was not sealed for this device"))
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Invitation {
-    digest: Commitment,
-    pub expires: u64,
-    attempts: u8,
-    consumed: Option<String>,
-    pub profile: Option<Profile>,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Admission {
-    First,
-    Retry,
-}
-impl Invitation {
-    pub fn is_open(&self, token: &[u8; 32], time: u64) -> bool {
-        self.consumed.is_none()
-            && self.attempts < WRONG_TOKENS_BEFORE_LOCK
-            && time <= self.expires
-            && commitment("rocky.credentials.invitation.v1", token) == self.digest
-    }
-
-    pub fn open(token: &[u8; 32], profile: Option<Profile>, expires: u64) -> Self {
-        Self {
-            digest: commitment("rocky.credentials.invitation.v1", token),
-            expires,
-            attempts: 0,
-            consumed: None,
-            profile,
-        }
-    }
-    pub fn admit(
-        &mut self,
-        token: &[u8; 32],
-        request: &PairRequest,
-        time: u64,
-    ) -> Result<Admission, Error> {
-        if request.version != PairRequest::VERSION || request.nonce.len() != 64 {
-            return Err(denied("invalid pairing request"));
-        }
-        if self.expires < time || self.attempts >= WRONG_TOKENS_BEFORE_LOCK {
-            return Err(denied("invitation expired or locked"));
-        }
-        if commitment("rocky.credentials.invitation.v1", token) != self.digest
-            || !equal(&request.expected(token), &request.proof)
-        {
-            self.attempts += 1;
-            return Err(denied("invalid invitation"));
-        }
-        match &self.consumed {
-            None => Ok(Admission::First),
-            Some(nonce) if *nonce == request.nonce => Ok(Admission::Retry),
-            Some(_) => Err(denied("invitation already used")),
-        }
-    }
-    pub fn claim(&mut self, request: &PairRequest) {
-        self.consumed = Some(request.nonce.clone());
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PairRequest {
-    pub version: u32,
-    pub nonce: String,
-    pub node: PublicKey,
-    pub user: PublicKey,
-    pub name: String,
-    proof: Commitment,
-    pub context: Commitment,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub routes: Vec<(String, String)>,
-}
-impl PairRequest {
-    const VERSION: u32 = 4;
-    pub fn new(
-        token: &[u8; 32],
-        nonce: String,
-        (node, user): (PublicKey, PublicKey),
-        name: String,
-        context: Commitment,
-    ) -> Self {
-        let mut request = Self {
-            version: Self::VERSION,
-            nonce,
-            node,
-            user,
-            name,
-            proof: [0; 32],
-            context,
-            routes: Vec::new(),
-        };
-        request.proof = request.expected(token);
-        request
-    }
-    pub fn with_routes(mut self, token: &[u8; 32], routes: Vec<(String, String)>) -> Self {
-        self.routes = routes;
-        self.proof = self.expected(token);
-        self
-    }
-    fn expected(&self, token: &[u8; 32]) -> Commitment {
-        let mut bound = [
-            token.as_slice(),
-            self.nonce.as_bytes(),
-            self.node.as_bytes(),
-            self.user.as_bytes(),
-            &self.context,
-        ]
-        .concat();
-        for part in std::iter::once(&self.name).chain(
-            self.routes
-                .iter()
-                .flat_map(|(transport, address)| [transport, address]),
-        ) {
-            bound.extend_from_slice(&(part.len() as u64).to_le_bytes());
-            bound.extend_from_slice(part.as_bytes());
-        }
-        commitment("rocky.credentials.pair-proof.v4", &bound)
-    }
-    fn aad(&self) -> Vec<u8> {
-        [
-            b"rocky.credentials.pairing.v4".as_slice(),
-            self.nonce.as_bytes(),
-            self.node.as_bytes(),
-            self.user.as_bytes(),
-        ]
-        .concat()
-    }
-    fn key(&self, token: &[u8; 32]) -> Commitment {
-        commitment(
-            "rocky.credentials.pair-key.v4",
-            &[token.as_slice(), self.nonce.as_bytes()].concat(),
-        )
-    }
-    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
-        encode(self)
-    }
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        decode_bounded(bytes, MAX_CREDENTIAL_BYTES)
-    }
-}
-pub fn seal_enrollment(
-    token: &[u8; 32],
-    request: &PairRequest,
-    enrollment: &[u8],
-) -> Result<Vec<u8>, Error> {
-    seal(request.key(token), &request.aad(), enrollment)
-}
-pub fn open_enrollment(
-    token: &[u8; 32],
-    request: &PairRequest,
-    sealed: &[u8],
-) -> Result<Vec<u8>, Error> {
-    open(request.key(token), &request.aad(), sealed)
 }
 
 pub struct Exchange([u8; 32]);

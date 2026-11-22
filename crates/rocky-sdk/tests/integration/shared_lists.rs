@@ -161,13 +161,13 @@ async fn checkpoint_writer(
     snap::value(issuer.session.seal(false)).await?;
     snap::value(issuer.session.compact(0)).await?;
     let invite = snap::value(
-        issuer.session.invite(
-            Some(rocky_sdk::GrantProfile::Writer {
+        issuer.session.provision(
+            rocky_sdk::GrantProfile::Writer {
                 scopes: (TABLES)
                     .into_iter()
                     .map(|scope| scope.to_string())
                     .collect(),
-            }),
+            },
             None,
         ),
     )
@@ -216,13 +216,13 @@ async fn an_unused_own_partition_prepared_before_a_seal_remains_creatable() -> R
         )
         .await?;
     let invite = snap::value(
-        issuer.session.invite(
-            Some(rocky_sdk::GrantProfile::Writer {
+        issuer.session.provision(
+            rocky_sdk::GrantProfile::Writer {
                 scopes: (TABLES)
                     .into_iter()
                     .map(|scope| scope.to_string())
                     .collect(),
-            }),
+            },
             None,
         ),
     )
@@ -364,13 +364,13 @@ async fn an_insert_author_creates_only_its_own_partition_and_shares_its_key() ->
         [json!("Base list"), json!("Member list")]
     );
     let read_invite = snap::value(
-        issuer.session.invite(
-            Some(rocky_sdk::GrantProfile::Reader {
+        issuer.session.provision(
+            rocky_sdk::GrantProfile::Reader {
                 scopes: (TABLES)
                     .into_iter()
                     .map(|scope| scope.to_string())
                     .collect(),
-            }),
+            },
             None,
         ),
     )
@@ -400,13 +400,13 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
     let issuer =
         Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
     let invitation = snap::value(
-        issuer.session.invite(
-            Some(rocky_sdk::GrantProfile::Writer {
+        issuer.session.provision(
+            rocky_sdk::GrantProfile::Writer {
                 scopes: (TABLES)
                     .into_iter()
                     .map(|scope| scope.to_string())
                     .collect(),
-            }),
+            },
             None,
         ),
     )
@@ -519,13 +519,13 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
     issuer.session.create_bookmark("main", None).await?;
     issuer.follow("main").await?;
     let invitation = snap::value(
-        issuer.session.invite(
-            Some(rocky_sdk::GrantProfile::Writer {
+        issuer.session.provision(
+            rocky_sdk::GrantProfile::Writer {
                 scopes: (TABLES)
                     .into_iter()
                     .map(|scope| scope.to_string())
                     .collect(),
-            }),
+            },
             None,
         ),
     )
@@ -567,9 +567,7 @@ async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arrivi
 
     let served = kinds(&snap::value(issuer.session.activity(0)).await?);
     for kind in [
-        "invitation_created",
-        "identity_admitted",
-        "node_linked",
+        "device_provisioned",
         "partition_created",
         "partition_shared",
     ] {
@@ -635,13 +633,13 @@ async fn compacting_releases_a_shared_lists_history_under_its_collections_policy
     issuer.session.create_bookmark("main", None).await?;
     issuer.follow("main").await?;
     let invitation = snap::value(
-        issuer.session.invite(
-            Some(rocky_sdk::GrantProfile::Writer {
+        issuer.session.provision(
+            rocky_sdk::GrantProfile::Writer {
                 scopes: (TABLES)
                     .into_iter()
                     .map(|scope| scope.to_string())
                     .collect(),
-            }),
+            },
             None,
         ),
     )
@@ -770,13 +768,13 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
     let issuer =
         Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
     let invitation = snap::value(
-        issuer.session.invite(
-            Some(rocky_sdk::GrantProfile::Writer {
+        issuer.session.provision(
+            rocky_sdk::GrantProfile::Writer {
                 scopes: (TABLES)
                     .into_iter()
                     .map(|scope| scope.to_string())
                     .collect(),
-            }),
+            },
             None,
         ),
     )
@@ -861,11 +859,8 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
             "INSERT INTO lists(id,title) VALUES(?,'Own list')",
         )
         .await?;
-    let invitation = snap::value(
-        a.session
-            .invite(Some(rocky_sdk::GrantProfile::Issuer), None),
-    )
-    .await?["uri"]
+    let invitation = snap::value(a.session.provision(rocky_sdk::GrantProfile::Issuer, None))
+        .await?["uri"]
         .as_str()
         .ok_or("uri")?
         .to_owned();
@@ -907,11 +902,8 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
     let root = support::small_directory()?;
     let hub = Arc::new(Hub::default());
     let a = Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
-    let invitation = snap::value(
-        a.session
-            .invite(Some(rocky_sdk::GrantProfile::Issuer), None),
-    )
-    .await?["uri"]
+    let invitation = snap::value(a.session.provision(rocky_sdk::GrantProfile::Issuer, None))
+        .await?["uri"]
         .as_str()
         .ok_or("uri")?
         .to_owned();
@@ -981,13 +973,13 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
         .collect();
     let invitation = snap::value(
-        issuer.session.invite(
-            Some(rocky_sdk::GrantProfile::Grants {
+        issuer.session.provision(
+            rocky_sdk::GrantProfile::Grants {
                 grants: serde_json::from_value::<Vec<rocky_sdk::credentials::Grant>>(json!(
                     grants_naming_every_table
                 ))
                 .expect("typed fixture"),
-            }),
+            },
             None,
         ),
     )
@@ -1122,13 +1114,13 @@ async fn a_full_writer_on_an_older_application_writes_after_the_migration() -> R
         .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
         .collect();
     let invitation = snap::value(
-        issuer.session.invite(
-            Some(rocky_sdk::GrantProfile::Grants {
+        issuer.session.provision(
+            rocky_sdk::GrantProfile::Grants {
                 grants: serde_json::from_value::<Vec<rocky_sdk::credentials::Grant>>(json!(
                     grants_naming_every_table
                 ))
                 .expect("typed fixture"),
-            }),
+            },
             None,
         ),
     )
@@ -1267,10 +1259,10 @@ async fn an_invited_writer_without_identity_writes_after_the_migration() -> Resu
             .set_genesis_minimum(inherited_by_migration_openings),
     )
     .await?;
-    let invitation = snap::value(issuer.session.invite(
-        Some(rocky_sdk::GrantProfile::Writer {
+    let invitation = snap::value(issuer.session.provision(
+        rocky_sdk::GrantProfile::Writer {
             scopes: TABLES.map(String::from).into(),
-        }),
+        },
         None,
     ))
     .await?["uri"]
@@ -1408,13 +1400,13 @@ async fn a_migration_update_over_more_than_max_bundle_rows_applies_and_replicate
         .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
         .collect();
     let invitation = snap::value(
-        issuer.session.invite(
-            Some(rocky_sdk::GrantProfile::Grants {
+        issuer.session.provision(
+            rocky_sdk::GrantProfile::Grants {
                 grants: serde_json::from_value::<Vec<rocky_sdk::credentials::Grant>>(json!(
                     grants_naming_every_table
                 ))
                 .expect("typed fixture"),
-            }),
+            },
             None,
         ),
     )

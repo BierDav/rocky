@@ -380,6 +380,8 @@ async fn a_reset_keeps_the_custodians_it_knows_unless_told_otherwise() -> Result
         &hub,
         &owner.invite_as(custody).await,
     )?;
+    server.sync().await.map_err(|error| error.to_string())?;
+    backup.sync().await.map_err(|error| error.to_string())?;
     let (own, server_node, backup_node) = (
         node_of(&owner).await?,
         node_of(&server).await?,

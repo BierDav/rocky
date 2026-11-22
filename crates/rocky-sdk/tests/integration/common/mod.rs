@@ -89,7 +89,12 @@ impl Device {
         let signer = external_identity(directory);
         let mut options = open(directory, Some(network));
         options.identity = Some(signer.clone());
-        Self::new(Database::join(options, invitation)?).map(|device| device.with_identity(signer))
+        let opened = Database::join(options, invitation)?;
+        let signer: Arc<dyn rocky_sdk::IdentityProvider> = match opened.identity.as_deref() {
+            Some(phrase) => Arc::new(rocky_sdk::IdentityKey::from_phrase(phrase)?),
+            None => signer,
+        };
+        Self::new(opened).map(|device| device.with_identity(signer))
     }
     pub fn open(directory: &Path, network: Option<Network>) -> Result<Self, Failure> {
         Self::new(Database::open(open(directory, network))?)
@@ -98,6 +103,9 @@ impl Device {
     pub fn with_identity(mut self, signer: Arc<dyn rocky_sdk::IdentityProvider>) -> Self {
         self.signer = Some(signer);
         self
+    }
+    pub fn signer(&self) -> Option<Arc<dyn rocky_sdk::IdentityProvider>> {
+        self.signer.clone()
     }
     pub fn root(&self) -> Arc<dyn rocky_sdk::IdentityProvider> {
         self.root_signer().expect("fixture root")
@@ -280,7 +288,7 @@ impl Device {
     }
     pub async fn invite_as(&self, profile: Value) -> String {
         self.session
-            .invitation_with(serde_json::from_value(profile).expect("profile"))
+            .provision(serde_json::from_value(profile).expect("profile"), None)
             .await
             .expect("invitation")
             .uri

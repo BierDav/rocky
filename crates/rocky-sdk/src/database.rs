@@ -54,8 +54,9 @@ pub(crate) enum Install {
         personal: Option<Box<crate::personal::Create>>,
     },
     Join {
-        invitation: String,
-        name: String,
+        provisioning: String,
+        single_use: bool,
+        phrase: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     },
     Supplied(Box<Supplied>),
     Identity {
@@ -90,7 +91,7 @@ impl Install {
     fn unwinds_on_failure(&self) -> bool {
         matches!(
             self,
-            Self::Create { .. } | Self::SignIn(_) | Self::Supplied(_)
+            Self::Create { .. } | Self::Join { .. } | Self::SignIn(_) | Self::Supplied(_)
         )
     }
     fn ends_personal_intent(&self) -> bool {
@@ -104,7 +105,10 @@ impl Install {
         )
     }
     fn discards_secrets(&self) -> bool {
-        matches!(self, Self::Create { personal: None, .. })
+        matches!(
+            self,
+            Self::Create { personal: None, .. } | Self::Join { .. }
+        )
     }
 }
 struct Setup {
@@ -362,9 +366,14 @@ impl Database {
             Self::create_install(credential_ttl, root, None, None)?,
         )
     }
-    pub fn join(open: Open<'_>, invitation: &str) -> Result<Opened, Failure> {
-        let install = Self::join_install(&open, invitation, "")?;
-        Self::start(open, install)
+    pub fn join(open: Open<'_>, provisioning: &str) -> Result<Opened, Failure> {
+        let single_use = open.identity.is_none();
+        let (install, phrase) = Self::join_install(provisioning, single_use);
+        let mut opened = Self::start(open, install)?;
+        if let Ok(mut guard) = phrase.lock() {
+            opened.identity = guard.take();
+        }
+        Ok(opened)
     }
     pub fn enroll_identity(open: Open<'_>, contact: &str) -> Result<Opened, Failure> {
         if open.network.is_none() {
@@ -450,14 +459,19 @@ impl Database {
             personal,
         })
     }
-    fn join_install(open: &Open<'_>, invitation: &str, name: &str) -> Result<Install, Failure> {
-        if open.network.is_none() {
-            return Err(ServiceError::NetworkRequired("join").into());
-        }
-        Ok(Install::Join {
-            invitation: invitation.into(),
-            name: name.into(),
-        })
+    fn join_install(
+        provisioning: &str,
+        single_use: bool,
+    ) -> (Install, Arc<std::sync::Mutex<Option<String>>>) {
+        let phrase = Arc::new(std::sync::Mutex::new(None));
+        (
+            Install::Join {
+                provisioning: provisioning.into(),
+                single_use,
+                phrase: phrase.clone(),
+            },
+            phrase,
+        )
     }
     pub fn node_keys_of(
         directory: &Path,
@@ -567,11 +581,13 @@ impl Database {
     }
     pub(crate) async fn launch_join(
         open: Open<'_>,
-        invitation: &str,
-        name: &str,
+        provisioning: &str,
+        single_use: bool,
     ) -> Result<Opened, Failure> {
-        let install = Self::join_install(&open, invitation, name)?;
-        Self::launch(open, install, None).await
+        let (install, phrase) = Self::join_install(provisioning, single_use);
+        let mut opened = Self::launch(open, install, None).await?;
+        opened.identity = phrase.lock().ok().and_then(|mut guard| guard.take());
+        Ok(opened)
     }
     pub(crate) async fn launch_link(
         open: Open<'_>,
@@ -621,8 +637,8 @@ impl Database {
         confirmation: Option<String>,
     ) -> Result<(Setup, Option<Network>), Failure> {
         let directory = open.directory.to_path_buf();
-        if let Install::Join { invitation, .. } = &install {
-            crate::enrollment::Invite::parse(invitation)?;
+        if let Install::Join { provisioning, .. } = &install {
+            crate::enrollment::ProvisioningBundle::parse(provisioning)?;
         }
         let setup = Setup {
             schema: open.schema.validated()?,
@@ -1494,18 +1510,39 @@ async fn identity(
                 }
             }
         }
-        Install::Join { invitation, name } => {
-            let network = network.ok_or(ServiceError::NetworkRequired("join"))?;
-            let joining =
-                Settings::prepare_join(path, (invitation, name), secrets, setup.identity.clone())?;
-            let key = Settings::route_secret(&joining.vault)?;
-            let (transport, owned) = network.start(false, key).await?;
-            match joining.enroll(path, schema, &*transport).await {
-                Ok(settings) => Ok((settings, Some((transport, owned)))),
-                Err(error) => {
-                    if owned {
+        Install::Join {
+            provisioning,
+            single_use,
+            phrase,
+        } => {
+            let (settings, vault, identity_phrase) =
+                Settings::install_provisioned(secrets, schema, provisioning, *single_use).await?;
+            let started = async {
+                let link = match network {
+                    Some(network) => {
+                        let key = Settings::route_secret(&vault)?;
+                        Some(network.start(settings.issuer(), key).await?)
+                    }
+                    None => None,
+                };
+                if let Err(error) = settings.save(path).await {
+                    if let Some((transport, true)) = link {
                         transport.close().await;
                     }
+                    return Err(error);
+                }
+                Ok::<_, Failure>(link)
+            }
+            .await;
+            match started {
+                Ok(link) => {
+                    if let Ok(mut guard) = phrase.lock() {
+                        *guard = identity_phrase;
+                    }
+                    Ok((settings, link))
+                }
+                Err(error) => {
+                    let _ = vault.forget(settings.roles());
                     Err(error)
                 }
             }
@@ -1808,8 +1845,8 @@ async fn restore(
             return Err("another restore is unfinished in this directory".into());
         }
     } else {
-        if Settings::invitation_publisher(invitation)? != opened.inventory.publisher {
-            return Err("the invitation is for another domain than the backup".into());
+        if Settings::provision_publisher(invitation)? != opened.inventory.publisher {
+            return Err("the provisioning bundle is for another domain than the backup".into());
         }
         crate::secrets::write_private(
             &marker,
@@ -1827,29 +1864,25 @@ async fn restore(
         let link = network.start(settings.issuer(), key).await?;
         (settings, link)
     } else {
-        let fresh_single_use_identity = None;
-        let joining =
-            Settings::prepare_join(path, (invitation, ""), secrets, fresh_single_use_identity)?;
-        let key = Settings::route_secret(&joining.vault)?;
-        let (transport, owned) = network.start(false, key).await?;
-        match joining.enroll(path, schema, &*transport).await {
-            Ok(mut settings) => {
-                let node =
-                    rocky_secure::PrivateKey::from_bytes(&settings.vault(secrets).get("node")?);
-                settings.learn_contacts(
-                    &opened.identity,
-                    &[node.public_key(), opened.inventory.node],
-                );
-                settings.save(path).await?;
-                (settings, (transport, owned))
-            }
-            Err(error) => {
-                if owned {
-                    transport.close().await;
-                }
-                return Err(error);
-            }
+        let (mut settings, vault, _) =
+            Settings::install_provisioned(secrets, schema, invitation, true).await?;
+        let prepared = async {
+            let node = rocky_secure::PrivateKey::from_bytes(&vault.get("node")?);
+            settings.learn_contacts(
+                &opened.identity,
+                &[node.public_key(), opened.inventory.node],
+            );
+            settings.save(path).await?;
+            Ok::<_, Failure>(())
         }
+        .await;
+        if let Err(error) = prepared {
+            let _ = vault.forget(settings.roles());
+            return Err(error);
+        }
+        let key = Settings::route_secret(&vault)?;
+        let link = network.start(settings.issuer(), key).await?;
+        (settings, link)
     };
     let placed = async {
         if (settings.mesh, settings.domain) != (opened.identity.mesh, opened.identity.domain) {
@@ -2054,12 +2087,12 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         Err(error) if fresh => return Err(unwind(&directory, None, error)),
         Err(error) => return Err(error),
     };
-    if let (Install::Join { .. }, Some(inviter)) = (&setup.install, settings.issuers.first()) {
-        bootstrap_intent.join(*inviter).await?;
-    }
     let startup_identity = setup.identity.take();
     let vault = settings.vault(&setup.secrets);
     let opened = async {
+        if let (Install::Join { .. }, Some(inviter)) = (&setup.install, settings.issuers.first()) {
+            bootstrap_intent.join(*inviter).await?;
+        }
         let completed_interrupted_revocation = settings.rotate(&vault)?.is_some();
         if completed_interrupted_revocation {
             settings.save(&path).await?;
@@ -2292,7 +2325,8 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     let personal = setup.install.ends_personal_intent();
     if hello.send(Ok((scope, network, revoked))).is_err() {
         let abandoned: Failure = "database opener abandoned".into();
-        let created_root_undelivered = fresh && matches!(setup.install, Install::Create { .. });
+        let created_root_undelivered =
+            fresh && matches!(setup.install, Install::Create { .. } | Install::Join { .. });
         return Err(if created_root_undelivered {
             discard(node, replica, &directory, &setup.install, abandoned).await
         } else {

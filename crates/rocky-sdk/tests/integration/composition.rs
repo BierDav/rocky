@@ -135,24 +135,24 @@ async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result
         client.session.info().await
     })
     .await;
-    for result in [
-        snap::observe(client.session.sync_once()).await,
-        snap::observe(
-            client
-                .session
-                .invitation_with(rocky_sdk::GrantProfile::Writer {
-                    scopes: ["items".into()].into(),
-                }),
+    let error = snap::observe(client.session.sync_once())
+        .await
+        .err()
+        .ok_or("needs a network")?;
+    assert_eq!(
+        error["code"], "network_required",
+        "sync requires a network: {error}"
+    );
+    assert_eq!(error["retryable"], json!(false));
+    let provisioning = client
+        .session
+        .provision(
+            rocky_sdk::GrantProfile::Writer {
+                scopes: ["items".into()].into(),
+            },
+            None,
         )
-        .await,
-    ] {
-        let error = result.err().ok_or("needs a network")?;
-        assert_eq!(
-            error["code"], "network_required",
-            "beyond renewing its own credentials, nothing works offline: {error}"
-        );
-        assert_eq!(error["retryable"], json!(false));
-    }
+        .await?;
     database.close().await?;
     database.close().await?;
 
@@ -162,18 +162,15 @@ async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result
     assert_eq!(client.titles().await, ["Eggs", "Milk"]);
     database.close().await?;
 
-    let error = Database::join(open(&root.path().join("b"), None), "rocky://join/x")
-        .err()
-        .ok_or("join needs a network")?;
-    assert_eq!(
-        service(&error),
-        Some(&ServiceError::NetworkRequired("join"))
-    );
+    let joined = Database::join(open(&root.path().join("b"), None), &provisioning.uri)?;
+    assert!(joined.network.is_none());
+    joined.database.close().await?;
+    assert!(Database::join(open(&root.path().join("c"), None), "rocky://provision/x").is_err());
     assert!(
-        !root.path().join("b").exists(),
-        "a combination that cannot work is refused before anything is stored"
+        !root.path().join("c").exists(),
+        "an invalid provisioning bundle is refused before anything is stored"
     );
-    assert!(Database::open(open(&root.path().join("b"), None)).is_err());
+    assert!(Database::open(open(&root.path().join("c"), None)).is_err());
     assert!(Database::create(open(&directory, None), None).is_err());
     Ok(())
 }
@@ -192,9 +189,12 @@ async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<()
     let invitation = creator
         .database
         .session()
-        .invitation_with(rocky_sdk::GrantProfile::Writer {
-            scopes: ["items".into()].into(),
-        })
+        .provision(
+            rocky_sdk::GrantProfile::Writer {
+                scopes: ["items".into()].into(),
+            },
+            None,
+        )
         .await?
         .uri;
     let member = Database::join(
@@ -216,8 +216,8 @@ async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<()
     let enrolled = hub.counts();
     assert_eq!(
         enrolled,
-        [2, 3, 2],
-        "starts, dials, closes: bootstrap and rows share a link and enrollment supplies the node number"
+        [2, 2, 2],
+        "starts, dials, closes: 0-RTT provisioning needs no enrollment dial and bootstrap shares a link"
     );
     assert!(!hub.listens("a"));
 
@@ -344,10 +344,10 @@ async fn borrowed_networks_outlive_their_service_and_owned_ones_are_released() -
         "memory",
         "the status names the attached network's kind"
     );
-    let invitation = snap::ok(creator_client.session.invite(
-        Some(rocky_sdk::GrantProfile::Writer {
+    let invitation = snap::ok(creator_client.session.provision(
+        rocky_sdk::GrantProfile::Writer {
             scopes: ["items".to_owned()].into_iter().collect(),
-        }),
+        },
         None,
     ))
     .await["uri"]
@@ -449,10 +449,10 @@ async fn a_closing_service_cancels_work_that_outlasts_its_drain() -> Result<(), 
         None,
     )?;
     let creator_client = Client::new(&creator)?;
-    let invitation = snap::ok(creator_client.session.invite(
-        Some(rocky_sdk::GrantProfile::Writer {
+    let invitation = snap::ok(creator_client.session.provision(
+        rocky_sdk::GrantProfile::Writer {
             scopes: ["items".to_owned()].into_iter().collect(),
-        }),
+        },
         None,
     ))
     .await["uri"]

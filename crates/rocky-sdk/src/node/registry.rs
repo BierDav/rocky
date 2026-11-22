@@ -57,76 +57,8 @@ impl Node {
         self.commit(Changes::default()).await
     }
 
-    pub(super) async fn answer_pair(&self, request: &[u8]) -> Result<Vec<u8>, Failure> {
-        if !self.settings.lock().await.issuer() {
-            return Err(refused("only an issuer enrolls devices"));
-        }
-        self.expire_requests().await?;
-        let registry = self.registry(&*self.settings_snapshot().await).await?;
-        let bootstrap = self.enrollment_bootstrap().await?;
-        let held = self.replica.revocations().await;
-        let (reply, changes, notes) = {
-            let mut settings = self.settings.lock().await;
-            let mut draft = settings.clone();
-            draft.learn_revocations(&held)?;
-            draft.bootstrap = Some(bootstrap);
-            let answer = draft.pair(&self.vault, request, &registry);
-            draft.bootstrap = None;
-            settings.commit(draft, &self.replica).await?;
-            answer?
-        };
-        self.commit(changes).await?;
-        for note in &notes {
-            if let crate::join_requests::Note::Enrolled { node, profile } = note {
-                let paired = rocky_credentials::PairRequest::from_bytes(request)?;
-                let known = registry.admitted(&paired.user);
-                self.see(paired.user, *node).await?;
-                if !known {
-                    self.activity.record(crate::ActivityKind::IdentityAdmitted {
-                        identity: (paired.user).to_owned(),
-                        profile: profile.clone(),
-                    });
-                }
-                self.activity.record(crate::ActivityKind::NodeLinked {
-                    identity: (paired.user).to_owned(),
-                    node: (node).to_owned(),
-                });
-            }
-        }
-        self.note(&notes).await;
-        Ok(reply)
-    }
-    pub(super) async fn note(&self, notes: &[crate::join_requests::Note]) {
-        let expires = self.settings.lock().await.pending_requests().1;
-        for note in notes {
-            if let Some(event) = note.event(expires) {
-                self.activity.record(event);
-            }
-        }
-    }
-    async fn expire_requests(&self) -> Result<(), Failure> {
-        let notes = self
-            .configure(|settings| Ok(settings.expire_requests(now()?)))
-            .await?;
-        self.note(&notes).await;
-        Ok(())
-    }
     pub(super) async fn discovered(&self) -> Result<crate::Discovered, Failure> {
-        self.expire_requests().await?;
         let settings = self.settings.lock().await.clone();
-        let (pending, expires) = settings.pending_requests();
-        let pending = pending
-            .iter()
-            .map(|request| crate::JoinRequest {
-                node: request.node,
-                nonce: request.nonce.clone(),
-                invitation: request.invitation.clone(),
-                name: request.name.clone(),
-                received_epoch_seconds: request.received,
-                expires_epoch_seconds: expires,
-                code: request.code.clone(),
-            })
-            .collect();
         let registry = self.registry(&*self.settings_snapshot().await).await?;
         let mut known = self.replica.revocations().await;
         known.verify_in(settings.database_context()?)?;
@@ -162,38 +94,7 @@ impl Node {
                 confirmed: held.confirmed,
             })
             .collect();
-        Ok(crate::Discovered {
-            pending,
-            seen,
-            links,
-        })
-    }
-
-    pub(super) async fn admit(&self, admit: crate::Admit) -> Result<(), Failure> {
-        let node = admit.node;
-        if !self.settings.lock().await.issuer() {
-            return Err(refused("only an issuer admits devices"));
-        }
-        self.settings.lock().await.admits(Some(&admit.profile))?;
-        self.expire_requests().await?;
-        let registry = self.registry(&*self.settings_snapshot().await).await?;
-        let notes = self
-            .configure(|settings| {
-                settings.admit(&node, &admit.code, (admit.profile, admit.label), &registry)
-            })
-            .await?;
-        self.note(&notes).await;
-        Ok(())
-    }
-
-    pub(super) async fn refuse(&self, node: PublicKey) -> Result<(), Failure> {
-        if !self.settings.lock().await.issuer() {
-            return Err(refused("only an issuer refuses devices"));
-        }
-        self.expire_requests().await?;
-        let notes = self.configure(|settings| settings.refuse(&node)).await?;
-        self.note(&notes).await;
-        Ok(())
+        Ok(crate::Discovered { seen, links })
     }
 
     pub(super) async fn answer_renewal(&self, request: &[u8]) -> Result<Vec<u8>, Failure> {

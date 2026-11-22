@@ -246,9 +246,12 @@ async fn two_personal_databases_share_an_endpoint_and_a_coordinator_and_detach_i
         )?;
         let invitation = owner
             .session
-            .invitation_with(GrantProfile::Custody {
-                scopes: ["items".to_owned()].into(),
-            })
+            .provision(
+                GrantProfile::Custody {
+                    scopes: ["items".to_owned()].into(),
+                },
+                None,
+            )
             .await?
             .uri;
         let custodian = Device::new(

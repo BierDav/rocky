@@ -125,73 +125,6 @@ fn registry_rows(directory: &Path, entry: &str) -> Result<i64, Failure> {
 }
 
 #[tokio::test]
-async fn invitation_availability_survives_reopen_and_tracks_replacement_and_use()
--> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
-    let hub = Arc::new(Hub::default());
-    let path = root.path().join("issuer");
-    let a = create(&path, memory(&hub, "issuer"))?;
-    let first = a.invite().await;
-    assert_eq!(
-        snap::ok(async {
-            let state = a.session.invitation_state(&(snap::text(&(first)))).await?;
-            Ok(json!({"open":state.open}))
-        })
-        .await["open"],
-        true
-    );
-    let second = a.invite().await;
-    assert_eq!(
-        snap::ok(async {
-            let state = a.session.invitation_state(&(snap::text(&(first)))).await?;
-            Ok(json!({"open":state.open}))
-        })
-        .await["open"],
-        false
-    );
-    a.close().await;
-    let a = Device::new(Database::open(open(&path, Some(memory(&hub, "issuer"))))?)?;
-    assert_eq!(
-        snap::ok(async {
-            let state = a.session.invitation_state(&(snap::text(&(second)))).await?;
-            Ok(json!({"open":state.open}))
-        })
-        .await["open"],
-        true
-    );
-    let b = join(&root.path().join("member"), memory(&hub, "member"), &second)?;
-    assert_eq!(
-        snap::ok(async {
-            let state = a.session.invitation_state(&(snap::text(&(second)))).await?;
-            Ok(json!({"open":state.open}))
-        })
-        .await["open"],
-        false
-    );
-    assert!(
-        snap::observe(async {
-            let state = b.session.invitation_state(&(snap::text(&(second)))).await?;
-            Ok(json!({"open":state.open}))
-        })
-        .await
-        .is_err()
-    );
-    a.close().await;
-    let a = Device::new(Database::open(open(&path, None))?)?;
-    assert_eq!(
-        snap::ok(async {
-            let state = a.session.invitation_state(&(snap::text(&(second)))).await?;
-            Ok(json!({"open":state.open}))
-        })
-        .await["open"],
-        false
-    );
-    b.close().await;
-    a.close().await;
-    Ok(())
-}
-
-#[tokio::test]
 async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -> Result<(), Failure>
 {
     let root = tempfile::tempdir()?;
@@ -203,6 +136,7 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
         memory(&hub, "b"),
         &a.invite_as(issuer()).await,
     )?;
+    a.session.add_peer(&b.contact().await).await?;
     settle(&b).await;
     online(&b, false).await;
     let m = join(&root.join("m"), memory(&hub, "m"), &a.invite().await)?;
@@ -284,6 +218,7 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
         memory(&hub, "b"),
         &a.invite_as(issuer()).await,
     )?;
+    a.session.add_peer(&b.contact().await).await?;
     settle(&b).await;
     online(&b, false).await;
     let m = join(&root.join("m"), memory(&hub, "m"), &a.invite().await)?;
@@ -364,8 +299,7 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
     let w = join(&root.join("w"), memory(&hub, "w"), &a.invite().await)?;
     synced(&r).await?;
     synced(&w).await?;
-    let (a_node, b_node) = (a.node().await, b.node().await);
-    snap::ok(a.session.remove_peer(snap::public_key(&(b_node)))).await;
+    let (a_node, _b_node) = (a.node().await, b.node().await);
     snap::ok(b.session.remove_peer(snap::public_key(&(a_node)))).await;
     introduce(&a, &c).await;
     introduce(&b, &c).await;
@@ -444,6 +378,8 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
         memory(&hub, "b"),
         &a.invite_as(issuer()).await,
     )?;
+    a.session.add_peer(&b.contact().await).await?;
+    settle(&b).await;
     let started = |name: &str, invitation: String| {
         let (directory, network) = (root.join(name), memory(&hub, name));
         tokio::task::spawn_blocking(move || {
@@ -745,49 +681,10 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
     let issuing = Arc::new(Faults::default());
     let a = create(&root.join("a"), faulty(&hub, "a", &issuing))?;
     let mut members = Vec::new();
-    for (name, issuer_side, approval) in [
-        ("m", true, false),
-        ("n", false, false),
-        ("p", true, true),
-        ("q", false, true),
-    ] {
+    for name in ["m", "n"] {
         let directory = root.join(name);
         let requesting = Arc::new(Faults::default());
-        let invitation = if approval {
-            let session = a.database.session();
-            let invitation = session.invitation().await?;
-            assert!(invitation.profile.is_none());
-            let error = join(&directory, faulty(&hub, name, &requesting), &invitation.uri)
-                .err()
-                .ok_or("joined without admission")?;
-            let awaiting = error
-                .downcast_ref::<rocky_sdk::AwaitingAdmission>()
-                .ok_or("not awaiting admission")?;
-            let pending = session.discovered().await?.pending;
-            assert_eq!(pending.len(), 1);
-            assert_eq!(pending[0].code, awaiting.code);
-            assert_eq!(pending[0].invitation, invitation.id);
-            session
-                .admit(rocky_sdk::Admit {
-                    node: pending[0].node,
-                    code: awaiting.code.clone(),
-                    profile: rocky_sdk::GrantProfile::Writer {
-                        scopes: ["items".into()].into_iter().collect(),
-                    },
-                    label: Some(name.as_bytes().to_vec()),
-                })
-                .await?;
-            session.close().await;
-            invitation.uri
-        } else {
-            a.invite().await
-        };
-        if issuer_side {
-            *issuing.answer.lock().unwrap() = Some(Protocol::Rpc);
-        } else {
-            *requesting.receipt.lock().unwrap() = Some(Protocol::Rpc);
-        }
-        assert!(join(&directory, faulty(&hub, name, &requesting), &invitation).is_err());
+        let invitation = a.invite().await;
         let recorded = identities(&a).await;
         let fresh: Vec<&String> = recorded
             .keys()
@@ -799,10 +696,6 @@ async fn interrupted_answers_leave_a_record_and_retry_as_the_same_device() -> Re
             .collect();
         assert_eq!(fresh.len(), 1, "{name}: {recorded:?}");
         let identity = fresh[0].clone();
-        if approval {
-            assert_eq!(recorded[&identity]["label"], json!(name.as_bytes()));
-        }
-        assert!(!directory.join("identity.json").exists(), "{name}");
         let member = join(&directory, faulty(&hub, name, &requesting), &invitation)?;
         assert_eq!(member.identity().await, identity, "{name}");
         assert_eq!(identities(&a).await.len(), recorded.len(), "{name}");
@@ -901,6 +794,7 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
         memory(&hub, "b"),
         &a.invite_as(issuer()).await,
     )?;
+    a.session.add_peer(&b.contact().await).await?;
     settle(&b).await;
     let reader = json!({"kind": "reader", "scopes": ["items"]});
     let invitation = a.invite_as(reader.clone()).await;
@@ -945,15 +839,10 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
     .err()
     .ok_or("granted a device past the registry's capacity")?;
     assert_eq!(refused["code"], "registry_full", "{refused}");
-    let refused = snap::observe(
-        a.session.invite(
-            Some(
-                serde_json::from_value::<rocky_sdk::GrantProfile>(json!(reader))
-                    .expect("typed fixture"),
-            ),
-            None,
-        ),
-    )
+    let refused = snap::observe(a.session.provision(
+        serde_json::from_value::<rocky_sdk::GrantProfile>(json!(reader)).expect("typed fixture"),
+        None,
+    ))
     .await
     .err()
     .ok_or("invited a 257th device")?;
@@ -988,54 +877,16 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
 }
 
 #[tokio::test]
-async fn a_newer_invitation_supersedes_an_interrupted_join() -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
-    let root = root.path();
-    let hub = Arc::new(Hub::default());
-    let a = create(&root.join("a"), memory(&hub, "a"))?;
-    let directory = root.join("m");
-    let requesting = Arc::new(Faults::default());
-    let spent = a.invite().await;
-    *requesting.receipt.lock().unwrap() = Some(Protocol::Rpc);
-    assert!(join(&directory, faulty(&hub, "m", &requesting), &spent).is_err());
-    let ghosts = identities(&a).await;
-    let Err(unfinished) = Database::open(open(&directory, None)) else {
-        panic!("an unfinished join opened");
-    };
-    assert!(
-        unfinished.to_string().contains("unfinished"),
-        "{unfinished}"
-    );
-    let newer = a.invite().await;
-    assert!(join(&directory, faulty(&hub, "m", &requesting), &spent).is_err());
-    let member = join(&directory, faulty(&hub, "m", &requesting), &newer)?;
-    let identity = member.identity().await;
-    assert!(!ghosts.contains_key(&identity));
-    assert!(identities(&a).await.contains_key(&identity));
-    a.add(1, "after").await;
-    synced(&member).await?;
-    assert_eq!(member.titles().await, ["after"]);
-    member.close().await;
-    a.close().await;
-    Ok(())
-}
-
-#[tokio::test]
 async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let path = root.path().join("issuer");
     let owner = create(&path, memory(&hub, "issuer"))?;
     let label = b"application-defined label";
-    let invitation = snap::ok(
-        owner.session.invite(
-            Some(
-                serde_json::from_value::<rocky_sdk::GrantProfile>(json!(issuer()))
-                    .expect("typed fixture"),
-            ),
-            Some(serde_json::from_value::<Vec<u8>>(json!(label)).expect("typed fixture")),
-        ),
-    )
+    let invitation = snap::ok(owner.session.provision(
+        serde_json::from_value::<rocky_sdk::GrantProfile>(json!(issuer())).expect("typed fixture"),
+        Some(serde_json::from_value::<Vec<u8>>(json!(label)).expect("typed fixture")),
+    ))
     .await;
     let member = join(
         &root.path().join("member"),
@@ -1046,15 +897,10 @@ async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Resul
     let record = identities(&owner).await.remove(&identity).ok_or("record")?;
     assert_eq!(record["invitation"], invitation["id"]);
     assert_eq!(record["label"], json!(label));
-    snap::ok(
-        owner.session.invite(
-            Some(
-                serde_json::from_value::<rocky_sdk::GrantProfile>(json!(issuer()))
-                    .expect("typed fixture"),
-            ),
-            None,
-        ),
-    )
+    snap::ok(owner.session.provision(
+        serde_json::from_value::<rocky_sdk::GrantProfile>(json!(issuer())).expect("typed fixture"),
+        None,
+    ))
     .await;
     member.database.close().await?;
     owner.database.close().await?;
@@ -1069,67 +915,5 @@ async fn invitation_identity_and_label_survive_replacement_and_reopen() -> Resul
     );
     assert_eq!(record["label"], json!(label));
     reopened.database.close().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_revoked_identity_cannot_retry_an_admitted_join_after_a_lost_answer()
--> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
-    let hub = Arc::new(Hub::default());
-    let issuer = create(&root.path().join("issuer"), memory(&hub, "issuer"))?;
-    let session = issuer.database.session();
-    let invitation = session.invitation().await?;
-    let directory = root.path().join("joining");
-    let faults = Arc::new(Faults::default());
-    let error = join(
-        &directory,
-        faulty(&hub, "joining", &faults),
-        &invitation.uri,
-    )
-    .err()
-    .ok_or("joined without admission")?;
-    let awaiting = error
-        .downcast_ref::<rocky_sdk::AwaitingAdmission>()
-        .ok_or("not awaiting admission")?;
-    let pending = session.discovered().await?.pending;
-    session
-        .admit(rocky_sdk::Admit {
-            node: pending[0].node,
-            code: awaiting.code.clone(),
-            profile: rocky_sdk::GrantProfile::Writer {
-                scopes: ["items".into()].into_iter().collect(),
-            },
-            label: None,
-        })
-        .await?;
-    *faults.receipt.lock().unwrap() = Some(Protocol::Rpc);
-    assert!(
-        join(
-            &directory,
-            faulty(&hub, "joining", &faults),
-            &invitation.uri
-        )
-        .is_err()
-    );
-    let records = identities(&issuer).await;
-    assert_eq!(records.len(), 1);
-    let identity = records.keys().next().ok_or("missing admitted identity")?;
-    snap::ok(
-        issuer
-            .session
-            .revoke_identity(snap::public_key(&(identity))),
-    )
-    .await;
-    let error = join(
-        &directory,
-        faulty(&hub, "joining", &faults),
-        &invitation.uri,
-    )
-    .err()
-    .ok_or("revoked identity joined")?;
-    assert!(error.to_string().contains("revoked"), "{error}");
-    session.close().await;
-    issuer.close().await;
     Ok(())
 }

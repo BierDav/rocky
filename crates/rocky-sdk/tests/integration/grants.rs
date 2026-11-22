@@ -217,15 +217,10 @@ async fn an_invitation_carries_raw_grants() -> Result<(), Failure> {
     let hub = Arc::new(Hub::default());
     let a = create(root, &hub, "a")?;
     let profile = json!({"kind": "grants", "grants": [{"scope": "notes", "rights": ["read", "insert", "custody"]}]});
-    let invitation = snap::ok(
-        a.session.invite(
-            Some(
-                serde_json::from_value::<rocky_sdk::GrantProfile>(json!(profile))
-                    .expect("typed fixture"),
-            ),
-            None,
-        ),
-    )
+    let invitation = snap::ok(a.session.provision(
+        serde_json::from_value::<rocky_sdk::GrantProfile>(json!(profile)).expect("typed fixture"),
+        None,
+    ))
     .await["uri"]
         .as_str()
         .unwrap_or_default()

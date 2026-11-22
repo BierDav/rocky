@@ -721,57 +721,65 @@ impl Node {
         }
     }
 
-    async fn invitation(
+    async fn provision(
         &self,
-        profile: Option<Profile>,
+        profile: Profile,
         label: Option<Vec<u8>>,
-    ) -> Result<crate::Invitation, Failure> {
+    ) -> Result<crate::Provisioning, Failure> {
         if label
             .as_ref()
             .is_some_and(|label| label.len() > crate::registry::MAX_LABEL)
         {
-            return Err(refused("invitation label exceeds 256 bytes"));
+            return Err(refused("device label exceeds 256 bytes"));
         }
-        self.settings.lock().await.admits(profile.as_ref())?;
+        self.settings.lock().await.admits(Some(&profile))?;
         let attached = self.network.read().await;
-        let work = async {
-            let transport = &*attached
-                .as_ref()
-                .ok_or(ServiceError::NetworkRequired("an invitation"))?
-                .transport;
-            let registry = self.registry(&*self.settings_snapshot().await).await?;
-            let (uri, expires, notes) = self
-                .settings
-                .lock()
-                .await
-                .invite(
-                    &self.replica,
+        let routes = match attached.as_deref() {
+            Some(link) => match link.transport.address().await {
+                Ok(address) if !address.is_empty() => vec![crate::enrollment::Route {
+                    transport: link.transport.kind().into(),
+                    address,
+                }],
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+        let registry = self.registry(&*self.settings_snapshot().await).await?;
+        let bootstrap = self.enrollment_bootstrap().await?;
+        let held = self.replica.revocations().await;
+        let ((uri, node, identity), changes) = {
+            let mut settings = self.settings.lock().await;
+            let mut draft = settings.clone();
+            draft.learn_revocations(&held)?;
+            draft.bootstrap = Some(bootstrap);
+            let provisioned = draft
+                .provision(
                     &self.vault,
-                    transport,
+                    routes,
+                    false,
                     (profile.clone(), label),
                     &registry,
                 )
-                .await
                 .map_err(named)?;
-            self.note(&notes).await;
-            let sequence = self
-                .activity
-                .record(crate::ActivityKind::InvitationCreated {
-                    profile: profile.clone(),
-                    expires: (expires),
-                });
-            Ok(crate::Invitation {
-                uri,
-                expires_at_epoch_seconds: expires,
-                profile,
-                sequence,
-                id: HEXLOWER.encode(&rocky_core::commitment(
-                    "rocky.sdk.invitation.v1",
-                    &self.vault.get("invitation")?,
-                )),
-            })
+            draft.bootstrap = None;
+            settings.commit(draft, &self.replica).await?;
+            provisioned
         };
-        Self::networked(attached.as_deref(), work).await
+        self.commit(changes).await?;
+        let sequence = self
+            .activity
+            .record(crate::ActivityKind::DeviceProvisioned {
+                node,
+                identity,
+                profile: profile.clone(),
+            });
+        Ok(crate::Provisioning {
+            uri,
+            node,
+            identity,
+            profile,
+            sequence,
+        })
     }
 
     async fn renew_now(&self) -> Result<(), Failure> {
@@ -805,28 +813,6 @@ impl Node {
             })
         };
         Self::networked(attached.as_deref(), work).await
-    }
-
-    async fn invitation_state(&self, uri: &str) -> Result<crate::InvitationState, Failure> {
-        let (id, expires) = Settings::invitation_identity(uri)?;
-        let open = self.settings.lock().await.invitation_open(uri)?;
-        let registry = self.registry(&*self.settings_snapshot().await).await?;
-        let enrolled = registry
-            .records
-            .iter()
-            .find(|(_, record)| {
-                record
-                    .admitted
-                    .as_ref()
-                    .is_some_and(|admitted| admitted.invitation.as_deref() == Some(&id))
-            })
-            .map(|(identity, _)| *identity);
-        Ok(crate::InvitationState {
-            id,
-            expires_at_epoch_seconds: expires,
-            open,
-            enrolled,
-        })
     }
 
     async fn enrollment_upstream(&self, contact: Option<&str>) -> Result<(), Failure> {
@@ -2421,7 +2407,6 @@ impl Node {
         ))))
     }
     pub async fn serve(&self, request: rocky_core::net::Request) -> Result<(), Failure> {
-        let mut enrolled = false;
         let result = async {
             let frame = crate::peer::RequestFrame::from_bytes(&request.bytes).map_err(refused)?;
             if !self.online.load(Ordering::SeqCst) || self.lifecycle.lock().await.is_logged_out() {
@@ -2439,10 +2424,7 @@ impl Node {
                         })
                 })
                 .transpose()?;
-            let pairing = matches!(frame.request, PeerRequest::Pair(_))
-                && !self.settings.lock().await.has_enrollment_upstream();
             let reply = self.answer_peer(frame.request).await?;
-            enrolled = pairing;
             Ok(reply)
         }
         .await
@@ -2456,9 +2438,6 @@ impl Node {
                 .to_bytes()?,
             )
             .await?;
-        if enrolled {
-            self.wake_sync();
-        }
         Ok(())
     }
 
@@ -2473,10 +2452,7 @@ impl Node {
         }
         let is_enrollment = matches!(
             request,
-            PeerRequest::Pair(_)
-                | PeerRequest::Renew(_)
-                | PeerRequest::Epochs(_)
-                | PeerRequest::Policy
+            PeerRequest::Renew(_) | PeerRequest::Epochs(_) | PeerRequest::Policy
         );
         if is_enrollment && let Some(reply) = self.forward_enrollment(&request).await? {
             return Ok(reply);
@@ -2489,9 +2465,6 @@ impl Node {
             return Err(refused("only an issuer renews devices or supplies policy"));
         }
         match request {
-            PeerRequest::Pair(request) => Ok(PeerReply::Pair(
-                Box::pin(self.answer_pair(&request.to_bytes()?)).await?,
-            )),
             PeerRequest::Renew(request) => Ok(PeerReply::Renew(
                 Box::pin(self.answer_renewal(&request.to_bytes()?)).await?,
             )),

@@ -61,9 +61,12 @@ async fn a_lapsed_custodian_alone_restores_under_its_same_renewed_grant() -> Res
     )?;
     let invitation = owner
         .session
-        .invitation_with(GrantProfile::Custody {
-            scopes: ["items".to_owned()].into(),
-        })
+        .provision(
+            GrantProfile::Custody {
+                scopes: ["items".to_owned()].into(),
+            },
+            None,
+        )
         .await?
         .uri;
     let custodian_path = directory.path().join("custodian");

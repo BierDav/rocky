@@ -631,7 +631,7 @@ fn Invite(todos: Shared) -> Element {
                     }
                 }
             }
-            p { class: "muted small", "Trusted devices invite and seal. Full devices receive every list. Partial devices receive only lists shared with them. Each code admits one device; paste it into that device's Join box." }
+            p { class: "muted small", "Trusted devices invite and seal. Full devices receive every list. Partial devices receive only lists shared with them. Treat each code as a secret and mint a fresh code for each device; paste it into that device's Join box." }
             if let Some(uri) = code() { textarea { class: "code", readonly: true, rows: 3, value: uri } }
             if let Some(message) = error() { p { role: "alert", "{message}" } }
         }

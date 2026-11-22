@@ -10,16 +10,3 @@ pub(crate) fn failure(error: &crate::Failure) -> PeerError {
         retryable: failure.retryable,
     }
 }
-#[cfg(test)]
-pub(crate) fn encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, crate::Failure> {
-    Ok(rocky_credentials::encode(value)?)
-}
-#[cfg(test)]
-pub(crate) fn decode<T: serde::Serialize + serde::de::DeserializeOwned>(
-    bytes: &[u8],
-) -> Result<T, crate::Failure> {
-    Ok(rocky_credentials::decode_bounded(
-        bytes,
-        rocky_credentials::MAX_PEER_RPC_MESSAGE,
-    )?)
-}

@@ -104,6 +104,10 @@ impl Peer {
             }
         })
         .await??;
+        let identity: Arc<dyn rocky_sdk::IdentityProvider> = match opened.identity.as_deref() {
+            Some(phrase) => Arc::new(rocky_sdk::IdentityKey::from_phrase(phrase)?),
+            None => identity,
+        };
         let settings = crate::common::authority_json(&settings_dir, "identity")?;
         let publisher = serde_json::from_value(settings["publisher"].clone())?;
         Ok(Self {
@@ -168,11 +172,9 @@ impl Peer {
             json!({"kind":kind,"scopes":["counts"]})
         };
         Ok(snap::value(
-            self.session.invite(
-                Some(
-                    serde_json::from_value::<rocky_sdk::GrantProfile>(json!(profile))
-                        .expect("typed fixture"),
-                ),
+            self.session.provision(
+                serde_json::from_value::<rocky_sdk::GrantProfile>(json!(profile))
+                    .expect("typed fixture"),
                 None,
             ),
         )

@@ -29,11 +29,13 @@ async fn join(
     issuer: &Device,
     profile: GrantProfile,
 ) -> Result<Device, Failure> {
-    let invitation = issuer.session().invitation_with(profile).await?.uri;
-    Device::new(Database::join(
+    let invitation = issuer.session().provision(profile, None).await?.uri;
+    let device = Device::new(Database::join(
         open(&root.join(name), hub, name),
         &invitation,
-    )?)
+    )?)?;
+    issuer.session().add_peer(&device.contact().await).await?;
+    Ok(device)
 }
 fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
     let mut identity = common::authority_json(&root.join(name), "identity")?;
@@ -257,11 +259,12 @@ async fn conflicting_root_revocations_merge(b_first: bool) -> Result<(), Failure
     )?)?;
     let mut issuers = Vec::new();
     for name in ["b", "c"] {
-        let invitation = a.session().invitation_with(GrantProfile::Issuer).await?;
+        let invitation = a.session().provision(GrantProfile::Issuer, None).await?;
         let issuer = Device::new(Database::join(
             open(&root.join(name), &hub, name),
             &invitation.uri,
         )?)?;
+        a.session().add_peer(&issuer.contact().await).await?;
         let identity = issuer.identity().await;
         let grant = a
             .session()

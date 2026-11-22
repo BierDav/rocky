@@ -895,7 +895,7 @@ impl Simulation {
         let uri = self
             .running(by)?
             .session()?
-            .invitation_with(profile)
+            .provision(profile, None)
             .await?
             .uri;
         let hub = self.hub.clone();

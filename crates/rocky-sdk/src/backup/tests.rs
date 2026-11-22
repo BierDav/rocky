@@ -34,7 +34,7 @@ async fn invite(owner: &Database) -> Result<String, Failure> {
     let profile = GrantProfile::Writer {
         scopes: ["notes".into()].into(),
     };
-    Ok(owner.session().invitation_with(profile).await?.uri)
+    Ok(owner.session().provision(profile, None).await?.uri)
 }
 fn staged(directory: &Path) -> Result<Vec<String>, Failure> {
     if !rocky_platform::fs::exists(directory) {

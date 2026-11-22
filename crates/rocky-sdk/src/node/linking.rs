@@ -48,7 +48,7 @@ impl Node {
             .get(&request.node)
             .is_some_and(|held| held.request == request_bytes)
         {
-            if requests.len() >= crate::join_requests::MAX_PENDING
+            if requests.len() >= 32
                 && let Some(oldest) = requests
                     .iter()
                     .min_by_key(|(_, held)| held.received)

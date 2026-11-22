@@ -83,12 +83,12 @@ impl Todos {
         Ok(self.database.session().status().await?.authority.node)
     }
     pub async fn invite(&self, role: Role) -> Result<String, Failure> {
-        let invitation = self
+        let provisioning = self
             .database
             .session()
-            .invitation_with(role.profile())
+            .provision(role.profile(), None)
             .await?;
-        Ok(format!("{role}:{}", invitation.uri))
+        Ok(format!("{role}:{}", provisioning.uri))
     }
     pub async fn register(&self, role: Role, name: &str) -> Result<(), Failure> {
         let node = self.node().await?;

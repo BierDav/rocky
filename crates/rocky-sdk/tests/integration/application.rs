@@ -183,11 +183,14 @@ async fn configured_peers_enroll_and_sync_through_the_rust_api() -> Result<(), F
         .database;
     let session = issuer.session();
     let invitation = session
-        .invitation_with(GrantProfile::Writer {
-            scopes: ["notes".into()].into(),
-        })
+        .provision(
+            GrantProfile::Writer {
+                scopes: ["notes".into()].into(),
+            },
+            None,
+        )
         .await?;
-    assert!(invitation.expires_at_epoch_seconds > 0);
+    assert!(!invitation.uri.is_empty());
     let member_configuration = Configuration::new(member_directory.path(), &schema()?)?
         .network(Network::Owned(hub.connector("member")));
     let member = member_configuration.join(&invitation.uri).await?.database;
@@ -500,8 +503,7 @@ async fn the_crate_quickstart_writes_reads_and_closes_a_note() -> Result<(), Fai
 }
 
 #[wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_join_refuses_a_device_name_over_256_bytes_before_spending_the_invitation()
--> Result<(), Failure> {
+async fn provision_refuses_a_device_label_over_256_bytes() -> Result<(), Failure> {
     use rocky_sdk::{GrantProfile, Network, transport::memory::Hub};
     use std::sync::Arc;
     let hub = Arc::new(Hub::default());
@@ -512,28 +514,23 @@ async fn a_join_refuses_a_device_name_over_256_bytes_before_spending_the_invitat
         .create()
         .await?
         .database;
-    let invitation = issuer
+    let profile = GrantProfile::Writer {
+        scopes: ["notes".into()].into(),
+    };
+    let refused = issuer
         .session()
-        .invitation_with(GrantProfile::Writer {
-            scopes: ["notes".into()].into(),
-        })
-        .await?;
-    let member = Configuration::new(member_directory.path(), &schema()?)?
-        .network(Network::Owned(hub.connector("member")));
-    let refused = member
-        .clone()
-        .name("x".repeat(257))
-        .join(&invitation.uri)
+        .provision(profile.clone(), Some(vec![b'x'; 257]))
         .await
         .err()
-        .ok_or("a 257-byte device name is refused")?;
-    assert!(
-        refused.to_string().contains("at most 256 bytes"),
-        "{refused}"
-    );
-    let joined = member
-        .name("x".repeat(256))
-        .join(&invitation.uri)
+        .ok_or("a 257-byte device label is refused")?;
+    assert!(refused.to_string().contains("256 bytes"), "{refused}");
+    let provisioning = issuer
+        .session()
+        .provision(profile, Some(vec![b'x'; 256]))
+        .await?;
+    let joined = Configuration::new(member_directory.path(), &schema()?)?
+        .network(Network::Owned(hub.connector("member")))
+        .join(&provisioning.uri)
         .await?
         .database;
     joined.close().await?;

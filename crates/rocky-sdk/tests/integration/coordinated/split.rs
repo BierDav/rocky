@@ -570,9 +570,12 @@ async fn a_skipped_members_seal_raises_the_alert_and_leaves_the_revocation_compl
     let t = trusted(&a, &root.path().join("t"), network("t"), None).await?;
     let invitation = a
         .session
-        .invitation_with(rocky_sdk::GrantProfile::Reader {
-            scopes: ["items".into()].into(),
-        })
+        .provision(
+            rocky_sdk::GrantProfile::Reader {
+                scopes: ["items".into()].into(),
+            },
+            None,
+        )
         .await?
         .uri;
     let reader = Device::new(Database::join(

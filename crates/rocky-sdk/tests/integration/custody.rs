@@ -68,10 +68,10 @@ async fn devices_never_online_together_converge_via_keyless_custody() -> Result<
     a.sync().await.expect("catch up");
     assert_eq!(a.titles().await, ["Eggs", "Milk"]);
     assert!(
-        snap::observe(relay.session.invite(
-            Some(rocky_sdk::GrantProfile::Writer {
+        snap::observe(relay.session.provision(
+            rocky_sdk::GrantProfile::Writer {
                 scopes: ["items".to_owned()].into_iter().collect()
-            }),
+            },
             None
         ))
         .await
@@ -284,10 +284,10 @@ async fn custody_forwards_pairing_and_renewal_to_an_explicit_issuer_with_creator
         "a routed contact updates only renewal routes and keeps the issuer key"
     );
     assert!(
-        snap::observe(relay.session.invite(
-            Some(rocky_sdk::GrantProfile::Writer {
+        snap::observe(relay.session.provision(
+            rocky_sdk::GrantProfile::Writer {
                 scopes: ["items".to_owned()].into_iter().collect()
-            }),
+            },
             None
         ))
         .await
@@ -343,8 +343,8 @@ async fn routed_records_preserve_authority_with_the_current_version() -> Result<
     };
     let original = decode(&invitation)?;
     let routed = decode(&route_enrollment(&invitation, &contact)?)?;
-    assert_eq!(routed["v"], 7);
-    for name in ["token", "publisher", "node", "profile", "expires"] {
+    assert_eq!(routed["v"], 1);
+    for name in ["publisher", "database", "node_key", "identity_key"] {
         assert_eq!(routed[name], original[name]);
     }
     let original = decode(&contact)?;

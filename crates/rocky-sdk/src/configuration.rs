@@ -11,7 +11,6 @@ pub struct Configuration {
     identity: Option<Arc<dyn IdentityProvider>>,
     network: Option<Network>,
     coordination: Option<crate::CoordinatorSlot>,
-    name: String,
     sign_in_wait: std::time::Duration,
 }
 impl Configuration {
@@ -25,7 +24,6 @@ impl Configuration {
             identity: None,
             network: None,
             coordination: None,
-            name: String::new(),
             sign_in_wait: DEFAULT_SIGN_IN_WAIT,
         })
     }
@@ -42,11 +40,6 @@ impl Configuration {
     #[must_use]
     pub fn network(mut self, network: Network) -> Self {
         self.network = Some(network);
-        self
-    }
-    #[must_use]
-    pub fn name(mut self, name: impl Into<String>) -> Self {
-        self.name = name.into();
         self
     }
     #[must_use]
@@ -279,26 +272,6 @@ impl Configuration {
         }
         Database::launch_open(self.options()).await
     }
-    pub async fn resume_join(
-        &self,
-        invitation: &str,
-        pending: &crate::AwaitingAdmission,
-    ) -> Result<Opened, Failure> {
-        pending.check_resume(&self.directory, invitation)?;
-        let mut options = self.options();
-        options.identity = Some(pending.identity.clone());
-        let mut opened = match Database::launch_join(options, invitation, &self.name).await {
-            Ok(opened) => opened,
-            Err(mut error) => {
-                if let Some(awaiting) = error.downcast_mut::<crate::AwaitingAdmission>() {
-                    awaiting.phrase = pending.phrase.clone();
-                }
-                return Err(error);
-            }
-        };
-        opened.identity = pending.phrase.clone();
-        Ok(opened)
-    }
     pub async fn link(
         &self,
         contact: &str,
@@ -322,24 +295,10 @@ impl Configuration {
         options.identity = Some(identity);
         Database::launch_link(options, contact, Some(pending)).await
     }
-    pub async fn join_linkable(&self, invitation: &str) -> Result<Opened, Failure> {
-        let identity = crate::IdentityKey::generate();
-        let phrase = identity.phrase();
-        let mut options = self.options();
-        options.identity = Some(Arc::new(identity));
-        let mut opened = match Database::launch_join(options, invitation, &self.name).await {
-            Ok(opened) => opened,
-            Err(mut error) => {
-                if let Some(pending) = error.downcast_mut::<crate::AwaitingAdmission>() {
-                    pending.phrase = Some(phrase);
-                }
-                return Err(error);
-            }
-        };
-        opened.identity = Some(phrase);
-        Ok(opened)
+    pub async fn join_linkable(&self, provisioning: &str) -> Result<Opened, Failure> {
+        Database::launch_join(self.options(), provisioning, false).await
     }
-    pub async fn join(&self, invitation: &str) -> Result<Opened, Failure> {
-        Database::launch_join(self.options(), invitation, &self.name).await
+    pub async fn join(&self, provisioning: &str) -> Result<Opened, Failure> {
+        Database::launch_join(self.options(), provisioning, true).await
     }
 }

@@ -86,7 +86,13 @@ WireGuard mesh, `rocky-tcp` is the plain-TCP connector instead (native only):
 `rocky_tcp::Options::new(bind).advertise("host:port")` through `Network::Owned`,
 or `Options::start` for an attachment the application keeps. Routes are
 `host:port`; it has no discovery or relays, and Rocky's own encryption and
-authorization apply on top as with any transport.
+authorization apply on top as with any transport. Its `websocket` feature also
+dials `ws://` and `wss://` routes (TLS with webpki roots), accepts WebSocket
+handshakes with `Options::websocket`, and admits connections an application's
+HTTP server already upgraded through `Attachment::external(url)` and
+`Attachment::admit_websocket`, so Rocky can sit behind an HTTPS reverse proxy.
+A dialer pins the node it expects, so a route must reach one node: behind a
+load balancer give each node its own path.
 Coordination is an application-owned slot: supply `Arc<dyn rocky_sdk::Coordinator>`
 with `Configuration::coordination` (or the engine/custody equivalents).
 For voters, construct `rocky_coordinator::Client::connect(&bundle, transport)`

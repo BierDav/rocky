@@ -6212,12 +6212,17 @@ dependencies = [
 name = "rocky-tcp"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "rocky-core",
  "rocky-credentials",
  "rocky-platform",
+ "rustls",
  "serde",
  "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
  "tracing",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -7501,6 +7506,18 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite",
 ]
 
 [[package]]

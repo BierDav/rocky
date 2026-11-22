@@ -583,6 +583,133 @@ async fn a_sql_transaction_over_two_reader_scopes_commits_one_bundle() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn applied_rows_stay_readable_while_later_frames_await_their_predecessors() {
+    let t = Typed::new();
+    let dir = Scratch::new().await;
+    let alice = t
+        .open(
+            &dir.path().join("a.db"),
+            &PrivateKey::new(),
+            vec![t.writer(t.items, "items")],
+            &[t.items],
+        )
+        .await;
+    let session = sql(&alice, &[t.items]).await;
+    let mut frames = Vec::new();
+    for (key, title) in [("a", "apples"), ("b", "bread"), ("c", "cheese")] {
+        let committed = insert(
+            &session,
+            "INSERT INTO items(key,title,done) VALUES(?,?,0)",
+            vec![text(key), text(title)],
+        )
+        .await
+        .unwrap();
+        frames.extend(committed.committed.unwrap().frames);
+    }
+    let [first, second, third] = frames.try_into().unwrap();
+    let reader_grant = || {
+        vec![grant(
+            t.items,
+            &[Right::Read, Right::Custody],
+            &t.every_field("items"),
+        )]
+    };
+
+    let fresh = t
+        .open(
+            &dir.path().join("c.db"),
+            &PrivateKey::new(),
+            reader_grant(),
+            &[t.items],
+        )
+        .await;
+    assert_eq!(
+        fresh.receive(third.clone()).await.unwrap(),
+        ReceiveStatus::PendingDependencies
+    );
+    assert_eq!(
+        sql_error(
+            sql(&fresh, &[t.items])
+                .await
+                .run("SELECT count(*) FROM items", vec![])
+                .await
+        ),
+        SqlError::Unavailable {
+            table: "items".into(),
+            reason: crate::sql::Unavailable::Incomplete
+        },
+        "a reader that applied nothing yet refuses as incomplete, not empty"
+    );
+
+    let bob = t
+        .open(
+            &dir.path().join("b.db"),
+            &PrivateKey::new(),
+            reader_grant(),
+            &[t.items],
+        )
+        .await;
+    let reader = sql(&bob, &[t.items]).await;
+    assert_eq!(bob.receive(first).await.unwrap(), ReceiveStatus::Applied);
+    assert_eq!(
+        bob.receive(third).await.unwrap(),
+        ReceiveStatus::PendingDependencies
+    );
+    assert_eq!(
+        select(&reader, "SELECT key FROM items ORDER BY key").await,
+        vec![vec![text("a")]],
+        "a statement reads the applied rows while a later frame awaits its predecessor"
+    );
+    let mut cursor = reader
+        .cursor(
+            "SELECT key FROM items ORDER BY key",
+            vec![],
+            crate::cursor::CursorLimits::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows_of(&mut cursor).await,
+        vec![vec![text("a")]],
+        "a cursor reads the applied rows while a later frame awaits its predecessor"
+    );
+    assert_eq!(bob.receive(second).await.unwrap(), ReceiveStatus::Applied);
+    assert_eq!(
+        select(&reader, "SELECT key FROM items ORDER BY key").await,
+        vec![vec![text("a")], vec![text("b")], vec![text("c")]]
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn an_import_of_another_scope_does_not_make_an_unwritable_table_retry_allocation() {
+    let t = Typed::new();
+    let dir = Scratch::new().await;
+    let both = [t.items, t.salaries];
+    let replica = t
+        .open(
+            &dir.path().join("a.db"),
+            &PrivateKey::new(),
+            vec![
+                grant(
+                    t.items,
+                    &[Right::Read, Right::Custody],
+                    &t.every_field("items"),
+                ),
+                t.writer(t.salaries, "salaries"),
+            ],
+            &both,
+        )
+        .await;
+    replica.set_importing([t.salaries].into()).await;
+    let session = sql(&replica, &both).await;
+    session.run("BEGIN", vec![]).await.unwrap();
+    assert!(
+        matches!(session.next_id("items").await, Err(Error::Rejected(_))),
+        "only an import of the table's own scope may make its allocation retry"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn statements_outside_the_session_and_unpermitted_fields_are_refused() {
     let t = Typed::new();
     let dir = Scratch::new().await;

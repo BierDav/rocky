@@ -812,7 +812,11 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(applied.next().await?.is_some())
     }
-    async fn holds_anything(&self, scope: ResourceScope, id: i64) -> Result<bool, Error> {
+    pub(in crate::replica) async fn holds_anything(
+        &self,
+        scope: ResourceScope,
+        id: i64,
+    ) -> Result<bool, Error> {
         if self.replayed_scope(scope) && self.holds_replayed_rows(scope).await? {
             return Ok(true);
         }

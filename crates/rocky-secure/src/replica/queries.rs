@@ -309,7 +309,7 @@ impl<A: RowApplication> Inner<A> {
         } else if !self.holds(scope).await? {
             Unavailable::NotHeld
         } else if self.restoring(scope).await?
-            || (self.engine_matches() && self.pending_now(scope).await?)
+            || (self.engine_matches() && self.pending_leaves_incomplete(scope).await?)
         {
             Unavailable::Incomplete
         } else {

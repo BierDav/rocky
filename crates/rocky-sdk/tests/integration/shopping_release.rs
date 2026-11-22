@@ -36,11 +36,9 @@ impl Peer {
 
     async fn invite(&self, profile: Value) -> Result<String, Failure> {
         Ok(snap::value(
-            self.session.invite(
-                Some(
-                    serde_json::from_value::<rocky_sdk::GrantProfile>(json!(profile))
-                        .expect("typed fixture"),
-                ),
+            self.session.provision(
+                serde_json::from_value::<rocky_sdk::GrantProfile>(json!(profile))
+                    .expect("typed fixture"),
                 None,
             ),
         )

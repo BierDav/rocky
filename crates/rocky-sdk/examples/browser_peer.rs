@@ -76,9 +76,12 @@ mod native {
         tx.commit().await?;
         let invitation = db
             .session()
-            .invitation_with(GrantProfile::Writer {
-                scopes: ["notes".into(), "invoices".into()].into(),
-            })
+            .provision(
+                GrantProfile::Writer {
+                    scopes: ["notes".into(), "invoices".into()].into(),
+                },
+                None,
+            )
             .await?;
         println!(
             "{}",

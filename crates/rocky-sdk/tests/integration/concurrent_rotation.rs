@@ -33,6 +33,7 @@ async fn join(
     let mut options = open(&directory, hub, name);
     options.schema = crate::support::snapshot::schema(schema);
     let device = Device::new(Database::join(options, &invitation)?)?;
+    a.session.add_peer(&device.contact().await).await?;
     fixture::settle(&device).await;
     Ok(device)
 }

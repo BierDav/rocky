@@ -1810,6 +1810,7 @@ async fn an_issuer_automatically_acquires_the_target_seal_when_main_changes_line
     let second = snap::ok(a.session.seal(false)).await["tip"].clone();
     b.sync().await.expect("issuer learns second seal");
     assert_eq!(snap::ok(b.session.compact(0)).await["compacted"], second);
+    let b_signer = b.signer().ok_or("b signer")?;
     b.close().await;
     let branch = snap::ok(async {
         let value = a.open_tip(&(snap::text(&(first))), 1).await?;
@@ -1818,7 +1819,15 @@ async fn an_issuer_automatically_acquires_the_target_seal_when_main_changes_line
     .await["tip"]
         .clone();
     snap::ok(a.move_bookmark("main", &(snap::text(&(branch))))).await;
-    let b = Device::open(&b_dir, Some(Network::Owned(hub.connector("b"))))?;
+    let b = Device::new(rocky_sdk::Database::open(rocky_sdk::Open {
+        identity: Some(b_signer.clone()),
+        directory: &b_dir,
+        schema: crate::support::snapshot::schema(common::SCHEMA),
+        secrets: None,
+        network: Some(Network::Owned(hub.connector("b"))),
+        coordination: None,
+    })?)?
+    .with_identity(b_signer);
     for _ in 0..3 {
         b.sync().await.expect("automatic target-state acquisition");
     }

@@ -718,12 +718,12 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
     .await?
     .database;
     let invitation = snap::value(
-        a.session().invite(
-            Some(rocky_sdk::GrantProfile::Writer {
+        a.session().provision(
+            rocky_sdk::GrantProfile::Writer {
                 scopes: ["lists".to_owned(), "items".to_owned()]
                     .into_iter()
                     .collect(),
-            }),
+            },
             None,
         ),
     )
@@ -824,10 +824,10 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
         coordination: None,
     };
     let a = Database::create(setup(&a_path, "a"), None)?.database;
-    let invitation = snap::value(a.session().invite(
-        Some(rocky_sdk::GrantProfile::Reader {
+    let invitation = snap::value(a.session().provision(
+        rocky_sdk::GrantProfile::Reader {
             scopes: ["lists".to_owned()].into_iter().collect(),
-        }),
+        },
         None,
     ))
     .await?;

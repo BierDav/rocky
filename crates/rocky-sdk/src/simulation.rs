@@ -1,4 +1,3 @@
-mod admission;
 mod clock;
 mod cluster;
 mod driver;

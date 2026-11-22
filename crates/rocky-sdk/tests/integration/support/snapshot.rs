@@ -94,14 +94,9 @@ impl Snapshot for sdk::SessionInfo {
         json!({"principal":self.principal,"node":self.node,"revocations":self.revocations,"expires":self.expires.to_string(),"issuer":self.issuer,"profile":self.profile,"transport":self.transport,"readable":self.readable,"writable":self.writable,"writer":self.writer.to_string()})
     }
 }
-impl Snapshot for sdk::Invitation {
+impl Snapshot for sdk::Provisioning {
     fn snapshot(self) -> Value {
-        json!({"uri":self.uri,"expires":self.expires_at_epoch_seconds.to_string(),"profile":self.profile,"id":self.id,"sequence":self.sequence.to_string()})
-    }
-}
-impl Snapshot for sdk::InvitationState {
-    fn snapshot(self) -> Value {
-        json!({"id":self.id,"expires":self.expires_at_epoch_seconds.to_string(),"open":self.open,"enrolled":self.enrolled})
+        json!({"uri":self.uri,"node":self.node,"identity":self.identity,"profile":self.profile,"sequence":self.sequence.to_string()})
     }
 }
 impl Snapshot for sdk::Supplied {
@@ -111,7 +106,7 @@ impl Snapshot for sdk::Supplied {
 }
 impl Snapshot for sdk::Discovered {
     fn snapshot(self) -> Value {
-        json!({"pending":self.pending.into_iter().map(|request|json!({"node":request.node,"nonce":request.nonce,"invitation":request.invitation,"name":request.name,"received":request.received_epoch_seconds.to_string(),"expires":request.expires_epoch_seconds.to_string(),"code":request.code})).collect::<Vec<_>>(),"seen":self.seen,"links":self.links})
+        json!({"seen":self.seen,"links":self.links})
     }
 }
 impl Snapshot for sdk::ContactInfo {
@@ -415,7 +410,7 @@ impl Snapshot for sdk::ActivityPage {
         let events=self.events.into_iter().map(|event| {
             let mut detail=match event.detail {
                 sdk::ActivityKind::LinkAdmissionFailed { error } => json!({"kind":"link_admission_failed","error":error}),
-                sdk::ActivityKind::InvitationCreated { profile, expires } => json!({"kind":"invitation_created","profile":profile,"expires":expires.to_string()}),
+                sdk::ActivityKind::DeviceProvisioned { node, identity, profile } => json!({"kind":"device_provisioned","node":node,"identity":identity,"profile":profile}),
                 sdk::ActivityKind::PeerAdded { peer } => json!({"kind":"peer_added","peer":peer}),
                 sdk::ActivityKind::PeerRemoved { peer } => json!({"kind":"peer_removed","peer":peer}),
                 sdk::ActivityKind::Renewed { revocations, expires, keys } => json!({"kind":"renewed","revocations":revocations,"expires":expires.to_string(),"keys":keys}),
@@ -473,10 +468,6 @@ impl Snapshot for sdk::ActivityPage {
                 sdk::ActivityKind::FinalCompactionFailed { error } => json!({"kind":"final_compaction_failed","error":error}),
                 sdk::ActivityKind::TipSchemaUnavailable { manifest, peer, error } => json!({"kind":"tip_schema_unavailable","manifest":data_encoding::HEXLOWER.encode(&manifest),"peer":peer,"error":error}),
                 sdk::ActivityKind::SchemaPublicationConflict { publication, terminal } => json!({"kind":"schema_publication_conflict","publication":data_encoding::HEXLOWER.encode(&publication),"terminal":data_encoding::HEXLOWER.encode(&terminal)}),
-                sdk::ActivityKind::JoinRequested { request } => json!({"kind":"join_requested","node":request.node,"nonce":request.nonce,"invitation":request.invitation,"name":request.name,"received":request.received_epoch_seconds.to_string(),"expires":request.expires_epoch_seconds.to_string(),"code":request.code}),
-                sdk::ActivityKind::JoinRequestDropped { request, reason, admitted } => json!({"kind":"join_request_dropped","node":request.node,"nonce":request.nonce,"invitation":request.invitation,"name":request.name,"received":request.received_epoch_seconds.to_string(),"expires":request.expires_epoch_seconds.to_string(),"code":request.code,"reason":format!("{reason:?}").to_lowercase(),"admitted":admitted}),
-                sdk::ActivityKind::JoinAdmitted { request } => json!({"kind":"join_admitted","node":request.node,"nonce":request.nonce,"invitation":request.invitation,"name":request.name,"received":request.received_epoch_seconds.to_string(),"expires":request.expires_epoch_seconds.to_string(),"code":request.code}),
-                sdk::ActivityKind::JoinRefused { request } => json!({"kind":"join_refused","node":request.node,"nonce":request.nonce,"invitation":request.invitation,"name":request.name,"received":request.received_epoch_seconds.to_string(),"expires":request.expires_epoch_seconds.to_string(),"code":request.code}),
             };
             detail["sequence"]=json!(event.sequence.to_string());
             detail["at"]=json!(event.at_epoch_millis.to_string());

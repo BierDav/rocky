@@ -1,13 +1,10 @@
 use crate::{
     Failure,
     enrollment::{AUTHORITY_IDENTITY_KEY, NewKey, Renewed, Settings, now},
-    join_requests::Note,
-    registry::Registry,
     secrets::Vault,
-    transport::Transport,
 };
 use rocky_core::TypedRows;
-use rocky_credentials::{Profile, RevocationSet, SignedRevocation};
+use rocky_credentials::{RevocationSet, SignedRevocation};
 use rocky_secure::EncryptedReplica;
 use std::{
     ops::{Deref, DerefMut},
@@ -146,21 +143,6 @@ impl SettingsGuard<'_> {
             *self.held = Shared::new(draft);
         }
         Ok((held, changed))
-    }
-    pub async fn invite(
-        &mut self,
-        replica: &EncryptedReplica<TypedRows>,
-        vault: &Vault,
-        transport: &dyn Transport,
-        offer: (Option<Profile>, Option<Vec<u8>>),
-        registry: &Registry,
-    ) -> Result<(String, u64, Vec<Note>), Failure> {
-        let mut draft = self.held.clone();
-        let invited = draft
-            .prepare_invite(vault, transport, offer, registry)
-            .await?;
-        self.commit(draft, replica).await?;
-        Ok(invited)
     }
 }
 impl Deref for SettingsGuard<'_> {

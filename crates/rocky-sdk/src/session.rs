@@ -1,27 +1,27 @@
 use crate::request::Request;
 use crate::{Failure, GrantProfile, PublicKey, Session};
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct Invitation {
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Provisioning {
     pub uri: String,
-    pub expires_at_epoch_seconds: u64,
-    pub profile: Option<GrantProfile>,
-    pub id: String,
+    pub node: PublicKey,
+    pub identity: PublicKey,
+    pub profile: GrantProfile,
     pub sequence: u64,
 }
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct JoinRequest {
-    pub node: PublicKey,
-    pub nonce: String,
-    pub invitation: String,
-    pub name: String,
-    pub received_epoch_seconds: u64,
-    pub expires_epoch_seconds: u64,
-    pub code: String,
+impl std::fmt::Debug for Provisioning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Provisioning")
+            .field("uri", &"<redacted>")
+            .field("node", &self.node)
+            .field("identity", &self.identity)
+            .field("profile", &self.profile)
+            .field("sequence", &self.sequence)
+            .finish()
+    }
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Discovered {
-    pub pending: Vec<JoinRequest>,
     pub seen: Vec<SeenDevice>,
     pub links: Vec<LinkRequest>,
 }
@@ -41,20 +41,6 @@ pub struct LinkRequest {
     pub code: String,
     pub received: u64,
     pub confirmed: bool,
-}
-#[derive(Clone)]
-pub struct Admit {
-    pub node: PublicKey,
-    pub code: String,
-    pub profile: GrantProfile,
-    pub label: Option<Vec<u8>>,
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InvitationState {
-    pub id: String,
-    pub expires_at_epoch_seconds: u64,
-    pub open: bool,
-    pub enrolled: Option<PublicKey>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -185,22 +171,12 @@ impl Session {
         self.send_signed(Some(identity), |reply| Request::Unlink(node, reply))
             .await
     }
-    pub async fn invitation(&self) -> Result<Invitation, Failure> {
-        self.invite(None, None).await
-    }
-    pub async fn invitation_with(&self, profile: GrantProfile) -> Result<Invitation, Failure> {
-        self.invite(Some(profile), None).await
-    }
-    pub async fn invite(
+    pub async fn provision(
         &self,
-        profile: Option<GrantProfile>,
+        profile: GrantProfile,
         label: Option<Vec<u8>>,
-    ) -> Result<Invitation, Failure> {
-        self.send(|reply| Request::Invitation(profile, label, reply))
-            .await
-    }
-    pub async fn invitation_state(&self, uri: &str) -> Result<InvitationState, Failure> {
-        self.send(|reply| Request::InvitationState(uri.into(), reply))
+    ) -> Result<Provisioning, Failure> {
+        self.send(|reply| Request::Provision(profile, label, reply))
             .await
     }
     pub async fn renew(&self) -> Result<(), Failure> {
@@ -212,12 +188,6 @@ impl Session {
     pub async fn confirm_link(&self, node: PublicKey, code: &str) -> Result<(), Failure> {
         self.send(|reply| Request::ConfirmLink(node, code.into(), reply))
             .await
-    }
-    pub async fn admit(&self, admit: Admit) -> Result<(), Failure> {
-        self.send(|reply| Request::Admit(admit, reply)).await
-    }
-    pub async fn refuse(&self, node: PublicKey) -> Result<(), Failure> {
-        self.send(|reply| Request::Refuse(node, reply)).await
     }
     pub async fn contact(&self) -> Result<String, Failure> {
         self.contact_info().await.map(|contact| contact.uri)

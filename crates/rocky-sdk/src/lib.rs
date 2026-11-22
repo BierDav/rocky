@@ -25,7 +25,6 @@ mod generation;
 mod groups;
 mod identities;
 mod inspection;
-mod join_requests;
 mod membership;
 mod mesh;
 mod node;
@@ -68,12 +67,10 @@ pub use custody::{CustodyConfiguration, CustodyPeer};
 pub use database::{Connection, CoordinatorSlot, Database, NetworkService, Open, Opened, Session};
 pub use delivery::State as DeliveryState;
 pub use enrollment::{
-    AwaitingAdmission, JoinRefused, NodeKeys, PublisherRequired, Supplied, Terms as GrantTerms,
-    route_enrollment,
+    NodeKeys, PublisherRequired, Supplied, Terms as GrantTerms, route_enrollment,
 };
 pub use error::{Error, ErrorKind};
 pub use inspection::*;
-pub use join_requests::Dropped as JoinRequestDropReason;
 pub use partitions::*;
 pub use personal::{
     PersonalOpened, PersonalSignInError, RestoreCoverage, SignInSource, VerifiedBackup,
@@ -124,8 +121,8 @@ pub use schema::{Column, Migration, MigrationStep, Schema, SchemaBuilder, Table}
 pub use secrets::{FileSecretStore, SecretStore};
 pub use service::{Network, ServiceError};
 pub use session::{
-    Admit, ContactInfo, Discovered, DroppedStage, Invitation, InvitationState, JoinRequest,
-    LinkRequest, RevocationResult, SeenDevice, SessionInfo,
+    ContactInfo, Discovered, DroppedStage, LinkRequest, Provisioning, RevocationResult, SeenDevice,
+    SessionInfo,
 };
 pub use sql::{DecodeError, FromSqlValue, IntoSqlValue, Row, Rows, Timestamp, Transaction};
 pub use status::*;

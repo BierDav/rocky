@@ -193,11 +193,8 @@ impl Node {
             Request::RevokeClaims(identity, reply) => {
                 let _ = reply.send(self.revoke_claims(identity).await.map(drop));
             }
-            Request::Invitation(profile, label, reply) => {
-                let _ = reply.send(self.invitation(profile, label).await);
-            }
-            Request::InvitationState(uri, reply) => {
-                let _ = reply.send(self.invitation_state(&uri).await);
+            Request::Provision(profile, label, reply) => {
+                let _ = reply.send(self.provision(profile, label).await);
             }
             Request::Renew(reply) => {
                 let _ = reply.send(self.renew_now().await);
@@ -207,12 +204,6 @@ impl Node {
             }
             Request::ConfirmLink(node, code, reply) => {
                 let _ = reply.send(self.confirm_link(node, &code).await);
-            }
-            Request::Admit(admit, reply) => {
-                let _ = reply.send(self.admit(admit).await);
-            }
-            Request::Refuse(node, reply) => {
-                let _ = reply.send(self.refuse(node).await);
             }
             Request::Contact(reply) => {
                 let _ = reply.send(self.contact_info().await);

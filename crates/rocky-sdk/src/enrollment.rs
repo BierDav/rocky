@@ -2,7 +2,6 @@ use crate::{
     Failure,
     domain::Domain,
     groups::{GroupPartition, GroupRecord, Member, secret_role},
-    join_requests::{Dropped, Note, State},
     membership::Membership,
     peer::{PeerReply, PeerRequest, ReplyFrame},
     registry::{self, Changes, Registry, RegistryFull},
@@ -14,9 +13,9 @@ use crate::{
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use rocky_core::{Commitment, DomainId, MeshId, ResourceGrant, Right, RowSelection, commitment};
 use rocky_credentials::{
-    Admission, Authority, Credentials, DatabaseKind, EpochRequest, IdentityProvider, Invitation,
-    MAX_LIVE_REVOCATIONS, PairRequest, PersonalContext, PersonalError, PersonalNamespace, Profile,
-    REVOCATION_SET_FULL, RenewRequest, Renewal, Revocation, open_enrollment, seal_enrollment,
+    Authority, Credentials, DatabaseKind, EpochRequest, IdentityKey, IdentityProvider,
+    MAX_LIVE_REVOCATIONS, PersonalContext, PersonalError, PersonalNamespace, Profile,
+    REVOCATION_SET_FULL, RenewRequest, Renewal, Revocation,
 };
 use rocky_secure::{
     CredentialChain, KeyMaterial, PrivateKey, PublicKey, RevocationSet, SecureConfig,
@@ -32,13 +31,12 @@ use std::{
 mod rotation_epoch;
 pub(crate) use rotation_epoch::RotationEpoch;
 
-pub const VERSION: u32 = 37;
+pub const VERSION: u32 = 38;
 pub(crate) const REPLICA_FILE: &str = "rocky.sqlite";
 pub(crate) const AUTHORITY_IDENTITY_KEY: &str = "identity";
 pub(crate) const AUTHORITY_REVOKED_KEY: &str = "revoked";
 pub(crate) const AUTHORITY_BOOTSTRAP_KEY: &str = "bootstrap";
-const INVITE_VERSION: u32 = 7;
-const ANSWER_FORMAT: u32 = 8;
+const PROVISION_VERSION: u32 = 1;
 const CONTACT_VERSION: u32 = 3;
 pub const MAX_CONTACTS: usize = 64;
 pub const MAX_DIALED: usize = 16;
@@ -46,7 +44,6 @@ const MAX_ISSUERS: usize = crate::registry::MAX_TRUSTED;
 const MAX_ROUTES: usize = 4;
 const MAX_ADDRESS: usize = 2048;
 pub const DEFAULT_TTL: u64 = 30 * 24 * 60 * 60;
-const INVITATION_TTL: u64 = 600;
 pub(crate) const MAX_EPOCHS: usize = 256;
 pub(crate) const SKEW: u64 = 300;
 type GroupDelivery = (GroupRecord, Vec<Vec<u8>>);
@@ -95,62 +92,6 @@ impl std::fmt::Display for PublisherRequired {
 }
 impl std::error::Error for PublisherRequired {}
 
-#[derive(Clone)]
-pub struct AwaitingAdmission {
-    pub code: String,
-    pub expires_epoch_seconds: u64,
-    pub(crate) identity: Arc<dyn IdentityProvider>,
-    pub(crate) phrase: Option<String>,
-    installation: String,
-    invitation: Commitment,
-}
-impl AwaitingAdmission {
-    pub(crate) fn check_resume(&self, directory: &Path, uri: &str) -> Result<(), Failure> {
-        let invite = Invite::parse(uri)?;
-        let token = hex32(&invite.token)?;
-        let digest = commitment("rocky.sdk.invitation.v1", &token);
-        let intent: Intent = serde_json::from_slice(&rocky_platform::fs::read(Intent::path(
-            &directory.join("identity.json"),
-            false,
-        ))?)?;
-        if digest != self.invitation
-            || intent.invitation != Some(digest)
-            || intent.installation != self.installation
-            || intent.identity != self.identity.public_key()?
-        {
-            return Err(
-                "the pending admission belongs to another installation or invitation".into(),
-            );
-        }
-        Ok(())
-    }
-}
-impl std::fmt::Debug for AwaitingAdmission {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AwaitingAdmission")
-            .field("code", &self.code)
-            .field("expires_epoch_seconds", &self.expires_epoch_seconds)
-            .finish_non_exhaustive()
-    }
-}
-impl std::fmt::Display for AwaitingAdmission {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "awaiting_admission: the issuer admits this device after confirming code {}",
-            self.code
-        )
-    }
-}
-impl std::error::Error for AwaitingAdmission {}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct JoinRefused;
-impl std::fmt::Display for JoinRefused {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("join_refused: the issuer refused this device's join request")
-    }
-}
-impl std::error::Error for JoinRefused {}
 pub(crate) fn root_signer<'a>(
     root: Option<&'a dyn IdentityProvider>,
     publisher: PublicKey,
@@ -355,10 +296,6 @@ pub struct Settings {
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Issuing {
-    pub invitation: Option<Invitation>,
-    pub invitation_label: Option<Vec<u8>>,
-    pub claimed: Option<Claim>,
-    pub requests: crate::join_requests::Requests,
     pub rotation: Option<Rotation>,
     pub tombstones: BTreeSet<rocky_credentials::PeerId>,
     pub heard: BTreeMap<PublicKey, u64>,
@@ -366,12 +303,6 @@ pub struct Issuing {
         BTreeMap<PublicKey, BTreeMap<PublicKey, crate::membership::TrustedObservation>>,
     pub stale_after: Option<u64>,
     pub seen: BTreeMap<PublicKey, crate::membership::Seen>,
-}
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Claim {
-    pub node: PublicKey,
-    pub user: PublicKey,
 }
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -513,29 +444,15 @@ impl ContactRecord {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Invite {
+pub(crate) struct ProvisioningBundle {
     v: u32,
     routes: Vec<Route>,
-    token: String,
     publisher: PublicKey,
     database: rocky_credentials::DatabaseContext,
-    node: PublicKey,
-    expires: u64,
-    pub(crate) profile: Option<Profile>,
     via_custody: bool,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Answer {
-    format: u32,
-    outcome: Outcome,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-enum Outcome {
-    Enrolled(Box<Enrollment>),
-    Awaiting { expires: u64 },
-    Refused,
+    node_key: String,
+    identity_key: String,
+    enrollment: Box<Enrollment>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -580,24 +497,27 @@ impl Sealed {
     }
 }
 
-impl Invite {
+impl ProvisioningBundle {
+    pub(crate) fn profile(&self) -> &Profile {
+        &self.enrollment.profile
+    }
     pub(crate) fn parse(uri: &str) -> Result<Self, Failure> {
         let bytes = BASE64URL_NOPAD.decode(
             uri.trim()
-                .strip_prefix("rocky://join/")
-                .ok_or("invalid invitation URI")?
+                .strip_prefix("rocky://provision/")
+                .ok_or("invalid provisioning URI")?
                 .as_bytes(),
         )?;
         let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-        if value["v"].as_u64() != Some(u64::from(INVITE_VERSION)) {
-            return Err("unsupported invitation version".into());
+        if value["v"].as_u64() != Some(u64::from(PROVISION_VERSION)) {
+            return Err("unsupported provisioning version".into());
         }
-        let invite: Self = serde_json::from_value(value)?;
-        if invite.database.publisher != invite.publisher {
-            return Err("invitation database publisher mismatch".into());
+        let bundle: Self = serde_json::from_value(value)?;
+        if bundle.database.publisher != bundle.publisher {
+            return Err("provisioning database publisher mismatch".into());
         }
-        Contact::checked(invite.routes.clone())?;
-        Ok(invite)
+        Contact::checked(bundle.routes.clone())?;
+        Ok(bundle)
     }
 }
 #[derive(Serialize, Deserialize)]
@@ -2116,96 +2036,14 @@ impl Settings {
             })
             .collect()
     }
-    pub(crate) async fn prepare_invite(
+    pub(crate) fn provision(
         &mut self,
         vault: &Vault,
-        transport: &dyn Transport,
-        (profile, label): (Option<Profile>, Option<Vec<u8>>),
-        registry: &Registry,
-    ) -> Result<(String, u64, Vec<Note>), Failure> {
-        if label
-            .as_ref()
-            .is_some_and(|label| label.len() > registry::MAX_LABEL)
-        {
-            return Err("invitation label exceeds 256 bytes".into());
-        }
-        if let Some(profile) = &profile {
-            self.check_profile(profile)?;
-        }
-        self.issuing("invites devices")?;
-        if registry.identities() >= registry::MAX_IDENTITIES {
-            return Err(Box::new(RegistryFull));
-        }
-        let address = transport.address().await?;
-        let token = vault.replace("invitation")?;
-        let expires = now()? + INVITATION_TTL;
-        let invitation = Invitation::open(&token, profile.clone(), expires);
-        let invite = Invite {
-            v: INVITE_VERSION,
-            routes: vec![Route {
-                transport: transport.kind().into(),
-                address,
-            }],
-            token: HEXLOWER.encode(&token),
-            publisher: self.publisher,
-            database: self.database_context()?,
-            node: PrivateKey::from_bytes(&vault.get("node")?).public_key(),
-            expires,
-            profile,
-            via_custody: false,
-        };
-        let uri = format!(
-            "rocky://join/{}",
-            BASE64URL_NOPAD.encode(&serde_json::to_vec(&invite)?)
-        );
-        let issuing = self.issuing("invites devices")?;
-        issuing.invitation_label = label;
-        issuing.invitation = Some(invitation);
-        issuing.claimed = None;
-        let notes = issuing.requests.end(Dropped::Replaced);
-        Ok((uri, expires, notes))
-    }
-    fn check_profile(&self, profile: &Profile) -> Result<(), Failure> {
-        let domain = self.domain()?;
-        profile.grants(&domain.resources())?;
-        grants_of(profile, &domain)?;
-        Ok(())
-    }
-    pub(crate) fn expire_requests(&mut self, time: u64) -> Vec<Note> {
-        let Some(issuing) = self.authority.as_mut() else {
-            return Vec::new();
-        };
-        let ended = issuing
-            .invitation
-            .as_ref()
-            .is_none_or(|invitation| invitation.expires < time);
-        if ended && issuing.requests.invitation.is_some() {
-            issuing.requests.end(Dropped::Expired)
-        } else {
-            Vec::new()
-        }
-    }
-    pub(crate) fn pending_requests(&self) -> (Vec<crate::join_requests::Request>, u64) {
-        self.authority
-            .as_ref()
-            .map(|issuing| {
-                (
-                    issuing.requests.pending().cloned().collect(),
-                    issuing
-                        .invitation
-                        .as_ref()
-                        .map_or(0, |invitation| invitation.expires),
-                )
-            })
-            .unwrap_or_default()
-    }
-    pub(crate) fn admit(
-        &mut self,
-        node: &PublicKey,
-        code: &str,
+        routes: Vec<Route>,
+        via_custody: bool,
         (profile, label): (Profile, Option<Vec<u8>>),
         registry: &Registry,
-    ) -> Result<Vec<Note>, Failure> {
+    ) -> Result<((String, PublicKey, PublicKey), Changes), Failure> {
         if label
             .as_ref()
             .is_some_and(|label| label.len() > registry::MAX_LABEL)
@@ -2213,190 +2051,14 @@ impl Settings {
             return Err("device label exceeds 256 bytes".into());
         }
         self.check_profile(&profile)?;
+        self.issuing("provisions devices")?;
         if registry.identities() >= registry::MAX_IDENTITIES {
             return Err(Box::new(RegistryFull));
         }
-        self.issuing("admits devices")?
-            .requests
-            .admit(node, code, (profile, label))
-    }
-    pub(crate) fn refuse(&mut self, node: &PublicKey) -> Result<Vec<Note>, Failure> {
-        self.issuing("refuses devices")?.requests.refuse(node)
-    }
-
-    pub(crate) fn invitation_identity(uri: &str) -> Result<(String, u64), Failure> {
-        let invite = Invite::parse(uri)?;
-        let token = HEXLOWER.decode(invite.token.as_bytes())?;
-        Ok((
-            HEXLOWER.encode(&commitment("rocky.sdk.invitation.v1", &token)),
-            invite.expires,
-        ))
-    }
-
-    pub fn invitation_open(&self, uri: &str) -> Result<bool, Failure> {
-        let authority = self
-            .authority
-            .as_ref()
-            .ok_or("only an issuer checks invitations")?;
-        let invite = Invite::parse(uri)?;
-        let token: [u8; 32] = HEXLOWER
-            .decode(invite.token.as_bytes())?
-            .try_into()
-            .map_err(|_| "invalid invitation token")?;
-        let time = now()?;
-        Ok(invite.database == self.database_context()?
-            && authority
-                .invitation
-                .as_ref()
-                .is_some_and(|invitation| invitation.is_open(&token, time)))
-    }
-
-    pub fn pair(
-        &mut self,
-        vault: &Vault,
-        request: &[u8],
-        registry: &Registry,
-    ) -> Result<(Vec<u8>, Changes, Vec<Note>), Failure> {
-        let request = PairRequest::from_bytes(request)?;
-        let token = vault.get("invitation")?;
-        let expected = context(&self.schema, self.database_context()?);
-        if request.context != expected {
-            return Err("application mismatch".into());
-        }
-        let time = now()?;
-        let active = self
-            .issuing("enrolls devices")?
-            .invitation
-            .as_mut()
-            .ok_or("no active invitation")?;
-        let admission = active.admit(&token, &request, time)?;
-        let (profile, expires) = (active.profile.clone(), active.expires);
-        if self.revoked_node(
-            &NodeKeys {
-                identity: request.user,
-                node: request.node,
-            },
-            registry,
-        ) {
-            return Err("the node or its identity was revoked".into());
-        }
-        let seal = |outcome| {
-            let answer = Answer {
-                format: ANSWER_FORMAT,
-                outcome,
-            };
-            Ok::<_, Failure>(seal_enrollment(
-                &token,
-                &request,
-                &serde_json::to_vec(&answer)?,
-            )?)
-        };
-        if let Some(profile) = profile {
-            return self.pair_invited(vault, &request, registry, (&token, profile, admission));
-        }
-        let held = self
-            .issuing("enrolls devices")?
-            .requests
-            .of(&request)
-            .map(|held| held.state.clone());
-        match held {
-            Some(State::Pending) => Ok((
-                seal(Outcome::Awaiting { expires })?,
-                Changes::default(),
-                Vec::new(),
-            )),
-            Some(State::Refused) => Ok((seal(Outcome::Refused)?, Changes::default(), Vec::new())),
-            Some(State::Admitted { profile, label }) => {
-                let (enrollment, changes) =
-                    self.enroll(vault, &request, registry, (&token, profile.clone(), label))?;
-                let enrolled = Note::Enrolled {
-                    node: request.node,
-                    profile,
-                };
-                Ok((
-                    seal(Outcome::Enrolled(Box::new(enrollment)))?,
-                    changes,
-                    vec![enrolled],
-                ))
-            }
-            None => {
-                if registry.admitted(&request.user) {
-                    return Err("device already enrolled".into());
-                }
-                let issuer = PrivateKey::from_bytes(&vault.get("node")?).public_key();
-                let notes = self.issuing("enrolls devices")?.requests.receive(
-                    &crate::join_requests::invitation_digest(&token),
-                    &issuer,
-                    &request,
-                    time,
-                )?;
-                Ok((
-                    seal(Outcome::Awaiting { expires })?,
-                    Changes::default(),
-                    notes,
-                ))
-            }
-        }
-    }
-    fn pair_invited(
-        &mut self,
-        vault: &Vault,
-        request: &PairRequest,
-        registry: &Registry,
-        (token, profile, admission): (&[u8; 32], Profile, Admission),
-    ) -> Result<(Vec<u8>, Changes, Vec<Note>), Failure> {
-        let authority = self.issuing("enrolls devices")?;
-        let claimed = authority
-            .claimed
-            .as_ref()
-            .filter(|claim| claim.node == request.node && claim.user == request.user)
-            .cloned();
-        match admission {
-            Admission::First if registry.revoked(&request.user) => {
-                return Err("identity was revoked".into());
-            }
-            Admission::First if registry.full_for(&request.user) => {
-                return Err(Box::new(RegistryFull));
-            }
-            Admission::Retry if claimed.is_none() => {
-                return Err("invitation already used".into());
-            }
-            _ => {}
-        }
-        let authority = self.issuing("enrolls devices")?;
-        authority
-            .invitation
-            .as_mut()
-            .ok_or("no active invitation")?
-            .claim(request);
-        authority.claimed = Some(Claim {
-            node: request.node,
-            user: request.user,
-        });
-        let label = authority.invitation_label.clone();
-        let (enrollment, changes) =
-            self.enroll(vault, request, registry, (token, profile.clone(), label))?;
-        let answer = Answer {
-            format: ANSWER_FORMAT,
-            outcome: Outcome::Enrolled(Box::new(enrollment)),
-        };
-        let sealed = seal_enrollment(token, request, &serde_json::to_vec(&answer)?)?;
-        let enrolled = Note::Enrolled {
-            node: request.node,
-            profile,
-        };
-        Ok((sealed, changes, vec![enrolled]))
-    }
-    fn enroll(
-        &mut self,
-        vault: &Vault,
-        request: &PairRequest,
-        registry: &Registry,
-        (token, profile, label): (&[u8; 32], Profile, Option<Vec<u8>>),
-    ) -> Result<(Enrollment, Changes), Failure> {
-        if registry.full_for(&request.user) {
-            return Err(Box::new(RegistryFull));
-        }
+        let provisioned_node = PrivateKey::from_bytes(&rocky_platform::entropy::random());
+        let provisioned_node_pub = provisioned_node.public_key();
+        let provisioned_identity = IdentityKey::from_secret(rocky_platform::entropy::random());
+        let provisioned_identity_pub = provisioned_identity.public_key();
         let domain = self.domain()?;
         let issuer = PrivateKey::from_bytes(&vault.get("node")?).public_key();
         let node = Self::node_key(vault)?;
@@ -2407,14 +2069,13 @@ impl Settings {
         let issued = self.issue(
             &authority,
             &domain,
-            request.user,
+            provisioned_identity_pub,
             grants.clone(),
             profile.issues(),
         )?;
-        self.learn_joined_peer(request.node, &request.routes, profile.issues());
         let mut changes = Changes::default();
         changes.admitted(
-            &request.user,
+            &provisioned_identity_pub,
             &registry::Admitted {
                 kind: registry::Kind::Paired,
                 profile: Some(profile.clone()),
@@ -2425,32 +2086,32 @@ impl Settings {
                     .origin
                     .map(|origin| origin.identity),
                 enrolled: time,
-                invitation: Some(crate::join_requests::invitation_digest(token)),
+                invitation: None,
                 single_use: false,
             },
             false,
         )?;
-        if registry
-            .get(&request.user)
-            .and_then(|record| record.label.as_ref())
-            .is_none()
-            && let Some(label) = &label
-        {
-            changes.label(&request.user, label)?;
+        if let Some(label) = &label {
+            changes.label(&provisioned_identity_pub, label)?;
         }
         changes.capability(
-            &request.user,
+            &provisioned_identity_pub,
             registry::Capability {
                 id: issued.id()?,
                 expires: issued.capability.expires,
             },
-            registry.get(&request.user),
+            None,
         )?;
         let keys = self.keys_for(vault, &domain, &grants)?;
         let database = self.database_context()?;
-        crate::reset::admit_after_resets(&mut self.revocations, &node, database, request.node)?;
+        crate::reset::admit_after_resets(
+            &mut self.revocations,
+            &node,
+            database,
+            provisioned_node_pub,
+        )?;
         let enrollment = Enrollment {
-            groups: self.groups_for(vault, request.node, &issued.capability, false)?,
+            groups: self.groups_for(vault, provisioned_node_pub, &issued.capability, false)?,
             naming: naming_for(vault, &profile)?,
             naming_escrow: match profile {
                 Profile::Custody { .. } if self.kind()?.is_personal() => {
@@ -2477,9 +2138,32 @@ impl Settings {
             chain: links.clone(),
             ttl: self.ttl,
             profile,
-            issuers: self.issuer_contacts(&[request.node])?,
+            issuers: self.issuer_contacts(&[provisioned_node_pub])?,
         };
-        Ok((enrollment, changes))
+        let bundle = ProvisioningBundle {
+            v: PROVISION_VERSION,
+            routes,
+            publisher: self.publisher,
+            database,
+            via_custody,
+            node_key: HEXLOWER.encode(provisioned_node.as_bytes()),
+            identity_key: HEXLOWER.encode(&provisioned_identity.secret()),
+            enrollment: Box::new(enrollment),
+        };
+        let uri = format!(
+            "rocky://provision/{}",
+            BASE64URL_NOPAD.encode(&serde_json::to_vec(&bundle)?)
+        );
+        Ok((
+            (uri, provisioned_node_pub, provisioned_identity_pub),
+            changes,
+        ))
+    }
+    fn check_profile(&self, profile: &Profile) -> Result<(), Failure> {
+        let domain = self.domain()?;
+        profile.grants(&domain.resources())?;
+        grants_of(profile, &domain)?;
+        Ok(())
     }
 
     pub fn grant(
@@ -2822,8 +2506,8 @@ impl Settings {
         Ok(changes)
     }
 
-    pub fn invitation_publisher(invitation: &str) -> Result<PublicKey, Failure> {
-        Ok(Invite::parse(invitation)?.publisher)
+    pub fn provision_publisher(provisioning: &str) -> Result<PublicKey, Failure> {
+        Ok(ProvisioningBundle::parse(provisioning)?.publisher)
     }
     pub fn learn_contacts(&mut self, other: &Settings, exclude: &[PublicKey]) {
         for (node, contact) in &other.peers {
@@ -2882,27 +2566,6 @@ impl Settings {
             }
         }
     }
-    fn learn_joined_peer(&mut self, node: PublicKey, routes: &[(String, String)], issuer: bool) {
-        let routes = routes
-            .iter()
-            .map(|(transport, address)| Route {
-                transport: transport.clone(),
-                address: address.clone(),
-            })
-            .collect();
-        let Ok(contact) = Contact::checked(routes) else {
-            return;
-        };
-        let full = (!self.peers.contains_key(&node) && self.contact_count() >= MAX_CONTACTS)
-            || (issuer && !self.issuers.contains(&node) && self.issuers.len() >= MAX_ISSUERS);
-        if contact.routes.is_empty() || full {
-            return;
-        }
-        if issuer && !self.issuers.contains(&node) {
-            self.issuers.push(node);
-        }
-        self.peers.entry(node).or_default().learn(contact.routes);
-    }
     fn revoked(&self, node: &PublicKey) -> bool {
         self.revocations.revokes(node)
     }
@@ -2922,38 +2585,6 @@ impl Settings {
             self.issuers.retain(|issuer| *issuer != node);
             self.enrollment_routes.remove(&node);
         }
-    }
-    pub fn prepare_join(
-        path: &Path,
-        (invitation, name): (&str, &str),
-        store: &std::sync::Arc<dyn crate::SecretStore>,
-        provider: Option<Arc<dyn IdentityProvider>>,
-    ) -> Result<Joining, Failure> {
-        if name.len() > registry::MAX_LABEL {
-            return Err(
-                format!("a device name holds at most {} bytes", registry::MAX_LABEL).into(),
-            );
-        }
-        let invite = Invite::parse(invitation)?;
-        let token = hex32(&invite.token)?;
-        let digest = commitment("rocky.sdk.invitation.v1", &token);
-        let single_use = provider.is_none();
-        let provider = provider.or_else(|| Some(Arc::new(crate::IdentityKey::generate())));
-        let (intent, vault) = Intent::resume(
-            &Intent::path(path, false),
-            Some(digest),
-            store,
-            provider.as_ref(),
-            single_use,
-        )?;
-        Ok(Joining {
-            vault,
-            invite,
-            intent,
-            token,
-            name: name.into(),
-            provider,
-        })
     }
     pub fn prepare_install(
         path: &Path,
@@ -3197,103 +2828,39 @@ fn after_recovery(revocations: &RevocationSet, time: u64) -> u64 {
         time.max(recovery.since + rocky_credentials::LIFETIME_SKEW + 1)
     })
 }
-pub struct Joining {
-    pub vault: Vault,
-    invite: Invite,
-    intent: Intent,
-    token: [u8; 32],
-    name: String,
-    provider: Option<Arc<dyn IdentityProvider>>,
-}
-impl Joining {
-    pub async fn enroll(
-        self,
-        path: &Path,
+impl Settings {
+    pub(crate) async fn install_provisioned(
+        store: &Arc<dyn crate::SecretStore>,
         schema: &Schema,
-        transport: &dyn Transport,
-    ) -> Result<Settings, Failure> {
-        let Self {
-            vault,
-            invite,
-            intent,
-            token,
-            name,
-            provider,
-        } = self;
-        let issuer = Contact {
-            routes: invite.routes,
-        };
-        let addresses = issuer.addresses(transport.kind());
-        if addresses.is_empty() {
-            return Err(ServiceError::NoRoute {
-                peer: "the invitation",
-                network: transport.kind().into(),
-            }
-            .into());
-        }
-        let identity = provider
-            .as_ref()
-            .ok_or("supply the identity for this installation")?
-            .public_key()?;
-        let node = PrivateKey::from_bytes(&vault.get("node")?);
-        let mut request = PairRequest::new(
-            &token,
-            intent.nonce.clone(),
-            (node.public_key(), identity),
-            name,
-            context(schema, invite.database),
-        );
-        if let Ok(return_route_for_later_commits) = transport.address().await
-            && !return_route_for_later_commits.is_empty()
-        {
-            request = request.with_routes(
-                &token,
-                vec![(transport.kind().into(), return_route_for_later_commits)],
-            );
-        }
-        let PeerReply::Pair(sealed) = exchange(
-            transport,
-            &addresses,
-            invite.database.scope,
-            &PeerRequest::Pair(request.clone()),
-        )
-        .await?
-        else {
-            return Err("pair reply kind".into());
-        };
-        let answer: serde_json::Value =
-            serde_json::from_slice(&open_enrollment(&token, &request, &sealed)?)?;
-        if answer["format"].as_u64() != Some(u64::from(ANSWER_FORMAT)) {
-            return Err("unsupported enrollment format".into());
-        }
-        let enrollment = match serde_json::from_value::<Answer>(answer)?.outcome {
-            Outcome::Enrolled(enrollment) => *enrollment,
-            Outcome::Awaiting { expires } => {
-                return Err(Box::new(AwaitingAdmission {
-                    code: crate::join_requests::admission_code(
-                        &invite.node,
-                        &node.public_key(),
-                        &intent.nonce,
-                    ),
-                    expires_epoch_seconds: expires,
-                    identity: provider.ok_or("missing pending identity")?,
-                    phrase: None,
-                    installation: intent.installation.clone(),
-                    invitation: intent.invitation.ok_or("missing invitation intent")?,
-                }));
-            }
-            Outcome::Refused => return Err(Box::new(JoinRefused)),
-        };
+        provisioning: &str,
+        single_use: bool,
+    ) -> Result<(Self, Vault, Option<String>), Failure> {
+        let bundle = ProvisioningBundle::parse(provisioning)?;
+        let enrollment = *bundle.enrollment;
         enrollment.record.bytes()?;
-        if enrollment.mesh != invite.database.scope.mesh
-            || enrollment.domain != invite.database.scope.domain
+        if enrollment.mesh != bundle.database.scope.mesh
+            || enrollment.domain != bundle.database.scope.domain
         {
             return Err("enrollment belongs to another database".into());
         }
-        enrollment.revocations.verify_in(invite.database)?;
+        if context(schema, bundle.database) != context(&enrollment.record.schema, bundle.database) {
+            return Err("application mismatch".into());
+        }
+        enrollment.revocations.verify_in(bundle.database)?;
+        let installation = HEXLOWER.encode(&rocky_platform::entropy::random::<32>());
+        let vault = Vault::new(store.clone(), &installation);
+        let node_secret = hex32(&bundle.node_key)?;
+        vault.put("node", &node_secret)?;
+        vault.put("transport", &rocky_platform::entropy::random::<32>())?;
+        let identity_key = IdentityKey::from_secret(hex32(&bundle.identity_key)?);
+        let identity = identity_key.public_key();
+        let phrase = (!single_use).then(|| identity_key.phrase());
+        let issuer = Contact {
+            routes: bundle.routes,
+        };
         let mut settings = Settings {
             version: VERSION,
-            installation: intent.installation.clone(),
+            installation,
             schema: enrollment.record.schema.clone(),
             generation: enrollment.record.generation,
             engine: enrollment.record.engine,
@@ -3302,9 +2869,9 @@ impl Joining {
             bootstrap: Some(enrollment.bootstrap),
             mesh: enrollment.mesh,
             domain: enrollment.domain,
-            publisher: invite.publisher,
+            publisher: bundle.publisher,
             identity,
-            single_use: intent.single_use,
+            single_use,
             genesis: enrollment.genesis,
             revocations: RevocationSet::new(),
             credentials: CredentialChain(Vec::new()),
@@ -3321,13 +2888,13 @@ impl Joining {
             contact_meta: BTreeMap::new(),
             peers: BTreeMap::from([(
                 enrollment.issuer,
-                if invite.via_custody {
+                if bundle.via_custody {
                     Contact::default()
                 } else {
                     issuer.clone()
                 },
             )]),
-            enrollment_routes: if invite.via_custody {
+            enrollment_routes: if bundle.via_custody {
                 BTreeMap::from([(enrollment.issuer, issuer)])
             } else {
                 BTreeMap::new()
@@ -3358,24 +2925,20 @@ impl Joining {
             .resources(&enrollment.capability.capability.grants);
         if enrollment.capability.issuer != signer
             || enrollment.capability.capability.subject != identity
-            || invite
-                .profile
-                .as_ref()
-                .is_some_and(|invited| *invited != settings.profile)
             || issues != settings.profile.issues()
             || (!issues
                 && (granted.len() != grants.len()
                     || granted.iter().any(|grant| !grants.contains(grant))
                     || grants.iter().any(|grant| !granted.contains(grant))))
         {
-            return Err("the enrollment differs from its invitation".into());
+            return Err("the enrollment differs from its provisioning bundle".into());
         }
         let mut links = enrollment.chain.clone();
         links.0.push(enrollment.capability.clone());
-        settings.credentials =
-            crate::identities::with_identity(provider.ok_or("missing join identity")?, || {
-                settings.certify(&vault, links, &domain)
-            })?;
+        let provider: Arc<dyn IdentityProvider> = Arc::new(identity_key);
+        settings.credentials = crate::identities::with_identity(provider, || {
+            settings.certify(&vault, links, &domain)
+        })?;
         for (name, scope) in domain.scopes() {
             if !reads(&grants, scope) {
                 continue;
@@ -3404,9 +2967,7 @@ impl Joining {
         }
         crate::escrow::keep_naming(&mut settings, enrollment.naming_escrow)?;
         settings.learn_issuers(&vault, &enrollment.issuers);
-        settings.save(path).await?;
-        rocky_platform::fs::remove_file(Intent::path(path, false))?;
-        Ok(settings)
+        Ok((settings, vault, phrase))
     }
 }
 impl Settings {
@@ -4530,16 +4091,16 @@ pub fn route_enrollment(uri: &str, custody_contact: &str) -> Result<String, Fail
         Ok(record)
     }
     let relay = contact(custody_contact)?;
-    if uri.trim().starts_with("rocky://join/") {
-        let mut invitation = Invite::parse(uri)?;
-        if invitation.publisher != relay.publisher {
+    if uri.trim().starts_with("rocky://provision/") {
+        let mut bundle = ProvisioningBundle::parse(uri)?;
+        if bundle.publisher != relay.publisher {
             return Err("relay belongs to another domain".into());
         }
-        invitation.routes = relay.routes;
-        invitation.via_custody = true;
+        bundle.routes = relay.routes;
+        bundle.via_custody = true;
         Ok(format!(
-            "rocky://join/{}",
-            BASE64URL_NOPAD.encode(&serde_json::to_vec(&invitation)?)
+            "rocky://provision/{}",
+            BASE64URL_NOPAD.encode(&serde_json::to_vec(&bundle)?)
         ))
     } else {
         let mut issuer = contact(uri)?;

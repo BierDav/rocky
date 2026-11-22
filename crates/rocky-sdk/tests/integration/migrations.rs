@@ -23,7 +23,10 @@ const FIXED: &str = r#"{"application":"shopping","version":3,"format":6,"tables"
   {"insert":"tags","select":"SELECT 'tag-' || key AS key, title AS label FROM items"}]}]}"#;
 
 fn reopen(options: Open<'_>) -> Result<Device, Failure> {
-    let signer = common::external_identity(options.directory);
+    let signer = options
+        .identity
+        .clone()
+        .unwrap_or_else(|| common::external_identity(options.directory));
     Device::new(Database::open(options)?).map(|device| device.with_identity(signer))
 }
 
@@ -161,10 +164,15 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::create(&a_dir, network("a"))?;
     a.follow_main_migrating().await;
-    let b = Device::new(Database::join(
+    let b_opened = Database::join(
         open(&b_dir, common::SCHEMA, network("b")),
         &a.invite_as(json!({"kind": "issuer"})).await,
-    )?)?;
+    )?;
+    let b_identity: Arc<dyn rocky_sdk::IdentityProvider> =
+        Arc::new(rocky_sdk::IdentityKey::from_phrase(
+            b_opened.identity.as_deref().ok_or("linkable identity")?,
+        )?);
+    let b = Device::new(b_opened)?;
     introduce(&a, &b).await;
     a.add(1, "apples").await;
     b.add(2, "bread").await;
@@ -172,8 +180,12 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
     a.close().await;
     b.close().await;
 
-    for directory in [&a_dir, &b_dir] {
-        let device = reopen(open(directory, POSITIONED, None))?;
+    for (directory, id) in [(&a_dir, None), (&b_dir, Some(b_identity.clone()))] {
+        let mut opts = open(directory, POSITIONED, None);
+        if let Some(id) = id {
+            opts.identity = Some(id);
+        }
+        let device = reopen(opts)?;
         assert_eq!(
             generation(&device).await["current"]["schema"],
             2,
@@ -182,7 +194,9 @@ async fn issuers_that_cannot_reach_each_other_both_migrate_and_converge() -> Res
         device.close().await;
     }
     let a = reopen(open(&a_dir, POSITIONED, network("a")))?;
-    let b = reopen(open(&b_dir, POSITIONED, network("b")))?;
+    let mut b_opts = open(&b_dir, POSITIONED, network("b"));
+    b_opts.identity = Some(b_identity);
+    let b = reopen(b_opts)?;
     sync(&b).await;
     sync(&a).await;
     sync(&b).await;
@@ -249,10 +263,15 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
     let a = Device::new(Database::create(open(&a_dir, LISTS, network("a")), None)?)?;
     a.follow_main_migrating().await;
-    let b = Device::new(Database::join(
+    let b_opened = Database::join(
         open(&b_dir, LISTS, network("b")),
         &a.invite_as(json!({"kind": "issuer"})).await,
-    )?)?;
+    )?;
+    let b_identity: Arc<dyn rocky_sdk::IdentityProvider> =
+        Arc::new(rocky_sdk::IdentityKey::from_phrase(
+            b_opened.identity.as_deref().ok_or("linkable identity")?,
+        )?);
+    let b = Device::new(b_opened)?;
     introduce(&a, &b).await;
     list(&a, "From a").await?;
     let theirs = list(&b, "From b").await?;
@@ -312,7 +331,9 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
         ])
     );
     b.close().await;
-    let b = reopen(open(&b_dir, POSITIONED_LISTS, network("b")))?;
+    let mut b_opts = open(&b_dir, POSITIONED_LISTS, network("b"));
+    b_opts.identity = Some(b_identity);
+    let b = reopen(b_opts)?;
     sync(&b).await;
     sync(&b).await;
     assert_eq!(

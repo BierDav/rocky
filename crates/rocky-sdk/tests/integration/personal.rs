@@ -126,16 +126,15 @@ async fn a_personal_database_admits_only_custody_principals() -> Result<(), Fail
     let session = owner.session();
     let scopes = ["items".to_owned()].into();
     for profile in [
-        None,
-        Some(GrantProfile::Reader {
+        GrantProfile::Reader {
             scopes: Clone::clone(&scopes),
-        }),
-        Some(GrantProfile::Writer {
+        },
+        GrantProfile::Writer {
             scopes: Clone::clone(&scopes),
-        }),
-        Some(GrantProfile::Issuer),
+        },
+        GrantProfile::Issuer,
     ] {
-        let error = session.invite(profile, None).await.expect_err("refused");
+        let error = session.provision(profile, None).await.expect_err("refused");
         assert_eq!(code(&error), "personal_owner_only");
     }
     let stranger = rocky_sdk::IdentityKey::generate().public_key().to_hex();
@@ -169,7 +168,7 @@ async fn a_personal_database_admits_only_custody_principals() -> Result<(), Fail
     };
     assert_eq!(code(&error), "personal_owner_only");
     session
-        .invitation_with(GrantProfile::Custody { scopes })
+        .provision(GrantProfile::Custody { scopes }, None)
         .await?;
     owner.close().await;
 

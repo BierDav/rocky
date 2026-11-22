@@ -67,10 +67,7 @@ pub use coordination::{
 };
 pub use delivery::{DeliveryReceipt, MAX_DELIVERY_PAYLOAD, SealedDelivery};
 pub use discovery::{DiscoverySecret, open_discovery, seal_discovery};
-pub use enroll::{
-    Admission, Exchange, IdentityAnswer, IdentityRequest, Invitation, PairRequest, RenewRequest,
-    Renewal, open_enrollment, seal_enrollment,
-};
+pub use enroll::{Exchange, IdentityAnswer, IdentityRequest, RenewRequest, Renewal};
 pub use escrow::{
     CarriedEscrow, MAX_ESCROW_PAYLOAD, MetadataEscrow, RootEscrow, VouchedEscrow, escrow_tag,
 };

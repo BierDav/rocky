@@ -1,6 +1,6 @@
 use crate::{
     Database, Failure, Network, Open, Opened,
-    enrollment::{Invite, Settings},
+    enrollment::{ProvisioningBundle, Settings},
 };
 use rocky_core::Right;
 use rocky_credentials::Profile;
@@ -50,12 +50,12 @@ impl CustodyPeer {
             let invitation = config
                 .invitation
                 .as_deref()
-                .ok_or("custody enrollment needs an invitation")?;
+                .ok_or("custody enrollment needs a provisioning bundle")?;
             if !matches!(
-                Invite::parse(invitation)?.profile,
-                Some(Profile::Custody { .. })
+                ProvisioningBundle::parse(invitation)?.profile(),
+                Profile::Custody { .. }
             ) {
-                return Err("custody enrollment requires a custody invitation".into());
+                return Err("custody enrollment requires a custody provisioning bundle".into());
             }
         }
         let open = Open {

@@ -38,13 +38,10 @@ pub(crate) enum Kind {
     Logout,
     Tips,
     Claims,
-    Invitation,
-    InvitationState,
+    Provision,
     Renew,
     Discovered,
     ConfirmLink,
-    Admit,
-    Refuse,
     Contact,
     PeerAdd,
     PeerRemove,
@@ -208,17 +205,14 @@ pub(crate) enum Request {
     InstallClaims(crate::ClaimGrant, Reply<()>),
     HeldClaims(Reply<Option<crate::ClaimGrant>>),
     RevokeClaims(rocky_credentials::PublicKey, Reply<()>),
-    Invitation(
-        Option<crate::GrantProfile>,
+    Provision(
+        crate::GrantProfile,
         Option<Vec<u8>>,
-        Reply<crate::Invitation>,
+        Reply<crate::Provisioning>,
     ),
-    InvitationState(String, Reply<crate::InvitationState>),
     Renew(Reply<()>),
     Discovered(Reply<crate::Discovered>),
     ConfirmLink(rocky_credentials::PublicKey, String, Reply<()>),
-    Admit(crate::Admit, Reply<()>),
-    Refuse(rocky_credentials::PublicKey, Reply<()>),
     Contact(Reply<crate::ContactInfo>),
     AddPeer(String, Reply<PublicKey>),
     RemovePeer(rocky_credentials::PublicKey, Reply<()>),
@@ -341,13 +335,10 @@ impl Request {
             Self::InstallClaims(..) => Kind::Claims,
             Self::HeldClaims(..) => Kind::Claims,
             Self::RevokeClaims(..) => Kind::Claims,
-            Self::Invitation(..) => Kind::Invitation,
-            Self::InvitationState(..) => Kind::InvitationState,
+            Self::Provision(..) => Kind::Provision,
             Self::Renew(..) => Kind::Renew,
             Self::Discovered(..) => Kind::Discovered,
             Self::ConfirmLink(..) => Kind::ConfirmLink,
-            Self::Admit(..) => Kind::Admit,
-            Self::Refuse(..) => Kind::Refuse,
             Self::Contact(..) => Kind::Contact,
             Self::AddPeer(..) => Kind::PeerAdd,
             Self::RemovePeer(..) => Kind::PeerRemove,
@@ -515,10 +506,7 @@ impl Request {
             Self::RevokeClaims(_, reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::Invitation(_, _, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::InvitationState(_, reply) => {
+            Self::Provision(_, _, reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::Renew(reply) => {
@@ -528,12 +516,6 @@ impl Request {
                 let _ = reply.send(Err(error));
             }
             Self::ConfirmLink(_, _, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::Admit(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::Refuse(_, reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::Contact(reply) => {

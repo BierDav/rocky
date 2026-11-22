@@ -64,6 +64,7 @@ pub(crate) async fn join(
 ) -> Result<Device, Failure> {
     let invite = issuer.invite_as(profile).await;
     let device = Device::new(Database::join(open(&root.join(name), hub, name), &invite)?)?;
+    issuer.session.add_peer(&device.contact().await).await?;
     settle(&device).await;
     Ok(device)
 }

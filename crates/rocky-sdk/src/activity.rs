@@ -19,9 +19,10 @@ pub enum ActivityKind {
     LinkAdmissionFailed {
         error: String,
     },
-    InvitationCreated {
-        profile: Option<crate::GrantProfile>,
-        expires: u64,
+    DeviceProvisioned {
+        node: PublicKey,
+        identity: PublicKey,
+        profile: crate::GrantProfile,
     },
     PeerAdded {
         peer: PublicKey,
@@ -230,20 +231,6 @@ pub enum ActivityKind {
     SchemaPublicationConflict {
         publication: rocky_core::Commitment,
         terminal: rocky_core::Commitment,
-    },
-    JoinRequested {
-        request: crate::JoinRequest,
-    },
-    JoinRequestDropped {
-        request: crate::JoinRequest,
-        reason: crate::JoinRequestDropReason,
-        admitted: bool,
-    },
-    JoinAdmitted {
-        request: crate::JoinRequest,
-    },
-    JoinRefused {
-        request: crate::JoinRequest,
     },
 }
 impl ActivityKind {

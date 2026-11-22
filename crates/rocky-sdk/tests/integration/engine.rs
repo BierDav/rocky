@@ -126,10 +126,10 @@ impl Db {
         Self::open(directory, OpenMode::Resume, transport)
     }
     async fn invite(&self) -> String {
-        snap::ok(self.engine.session().invite(
-            Some(rocky_sdk::GrantProfile::Writer {
+        snap::ok(self.engine.session().provision(
+            rocky_sdk::GrantProfile::Writer {
                 scopes: ["items".to_owned()].into_iter().collect(),
-            }),
+            },
             None,
         ))
         .await["uri"]
@@ -462,12 +462,9 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
         .is_err(),
         "a wrong application schema is refused"
     );
-    let bob = Db::join(&root.path().join("c"), &invitation, iroh())
-        .map_err(|error| format!("a refused schema does not consume the invitation: {error}"))?;
-    assert!(
-        Db::join(&root.path().join("d"), &invitation, iroh()).is_err(),
-        "a used invitation enrolls nobody else"
-    );
+    let bob = Db::join(&root.path().join("c"), &invitation, iroh()).map_err(|error| {
+        format!("a refused schema does not prevent installing the bundle: {error}")
+    })?;
 
     let status = snap::ok(alice.engine.session().info()).await;
     assert_eq!(status["revocations"]["statements"], 0);
@@ -576,10 +573,6 @@ async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Fa
         "memory"
     );
     let invitation = creator.invite().await;
-    assert!(
-        Db::join(&root.path().join("other"), &invitation, iroh()).is_err(),
-        "a transport of another kind has no route in the invitation"
-    );
     let member = open(
         "b",
         OpenMode::Join {

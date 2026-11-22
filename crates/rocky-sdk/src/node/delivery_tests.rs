@@ -97,7 +97,7 @@ impl Device {
         Ok(Self::new(database, directory, &name, &hub))
     }
     async fn invite(&self, profile: crate::GrantProfile) -> Result<String, Failure> {
-        Ok(self.session.invite(Some(profile), None).await?.uri)
+        Ok(self.session.provision(profile, None).await?.uri)
     }
     async fn epochs(&self) -> Result<Vec<Value>, Failure> {
         Ok(snap::value(

@@ -181,11 +181,9 @@ async fn profiles_bound_reads_and_writes_across_renewal() -> Result<(), Failure>
         json!({"kind": "writer", "scopes": ["unknown"]}),
     ] {
         let refused = snap::observe(
-            a.session.invite(
-                Some(
-                    serde_json::from_value::<rocky_sdk::GrantProfile>(json!(profile))
-                        .expect("typed fixture"),
-                ),
+            a.session.provision(
+                serde_json::from_value::<rocky_sdk::GrantProfile>(json!(profile))
+                    .expect("typed fixture"),
                 None,
             ),
         )
@@ -217,11 +215,9 @@ async fn profiles_bound_reads_and_writes_across_renewal() -> Result<(), Failure>
         );
         assert!(
             snap::observe(
-                r.session.invite(
-                    Some(
-                        serde_json::from_value::<rocky_sdk::GrantProfile>(json!(reader))
-                            .expect("typed fixture")
-                    ),
+                r.session.provision(
+                    serde_json::from_value::<rocky_sdk::GrantProfile>(json!(reader))
+                        .expect("typed fixture"),
                     None
                 )
             )

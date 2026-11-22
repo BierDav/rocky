@@ -109,8 +109,9 @@ async fn creator_revocation(mode: RevocationMode) -> Result<(), Failure> {
         root,
         &hub,
         "b",
-        &a.session().invitation_with(GrantProfile::Issuer).await?.uri,
+        &a.session().provision(GrantProfile::Issuer, None).await?.uri,
     )?;
+    a.session().add_peer(&b.contact().await).await?;
     let principal = session(&b).await.principal.to_hex();
     let grant = a
         .session()
@@ -342,8 +343,9 @@ async fn a_granted_credential_close_to_expiry_renews_through_the_second_issuer()
         root,
         &hub,
         "b",
-        &a.session().invitation_with(GrantProfile::Issuer).await?.uri,
+        &a.session().provision(GrantProfile::Issuer, None).await?.uri,
     )?;
+    a.session().add_peer(&b.contact().await).await?;
     synced(&b).await.map_err(|error| {
         format!("the second issuer bootstraps its keys before their source is lost: {error}")
     })?;
@@ -396,7 +398,7 @@ async fn revoking_a_trusted_identity_cascades_to_what_it_enrolled() -> Result<()
         root,
         &hub,
         "t",
-        &a.session().invitation_with(GrantProfile::Issuer).await?.uri,
+        &a.session().provision(GrantProfile::Issuer, None).await?.uri,
     )?;
     let t_identity = session(&t).await.principal.to_hex();
     let grant = a

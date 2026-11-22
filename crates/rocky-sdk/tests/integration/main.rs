@@ -1,6 +1,5 @@
 mod activity;
 #[cfg(not(target_family = "wasm"))]
-mod admission;
 mod application;
 #[cfg(not(target_family = "wasm"))]
 mod backup;

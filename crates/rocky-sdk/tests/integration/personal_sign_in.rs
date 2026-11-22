@@ -229,9 +229,12 @@ async fn a_custodian_alone_restores_an_unwitnessed_view() -> Result<(), Failure>
     let owner = create(&owner_path, &hub, "owner").await?;
     let invitation = owner
         .session
-        .invitation_with(GrantProfile::Custody {
-            scopes: ["items".to_owned()].into(),
-        })
+        .provision(
+            GrantProfile::Custody {
+                scopes: ["items".to_owned()].into(),
+            },
+            None,
+        )
         .await?
         .uri;
     let custodian = Device::new(
@@ -331,9 +334,12 @@ async fn partition_custody_receipts_and_a_keyless_backup_restore_only_retained_d
     }
     let invitation = owner
         .session
-        .invitation_with(GrantProfile::Custody {
-            scopes: ["items".to_owned()].into(),
-        })
+        .provision(
+            GrantProfile::Custody {
+                scopes: ["items".to_owned()].into(),
+            },
+            None,
+        )
         .await?
         .uri;
     let keeper_path = directory.path().join("custody");
@@ -466,9 +472,12 @@ async fn custody(directory: &Path, hub: &Arc<Hub>) -> Result<(PathBuf, Device), 
     let owner = create(&owner_path, hub, "owner").await?;
     let invitation = owner
         .session
-        .invitation_with(GrantProfile::Custody {
-            scopes: ["items".to_owned()].into(),
-        })
+        .provision(
+            GrantProfile::Custody {
+                scopes: ["items".to_owned()].into(),
+            },
+            None,
+        )
         .await?
         .uri;
     let custodian = Device::new(
@@ -1486,9 +1495,12 @@ async fn personal_notices_are_local_durable_and_deduplicated_after_custody_deliv
     assert!(owner.session.personal_device_notices().await?.is_empty());
     let invitation = owner
         .session
-        .invitation_with(GrantProfile::Custody {
-            scopes: ["items".to_owned()].into(),
-        })
+        .provision(
+            GrantProfile::Custody {
+                scopes: ["items".to_owned()].into(),
+            },
+            None,
+        )
         .await?
         .uri;
     let custodian = Device::new(

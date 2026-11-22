@@ -30,7 +30,6 @@ pub(super) struct Member {
     schema: &'static str,
     pub(super) ahead: Arc<std::sync::atomic::AtomicU64>,
     pub(super) root: Option<Arc<crate::RootKey>>,
-    pending_join: Option<crate::AwaitingAdmission>,
 }
 
 impl Member {
@@ -45,7 +44,6 @@ impl Member {
             revoked: false,
             ahead: Arc::default(),
             root: None,
-            pending_join: None,
         }
     }
     pub(super) async fn start(&mut self, hub: &Arc<Hub>, install: Install) -> Result<(), Failure> {
@@ -56,27 +54,14 @@ impl Member {
                 directory: &self.directory,
                 schema: &schema,
                 secrets: Some(secrets),
-                identity: self
-                    .pending_join
-                    .as_ref()
-                    .map(|pending| pending.identity.clone()),
+                identity: None,
                 network: Some(Network::Owned(hub.connector(&self.name))),
                 coordination: None,
             },
             install,
             self.ahead.clone(),
         )
-        .await;
-        let hosted = match hosted {
-            Ok(hosted) => hosted,
-            Err(error) => {
-                if let Some(pending) = error.downcast_ref::<crate::AwaitingAdmission>() {
-                    self.pending_join = Some(pending.clone());
-                }
-                return Err(error);
-            }
-        };
-        self.pending_join = None;
+        .await?;
         let database = hosted.opened.database;
         self.running = Some(Running {
             session: database.session(),
@@ -102,12 +87,13 @@ impl Member {
         )
         .await
     }
-    pub(super) async fn join(&mut self, hub: &Arc<Hub>, invitation: &str) -> Result<(), Failure> {
+    pub(super) async fn join(&mut self, hub: &Arc<Hub>, provisioning: &str) -> Result<(), Failure> {
         self.start(
             hub,
             Install::Join {
-                invitation: invitation.into(),
-                name: self.name.clone(),
+                provisioning: provisioning.into(),
+                single_use: true,
+                phrase: Arc::new(std::sync::Mutex::new(None)),
             },
         )
         .await

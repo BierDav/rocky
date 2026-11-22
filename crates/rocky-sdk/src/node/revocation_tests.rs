@@ -1058,3 +1058,144 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn invited_redemptions_run_one_at_a_time_and_neither_a_retry_nor_a_failed_record_repeats_one()
+-> Result<(), Failure> {
+    use crate::invitation::{AUTHORITY_INVITATIONS_KEY, Book};
+    use rocky_credentials::{IdentityKey, IdentityRequest, InvitedEnrollmentRequest};
+    let directory = tempfile::tempdir()?;
+    let node = issuer(directory.path(), Arc::new(Keys::default())).await?;
+    let person = IdentityKey::generate();
+    let identity = person.public_key();
+    let settings = node.settings.lock().await.clone();
+    let registry = node.registry(&settings).await?;
+    let profile = |scopes: serde_json::Value| -> Result<Profile, Failure> {
+        Ok(serde_json::from_value(
+            serde_json::json!({"kind": "writer", "scopes": scopes}),
+        )?)
+    };
+    let narrow = profile(serde_json::json!(["items"]))?;
+    let wide = profile(serde_json::json!(["items", "notes"]))?;
+    let time = now()?;
+    let mut book = Book::read(&node.replica).await?;
+    let mut open = |profile: Profile, label: &[u8]| {
+        settings.invite(
+            (
+                &node.vault,
+                vec![crate::enrollment::Route {
+                    transport: "memory".into(),
+                    address: "issuer".into(),
+                }],
+            ),
+            &mut book,
+            (
+                identity,
+                profile,
+                &crate::InviteTerms {
+                    valid_for: None,
+                    label: Some(label.to_vec()),
+                },
+            ),
+            &registry,
+            time,
+        )
+    };
+    let invited = open(narrow.clone(), b"Alice")?;
+    let rival = open(wide, b"Mallory")?;
+    node.replica
+        .put_authority_state(AUTHORITY_INVITATIONS_KEY, &book.to_bytes()?, time)
+        .await?;
+    let audience = Settings::node_key(&node.vault)?.public_key();
+    let database = settings.database_context()?;
+    let ask = |key: &PrivateKey, invitation: crate::InvitationId| {
+        let (request, _) = IdentityRequest::sign(&person, key, audience, now()?, database)?;
+        Ok::<_, Failure>(InvitedEnrollmentRequest::sign(request, invitation.0, key)?)
+    };
+    let redeemers = || async {
+        Ok::<_, Failure>(
+            Book::read(&node.replica)
+                .await?
+                .listed(now()?)
+                .into_iter()
+                .map(|open| (open.id, open.redeemed_by))
+                .collect::<BTreeMap<_, _>>(),
+        )
+    };
+    let redemptions = || {
+        node.activity
+            .after(0)
+            .events
+            .iter()
+            .filter(|event| matches!(event.detail, crate::ActivityKind::InvitationRedeemed { .. }))
+            .count()
+    };
+    let (joiner, rival_node) = (PrivateKey::new(), PrivateKey::new());
+
+    *node
+        .redemption_hook
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some(super::invitations::RedemptionHook::Fail);
+    assert!(
+        node.answer_invitation(ask(&joiner, invited.id)?)
+            .await
+            .is_err()
+    );
+    assert!(
+        redeemers().await?.values().all(Option::is_none),
+        "a redemption its registry write failed for leaves the invitation open"
+    );
+    assert_eq!(redemptions(), 0);
+
+    let gate = Arc::new(super::invitations::RedemptionGate {
+        reached: tokio::sync::Notify::new(),
+        open: tokio::sync::Semaphore::new(0),
+    });
+    *node
+        .redemption_hook
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) =
+        Some(super::invitations::RedemptionHook::Pause(gate.clone()));
+    let (admitted, ()) = tokio::join!(node.answer_invitation(ask(&joiner, invited.id)?), async {
+        gate.reached.notified().await;
+        assert!(
+            node.redeeming.try_lock().is_err(),
+            "a redemption holds every other one off until its registry write ends"
+        );
+        gate.open.add_permits(1);
+    });
+    assert!(matches!(admitted?, IdentityReply::Enrolled(_)));
+    assert!(
+        node.answer_invitation(ask(&rival_node, rival.id)?)
+            .await
+            .is_err(),
+        "of two invitations into different profiles only one admits the identity"
+    );
+    assert_eq!(
+        redeemers().await?,
+        BTreeMap::from([(invited.id, Some(joiner.public_key())), (rival.id, None)])
+    );
+    assert_eq!(redemptions(), 1);
+
+    node.label(identity, b"Alice Smith".to_vec()).await?;
+    assert!(matches!(
+        node.answer_invitation(ask(&joiner, invited.id)?).await?,
+        IdentityReply::Enrolled(_)
+    ));
+    let record = node.registry(&*node.settings_snapshot().await).await?;
+    let record = record
+        .get(&identity)
+        .ok_or("the identity is not recorded")?;
+    assert_eq!(
+        record.label.as_deref(),
+        Some(b"Alice Smith".as_slice()),
+        "a retried redemption keeps a label edited after the first"
+    );
+    assert_eq!(
+        record.profile(),
+        Some(&narrow),
+        "the admitted profile is the one that won"
+    );
+    assert_eq!(redemptions(), 1, "a retry records no second redemption");
+    Ok(())
+}

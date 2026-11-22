@@ -22,7 +22,7 @@ use std::{collections::BTreeMap, ops::RangeInclusive, path::Path, sync::Arc, tim
 
 pub(crate) const AUTHORITY_INVITATIONS_KEY: &str = "invitations";
 const BOOK_VERSION: u32 = 1;
-const INVITE_VERSION: u32 = 1;
+const INVITE_VERSION: u32 = 2;
 const INVITE_PREFIX: &str = "rocky://invite/";
 const SKEW: u64 = 300;
 const VALIDITY_SECONDS: RangeInclusive<u64> = 60..=30 * 24 * 60 * 60;
@@ -234,7 +234,7 @@ impl Book {
         id: InvitationId,
         device: NodeKeys,
         time: u64,
-    ) -> Result<(Profile, Option<Vec<u8>>), InvitationRefusal> {
+    ) -> Result<Redemption, InvitationRefusal> {
         let pending = self.open.get_mut(&id).ok_or(InvitationRefusal::Unknown)?;
         if pending.expires < time {
             return Err(InvitationRefusal::Expired);
@@ -248,8 +248,21 @@ impl Book {
         {
             return Err(InvitationRefusal::Used);
         }
-        pending.redeemed_by = Some(device.node);
-        Ok((pending.profile.clone(), pending.label.clone()))
+        let first = pending.redeemed_by.replace(device.node).is_none();
+        Ok(Redemption {
+            profile: pending.profile.clone(),
+            label: pending.label.clone().filter(|_| first),
+            first,
+        })
+    }
+    pub(crate) fn release(&mut self, id: InvitationId, node: PublicKey) -> bool {
+        match self.open.get_mut(&id) {
+            Some(pending) if pending.redeemed_by == Some(node) => {
+                pending.redeemed_by = None;
+                true
+            }
+            _ => false,
+        }
     }
     pub(crate) fn withdraw(&mut self, id: InvitationId, time: u64) -> Result<(), Failure> {
         self.forget_expired(time);
@@ -284,6 +297,7 @@ struct Invite {
     database: DatabaseContext,
     issuer: PublicKey,
     routes: Vec<Route>,
+    via_custody: bool,
     identity: PublicKey,
     expires: u64,
 }
@@ -333,17 +347,40 @@ fn keeps_recorded_profile(
 pub(crate) fn check_uri(uri: &str) -> Result<(), Failure> {
     Invite::parse(uri).map(drop)
 }
+pub(crate) fn is_uri(uri: &str) -> bool {
+    uri.trim().starts_with(INVITE_PREFIX)
+}
+pub(crate) fn routed_through(
+    uri: &str,
+    relay: crate::enrollment::ContactRecord,
+) -> Result<String, Failure> {
+    let mut invite = Invite::parse(uri)?;
+    if invite.publisher != relay.publisher {
+        return Err("relay belongs to another domain".into());
+    }
+    invite.routes = relay.routes;
+    invite.via_custody = true;
+    invite.uri()
+}
 
 pub(crate) struct Issued {
     pub(crate) uri: String,
     pub(crate) id: InvitationId,
     pub(crate) expires: u64,
 }
+#[derive(Debug, PartialEq)]
+struct Redemption {
+    profile: Profile,
+    label: Option<Vec<u8>>,
+    first: bool,
+}
+
 pub(crate) struct Redeemed {
     pub(crate) answer: Vec<u8>,
     pub(crate) changes: Changes,
     pub(crate) id: InvitationId,
     pub(crate) device: NodeKeys,
+    pub(crate) first: bool,
 }
 
 impl Settings {
@@ -389,6 +426,7 @@ impl Settings {
             database: self.database_context()?,
             issuer: Self::node_key(vault)?.public_key(),
             routes,
+            via_custody: false,
             identity,
             expires,
         }
@@ -409,8 +447,9 @@ impl Settings {
         }
         wire.verify_binding()?;
         let request = wire.request;
+        let answering = Self::node_key(vault)?;
         request.verify(
-            Self::node_key(vault)?.public_key(),
+            answering.public_key(),
             request.identity,
             (time, SKEW),
             self.database_context()?,
@@ -420,17 +459,22 @@ impl Settings {
             identity: request.identity,
             node: request.node,
         };
-        let admission = book.redeem(id, device, time)?;
-        keeps_recorded_profile(registry, &device.identity, &admission.0)?;
+        let Redemption {
+            profile,
+            label,
+            first,
+        } = book.redeem(id, device, time)?;
+        keeps_recorded_profile(registry, &device.identity, &profile)?;
         let (enrollment, changes) =
-            self.enrollment_for(vault, device, admission, Some(id), registry)?;
+            self.enrollment_for(vault, device, (profile, label), Some(id), registry)?;
         Ok(Redeemed {
             answer: request
-                .answer(&serde_json::to_vec(&enrollment)?)?
+                .answer(&answering, &serde_json::to_vec(&enrollment)?)?
                 .to_bytes()?,
             changes,
             id,
             device,
+            first,
         })
     }
 
@@ -506,7 +550,7 @@ impl Settings {
                 publisher: invite.publisher,
                 database: invite.database,
                 routes: invite.routes,
-                via_custody: false,
+                via_custody: invite.via_custody,
             },
             enrollment,
             (provider, intent.single_use),
@@ -551,10 +595,21 @@ mod tests {
             book.redeem(id, device(2, 10), NOW),
             Err(InvitationRefusal::OtherIdentity)
         );
-        assert_eq!(book.redeem(id, device(1, 10), NOW), Ok((writer(), None)));
+        assert_eq!(
+            book.redeem(id, device(1, 10), NOW),
+            Ok(Redemption {
+                profile: writer(),
+                label: None,
+                first: true
+            })
+        );
         assert_eq!(
             book.redeem(id, device(1, 10), NOW + 1),
-            Ok((writer(), None)),
+            Ok(Redemption {
+                profile: writer(),
+                label: None,
+                first: false
+            }),
             "the redeeming node retries an answer it lost"
         );
         assert_eq!(
@@ -562,6 +617,33 @@ mod tests {
             Err(InvitationRefusal::Used),
             "a second node of the same identity links instead"
         );
+    }
+
+    #[test]
+    fn a_retried_redemption_leaves_the_label_alone_and_a_released_one_starts_over() {
+        let mut book = Book::empty();
+        let id = book
+            .open(key(1), (writer(), Some(b"Alice".to_vec())), OPEN_FOR, NOW)
+            .expect("open invitation")
+            .0;
+        let first = book.redeem(id, device(1, 10), NOW).expect("redeemed");
+        assert!(first.first);
+        assert_eq!(first.label.as_deref(), Some(b"Alice".as_slice()));
+        let retried = book.redeem(id, device(1, 10), NOW).expect("redeemed");
+        assert!(!retried.first);
+        assert_eq!(
+            retried.label, None,
+            "a retry does not overwrite a label edited since the first redemption"
+        );
+        assert!(
+            !book.release(id, key(11)),
+            "only the redeeming node is released"
+        );
+        assert!(book.release(id, key(10)));
+        assert!(book.listed(NOW)[0].redeemed_by.is_none());
+        let again = book.redeem(id, device(1, 11), NOW).expect("redeemed");
+        assert!(again.first);
+        assert_eq!(again.label.as_deref(), Some(b"Alice".as_slice()));
     }
 
     #[test]
@@ -655,6 +737,7 @@ mod tests {
                 transport: "memory".into(),
                 address: "issuer".into(),
             }],
+            via_custody: false,
             identity: key(1),
             expires: NOW,
         };
@@ -679,7 +762,8 @@ mod tests {
                 "issuer",
                 "publisher",
                 "routes",
-                "v"
+                "v",
+                "via_custody"
             ],
             "an invitation names public keys and routes only"
         );

@@ -4134,7 +4134,9 @@ pub fn route_enrollment(uri: &str, custody_contact: &str) -> Result<String, Fail
         Ok(record)
     }
     let relay = contact(custody_contact)?;
-    if uri.trim().starts_with("rocky://provision/") {
+    if crate::invitation::is_uri(uri) {
+        crate::invitation::routed_through(uri, relay)
+    } else if uri.trim().starts_with("rocky://provision/") {
         let mut bundle = ProvisioningBundle::parse(uri)?;
         if bundle.publisher != relay.publisher {
             return Err("relay belongs to another domain".into());

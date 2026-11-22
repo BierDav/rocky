@@ -328,6 +328,87 @@ async fn custody_forwards_pairing_and_renewal_to_an_explicit_issuer_with_creator
 }
 
 #[tokio::test]
+async fn custody_forwards_an_invitation_to_the_issuer_it_names_and_its_node_renews_through_the_relay()
+-> Result<(), Failure> {
+    use rocky_sdk::{Configuration, IdentityKey, IdentityProvider, InviteTerms, route_enrollment};
+    let root = crate::support::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let net = |name| Some(Network::Owned(hub.connector(name)));
+    let issuer = Device::create(&root.path().join("issuer"), net("issuer"))?;
+    let relay = Device::join(
+        &root.path().join("relay"),
+        &issuer
+            .invite_as(json!({"kind": "custody", "scopes": ["items"]}))
+            .await,
+        net("relay").ok_or("network")?,
+    )?;
+    let upstream = Device::join(
+        &root.path().join("upstream"),
+        &issuer.invite_as(json!({"kind": "issuer"})).await,
+        net("upstream").ok_or("network")?,
+    )?;
+    let upstream_contact = upstream.contact().await;
+    snap::ok(
+        relay
+            .session
+            .set_enrollment_upstream(Some(&snap::text(&upstream_contact))),
+    )
+    .await;
+    let person: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::generate());
+    let identity = person.public_key()?;
+    let writer: rocky_sdk::GrantProfile =
+        serde_json::from_value(json!({"kind": "writer", "scopes": ["items"]}))?;
+    let invitation = issuer
+        .session
+        .invite(identity, writer.clone(), InviteTerms::default())
+        .await?;
+    let routed = route_enrollment(&invitation.uri, &relay.contact().await)?;
+    let other = Device::create(&root.path().join("other"), net("other"))?;
+    assert!(
+        route_enrollment(&invitation.uri, &other.contact().await).is_err(),
+        "a relay of another database does not route the invitation"
+    );
+    other.close().await;
+    let opened = Configuration::new(root.path().join("member"), common::parsed_schema())?
+        .network(Network::Owned(hub.connector("member")))
+        .identity(person.clone())
+        .accept_invitation(&routed)
+        .await?;
+    let member = Device::new(opened)?.with_identity(person.clone());
+    let info = member.session.info().await?;
+    assert_eq!(info.principal, identity);
+    assert_eq!(info.profile, writer);
+    assert_eq!(
+        issuer.session.open_invitations().await?[0].redeemed_by,
+        Some(info.node),
+        "the relay forwarded the redemption to the issuer the invitation names, not its upstream"
+    );
+    let identity_json = common::authority_json(&root.path().join("relay"), "identity")?;
+    assert_eq!(
+        identity_json["authority"],
+        json!(null),
+        "forwarding an invitation gives the relay no authority"
+    );
+    let issuer_contact = issuer.contact().await;
+    snap::ok(
+        relay
+            .session
+            .set_enrollment_upstream(Some(&snap::text(&issuer_contact))),
+    )
+    .await;
+    snap::ok(async {
+        member.session.renew().await?;
+        member.session.info().await
+    })
+    .await;
+    member.close().await;
+    relay.close().await;
+    upstream.close().await;
+    issuer.close().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn routed_records_preserve_authority_with_the_current_version() -> Result<(), Failure> {
     use data_encoding::BASE64URL_NOPAD;
     use rocky_sdk::route_enrollment;

@@ -440,6 +440,9 @@ impl IdentityRequest {
         }
         Ok(())
     }
+    pub fn audience(&self) -> PublicKey {
+        self.audience
+    }
     fn id(&self) -> Result<Commitment, Error> {
         Ok(commitment(
             "rocky.credentials.identity-request.id.v2",
@@ -461,16 +464,22 @@ impl IdentityRequest {
         );
         Ok(format!("{:06}", number % 1_000_000))
     }
-    pub fn answer(&self, payload: &[u8]) -> Result<IdentityAnswer, Error> {
+    pub fn answer(&self, audience: &PrivateKey, payload: &[u8]) -> Result<IdentityAnswer, Error> {
+        if audience.public_key() != self.audience {
+            return Err(denied("only the node a request names answers it"));
+        }
         let (secret, exchange) = Exchange::new();
         let shared = secret.shared(&self.exchange)?;
+        let sealed = seal(
+            self.key(&exchange, &shared)?,
+            b"rocky.credentials.identity-answer.v3",
+            payload,
+        )?;
+        let signature = audience.sign(&IdentityAnswer::body(self, &exchange, &sealed)?);
         Ok(IdentityAnswer {
-            sealed: seal(
-                self.key(&exchange, &shared)?,
-                b"rocky.credentials.identity-answer.v2",
-                payload,
-            )?,
             exchange,
+            sealed,
+            signature,
         })
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
@@ -484,13 +493,36 @@ impl IdentityRequest {
 pub struct IdentityAnswer {
     exchange: [u8; 32],
     sealed: Vec<u8>,
+    signature: Signature,
 }
 impl IdentityAnswer {
+    fn body(
+        request: &IdentityRequest,
+        exchange: &[u8; 32],
+        sealed: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        signing_bytes(
+            "rocky.credentials.identity-answer.v3",
+            &(
+                request.id()?,
+                exchange,
+                commitment("rocky.credentials.identity-answer-payload.v3", sealed),
+            ),
+        )
+    }
     pub fn open(&self, request: &IdentityRequest, secret: &Exchange) -> Result<Vec<u8>, Error> {
+        if !request.audience.verify(
+            &Self::body(request, &self.exchange, &self.sealed)?,
+            &self.signature,
+        ) {
+            return Err(denied(
+                "the answer is not signed by the node its request names",
+            ));
+        }
         let shared = secret.shared(&self.exchange)?;
         open(
             request.key(&self.exchange, &shared)?,
-            b"rocky.credentials.identity-answer.v2",
+            b"rocky.credentials.identity-answer.v3",
             &self.sealed,
         )
     }

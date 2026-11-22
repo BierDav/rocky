@@ -240,6 +240,9 @@ pub(crate) struct Node {
     clients: std::sync::Mutex<BTreeMap<u64, Arc<Client>>>,
     syncing: Mutex<()>,
     bootstrap: Mutex<()>,
+    redeeming: Mutex<()>,
+    #[cfg(test)]
+    redemption_hook: std::sync::Mutex<Option<invitations::RedemptionHook>>,
     pub(crate) bootstrap_intent: BootstrapIntentFile,
     retry_seed: u64,
     retries: std::sync::Mutex<BTreeMap<PublicKey, PeerRetry>>,
@@ -372,6 +375,9 @@ impl Node {
             clients: std::sync::Mutex::new(BTreeMap::new()),
             syncing: Mutex::new(()),
             bootstrap: Mutex::new(()),
+            redeeming: Mutex::new(()),
+            #[cfg(test)]
+            redemption_hook: std::sync::Mutex::new(None),
             bootstrap_intent,
             retry_seed: rocky_platform::entropy::random_u64(),
             retries: std::sync::Mutex::new(BTreeMap::new()),
@@ -2457,7 +2463,10 @@ impl Node {
         }
         let is_enrollment = matches!(
             request,
-            PeerRequest::Renew(_) | PeerRequest::Epochs(_) | PeerRequest::Policy
+            PeerRequest::Renew(_)
+                | PeerRequest::Epochs(_)
+                | PeerRequest::Policy
+                | PeerRequest::Identity(IdentityEnrollment::Invited(_))
         );
         if is_enrollment && let Some(reply) = self.forward_enrollment(&request).await? {
             return Ok(reply);
@@ -2609,14 +2618,26 @@ impl Node {
         let upstream = settings
             .enrollment_upstream
             .ok_or_else(|| refused("enrollment upstream could not be resolved"))?;
+        let (target, peer) = match request {
+            PeerRequest::Identity(IdentityEnrollment::Invited(invited)) => {
+                let issuer = invited.request.audience();
+                if !settings.issuers.contains(&issuer) {
+                    return Err(refused(
+                        "the invitation names an issuer this relay does not know",
+                    ));
+                }
+                (issuer, "the invitation's issuer")
+            }
+            _ => (upstream, "enrollment upstream"),
+        };
         let contact = settings
             .peers
-            .get(&upstream)
-            .ok_or_else(|| refused("enrollment upstream is not configured"))?;
+            .get(&target)
+            .ok_or_else(|| refused(format!("{peer} is not configured")))?;
         let addresses = contact.addresses(link.transport.kind());
         if addresses.is_empty() {
             return Err(ServiceError::NoRoute {
-                peer: "enrollment upstream",
+                peer,
                 network: link.transport.kind().into(),
             }
             .into());

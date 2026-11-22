@@ -149,7 +149,9 @@ impl Settings {
             },
             issuers: self.issuer_contacts(&[request.node])?,
         };
-        Ok(request.answer(&serde_json::to_vec(&bundle)?)?.to_bytes()?)
+        Ok(request
+            .answer(&node, &serde_json::to_vec(&bundle)?)?
+            .to_bytes()?)
     }
 
     pub(crate) fn prepare_identity(

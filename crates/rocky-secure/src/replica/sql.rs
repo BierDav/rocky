@@ -331,8 +331,7 @@ impl<A: RowApplication> SecureSql<A> {
             None => table.scope,
         };
         if !self.session.status.writable.contains(&scope) {
-            let may_become_writable = !inner.importing.is_empty()
-                || inner.importing(scope).await?
+            let may_become_writable = inner.importing(scope).await?
                 || (inner.partitions.contains_key(&scope)
                     && !self.session.status.scopes.contains(&scope));
             if may_become_writable {

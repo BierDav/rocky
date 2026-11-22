@@ -211,25 +211,57 @@ impl<A: RowApplication> Inner<A> {
         Ok(pending.next().await?.is_some())
     }
     pub(super) async fn pending_now(&self, scope: ResourceScope) -> Result<bool, Error> {
+        Ok(!self.due_pending_heads(scope).await?.is_empty())
+    }
+    pub(super) async fn pending_leaves_incomplete(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<bool, Error> {
+        let heads = self.due_pending_heads(scope).await?;
+        if heads.is_empty() {
+            return Ok(false);
+        }
+        let stalled = heads.iter().any(|head| {
+            !awaits_delivery(
+                self.waits
+                    .get(head)
+                    .copied()
+                    .unwrap_or(WaitReason::Unexamined),
+            )
+        });
+        if stalled {
+            return Ok(true);
+        }
+        match self.find_scope_id(scope).await? {
+            Some(id) => Ok(!self.holds_anything(scope, id).await?),
+            None => Ok(true),
+        }
+    }
+    async fn due_pending_heads(&self, scope: ResourceScope) -> Result<Vec<Hash>, Error> {
         let heads = collect_rows(
             self.conn
                 .query(
-                    "SELECT o.header FROM (SELECT author,min(sequence) AS sequence FROM secure_operations WHERE scope=?1 AND status='pending' GROUP BY author) h JOIN secure_operations o ON o.scope=?1 AND o.author=h.author AND o.sequence=h.sequence",
+                    "SELECT o.hash,o.header FROM (SELECT author,min(sequence) AS sequence FROM secure_operations WHERE scope=?1 AND status='pending' GROUP BY author) h JOIN secure_operations o ON o.scope=?1 AND o.author=h.author AND o.sequence=h.sequence",
                     [encode(&scope)?],
                 )
                 .await?,
         )
         .await?;
+        let mut due = Vec::new();
         for head in heads {
-            let [SqlValue::Blob(header)] = head.as_slice() else {
+            let [SqlValue::Blob(hash), SqlValue::Blob(header)] = head.as_slice() else {
                 return Err(Error::Corrupt("pending operation".into()));
             };
             let header: p2panda_core::Header<Extensions> = decode(header)?;
             if self.clock_ahead(&header)?.is_none() {
-                return Ok(true);
+                due.push(Hash::from_bytes(
+                    hash.as_slice()
+                        .try_into()
+                        .map_err(|_| Error::Corrupt("pending operation".into()))?,
+                ));
             }
         }
-        Ok(false)
+        Ok(due)
     }
     pub(super) async fn page(
         &self,
@@ -328,4 +360,8 @@ impl<A: RowApplication> Inner<A> {
             pruned,
         })
     }
+}
+
+fn awaits_delivery(reason: WaitReason) -> bool {
+    matches!(reason, WaitReason::Unexamined | WaitReason::Dependencies)
 }

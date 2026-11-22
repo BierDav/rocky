@@ -440,6 +440,9 @@ impl IdentityRequest {
         }
         Ok(())
     }
+    pub fn audience(&self) -> PublicKey {
+        self.audience
+    }
     fn id(&self) -> Result<Commitment, Error> {
         Ok(commitment(
             "rocky.credentials.identity-request.id.v2",

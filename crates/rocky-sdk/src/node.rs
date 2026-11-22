@@ -2618,14 +2618,26 @@ impl Node {
         let upstream = settings
             .enrollment_upstream
             .ok_or_else(|| refused("enrollment upstream could not be resolved"))?;
+        let (target, peer) = match request {
+            PeerRequest::Identity(IdentityEnrollment::Invited(invited)) => {
+                let issuer = invited.request.audience();
+                if issuer != upstream && !settings.issuers.contains(&issuer) {
+                    return Err(refused(
+                        "the invitation names an issuer this relay does not know",
+                    ));
+                }
+                (issuer, "the invitation's issuer")
+            }
+            _ => (upstream, "enrollment upstream"),
+        };
         let contact = settings
             .peers
-            .get(&upstream)
-            .ok_or_else(|| refused("enrollment upstream is not configured"))?;
+            .get(&target)
+            .ok_or_else(|| refused(format!("{peer} is not configured")))?;
         let addresses = contact.addresses(link.transport.kind());
         if addresses.is_empty() {
             return Err(ServiceError::NoRoute {
-                peer: "enrollment upstream",
+                peer,
                 network: link.transport.kind().into(),
             }
             .into());

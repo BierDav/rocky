@@ -328,7 +328,7 @@ async fn custody_forwards_pairing_and_renewal_to_an_explicit_issuer_with_creator
 }
 
 #[tokio::test]
-async fn custody_forwards_an_invitation_to_its_issuer_and_the_invited_node_renews_through_it()
+async fn custody_forwards_an_invitation_to_the_issuer_it_names_and_its_node_renews_through_the_relay()
 -> Result<(), Failure> {
     use rocky_sdk::{Configuration, IdentityKey, IdentityProvider, InviteTerms, route_enrollment};
     let root = crate::support::small_directory()?;
@@ -342,11 +342,16 @@ async fn custody_forwards_an_invitation_to_its_issuer_and_the_invited_node_renew
             .await,
         net("relay").ok_or("network")?,
     )?;
-    let issuer_contact = issuer.contact().await;
+    let upstream = Device::join(
+        &root.path().join("upstream"),
+        &issuer.invite_as(json!({"kind": "issuer"})).await,
+        net("upstream").ok_or("network")?,
+    )?;
+    let upstream_contact = upstream.contact().await;
     snap::ok(
         relay
             .session
-            .set_enrollment_upstream(Some(&snap::text(&issuer_contact))),
+            .set_enrollment_upstream(Some(&snap::text(&upstream_contact))),
     )
     .await;
     let person: Arc<dyn IdentityProvider> = Arc::new(IdentityKey::generate());
@@ -376,7 +381,7 @@ async fn custody_forwards_an_invitation_to_its_issuer_and_the_invited_node_renew
     assert_eq!(
         issuer.session.open_invitations().await?[0].redeemed_by,
         Some(info.node),
-        "the relay forwarded the redemption to the issuer the invitation names"
+        "the relay forwarded the redemption to the issuer the invitation names, not its upstream"
     );
     let identity_json = common::authority_json(&root.path().join("relay"), "identity")?;
     assert_eq!(
@@ -384,6 +389,13 @@ async fn custody_forwards_an_invitation_to_its_issuer_and_the_invited_node_renew
         json!(null),
         "forwarding an invitation gives the relay no authority"
     );
+    let issuer_contact = issuer.contact().await;
+    snap::ok(
+        relay
+            .session
+            .set_enrollment_upstream(Some(&snap::text(&issuer_contact))),
+    )
+    .await;
     snap::ok(async {
         member.session.renew().await?;
         member.session.info().await
@@ -391,6 +403,7 @@ async fn custody_forwards_an_invitation_to_its_issuer_and_the_invited_node_renew
     .await;
     member.close().await;
     relay.close().await;
+    upstream.close().await;
     issuer.close().await;
     Ok(())
 }

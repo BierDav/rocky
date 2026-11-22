@@ -193,10 +193,12 @@ impl Attachment {
             closed: watch::channel(false).0,
         }))
     }
+    #[cfg(feature = "websocket")]
     pub fn external(advertise: impl Into<String>) -> Self {
         Self::build(None, Some(advertise.into()), true, false)
     }
-    pub async fn admit(&self, stream: impl SessionStream + 'static) -> Result<(), Failure> {
+    #[cfg(feature = "websocket")]
+    async fn admit(&self, stream: impl SessionStream + 'static) -> Result<(), Failure> {
         if *self.0.closed.borrow() {
             return Err("the TCP attachment is closed".into());
         }

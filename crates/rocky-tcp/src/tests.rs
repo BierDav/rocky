@@ -260,7 +260,10 @@ async fn closing_a_borrowed_port_keeps_the_attachment_serving() -> Result<(), Fa
 #[cfg(feature = "websocket")]
 mod websocket {
     use super::*;
-    use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+    use tokio_tungstenite::{
+        WebSocketStream,
+        tungstenite::{Message, protocol::Role},
+    };
 
     async fn answer_once(port: Arc<dyn Transport>) -> Result<(), Failure> {
         match port.accept().await {
@@ -342,6 +345,40 @@ mod websocket {
         framing::write(&mut client, b"over the proxy").await?;
         assert_eq!(framing::read(&mut inbound).await?, b"over the proxy");
         attachment.close().await;
+        Ok(())
+    }
+
+    async fn pair() -> (
+        WebSocketStream<tokio::io::DuplexStream>,
+        super::super::websocket::Io<tokio::io::DuplexStream>,
+    ) {
+        let (client, server) = tokio::io::duplex(1 << 20);
+        let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        (client, websocket_stream(server).await)
+    }
+
+    #[tokio::test]
+    async fn a_received_close_is_answered_before_eof() -> Result<(), Failure> {
+        use futures_util::{SinkExt, StreamExt};
+        let (mut client, mut server) = pair().await;
+        client.send(Message::Close(None)).await?;
+        let mut rest = Vec::new();
+        server.read_to_end(&mut rest).await?;
+        assert!(rest.is_empty());
+        drop(server);
+        assert!(matches!(client.next().await, Some(Ok(Message::Close(_)))));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_oversized_message_is_refused_before_admission() -> Result<(), Failure> {
+        use futures_util::SinkExt;
+        let (mut client, mut server) = pair().await;
+        client
+            .send(Message::Binary(vec![0; 200_000].into()))
+            .await?;
+        let mut byte = [0; 1];
+        assert!(server.read(&mut byte).await.is_err());
         Ok(())
     }
 

@@ -13,12 +13,20 @@ use tokio::{
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{
-        Bytes, Error, Message, client::IntoClientRequest, handshake::derive_accept_key,
-        protocol::Role,
+        Bytes, Error, Message,
+        client::IntoClientRequest,
+        handshake::derive_accept_key,
+        protocol::{Role, WebSocketConfig},
     },
 };
 
 const CHUNK: usize = 64 * 1024;
+
+fn config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(CHUNK))
+        .max_frame_size(Some(CHUNK))
+}
 
 pub fn accept_key(key: &[u8]) -> String {
     derive_accept_key(key)
@@ -29,14 +37,16 @@ pub(crate) fn is_url(address: &str) -> bool {
 }
 
 pub(crate) async fn accept(stream: TcpStream) -> Result<Io<TcpStream>, Failure> {
-    Ok(Io::new(tokio_tungstenite::accept_async(stream).await?))
+    Ok(Io::new(
+        tokio_tungstenite::accept_async_with_config(stream, Some(config())).await?,
+    ))
 }
 
 pub async fn stream<S>(io: S) -> Io<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    Io::new(WebSocketStream::from_raw_socket(io, Role::Server, None).await)
+    Io::new(WebSocketStream::from_raw_socket(io, Role::Server, Some(config())).await)
 }
 
 pub(crate) async fn dial(address: &str) -> Result<Box<dyn SessionStream>, Failure> {
@@ -57,14 +67,16 @@ pub(crate) async fn dial(address: &str) -> Result<Box<dyn SessionStream>, Failur
     let tcp = TcpStream::connect((host.as_str(), port)).await?;
     tcp.set_nodelay(true)?;
     if !secure {
-        let (socket, _) = tokio_tungstenite::client_async(request, tcp).await?;
+        let (socket, _) =
+            tokio_tungstenite::client_async_with_config(request, tcp, Some(config())).await?;
         return Ok(Box::new(Io::new(socket)));
     }
     let name = rustls::pki_types::ServerName::try_from(host)?;
     let tls = tokio_rustls::TlsConnector::from(client_config()?)
         .connect(name, tcp)
         .await?;
-    let (socket, _) = tokio_tungstenite::client_async(request, tls).await?;
+    let (socket, _) =
+        tokio_tungstenite::client_async_with_config(request, tls, Some(config())).await?;
     Ok(Box::new(Io::new(socket)))
 }
 
@@ -91,6 +103,7 @@ pub struct Io<S> {
     read: Bytes,
     write: Vec<u8>,
     ended: bool,
+    replying: bool,
 }
 impl<S> Io<S> {
     #[cfg(test)]
@@ -103,6 +116,7 @@ impl<S> Io<S> {
             read: Bytes::new(),
             write: Vec::new(),
             ended: false,
+            replying: false,
         }
     }
 }
@@ -133,11 +147,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for Io<S> {
                 return Poll::Ready(Ok(()));
             }
             if this.ended {
+                if this.replying {
+                    let _ = ready!(Pin::new(&mut this.socket).poll_flush(cx));
+                    this.replying = false;
+                }
                 return Poll::Ready(Ok(()));
             }
             match ready!(Pin::new(&mut this.socket).poll_next(cx)) {
                 Some(Ok(Message::Binary(bytes))) => this.read = bytes,
-                Some(Ok(Message::Close(_))) | None => this.ended = true,
+                Some(Ok(Message::Close(_))) => {
+                    this.ended = true;
+                    this.replying = true;
+                }
+                None => this.ended = true,
                 Some(Ok(_)) => {}
                 Some(Err(Error::ConnectionClosed | Error::AlreadyClosed)) => this.ended = true,
                 Some(Err(error)) => return Poll::Ready(Err(io::Error::other(error))),

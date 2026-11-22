@@ -3,8 +3,8 @@
 use rocky_core::{
     Scope,
     net::{
-        BoxFuture, Connected, Connector, Failure, Incoming, Protocol, ScopeRefusal, Stream,
-        Transport, framing,
+        BoxFuture, Connected, Connector, Failure, Incoming, Protocol, ScopeRefusal, SessionStream,
+        Stream, Transport, framing,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -93,6 +93,7 @@ impl Route {
 struct Shared {
     local: Option<SocketAddr>,
     advertise: Option<String>,
+    accepts: bool,
     owned: bool,
     routes: std::sync::Mutex<HashMap<Option<Scope>, Weak<Route>>>,
     rpc: Arc<Semaphore>,
@@ -104,28 +105,41 @@ struct Shared {
 pub struct Options {
     bind: SocketAddr,
     advertise: Option<String>,
+    websocket: bool,
 }
 impl Options {
     pub fn new(bind: SocketAddr) -> Self {
         Self {
             bind,
             advertise: None,
+            websocket: false,
         }
     }
     pub fn advertise(mut self, address: impl Into<String>) -> Self {
         self.advertise = Some(address.into());
         self
     }
+    #[cfg(feature = "websocket")]
+    pub fn websocket(mut self) -> Self {
+        self.websocket = true;
+        self
+    }
     pub async fn start(&self) -> Result<Attachment, Failure> {
         self.serve(false).await
     }
     pub fn dialer() -> Attachment {
-        Attachment::build(None, None, false)
+        Attachment::build(None, None, false, false)
     }
     async fn serve(&self, owned: bool) -> Result<Attachment, Failure> {
         let listener = TcpListener::bind(self.bind).await?;
-        let attachment =
-            Attachment::build(Some(listener.local_addr()?), self.advertise.clone(), owned);
+        let local = listener.local_addr()?;
+        let advertise = match (&self.advertise, self.websocket) {
+            (Some(advertise), _) => Some(advertise.clone()),
+            (None, true) => Some(format!("ws://{local}")),
+            (None, false) => None,
+        };
+        let attachment = Attachment::build(Some(local), advertise, true, owned);
+        let websocket = self.websocket;
         let shared = Arc::downgrade(&attachment.0);
         let mut closed = attachment.0.closed.subscribe();
         rocky_platform::task::spawn(async move {
@@ -142,7 +156,7 @@ impl Options {
                     break;
                 };
                 rocky_platform::task::spawn(async move {
-                    let _ = admit(shared, stream).await;
+                    let _ = accepted_tcp(shared, stream, websocket).await;
                 });
             }
         });
@@ -162,16 +176,40 @@ impl Connector for Options {
 #[derive(Clone)]
 pub struct Attachment(Arc<Shared>);
 impl Attachment {
-    fn build(local: Option<SocketAddr>, advertise: Option<String>, owned: bool) -> Self {
+    fn build(
+        local: Option<SocketAddr>,
+        advertise: Option<String>,
+        accepts: bool,
+        owned: bool,
+    ) -> Self {
         Self(Arc::new(Shared {
             local,
             advertise,
+            accepts,
             owned,
             routes: Default::default(),
             rpc: Arc::new(Semaphore::new(RPC_REQUESTS)),
             refused: AtomicU64::new(0),
             closed: watch::channel(false).0,
         }))
+    }
+    #[cfg(feature = "websocket")]
+    pub fn external(advertise: impl Into<String>) -> Self {
+        Self::build(None, Some(advertise.into()), true, false)
+    }
+    #[cfg(feature = "websocket")]
+    async fn admit(&self, stream: impl SessionStream + 'static) -> Result<(), Failure> {
+        if *self.0.closed.borrow() {
+            return Err("the TCP attachment is closed".into());
+        }
+        admit(self.0.clone(), stream).await
+    }
+    #[cfg(feature = "websocket")]
+    pub async fn admit_websocket(
+        &self,
+        upgraded: impl SessionStream + 'static,
+    ) -> Result<(), Failure> {
+        self.admit(websocket::stream(upgraded).await).await
     }
     pub fn local_addr(&self) -> Option<SocketAddr> {
         self.0.local
@@ -218,9 +256,7 @@ impl Attachment {
             Protocol::Coordinate => None,
             Protocol::Rpc | Protocol::Link => Some(scope.ok_or(ScopeRefusal::UnknownScope)?),
         };
-        let mut stream =
-            rocky_platform::time::timeout(TIMEOUT, TcpStream::connect(address)).await??;
-        stream.set_nodelay(true)?;
+        let mut stream = rocky_platform::time::timeout(TIMEOUT, open(address)).await??;
         rocky_platform::time::timeout(TIMEOUT, async {
             framing::write(
                 &mut stream,
@@ -284,8 +320,40 @@ fn route_for(shared: &Shared, hello: &Hello) -> Result<Admitted, ScopeRefusal> {
     }
 }
 
-async fn admit(shared: Arc<Shared>, mut stream: TcpStream) -> Result<(), Failure> {
+async fn open(address: &str) -> Result<Box<dyn SessionStream>, Failure> {
+    #[cfg(feature = "websocket")]
+    if websocket::is_url(address) {
+        return websocket::dial(address).await;
+    }
+    if address.starts_with("ws://") || address.starts_with("wss://") {
+        return Err("rocky-tcp was built without the websocket feature".into());
+    }
+    let stream = TcpStream::connect(address).await?;
     stream.set_nodelay(true)?;
+    Ok(Box::new(stream))
+}
+
+async fn accepted_tcp(
+    shared: Arc<Shared>,
+    stream: TcpStream,
+    websocket: bool,
+) -> Result<(), Failure> {
+    stream.set_nodelay(true)?;
+    if websocket {
+        #[cfg(feature = "websocket")]
+        {
+            let stream =
+                rocky_platform::time::timeout(TIMEOUT, websocket::accept(stream)).await??;
+            return admit(shared, stream).await;
+        }
+    }
+    admit(shared, stream).await
+}
+
+async fn admit(
+    shared: Arc<Shared>,
+    mut stream: impl SessionStream + 'static,
+) -> Result<(), Failure> {
     let hello: Hello = rocky_platform::time::timeout(TIMEOUT, async {
         rocky_credentials::decode_bounded(
             &framing::read_bounded(&mut stream, MAX_HEADER).await?,
@@ -435,7 +503,7 @@ impl Transport for Port {
             .unwrap_or_else(PoisonError::into_inner);
         routes.retain(|_, route| route.strong_count() > 0);
         if listening {
-            if shared.local.is_none() {
+            if !shared.accepts {
                 return Err("this TCP attachment does not accept connections".into());
             }
             if *self.route.closed.borrow() || *shared.closed.borrow() {
@@ -479,6 +547,13 @@ impl Transport for Port {
         })
     }
 }
+
+#[cfg(feature = "websocket")]
+mod websocket;
+#[cfg(feature = "websocket")]
+pub use websocket::{
+    Io as WebSocketIo, accept_key as websocket_accept_key, stream as websocket_stream,
+};
 
 #[cfg(test)]
 mod tests;

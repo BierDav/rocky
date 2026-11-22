@@ -256,3 +256,137 @@ async fn closing_a_borrowed_port_keeps_the_attachment_serving() -> Result<(), Fa
     server.close().await;
     Ok(())
 }
+
+#[cfg(feature = "websocket")]
+mod websocket {
+    use super::*;
+    use tokio_tungstenite::{
+        WebSocketStream,
+        tungstenite::{Message, protocol::Role},
+    };
+
+    async fn answer_once(port: Arc<dyn Transport>) -> Result<(), Failure> {
+        match port.accept().await {
+            Some(Incoming::Request(request)) => {
+                let reply: Vec<u8> = request.bytes.iter().rev().copied().collect();
+                request.respond(reply).await
+            }
+            _ => Err("expected a request".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_websocket_listener_advertises_a_ws_url_and_answers() -> Result<(), Failure> {
+        let server = loopback().websocket().start().await?;
+        let port = server.transport();
+        let address = port.address().await?;
+        assert!(address.starts_with("ws://127.0.0.1:"), "{address}");
+        port.listen(Some(scope(1)), true)?;
+        let answer = tokio::spawn(answer_once(port.clone()));
+        let caller = Options::dialer().transport();
+        assert_eq!(
+            caller.request(&[address], scope(1), b"ping").await?,
+            b"gnip"
+        );
+        answer.await??;
+        server.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_link_session_carries_frames_larger_than_one_message() -> Result<(), Failure> {
+        let server = loopback().websocket().start().await?;
+        let port = server.transport();
+        port.listen(Some(scope(1)), true)?;
+        let caller = Options::dialer().transport();
+        let mut session = caller.session(&[port.address().await?], scope(1)).await?;
+        let large: Vec<u8> = (0..300_000u32).map(|value| (value % 251) as u8).collect();
+        framing::write(&mut session, &large).await?;
+        let Some(Incoming::Stream(Protocol::Link, mut inbound)) = port.accept().await else {
+            return Err("expected a link stream".into());
+        };
+        assert_eq!(framing::read(&mut inbound).await?, large);
+        framing::write(&mut inbound, b"back").await?;
+        assert_eq!(framing::read(&mut session).await?, b"back");
+        server.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_external_attachment_admits_an_upgraded_connection() -> Result<(), Failure> {
+        let attachment = Attachment::external("wss://prism.example/rocky");
+        let port = attachment.transport();
+        assert_eq!(port.address().await?, "wss://prism.example/rocky");
+        port.listen(Some(scope(1)), true)?;
+        let (client, upgraded) = tokio::io::duplex(1 << 16);
+        let admitting = attachment.clone();
+        let admitted = tokio::spawn(async move { admitting.admit_websocket(upgraded).await });
+        let mut client = super::super::websocket::Io::new_for_tests(
+            WebSocketStream::from_raw_socket(client, Role::Client, None).await,
+        );
+        framing::write(
+            &mut client,
+            &rocky_credentials::encode(&Hello {
+                version: VERSION,
+                protocol: Wire::Link,
+                scope: Some(scope(1)),
+            })?,
+        )
+        .await?;
+        let reply: Accepted = rocky_credentials::decode_bounded(
+            &framing::read_bounded(&mut client, MAX_HEADER).await?,
+            MAX_HEADER,
+        )?;
+        assert_eq!(reply.result, Ok(()));
+        admitted.await??;
+        let Some(Incoming::Stream(Protocol::Link, mut inbound)) = port.accept().await else {
+            return Err("expected a link stream".into());
+        };
+        framing::write(&mut client, b"over the proxy").await?;
+        assert_eq!(framing::read(&mut inbound).await?, b"over the proxy");
+        attachment.close().await;
+        Ok(())
+    }
+
+    async fn pair() -> (
+        WebSocketStream<tokio::io::DuplexStream>,
+        super::super::websocket::Io<tokio::io::DuplexStream>,
+    ) {
+        let (client, server) = tokio::io::duplex(1 << 20);
+        let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        (client, websocket_stream(server).await)
+    }
+
+    #[tokio::test]
+    async fn a_received_close_is_answered_before_eof() -> Result<(), Failure> {
+        use futures_util::{SinkExt, StreamExt};
+        let (mut client, mut server) = pair().await;
+        client.send(Message::Close(None)).await?;
+        let mut rest = Vec::new();
+        server.read_to_end(&mut rest).await?;
+        assert!(rest.is_empty());
+        drop(server);
+        assert!(matches!(client.next().await, Some(Ok(Message::Close(_)))));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_oversized_message_is_refused_before_admission() -> Result<(), Failure> {
+        use futures_util::SinkExt;
+        let (mut client, mut server) = pair().await;
+        client
+            .send(Message::Binary(vec![0; 200_000].into()))
+            .await?;
+        let mut byte = [0; 1];
+        assert!(server.read(&mut byte).await.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn the_accept_key_matches_rfc_6455() {
+        assert_eq!(
+            websocket_accept_key(b"dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
+    }
+}

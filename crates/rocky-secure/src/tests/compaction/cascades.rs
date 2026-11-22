@@ -1096,6 +1096,70 @@ async fn a_cancelled_direct_import_reaches_no_rows_and_marks_nothing() {
     );
 }
 
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn frames_a_cancelled_direct_import_held_back_read_incomplete_until_they_apply() {
+    let lineage = linked();
+    let dir = Scratch::new().await;
+    let keys = [PrivateKey::new(), PrivateKey::new()];
+    let a = open(&lineage, &dir, "a", &keys[0]).await;
+    follow_main(&lineage, &a).await;
+    insert(&a, "p", "parent").await;
+    seal(&lineage, &a).await;
+    a.compact(lineage.domain, 0).await.unwrap();
+    let b = open(&lineage, &dir, "b", &keys[1]).await;
+    crate::tests::exchange_graphs(&a, &b, lineage.domain).await;
+    b.follow_bookmark(lineage.domain, "main").await.unwrap();
+    let items = lineage.scope("items");
+    let credentials = lineage.credentials(3, &keys[1]);
+    a.admit_peer(keys[1].public_key(), &credentials, b.followed_tip().await)
+        .await
+        .unwrap();
+    let offered = a
+        .checkpoint_offer(keys[1].public_key(), &credentials, items)
+        .await
+        .unwrap()
+        .unwrap();
+    let checkpoint = offered.id().unwrap();
+    b.begin_rebootstrap(offered).await.unwrap();
+    let page = a
+        .checkpoint_page(
+            keys[1].public_key(),
+            &credentials,
+            items,
+            checkpoint,
+            None,
+            64 * 1024,
+        )
+        .await
+        .unwrap();
+    b.stage_checkpoint_page(page).await.unwrap();
+    insert(&a, "q", "after the checkpoint").await;
+    sync_scope(&lineage, &a, &b, &keys[1], items).await;
+    assert_eq!(
+        stored(&b, "SELECT direct FROM secure_rebootstrap").await,
+        vec![vec![SqlValue::Integer(1)]]
+    );
+    crate::APPLY_BUDGET.with(|budget| budget.set(Some(0)));
+    let cancelled = b.cancel_rebootstrap(items, checkpoint).await;
+    crate::APPLY_BUDGET.with(|budget| budget.set(None));
+    assert!(matches!(cancelled, Err(Error::InjectedFailure)));
+    assert!(
+        matches!(
+            session(&b).await.run("SELECT key FROM items", vec![]).await,
+            Err(Error::Sql(crate::sql::SqlError::Unavailable {
+                reason: crate::sql::Unavailable::Incomplete,
+                ..
+            }))
+        ),
+        "the abort leaves the table holding only frames it has not applied, so it reads incomplete, not empty"
+    );
+    b.settle().await.unwrap();
+    assert_eq!(
+        select(&b, "SELECT key FROM items ORDER BY key").await,
+        vec![vec![text("p")], vec![text("q")]]
+    );
+}
+
 async fn orphaned_tags(replica: &Replica) -> Vec<Vec<SqlValue>> {
     stored(
         replica,

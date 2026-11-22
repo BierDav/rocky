@@ -34,9 +34,16 @@ A database's authority is an offline root key: `Configuration::create`
 returns it once as a 24-word phrase (`Opened::root`), or
 `create_with_root` takes a passkey-backed signer. Rocky never stores it.
 The owner's identity is derived from that root. Identity signers are also
-never stored: a new device joins as a single-use identity, or
-`Configuration::join_linkable` returns its identity phrase once. Supply the
-identity for later linking; opening and renewal use the node key alone.
+never stored: a device joining with `Session::provision`'s URI joins as a
+single-use identity the issuer minted, or `Configuration::join_linkable`
+returns its identity phrase once. To keep an identity the person already
+has, an issuer calls `Session::invite` with its public key instead; the
+URI carries no secret, and `Configuration::accept_invitation` joins with
+the configured identity provider over the network, asking the issuing node
+for the enrollment. Such an invitation is single use and expires (ten
+minutes by default, `InviteTerms::valid_for`); the issuer withdraws an
+unused one with `Session::withdraw_invitation`. Supply the identity for
+later linking; opening and renewal use the node key alone.
 The root grants and revokes trust per identity; those calls fail with
 `publisher_required` without it. Every linked node of a trusted identity
 can invite, renew, revoke ordinary identities and seal. Linking another node

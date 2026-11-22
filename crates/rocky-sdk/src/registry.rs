@@ -43,7 +43,7 @@ pub struct Admitted {
     pub issuer: PublicKey,
     pub origin: Option<PublicKey>,
     pub enrolled: u64,
-    pub invitation: Option<String>,
+    pub invitation: Option<crate::InvitationId>,
     pub single_use: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -19,14 +19,59 @@ pub struct IdentityEnrollmentRequest {
     pub code: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "one request per RPC, the shared one as large as its siblings"
-)]
+#[serde(deny_unknown_fields)]
+pub struct InvitedEnrollmentRequest {
+    pub request: IdentityRequest,
+    pub invitation: Commitment,
+    binding: Signature,
+}
+impl InvitedEnrollmentRequest {
+    pub fn sign(
+        request: IdentityRequest,
+        invitation: Commitment,
+        node: &PrivateKey,
+    ) -> Result<Self, Error> {
+        if request.node != node.public_key() {
+            return Err(denied(
+                "the invitation binding needs the request's node key",
+            ));
+        }
+        let binding = node.sign(&Self::bound(&request, invitation)?);
+        Ok(Self {
+            request,
+            invitation,
+            binding,
+        })
+    }
+    pub fn verify_binding(&self) -> Result<(), Error> {
+        if !self
+            .request
+            .node
+            .verify(&Self::bound(&self.request, self.invitation)?, &self.binding)
+        {
+            return Err(denied("the request is not bound to this invitation"));
+        }
+        Ok(())
+    }
+    fn bound(request: &IdentityRequest, invitation: Commitment) -> Result<Vec<u8>, Error> {
+        signing_bytes(
+            "rocky.credentials.invited-enrollment.v1",
+            &(
+                rocky_core::commitment(
+                    "rocky.credentials.invited-enrollment-request.v1",
+                    &request.to_bytes()?,
+                ),
+                invitation,
+            ),
+        )
+    }
+}
+#[derive(Serialize, Deserialize)]
 pub enum IdentityEnrollment {
     Shared(IdentityEnrollmentRequest),
     PersonalHello(PersonalHello),
     Personal(Box<PersonalAuthorization>),
+    Invited(InvitedEnrollmentRequest),
 }
 #[derive(Serialize, Deserialize)]
 pub enum LinkEnrollment {
@@ -160,7 +205,7 @@ pub enum StagedCloseStatus {
     },
 }
 
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 pub const MAX_MESSAGE: usize = 3 * crate::MAX_REVOCATION_SET_BYTES;
 
 #[derive(Serialize, Deserialize)]
@@ -179,6 +224,7 @@ pub enum PeerRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PeerTrust {
     Public,
+    Invitation,
     Enrolled,
     Identity,
     Root,
@@ -194,6 +240,9 @@ impl PeerRequest {
     pub fn requirements(&self) -> (PeerTrust, PeerAdmission) {
         match self {
             Self::Renew(_) | Self::Epochs(_) => (PeerTrust::Enrolled, PeerAdmission::Enrollment),
+            Self::Identity(IdentityEnrollment::Invited(_)) => {
+                (PeerTrust::Invitation, PeerAdmission::Enrollment)
+            }
             Self::Identity(IdentityEnrollment::Personal(_))
             | Self::LinkEnroll(LinkEnrollment::Personal(_) | LinkEnrollment::PersonalCustody(_)) => {
                 (PeerTrust::Root, PeerAdmission::Membership)
@@ -219,6 +268,10 @@ impl PeerRequest {
                     PeerReply::Identity(
                         IdentityReply::ConfirmationRequired | IdentityReply::Enrolled(_)
                     )
+                )
+                | (
+                    Self::Identity(IdentityEnrollment::Invited(_)),
+                    PeerReply::Identity(IdentityReply::Enrolled(_))
                 )
                 | (
                     Self::Identity(IdentityEnrollment::PersonalHello(_)),
@@ -572,5 +625,56 @@ mod tests {
             assert_eq!(error.message, "peer refused");
             assert_eq!(error.retryable, retryable);
         }
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn an_invited_enrollment_is_an_invitation_admission_answered_only_by_an_enrollment() {
+        let identity = PrivateKey::from_bytes(&[5; 32]);
+        let node = PrivateKey::from_bytes(&[6; 32]);
+        let issuer = PrivateKey::from_bytes(&[7; 32]);
+        let database = crate::DatabaseContext {
+            publisher: issuer.public_key(),
+            scope: rocky_core::Scope {
+                mesh: rocky_core::MeshId([1; 16]),
+                app: rocky_core::AppId([2; 16]),
+                domain: rocky_core::DomainId([3; 16]),
+            },
+        };
+        let (signed, _) =
+            IdentityRequest::sign(&identity, &node, issuer.public_key(), 1_000, database).unwrap();
+        let mut substituted =
+            InvitedEnrollmentRequest::sign(signed.clone(), [9; 32], &node).unwrap();
+        substituted.invitation = [8; 32];
+        assert!(
+            substituted.verify_binding().is_err(),
+            "a request bound to one invitation redeems no other"
+        );
+        assert!(
+            InvitedEnrollmentRequest::sign(signed.clone(), [9; 32], &issuer).is_err(),
+            "only the request's node binds it"
+        );
+        let bound = InvitedEnrollmentRequest::sign(signed, [9; 32], &node).unwrap();
+        let request = PeerRequest::Identity(IdentityEnrollment::Invited(bound));
+        assert_eq!(
+            request.requirements(),
+            (PeerTrust::Invitation, PeerAdmission::Enrollment)
+        );
+        assert!(request.accepts(&PeerReply::Identity(IdentityReply::Enrolled(Vec::new()))));
+        assert!(!request.accepts(&PeerReply::Identity(IdentityReply::ConfirmationRequired)));
+        let frame = PeerRequestFrame::from_bytes(&request.to_bytes().unwrap()).unwrap();
+        let PeerRequest::Identity(IdentityEnrollment::Invited(carried)) = frame.request else {
+            panic!("the invited enrollment changed kind on the wire");
+        };
+        assert_eq!(carried.invitation, [9; 32]);
+        carried.verify_binding().unwrap();
+        carried
+            .request
+            .verify(
+                issuer.public_key(),
+                identity.public_key(),
+                (1_000, 0),
+                database,
+            )
+            .unwrap();
     }
 }

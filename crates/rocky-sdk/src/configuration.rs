@@ -295,6 +295,9 @@ impl Configuration {
         options.identity = Some(identity);
         Database::launch_link(options, contact, Some(pending)).await
     }
+    pub async fn accept_invitation(&self, invitation: &str) -> Result<Opened, Failure> {
+        Database::launch_invited(self.options(), invitation).await
+    }
     pub async fn join_linkable(&self, provisioning: &str) -> Result<Opened, Failure> {
         Database::launch_join(self.options(), provisioning, false).await
     }

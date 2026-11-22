@@ -37,6 +37,8 @@ mod group_secrets;
 #[cfg(not(target_family = "wasm"))]
 mod identities;
 #[cfg(not(target_family = "wasm"))]
+mod invitations;
+#[cfg(not(target_family = "wasm"))]
 mod iroh;
 #[cfg(not(target_family = "wasm"))]
 mod issuers;

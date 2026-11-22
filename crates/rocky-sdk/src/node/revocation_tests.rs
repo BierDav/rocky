@@ -949,3 +949,112 @@ fn revocation_keys_and_their_copy_each_meet_the_key_provider_contract() -> Resul
     rocky_credentials::testing::key_provider_contract(&keys.copy()?);
     Ok(())
 }
+
+#[tokio::test]
+async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_can()
+-> Result<(), Failure> {
+    use crate::invitation::{AUTHORITY_INVITATIONS_KEY, Book};
+    use rocky_credentials::{IdentityKey, IdentityRequest, InvitedEnrollmentRequest};
+    let directory = tempfile::tempdir()?;
+    let node = issuer(directory.path(), Arc::new(Keys::default())).await?;
+    let person = IdentityKey::generate();
+    let settings = node.settings.lock().await.clone();
+    let registry = node.registry(&settings).await?;
+    let profile: Profile =
+        serde_json::from_value(serde_json::json!({"kind": "writer", "scopes": ["items"]}))?;
+    let routes = || {
+        vec![crate::enrollment::Route {
+            transport: "memory".into(),
+            address: "issuer".into(),
+        }]
+    };
+    let mut book = Book::read(&node.replica).await?;
+    let time = now()?;
+    let terms = crate::InviteTerms::default();
+    let open = |book: &mut Book, profile: Profile| {
+        settings.invite(
+            (&node.vault, routes()),
+            book,
+            (person.public_key(), profile, &terms),
+            &registry,
+            time,
+        )
+    };
+    let wider: Profile = serde_json::from_value(
+        serde_json::json!({"kind": "writer", "scopes": ["items", "notes"]}),
+    )?;
+    let issued = open(&mut book, profile.clone())?;
+    let spare = open(&mut book, profile.clone())?;
+    let conflicting = open(&mut book, wider.clone())?;
+    node.replica
+        .put_authority_state(AUTHORITY_INVITATIONS_KEY, &book.to_bytes()?, time)
+        .await?;
+    let audience = Settings::node_key(&node.vault)?.public_key();
+    let database = settings.database_context()?;
+    let ask_for = |key: &PrivateKey, invitation: crate::InvitationId| {
+        let (request, _) = IdentityRequest::sign(&person, key, audience, now()?, database)?;
+        Ok::<_, Failure>(InvitedEnrollmentRequest::sign(request, invitation.0, key)?)
+    };
+    let ask = |key: &PrivateKey| ask_for(key, issued.id);
+    let joiner = PrivateKey::new();
+    let mut substituted = ask(&joiner)?;
+    substituted.invitation = spare.id.0;
+    assert!(
+        node.answer_invitation(substituted).await.is_err(),
+        "a request bound to one invitation redeems no other"
+    );
+    for attempt in ["first answer", "the answer the joiner lost, again"] {
+        assert!(
+            matches!(
+                node.answer_invitation(ask(&joiner)?).await?,
+                IdentityReply::Enrolled(_)
+            ),
+            "{attempt}"
+        );
+    }
+    let other = node
+        .answer_invitation(ask(&PrivateKey::new())?)
+        .await
+        .err()
+        .ok_or("a second node redeemed the invitation")?;
+    assert_eq!(
+        other.downcast_ref::<crate::InvitationRefusal>(),
+        Some(&crate::InvitationRefusal::Used)
+    );
+    assert!(
+        node.answer_invitation(ask_for(&PrivateKey::new(), conflicting.id)?)
+            .await
+            .is_err(),
+        "an invitation issued before the identity was admitted keeps the admitted profile"
+    );
+    let held = Book::read(&node.replica).await?.listed(now()?);
+    let redeemer = |id: crate::InvitationId| {
+        held.iter()
+            .find(|open| open.id == id)
+            .map(|open| open.redeemed_by)
+    };
+    assert_eq!(redeemer(issued.id), Some(Some(joiner.public_key())));
+    assert_eq!(redeemer(spare.id), Some(None));
+    assert_eq!(redeemer(conflicting.id), Some(None));
+    let snapshot = node.settings_snapshot().await;
+    let recorded = node.registry(&snapshot).await?;
+    let admitted = recorded
+        .get(&person.public_key())
+        .and_then(|record| record.admitted.as_ref())
+        .ok_or("the invited identity is not admitted")?;
+    assert_eq!(admitted.invitation, Some(issued.id));
+    assert_eq!(admitted.profile, Some(profile));
+    assert!(
+        settings
+            .invite(
+                (&node.vault, routes()),
+                &mut Book::read(&node.replica).await?,
+                (person.public_key(), wider, &terms),
+                &recorded,
+                now()?,
+            )
+            .is_err(),
+        "an admitted identity is not invited into another profile"
+    );
+    Ok(())
+}

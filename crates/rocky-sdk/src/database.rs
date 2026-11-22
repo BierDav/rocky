@@ -63,6 +63,9 @@ pub(crate) enum Install {
         contact: String,
         confirmed: Option<Arc<crate::AwaitingLink>>,
     },
+    Invited {
+        invitation: String,
+    },
     Installed,
     SignIn(Box<crate::personal::SignIn>),
     Restore {
@@ -86,7 +89,10 @@ impl Install {
         })
     }
     fn bootstraps_from_checkpoint(&self) -> bool {
-        matches!(self, Self::Join { .. } | Self::Identity { .. })
+        matches!(
+            self,
+            Self::Join { .. } | Self::Identity { .. } | Self::Invited { .. }
+        )
     }
     fn unwinds_on_failure(&self) -> bool {
         matches!(
@@ -390,6 +396,9 @@ impl Database {
             },
         )
     }
+    pub fn accept_invitation(open: Open<'_>, invitation: &str) -> Result<Opened, Failure> {
+        Self::start(open, Self::invited_install(invitation))
+    }
     pub fn install(open: Open<'_>, supplied: Supplied) -> Result<Opened, Failure> {
         Self::start(open, Install::Supplied(Box::new(supplied)))
     }
@@ -589,6 +598,17 @@ impl Database {
         opened.identity = phrase.lock().ok().and_then(|mut guard| guard.take());
         Ok(opened)
     }
+    fn invited_install(invitation: &str) -> Install {
+        Install::Invited {
+            invitation: invitation.into(),
+        }
+    }
+    pub(crate) async fn launch_invited(
+        open: Open<'_>,
+        invitation: &str,
+    ) -> Result<Opened, Failure> {
+        Self::launch(open, Self::invited_install(invitation), None).await
+    }
     pub(crate) async fn launch_link(
         open: Open<'_>,
         contact: &str,
@@ -639,6 +659,15 @@ impl Database {
         let directory = open.directory.to_path_buf();
         if let Install::Join { provisioning, .. } = &install {
             crate::enrollment::ProvisioningBundle::parse(provisioning)?;
+        }
+        if let Install::Invited { invitation } = &install {
+            crate::invitation::check_uri(invitation)?;
+            if open.network.is_none() {
+                return Err(ServiceError::NetworkRequired("accept an invitation").into());
+            }
+            if open.identity.is_none() {
+                return Err("accepting an invitation needs the invited identity's provider".into());
+            }
         }
         let setup = Setup {
             schema: open.schema.validated()?,
@@ -1576,6 +1605,33 @@ async fn identity(
                 }
             }
         }
+        Install::Invited { invitation } => {
+            let network = network.ok_or(ServiceError::NetworkRequired("accept an invitation"))?;
+            let provider = setup
+                .identity
+                .clone()
+                .ok_or("accepting an invitation needs the invited identity's provider")?;
+            let prepared = Settings::prepare_invited(path, secrets, &provider, invitation)?;
+            let key = Settings::route_secret(&prepared.1)?;
+            let (transport, owned) = network.start(false, key).await?;
+            match Settings::enroll_invited(
+                (path, schema),
+                prepared,
+                provider,
+                invitation,
+                &*transport,
+            )
+            .await
+            {
+                Ok(settings) => Ok((settings, Some((transport, owned)))),
+                Err(error) => {
+                    if owned {
+                        transport.close().await;
+                    }
+                    Err(error)
+                }
+            }
+        }
         Install::SignIn(sign_in) => {
             if setup.identity.is_some() {
                 return Err(crate::enrollment::personal_refusal(
@@ -2090,7 +2146,9 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     let startup_identity = setup.identity.take();
     let vault = settings.vault(&setup.secrets);
     let opened = async {
-        if let (Install::Join { .. }, Some(inviter)) = (&setup.install, settings.issuers.first()) {
+        if let (Install::Join { .. } | Install::Invited { .. }, Some(inviter)) =
+            (&setup.install, settings.issuers.first())
+        {
             bootstrap_intent.join(*inviter).await?;
         }
         let completed_interrupted_revocation = settings.rotate(&vault)?.is_some();

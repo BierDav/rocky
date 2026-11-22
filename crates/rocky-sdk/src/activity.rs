@@ -24,6 +24,17 @@ pub enum ActivityKind {
         identity: PublicKey,
         profile: crate::GrantProfile,
     },
+    IdentityInvited {
+        invitation: crate::InvitationId,
+        identity: PublicKey,
+        profile: crate::GrantProfile,
+        expires: u64,
+    },
+    InvitationRedeemed {
+        invitation: crate::InvitationId,
+        identity: PublicKey,
+        node: PublicKey,
+    },
     PeerAdded {
         peer: PublicKey,
     },

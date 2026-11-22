@@ -411,6 +411,8 @@ impl Snapshot for sdk::ActivityPage {
             let mut detail=match event.detail {
                 sdk::ActivityKind::LinkAdmissionFailed { error } => json!({"kind":"link_admission_failed","error":error}),
                 sdk::ActivityKind::DeviceProvisioned { node, identity, profile } => json!({"kind":"device_provisioned","node":node,"identity":identity,"profile":profile}),
+                sdk::ActivityKind::IdentityInvited { invitation, identity, profile, expires } => json!({"kind":"identity_invited","invitation":invitation,"identity":identity,"profile":profile,"expires":expires.to_string()}),
+                sdk::ActivityKind::InvitationRedeemed { invitation, identity, node } => json!({"kind":"invitation_redeemed","invitation":invitation,"identity":identity,"node":node}),
                 sdk::ActivityKind::PeerAdded { peer } => json!({"kind":"peer_added","peer":peer}),
                 sdk::ActivityKind::PeerRemoved { peer } => json!({"kind":"peer_removed","peer":peer}),
                 sdk::ActivityKind::Renewed { revocations, expires, keys } => json!({"kind":"renewed","revocations":revocations,"expires":expires.to_string(),"keys":keys}),

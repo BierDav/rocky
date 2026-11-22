@@ -2463,7 +2463,10 @@ impl Node {
         }
         let is_enrollment = matches!(
             request,
-            PeerRequest::Renew(_) | PeerRequest::Epochs(_) | PeerRequest::Policy
+            PeerRequest::Renew(_)
+                | PeerRequest::Epochs(_)
+                | PeerRequest::Policy
+                | PeerRequest::Identity(IdentityEnrollment::Invited(_))
         );
         if is_enrollment && let Some(reply) = self.forward_enrollment(&request).await? {
             return Ok(reply);

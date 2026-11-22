@@ -22,7 +22,7 @@ use std::{collections::BTreeMap, ops::RangeInclusive, path::Path, sync::Arc, tim
 
 pub(crate) const AUTHORITY_INVITATIONS_KEY: &str = "invitations";
 const BOOK_VERSION: u32 = 1;
-const INVITE_VERSION: u32 = 1;
+const INVITE_VERSION: u32 = 2;
 const INVITE_PREFIX: &str = "rocky://invite/";
 const SKEW: u64 = 300;
 const VALIDITY_SECONDS: RangeInclusive<u64> = 60..=30 * 24 * 60 * 60;
@@ -297,6 +297,7 @@ struct Invite {
     database: DatabaseContext,
     issuer: PublicKey,
     routes: Vec<Route>,
+    via_custody: bool,
     identity: PublicKey,
     expires: u64,
 }
@@ -345,6 +346,21 @@ fn keeps_recorded_profile(
 }
 pub(crate) fn check_uri(uri: &str) -> Result<(), Failure> {
     Invite::parse(uri).map(drop)
+}
+pub(crate) fn is_uri(uri: &str) -> bool {
+    uri.trim().starts_with(INVITE_PREFIX)
+}
+pub(crate) fn routed_through(
+    uri: &str,
+    relay: crate::enrollment::ContactRecord,
+) -> Result<String, Failure> {
+    let mut invite = Invite::parse(uri)?;
+    if invite.publisher != relay.publisher {
+        return Err("relay belongs to another domain".into());
+    }
+    invite.routes = relay.routes;
+    invite.via_custody = true;
+    invite.uri()
 }
 
 pub(crate) struct Issued {
@@ -410,6 +426,7 @@ impl Settings {
             database: self.database_context()?,
             issuer: Self::node_key(vault)?.public_key(),
             routes,
+            via_custody: false,
             identity,
             expires,
         }
@@ -533,7 +550,7 @@ impl Settings {
                 publisher: invite.publisher,
                 database: invite.database,
                 routes: invite.routes,
-                via_custody: false,
+                via_custody: invite.via_custody,
             },
             enrollment,
             (provider, intent.single_use),
@@ -720,6 +737,7 @@ mod tests {
                 transport: "memory".into(),
                 address: "issuer".into(),
             }],
+            via_custody: false,
             identity: key(1),
             expires: NOW,
         };
@@ -744,7 +762,8 @@ mod tests {
                 "issuer",
                 "publisher",
                 "routes",
-                "v"
+                "v",
+                "via_custody"
             ],
             "an invitation names public keys and routes only"
         );

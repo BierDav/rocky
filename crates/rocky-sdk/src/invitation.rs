@@ -234,7 +234,7 @@ impl Book {
         id: InvitationId,
         device: NodeKeys,
         time: u64,
-    ) -> Result<(Profile, Option<Vec<u8>>), InvitationRefusal> {
+    ) -> Result<Redemption, InvitationRefusal> {
         let pending = self.open.get_mut(&id).ok_or(InvitationRefusal::Unknown)?;
         if pending.expires < time {
             return Err(InvitationRefusal::Expired);
@@ -248,8 +248,21 @@ impl Book {
         {
             return Err(InvitationRefusal::Used);
         }
-        pending.redeemed_by = Some(device.node);
-        Ok((pending.profile.clone(), pending.label.clone()))
+        let first = pending.redeemed_by.replace(device.node).is_none();
+        Ok(Redemption {
+            profile: pending.profile.clone(),
+            label: pending.label.clone().filter(|_| first),
+            first,
+        })
+    }
+    pub(crate) fn release(&mut self, id: InvitationId, node: PublicKey) -> bool {
+        match self.open.get_mut(&id) {
+            Some(pending) if pending.redeemed_by == Some(node) => {
+                pending.redeemed_by = None;
+                true
+            }
+            _ => false,
+        }
     }
     pub(crate) fn withdraw(&mut self, id: InvitationId, time: u64) -> Result<(), Failure> {
         self.forget_expired(time);
@@ -339,11 +352,19 @@ pub(crate) struct Issued {
     pub(crate) id: InvitationId,
     pub(crate) expires: u64,
 }
+#[derive(Debug, PartialEq)]
+struct Redemption {
+    profile: Profile,
+    label: Option<Vec<u8>>,
+    first: bool,
+}
+
 pub(crate) struct Redeemed {
     pub(crate) answer: Vec<u8>,
     pub(crate) changes: Changes,
     pub(crate) id: InvitationId,
     pub(crate) device: NodeKeys,
+    pub(crate) first: bool,
 }
 
 impl Settings {
@@ -421,10 +442,14 @@ impl Settings {
             identity: request.identity,
             node: request.node,
         };
-        let admission = book.redeem(id, device, time)?;
-        keeps_recorded_profile(registry, &device.identity, &admission.0)?;
+        let Redemption {
+            profile,
+            label,
+            first,
+        } = book.redeem(id, device, time)?;
+        keeps_recorded_profile(registry, &device.identity, &profile)?;
         let (enrollment, changes) =
-            self.enrollment_for(vault, device, admission, Some(id), registry)?;
+            self.enrollment_for(vault, device, (profile, label), Some(id), registry)?;
         Ok(Redeemed {
             answer: request
                 .answer(&answering, &serde_json::to_vec(&enrollment)?)?
@@ -432,6 +457,7 @@ impl Settings {
             changes,
             id,
             device,
+            first,
         })
     }
 
@@ -552,10 +578,21 @@ mod tests {
             book.redeem(id, device(2, 10), NOW),
             Err(InvitationRefusal::OtherIdentity)
         );
-        assert_eq!(book.redeem(id, device(1, 10), NOW), Ok((writer(), None)));
+        assert_eq!(
+            book.redeem(id, device(1, 10), NOW),
+            Ok(Redemption {
+                profile: writer(),
+                label: None,
+                first: true
+            })
+        );
         assert_eq!(
             book.redeem(id, device(1, 10), NOW + 1),
-            Ok((writer(), None)),
+            Ok(Redemption {
+                profile: writer(),
+                label: None,
+                first: false
+            }),
             "the redeeming node retries an answer it lost"
         );
         assert_eq!(
@@ -563,6 +600,33 @@ mod tests {
             Err(InvitationRefusal::Used),
             "a second node of the same identity links instead"
         );
+    }
+
+    #[test]
+    fn a_retried_redemption_leaves_the_label_alone_and_a_released_one_starts_over() {
+        let mut book = Book::empty();
+        let id = book
+            .open(key(1), (writer(), Some(b"Alice".to_vec())), OPEN_FOR, NOW)
+            .expect("open invitation")
+            .0;
+        let first = book.redeem(id, device(1, 10), NOW).expect("redeemed");
+        assert!(first.first);
+        assert_eq!(first.label.as_deref(), Some(b"Alice".as_slice()));
+        let retried = book.redeem(id, device(1, 10), NOW).expect("redeemed");
+        assert!(!retried.first);
+        assert_eq!(
+            retried.label, None,
+            "a retry does not overwrite a label edited since the first redemption"
+        );
+        assert!(
+            !book.release(id, key(11)),
+            "only the redeeming node is released"
+        );
+        assert!(book.release(id, key(10)));
+        assert!(book.listed(NOW)[0].redeemed_by.is_none());
+        let again = book.redeem(id, device(1, 11), NOW).expect("redeemed");
+        assert!(again.first);
+        assert_eq!(again.label.as_deref(), Some(b"Alice".as_slice()));
     }
 
     #[test]

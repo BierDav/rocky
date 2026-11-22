@@ -240,6 +240,9 @@ pub(crate) struct Node {
     clients: std::sync::Mutex<BTreeMap<u64, Arc<Client>>>,
     syncing: Mutex<()>,
     bootstrap: Mutex<()>,
+    redeeming: Mutex<()>,
+    #[cfg(test)]
+    redemption_hook: std::sync::Mutex<Option<invitations::RedemptionHook>>,
     pub(crate) bootstrap_intent: BootstrapIntentFile,
     retry_seed: u64,
     retries: std::sync::Mutex<BTreeMap<PublicKey, PeerRetry>>,
@@ -372,6 +375,9 @@ impl Node {
             clients: std::sync::Mutex::new(BTreeMap::new()),
             syncing: Mutex::new(()),
             bootstrap: Mutex::new(()),
+            redeeming: Mutex::new(()),
+            #[cfg(test)]
+            redemption_hook: std::sync::Mutex::new(None),
             bootstrap_intent,
             retry_seed: rocky_platform::entropy::random_u64(),
             retries: std::sync::Mutex::new(BTreeMap::new()),

@@ -232,7 +232,7 @@ impl Node {
                     issuer: admitted.issuer,
                     origin: admitted.origin,
                     enrolled: admitted.enrolled,
-                    invitation: admitted.invitation.clone(),
+                    invitation: admitted.invitation,
                     single_use: admitted.single_use,
                     own: *identity == settings.identity,
                     revoked: settings.revoked_identity(identity, &registry),

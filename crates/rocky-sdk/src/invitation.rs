@@ -358,6 +358,13 @@ impl Settings {
         if self.revoked_identity(&identity, registry) {
             return Err("the identity was revoked".into());
         }
+        if registry
+            .get(&identity)
+            .and_then(crate::registry::IdentityRecord::profile)
+            .is_some_and(|held| *held != profile)
+        {
+            return Err("the identity already holds another profile in this database".into());
+        }
         if identity == self.identity || registry.trusted.contains_key(&identity) {
             return Err(
                 "a trusted identity links its nodes instead of accepting an invitation".into(),
@@ -392,6 +399,7 @@ impl Settings {
         if !self.issuer() {
             return Err("only an issuer answers invitations".into());
         }
+        wire.verify_binding()?;
         let request = wire.request;
         request.verify(
             Self::node_key(vault)?.public_key(),
@@ -463,17 +471,17 @@ impl Settings {
         let node = PrivateKey::from_bytes(&vault.get("node")?);
         let (request, secret) =
             IdentityRequest::sign(&*provider, &node, invite.issuer, now()?, invite.database)?;
-        let reply = exchange(
-            transport,
-            &addresses,
-            invite.database.scope,
-            &PeerRequest::Identity(IdentityEnrollment::Invited(InvitedEnrollmentRequest {
-                request: request.clone(),
-                invitation: invite.id.0,
-            })),
-        )
-        .await
-        .map_err(InvitationRefusal::carried)?;
+        let reply =
+            exchange(
+                transport,
+                &addresses,
+                invite.database.scope,
+                &PeerRequest::Identity(IdentityEnrollment::Invited(
+                    InvitedEnrollmentRequest::sign(request.clone(), invite.id.0, &node)?,
+                )),
+            )
+            .await
+            .map_err(InvitationRefusal::carried)?;
         let PeerReply::Identity(IdentityReply::Enrolled(sealed)) = reply else {
             return Err("invitation reply kind".into());
         };

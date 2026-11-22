@@ -23,12 +23,50 @@ pub struct IdentityEnrollmentRequest {
 pub struct InvitedEnrollmentRequest {
     pub request: IdentityRequest,
     pub invitation: Commitment,
+    binding: Signature,
+}
+impl InvitedEnrollmentRequest {
+    pub fn sign(
+        request: IdentityRequest,
+        invitation: Commitment,
+        node: &PrivateKey,
+    ) -> Result<Self, Error> {
+        if request.node != node.public_key() {
+            return Err(denied(
+                "the invitation binding needs the request's node key",
+            ));
+        }
+        let binding = node.sign(&Self::bound(&request, invitation)?);
+        Ok(Self {
+            request,
+            invitation,
+            binding,
+        })
+    }
+    pub fn verify_binding(&self) -> Result<(), Error> {
+        if !self
+            .request
+            .node
+            .verify(&Self::bound(&self.request, self.invitation)?, &self.binding)
+        {
+            return Err(denied("the request is not bound to this invitation"));
+        }
+        Ok(())
+    }
+    fn bound(request: &IdentityRequest, invitation: Commitment) -> Result<Vec<u8>, Error> {
+        signing_bytes(
+            "rocky.credentials.invited-enrollment.v1",
+            &(
+                rocky_core::commitment(
+                    "rocky.credentials.invited-enrollment-request.v1",
+                    &request.to_bytes()?,
+                ),
+                invitation,
+            ),
+        )
+    }
 }
 #[derive(Serialize, Deserialize)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "one request per RPC, the shared one as large as its siblings"
-)]
 pub enum IdentityEnrollment {
     Shared(IdentityEnrollmentRequest),
     PersonalHello(PersonalHello),
@@ -604,11 +642,19 @@ mod tests {
         };
         let (signed, _) =
             IdentityRequest::sign(&identity, &node, issuer.public_key(), 1_000, database).unwrap();
-        let request =
-            PeerRequest::Identity(IdentityEnrollment::Invited(InvitedEnrollmentRequest {
-                request: signed,
-                invitation: [9; 32],
-            }));
+        let mut substituted =
+            InvitedEnrollmentRequest::sign(signed.clone(), [9; 32], &node).unwrap();
+        substituted.invitation = [8; 32];
+        assert!(
+            substituted.verify_binding().is_err(),
+            "a request bound to one invitation redeems no other"
+        );
+        assert!(
+            InvitedEnrollmentRequest::sign(signed.clone(), [9; 32], &issuer).is_err(),
+            "only the request's node binds it"
+        );
+        let bound = InvitedEnrollmentRequest::sign(signed, [9; 32], &node).unwrap();
+        let request = PeerRequest::Identity(IdentityEnrollment::Invited(bound));
         assert_eq!(
             request.requirements(),
             (PeerTrust::Invitation, PeerAdmission::Enrollment)
@@ -620,6 +666,7 @@ mod tests {
             panic!("the invited enrollment changed kind on the wire");
         };
         assert_eq!(carried.invitation, [9; 32]);
+        carried.verify_binding().unwrap();
         carried
             .request
             .verify(

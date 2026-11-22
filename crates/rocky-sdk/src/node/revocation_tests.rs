@@ -962,25 +962,26 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
     let registry = node.registry(&settings).await?;
     let profile: Profile =
         serde_json::from_value(serde_json::json!({"kind": "writer", "scopes": ["items"]}))?;
+    let routes = || {
+        vec![crate::enrollment::Route {
+            transport: "memory".into(),
+            address: "issuer".into(),
+        }]
+    };
     let mut book = Book::read(&node.replica).await?;
     let time = now()?;
-    let issued = settings.invite(
-        (
-            &node.vault,
-            vec![crate::enrollment::Route {
-                transport: "memory".into(),
-                address: "issuer".into(),
-            }],
-        ),
-        &mut book,
-        (
-            person.public_key(),
-            profile.clone(),
-            &crate::InviteTerms::default(),
-        ),
-        &registry,
-        time,
-    )?;
+    let terms = crate::InviteTerms::default();
+    let open = |book: &mut Book, profile: Profile| {
+        settings.invite(
+            (&node.vault, routes()),
+            book,
+            (person.public_key(), profile, &terms),
+            &registry,
+            time,
+        )
+    };
+    let issued = open(&mut book, profile.clone())?;
+    let spare = open(&mut book, profile.clone())?;
     node.replica
         .put_authority_state(AUTHORITY_INVITATIONS_KEY, &book.to_bytes()?, time)
         .await?;
@@ -988,12 +989,15 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
     let database = settings.database_context()?;
     let ask = |key: &PrivateKey| -> Result<InvitedEnrollmentRequest, Failure> {
         let (request, _) = IdentityRequest::sign(&person, key, audience, now()?, database)?;
-        Ok(InvitedEnrollmentRequest {
-            request,
-            invitation: issued.id.0,
-        })
+        Ok(InvitedEnrollmentRequest::sign(request, issued.id.0, key)?)
     };
     let joiner = PrivateKey::new();
+    let mut substituted = ask(&joiner)?;
+    substituted.invitation = spare.id.0;
+    assert!(
+        node.answer_invitation(substituted).await.is_err(),
+        "a request bound to one invitation redeems no other"
+    );
     for attempt in ["first answer", "the answer the joiner lost, again"] {
         assert!(
             matches!(
@@ -1013,8 +1017,13 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
         Some(&crate::InvitationRefusal::Used)
     );
     let held = Book::read(&node.replica).await?.listed(now()?);
-    assert_eq!(held.len(), 1);
-    assert_eq!(held[0].redeemed_by, Some(joiner.public_key()));
+    let redeemer = |id: crate::InvitationId| {
+        held.iter()
+            .find(|open| open.id == id)
+            .map(|open| open.redeemed_by)
+    };
+    assert_eq!(redeemer(issued.id), Some(Some(joiner.public_key())));
+    assert_eq!(redeemer(spare.id), Some(None));
     let snapshot = node.settings_snapshot().await;
     let recorded = node.registry(&snapshot).await?;
     let admitted = recorded
@@ -1023,5 +1032,20 @@ async fn an_invited_node_that_lost_its_answer_redeems_again_and_no_other_node_ca
         .ok_or("the invited identity is not admitted")?;
     assert_eq!(admitted.invitation, Some(issued.id));
     assert_eq!(admitted.profile, Some(profile));
+    let wider: Profile = serde_json::from_value(
+        serde_json::json!({"kind": "writer", "scopes": ["items", "notes"]}),
+    )?;
+    assert!(
+        settings
+            .invite(
+                (&node.vault, routes()),
+                &mut Book::read(&node.replica).await?,
+                (person.public_key(), wider, &terms),
+                &recorded,
+                now()?,
+            )
+            .is_err(),
+        "an admitted identity is not invited into another profile"
+    );
     Ok(())
 }

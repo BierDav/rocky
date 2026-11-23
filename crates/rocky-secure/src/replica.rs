@@ -198,6 +198,7 @@ pub struct OpenConfig {
     security: SecureConfig,
     table_scopes: Option<Vec<ResourceScope>>,
     lease_clock: sql::LeaseClock,
+    page_cache: PageCache,
 }
 impl From<SecureConfig> for OpenConfig {
     fn from(security: SecureConfig) -> Self {
@@ -205,7 +206,27 @@ impl From<SecureConfig> for OpenConfig {
             security,
             table_scopes: None,
             lease_clock: sql::LeaseClock::Wall,
+            page_cache: PageCache::default(),
         }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageCache {
+    mebibytes: std::num::NonZeroU16,
+}
+impl PageCache {
+    pub const fn mebibytes(mebibytes: std::num::NonZeroU16) -> Self {
+        Self { mebibytes }
+    }
+    fn kibibytes_per_schema(self) -> i64 {
+        i64::from(self.mebibytes.get()) * 1024 / 2
+    }
+}
+impl Default for PageCache {
+    fn default() -> Self {
+        Self::mebibytes(
+            std::num::NonZeroU16::new(group::CACHE_MIB).unwrap_or(std::num::NonZeroU16::MIN),
+        )
     }
 }
 impl SecureConfig {
@@ -217,6 +238,9 @@ impl SecureConfig {
     }
 }
 impl OpenConfig {
+    pub fn with_page_cache(self, page_cache: PageCache) -> Self {
+        Self { page_cache, ..self }
+    }
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_manual_lease_clock(self, clock: &ManualLeaseClock) -> Self {
         Self {
@@ -969,6 +993,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let manifest = app.manifest();
         let families = config.families(&manifest)?;
         let lease_clock = config.lease_clock;
+        let page_cache = config.page_cache;
         let mut config = config.security;
         let genesis = config
             .manifest
@@ -993,7 +1018,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         check_replica_format(path.as_ref()).await?;
         let (owner, raw) = DatabaseOwner::open(path.as_ref()).await?;
         let conn = Arc::new(ScopedConnection::new(raw, None, SCHEMA));
-        configure(&conn).await?;
+        configure(&conn, page_cache).await?;
         rows(&conn, "PRAGMA main.wal_checkpoint(TRUNCATE)").await?;
         drop(wal_index);
         let mut identity = generation::identity(
@@ -2395,7 +2420,7 @@ const REPLICA_OWNS_WAL_CHECKPOINTS_AND_BUSY_RETRIES: [(&str, &str); 2] = [
     ("PRAGMA wal_autocheckpoint=0", "PRAGMA wal_autocheckpoint"),
     ("PRAGMA busy_timeout=0", "PRAGMA busy_timeout"),
 ];
-async fn configure(conn: &ScopedConnection) -> Result<(), Error> {
+async fn configure(conn: &ScopedConnection, page_cache: PageCache) -> Result<(), Error> {
     for (set, read, expected) in &COMMITS_BUFFERED_UNTIL_A_FULL_DEVICE_FLUSH {
         let expected = expected.sql();
         rows(conn, set).await?;
@@ -2415,8 +2440,8 @@ async fn configure(conn: &ScopedConnection) -> Result<(), Error> {
         }
     }
     for (name, value) in [
-        ("cache_size", group::CACHE_KIB / 2),
-        ("temp.cache_size", group::CACHE_KIB / 2),
+        ("cache_size", -page_cache.kibibytes_per_schema()),
+        ("temp.cache_size", -page_cache.kibibytes_per_schema()),
         ("journal_size_limit", group::WAL_CHECKPOINT_BYTES as i64),
     ] {
         rows(conn, &format!("PRAGMA {name}={value}")).await?;

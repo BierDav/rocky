@@ -16,9 +16,9 @@ const QUIET_TRUNCATE_WAIT: std::time::Duration = std::time::Duration::from_secs(
 pub(crate) const RECLAIM_PAGES: i64 = 1024;
 pub(crate) const RECLAIM_STEP: i64 = 4096;
 #[cfg(target_os = "android")]
-pub(super) const CACHE_KIB: i64 = -8 * 1024;
+pub(crate) const CACHE_MIB: u16 = 8;
 #[cfg(not(target_os = "android"))]
-pub(super) const CACHE_KIB: i64 = -32 * 1024;
+pub(crate) const CACHE_MIB: u16 = 32;
 
 pub(super) enum Work {
     Author {

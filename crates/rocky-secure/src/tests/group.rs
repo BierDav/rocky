@@ -72,6 +72,42 @@ async fn open_verifies_buffered_commits_full_flushes_manual_checkpoints_and_no_b
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_configured_page_cache_sizes_the_writer_connection() {
+    let f = Fixture::new();
+    let dir = Scratch::new().await;
+    let node = PrivateKey::new();
+    let cache = async |path: &std::path::Path, page_cache: Option<crate::PageCache>| {
+        let config: crate::OpenConfig = f.config(&node, f.full(), &[f.public]).into();
+        let config = match page_cache {
+            Some(page_cache) => config.with_page_cache(page_cache),
+            None => config,
+        };
+        let replica = EncryptedReplica::open(path, f.app(), config).await.unwrap();
+        let inner = replica.inner.lock(crate::replica::Class::Background).await;
+        let mut sizes = Vec::new();
+        for pragma in ["PRAGMA cache_size", "PRAGMA temp.cache_size"] {
+            sizes.extend(rows(&inner.conn, pragma).await.unwrap());
+        }
+        sizes
+    };
+    let server = crate::PageCache::mebibytes(std::num::NonZeroU16::new(512).unwrap());
+    assert_eq!(
+        cache(&dir.path().join("server.db"), Some(server)).await,
+        vec![vec![SqlValue::Integer(-256 * 1024)]; 2],
+        "half of the budget for the main schema and half for temporary tables, in KiB"
+    );
+    assert_eq!(
+        cache(&dir.path().join("default.db"), None).await,
+        vec![
+            vec![SqlValue::Integer(
+                -i64::from(crate::replica::group::CACHE_MIB) * 512
+            )];
+            2
+        ]
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn explicit_wal_flush_covers_buffered_writes_without_changing_contents() {
     let f = Fixture::new();
     let dir = Scratch::new().await;

@@ -35,6 +35,7 @@ pub(crate) struct Opening<'a> {
     pub(crate) secrets: Option<Arc<dyn SecretStore>>,
     pub(crate) identity: Option<Arc<dyn crate::IdentityProvider>>,
     pub(crate) network: Option<Network>,
+    pub(crate) page_cache: rocky_secure::PageCache,
 }
 impl<'a> From<Open<'a>> for Opening<'a> {
     fn from(open: Open<'a>) -> Self {
@@ -44,6 +45,7 @@ impl<'a> From<Open<'a>> for Opening<'a> {
             secrets: open.secrets,
             identity: open.identity,
             network: open.network,
+            page_cache: rocky_secure::PageCache::default(),
         }
     }
 }
@@ -102,6 +104,7 @@ struct Setup {
     identity: Option<Arc<dyn crate::IdentityProvider>>,
     install: Install,
     confirmation: Option<String>,
+    page_cache: rocky_secure::PageCache,
     #[cfg(test)]
     expose: Option<std::sync::mpsc::Sender<std::sync::Weak<Node>>>,
 }
@@ -562,6 +565,7 @@ impl Database {
             directory,
             install,
             confirmation,
+            page_cache: open.page_cache,
             #[cfg(test)]
             expose: None,
         };
@@ -1589,7 +1593,8 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
                 domain.app.clone(),
                 settings
                     .config(&vault, &domain)?
-                    .with_table_scopes(domain.scopes().map(|(_, scope)| scope).collect()),
+                    .with_table_scopes(domain.scopes().map(|(_, scope)| scope).collect())
+                    .with_page_cache(setup.page_cache),
                 bootstrap.graph.clone(),
                 bootstrap.followed.clone(),
             )
@@ -1600,7 +1605,8 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
                 domain.app.clone(),
                 settings
                     .config(&vault, &domain)?
-                    .with_table_scopes(domain.scopes().map(|(_, scope)| scope).collect()),
+                    .with_table_scopes(domain.scopes().map(|(_, scope)| scope).collect())
+                    .with_page_cache(setup.page_cache),
             )
             .await?
         };

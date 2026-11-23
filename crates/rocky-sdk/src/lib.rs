@@ -90,7 +90,7 @@ pub use rocky_secure::{
     CheckpointStatus, CurrentValue, HeldChange, HeldField, HeldKind, HeldRow, Holding,
     RetentionLimits, RetentionPolicy,
 };
-pub use rocky_secure::{PartitionCustody, ReplicaRole, RoleConfig as ReplicaRoleConfig};
+pub use rocky_secure::{PageCache, PartitionCustody, ReplicaRole, RoleConfig as ReplicaRoleConfig};
 pub use rollout::{RemovalImpact, RolloutConfirmationRequired, RolloutImpact};
 pub use schema::{Column, Migration, MigrationStep, Schema, SchemaBuilder, Table};
 pub use secrets::{FileSecretStore, SecretStore};

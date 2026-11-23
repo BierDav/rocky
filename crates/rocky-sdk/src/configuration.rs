@@ -10,6 +10,7 @@ pub struct Configuration {
     secrets: Option<Arc<dyn SecretStore>>,
     identity: Option<Arc<dyn IdentityProvider>>,
     network: Option<Network>,
+    page_cache: rocky_secure::PageCache,
 }
 impl Configuration {
     pub fn new(directory: impl Into<PathBuf>, schema: &Schema) -> Result<Self, Failure> {
@@ -26,6 +27,7 @@ impl Configuration {
             secrets: None,
             identity: None,
             network: None,
+            page_cache: rocky_secure::PageCache::default(),
         }
     }
     #[must_use]
@@ -43,6 +45,11 @@ impl Configuration {
         self.network = Some(network);
         self
     }
+    #[must_use]
+    pub fn page_cache(mut self, page_cache: rocky_secure::PageCache) -> Self {
+        self.page_cache = page_cache;
+        self
+    }
     fn options(&self) -> Opening<'_> {
         Opening {
             directory: &self.directory,
@@ -50,6 +57,7 @@ impl Configuration {
             secrets: self.secrets.clone(),
             identity: self.identity.clone(),
             network: self.network.clone(),
+            page_cache: self.page_cache,
         }
     }
     pub async fn create(&self) -> Result<Opened, Failure> {

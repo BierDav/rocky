@@ -119,8 +119,6 @@ pub enum RevocationReason {
     Node,
     Identity,
     Cascade { trusted: String },
-    Recovery { recovered: String },
-    Reset { reset: rocky_core::Commitment },
     Capability,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -472,19 +470,6 @@ pub enum AlertKind {
         node: String,
         sequence: u64,
         acknowledgment: bool,
-    },
-    EscrowRefused {
-        node: String,
-        records: u64,
-        reason: String,
-    },
-    RecoveriesMet {
-        kept: String,
-        ended: String,
-    },
-    RecoveryEnded {
-        recovered: String,
-        ended: String,
     },
 }
 pub const TRUSTED_STALE_AFTER: std::time::Duration =

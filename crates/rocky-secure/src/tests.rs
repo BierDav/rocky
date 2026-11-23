@@ -322,7 +322,6 @@ pub(crate) fn revoking(
         capabilities: capabilities.iter().copied().collect(),
         cut: Default::default(),
         mode: rocky_credentials::RevocationMode::Lost,
-        recovery: None,
     };
     RevocationSet::try_from(vec![
         SignedRevocation::sign_in(
@@ -1635,7 +1634,6 @@ mod compaction;
 mod coordinated;
 mod delegation;
 mod delivery;
-mod escrow;
 mod failed_commit;
 mod formats;
 mod generations;
@@ -1647,7 +1645,6 @@ mod placements;
 mod recovery;
 #[cfg(unix)]
 mod replayed_constraints;
-mod reset;
 pub(crate) mod revocations;
 mod roles;
 mod rotation;

@@ -75,7 +75,6 @@ fn statements(f: &Fixture, count: usize, nodes: &[PublicKey]) -> RevocationSet {
                 },
                 cut: Default::default(),
                 mode: rocky_credentials::RevocationMode::Lost,
-                recovery: None,
             };
             SignedRevocation::sign_in(
                 statement,

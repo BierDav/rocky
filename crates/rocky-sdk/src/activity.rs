@@ -53,10 +53,6 @@ pub enum ActivityKind {
         identity: PublicKey,
         node: PublicKey,
     },
-    NodeReset {
-        node: PublicKey,
-        reset: rocky_core::Commitment,
-    },
     RevocationCutDroppedStages {
         identity: Option<PublicKey>,
         count: usize,

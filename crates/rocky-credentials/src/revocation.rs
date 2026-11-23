@@ -14,7 +14,6 @@ pub const MAX_LIVE_REVOCATIONS: usize = 1024;
 pub const MAX_REVOCATION_BYTES: usize = 8 * 1024;
 pub const SIGNATURE_OVERHEAD: usize = 1024;
 pub const MAX_REVOCATION_SET_BYTES: usize = 4 * 1024 * 1024;
-pub const MAX_RESET_SET_BYTES: usize = 1024 * 1024;
 pub const REVOCATION_SET_FULL: &str = "revocation set full: 1,024 live statements";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,38 +33,6 @@ pub struct Revocation {
     pub identities: BTreeSet<PublicKey>,
     pub capabilities: BTreeSet<Commitment>,
     pub cut: Vec<Cut>,
-    pub recovery: Option<RootDecision>,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RootDecision {
-    Grants(RootRecovery),
-    Reset(Box<crate::Reset>),
-}
-impl RootDecision {
-    pub fn grants(&self) -> Option<RootRecovery> {
-        match self {
-            Self::Grants(recovery) => Some(*recovery),
-            Self::Reset(_) => None,
-        }
-    }
-    pub fn reset(&self) -> Option<&crate::Reset> {
-        match self {
-            Self::Reset(reset) => Some(reset),
-            Self::Grants(_) => None,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RootRecovery {
-    pub since: u64,
-    pub keep: PublicKey,
-}
-impl RootRecovery {
-    pub fn ends(&self, since: u64, identity: &PublicKey) -> bool {
-        (since, *identity) < (self.since, self.keep)
-    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Cut {
@@ -84,7 +51,7 @@ pub const MAX_CUT_HEADS: usize = 64;
 impl Revocation {
     pub fn id(&self) -> Result<Commitment, Error> {
         Ok(rocky_core::commitment(
-            "rocky.revocation.id.v6",
+            "rocky.revocation.id.v7",
             &encode(self)?,
         ))
     }
@@ -100,36 +67,7 @@ impl Revocation {
         self.identities.iter()
     }
     fn empty(&self) -> bool {
-        self.nodes.is_empty()
-            && self.identities.is_empty()
-            && self.capabilities.is_empty()
-            && self.recovery.is_none()
-    }
-    pub fn grants(&self) -> Option<RootRecovery> {
-        self.recovery.as_ref().and_then(RootDecision::grants)
-    }
-    pub fn reset(&self) -> Option<&crate::Reset> {
-        self.recovery.as_ref().and_then(RootDecision::reset)
-    }
-    fn valid_recovery(&self, root: bool) -> bool {
-        match &self.recovery {
-            None => true,
-            Some(RootDecision::Grants(_)) => root && self.mode == RevocationMode::Compromised,
-            Some(RootDecision::Reset(reset)) => {
-                root && self.mode == RevocationMode::Lost
-                    && self.nodes.is_empty()
-                    && self.identities.is_empty()
-                    && self.capabilities.is_empty()
-                    && reset.validate().is_ok()
-            }
-        }
-    }
-    fn max_bytes(&self) -> usize {
-        if self.reset().is_some() {
-            crate::MAX_RESET_BYTES
-        } else {
-            MAX_REVOCATION_BYTES
-        }
+        self.nodes.is_empty() && self.identities.is_empty() && self.capabilities.is_empty()
     }
     fn valid_cut(&self, authorized: bool) -> bool {
         (authorized || self.cut.is_empty())
@@ -146,13 +84,7 @@ impl Revocation {
                 <= MAX_CUT_HEADS
             && self.cut.iter().all(|cut| {
                 (self.identities.contains(&cut.identity)
-                    || self.nodes.contains(&crate::PeerId::of(cut.lane))
-                    || self
-                        .grants()
-                        .is_some_and(|recovery| recovery.keep != cut.identity)
-                    || self
-                        .reset()
-                        .is_some_and(|reset| !reset.keep.contains(&crate::PeerId::of(cut.lane))))
+                    || self.nodes.contains(&crate::PeerId::of(cut.lane)))
                     && cut.statements.windows(2).all(|pair| pair[0] < pair[1])
             })
     }
@@ -165,7 +97,7 @@ pub struct SignedRevocation {
     attestation: Attestation,
     database: Option<crate::DatabaseContext>,
 }
-const SIGNED: &str = "rocky.revocation.v9";
+const SIGNED: &str = "rocky.revocation.v10";
 impl SignedRevocation {
     pub fn sign<'s>(
         statement: Revocation,
@@ -213,7 +145,6 @@ impl SignedRevocation {
                 && (signer.signing_node().is_some() || !Self::unlink_shape(&statement, chain)))
             || statement.empty()
             || !statement.valid_cut(chain.0.is_empty() || Self::unlink_shape(&statement, chain))
-            || !statement.valid_recovery(chain.0.is_empty())
             || (statement.mode == RevocationMode::Compromised && !chain.0.is_empty())
         {
             return Err(denied("invalid revocation"));
@@ -232,7 +163,7 @@ impl SignedRevocation {
             chain: chain.clone(),
             statement,
         };
-        if encode(&signed)?.len() > signed.statement.max_bytes() {
+        if encode(&signed)?.len() > MAX_REVOCATION_BYTES {
             return Err(denied("revocation exceeds its size limit"));
         }
         Ok(signed)
@@ -247,7 +178,6 @@ impl SignedRevocation {
                 && statement.cut.iter().all(|cut| {
                     cut.identity == statement.issuer && cut.lane == certificate.capability.subject
                 })
-                && statement.recovery.is_none()
         })
     }
     fn identity_unlink(&self) -> bool {
@@ -299,13 +229,9 @@ impl SignedRevocation {
             || statement.app != app
             || statement.empty()
             || !statement.valid_cut(self.chain.0.is_empty() || unlink)
-            || !statement.valid_recovery(self.chain.0.is_empty())
             || (statement.mode == RevocationMode::Compromised && !self.root())
-            || statement
-                .grants()
-                .is_some_and(|recovery| recovery.keep == publisher)
             || statement.identities.contains(&publisher)
-            || encode(self)?.len() > statement.max_bytes()
+            || encode(self)?.len() > MAX_REVOCATION_BYTES
             || signer.ok() != Some(statement.issuer)
             || (!unlink && self.chain.0.is_empty() != self.attestation.certificate().is_none())
             || self
@@ -347,21 +273,15 @@ impl SignedRevocation {
         let subject = &link.capability.subject;
         let extended = link.capability.extended()?;
         let capabilities = &self.statement.capabilities;
-        let recovery = self.statement.grants().filter(|_| self.root());
-        let reset = self.statement.reset().filter(|_| self.root());
         Ok(self.statement.subjects().any(|key| key == subject)
             || (self.root()
-                && extended.origin.is_some_and(|origin| {
-                    (self.statement.mode == RevocationMode::Compromised
-                        && self.statement.identities.contains(&origin.identity))
-                        || recovery.is_some_and(|r| r.ends(origin.since, &origin.identity))
-                }))
-            || (extended.trusted.is_some()
-                && recovery.is_some_and(|r| r.ends(link.capability.not_before, subject)))
+                && self.statement.mode == RevocationMode::Compromised
+                && extended
+                    .origin
+                    .is_some_and(|origin| self.statement.identities.contains(&origin.identity)))
             || extended.node.is_some_and(|node| {
-                (self.statement.nodes.contains(&node)
-                    && (!self.identity_unlink() || link.issuer == self.statement.issuer))
-                    || reset.is_some_and(|reset| !reset.keep.contains(&node))
+                self.statement.nodes.contains(&node)
+                    && (!self.identity_unlink() || link.issuer == self.statement.issuer)
             })
             || capabilities.contains(&link.id()?)
             || extended
@@ -372,7 +292,7 @@ impl SignedRevocation {
         encode(self)
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        decode_bounded(bytes, crate::MAX_RESET_BYTES)
+        decode_bounded(bytes, MAX_REVOCATION_BYTES)
     }
 }
 
@@ -381,7 +301,6 @@ impl SignedRevocation {
 pub struct RevocationSet {
     database: Option<Box<crate::DatabaseContext>>,
     certificates: BTreeMap<Commitment, SignedCapability>,
-    admissions: BTreeMap<Commitment, crate::SignedResetAdmission>,
     statements: BTreeMap<Commitment, SignedRevocation>,
     subjects: BTreeSet<PublicKey>,
     references: BTreeSet<crate::PeerId>,
@@ -389,15 +308,12 @@ pub struct RevocationSet {
     root: Ended,
     compromised: BTreeSet<PublicKey>,
     cuts: BTreeMap<(PublicKey, PublicKey), Heads>,
-    recovery: Option<RootRecovery>,
     derived: Derived,
 }
 #[derive(Clone, Default)]
 struct Derived {
     membership_ended: OnceLock<MembershipEnded>,
     fingerprint: OnceLock<Commitment>,
-    resets: OnceLock<crate::reset::Resets>,
-    unfenced: OnceLock<Box<RevocationSet>>,
 }
 #[derive(Clone, Default)]
 struct MembershipEnded {
@@ -433,9 +349,8 @@ struct ReplicatedAuthority {
     database: Option<crate::DatabaseContext>,
     statements: Vec<SignedRevocation>,
     certificates: Vec<SignedCapability>,
-    admissions: Vec<crate::SignedResetAdmission>,
 }
-const AUTHORITY_FORMAT: u32 = 6;
+const AUTHORITY_FORMAT: u32 = 7;
 impl From<RevocationSet> for ReplicatedAuthority {
     fn from(set: RevocationSet) -> Self {
         Self {
@@ -443,7 +358,6 @@ impl From<RevocationSet> for ReplicatedAuthority {
             database: set.database.map(|database| *database),
             statements: set.statements.into_values().collect(),
             certificates: set.certificates.into_values().collect(),
-            admissions: set.admissions.into_values().collect(),
         }
     }
 }
@@ -467,12 +381,7 @@ impl TryFrom<ReplicatedAuthority> for RevocationSet {
             }
             set.add_link(certificate)?;
         }
-        for admission in value.admissions {
-            if set.add_admission(admission)?.is_none() {
-                return Err(denied("duplicate admission"));
-            }
-        }
-        if !set.certificates.is_empty() || !set.admissions.is_empty() {
+        if !set.certificates.is_empty() {
             set.check_size()?;
         }
         Ok(set)
@@ -542,10 +451,6 @@ impl RevocationSet {
             .statements
             .values()
             .any(|statement| statement.database != Some(database))
-            || self
-                .admissions
-                .values()
-                .any(|signed| signed.admission.database != database)
         {
             return Err(denied("authority evidence belongs to another database"));
         }
@@ -600,36 +505,6 @@ impl RevocationSet {
     }
     pub fn certificates(&self) -> impl Iterator<Item = &SignedCapability> {
         self.certificates.values()
-    }
-    pub fn admit(&mut self, admission: crate::SignedResetAdmission) -> Result<bool, Error> {
-        let database = self.database.clone();
-        let Some(id) = self.add_admission(admission)? else {
-            return Ok(false);
-        };
-        if let Err(error) = self.check_size() {
-            self.admissions.remove(&id);
-            self.database = database;
-            self.derived = Derived::default();
-            return Err(error);
-        }
-        Ok(true)
-    }
-    fn add_admission(
-        &mut self,
-        admission: crate::SignedResetAdmission,
-    ) -> Result<Option<Commitment>, Error> {
-        admission.verify()?;
-        let id = admission.id()?;
-        if self.admissions.contains_key(&id) {
-            return Ok(None);
-        }
-        self.bind(Some(admission.admission.database))?;
-        self.derived = Derived::default();
-        self.admissions.insert(id, admission);
-        Ok(Some(id))
-    }
-    pub fn admissions(&self) -> impl Iterator<Item = &crate::SignedResetAdmission> {
-        self.admissions.values()
     }
     pub fn membership(&self) -> Result<crate::MembershipSet, Error> {
         let mut membership = crate::MembershipSet::new();
@@ -734,7 +609,6 @@ impl RevocationSet {
                 .extend(signed.statement.nodes.iter().copied());
             root.capabilities
                 .extend(signed.statement.capabilities.iter().copied());
-            self.recovery = self.recovery.max(signed.statement.grants());
         }
         let implicit = signed
             .chain
@@ -802,27 +676,9 @@ impl RevocationSet {
                 return Err(denied("membership certificate belongs to another database"));
             }
         }
-        for signed in self.admissions.values() {
-            signed.verify()?;
-            let database = signed.admission.database;
-            if database.publisher != publisher || database.scope.app != app {
-                return Err(denied("admission belongs to another database"));
-            }
-        }
         self.check_size()
     }
     fn check_size(&self) -> Result<(), Error> {
-        let mut resets = 0;
-        for signed in self.statements.values() {
-            if signed.statement.reset().is_some() {
-                resets += encode(signed)?.len();
-            }
-        }
-        if resets > MAX_RESET_SET_BYTES {
-            return Err(denied(
-                "owner resets exceed their share of the revocation set",
-            ));
-        }
         if encode(self)?.len() > MAX_REVOCATION_SET_BYTES {
             return Err(denied("revocation set exceeds its size limit"));
         }
@@ -851,9 +707,6 @@ impl RevocationSet {
         for certificate in other.certificates.values() {
             next.add_link(certificate.clone())?;
         }
-        for admission in other.admissions.values() {
-            next.add_admission(admission.clone())?;
-        }
         next = next.pruned(time);
         next.check_size()?;
         *self = next;
@@ -863,7 +716,6 @@ impl RevocationSet {
         let mut set = Self {
             database: self.database.clone(),
             certificates: self.certificates.clone(),
-            admissions: self.admissions.clone(),
             ..Self::default()
         };
         for signed in self.statements.values() {
@@ -883,7 +735,7 @@ impl RevocationSet {
         self.statements.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.statements.is_empty() && self.certificates.is_empty() && self.admissions.is_empty()
+        self.statements.is_empty() && self.certificates.is_empty()
     }
     pub fn has_revocations(&self) -> bool {
         if !self.statements.is_empty() {
@@ -930,11 +782,10 @@ impl RevocationSet {
     }
     pub fn exchange_digest(&self, time: u64) -> Result<Commitment, Error> {
         Ok(rocky_core::commitment(
-            "rocky.authority-exchange.v3",
+            "rocky.authority-exchange.v4",
             &encode(&(
                 self.digest(time)?,
                 self.certificates.keys().collect::<Vec<_>>(),
-                self.admissions.keys().collect::<Vec<_>>(),
             ))?,
         ))
     }
@@ -960,7 +811,7 @@ impl RevocationSet {
         self.cuts.iter()
     }
     pub fn revokes_reference(&self, node: &crate::PeerId) -> bool {
-        if self.references.contains(node) || self.reset_ends(node) {
+        if self.references.contains(node) {
             return true;
         }
         let mut known = self
@@ -986,30 +837,6 @@ impl RevocationSet {
     pub fn revokes_origin(&self, origin: &PublicKey) -> bool {
         self.compromised.contains(origin)
     }
-    pub fn ends_origin(&self, origin: &crate::Origin) -> bool {
-        self.revokes_origin(&origin.identity) || self.recovery_ends(origin.since, &origin.identity)
-    }
-    pub fn ends_trusted(&self, grant: &crate::Capability) -> bool {
-        self.revokes_trusted(&grant.subject) || self.recovery_ends(grant.not_before, &grant.subject)
-    }
-    pub fn recovery_ends(&self, since: u64, identity: &PublicKey) -> bool {
-        self.recovery
-            .is_some_and(|recovery| recovery.ends(since, identity))
-    }
-    pub fn recovery(&self) -> Option<&RootRecovery> {
-        self.recovery.as_ref()
-    }
-    pub fn recoveries(&self) -> Vec<RootRecovery> {
-        let mut recoveries: Vec<RootRecovery> = self
-            .statements
-            .values()
-            .filter(|signed| signed.root())
-            .filter_map(|signed| signed.statement.grants())
-            .collect();
-        recoveries.sort_unstable();
-        recoveries.dedup();
-        recoveries
-    }
     pub fn ends_at(&self, link: &SignedCapability, protected: bool) -> Result<bool, Error> {
         let extended = link.capability.extended()?;
         let (subjects, references, capabilities) = if protected {
@@ -1028,12 +855,9 @@ impl RevocationSet {
             || extended
                 .claims
                 .is_some_and(|right| capabilities.contains(&right.grant))
-            || (extended.trusted.is_some()
-                && self.recovery_ends(link.capability.not_before, &link.capability.subject))
             || extended
                 .origin
-                .is_some_and(|origin| self.ends_origin(&origin))
-            || extended.node.is_some_and(|node| self.reset_ends(&node)))
+                .is_some_and(|origin| self.revokes_origin(&origin.identity)))
     }
     pub fn ends_node(&self, node: PublicKey, protected: bool) -> bool {
         let mut known = self
@@ -1053,7 +877,6 @@ impl RevocationSet {
         };
         subjects.contains(&node)
             || explicit.contains(&crate::PeerId::of(node))
-            || self.reset_ends(&crate::PeerId::of(node))
             || (known.peek().is_some()
                 && known.all(|certificate| self.ends_node_of(certificate.issuer, node, protected)))
     }
@@ -1065,7 +888,6 @@ impl RevocationSet {
         };
         subjects.contains(&node)
             || references.contains(&crate::PeerId::of(node))
-            || self.reset_ends(&crate::PeerId::of(node))
             || self.identity_unlinks(identity, crate::PeerId::of(node))
             || self.membership_ends(identity, crate::PeerId::of(node))
     }
@@ -1102,98 +924,19 @@ impl RevocationSet {
     fn reinsert(&mut self, signed: SignedRevocation) {
         let _ = self.insert(signed);
     }
-    fn reset_still_ends(
-        &self,
-        id: &Commitment,
-        signed: &SignedRevocation,
-        link: &SignedCapability,
-    ) -> Result<bool, Error> {
-        Ok(signed.statement.reset().is_none()
-            || link
-                .capability
-                .extended()?
-                .node
-                .is_some_and(|node| self.resets().ending(&node).any(|(ending, _)| ending == id)))
-    }
     fn first_ending(
         &self,
         chain: &CredentialChain,
         start: usize,
     ) -> Result<Option<&SignedRevocation>, Error> {
-        for (id, signed) in &self.statements {
+        for signed in self.statements.values() {
             for (index, link) in chain.0.iter().enumerate().skip(start) {
-                if signed.ends_at(link, chain.protected(index)?)?
-                    && self.reset_still_ends(id, signed, link)?
-                {
+                if signed.ends_at(link, chain.protected(index)?)? {
                     return Ok(Some(signed));
                 }
             }
         }
         Ok(None)
-    }
-    fn resets(&self) -> &crate::reset::Resets {
-        self.derived.resets.get_or_init(|| {
-            let admits_nobody = |signer: &PublicKey| {
-                self.subjects.contains(signer)
-                    || self.references.contains(&crate::PeerId::of(*signer))
-            };
-            crate::reset::Resets::new(
-                self.statements
-                    .iter()
-                    .filter(|(_, signed)| signed.root())
-                    .filter_map(|(id, signed)| Some((*id, signed.statement.reset()?.clone())))
-                    .collect(),
-                self.admissions
-                    .values()
-                    .map(|signed| &signed.admission)
-                    .filter(|admission| !admits_nobody(&admission.signer))
-                    .map(|admission| {
-                        (
-                            admission.node,
-                            admission.follows.clone(),
-                            crate::PeerId::of(admission.signer),
-                        )
-                    }),
-            )
-        })
-    }
-    pub fn reset_ends(&self, node: &crate::PeerId) -> bool {
-        !self.resets().is_empty() && self.resets().ends(node)
-    }
-    pub fn ending_resets(&self, node: &crate::PeerId) -> Vec<Commitment> {
-        self.resets().ending(node).map(|(id, _)| *id).collect()
-    }
-    pub fn reset_standing(
-        &self,
-        scope: &rocky_core::ResourceScope,
-        writer: &PublicKey,
-        position: u64,
-    ) -> crate::ResetStanding {
-        self.resets().standing(scope, writer, position)
-    }
-    pub fn reset_heads(&self) -> BTreeSet<Commitment> {
-        self.resets().heads()
-    }
-    pub fn reset_kept(&self) -> BTreeSet<crate::PeerId> {
-        self.resets().kept()
-    }
-    pub fn unfenced(&self) -> &RevocationSet {
-        if self.resets().is_empty() {
-            return self;
-        }
-        self.derived.unfenced.get_or_init(|| {
-            let mut set = Self {
-                database: self.database.clone(),
-                certificates: self.certificates.clone(),
-                ..Self::default()
-            };
-            for signed in self.statements.values() {
-                if signed.statement.reset().is_none() {
-                    set.reinsert(signed.clone());
-                }
-            }
-            Box::new(set)
-        })
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         encode(self)

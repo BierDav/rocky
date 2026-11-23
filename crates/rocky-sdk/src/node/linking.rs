@@ -20,9 +20,7 @@ impl Node {
             || settings.tombstoned(&settings.identity)
             || settings
                 .revocations
-                .unfenced()
                 .ends_node_of(settings.identity, request.node, false)
-            || settings.signed_out(&request.node)
         {
             return Err("identity or node cannot link".into());
         }

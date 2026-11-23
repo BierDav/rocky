@@ -486,7 +486,6 @@ async fn eviction_needs_fresh_durable_custody_and_a_resubscribed_scope_converges
     insert(&f, &device, scope, 0..30, 3).await;
     rename(&f, &device, scope, 0, "row 0", "renamed").await;
 
-    custody::escrow(&f, &device, &[scope]).await;
     custody::policy(&device, scope, &[&full], 1).await;
     assert!(device.replica.evict(scope).await.is_err());
     let (mut session, server) = connect(&device, &custodian).await;
@@ -694,7 +693,7 @@ async fn a_resubscribed_scope_without_own_writes_reads_incomplete_until_restored
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn pruning_requires_complete_escrow_and_counts_a_keyless_receipt() {
+async fn pruning_counts_a_keyless_custody_receipt() {
     let f = Fixture::new();
     let dir = Scratch::new().await;
     let scope = department(&f, 0);
@@ -730,24 +729,6 @@ async fn pruning_requires_complete_escrow_and_counts_a_keyless_receipt() {
         .unwrap();
     compacted_base(&device.replica, &f.publisher, scope).await;
     custody::policy(&device, scope, &[&custodian], 1).await;
-    let (mut session, server) = connect(&device, &custodian).await;
-    session.push(&device.replica, scope, QUOTA).await.unwrap();
-    drop(session);
-    server.await.unwrap();
-    let blocked = device.replica.prune(scope).await.unwrap();
-    assert_eq!(blocked.pruned, 0);
-    assert!(
-        matches!(
-            blocked.blocked,
-            Some(PruneBlock::Custody {
-                durable: 0,
-                needed: 1,
-                ..
-            })
-        ),
-        "a custody-only node holding every frame it cannot apply earns no durable custody without escrow"
-    );
-    custody::escrow(&f, &device, &[scope]).await;
     let (mut session, server) = connect(&device, &custodian).await;
     session.push(&device.replica, scope, QUOTA).await.unwrap();
     drop(session);

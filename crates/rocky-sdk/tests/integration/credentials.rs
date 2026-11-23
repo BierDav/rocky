@@ -524,7 +524,6 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
         .into(),
         cut: Default::default(),
         mode: rocky_credentials::RevocationMode::Lost,
-        recovery: None,
     };
     let statement_id = statement.id()?;
     saved["authority"]["rotation"] = json!({

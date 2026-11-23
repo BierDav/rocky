@@ -473,7 +473,6 @@ async fn a_claim_right_holder_claims_until_its_revocation_is_pushed() {
             capabilities: Default::default(),
             cut: Default::default(),
             mode: rocky_credentials::RevocationMode::Lost,
-            recovery: None,
         },
         &service.publisher,
         &CredentialChain::default(),

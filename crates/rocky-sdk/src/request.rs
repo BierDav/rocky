@@ -48,7 +48,6 @@ pub(crate) enum Kind {
     PeerRemove,
     EnrollmentUpstream,
     Unlink,
-    Backup,
     Revoke,
     Session,
     Grant,
@@ -231,7 +230,6 @@ pub(crate) enum Request {
         Reply<Option<crate::DeviceRevocationReceipt>>,
     ),
     Unlink(rocky_credentials::PeerId, Reply<()>),
-    Backup(std::path::PathBuf, Reply<crate::BackupInventory>),
     RevokeIdentity(
         rocky_credentials::PublicKey,
         rocky_credentials::RevocationMode,
@@ -239,12 +237,6 @@ pub(crate) enum Request {
         bool,
         Reply<crate::RevocationResult>,
     ),
-    SignOutEverywhereElse(
-        crate::node::Root,
-        crate::ResetKeep,
-        Reply<crate::ResetReceipt>,
-    ),
-    Freshness(Reply<crate::Freshness>),
     Info(Reply<crate::SessionInfo>),
     Grant(
         crate::NodeKeys,
@@ -345,9 +337,7 @@ impl Request {
             Self::EnrollmentUpstream(..) => Kind::EnrollmentUpstream,
             Self::DeviceRevocationReceipt(..) => Kind::Status,
             Self::Unlink(..) => Kind::Unlink,
-            Self::Backup(..) => Kind::Backup,
-            Self::RevokeIdentity(..) | Self::SignOutEverywhereElse(..) => Kind::Revoke,
-            Self::Freshness(..) => Kind::Status,
+            Self::RevokeIdentity(..) => Kind::Revoke,
             Self::Info(..) => Kind::Session,
             Self::Grant(..) => Kind::Grant,
             Self::Install(..) => Kind::Install,
@@ -542,16 +532,7 @@ impl Request {
             Self::Unlink(_, reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::Backup(_, reply) => {
-                let _ = reply.send(Err(error));
-            }
             Self::RevokeIdentity(_, _, _, _, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::SignOutEverywhereElse(_, _, reply) => {
-                let _ = reply.send(Err(error));
-            }
-            Self::Freshness(reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::Info(reply) => {

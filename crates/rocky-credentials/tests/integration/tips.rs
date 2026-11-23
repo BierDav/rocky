@@ -638,7 +638,6 @@ fn revoking(owner: &PrivateKey, identities: &[rocky_credentials::PublicKey]) -> 
         capabilities: Default::default(),
         cut: Default::default(),
         mode: rocky_credentials::RevocationMode::Lost,
-        recovery: None,
     };
     let signed = Authority::owner_in(
         owner,
@@ -1428,7 +1427,6 @@ fn cutting(
         capabilities: Default::default(),
         cut: cut.into_iter().collect(),
         mode: rocky_credentials::RevocationMode::Lost,
-        recovery: None,
     };
     RevocationSet::try_from(vec![
         Authority::owner_in(
@@ -1624,7 +1622,6 @@ fn a_cut_binds_its_chain_to_the_identity_it_names() {
             acknowledgments: None,
         }],
         mode: rocky_credentials::RevocationMode::Lost,
-        recovery: None,
     };
     let revocations = RevocationSet::try_from(vec![
         Authority::owner_in(
@@ -1689,7 +1686,6 @@ fn a_cut_binds_its_chain_to_the_identity_it_names() {
             acknowledgments: None,
         }],
         mode: rocky_credentials::RevocationMode::Lost,
-        recovery: None,
     };
     assert!(
         Authority::owner_in(
@@ -1840,7 +1836,6 @@ fn a_stage_branches_off_the_live_chain_and_a_cut_keeps_the_branches_it_names() {
             capabilities: Default::default(),
             cut: vec![cut],
             mode: rocky_credentials::RevocationMode::Lost,
-            recovery: None,
         };
         RevocationSet::try_from(vec![
             Authority::owner_in(
@@ -2027,7 +2022,6 @@ fn a_cut_strips_the_acknowledgments_past_its_head_from_finality_records() {
             }),
         }],
         mode: rocky_credentials::RevocationMode::Lost,
-        recovery: None,
     };
     let revocations = RevocationSet::try_from(vec![
         Authority::owner_in(

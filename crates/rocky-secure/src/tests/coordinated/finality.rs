@@ -266,7 +266,6 @@ async fn a_held_cut_strips_a_revoked_nodes_acknowledgments_and_the_seal_stays_fi
             ..heads
         }],
         mode: rocky_credentials::RevocationMode::Lost,
-        recovery: None,
     };
     let revoked = RevocationSet::try_from(vec![
         rocky_credentials::SignedRevocation::sign_in(

@@ -70,6 +70,11 @@ pub enum IdentityEnrollment {
     Shared(IdentityEnrollmentRequest),
     Invited(InvitedEnrollmentRequest),
 }
+impl IdentityEnrollment {
+    pub fn invited(&self) -> bool {
+        matches!(self, Self::Invited(_))
+    }
+}
 
 const RESOLUTION_VERSION: u32 = 1;
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -204,7 +209,7 @@ pub enum PeerRequest {
     Renew(RenewRequest),
     Epochs(EpochRequest),
     Policy,
-    Identity(IdentityEnrollment),
+    Identity(Box<IdentityEnrollment>),
     LinkEnroll(Box<SignedCapability>),
     Unlink(RevocationSet),
     Resolve(PeerResolutionRequest),
@@ -230,12 +235,12 @@ impl PeerRequest {
     pub fn requirements(&self) -> (PeerTrust, PeerAdmission) {
         match self {
             Self::Renew(_) | Self::Epochs(_) => (PeerTrust::Enrolled, PeerAdmission::Enrollment),
-            Self::Identity(IdentityEnrollment::Invited(_)) => {
+            Self::Identity(enrollment) if enrollment.invited() => {
                 (PeerTrust::Invitation, PeerAdmission::Enrollment)
             }
-            Self::Identity(IdentityEnrollment::Shared(_))
-            | Self::LinkEnroll(_)
-            | Self::Unlink(_) => (PeerTrust::Identity, PeerAdmission::Membership),
+            Self::Identity(_) | Self::LinkEnroll(_) | Self::Unlink(_) => {
+                (PeerTrust::Identity, PeerAdmission::Membership)
+            }
             Self::Policy | Self::Resolve(_) | Self::TipSchema { .. } => {
                 (PeerTrust::Public, PeerAdmission::Metadata)
             }
@@ -243,19 +248,20 @@ impl PeerRequest {
         }
     }
     pub fn accepts(&self, reply: &PeerReply) -> bool {
+        if let (
+            Self::Identity(enrollment),
+            PeerReply::Identity(IdentityReply::ConfirmationRequired),
+        ) = (self, reply)
+        {
+            return !enrollment.invited();
+        }
         matches!(
             (self, reply),
             (Self::Renew(_), PeerReply::Renew(_))
                 | (Self::Epochs(_), PeerReply::Epochs(_))
                 | (Self::Policy, PeerReply::Policy(_))
                 | (
-                    Self::Identity(IdentityEnrollment::Shared(_)),
-                    PeerReply::Identity(
-                        IdentityReply::ConfirmationRequired | IdentityReply::Enrolled(_)
-                    )
-                )
-                | (
-                    Self::Identity(IdentityEnrollment::Invited(_)),
+                    Self::Identity(_),
                     PeerReply::Identity(IdentityReply::Enrolled(_))
                 )
                 | (Self::LinkEnroll(_), PeerReply::LinkEnroll(_))
@@ -410,7 +416,6 @@ mod tests {
                 capabilities: Default::default(),
                 cut: Vec::new(),
                 mode: crate::RevocationMode::Lost,
-                recovery: None,
             },
             &root,
             &crate::CredentialChain::default(),
@@ -568,7 +573,7 @@ mod tests {
             "only the request's node binds it"
         );
         let bound = InvitedEnrollmentRequest::sign(signed, [9; 32], &node).unwrap();
-        let request = PeerRequest::Identity(IdentityEnrollment::Invited(bound));
+        let request = PeerRequest::Identity(Box::new(IdentityEnrollment::Invited(bound)));
         assert_eq!(
             request.requirements(),
             (PeerTrust::Invitation, PeerAdmission::Enrollment)
@@ -576,7 +581,10 @@ mod tests {
         assert!(request.accepts(&PeerReply::Identity(IdentityReply::Enrolled(Vec::new()))));
         assert!(!request.accepts(&PeerReply::Identity(IdentityReply::ConfirmationRequired)));
         let frame = PeerRequestFrame::from_bytes(&request.to_bytes().unwrap()).unwrap();
-        let PeerRequest::Identity(IdentityEnrollment::Invited(carried)) = frame.request else {
+        let PeerRequest::Identity(enrollment) = frame.request else {
+            panic!("the invited enrollment changed kind on the wire");
+        };
+        let IdentityEnrollment::Invited(carried) = *enrollment else {
             panic!("the invited enrollment changed kind on the wire");
         };
         assert_eq!(carried.invitation, [9; 32]);

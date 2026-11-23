@@ -102,9 +102,6 @@ impl CustodyPeer {
         session.close().await;
         contact
     }
-    pub async fn backup(&self, target: &Path) -> Result<crate::BackupInventory, Failure> {
-        self.database.backup(target).await
-    }
     pub async fn close(&self) -> Result<(), Failure> {
         self.database.close().await
     }

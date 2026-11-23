@@ -17,7 +17,6 @@ async fn revocation_by(issuer: &Node) -> Result<SignedRevocation, Failure> {
         capabilities: Default::default(),
         cut: Default::default(),
         mode: RevocationMode::Lost,
-        recovery: None,
     };
     Ok(SignedRevocation::sign(
         statement,

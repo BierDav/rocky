@@ -13,38 +13,11 @@ const SCOPE: Scope = Scope {
 };
 
 fn trusted(root: &RootKey) -> (PrivateKey, CredentialChain) {
-    trusted_at(root, NOW)
-}
-fn trusted_at(root: &RootKey, time: u64) -> (PrivateKey, CredentialChain) {
     let key = PrivateKey::new();
     let grant = Authority::owner(root)
-        .issue_trusted(key.public_key(), SCOPE, time)
+        .issue_trusted(key.public_key(), SCOPE, NOW)
         .unwrap();
     (key, CredentialChain(vec![grant]))
-}
-fn recovery(root: &RootKey, recovered: &(PrivateKey, CredentialChain)) -> RevocationSet {
-    let statement = Revocation {
-        app: APP,
-        issuer: root.public_key(),
-        time: NOW,
-        nodes: Default::default(),
-        identities: Default::default(),
-        capabilities: Default::default(),
-        cut: Default::default(),
-        mode: rocky_credentials::RevocationMode::Compromised,
-        recovery: Some(rocky_credentials::RootDecision::Grants(
-            rocky_credentials::RootRecovery {
-                since: recovered.1.0[0].capability.not_before,
-                keep: recovered.0.public_key(),
-            },
-        )),
-    };
-    set(Authority::owner(root).revoke(statement).unwrap())
-}
-fn node_of(trusted: &(PrivateKey, CredentialChain)) -> (PrivateKey, CredentialChain) {
-    let node = PrivateKey::new();
-    let chain = trusted.1.clone().certify(&trusted.0, &node).unwrap();
-    (node, chain)
 }
 fn issuer(parent: &(PrivateKey, CredentialChain)) -> (PrivateKey, CredentialChain) {
     let key = PrivateKey::new();
@@ -100,7 +73,6 @@ fn revocation(by: &dyn rocky_credentials::IdentityProvider, identity: &PrivateKe
         capabilities: Default::default(),
         cut: Default::default(),
         mode: rocky_credentials::RevocationMode::Lost,
-        recovery: None,
     }
 }
 fn set(statement: rocky_credentials::SignedRevocation) -> RevocationSet {
@@ -255,7 +227,6 @@ fn revoking_a_trusted_identity_cascades_to_what_it_first_enrolled() {
         .revoke(revocation(&root, &hijacked.0))
         .unwrap();
     let lost = set(lost_statement.clone());
-    assert!(lost.ends_trusted(&hijacked.1.0[0].capability));
     assert!(lost.revokes_trusted(&hijacked.0.public_key()));
     assert!(!lost.revokes_origin(&hijacked.0.public_key()));
     assert!(lost.revoking_holder(&enrolled).unwrap().is_none());
@@ -322,76 +293,6 @@ fn revoking_a_trusted_identity_cascades_to_what_it_first_enrolled() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn a_recovery_ends_every_earlier_trusted_grant_and_what_it_enrolled() {
-    let root = RootKey::generate();
-    let unknown = trusted(&root);
-    let (user, node, enrolled) = member(&unknown);
-    let below = issuer(&unknown);
-    let (_, below_node, below_member) = member(&below);
-    let recovered = trusted_at(&root, NOW + 2 * DAY);
-    let renewed = rocky_credentials::testing::authority(&recovered.0, &recovered.1)
-        .renew(
-            &enrolled.0[1].capability,
-            &RevocationSet::new(),
-            rocky_credentials::Validity {
-                issued_at: NOW + 2 * DAY,
-                lifetime: std::time::Duration::from_secs(30 * DAY),
-                clock_skew: std::time::Duration::from_secs(0),
-            },
-        )
-        .unwrap();
-    let mut chain = recovered.1.clone();
-    chain.0.push(renewed.clone());
-    let renewed_chain = chain.certify(&user, &node).unwrap();
-    let (_, own_node, own) = member(&recovered);
-    let readded = trusted_at(&root, NOW + 3 * DAY);
-
-    let set = recovery(&root, &recovered);
-    let at = NOW + 4 * DAY;
-    let verify = |chain: &CredentialChain, node: &PrivateKey| {
-        chain.verify(root.public_key(), node.public_key(), &set, at)
-    };
-    let (unknown_node, unknown_chain) = node_of(&unknown);
-    for (chain, node) in [
-        (&unknown_chain, &unknown_node),
-        (&enrolled, &node),
-        (&below_member, &below_node),
-        (&renewed_chain, &node),
-    ] {
-        assert!(
-            verify(chain, node).is_err(),
-            "a recovery ends grants no store it reaches names and renewals made before it was known"
-        );
-        assert!(set.revoking(chain).unwrap().is_some());
-    }
-    let (recovered_node, recovered_chain) = node_of(&recovered);
-    let (readded_node, readded_chain) = node_of(&readded);
-    for (chain, node) in [
-        (&recovered_chain, &recovered_node),
-        (&own, &own_node),
-        (&readded_chain, &readded_node),
-    ] {
-        verify(chain, node).unwrap();
-    }
-    assert!(set.ends_trusted(&unknown.1.0[0].capability));
-    assert!(!set.ends_trusted(&readded.1.0[0].capability));
-    assert!(
-        rocky_credentials::testing::authority(&recovered.0, &recovered.1)
-            .renew(
-                &renewed.capability,
-                &set,
-                rocky_credentials::Validity {
-                    issued_at: at,
-                    lifetime: std::time::Duration::from_secs(30 * DAY),
-                    clock_skew: std::time::Duration::from_secs(0)
-                }
-            )
-            .is_err(),
-        "no survivor renews what the ended identity enrolled once it holds the statement"
-    );
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
 fn an_origin_states_its_trusted_grants_time() {
     let root = RootKey::generate();
     let lost = trusted(&root);
@@ -434,92 +335,6 @@ fn an_origin_states_its_trusted_grants_time() {
             NOW,
         )
         .unwrap();
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
-fn the_later_of_two_recoveries_ends_the_earlier() {
-    let root = RootKey::generate();
-    let first = trusted_at(&root, NOW);
-    let second = trusted_at(&root, NOW + DAY);
-    let (a, b) = (recovery(&root, &first), recovery(&root, &second));
-    let ends = |set: &RevocationSet, identity: &(PrivateKey, CredentialChain)| {
-        set.ends_trusted(&identity.1.0[0].capability)
-    };
-    assert!(!ends(&a, &first) && !ends(&a, &second));
-    assert!(ends(&b, &first) && !ends(&b, &second));
-    for (one, other) in [(&a, &b), (&b, &a)] {
-        let mut merged = one.clone();
-        merged
-            .merge(other, root.public_key(), APP, NOW + DAY)
-            .unwrap();
-        assert!(ends(&merged, &first) && !ends(&merged, &second));
-        for (recovered, kept) in [(&first, false), (&second, true)] {
-            let (node, chain) = node_of(recovered);
-            let verified = chain.verify(root.public_key(), node.public_key(), &merged, NOW + DAY);
-            assert_eq!(
-                verified.is_ok(),
-                kept,
-                "only the later recovery's nodes stay valid"
-            );
-        }
-        assert_eq!(
-            merged.recovery().map(|r| r.keep),
-            Some(second.0.public_key())
-        );
-        assert_eq!(merged.recoveries().len(), 2);
-    }
-    let tie = trusted_at(&root, NOW);
-    let (low, high) = if tie.0.public_key() < first.0.public_key() {
-        (&tie, &first)
-    } else {
-        (&first, &tie)
-    };
-    let set = recovery(&root, high);
-    assert!(
-        ends(&set, low) && !ends(&set, high),
-        "granted in the same second, the larger key is the later"
-    );
-    let mut statement = Revocation {
-        app: APP,
-        issuer: first.0.public_key(),
-        time: NOW,
-        nodes: Default::default(),
-        identities: Default::default(),
-        capabilities: Default::default(),
-        cut: Default::default(),
-        mode: rocky_credentials::RevocationMode::Compromised,
-        recovery: Some(rocky_credentials::RootDecision::Grants(
-            rocky_credentials::RootRecovery {
-                since: NOW + 10 * DAY,
-                keep: first.0.public_key(),
-            },
-        )),
-    };
-    assert!(
-        rocky_credentials::testing::authority(&first.0, &first.1)
-            .revoke(statement.clone())
-            .is_err(),
-        "only the root signs a recovery"
-    );
-    statement.issuer = root.public_key();
-    let cut = |identity: &PrivateKey| rocky_credentials::Cut {
-        identity: identity.public_key(),
-        lane: PrivateKey::new().public_key(),
-        statements: vec![rocky_credentials::Head {
-            sequence: 1,
-            id: [1; 32],
-        }],
-        acknowledgments: None,
-    };
-    for (cut, valid) in [(cut(&second.0), true), (cut(&first.0), false)] {
-        let mut cutting = statement.clone();
-        cutting.cut = vec![cut];
-        assert_eq!(
-            Authority::owner(&root).revoke(cutting).is_ok(),
-            valid,
-            "a cut keeps chains of an identity it ends, never of the one it keeps"
-        );
-    }
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]

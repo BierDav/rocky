@@ -19,12 +19,7 @@ async fn format_template() -> (Fixture, Scratch, std::path::PathBuf, PrivateKey)
         .await
         .unwrap();
     compacted_base(&replica, &f.publisher, f.public).await;
-    replica
-        .backup_into(&template.path().join("base.sqlite"))
-        .await
-        .unwrap();
-    drop(replica);
-    let source = template.path().join("base.sqlite");
+    replica.close().await;
     (f, template, source, node)
 }
 
@@ -80,7 +75,7 @@ async fn unsupported_checkpoint_formats_refuse_before_writes() {
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn unsupported_replica_formats_refuse_before_writes() {
     let (f, _template, source, node) = format_template().await;
-    for version in (0..61).chain([62]) {
+    for version in (0..62).chain([63]) {
         let directory = Scratch::new().await;
         let path = directory.path().join("replica.sqlite");
         rocky_platform::fs::copy(&source, &path).unwrap();

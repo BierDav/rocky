@@ -285,7 +285,6 @@ async fn discovery_topics_keep_a_value_minted_for_a_statement_under_the_settings
         capabilities: Default::default(),
         cut: Default::default(),
         mode: RevocationMode::Lost,
-        recovery: None,
     };
     let credentials = held.credentials.clone();
     let links = held.issuer_links();
@@ -334,7 +333,6 @@ async fn an_exposure_rotation_that_fails_while_absorbing_revocations_leaves_memo
         capabilities: Default::default(),
         cut: Default::default(),
         mode: RevocationMode::Lost,
-        recovery: None,
     };
     let signed = SignedRevocation::sign(
         statement,
@@ -572,35 +570,6 @@ async fn stop_at(
         assert_eq!(vault.get(role)?, key);
     }
     again.close().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn holding_every_group_partition_keeps_escrow_in_one_pass() -> Result<(), Failure> {
-    let directory = tempfile::tempdir()?;
-    let node = issuer(directory.path(), Arc::new(Keys::default())).await?;
-    let lists = 8;
-    for list in 0..lists {
-        node.create_partition(&list_partition(format!("L{list}")))
-            .await?;
-    }
-    let settings = node.settings.lock().await.clone();
-    let partitions = settings.partitions(&node.domain())?;
-    assert_eq!(partitions.len(), lists);
-    let count = crate::escrow::CONSIDERED.with(|considered| considered.replace(0));
-    assert!(count > 0);
-    crate::escrow::keep(&node.replica, &settings, &node.vault, &node.domain()).await?;
-    let pass = crate::escrow::CONSIDERED.with(|considered| considered.replace(0));
-    assert!(
-        pass >= lists * 3,
-        "every member table of every partition is one key to consider: {pass}"
-    );
-    node.hold_keys(&settings, &partitions).await?;
-    assert_eq!(
-        crate::escrow::CONSIDERED.with(|considered| considered.get()),
-        pass,
-        "one pass for all partitions, not one per partition"
-    );
     Ok(())
 }
 

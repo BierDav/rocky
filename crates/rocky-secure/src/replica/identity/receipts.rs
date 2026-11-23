@@ -23,7 +23,7 @@ const CONTEXT: &str = "rocky.admission-context.v1";
 const HEAD: &str = "rocky.admission-head.v1";
 const ENTRY: &str = "rocky.admission-entry.v1";
 const CHAIN: &str = "rocky.admission-chain.v1";
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,19 +33,6 @@ pub(in crate::replica) struct AdmissionContext {
     lineage: Commitment,
     publisher: PublicKey,
     node: PublicKey,
-    cuts: Vec<PredecessorCut>,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(in crate::replica) struct PredecessorCut {
-    #[serde(with = "serde_bytes")]
-    lineage: Commitment,
-    node: PublicKey,
-    count: u64,
-    #[serde(with = "serde_bytes")]
-    chain: Commitment,
-    revision: u64,
-    head_signature: Signature,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -570,22 +557,6 @@ fn verify<T: Serialize>(
     Ok(())
 }
 
-impl AdmissionContext {
-    fn signer_of(&self, index: u64) -> (Commitment, PublicKey) {
-        let mut low = 0;
-        for cut in &self.cuts {
-            if index > low && index <= cut.count {
-                return (cut.lineage, cut.node);
-            }
-            low = cut.count;
-        }
-        (self.lineage, self.node)
-    }
-    fn genesis(&self) -> Commitment {
-        genesis(self.cuts.first().map_or(self.lineage, |cut| cut.lineage))
-    }
-}
-
 impl<A: RowApplication> Inner<A> {
     pub(in crate::replica) async fn create_admission_context(&self) -> Result<(), Error> {
         let lineage: Commitment = rocky_platform::entropy::random();
@@ -594,7 +565,6 @@ impl<A: RowApplication> Inner<A> {
             lineage,
             publisher: self.config.publisher,
             node: self.config.node.public_key(),
-            cuts: Vec::new(),
         };
         let head = AdmissionHead {
             version: VERSION,
@@ -676,18 +646,6 @@ impl<A: RowApplication> Inner<A> {
     }
     pub(in crate::replica) async fn verify_admission_head(&self) -> Result<(), Error> {
         let (context, head) = self.admission_context().await?;
-        let predecessors = rows(
-            &self.conn,
-            "SELECT node FROM secure_predecessors ORDER BY rowid",
-        )
-        .await?;
-        if predecessors.len() != context.cuts.len()
-            || predecessors.iter().zip(&context.cuts).any(|(row, cut)| {
-                !matches!(row.as_slice(), [SqlValue::Blob(node)] if node.as_slice() == cut.node.as_bytes())
-            })
-        {
-            return Err(corrupt("cuts differ from the predecessors"));
-        }
         let count = match rows(
             &self.conn,
             "SELECT MAX(entry) FROM secure_admission_entries",
@@ -704,24 +662,6 @@ impl<A: RowApplication> Inner<A> {
             || stored_chain_at(&self.conn, head.count, &context).await? != head.chain
         {
             return Err(corrupt("head does not cover the stored entries"));
-        }
-        let mut low = 0;
-        for cut in &context.cuts {
-            if cut.count < low
-                || cut.count > head.count
-                || stored_chain_at(&self.conn, cut.count, &context).await? != cut.chain
-            {
-                return Err(corrupt("cut does not match the stored entries"));
-            }
-            let cut_head = AdmissionHead {
-                version: VERSION,
-                lineage: cut.lineage,
-                count: cut.count,
-                chain: cut.chain,
-                revision: cut.revision,
-            };
-            verify(cut.node, HEAD, &cut_head, &cut.head_signature)?;
-            low = cut.count;
         }
         if head.revision > self.stored_revision().await? {
             return Err(corrupt("head is newer than the file"));
@@ -1455,115 +1395,13 @@ async fn rows_with(
     collect_rows(conn.query(sql, bindings(values)).await?).await
 }
 
-pub(in crate::replica) async fn adopt_admission(
-    conn: &ScopedConnection,
-    publisher: PublicKey,
-    predecessor: PublicKey,
-    node: &PrivateKey,
-) -> Result<(), Error> {
-    let records = rows(
-        conn,
-        "SELECT context,signature,head,head_signature FROM secure_admission_context WHERE id=1",
-    )
-    .await?;
-    let Some(
-        [
-            SqlValue::Blob(context),
-            SqlValue::Blob(signature),
-            SqlValue::Blob(head),
-            SqlValue::Blob(head_signature),
-        ],
-    ) = records.first().map(Vec::as_slice)
-    else {
-        return Err(corrupt("context is missing"));
-    };
-    let mut context: AdmissionContext = canonical(context)?;
-    let head: AdmissionHead = canonical(head)?;
-    let head_signature = signature_of(head_signature)?;
-    if context.version != VERSION
-        || head.version != VERSION
-        || context.node != predecessor
-        || context.publisher != publisher
-        || head.lineage != context.lineage
-    {
-        return Err(corrupt("context is not the predecessor's"));
-    }
-    verify(predecessor, CONTEXT, &context, &signature_of(signature)?)?;
-    verify(predecessor, HEAD, &head, &head_signature)?;
-    let metadata = rows(conn, "SELECT revision FROM secure_metadata WHERE id=1").await?;
-    let Some([SqlValue::Integer(revision)]) = metadata.first().map(Vec::as_slice) else {
-        return Err(corrupt("revision"));
-    };
-    let count = rows(
-        conn,
-        "SELECT COALESCE(MAX(entry),0) FROM secure_admission_entries",
-    )
-    .await?;
-    if head.revision > *revision as u64 || count != vec![vec![SqlValue::Integer(head.count as i64)]]
-    {
-        return Err(corrupt("head does not cover the copied file"));
-    }
-    let predecessors = rows(conn, "SELECT node FROM secure_predecessors ORDER BY rowid").await?;
-    if predecessors.len() != context.cuts.len() || predecessors.iter().zip(&context.cuts).any(|(row, cut)| {
-        !matches!(row.as_slice(), [SqlValue::Blob(node)] if node.as_slice() == cut.node.as_bytes())
-    }) { return Err(corrupt("cuts differ from predecessors")); }
-    let mut low = 0;
-    for cut in &context.cuts {
-        if cut.count < low
-            || cut.count > head.count
-            || stored_chain_at(conn, cut.count, &context).await? != cut.chain
-        {
-            return Err(corrupt("predecessor cut differs"));
-        }
-        verify(
-            cut.node,
-            HEAD,
-            &AdmissionHead {
-                version: VERSION,
-                lineage: cut.lineage,
-                count: cut.count,
-                chain: cut.chain,
-                revision: cut.revision,
-            },
-            &cut.head_signature,
-        )?;
-        low = cut.count;
-    }
-    for index in 1..=head.count {
-        verify_entry_with(conn, &context, index).await?;
-    }
-    if stored_chain_at(conn, head.count, &context).await? != head.chain {
-        return Err(corrupt("copied chain differs"));
-    }
-    context.cuts.push(PredecessorCut {
-        lineage: context.lineage,
-        node: predecessor,
-        count: head.count,
-        chain: head.chain,
-        revision: head.revision,
-        head_signature,
-    });
-    context.lineage = rocky_platform::entropy::random();
-    context.node = node.public_key();
-    let head = AdmissionHead {
-        lineage: context.lineage,
-        revision: *revision as u64 + 1,
-        ..head
-    };
-    conn.execute("UPDATE secure_admission_context SET context=?,signature=?,head=?,head_signature=? WHERE id=1", bindings(vec![
-        SqlValue::Blob(encode(&context)?), SqlValue::Blob(sign(node, CONTEXT, &context)?.to_bytes().to_vec()),
-        SqlValue::Blob(encode(&head)?), SqlValue::Blob(sign(node, HEAD, &head)?.to_bytes().to_vec()),
-    ])).await?;
-    Ok(())
-}
-
 async fn stored_chain_at(
     conn: &ScopedConnection,
     index: u64,
     context: &AdmissionContext,
 ) -> Result<Commitment, Error> {
     if index == 0 {
-        return Ok(context.genesis());
+        return Ok(genesis(context.lineage));
     }
     match rows_with(
         conn,
@@ -1609,8 +1447,12 @@ async fn verify_entry_with(
     if let EntryKind::Frame(receipt) = &entry.kind {
         check_receipt_shape(receipt)?;
     }
-    let (lineage, node) = context.signer_of(index);
-    verify(node, ENTRY, &(lineage, &entry), &signature_of(signature)?)?;
+    verify(
+        context.node,
+        ENTRY,
+        &(context.lineage, &entry),
+        &signature_of(signature)?,
+    )?;
     let previous = stored_chain_at(conn, index - 1, context).await?;
     if link(previous, bytes) != row_of(chain)? {
         return Err(corrupt("chain link is broken"));

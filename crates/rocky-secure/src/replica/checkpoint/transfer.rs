@@ -16,8 +16,6 @@ pub struct CheckpointPage {
     #[serde(with = "sealed")]
     pub rows: EncryptedPackage,
     pub next: Option<Commitment>,
-    #[serde(skip)]
-    pub(crate) carrier: Option<PublicKey>,
 }
 mod sealed {
     use super::*;
@@ -75,14 +73,12 @@ struct PagePlain {
     creations: Vec<Hash>,
     authors: stamp_authors::Authors,
     bindings: Vec<serde_bytes::ByteBuf>,
-    #[serde(default)]
-    escrow: Vec<rocky_credentials::VouchedEscrow>,
     headers: Vec<serde_bytes::ByteBuf>,
     signature: Signature,
 }
 fn page_signing_bytes(plain: &PagePlain) -> Result<Vec<u8>, Error> {
     let rows = rocky_core::commitment(
-        "rocky.checkpoint-page-rows.v1",
+        "rocky.checkpoint-page-rows.v2",
         &encode(&(
             plain.checkpoint,
             plain.after,
@@ -92,10 +88,9 @@ fn page_signing_bytes(plain: &PagePlain) -> Result<Vec<u8>, Error> {
             &plain.creations,
             &plain.authors,
             &plain.rows,
-            &plain.escrow,
         ))?,
     );
-    signing_bytes("rocky.checkpoint-page.v1", &rows)
+    signing_bytes("rocky.checkpoint-page.v2", &rows)
 }
 const PAGE_ROWS: usize = 256;
 const STORE_ROWS: usize = if cfg!(test) { 8 } else { 128 };
@@ -125,7 +120,6 @@ struct OpenedPage {
     authors: stamp_authors::Authors,
     next: Option<Commitment>,
     signature: Signature,
-    escrow: Vec<rocky_credentials::VouchedEscrow>,
 }
 struct ExportSource {
     authority: u64,
@@ -161,14 +155,6 @@ fn open_page(
         || plain.rows.len() > PAGE_ROWS
     {
         return Err(denied("checkpoint page binding mismatch"));
-    }
-    if plain.escrow.iter().any(|record| {
-        signed
-            .statement
-            .key_epoch()
-            .is_none_or(|epoch| record.slot() != (signed.statement.scope, epoch))
-    }) {
-        return Err(denied("checkpoint escrow outside key epoch"));
     }
     if plain.legend.iter().any(String::is_empty)
         || plain.legend.windows(2).any(|pair| pair[0] >= pair[1])
@@ -342,7 +328,6 @@ fn open_page(
             .collect(),
         next: plain.next,
         signature: plain.signature,
-        escrow: plain.escrow,
     })
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1166,16 +1151,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await;
         }
         let (generation, key) = inner.scope_key(scope)?;
-        let escrow = if after.is_none() {
-            drop(inner);
-            let records = self
-                .escrow_of(&[(scope, generation)].into_iter().collect())
-                .await?;
-            inner = self.inner.lock(Class::Background).await;
-            records
-        } else {
-            Vec::new()
-        };
         let (id, signed, served) = match inner.served_checkpoint(scope).await? {
             Some((id, signed)) if signed.id()? == checkpoint => (id, signed, served::Served::Base),
             offered => match inner.served_seal_checkpoint(scope, checkpoint).await? {
@@ -1250,7 +1225,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             bindings: vec![],
             headers: vec![],
             signature: Signature::from_bytes(&[0; 64]),
-            escrow,
         };
         let mut named = BTreeSet::new();
         let mut named_headers = BTreeSet::new();
@@ -1527,7 +1501,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 &key,
                 &encode(&plain)?,
             )?,
-            carrier: None,
         };
         if encode(&page)?.len() > byte_quota {
             return Err(denied("checkpoint page exceeds the byte quota"));
@@ -1745,7 +1718,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.crypto.clone(),
             )
         };
-        let escrow_peer = page.carrier.unwrap_or(signed.signer());
         let (page, plain, supplied, origins) = rocky_platform::task::spawn_blocking(move || {
             let plain: PagePlain = decode(&page.rows.open(&key)?)?;
             let supplied: BTreeSet<_> = plain
@@ -1783,8 +1755,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })
         .await
         .map_err(|_| Error::Closed)??;
-        let escrow = opened.escrow.clone();
-        let escrow_time = now()?;
         let validate = |staging: &Staging| -> Result<(), Error> {
             if staging.signed.id()? != checkpoint || staging.complete || staging.cursor != after {
                 return Err(denied("unexpected checkpoint page"));
@@ -2048,11 +2018,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.units("checkpoint_store_row", chunk.rows.len() as u64);
             }
             transaction!(@without_wal_checkpoint inner, |inner| {
-                if chunk_index == 0 && !escrow.is_empty() {
-                    inner
-                        .keep_carried_escrow_rows(escrow_peer, &escrow, escrow_time)
-                        .await?;
-                }
                 inner.store_page_metadata(metadata).await?;
                 inner.store_page(scope, id, &staging, &chunk, if chunk_index + 1 == chunks { Some(finish_cursor) } else { None }).await
             })?;
@@ -2087,13 +2052,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 && plain.bindings.is_empty()
                 && plain.headers.is_empty())
             || plain.rows.iter().any(|row| row.clock != 0)
-            || plain.escrow.iter().any(|record| {
-                staging
-                    .signed
-                    .statement
-                    .key_epoch()
-                    .is_none_or(|epoch| record.slot() != (page.scope, epoch))
-            })
         {
             return Err(denied("checkpoint page binding mismatch"));
         }
@@ -2121,15 +2079,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .find_scope_id(page.scope)
             .await?
             .ok_or_else(|| denied("no rebootstrap in progress"))?;
-        let escrow_peer = page.carrier.unwrap_or(staging.signed.signer());
-        let escrow_time = now()?;
-        let escrow = plain.escrow.clone();
         transaction!(inner, |inner| {
-            if !escrow.is_empty() {
-                inner
-                    .keep_carried_escrow_rows(escrow_peer, &escrow, escrow_time)
-                    .await?;
-            }
             if staging.direct {
                 inner
                     .restore_images(page.scope, staging.signed.statement.tip, &rows)

@@ -28,7 +28,6 @@ pub enum ErrorKind {
     MigrationPending,
     Invitation(crate::InvitationRefusal),
     Service(String),
-    Reset(String),
     Other(String),
 }
 
@@ -80,7 +79,7 @@ impl ErrorKind {
             Self::GenesisMinimumMissing => "genesis_minimum_missing",
             Self::MigrationPending => "migration_pending",
             Self::Invitation(refusal) => refusal.code(),
-            Self::Service(code) | Self::Reset(code) | Self::Other(code) => code,
+            Self::Service(code) | Self::Other(code) => code,
         }
     }
 }

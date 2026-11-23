@@ -802,7 +802,6 @@ impl Handle {
             credentials: admission.credentials.clone(),
             peer_chain: admission.peer_chain.clone(),
             chains: Default::default(),
-            escrow: Default::default(),
             signing: frame_binding(&binding),
             binding: admission.binding,
             proved: admission.proved.clone(),

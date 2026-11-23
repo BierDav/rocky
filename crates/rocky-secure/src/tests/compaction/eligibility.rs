@@ -47,7 +47,6 @@ async fn an_open_revocation_loader_retry_keeps_supplied_statements_past_expired_
         capabilities: BTreeSet::new(),
         cut: Default::default(),
         mode: rocky_credentials::RevocationMode::Lost,
-        recovery: None,
     };
     assert!(
         !expired.live(now().unwrap()),

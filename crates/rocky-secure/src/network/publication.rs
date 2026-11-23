@@ -108,14 +108,9 @@ impl Plan {
             .publication_pages(peer, credentials, cursors)
             .await?;
         let upper = export.upper;
-        let mut escrow = std::collections::BTreeMap::<_, Vec<_>>::new();
-        for record in export.escrow {
-            escrow.entry(record.slot()).or_default().push(record);
-        }
         let mut messages = Vec::new();
         let mut chains = BTreeSet::new();
         let mut migration_ids = BTreeSet::new();
-        let mut slots = BTreeSet::new();
         let mut items = 0;
         let mut ids = Vec::new();
         for mut page in ordering::pages(export.pages, &export.members)? {
@@ -152,35 +147,10 @@ impl Plan {
                     }
                 }
             }
-            let mut fresh = BTreeSet::new();
-            for frame in &page.frames {
-                let slot = (frame.scope()?, frame.generation()?);
-                if slots.insert(slot) {
-                    fresh.insert(slot);
-                }
-            }
-            let records = fresh
-                .into_iter()
-                .flat_map(|slot| escrow.remove(&slot).unwrap_or_default())
-                .collect::<Vec<_>>();
-            for record in &records {
-                let chain = crate::wire::Chain::new(record.chain().clone())?;
-                if chains.insert(chain.digest()) {
-                    carried.push(chain);
-                }
-            }
             if !carried.is_empty() {
                 messages.push(Message::Chains(ChainMessage::Carry { chains: carried }));
             }
             messages.extend(migrations);
-            if !records.is_empty() {
-                let records = records
-                    .iter()
-                    .map(rocky_credentials::VouchedEscrow::carried)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(credential)?;
-                messages.push(Message::Escrow(EscrowMessage::Carry { records }));
-            }
             items += page.frames.len() + page.voids.len();
             messages.push(Message::Publication(PublicationMessage::Page {
                 frames: page.frames,
@@ -425,7 +395,6 @@ impl NativeSession {
         let mut repair_all = false;
         let mut reasons = BTreeSet::new();
         let mut chain_ids = BTreeSet::new();
-        let mut escrow_ids = BTreeSet::new();
         let mut migration_ids = BTreeSet::new();
         for _ in 0..parts {
             let message = self.receive().await?;
@@ -462,18 +431,6 @@ impl NativeSession {
                         return Err(denied("publication duplicate chains"));
                     }
                     self.learn_chains(ChainMessage::Carry { chains });
-                }
-                Message::Escrow(EscrowMessage::Carry { records }) => {
-                    if records.is_empty() {
-                        return Err(denied("publication empty escrow"));
-                    }
-                    for record in &records {
-                        let id = rocky_core::commitment("rocky.live-escrow.v1", &encode(record)?);
-                        if !escrow_ids.insert(id) {
-                            return Err(denied("publication duplicate escrow"));
-                        }
-                    }
-                    self.learn_escrow(EscrowMessage::Carry { records })?;
                 }
                 Message::Publication(PublicationMessage::Page { frames, voids }) => {
                     let mut scopes = BTreeSet::new();
@@ -562,7 +519,6 @@ impl NativeSession {
                         repair_all = true;
                         reasons.insert(PublicationRepairReason::MissingChain);
                     }
-                    self.keep_escrow(replica, &frames).await?;
                     for frame in &frames {
                         received.push((frame.scope()?, frame.id()?));
                     }
@@ -646,16 +602,6 @@ pub(super) fn charge_references(
             .ok_or_else(|| denied("incomplete migration chain"))?;
         charge(&encode(chain)?, used)?;
         charge_chain(chain.credentials(), used)?;
-    }
-    if let Message::Escrow(EscrowMessage::Carry { records, .. }) = message {
-        for record in records {
-            let chain = table
-                .received
-                .get(&record.chain_digest())
-                .ok_or_else(|| denied("incomplete escrow chain"))?;
-            charge(&encode(chain)?, used)?;
-            charge_chain(chain.credentials(), used)?;
-        }
     }
     Ok(())
 }

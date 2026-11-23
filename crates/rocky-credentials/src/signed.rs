@@ -161,7 +161,7 @@ impl Attestation {
         protected: bool,
         identity: PublicKey,
     ) -> bool {
-        self.node_ended((revocations.unfenced(), time), protected, identity)
+        self.node_ended((revocations, time), protected, identity)
     }
     pub fn certificate(&self) -> Option<&Certificate> {
         self.certificate.as_ref()

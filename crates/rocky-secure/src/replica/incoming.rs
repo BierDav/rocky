@@ -602,7 +602,8 @@ impl<A: RowApplication> Inner<A> {
             return self.hold_closed_one(frame, time).await;
         }
         if self
-            .header_revocations(&operation.header)
+            .config
+            .revocations
             .revoking(frame.chain()?.credentials())
             .map_err(credential)?
             .is_some()

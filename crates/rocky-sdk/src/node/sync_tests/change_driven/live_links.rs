@@ -72,12 +72,12 @@ impl PublicationTraffic {
         assert_eq!(self.sessions, 2, "one channel's two endpoints: {self:?}");
         assert_eq!(
             self.families,
-            [("chains", 1), ("escrow", 1), ("publication", 4)].into(),
+            [("chains", 1), ("publication", 4)].into(),
             "unexpected control/discovery/row traffic: {self:?}"
         );
         assert_eq!(
             self.messages,
-            ["start", "chains", "escrow", "page", "finish", "receipt"]
+            ["start", "chains", "page", "finish", "receipt"]
                 .into_iter()
                 .map(|part| (part, 1))
                 .collect(),
@@ -161,8 +161,6 @@ async fn committed_edit_publishes_on_the_link_without_receiver_reconcile() -> Re
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let (a, b) = pair(root.path(), &hub).await?;
-            crate::escrow::keep(&a.replica, &*a.settings.lock().await, &a.vault, &a.domain())
-                .await?;
             let service_a = a.current().ok_or("service")?;
             let service_b = b.current().ok_or("service")?;
             until(|| {
@@ -219,8 +217,8 @@ async fn committed_edit_publishes_on_the_link_without_receiver_reconcile() -> Re
             assert_eq!(hub.dials_to("a"), before[0], "receiver must not dial");
             assert_eq!(
                 hub.link_messages("a"),
-                messages[0] + 7,
-                "one declaration, five native messages including escrow, and channel close"
+                messages[0] + 6,
+                "one declaration, four native messages, and channel close"
             );
             assert_eq!(
                 hub.link_messages("b"),
@@ -1354,7 +1352,6 @@ async fn learn_revocation(node: &Node, peer: PublicKey) -> Result<(), Failure> {
             capabilities: Default::default(),
             cut: Default::default(),
             mode: rocky_credentials::RevocationMode::Lost,
-            recovery: None,
         },
         rocky_credentials::Signer::node(&signer, &credentials)?,
         &links,
@@ -2176,7 +2173,6 @@ async fn publication_with_32_held_scopes_notifies_a_complete_contact_transaction
         }).collect());
         let schema = Schema::parse(&schema.to_string())?;
         let a = enrolled_schema(&root.path().join("a"), &hub, "a", None, &schema).await?;
-        crate::escrow::keep(&a.replica, &*a.settings.lock().await, &a.vault, &a.domain()).await?;
         let b = enrolled_schema(&root.path().join("b"), &hub, "b", Some((&a, Profile::Reader {
             scopes: names.iter().cloned().collect(),
         })), &schema).await?;
@@ -2233,7 +2229,7 @@ async fn publication_with_32_held_scopes_notifies_a_complete_contact_transaction
             eprintln!("publication native traffic: {traffic:?}");
             assert_eq!(
                 [hub.link_messages("a") - messages_before[0], hub.link_messages("b") - messages_before[1]],
-                [if version == 1 { 9 } else { 10 }, 2],
+                [if version == 1 { 8 } else { 9 }, 2],
                 "one fragmented publication and receipt"
             );
             let notification_us = if notified >= committed {
@@ -2285,8 +2281,6 @@ async fn a_peer_holding_more_than_one_frontier_batch_publishes_only_the_changed_
             let a = enrolled_schema(&root.path().join("a"), &hub, "a", None, &schema)
                 .await
                 .map_err(|error| format!("multi-batch source enrollment: {error}"))?;
-            crate::escrow::keep(&a.replica, &*a.settings.lock().await, &a.vault, &a.domain())
-                .await?;
             let b = enrolled_schema(
                 &root.path().join("b"),
                 &hub,

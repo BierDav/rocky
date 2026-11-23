@@ -334,70 +334,6 @@ impl Node {
             .map(|kind| Alert { kind, since: None })
             .collect())
     }
-    pub(super) async fn escrow_alerts(&self) -> Result<Vec<Alert>, Failure> {
-        Ok(self
-            .replica
-            .escrow_refusals()
-            .await?
-            .into_iter()
-            .map(|(peer, records, reason)| Alert {
-                kind: AlertKind::EscrowRefused {
-                    node: peer.to_hex(),
-                    records,
-                    reason,
-                },
-                since: None,
-            })
-            .collect())
-    }
-    pub(super) async fn recovery_alerts(&self) -> Result<Vec<Alert>, Failure> {
-        let snapshot = self.settings_snapshot().await;
-        if snapshot.revocations.recovery().is_none() {
-            return Ok(Vec::new());
-        }
-        let registry = self.registry(&snapshot).await?;
-        let mut known_trusted_grant_times: BTreeMap<PublicKey, u64> =
-            match self.replica.tip_graph(self.domain().scope).await {
-                Ok(graph) => graph.trusted_grants().map_err(refused)?,
-                Err(_graph_not_installed) => BTreeMap::new(),
-            };
-        for (identity, record) in &registry.trusted {
-            let since = known_trusted_grant_times
-                .entry(*identity)
-                .or_insert(record.grant.capability.not_before);
-            *since = (*since).max(record.grant.capability.not_before);
-        }
-        let settings = self.settings.lock().await;
-        let revocations = &settings.revocations;
-        let Some(latest) = revocations.recovery().copied() else {
-            return Ok(Vec::new());
-        };
-        let recoveries = revocations.recoveries();
-        let met = recoveries
-            .iter()
-            .filter(|recovery| **recovery != latest)
-            .map(|ended| AlertKind::RecoveriesMet {
-                kept: latest.keep.to_hex(),
-                ended: ended.keep.to_hex(),
-            });
-        let ended = known_trusted_grant_times
-            .iter()
-            .filter(|(identity, since)| {
-                **identity != settings.identity
-                    && !recoveries
-                        .iter()
-                        .any(|recovery| recovery.keep == **identity)
-                    && latest.ends(**since, identity)
-            })
-            .map(|(identity, _)| AlertKind::RecoveryEnded {
-                recovered: latest.keep.to_hex(),
-                ended: identity.to_hex(),
-            });
-        Ok(met
-            .chain(ended)
-            .map(|kind| Alert { kind, since: None })
-            .collect())
-    }
     pub(super) async fn refresh_trusted_watch(&self) -> Result<(), Failure> {
         let registry = if self.collects().await {
             Some(self.registry(&*self.settings_snapshot().await).await?)
@@ -636,8 +572,6 @@ impl Node {
             since: None,
         }));
         alerts.extend(self.tip_chain_alerts().await?);
-        alerts.extend(self.escrow_alerts().await?);
-        alerts.extend(self.recovery_alerts().await?);
         alerts.sort();
         alerts.truncate(MAX_ITEMS);
         Ok(HealthReport {

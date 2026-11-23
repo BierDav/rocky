@@ -167,7 +167,7 @@ impl Registry {
             }
             if record.grant.capability.not_before <= time
                 && time < record.grant.capability.expires
-                && !revocations.ends_trusted(&record.grant.capability)
+                && !revocations.revokes_trusted(&record.grant.capability.subject)
             {
                 trusted.push(*identity);
             }

@@ -129,7 +129,6 @@ async fn configuration_enrolls_resumes_and_refuses_reading_identities() -> Resul
     let peer = tokio::task::spawn_blocking(move || CustodyPeer::open(first)).await??;
     let contact = peer.contact().await?;
     assert!(contact.starts_with("rocky://peer/"));
-    peer.backup(&root.path().join("archive")).await?;
     peer.close().await?;
     let peer = tokio::task::spawn_blocking(move || CustodyPeer::open(config)).await??;
     assert!(peer.contact().await?.starts_with("rocky://peer/"));

@@ -434,7 +434,6 @@ fn trusted_siblings_claim_until_their_identity_unlinks_them() {
             capabilities: Default::default(),
             cut: Default::default(),
             mode: rocky_credentials::RevocationMode::Lost,
-            recovery: None,
         },
         &identity,
         &chains[1],

@@ -3,7 +3,6 @@ use super::*;
 pub(crate) struct PublicationExport {
     pub upper: Vec<ScopeFrontier>,
     pub pages: Vec<RangePage>,
-    pub escrow: Vec<rocky_credentials::VouchedEscrow>,
     pub members: BTreeMap<Hash, Vec<(ResourceScope, PublicKey, u64)>>,
 }
 
@@ -142,19 +141,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     }
                 }
             }
-            let slots = pages
-                .iter()
-                .flat_map(|page| &page.frames)
-                .map(|frame| Ok((frame.scope()?, frame.generation()?)))
-                .collect::<Result<BTreeSet<_>, Error>>()?;
-            let escrow = inner
-                .escrow_of(&slots, Some(crate::network::publication::MAX_BYTES))
-                .await?;
             (
                 PublicationExport {
                     upper,
                     pages,
-                    escrow,
                     members,
                 },
                 inner.locked_commit(),

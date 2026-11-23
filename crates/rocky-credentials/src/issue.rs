@@ -607,7 +607,7 @@ impl<'a> Authority<'a> {
             || revocations.revokes(&prior.subject)
             || extended
                 .origin
-                .is_some_and(|origin| revocations.ends_origin(&origin))
+                .is_some_and(|origin| revocations.revokes_origin(&origin.identity))
         {
             return Err(denied("invalid or revoked credential"));
         }
@@ -739,7 +739,6 @@ impl CredentialChain {
                 capabilities: BTreeSet::new(),
                 cut: Vec::new(),
                 mode: crate::RevocationMode::Lost,
-                recovery: None,
             },
             holder,
             &self.capabilities().with_certificate(certificate.clone()),

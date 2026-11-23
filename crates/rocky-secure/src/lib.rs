@@ -27,13 +27,13 @@ pub use replica::{
     PeerLag, PeerScopeFrontier, PendingSchema, Placement, PlacementPage, PlacementRequest,
     ProjectionPlan, PruneBlock, PruneReport, PrunedPage, Publication, ROWS_PER_FRAME, RangePage,
     RebootstrapReport, ReceiveStatus, Refusal, RemotePage, ReplicaRole, ReplicaStatus,
-    ResetEndsSigner, RetentionLimits, RetentionPolicy, RoleConfig, SchemaConfig, SchemaStage,
-    ScopeFrontier, ScopeStatus, SealRebootstrap, SealViews, SealedOutcome, SealedOutcomes,
-    SealedTransaction, SecureCommit, SecureConfig, SecurePage, SecureRows, SecureSession,
-    SecureSnapshot, SecureSql, SecureTransaction, SessionStatus, SetSummary, SignedCheckpoint,
-    SignedVoid, StagedCloseStatus, StateAdvice, TipDevice, TipNodeObservation, TipObservation,
-    TipStatement, UpdateMode, created_name, installed_tip_schema, read_authority_entry,
-    remove_authority_entry, write_authority_entry,
+    RetentionLimits, RetentionPolicy, RoleConfig, SchemaConfig, SchemaStage, ScopeFrontier,
+    ScopeStatus, SealRebootstrap, SealViews, SealedOutcome, SealedOutcomes, SealedTransaction,
+    SecureCommit, SecureConfig, SecurePage, SecureRows, SecureSession, SecureSnapshot, SecureSql,
+    SecureTransaction, SessionStatus, SetSummary, SignedCheckpoint, SignedVoid, StagedCloseStatus,
+    StateAdvice, TipDevice, TipNodeObservation, TipObservation, TipStatement, UpdateMode,
+    created_name, installed_tip_schema, read_authority_entry, remove_authority_entry,
+    write_authority_entry,
 };
 pub use rocky_core::{Blocker, BlockerKind, ClearsBy, WaitReason, domain_label, scope_label};
 pub use rocky_credentials as credentials;

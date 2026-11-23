@@ -33,7 +33,6 @@ fn revoking(root: &PrivateKey, revocation: impl FnOnce(&mut Revocation)) -> Revo
         capabilities: Default::default(),
         cut: Default::default(),
         mode: rocky_credentials::RevocationMode::Lost,
-        recovery: None,
     };
     revocation(&mut statement);
     RevocationSet::try_from(vec![Authority::owner(root).revoke(statement).unwrap()]).unwrap()

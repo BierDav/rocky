@@ -745,9 +745,6 @@ impl Simulation {
                 crate::AlertKind::TipChainEquivocation { node, sequence, .. } => {
                     format!("{} forked at {sequence}", name(node))
                 }
-                crate::AlertKind::EscrowRefused { node, records, .. } => {
-                    format!("{} escrow refused {records}", name(node))
-                }
                 crate::AlertKind::TrustedNodeLinked { node, .. } => {
                     format!("{} linked", name(node))
                 }
@@ -757,11 +754,6 @@ impl Simulation {
                 crate::AlertKind::TrustedIdentityStale { identity, .. } => format!(
                     "{} stale",
                     self.identities.get(identity).map_or("?", String::as_str)
-                ),
-                crate::AlertKind::RecoveriesMet { .. } => "recoveries met".to_owned(),
-                crate::AlertKind::RecoveryEnded { ended, .. } => format!(
-                    "{} ended by recovery",
-                    self.identities.get(ended).map_or("?", String::as_str)
                 ),
             })
             .collect();
@@ -858,7 +850,7 @@ impl Simulation {
             GroupBeforeCommit | GroupAfterCommit => {
                 member.write(&format!("w{index}"), index as u64).await
             }
-            Custody | Import | Switch | Settle | Evict | Apply | Rewind | Redo | UndoDeletion => {
+            Import | Switch | Settle | Evict | Apply | Rewind | Redo | UndoDeletion => {
                 self.sync(node).await.map(drop)
             }
         };

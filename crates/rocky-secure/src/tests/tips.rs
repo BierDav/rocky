@@ -1861,7 +1861,6 @@ async fn a_held_cut_refuses_and_prunes_what_follows_its_head() {
             acknowledgments: None,
         }],
         mode: rocky_credentials::RevocationMode::Lost,
-        recovery: None,
     };
     let revoked = RevocationSet::try_from(vec![
         SignedRevocation::sign_in(

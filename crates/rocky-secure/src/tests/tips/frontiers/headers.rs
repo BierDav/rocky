@@ -62,8 +62,6 @@ async fn the_optional_scan_index_tracks_rows_and_is_not_backfilled_at_open() {
     inner.conn.execute("RELEASE index_rows", ()).await.unwrap();
     assert_eq!(rows(&inner.conn, query).await.unwrap(), original);
     drop(inner);
-    let backup = dir.path().join("retained-backup.db");
-    replica.backup_into(&backup).await.unwrap();
     let mut inner = replica.inner.lock(crate::replica::Class::Background).await;
     inner.flush().unwrap();
     let operation_pages = if rows(
@@ -87,9 +85,8 @@ async fn the_optional_scan_index_tracks_rows_and_is_not_backfilled_at_open() {
         .unwrap();
     let wal_after = rocky_platform::fs::len(&wal_path).unwrap_or(0);
     println!(
-        "operation index accounting retained=1: operation objects={operation_pages:?}; pages/free={pages:?}/{free:?}; main={}B; WAL before/after={wal_before}/{wal_after}B; compact backup={}B",
-        rocky_platform::fs::len(&path).unwrap(),
-        rocky_platform::fs::len(&backup).unwrap()
+        "operation index accounting retained=1: operation objects={operation_pages:?}; pages/free={pages:?}/{free:?}; main={}B; WAL before/after={wal_before}/{wal_after}B",
+        rocky_platform::fs::len(&path).unwrap()
     );
     drop(inner);
     drop(replica);

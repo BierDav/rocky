@@ -183,7 +183,7 @@ impl Node {
                 crate::enrollment::fault::check(crate::enrollment::fault::Stage::Table)?;
             }
         }
-        crate::escrow::keep(&self.replica, settings, &self.vault, &domain).await
+        Ok(())
     }
     async fn know(&self, partition: &GroupPartition) -> Result<(), Failure> {
         let key = record_key(&partition.record.address);

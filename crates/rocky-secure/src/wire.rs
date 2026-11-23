@@ -178,9 +178,6 @@ impl EncryptedFrame {
     pub fn scope(&self) -> Result<ResourceScope, Error> {
         Ok(self.operation_ref()?.header.extensions.scope)
     }
-    pub(crate) fn generation(&self) -> Result<rocky_core::KeyEpoch, Error> {
-        Ok(self.operation_ref()?.header.extensions.generation)
-    }
     pub(crate) fn operation(&self) -> Result<Operation<Extensions>, Error> {
         self.operation_ref().cloned()
     }

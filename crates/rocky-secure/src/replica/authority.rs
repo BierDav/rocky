@@ -212,7 +212,6 @@ impl<A: RowApplication> Inner<A> {
                     Some((added, None))
                 } else {
                     let authority_changed = !added.is_empty()
-                        || merged.admissions().ne(self.config.revocations.admissions())
                         || self.config.revocations.certificates().any(|certificate| {
                             let node = certificate.capability.subject;
                             merged.ends_node_of(certificate.issuer, node, false)
@@ -268,10 +267,6 @@ impl<A: RowApplication> Inner<A> {
                 inner.conn.execute(update, [bytes.clone()]).await?;
                 if *authority_changed {
                     inner.resolve_revoked(merged).await?;
-                    inner.drop_revoked_escrow(None).await?;
-                    inner
-                        .rejudge_reset_writers(&old_revocations, merged)
-                        .await?;
                 }
             }
             Ok(())

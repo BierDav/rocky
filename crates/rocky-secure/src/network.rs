@@ -15,7 +15,6 @@ mod contacts;
 pub mod link;
 pub use contacts::{ContactFuture, ContactHandler, ContactHint, ContactRequest, ContactResponse};
 mod delivery;
-mod escrow;
 mod frontiers;
 mod held;
 use held::HeldMessage;
@@ -33,7 +32,6 @@ use checkpoints::CheckpointMessage;
 use contacts::ContactMessage;
 use delivery::DeliveryMessage;
 pub use delivery::{DELIVERY_PAGE, Delivered, Deliveries, DeliveryFuture, Held, Outgoing};
-use escrow::{EscrowMessage, EscrowTable};
 pub use frontiers::FrontierExchange;
 use frontiers::FrontierMessage;
 use holdings::HoldingMessage;
@@ -179,7 +177,6 @@ enum Message {
     Contacts(ContactMessage),
     Delivery(DeliveryMessage),
     Chains(ChainMessage),
-    Escrow(EscrowMessage),
     LinkState(Vec<(ResourceScope, Commitment)>),
     HeldChanges(HeldMessage),
     Tips(TipMessage),
@@ -199,7 +196,6 @@ impl Message {
             Self::Contacts(_) => "contacts",
             Self::Delivery(_) => "delivery",
             Self::Chains(_) => "chains",
-            Self::Escrow(_) => "escrow",
             Self::LinkState(_) => "link state",
             Self::HeldChanges(_) => "held changes",
             Self::Tips(_) => "tips",
@@ -235,7 +231,6 @@ families!(
     Contacts(ContactMessage),
     Delivery(DeliveryMessage),
     Chains(ChainMessage),
-    Escrow(EscrowMessage),
     HeldChanges(HeldMessage),
     Tips(TipMessage),
     Placements(PlacementMessage),
@@ -270,7 +265,6 @@ pub struct NativeSession {
     credentials: CredentialChain,
     peer_chain: crate::wire::Chain,
     chains: ChainTable,
-    escrow: EscrowTable,
     signing: Commitment,
     binding: Commitment,
     proved: std::collections::BTreeSet<ResourceScope>,
@@ -357,7 +351,6 @@ impl NativeSession {
             peer: peer.node,
             peer_chain: crate::wire::Chain::new(peer.credentials.clone())?,
             chains: Default::default(),
-            escrow: Default::default(),
             credentials: peer.credentials,
             signing: frame_binding(&binding),
             binding: rocky_core::commitment("rocky.holding-session.v1", &binding),
@@ -614,7 +607,6 @@ impl NativeSession {
         loop {
             match self.receive_with_idle(idle).await? {
                 Message::Chains(message) => self.learn_chains(message),
-                Message::Escrow(message) => self.learn_escrow(message)?,
                 Message::Refused { reason } => {
                     if let Some(request) = self.request.take() {
                         request.finish("refused");

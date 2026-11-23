@@ -88,7 +88,6 @@ impl Domain {
             capabilities: BTreeSet::new(),
             cut: Default::default(),
             mode: rocky_credentials::RevocationMode::Lost,
-            recovery: None,
         };
         let signed = self.authority().revoke(statement).expect("revocation");
         RevocationSet::try_from(vec![signed]).expect("set")

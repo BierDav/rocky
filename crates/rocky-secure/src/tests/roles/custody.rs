@@ -1,25 +1,6 @@
 use super::*;
-use rocky_credentials::{PeerId, RootEscrow, RootKey, escrow_tag};
+use rocky_credentials::PeerId;
 
-pub(super) async fn escrow(f: &Fixture, node: &Node, scopes: &[ResourceScope]) {
-    let records = scopes
-        .iter()
-        .map(|scope| {
-            let secret = key_of(scope);
-            let epoch = rocky_core::KeyEpoch::new(1, &secret);
-            (
-                Some((*scope, epoch)),
-                RootEscrow::seal(
-                    f.publisher.public_key(),
-                    escrow_tag(f.publisher.public_key(), &secret),
-                    &secret,
-                )
-                .unwrap(),
-            )
-        })
-        .collect();
-    node.replica.keep_escrow(records).await.unwrap();
-}
 pub(super) async fn policy(node: &Node, scope: ResourceScope, peers: &[&Node], copies: usize) {
     node.replica
         .set_partition_custody(
@@ -113,7 +94,6 @@ async fn registry_and_chat_have_independent_durable_custody_and_loss_reporting()
         .set_partition_custody(chat, PartitionCustody::default())
         .await
         .unwrap();
-    escrow(&f, &owner, &scopes).await;
     assert!(owner.replica.evict(registry).await.is_err());
     assert!(owner.replica.unsubscribe(registry).await.is_err());
     push(&owner, &keeper, chat).await;
@@ -179,91 +159,6 @@ async fn registry_and_chat_have_independent_durable_custody_and_loss_reporting()
             .unwrap()
             .recovery_unconfirmed
     );
-    let (records, held) = keeper.replica.escrow_inventory().await.unwrap();
-    assert!(held.iter().all(|(scope, _)| *scope == registry));
-    let root = RootKey::from_secret(*f.publisher.as_bytes());
-    let restored = open_node(
-        &f,
-        &dir.path().join("restored.db"),
-        &PrivateKey::new(),
-        &scopes,
-        &[],
-    )
-    .await;
-    for (slot, record) in records {
-        if let Some((scope, epoch)) = slot {
-            assert_eq!(scope, registry);
-            let recovered: [u8; 32] = record.open(&root).unwrap().try_into().unwrap();
-            restored
-                .replica
-                .install_key_epoch(KeyMaterial::at(scope, epoch, recovered))
-                .await
-                .unwrap();
-        }
-    }
-    assert!(restored.replica.key_epochs(chat).await.is_empty());
-    let (mut session, server) = connect(&restored, &keeper).await;
-    assert!(
-        session
-            .bootstrap_scope(&restored.replica, registry, QUOTA)
-            .await
-            .unwrap()
-            .is_some()
-    );
-    session
-        .sync_scope(&restored.replica, registry, QUOTA)
-        .await
-        .unwrap();
-    drop(session);
-    server.await.unwrap();
-    assert_eq!(all_rows(&restored.replica, registry).await.len(), 6);
-    assert_eq!(stored_rows(&restored.replica, chat).await, 0);
-}
-
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn ciphertext_without_committed_escrow_earns_nothing_and_restart_finishes() {
-    let f = Fixture::new();
-    let dir = Scratch::new().await;
-    let scope = department(&f, 0);
-    let owner = open_node(
-        &f,
-        &dir.path().join("owner.db"),
-        &PrivateKey::new(),
-        &[scope],
-        &[scope],
-    )
-    .await;
-    let path = dir.path().join("keeper.db");
-    let key = PrivateKey::new();
-    let keeper = keyless(&f, &path, &key, &[scope]).await;
-    policy(&owner, scope, &[&keeper], 1).await;
-    escrow(&f, &owner, &[scope]).await;
-    insert(&f, &owner, scope, 0..4, 2).await;
-    keeper.replica.arm_crash(Some(CrashPoint::Custody)).await;
-    let (mut session, server) = connect(&owner, &keeper).await;
-    assert!(session.push(&owner.replica, scope, QUOTA).await.is_err());
-    drop(session);
-    server.await.unwrap();
-    assert_eq!(keeper.replica.crashed().await, Some(CrashPoint::Custody));
-    assert_eq!(
-        keeper.replica.frontier(scope).await.unwrap().logs[0].held,
-        2
-    );
-    assert!(
-        keeper
-            .replica
-            .escrow_inventory()
-            .await
-            .unwrap()
-            .0
-            .is_empty()
-    );
-    assert_eq!(count(&owner, scope).await, 0);
-    drop(keeper);
-    let keeper = keyless(&f, &path, &key, &[scope]).await;
-    push(&owner, &keeper, scope).await;
-    assert_eq!(count(&owner, scope).await, 1);
-    assert_eq!(keeper.replica.escrow_inventory().await.unwrap().0.len(), 1);
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
@@ -288,7 +183,6 @@ async fn receipts_are_bound_to_challenges_partitions_and_live_custodians() {
     )
     .await;
     insert(&f, &owner, scope, 0..2, 1).await;
-    escrow(&f, &owner, &[scope]).await;
     policy(&owner, scope, &[&keeper], 1).await;
     push(&owner, &keeper, scope).await;
     let (binding, challenge) = ([3; 32], [4; 32]);
@@ -425,7 +319,6 @@ async fn quota_refusals_and_applied_frontiers_earn_no_durable_credit() {
     )
     .await;
     insert(&f, &owner, scope, 0..2, 1).await;
-    escrow(&f, &owner, &[scope]).await;
     policy(&owner, scope, &[&keeper], 1).await;
     owner
         .replica

@@ -8,7 +8,6 @@
     )
 )]
 mod activity;
-mod backup;
 mod bootstrap_intent;
 mod claims;
 mod configuration;
@@ -20,7 +19,6 @@ mod delivery;
 mod domain;
 mod enrollment;
 mod error;
-mod escrow;
 mod generation;
 mod groups;
 mod identities;
@@ -33,10 +31,8 @@ mod partitions;
 mod pause;
 mod peer;
 mod reactor;
-mod recovery;
 mod registry;
 mod request;
-mod reset;
 mod rollout;
 mod scheduling;
 mod schema;
@@ -56,7 +52,6 @@ mod tips;
 pub mod transport;
 
 pub use activity::{ActivityEvent, ActivityKind, ActivityPage, ActivityScope, ActivityTransfer};
-pub use backup::{Entry as BackupEntry, Inventory as BackupInventory};
 pub use claims::{ClaimCounters, ClaimGrant};
 pub use configuration::Configuration;
 pub use connection::{
@@ -77,8 +72,6 @@ pub use reactor::{ReactorMeasurements, ReactorSnapshot, SqlCallTiming};
 pub use registry::{
     ClaimRecord as RecordedClaimRight, Grant as RecordedPartitionGrant, Kind as IdentityOrigin,
 };
-pub(crate) use reset::ResetRefused;
-pub use reset::{Freshness, ResetKeep, ResetReceipt, RestoreChoice};
 pub use rocky_credentials::counters;
 pub use rocky_credentials::{Coordinator, CoordinatorBundle, CoordinatorConnector};
 

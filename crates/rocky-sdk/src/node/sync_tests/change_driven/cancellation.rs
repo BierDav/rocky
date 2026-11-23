@@ -8,6 +8,19 @@ struct Fixture {
     databases: [PathBuf; 2],
 }
 
+fn copy_database(from: &std::path::Path, to: &std::path::Path) -> Result<(), Failure> {
+    std::fs::copy(from, to)?;
+    let wal = |path: &std::path::Path| {
+        let mut wal = path.as_os_str().to_owned();
+        wal.push("-wal");
+        PathBuf::from(wal)
+    };
+    if wal(from).exists() {
+        std::fs::copy(wal(from), wal(to))?;
+    }
+    Ok(())
+}
+
 pub(super) async fn run(exhaustive: bool) -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -45,8 +58,13 @@ pub(super) async fn run(exhaustive: bool) -> Result<(), Failure> {
                 root.path().join("a-copy.sqlite"),
                 root.path().join("b-copy.sqlite"),
             );
-            frozen(a.replica.backup_into(&a_copy)).await?;
-            frozen(b.replica.backup_into(&b_copy)).await?;
+            for (name, node, copy) in [("a", &a, &a_copy), ("b", &b, &b_copy)] {
+                frozen(node.replica.flush()).await?;
+                copy_database(
+                    &root.path().join(name).join(crate::enrollment::REPLICA_FILE),
+                    copy,
+                )?;
+            }
             let before = *hub.written().borrow();
             frozen(a.sync(&*transport(&a).await?)).await?;
             let bytes = *hub.written().borrow() - before;
@@ -164,7 +182,7 @@ async fn trial(fixture: &Fixture, offset: usize) -> Result<(), Failure> {
     let (a_dir, b_dir) = (trial.join("a"), trial.join("b"));
     for (directory, copy) in [(&a_dir, a_copy), (&b_dir, b_copy)] {
         std::fs::create_dir_all(directory)?;
-        std::fs::copy(copy, directory.join("rocky.sqlite"))?;
+        copy_database(copy, &directory.join(crate::enrollment::REPLICA_FILE))?;
     }
     let a = node(
         &a_dir,

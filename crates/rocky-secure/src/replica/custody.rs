@@ -34,7 +34,6 @@ struct Coverage {
     challenge: Commitment,
     chain: CredentialChain,
     logs: Vec<(PublicKey, u64, Hash)>,
-    epochs: BTreeMap<rocky_core::KeyEpoch, Commitment>,
     checkpoint: Option<SignedCheckpoint>,
 }
 
@@ -106,7 +105,7 @@ impl<A: RowApplication> Inner<A> {
         time: u64,
     ) -> Result<(), Error> {
         let body = &receipt.body;
-        if body.version != 1
+        if body.version != 2
             || body.descriptor != self.config.manifest.descriptor()
             || body.audience != self.config.node.public_key()
             || body.signer == body.audience
@@ -117,7 +116,7 @@ impl<A: RowApplication> Inner<A> {
                 .any(|(_, held, _)| *held == 0 || *held > i64::MAX as u64)
             || body.logs.windows(2).any(|pair| pair[0].0 >= pair[1].0)
             || !body.signer.verify(
-                &signing_bytes("rocky.custody-receipt.v2", body)?,
+                &signing_bytes("rocky.custody-receipt.v3", body)?,
                 &receipt.signature,
             )
         {
@@ -128,15 +127,8 @@ impl<A: RowApplication> Inner<A> {
             return Err(denied("custody receipt grant expired or revoked"));
         }
         if let Some(signed) = &body.checkpoint {
-            if signed.statement.scope != body.scope
-                || !body.epochs.contains_key(
-                    &signed
-                        .statement
-                        .key_epoch()
-                        .ok_or_else(|| denied("custody checkpoint epoch"))?,
-                )
-            {
-                return Err(denied("custody checkpoint outside partition or escrow"));
+            if signed.statement.scope != body.scope {
+                return Err(denied("custody checkpoint outside partition"));
             }
             signed.verify_authority(self, time)?;
         }
@@ -214,24 +206,6 @@ impl CustodyReceipt {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
-    pub(crate) async fn custody_escrow_slots(
-        &self,
-        scope: ResourceScope,
-    ) -> Result<BTreeSet<(ResourceScope, rocky_core::KeyEpoch)>, Error> {
-        let inner = self.inner.lock(Class::Background).await;
-        let mut result = inner
-            .conn
-            .query(
-                "SELECT DISTINCT generation FROM secure_escrow WHERE scope=?",
-                [encode(&scope)?],
-            )
-            .await?;
-        let mut slots = BTreeSet::new();
-        while let Some(row) = result.next().await? {
-            slots.insert((scope, decode(&row.get::<Vec<u8>>(0)?)?));
-        }
-        Ok(slots)
-    }
     pub(crate) async fn begin_custody_challenge(
         &self,
         peer: PublicKey,
@@ -360,21 +334,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if inner.check_archive_quota(0).await.is_err() {
             return Ok(None);
         }
-        let mut epochs = BTreeMap::new();
         let mut logs: BTreeMap<PublicKey, (u64, Hash)> = BTreeMap::new();
         let checkpoint = inner.archived_checkpoint(scope, true).await?;
         if let Some(signed) = &checkpoint {
             signed.verify_authority(&inner, time)?;
-            if let Some(epoch) = signed.statement.key_epoch() {
-                let records = inner.escrow_of(&[(scope, epoch)].into(), None).await?;
-                let Some(record) = records
-                    .iter()
-                    .find(|record| inner.judge_escrow(record, time).is_ok())
-                else {
-                    return Ok(None);
-                };
-                epochs.insert(epoch, record.record().tag());
-            }
             for log in &signed.statement.frontier {
                 let held = log
                     .sequence
@@ -408,24 +371,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
             {
                 gaps.insert(author);
             }
-            if !epochs.contains_key(&header.extensions.generation) {
-                let slot = (scope, header.extensions.generation);
-                let records = inner.escrow_of(&[slot].into(), None).await?;
-                let Some(record) = records
-                    .iter()
-                    .find(|record| inner.judge_escrow(record, time).is_ok())
-                else {
-                    return Ok(None);
-                };
-                epochs.insert(slot.1, record.record().tag());
-            }
             let held = header
                 .seq_num
                 .checked_add(1)
                 .filter(|held| *held <= i64::MAX as u64)
                 .ok_or_else(|| denied("custody frame frontier sequence overflow"))?;
             logs.insert(author, (held, header.hash()));
-            if logs.len() > MAX_CHECKPOINT_LOGS || epochs.len() > MAX_SECURE_RECORDS {
+            if logs.len() > MAX_CHECKPOINT_LOGS {
                 return Ok(None);
             }
         }
@@ -435,7 +387,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .map(|(author, (held, hash))| (author, held, hash))
             .collect();
         let body = Coverage {
-            version: 1,
+            version: 2,
             descriptor: inner.config.manifest.descriptor(),
             scope,
             tip: inner.workspace.tip,
@@ -445,7 +397,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             challenge,
             chain: inner.config.credentials.clone(),
             logs,
-            epochs,
             checkpoint,
         };
         if encode(&body)?.len() > SECURE_MESSAGE_BYTES / 2 {
@@ -454,7 +405,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let signature = inner
             .config
             .node
-            .sign(&signing_bytes("rocky.custody-receipt.v2", &body)?);
+            .sign(&signing_bytes("rocky.custody-receipt.v3", &body)?);
         Ok(Some(CustodyReceipt { body, signature }))
     }
     pub(crate) async fn record_custody_receipt(
@@ -476,36 +427,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("custody receipt outside challenge"));
         }
         inner.check_receipt(&receipt)?;
-        let mut required = inner
-            .conn
-            .query(
-                "SELECT header FROM secure_operations WHERE scope=?",
-                [encode(&scope)?],
-            )
-            .await?;
-        while let Some(row) = required.next().await? {
-            let header: p2panda_core::Header<Extensions> = decode(&row.get::<Vec<u8>>(0)?)?;
-            if receipt.covers(header.public_key, header.seq_num)
-                && !body.epochs.contains_key(&header.extensions.generation)
-                && body.checkpoint.as_ref().is_none_or(|signed| {
-                    !signed.statement.frontier.iter().any(|log| {
-                        log.author == header.public_key && log.sequence >= header.seq_num
-                    })
-                })
-            {
-                return Err(denied("custody receipt lacks epoch escrow"));
-            }
-        }
-        drop(required);
-        let time = now()?;
-        for (epoch, tag) in &body.epochs {
-            let records = inner.escrow_of(&[(scope, *epoch)].into(), None).await?;
-            if !records.iter().any(|record| {
-                record.record().tag() == *tag && inner.judge_escrow(record, time).is_ok()
-            }) {
-                return Err(denied("custody receipt escrow mismatch"));
-            }
-        }
         if !inner
             .partition_custody(scope)
             .await?

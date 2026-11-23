@@ -122,37 +122,6 @@ async fn authority_change_during_flush_leaves_held_listing_current() {
     assert!(listing.await.unwrap().is_empty());
 }
 
-#[cfg(not(target_family = "wasm"))]
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn authority_change_during_flush_leaves_backup_current() {
-    let t = Typed::new();
-    let dir = Scratch::new().await;
-    let replica = t
-        .open(
-            &dir.path().join("authority.db"),
-            &PrivateKey::new(),
-            t.full(),
-            &[t.items],
-        )
-        .await;
-    let sql = buffered(&replica, t.items).await;
-    insert(&sql, "INSERT INTO items VALUES('a','first',0)", vec![])
-        .await
-        .unwrap();
-    let (entered, resume) = replica.pause_flush().await;
-    let target = dir.path().join("backup.db");
-    let backup = replica.backup_into(&target);
-    tokio::pin!(backup);
-    tokio::select! {
-        result = &mut backup => panic!("backup did not flush: {result:?}"),
-        result = entered => result.unwrap(),
-    }
-    learn_keys_or_credentials_while_the_writer_is_released(&replica).await;
-    resume.send(()).unwrap();
-    backup.await.unwrap();
-    assert!(rocky_platform::fs::exists(&target));
-}
-
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn flushed_commit_defers_maintenance_until_driver_runs() {
     let t = Typed::new();

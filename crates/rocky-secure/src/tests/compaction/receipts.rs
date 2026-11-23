@@ -14,49 +14,6 @@ async fn records(replica: &Replica, sql: &str) -> Vec<Vec<SqlValue>> {
     .unwrap()
 }
 
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_revoked_fresh_restore_config_does_not_rebind_the_backup() {
-    let lineage = Lineage::pinned(249);
-    let dir = Scratch::new().await;
-    let keys = [250, 251, 252].map(|seed| PrivateKey::from_bytes(&[seed; 32]));
-    let source = open(&lineage, &dir, "source", &keys[0]).await;
-    insert(&source, "one", "before backup").await;
-    let path = dir.path().join("restored.db");
-    source.backup_into(&path).await.unwrap();
-    let mut rejected = lineage.config(3, &keys[1]);
-    rejected.revocations = crate::tests::revoking(
-        lineage.publisher(),
-        lineage.domain.app,
-        &[keys[1].public_key()],
-        &[],
-    );
-    let result =
-        EncryptedReplica::open_restored(&path, lineage.app(3), rejected, keys[0].public_key())
-            .await;
-    let error = match result {
-        Ok(_) => panic!("revoked fresh identity cannot adopt a backup"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("revoked"), "{error}");
-    let restored = EncryptedReplica::open_restored(
-        &path,
-        lineage.app(3),
-        lineage.config(3, &keys[2]),
-        keys[0].public_key(),
-    )
-    .await
-    .expect("a different qualified fresh node can still adopt the untouched identity");
-    assert_eq!(
-        restored.predecessors().await.unwrap(),
-        vec![keys[0].public_key()]
-    );
-    assert_eq!(
-        titles(&restored).await,
-        vec![vec![text("one"), text("before backup")]]
-    );
-    restored.audit(lineage.scope("items")).await.unwrap();
-}
-
 fn logical_size(value: &SqlValue) -> usize {
     match value {
         SqlValue::Integer(_) | SqlValue::Real(_) => 8,

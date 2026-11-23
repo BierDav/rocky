@@ -56,7 +56,6 @@ fn statement(issuer: &PrivateKey, time: u64, node: PublicKey) -> Revocation {
         capabilities: [[time as u8; 32]].into(),
         cut: Default::default(),
         mode: crate::RevocationMode::Lost,
-        recovery: None,
     }
 }
 fn single(signed: &SignedRevocation) -> RevocationSet {
@@ -169,28 +168,6 @@ fn the_mode_is_required_signed_and_only_the_root_may_cascade() {
     compromised
         .verify_historic(publisher.public_key(), APP)
         .unwrap();
-
-    let recovery = Revocation {
-        recovery: Some(RootDecision::Grants(RootRecovery {
-            since: NOW,
-            keep: target,
-        })),
-        ..body
-    };
-    assert!(
-        SignedRevocation::sign(recovery.clone(), &publisher, &CredentialChain::default()).is_err()
-    );
-    SignedRevocation::sign(
-        Revocation {
-            mode: RevocationMode::Compromised,
-            ..recovery
-        },
-        &publisher,
-        &CredentialChain::default(),
-    )
-    .unwrap()
-    .verify_historic(publisher.public_key(), APP)
-    .unwrap();
 
     let issuing = issuer(&publisher);
     let mut body = statement(&issuing.0, NOW, target);
@@ -612,21 +589,6 @@ fn no_statement_revokes_the_publisher_or_recovers_to_it() {
         signed(statement(&issuer.0, NOW, anchor), &issuer)
             .verify_historic(anchor, APP)
             .is_err()
-    );
-    let recovery = |keep: PublicKey| Revocation {
-        identities: BTreeSet::new(),
-        capabilities: BTreeSet::new(),
-        mode: RevocationMode::Compromised,
-        recovery: Some(RootDecision::Grants(RootRecovery { since: NOW, keep })),
-        ..statement(&publisher, NOW, anchor)
-    };
-    by_root(recovery(PrivateKey::new().public_key()))
-        .unwrap()
-        .verify_historic(anchor, APP)
-        .unwrap();
-    assert!(
-        !by_root(recovery(anchor)).is_ok_and(|signed| signed.verify_historic(anchor, APP).is_ok()),
-        "a recovery keeps a trusted identity, never the publisher"
     );
 }
 

@@ -17,7 +17,6 @@ mod mesh;
 mod partition;
 mod recovery;
 mod registry;
-mod reset;
 mod schema_publication;
 mod schemas;
 mod shared;
@@ -258,7 +257,6 @@ pub(crate) struct Node {
     sync_status: watch::Sender<SyncStatus>,
     link_revision: AtomicU64,
     pub(crate) activity: crate::activity::Activity,
-    backups: Mutex<()>,
     reached: std::sync::Mutex<BTreeMap<PublicKey, Reached>>,
     met: std::sync::Mutex<BTreeMap<PublicKey, u64>>,
     link_requests: std::sync::Mutex<BTreeMap<PublicKey, crate::self_enrollment::PendingLink>>,
@@ -390,7 +388,6 @@ impl Node {
             link_revision: AtomicU64::new(0),
             sync_status: watch::channel(SyncStatus::new(SyncState::Idle)).0,
             activity: crate::activity::Activity::new(),
-            backups: Mutex::new(()),
             reached: std::sync::Mutex::new(BTreeMap::new()),
             met: std::sync::Mutex::new(BTreeMap::new()),
             clocks: std::sync::Mutex::new(BTreeMap::new()),
@@ -1104,69 +1101,6 @@ impl Node {
             }
         }
     }
-    async fn backup(&self, target: &std::path::Path) -> Result<crate::BackupInventory, Failure> {
-        let _backup = self.backups.lock().await;
-        if rocky_platform::fs::exists(target) {
-            return Err(refused("the backup target exists"));
-        }
-        let directory = self
-            .path
-            .parent()
-            .ok_or("the identity has no data directory")?
-            .to_path_buf();
-        let staging = directory.join(format!(
-            "backup-{}",
-            HEXLOWER.encode(
-                &commitment(
-                    "rocky.sdk.backup-staging.v1",
-                    target.as_os_str().as_encoded_bytes()
-                )[..8]
-            )
-        ));
-        let _ = rocky_platform::fs::remove_dir_all(&staging);
-        rocky_platform::fs::create_dir_all(&staging)?;
-        let result = async {
-            let settings = self.settings.lock().await;
-            let database = staging.join("rocky.sqlite");
-            let revision = self.replica.backup_into(&database).await?;
-            let settings = settings.clone();
-            let identity = staging.join("identity.json");
-            rocky_platform::fs::write(&identity, serde_json::to_vec(&*settings)?)?;
-            let staged = vec![("identity.json", identity), ("rocky.sqlite", database)];
-            let node = PrivateKey::from_bytes(&self.vault.get("node")?);
-            let scope = self.domain().scope;
-            let target = target.to_path_buf();
-            let inventory = rocky_platform::task::spawn_blocking(move || {
-                crate::backup::write(&target, &staged, &settings, scope, revision, &node, now()?)
-            })
-            .await??;
-            Ok::<_, Failure>(inventory)
-        }
-        .await;
-        let _ = rocky_platform::fs::remove_dir_all(&staging);
-        result
-    }
-    pub(crate) async fn export_backup(&self) -> Result<Vec<u8>, Failure> {
-        let directory = self
-            .path
-            .parent()
-            .ok_or("the identity has no data directory")?;
-        let target = directory.join(format!(
-            "export-{}.backup",
-            HEXLOWER.encode(&crate::enrollment::random::<8>())
-        ));
-        let exported = async {
-            self.backup(&target).await?;
-            Ok(rocky_platform::fs::read(&target)?)
-        }
-        .await;
-        for leftover in [&target, &target.with_extension("partial")] {
-            if rocky_platform::fs::exists(leftover) {
-                rocky_platform::fs::remove_file(leftover)?;
-            }
-        }
-        exported
-    }
     async fn domain_info(&self) -> Result<crate::DomainInfo, Failure> {
         let settings = self.settings.lock().await;
         Ok(crate::DomainInfo {
@@ -1217,12 +1151,7 @@ impl Node {
     ) -> Result<(), Failure> {
         let node = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
         let statement = &signed.statement;
-        if statement.reset().is_some() && signed.root() {
-            self.activity.record(crate::ActivityKind::NodeReset {
-                node,
-                reset: signed.id()?,
-            });
-        } else if !statement.identities.contains(&identity)
+        if !statement.identities.contains(&identity)
             && statement
                 .nodes
                 .contains(&rocky_credentials::PeerId::of(node))
@@ -1235,91 +1164,6 @@ impl Node {
             self.activity.record(crate::ActivityKind::IdentityRevoked {
                 identity: (identity).to_owned(),
             });
-        }
-        Ok(())
-    }
-    pub(crate) async fn revoke_lost(
-        &self,
-        root: Arc<dyn rocky_credentials::IdentityProvider>,
-        archived: &Settings,
-    ) -> Result<Vec<PublicKey>, Failure> {
-        let root = Root::held(root);
-        let registry = self.registry(&*self.settings_snapshot().await).await?;
-        let own = self.settings.lock().await.identity;
-        let lost: Vec<PublicKey> = registry
-            .trusted
-            .keys()
-            .copied()
-            .filter(|identity| {
-                *identity != own
-                    && !archived.revocations.revokes_trusted(identity)
-                    && !archived.tombstoned(identity)
-            })
-            .collect();
-        for identity in &lost {
-            let revoked_with_cut = {
-                let settings = self.settings.lock().await;
-                settings.revocations.revokes_trusted(identity) || settings.tombstoned(identity)
-            };
-            if revoked_with_cut {
-                continue;
-            }
-            let target = crate::enrollment::Revoke::TrustedIdentity(
-                *identity,
-                rocky_credentials::RevocationMode::Compromised,
-            );
-            self.revoke_with(target, &root, true)
-                .await
-                .map_err(|error| format!("revoking lost trusted identity {identity}: {error}"))?;
-            self.activity.record(crate::ActivityKind::IdentityRevoked {
-                identity: (identity).to_owned(),
-            });
-        }
-        if let Some(directory) = self.path.parent() {
-            crate::recovery::fault::check(directory, crate::recovery::fault::Stage::Named)?;
-        }
-        self.revoke_before_recovery(&root).await?;
-        Ok(lost)
-    }
-    async fn revoke_before_recovery(&self, root: &Root) -> Result<(), Failure> {
-        let graph = self.replica.tip_graph(self.domain().scope).await?;
-        let mut settings = self.settings.lock().await;
-        let mut cut = Vec::new();
-        for identity in graph.chain_identities().map_err(refused)? {
-            if identity == settings.identity || settings.revocations.revokes_trusted(&identity) {
-                continue;
-            }
-            let lanes = graph
-                .lanes_of(&identity)
-                .map_err(refused)?
-                .into_iter()
-                .filter(|lane| !settings.revocations.ends_node_of(identity, *lane, true))
-                .collect();
-            let (kept, dropped) = graph.proposed_cut(&identity, &lanes).map_err(refused)?;
-            if !dropped.is_empty() {
-                self.activity
-                    .record(crate::ActivityKind::RevocationCutDroppedStages {
-                        identity: Some(identity),
-                        count: dropped.len(),
-                        heads: Vec::new(),
-                    });
-            }
-            cut.extend(kept);
-        }
-        let mut draft = settings.clone();
-        if !draft.revoke_before_recovery(root.signer(), cut)? {
-            return Ok(());
-        }
-        settings.commit(draft, &self.replica).await?;
-        self.apply(&mut settings, Vec::new()).await?;
-        drop(settings);
-
-        if let Err(error) = self.push_revocations().await {
-            self.activity
-                .record(crate::ActivityKind::RevocationsUnpushed {
-                    error: (error.to_string()).to_owned(),
-                    retry: None,
-                });
         }
         Ok(())
     }
@@ -1470,7 +1314,7 @@ impl Node {
                 .install_key_epoch(KeyMaterial::at(scope, generation, key))
                 .await?;
         }
-        crate::escrow::keep(&self.replica, settings, &self.vault, &self.domain()).await
+        Ok(())
     }
     async fn renew(
         &self,
@@ -2429,11 +2273,8 @@ impl Node {
     async fn answer_peer(&self, request: PeerRequest) -> Result<PeerReply, Failure> {
         let is_enrollment = matches!(
             request,
-            PeerRequest::Renew(_)
-                | PeerRequest::Epochs(_)
-                | PeerRequest::Policy
-                | PeerRequest::Identity(IdentityEnrollment::Invited(_))
-        );
+            PeerRequest::Renew(_) | PeerRequest::Epochs(_) | PeerRequest::Policy
+        ) || matches!(&request, PeerRequest::Identity(enrollment) if enrollment.invited());
         if is_enrollment && let Some(reply) = self.forward_enrollment(&request).await? {
             return Ok(reply);
         }
@@ -2498,15 +2339,17 @@ impl Node {
                 }
                 Ok(PeerReply::Policy(known))
             }
-            PeerRequest::Identity(IdentityEnrollment::Shared(request)) => {
-                let mut settings = self.settings.lock().await.clone();
-                settings.bootstrap = Some(self.enrollment_bootstrap().await?);
-                settings.learn_revocations(&self.replica.revocations().await)?;
-                Ok(PeerReply::Identity(self.answer_link(&settings, request)?))
-            }
-            PeerRequest::Identity(IdentityEnrollment::Invited(request)) => Ok(PeerReply::Identity(
-                Box::pin(self.answer_invitation(request)).await?,
-            )),
+            PeerRequest::Identity(enrollment) => match *enrollment {
+                IdentityEnrollment::Shared(request) => {
+                    let mut settings = self.settings.lock().await.clone();
+                    settings.bootstrap = Some(self.enrollment_bootstrap().await?);
+                    settings.learn_revocations(&self.replica.revocations().await)?;
+                    Ok(PeerReply::Identity(self.answer_link(&settings, request)?))
+                }
+                IdentityEnrollment::Invited(request) => Ok(PeerReply::Identity(
+                    Box::pin(self.answer_invitation(request)).await?,
+                )),
+            },
             PeerRequest::LinkEnroll(certificate) => {
                 Ok(PeerReply::LinkEnroll(self.accept_link(*certificate).await?))
             }
@@ -2569,7 +2412,9 @@ impl Node {
             .enrollment_upstream
             .ok_or_else(|| refused("enrollment upstream could not be resolved"))?;
         let (target, peer) = match request {
-            PeerRequest::Identity(IdentityEnrollment::Invited(invited)) => {
+            PeerRequest::Identity(enrollment)
+                if let IdentityEnrollment::Invited(invited) = &**enrollment =>
+            {
                 let issuer = invited.request.audience();
                 if !settings.issuers.contains(&issuer) {
                     return Err(refused(
@@ -2635,9 +2480,6 @@ pub(crate) struct Root(Option<crate::identities::Loan>);
 impl Root {
     pub(crate) fn lent(loan: Option<crate::identities::Loan>) -> Self {
         Self(loan)
-    }
-    pub(crate) fn held(provider: Arc<dyn rocky_credentials::IdentityProvider>) -> Self {
-        Self(Some(crate::identities::Loan::untracked(provider)))
     }
     pub(crate) fn signer(&self) -> Option<&dyn rocky_credentials::IdentityProvider> {
         self.0.as_ref().and_then(crate::identities::Loan::signer)
@@ -2705,8 +2547,6 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
         (crate::ErrorKind::RevocationSetFull, false)
     } else if error.is::<Refused>() {
         (crate::ErrorKind::Rejected, false)
-    } else if let Some(reset) = error.downcast_ref::<crate::ResetRefused>() {
-        (crate::ErrorKind::Reset(reset.code().to_owned()), false)
     } else if let Some(refusal) = replica_refusal(error) {
         (crate::ErrorKind::from_refusal(refusal), refusal.retryable())
     } else if let Some(coordination) = error.downcast_ref::<rocky_core::CoordinationError>() {

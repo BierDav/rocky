@@ -739,7 +739,8 @@ impl<A: RowApplication> Inner<A> {
                 if !self.visible_in_workspace(operation)?
                     || !self.offered(&operation.header).await?
                     || self
-                        .header_revocations(&operation.header)
+                        .config
+                        .revocations
                         .revoking(frame.chain()?.credentials())
                         .map_err(credential)?
                         .is_some()

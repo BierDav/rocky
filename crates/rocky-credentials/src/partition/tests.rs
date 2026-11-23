@@ -69,7 +69,6 @@ fn revoking(publisher: &PrivateKey, key: PublicKey) -> RevocationSet {
         capabilities: BTreeSet::new(),
         cut: Default::default(),
         mode: crate::RevocationMode::Lost,
-        recovery: None,
     };
     RevocationSet::try_from(vec![
         SignedRevocation::sign(statement, publisher, &CredentialChain::default()).unwrap(),

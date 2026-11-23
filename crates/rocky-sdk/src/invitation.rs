@@ -522,17 +522,16 @@ impl Settings {
         let node = PrivateKey::from_bytes(&vault.get("node")?);
         let (request, secret) =
             IdentityRequest::sign(&*provider, &node, invite.issuer, now()?, invite.database)?;
-        let reply =
-            exchange(
-                transport,
-                &addresses,
-                invite.database.scope,
-                &PeerRequest::Identity(IdentityEnrollment::Invited(
-                    InvitedEnrollmentRequest::sign(request.clone(), invite.id.0, &node)?,
-                )),
-            )
-            .await
-            .map_err(InvitationRefusal::carried)?;
+        let reply = exchange(
+            transport,
+            &addresses,
+            invite.database.scope,
+            &PeerRequest::Identity(Box::new(IdentityEnrollment::Invited(
+                InvitedEnrollmentRequest::sign(request.clone(), invite.id.0, &node)?,
+            ))),
+        )
+        .await
+        .map_err(InvitationRefusal::carried)?;
         let PeerReply::Identity(IdentityReply::Enrolled(sealed)) = reply else {
             return Err("invitation reply kind".into());
         };

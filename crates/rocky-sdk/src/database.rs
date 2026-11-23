@@ -19,6 +19,7 @@ use std::{
 };
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 
+mod fault;
 mod residence;
 
 pub struct Open<'a> {
@@ -39,7 +40,6 @@ pub struct Opened {
     pub network: Option<NetworkService>,
     pub root: Option<crate::RootKey>,
     pub identity: Option<String>,
-    pub revoked: Vec<rocky_credentials::PublicKey>,
 }
 
 #[cfg_attr(
@@ -66,26 +66,8 @@ pub(crate) enum Install {
         invitation: String,
     },
     Installed,
-    Restore {
-        archive: PathBuf,
-        invitation: String,
-    },
-    Recover {
-        archive: PathBuf,
-        root: std::sync::Mutex<Option<Box<crate::RootKey>>>,
-        archived: std::sync::Mutex<Option<Box<Settings>>>,
-    },
 }
 impl Install {
-    fn resumes_interrupted(&self, directory: &Path) -> Result<bool, Failure> {
-        Ok(match self {
-            Self::Restore { .. } => {
-                rocky_platform::fs::exists(directory.join(crate::backup::MARKER))
-            }
-            Self::Recover { .. } => crate::recovery::unfinished(directory)?.is_some(),
-            _ => false,
-        })
-    }
     fn bootstraps_from_checkpoint(&self) -> bool {
         matches!(
             self,
@@ -138,7 +120,6 @@ enum Command {
         std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
     ),
     End(u64, oneshot::Sender<()>),
-    Export(oneshot::Sender<Result<Vec<u8>, Failure>>),
     Attach(Network, oneshot::Sender<Result<u64, Failure>>),
     Detach(u64, oneshot::Sender<()>),
     Close(oneshot::Sender<Result<(), String>>),
@@ -203,11 +184,7 @@ enum Command {
     ),
 }
 type Greeting = Result<Ready, Failure>;
-type Ready = (
-    rocky_core::Scope,
-    Option<u64>,
-    Vec<rocky_credentials::PublicKey>,
-);
+type Ready = (rocky_core::Scope, Option<u64>);
 enum Hello {
     #[cfg(not(target_family = "wasm"))]
     Thread(std::sync::mpsc::SyncSender<Greeting>),
@@ -390,17 +367,6 @@ impl Database {
     pub fn open_confirmed(open: Open<'_>, digest: &str) -> Result<Opened, Failure> {
         Self::start_confirmed(open, Install::Installed, Some(digest.into()))
     }
-    pub fn restore(open: Open<'_>, archive: &Path, invitation: &str) -> Result<Opened, Failure> {
-        let install = Self::restore_install(&open, archive, invitation)?;
-        Self::start(open, install)
-    }
-    pub fn recover(
-        open: Open<'_>,
-        archive: &Path,
-        root: &crate::RootKey,
-    ) -> Result<Opened, Failure> {
-        Self::start(open, Self::recover_install(archive, root))
-    }
     fn start(open: Open<'_>, install: Install) -> Result<Opened, Failure> {
         Self::start_confirmed(open, install, None)
     }
@@ -475,52 +441,6 @@ impl Database {
         let secrets =
             secrets.unwrap_or_else(|| Arc::new(FileSecretStore::new(directory.join("secrets"))));
         Settings::prepare_install(&path, &secrets, identity)
-    }
-    pub(crate) async fn launch_restore(
-        open: Open<'_>,
-        archive: &Path,
-        invitation: &str,
-    ) -> Result<Opened, Failure> {
-        let install = Self::restore_install(&open, archive, invitation)?;
-        Self::launch(open, install, None).await
-    }
-    fn restore_install(
-        open: &Open<'_>,
-        archive: &Path,
-        invitation: &str,
-    ) -> Result<Install, Failure> {
-        if open.network.is_none() {
-            return Err(ServiceError::NetworkRequired("restore").into());
-        }
-        Ok(Install::Restore {
-            archive: archive.to_path_buf(),
-            invitation: invitation.into(),
-        })
-    }
-    pub(crate) async fn launch_recover(
-        open: Open<'_>,
-        archive: &Path,
-        root: &crate::RootKey,
-    ) -> Result<Opened, Failure> {
-        Self::launch(open, Self::recover_install(archive, root), None).await
-    }
-    fn recover_install(archive: &Path, root: &crate::RootKey) -> Install {
-        Install::Recover {
-            archive: archive.to_path_buf(),
-            root: std::sync::Mutex::new(Some(Box::new(crate::RootKey::from_secret(root.secret())))),
-            archived: std::sync::Mutex::new(None),
-        }
-    }
-    pub async fn backup(&self, target: &Path) -> Result<crate::BackupInventory, Failure> {
-        let session = self.session();
-        let result = session
-            .send(|reply| crate::request::Request::Backup(target.to_path_buf(), reply))
-            .await;
-        session.close().await;
-        result
-    }
-    pub async fn export_backup(&self) -> Result<Vec<u8>, Failure> {
-        self.shared.request(Command::Export).await?
     }
     async fn launch(
         open: Open<'_>,
@@ -684,7 +604,7 @@ impl Database {
             },
         ))
     }
-    fn opened((scope, network, revoked): Ready, senders: Senders, worker: Worker) -> Opened {
+    fn opened((scope, network): Ready, senders: Senders, worker: Worker) -> Opened {
         let shared = Arc::new(Shared {
             input: senders.input,
             cleanup: senders.cleanup,
@@ -696,7 +616,6 @@ impl Database {
         Opened {
             root: None,
             identity: None,
-            revoked,
             network: network.map(|id| NetworkService::new(&shared, id)),
             database: Arc::new(Self {
                 shared,
@@ -1269,19 +1188,6 @@ impl Session {
         self.revoke_identity_with_root(identity, mode, Some(root), true)
             .await
     }
-    pub async fn sign_out_everywhere_else(
-        &self,
-        root: Arc<dyn crate::IdentityProvider>,
-        keep: crate::ResetKeep,
-    ) -> Result<crate::ResetReceipt, Failure> {
-        self.send_rooted(Some(root), |root, reply| {
-            crate::request::Request::SignOutEverywhereElse(root, keep, reply)
-        })
-        .await
-    }
-    pub async fn freshness(&self) -> Result<crate::Freshness, Failure> {
-        self.send(crate::request::Request::Freshness).await
-    }
     pub async fn revoke_identity(
         &self,
         identity: rocky_credentials::PublicKey,
@@ -1397,33 +1303,17 @@ async fn identity(
     network: Option<Network>,
 ) -> Result<(Settings, Option<Link>), Failure> {
     let Setup {
-        directory,
         schema,
         secrets,
         install,
         ..
     } = setup;
     let exists = Settings::exists(path)?;
-    let resuming = install.resumes_interrupted(directory)?;
-    if exists && !matches!(install, Install::Installed) && !resuming {
+    if exists && !matches!(install, Install::Installed) {
         return Err("a domain exists in this directory: open it instead".into());
     }
     if !exists && matches!(install, Install::Installed) {
         return Err("no domain in this directory: create or join one".into());
-    }
-    if exists && !resuming && rocky_platform::fs::exists(directory.join(crate::backup::MARKER)) {
-        let conn = rocky_storage::sqlite::Connection::open_read_only(path)?;
-        let placed = !conn
-            .rows(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'secure_metadata'",
-                (),
-            )?
-            .is_empty();
-        if !placed {
-            return Err(
-                "a restore is unfinished in this directory: restore again with its backup".into(),
-            );
-        }
     }
     match install {
         Install::Create { ttl, root, .. } => {
@@ -1572,44 +1462,6 @@ async fn identity(
             let key = Settings::route_secret(&settings.vault(secrets))?;
             Ok((settings, Some(network.start(false, key).await?)))
         }
-        Install::Restore {
-            archive,
-            invitation,
-        } => {
-            let network = network.ok_or(ServiceError::NetworkRequired("restore"))?;
-            restore(
-                path, directory, secrets, schema, archive, invitation, network,
-            )
-            .await
-        }
-        Install::Recover {
-            archive,
-            root,
-            archived,
-        } => {
-            let root = root
-                .lock()
-                .map_err(|_| "root poisoned")?
-                .as_deref()
-                .map(|root| crate::RootKey::from_secret(root.secret()))
-                .ok_or(crate::enrollment::PublisherRequired("recovering a domain"))?;
-            let (settings, record) = crate::recovery::recover(
-                path,
-                directory,
-                secrets,
-                archive,
-                &root,
-                setup.identity.clone(),
-            )
-            .await?;
-            drop(root);
-            *archived.lock().map_err(|_| "archive poisoned")? = Some(Box::new(record));
-            let Some(network) = network else {
-                return Ok((settings, None));
-            };
-            let key = Settings::route_secret(&settings.vault(secrets))?;
-            Ok((settings, Some(network.start(true, key).await?)))
-        }
         Install::Installed => {
             let mut settings = Settings::load(path)?;
             if settings.logged_out {
@@ -1654,7 +1506,6 @@ pub(crate) async fn attach(
             &vault.get("node")?,
         ))
         .await?;
-    crate::escrow::keep(replica, settings, vault, domain).await?;
     Ok(recovered)
 }
 
@@ -1793,87 +1644,6 @@ pub(crate) async fn insert_rows(
     }
     Ok(())
 }
-async fn restore(
-    path: &Path,
-    directory: &Path,
-    secrets: &Arc<dyn SecretStore>,
-    schema: &Schema,
-    archive: &Path,
-    invitation: &str,
-    network: Network,
-) -> Result<(Settings, Option<Link>), Failure> {
-    use crate::backup::{MARKER, Marker};
-    let staging = directory.join("restore");
-    let opened = crate::backup::open(archive, &staging)?;
-    let marker = directory.join(MARKER);
-    if rocky_platform::fs::exists(&marker) {
-        let saved: Marker = serde_json::from_slice(&rocky_platform::fs::read(&marker)?)?;
-        if saved.recovery.is_some() {
-            return Err("a recovery is unfinished in this directory".into());
-        }
-        if saved.archive != opened.id {
-            return Err("another restore is unfinished in this directory".into());
-        }
-    } else {
-        if Settings::provision_publisher(invitation)? != opened.inventory.publisher {
-            return Err("the provisioning bundle is for another domain than the backup".into());
-        }
-        crate::secrets::write_private(
-            &marker,
-            &serde_json::to_vec(&Marker {
-                predecessor: opened.inventory.node,
-                archive: opened.id.clone(),
-                recovery: None,
-            })?,
-        )?;
-    }
-    let (settings, link) = if Settings::exists(path)? {
-        let settings = Settings::load(path)?;
-        let vault = settings.vault(secrets);
-        let key = Settings::route_secret(&vault)?;
-        let link = network.start(settings.issuer(), key).await?;
-        (settings, link)
-    } else {
-        let (mut settings, vault, _) =
-            Settings::install_provisioned(secrets, schema, invitation, true).await?;
-        let prepared = async {
-            let node = rocky_secure::PrivateKey::from_bytes(&vault.get("node")?);
-            settings.learn_contacts(
-                &opened.identity,
-                &[node.public_key(), opened.inventory.node],
-            );
-            settings.save(path).await?;
-            Ok::<_, Failure>(())
-        }
-        .await;
-        if let Err(error) = prepared {
-            let _ = vault.forget(settings.roles());
-            return Err(error);
-        }
-        let key = Settings::route_secret(&vault)?;
-        let link = network.start(settings.issuer(), key).await?;
-        (settings, link)
-    };
-    let placed = async {
-        if (settings.mesh, settings.domain) != (opened.identity.mesh, opened.identity.domain) {
-            return Err("the enrolled domain differs from the backup's".into());
-        }
-        crate::recovery::fault::check(directory, crate::recovery::fault::Stage::Enrolled)?;
-        crate::backup::place(&opened, directory)?;
-        settings.save(path).await?;
-        rocky_platform::fs::remove_dir_all(&staging)?;
-        Ok::<_, Failure>(())
-    }
-    .await;
-    if let Err(error) = placed {
-        if link.1 {
-            link.0.close().await;
-        }
-        return Err(error);
-    }
-    Ok((settings, Some(link)))
-}
-
 async fn confirm_removals(setup: &Setup, directory: &Path, path: &Path) -> Result<(), Failure> {
     let settings = Settings::load(path)?;
     let has_tip_schema = rocky_secure::installed_tip_schema(
@@ -1935,14 +1705,6 @@ async fn adopt_committed_pending_schema(
     Ok(())
 }
 
-fn unfinished_restore(marker: &Path) -> Result<Option<crate::backup::Marker>, Failure> {
-    if !rocky_platform::fs::exists(marker) {
-        return Ok(None);
-    }
-    let saved: crate::backup::Marker = serde_json::from_slice(&rocky_platform::fs::read(marker)?)?;
-    Ok((saved.recovery != Some(crate::backup::Recovery::Keyed)).then_some(saved))
-}
-
 async fn drain_migration_work(
     replica: &EncryptedReplica<rocky_core::TypedRows>,
     scope: rocky_core::Scope,
@@ -1951,36 +1713,6 @@ async fn drain_migration_work(
     replica.maintain().await;
     replica.finalize_path(scope).await?;
     Ok(())
-}
-
-async fn revoke_lost_trusted(
-    node: &Node,
-    root: &std::sync::Mutex<Option<Box<crate::RootKey>>>,
-    archived: &std::sync::Mutex<Option<Box<Settings>>>,
-    directory: &Path,
-) -> Result<Vec<rocky_credentials::PublicKey>, Failure> {
-    let archived = archived
-        .lock()
-        .map_err(|_| "archive poisoned")?
-        .take()
-        .ok_or("the recovered archive was not opened")?;
-    let root: Arc<crate::RootKey> = root
-        .lock()
-        .map_err(|_| "root poisoned")?
-        .take()
-        .ok_or(crate::enrollment::PublisherRequired("recovering a domain"))?
-        .into();
-    let unfinished = |error: Failure| -> Failure {
-        format!("recovered, but {error}; recover again with its backup and the root").into()
-    };
-    crate::recovery::fault::check(directory, crate::recovery::fault::Stage::Revoking)
-        .map_err(unfinished)?;
-    let revoked = node
-        .revoke_lost(root, &archived)
-        .await
-        .map_err(unfinished)?;
-    rocky_platform::fs::remove_file(directory.join(crate::backup::MARKER))?;
-    Ok(revoked)
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -2045,9 +1777,6 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
     if setup.install.bootstraps_from_checkpoint() && !Settings::exists(&path)? {
         bootstrap_intent.request_checkpoint_import().await?;
     }
-    if !matches!(setup.install, Install::Recover { .. }) {
-        crate::recovery::refuse_unfinished(&directory)?;
-    }
     if matches!(setup.install, Install::Installed) {
         confirm_removals(&setup, &directory, &path).await?;
     }
@@ -2091,25 +1820,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         }
         adopt_committed_pending_schema(&mut settings, &vault, &directory, &path).await?;
         let domain = settings.domain()?;
-        let marker = directory.join(crate::backup::MARKER);
-        let restored = unfinished_restore(&marker)?;
-        let mut keys_awaiting_tables = Vec::new();
-        let replica = if let Some(restored) = &restored {
-            let mut config = settings.config(&vault, &domain)?;
-            let store_may_lack_frames = restored.recovery.is_some();
-            if store_may_lack_frames {
-                keys_awaiting_tables = std::mem::take(&mut config.keys);
-            }
-            let replica = EncryptedReplica::open_restored(
-                directory.join("rocky.sqlite"),
-                domain.app.clone(),
-                config.with_table_scopes(domain.scopes().map(|(_, scope)| scope).collect()),
-                restored.predecessor,
-            )
-            .await?;
-            crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Rebound)?;
-            replica
-        } else if let Some(bootstrap) = &settings.bootstrap {
+        let replica = if let Some(bootstrap) = &settings.bootstrap {
             bootstrap.verify(&settings)?;
             EncryptedReplica::open_following(
                 directory.join("rocky.sqlite"),
@@ -2139,24 +1850,6 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
                     now()?,
                 )
                 .await?;
-        }
-        crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Attached)?;
-        let mut newest_first = keys_awaiting_tables;
-        newest_first.sort_by_key(|key| std::cmp::Reverse(key.generation));
-        for key in newest_first {
-            replica.install_key_epoch(key).await?;
-            crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Keyed)?;
-        }
-        match restored {
-            Some(saved) if saved.recovery.is_some() => crate::recovery::mark(
-                &directory,
-                &crate::backup::Marker {
-                    recovery: Some(crate::backup::Recovery::Keyed),
-                    ..saved
-                },
-            )?,
-            Some(_) => rocky_platform::fs::remove_file(&marker)?,
-            None => {}
         }
         replica
             .record_current_schema(
@@ -2250,10 +1943,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
             .map_err(|_| "created settings poisoned")?
             .take();
         if let Some(signed) = created {
-            crate::recovery::fault::check(
-                &directory,
-                crate::recovery::fault::Stage::SettingsSigned,
-            )?;
+            fault::check(&directory, fault::Stage::SettingsSigned)?;
             node.publish_settings(signed).await?;
         }
         if let Install::Create {
@@ -2264,7 +1954,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
             node.follow_new_bookmark(name).await?;
         }
         drain_migration_work(&replica, node.domain().scope).await?;
-        crate::recovery::fault::check(&directory, crate::recovery::fault::Stage::Started)?;
+        fault::check(&directory, fault::Stage::Started)?;
         if matches!(setup.install, Install::Supplied(_)) {
             rocky_platform::fs::remove_file(crate::enrollment::Intent::path(&path, true))?;
         }
@@ -2285,13 +1975,7 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         Some((transport, owned)) => Some(node.link(transport, owned).await?),
         None => None,
     };
-    let revoked = match &setup.install {
-        Install::Recover { root, archived, .. } => {
-            revoke_lost_trusted(&node, root, archived, &directory).await?
-        }
-        _ => Vec::new(),
-    };
-    if hello.send(Ok((scope, network, revoked))).is_err() {
+    if hello.send(Ok((scope, network))).is_err() {
         let abandoned: Failure = "database opener abandoned".into();
         let created_root_undelivered =
             fresh && matches!(setup.install, Install::Create { .. } | Install::Join { .. });
@@ -2361,11 +2045,6 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
             Command::Attach(network, reply) => {
                 crate::reactor::spawn_in(&mut tasks, "attach", async move {
                     let _ = reply.send(node.attach(network).await);
-                });
-            }
-            Command::Export(reply) => {
-                crate::reactor::spawn_in(&mut tasks, "export_backup", async move {
-                    let _ = reply.send(node.export_backup().await);
                 });
             }
             Command::Detach(id, reply) => {
@@ -2758,13 +2437,10 @@ mod tests {
                 log.client(rocky_credentials::PrivateKey::new().public_key()),
             ))),
         };
-        crate::recovery::fault::STOPS
+        fault::STOPS
             .lock()
             .map_err(|_| "poisoned fault")?
-            .push((
-                directory.path().to_owned(),
-                crate::recovery::fault::Stage::SettingsSigned,
-            ));
+            .push((directory.path().to_owned(), fault::Stage::SettingsSigned));
         let failed = Database::create(options(), None)
             .err()
             .ok_or("the create published no settings yet succeeded")?;
@@ -3066,13 +2742,10 @@ mod tests {
             .collect()
     }
     fn stop_once_started(directory: &Path) -> Result<(), Failure> {
-        crate::recovery::fault::STOPS
+        fault::STOPS
             .lock()
             .map_err(|_| "poisoned")?
-            .push((
-                directory.to_path_buf(),
-                crate::recovery::fault::Stage::Started,
-            ));
+            .push((directory.to_path_buf(), fault::Stage::Started));
         Ok(())
     }
     fn notes() -> Result<crate::Schema, Failure> {

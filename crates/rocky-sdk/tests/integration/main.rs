@@ -2,7 +2,6 @@ mod activity;
 #[cfg(not(target_family = "wasm"))]
 mod application;
 #[cfg(not(target_family = "wasm"))]
-mod backup;
 #[cfg(not(target_family = "wasm"))]
 mod bootstrap;
 #[cfg(not(target_family = "wasm"))]
@@ -49,7 +48,6 @@ mod migrations;
 #[cfg(not(target_family = "wasm"))]
 mod node_writers;
 #[cfg(not(target_family = "wasm"))]
-mod owner_reset;
 #[cfg(not(target_family = "wasm"))]
 mod partitions;
 #[cfg(not(target_family = "wasm"))]
@@ -69,7 +67,6 @@ mod replayed;
 #[cfg(not(target_family = "wasm"))]
 mod revocations;
 #[cfg(not(target_family = "wasm"))]
-mod root_recovery;
 #[cfg(not(target_family = "wasm"))]
 mod service;
 #[cfg(not(target_family = "wasm"))]

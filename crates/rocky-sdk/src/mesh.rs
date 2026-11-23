@@ -523,7 +523,6 @@ mod tests {
             capabilities: BTreeSet::new(),
             cut: Default::default(),
             mode: rocky_credentials::RevocationMode::Lost,
-            recovery: None,
         };
         let signed = SignedRevocation::sign(
             statement.clone(),
@@ -647,7 +646,6 @@ mod tests {
                 capabilities: BTreeSet::new(),
                 cut: Default::default(),
                 mode: rocky_credentials::RevocationMode::Lost,
-                recovery: None,
             })
         }
         fn learn(

@@ -64,7 +64,6 @@ impl Node {
                         capabilities: Default::default(),
                         cut,
                         mode: rocky_credentials::RevocationMode::Lost,
-                        recovery: None,
                     },
                     &*identity,
                     &settings.identity_links().with_certificate(certificate),

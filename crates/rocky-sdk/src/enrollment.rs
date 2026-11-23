@@ -713,14 +713,6 @@ impl Settings {
             crate::RevocationReason::Node
         } else if revoked.identities.contains(&self.identity) {
             crate::RevocationReason::Identity
-        } else if let Some(recovery) = revoked.grants().filter(|_| statement.root()) {
-            crate::RevocationReason::Recovery {
-                recovered: recovery.keep.to_hex(),
-            }
-        } else if revoked.reset().is_some() && statement.root() {
-            crate::RevocationReason::Reset {
-                reset: statement.id()?,
-            }
         } else if let Some(origin) = self.link_origin()?.filter(|origin| {
             statement.root()
                 && revoked.mode == rocky_credentials::RevocationMode::Compromised
@@ -1301,89 +1293,6 @@ impl Settings {
         )?;
         Ok(settings)
     }
-    pub(crate) fn recover(
-        store: &std::sync::Arc<dyn crate::SecretStore>,
-        (archived, predecessor): (&Self, PublicKey),
-        recovered: &crate::escrow::Recovered,
-        provider: Option<Arc<dyn IdentityProvider>>,
-        root: &dyn IdentityProvider,
-    ) -> Result<Self, Failure> {
-        let publisher = root.public_key()?;
-        if publisher != archived.publisher {
-            return Err("the root key is not this domain's root".into());
-        }
-        let installation = HEXLOWER.encode(&random::<16>());
-        let vault = Vault::new(store.clone(), &installation);
-        let (single_use, identity): (bool, Arc<dyn IdentityProvider>) = match provider {
-            Some(provider) => (false, provider),
-            None => (true, Arc::new(crate::IdentityKey::generate())),
-        };
-        if identity.public_key()? == publisher {
-            return Err("a device's identity is never the root key".into());
-        }
-        vault.create("node")?;
-        vault.create("transport")?;
-        match recovered.naming {
-            Some(naming) => vault.put(crate::groups::NAMING_ROLE, &naming)?,
-            None => drop(vault.create(crate::groups::NAMING_ROLE)?),
-        }
-        let bound = archived.domain()?;
-        let mut keys: BTreeMap<String, Vec<rocky_core::KeyEpoch>> = BTreeMap::new();
-        for ((name, epoch), key) in &recovered.readers {
-            vault.put(&key_role(name, *epoch), key)?;
-            keys.entry(name.clone()).or_default().push(*epoch);
-        }
-        for (name, _) in bound.scopes() {
-            if !keys.contains_key(name) {
-                let key = random::<32>();
-                let epoch = rocky_core::KeyEpoch::new(1, &key);
-                vault.put(&key_role(name, epoch), &key)?;
-                keys.insert(name.to_owned(), vec![epoch]);
-            }
-        }
-        for ((address, epoch), secret) in &recovered.secrets {
-            vault.put(&secret_role(address, *epoch), secret)?;
-        }
-        let groups = escrowed_groups(&archived.groups, &recovered.groups)?;
-        let grant = Authority::owner(root).issue_trusted(
-            identity.public_key()?,
-            bound.scope,
-            after_recovery(&archived.revocations, now()? + AFTER_SAME_SECOND_GRANTS),
-        )?;
-        let mut settings = Self::installed(
-            (installation, single_use),
-            (publisher, identity.public_key()?),
-            (archived.mesh, archived.domain, archived.schema.clone()),
-            archived.genesis.clone(),
-            archived.ttl,
-        );
-        settings.generation = archived.generation;
-        settings.engine = archived.engine;
-        settings.pending = archived.pending.clone();
-        settings.pending_follow = archived.pending_follow.clone();
-        settings.learn_revocations(&archived.revocations)?;
-        settings.keys = keys;
-        settings.groups = groups;
-        settings.epoch_statements = archived.epoch_statements.clone();
-        settings.authority = Some(Issuing::default());
-        let links = CredentialChain(vec![grant]);
-        settings.credentials =
-            crate::identities::with_identity(identity, || settings.certify(&vault, links, &bound))?;
-        let node = Settings::node_key(&vault)?;
-        let credentials = settings.credentials.clone();
-        let links = credentials.capabilities();
-        crate::mesh::create_root(
-            &vault,
-            (
-                rocky_credentials::Signer::node(&node, &credentials)?,
-                &links,
-            ),
-            bound.scope,
-        )?;
-        let node = PrivateKey::from_bytes(&vault.get("node")?).public_key();
-        settings.learn_contacts(archived, &[node, predecessor]);
-        Ok(settings)
-    }
     pub(crate) fn installed(
         (installation, single_use): (String, bool),
         (publisher, identity): (PublicKey, PublicKey),
@@ -1463,11 +1372,7 @@ impl Settings {
             )
             .into());
         }
-        let grant = Authority::owner(root).issue_trusted(
-            identity,
-            self.domain()?.scope,
-            after_recovery(&self.revocations, now()?),
-        )?;
+        let grant = Authority::owner(root).issue_trusted(identity, self.domain()?.scope, now()?)?;
         let mut changes = Changes::default();
         changes.trusted(
             &identity,
@@ -1477,62 +1382,6 @@ impl Settings {
             },
         )?;
         Ok((grant, changes))
-    }
-    pub(crate) fn revoke_before_recovery(
-        &mut self,
-        root: Option<&dyn IdentityProvider>,
-        mut cut: Vec<rocky_credentials::Cut>,
-    ) -> Result<bool, Failure> {
-        let root = root_signer(root, self.publisher, "recovering a domain")?;
-        let links = self.identity_links();
-        let grant = &links
-            .0
-            .first()
-            .filter(|_| links.0.len() == 1)
-            .ok_or("a recovered identity holds one trusted grant")?
-            .capability;
-        let recovery = rocky_credentials::RootRecovery {
-            since: grant.not_before,
-            keep: self.identity,
-        };
-        if self.revocations.recoveries().contains(&recovery) {
-            return Ok(false);
-        }
-        cut.sort();
-        let mut parts: Vec<Vec<rocky_credentials::Cut>> = vec![Vec::new()];
-        for chain in cut {
-            let last = parts.last_mut().ok_or("no statement")?;
-            let heads: usize = last.iter().map(|held| held.statements.len()).sum();
-            if last.len() == rocky_credentials::MAX_CUT_LANES
-                || heads + chain.statements.len() > rocky_credentials::MAX_CUT_HEADS
-            {
-                parts.push(Vec::new());
-            }
-            parts.last_mut().ok_or("no statement")?.push(chain);
-        }
-        let (app, time) = (self.domain()?.manifest().app, now()?);
-        let database = self.database_context()?;
-        let statements = parts
-            .into_iter()
-            .map(|cut| {
-                Authority::owner(root).revoke_in(
-                    Revocation {
-                        app,
-                        issuer: self.publisher,
-                        time,
-                        nodes: BTreeSet::new(),
-                        identities: BTreeSet::new(),
-                        capabilities: BTreeSet::new(),
-                        cut,
-                        mode: rocky_credentials::RevocationMode::Compromised,
-                        recovery: Some(rocky_credentials::RootDecision::Grants(recovery)),
-                    },
-                    database,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        self.learn_revocations(&RevocationSet::try_from(statements)?)?;
-        Ok(true)
     }
     pub fn install_trust(&mut self, vault: &Vault, link: SignedCapability) -> Result<(), Failure> {
         let identity = CredentialChain(vec![link.clone()]).trusted_identity(
@@ -1970,8 +1819,6 @@ impl Settings {
             known,
         )?;
         let keys = self.keys_for(vault, &domain, &grants)?;
-        let database = self.database_context()?;
-        crate::reset::admit_after_resets(&mut self.revocations, &node, database, device.node)?;
         let enrollment = Enrollment {
             groups: self.groups_for(vault, device.node, &issued.capability, false)?,
             naming: naming_for(vault, &profile)?,
@@ -2081,8 +1928,6 @@ impl Settings {
             },
             known,
         )?;
-        let database = self.database_context()?;
-        crate::reset::admit_after_resets(&mut self.revocations, &node, database, device.node)?;
         let supplied = Supplied {
             epoch_statements: self.statements_for_keys(&keys),
             mesh: self.mesh,
@@ -2183,8 +2028,6 @@ impl Settings {
                 known,
             )?;
         }
-        let database = self.database_context()?;
-        crate::reset::admit_after_resets(&mut self.revocations, &node, database, device.node)?;
         let supplied = Supplied {
             epoch_statements: self.statements_for_keys(&keys),
             mesh: self.mesh,
@@ -2338,26 +2181,6 @@ impl Settings {
         Ok(changes)
     }
 
-    pub fn provision_publisher(provisioning: &str) -> Result<PublicKey, Failure> {
-        Ok(ProvisioningBundle::parse(provisioning)?.publisher)
-    }
-    pub fn learn_contacts(&mut self, other: &Settings, exclude: &[PublicKey]) {
-        for (node, contact) in &other.peers {
-            if exclude.contains(node) || self.peers.contains_key(node) {
-                continue;
-            }
-            if self.contact_count() >= MAX_CONTACTS {
-                break;
-            }
-            self.peers.insert(*node, contact.clone());
-            if other.issuers.contains(node)
-                && !self.issuers.contains(node)
-                && self.issuers.len() < MAX_ISSUERS
-            {
-                self.issuers.push(*node);
-            }
-        }
-    }
     pub(crate) fn issuer_contacts(&self, exclude: &[PublicKey]) -> Result<Vec<String>, Failure> {
         let mut contacts = Vec::new();
         for node in &self.issuers {
@@ -2613,33 +2436,6 @@ fn refuse_oversized_revocation(
     Ok(())
 }
 
-const AFTER_SAME_SECOND_GRANTS: u64 = 1;
-
-fn escrowed_groups(
-    archived: &BTreeMap<String, GroupRecord>,
-    escrowed: &BTreeMap<String, GroupRecord>,
-) -> Result<BTreeMap<String, GroupRecord>, Failure> {
-    let mut groups = archived.clone();
-    for record in groups.values_mut() {
-        record.epochs.clear();
-    }
-    for (key, record) in escrowed {
-        match groups.get_mut(key) {
-            Some(named) if named.name != record.name => {
-                return Err("an escrowed partition differs from the one the backup names".into());
-            }
-            Some(named) => named.epochs = record.epochs.clone(),
-            None => drop(groups.insert(key.clone(), record.clone())),
-        }
-    }
-    Ok(groups)
-}
-
-fn after_recovery(revocations: &RevocationSet, time: u64) -> u64 {
-    revocations.recovery().map_or(time, |recovery| {
-        time.max(recovery.since + rocky_credentials::LIFETIME_SKEW + 1)
-    })
-}
 impl Settings {
     pub(crate) async fn install_provisioned(
         store: &Arc<dyn crate::SecretStore>,
@@ -3290,25 +3086,12 @@ impl Settings {
         Ok((renewal.to_bytes()?, changes))
     }
     pub(crate) fn tombstoned(&self, key: &PublicKey) -> bool {
-        self.revocations.unfenced().revokes(key)
-            || self.signed_out(key)
+        self.revocations.revokes(key)
             || self.authority.as_ref().is_some_and(|authority| {
                 authority
                     .tombstones
                     .contains(&rocky_credentials::PeerId::of(*key))
             })
-    }
-    pub(crate) fn signed_out(&self, node: &PublicKey) -> bool {
-        self.revocations
-            .reset_ends(&rocky_credentials::PeerId::of(*node))
-            && (self
-                .revocations
-                .certificates()
-                .any(|certificate| certificate.capability.subject == *node)
-                || self
-                    .authority
-                    .as_ref()
-                    .is_some_and(|authority| authority.seen.contains_key(node)))
     }
     pub(crate) fn revoked_identity(&self, identity: &PublicKey, registry: &Registry) -> bool {
         self.tombstoned(identity) || registry.revoked(identity)
@@ -3456,7 +3239,6 @@ impl Settings {
                     )
                     .collect(),
                 cut: if root.is_some() { cut } else { Vec::new() },
-                recovery: None,
             },
             Revoke::Claims(capability) => Revocation {
                 app: domain.manifest().app,
@@ -3467,7 +3249,6 @@ impl Settings {
                 identities: BTreeSet::new(),
                 capabilities: [capability].into(),
                 cut: Default::default(),
-                recovery: None,
             },
         };
         let claim_right_reads_nothing = matches!(target, Revoke::Claims(_));

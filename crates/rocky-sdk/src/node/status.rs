@@ -273,8 +273,6 @@ impl Node {
             alerts: {
                 let mut alerts = self.alerts();
                 alerts.extend(self.tip_chain_alerts().await?);
-                alerts.extend(self.escrow_alerts().await?);
-                alerts.extend(self.recovery_alerts().await?);
                 alerts.sort();
                 alerts
             },

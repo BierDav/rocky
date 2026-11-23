@@ -629,7 +629,6 @@ fn a_verified_chain_is_refused_under_another_revocation_set() {
             capabilities: BTreeSet::new(),
             cut: Default::default(),
             mode: crate::RevocationMode::Lost,
-            recovery: None,
         },
         &f.root,
         &CredentialChain::default(),

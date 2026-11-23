@@ -238,17 +238,8 @@ impl Node {
             Request::Unlink(node, reply) => {
                 let _ = reply.send(self.unlink(node).await.map(drop));
             }
-            Request::Backup(target, reply) => {
-                let _ = reply.send(self.backup(&target).await);
-            }
             Request::RevokeIdentity(identity, mode, root, keep, reply) => {
                 let _ = reply.send(self.revoke_identity(identity, mode, &root, keep).await);
-            }
-            Request::SignOutEverywhereElse(root, keep, reply) => {
-                let _ = reply.send(self.sign_out_everywhere_else(&root, keep).await);
-            }
-            Request::Freshness(reply) => {
-                let _ = reply.send(self.freshness().await);
             }
             Request::Info(reply) => {
                 let _ = reply.send(self.session_info().await);

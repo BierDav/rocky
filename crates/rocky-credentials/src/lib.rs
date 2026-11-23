@@ -26,7 +26,6 @@ pub use settings::{
 mod delivery;
 mod discovery;
 mod enroll;
-mod escrow;
 mod extension;
 mod families;
 mod finality;
@@ -45,7 +44,6 @@ mod peer;
 mod peer_rpc;
 mod phrase_key;
 mod possession;
-mod reset;
 mod revocation;
 mod root;
 mod settings;
@@ -66,7 +64,6 @@ pub use coordination::{
 pub use delivery::{DeliveryReceipt, MAX_DELIVERY_PAYLOAD, SealedDelivery};
 pub use discovery::{DiscoverySecret, open_discovery, seal_discovery};
 pub use enroll::{Exchange, IdentityAnswer, IdentityRequest, RenewRequest, Renewal};
-pub use escrow::{CarriedEscrow, MAX_ESCROW_PAYLOAD, RootEscrow, VouchedEscrow, escrow_tag};
 pub use extension::{DatabaseContext, Extended, Extension, Origin};
 pub use families::GrantFamilies;
 pub use finality::{
@@ -92,15 +89,10 @@ pub use peer_rpc::{
     PeerResolutionRequest, PeerTrust, StagedCloseStatus, UnlinkReply, VERSION as PEER_RPC_VERSION,
 };
 pub use possession::NodePossession;
-pub use reset::{
-    FenceLog, FenceScope, MAX_FENCE_LOGS, MAX_RESET_BYTES, MAX_RESET_FOLLOWS, MAX_RESET_KEEP,
-    Reset, ResetAdmission, ResetStanding, SignedResetAdmission,
-};
 pub use revocation::{
     Cut, DAY, Head, Heads, LIFETIME_SKEW, MAX_CHAIN_LIFETIME, MAX_CUT_HEADS, MAX_CUT_LANES,
-    MAX_LIVE_REVOCATIONS, MAX_RESET_SET_BYTES, MAX_REVOCATION_BYTES, MAX_REVOCATION_SET_BYTES,
-    REVOCATION_SET_FULL, Revocation, RevocationMode, RevocationSet, RootDecision, RootRecovery,
-    SIGNATURE_OVERHEAD, SignedRevocation,
+    MAX_LIVE_REVOCATIONS, MAX_REVOCATION_BYTES, MAX_REVOCATION_SET_BYTES, REVOCATION_SET_FULL,
+    Revocation, RevocationMode, RevocationSet, SIGNATURE_OVERHEAD, SignedRevocation,
 };
 pub use root::RootKey;
 pub use signed::{

@@ -76,7 +76,6 @@ fn pruning_judges_only_the_lanes_a_cut_names_and_what_arrived_since() {
             acknowledgments: None,
         }],
         mode: crate::RevocationMode::Lost,
-        recovery: None,
     };
     let revocations =
         RevocationSet::try_from(vec![Authority::owner(&owner).revoke(statement).unwrap()]).unwrap();
@@ -168,7 +167,6 @@ fn a_trusted_identity_keeps_both_lanes_through_unlink_and_root_cuts() {
                 .unwrap(),
         ],
         mode: crate::RevocationMode::Lost,
-        recovery: None,
     };
     let unlink =
         crate::SignedRevocation::sign(unlink_statement.clone(), &identity, &chains[0]).unwrap();
@@ -231,7 +229,6 @@ fn a_trusted_identity_keeps_both_lanes_through_unlink_and_root_cuts() {
             capabilities: Default::default(),
             cut: root_cut,
             mode: crate::RevocationMode::Lost,
-            recovery: None,
         })
         .unwrap();
     revocations
@@ -257,7 +254,6 @@ fn a_trusted_identity_keeps_both_lanes_through_unlink_and_root_cuts() {
                     .unwrap(),
             ],
             mode: crate::RevocationMode::Lost,
-            recovery: None,
         },
         &identity,
         &chains[1],
@@ -314,7 +310,6 @@ fn implicit_empty_unlink_cut_matches_an_explicit_empty_lane() {
         capabilities: Default::default(),
         cut: vec![],
         mode: crate::RevocationMode::Lost,
-        recovery: None,
     };
     let implicit = crate::SignedRevocation::sign(statement.clone(), &identity, &chain).unwrap();
     let explicit = crate::SignedRevocation::sign(

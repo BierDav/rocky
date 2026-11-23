@@ -62,12 +62,6 @@ within the configured threshold. Root revocation keeps each linked node's
 seals and bookmark moves through the latest heads the revoking node holds;
 unlink cuts that node's lane independently. Later statements raise
 `TipStatementsPastCut`.
-Every data key epoch is also sealed to the root's public key in records
-that sync with its frames, so with every device lost the root and any
-node's backup, a keyless custodian's too, restore the data that store
-holds (`Configuration::recover`); the recovery revokes every trusted
-grant older than its own, including ones its backup never knew. Of two
-recoveries, the later one ends the earlier.
 
 The todo app shares ordered lists between trusted, full and partial
 devices. Run several installations in one window, or one per device over

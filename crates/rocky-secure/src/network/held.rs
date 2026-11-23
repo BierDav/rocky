@@ -113,7 +113,6 @@ impl NativeSession {
         if incomplete != 0 {
             return Err(denied(crate::wire::INCOMPLETE_FRAME));
         }
-        self.keep_escrow(replica, &frames).await?;
         let count = frames.len();
         replica.receive_held_frames(frames).await?;
         Ok((count, next))
@@ -132,7 +131,6 @@ impl NativeSession {
             .await?;
         let count = frames.len();
         self.carry_chains(&mut frames).await?;
-        self.carry_escrow(replica, &frames).await?;
         self.send(HeldMessage::Push { scope, frames }).await?;
         if !matches!(self.reply::<HeldMessage>().await?, HeldMessage::Stored) {
             return Err(denied("unexpected held-change response"));
@@ -163,7 +161,6 @@ impl NativeSession {
                     .held_frame_page(self.peer, &self.credentials, scope, after, quota)
                     .await?;
                 self.carry_chains(&mut frames).await?;
-                self.carry_escrow(replica, &frames).await?;
                 self.send(HeldMessage::Page {
                     scope,
                     frames,
@@ -184,7 +181,6 @@ impl NativeSession {
                 if incomplete != 0 {
                     return Err(denied(crate::wire::INCOMPLETE_FRAME));
                 }
-                self.keep_escrow(replica, &frames).await?;
                 replica.receive_held_frames(frames).await?;
                 self.send(HeldMessage::Stored).await
             }

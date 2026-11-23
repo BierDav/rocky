@@ -484,7 +484,6 @@ pub struct CheckpointStatus {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stage {
-    Custody,
     #[cfg(test)]
     AuditReplay,
     #[cfg(test)]

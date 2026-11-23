@@ -17,7 +17,6 @@ mod apply;
 mod author;
 mod authority;
 pub use authority::{read_authority_entry, remove_authority_entry, write_authority_entry};
-mod backup;
 mod blockers;
 mod bulk;
 pub use bulk::{MigrationMembership, MigrationStorage};
@@ -81,8 +80,6 @@ pub(crate) mod replay;
 pub use removal::{local_row_counts, local_table_digests};
 use replay::Rebuilding;
 pub use replay::outcomes::OutcomeDivergence;
-mod reset_fence;
-pub use reset_fence::ResetEndsSigner;
 mod restore;
 mod revoked_heads;
 pub(super) mod roles;
@@ -735,7 +732,6 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         tips::SCHEMA,
         tip_drop::SCHEMA,
         migrate::SCHEMA,
-        backup::SCHEMA,
         rebuild::SCHEMA,
         removal::SCHEMA,
         held::SCHEMA,
@@ -1781,70 +1777,24 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.settle().await?;
         Ok(added)
     }
-    pub async fn install_reset<E: From<Error> + From<ResetEndsSigner>>(
-        &self,
-        keep: &BTreeSet<PeerId>,
-        sign: impl FnOnce(
-            &RevocationSet,
-            Vec<rocky_credentials::FenceScope>,
-        ) -> Result<SignedRevocation, E>,
-    ) -> Result<SignedRevocation, E> {
-        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
-        let fence = inner.reset_fence(keep).await?;
-        let signed = sign(&inner.config.revocations, fence)?;
-        let single = RevocationSet::try_from(vec![signed.clone()]).map_err(credential)?;
-        let time = now()?;
-        let mut held = inner.config.revocations.clone();
-        held.merge(&single, inner.config.publisher, inner.definition.app, time)
-            .map_err(credential)?;
-        let node = inner.config.node.public_key();
-        if inner
-            .resolve_chain(&inner.config.credentials, node, &held, time)
-            .is_err()
-        {
-            return Err(ResetEndsSigner.into());
-        }
-        inner.merge_revocations(&single).await?;
-        drop(inner);
-        self.settle().await?;
-        Ok(signed)
-    }
     pub(crate) async fn learn_session_revocations(
         &self,
         statements: Vec<SignedRevocation>,
         own: &CredentialChain,
     ) -> Result<Option<SignedRevocation>, Error> {
-        let (publisher, app, node) = {
+        let (publisher, app) = {
             let inner = self.inner.lock(crate::replica::Class::Background).await;
-            (
-                inner.config.publisher,
-                inner.definition.app,
-                PeerId::of(inner.config.node.public_key()),
-            )
+            (inner.config.publisher, inner.definition.app)
         };
         let mut revoking = None;
         let mut others = Vec::new();
-        let mut all = self.revocations().await;
-        for signed in &statements {
-            if signed.statement.reset().is_some() {
-                let single = RevocationSet::try_from(vec![signed.clone()]).map_err(credential)?;
-                all.merge(&single, publisher, app, now()?)
-                    .map_err(credential)?;
-            }
-        }
         for signed in statements {
             signed.verify_historic(publisher, app).map_err(credential)?;
             let single = RevocationSet::try_from(vec![signed.clone()]).map_err(credential)?;
             single
                 .verify_in(own.database_context(publisher).map_err(credential)?)
                 .map_err(credential)?;
-            let ends_own = if signed.statement.reset().is_some() {
-                let id = signed.id().map_err(credential)?;
-                all.ending_resets(&node).contains(&id)
-            } else {
-                single.revoking_holder(own).map_err(credential)?.is_some()
-            };
-            if ends_own {
+            if single.revoking_holder(own).map_err(credential)?.is_some() {
                 revoking.get_or_insert(signed);
             } else {
                 others.push(signed);
@@ -2145,23 +2095,7 @@ impl<A: RowApplication> Inner<A> {
         credentials: &CredentialChain,
         time: u64,
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
-        self.header_authority(header, credentials, self.header_revocations(header), time)
-    }
-    pub(super) fn header_revocations(
-        &self,
-        header: &p2panda_core::Header<Extensions>,
-    ) -> &RevocationSet {
-        let revocations = &self.config.revocations;
-        match revocations.reset_standing(
-            &header.extensions.scope,
-            &header.public_key,
-            header.seq_num,
-        ) {
-            rocky_credentials::ResetStanding::Covered => revocations.unfenced(),
-            rocky_credentials::ResetStanding::Live | rocky_credentials::ResetStanding::Fenced => {
-                revocations
-            }
-        }
+        self.header_authority(header, credentials, &self.config.revocations, time)
     }
     pub(super) fn placement_authority(
         &self,
@@ -2179,7 +2113,7 @@ impl<A: RowApplication> Inner<A> {
         if !extension.authored {
             return Err(denied("node author missing"));
         }
-        let revocations = self.header_revocations(header);
+        let revocations = &self.config.revocations;
         self.verified_chain(credentials, revocations, time)?
             .unseen_partition_author(header.public_key, extension.scope, revocations, time)
             .map_err(credential)
@@ -2513,7 +2447,6 @@ impl<A: RowApplication> Inner<A> {
             return Ok(added);
         }
         let authority_changed = !added.is_empty()
-            || merged.admissions().ne(self.config.revocations.admissions())
             || self.config.revocations.certificates().any(|certificate| {
                 let node = certificate.capability.subject;
                 merged.ends_node_of(certificate.issuer, node, false)
@@ -2548,10 +2481,6 @@ impl<A: RowApplication> Inner<A> {
             inner.conn.execute(update, [bytes.clone()]).await?;
             if authority_changed {
                 inner.resolve_revoked(&merged).await?;
-                inner.drop_revoked_escrow(None).await?;
-                inner
-                    .rejudge_reset_writers(&old_revocations, &merged)
-                    .await?;
             }
             Ok(())
         });

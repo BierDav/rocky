@@ -1,6 +1,5 @@
 use crate::{
-    Error, IdentityKey, IdentityProvider, PrivateKey, PublicKey, Purpose, Signature,
-    phrase_key::PhraseKey,
+    Error, IdentityKey, IdentityProvider, PublicKey, Purpose, Signature, phrase_key::PhraseKey,
 };
 
 const OWNER_IDENTITY_DERIVATION: &[u8] = b"rocky identity v1";
@@ -28,9 +27,6 @@ impl RootKey {
     pub fn identity(&self) -> IdentityKey {
         let secret = zeroize::Zeroizing::new(self.secret());
         IdentityKey::from_secret(crate::group::hkdf(&[], &*secret, OWNER_IDENTITY_DERIVATION))
-    }
-    pub(crate) fn private(&self) -> &PrivateKey {
-        self.0.private()
     }
 }
 impl IdentityProvider for RootKey {

@@ -953,69 +953,6 @@ async fn an_uninterrupted_local_plan_switches_while_reads_continue() {
     assert_eq!(replica.projection_plan().await.unwrap(), None);
 }
 
-#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
-async fn a_backup_copy_opens_only_under_a_fresh_identity_and_keeps_its_history() {
-    let lineage = Lineage::new();
-    let dir = Scratch::new().await;
-    let (old_key, new_key) = (PrivateKey::new(), PrivateKey::new());
-    let alice = lineage
-        .open(&dir.path().join("alice.db"), &old_key, 1, None)
-        .await
-        .unwrap();
-    insert(&alice, 0..3).await;
-    let copy = dir.path().join("copy.db");
-    alice.backup_into(&copy).await.unwrap();
-    assert!(alice.backup_into(&copy).await.is_err(), "never overwritten");
-    let restore = |node: &PrivateKey, predecessor: PublicKey| {
-        EncryptedReplica::open_restored(&copy, lineage.app(1), lineage.config(1, node), predecessor)
-    };
-    assert!(restore(&old_key, old_key.public_key()).await.is_err());
-    assert!(
-        restore(&new_key, PrivateKey::new().public_key())
-            .await
-            .is_err()
-    );
-    assert!(
-        EncryptedReplica::open(&copy, lineage.app(1), lineage.config(1, &new_key))
-            .await
-            .is_err(),
-        "a copied file keeps the old node's identity, so opening it is refused"
-    );
-    let restored = restore(&new_key, old_key.public_key()).await.unwrap();
-    restored
-        .install_tables(lineage.schema(1), lineage.domain, lineage.readers(1))
-        .await
-        .unwrap();
-    assert_eq!(
-        restored.predecessors().await.unwrap(),
-        [old_key.public_key()]
-    );
-    assert_eq!(
-        select(&restored, "SELECT count(*) FROM items").await,
-        vec![vec![SqlValue::Integer(3)]]
-    );
-    insert(&restored, 3..4).await;
-    let items = lineage.scope("items");
-    let authors: BTreeSet<_> = frames(&restored, &alice, items)
-        .await
-        .iter()
-        .map(|frame| frame.operation().unwrap().header.public_key)
-        .collect();
-    assert_eq!(
-        authors,
-        [old_key.clone().public_key(), new_key.clone().public_key()].into()
-    );
-    restored.audit(items).await.unwrap();
-    drop(restored);
-    let reopened = restore(&new_key, old_key.public_key())
-        .await
-        .expect("rebinding happened once; reopening is ordinary");
-    assert_eq!(
-        reopened.predecessors().await.unwrap(),
-        [old_key.public_key()]
-    );
-}
-
 async fn sync(
     source: &EncryptedReplica<TypedRows>,
     target: &EncryptedReplica<TypedRows>,

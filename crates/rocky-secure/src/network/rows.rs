@@ -205,7 +205,6 @@ impl NativeSession {
             receive_voids(replica, &page.voids, &[scope]).await?;
             let (frames, incomplete) = self.complete_frames(page.frames)?;
             report.incomplete += incomplete;
-            self.keep_escrow(replica, &frames).await?;
             let span = tracing::debug_span!(
                 "page_apply",
                 scope = rocky_core::scope_label(&scope),
@@ -298,7 +297,6 @@ impl NativeSession {
                 bytes.saturating_add(frame.weight())
             });
             self.carry_chains(&mut page.frames).await?;
-            self.carry_escrow(replica, &page.frames).await?;
             self.send(RowMessage::Push {
                 scope,
                 frames: page.frames,
@@ -362,8 +360,6 @@ impl NativeSession {
             return Ok(());
         }
         self.ensure_holding(replica, &[scope]).await?;
-        self.carry_escrow_slots(replica, replica.custody_escrow_slots(scope).await?)
-            .await?;
         self.push_checkpoint_custody(replica, scope).await?;
         let challenge = rocky_platform::entropy::random();
         replica
@@ -436,7 +432,6 @@ impl NativeSession {
         replica
             .authorize_scope_peer(self.peer, &self.credentials, scope)
             .await?;
-        self.keep_pending_escrow(replica, scope).await?;
         let receipt = replica
             .custody_receipt(self.peer, &self.credentials, scope, self.binding, challenge)
             .await?;
@@ -495,7 +490,6 @@ impl NativeSession {
                     .range_page(self.peer, &self.credentials, &frontier, after, quota)
                     .await?;
                 self.carry_chains(&mut page.frames).await?;
-                self.carry_escrow(replica, &page.frames).await?;
                 self.send(RowMessage::RangeFrames {
                     page: Box::new(page),
                 })
@@ -536,7 +530,6 @@ impl NativeSession {
                 for status in replica.receive_migration_all(frames.clone()).await {
                     status?;
                 }
-                self.keep_escrow(replica, &frames).await?;
                 let frontier = replica.frontier(scope).await?;
                 self.send(RowMessage::Frontier { frontier }).await
             }

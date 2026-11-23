@@ -69,12 +69,6 @@ impl NativeSession {
             return Ok(());
         }
         let checkpoint = signed.id()?;
-        let epoch = signed
-            .statement
-            .key_epoch()
-            .ok_or_else(|| denied("checkpoint epoch missing"))?;
-        self.carry_escrow_slots(replica, [(scope, epoch)].into())
-            .await?;
         self.send(CheckpointMessage::ArchiveBegin {
             signed: Box::new(signed),
         })
@@ -492,9 +486,7 @@ impl NativeSession {
                 .await?;
                 left = next_window;
             }
-            let mut page = *page;
-            page.carrier = Some(self.peer);
-            replica.stage_checkpoint_page(page).await?;
+            replica.stage_checkpoint_page(*page).await?;
         }
         Ok(true)
     }

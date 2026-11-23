@@ -95,6 +95,9 @@ async fn online(device: &Device, online: bool) {
     };
     snap::ok(device.database.set_sync(mode)).await;
 }
+async fn learn_what_peer_issuers_recorded(issuer: &Device) -> Result<(), Failure> {
+    synced(issuer).await.map(drop)
+}
 async fn settle_first_syncs_before_anything_else_is_recorded(devices: &[&Device]) {
     for device in devices {
         settle(device).await;
@@ -402,6 +405,7 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     );
     let (x, y) = (x??, y??);
     a.admit(&x).await;
+    learn_what_peer_issuers_recorded(&a).await?;
     a.admit(&y).await;
     settle_first_syncs_before_anything_else_is_recorded(&[&x, &y]).await;
     let mut writers = std::collections::BTreeSet::new();

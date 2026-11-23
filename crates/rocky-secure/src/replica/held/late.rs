@@ -339,6 +339,13 @@ impl<A: RowApplication> Inner<A> {
         );
         Ok(generation)
     }
+    fn closed_held_refreshed(&self, scope: ResourceScope, generation: Commitment) -> bool {
+        self.held_refresh
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&scope)
+            == Some(&generation)
+    }
     async fn refresh_closed_held_step(
         &self,
         scope: ResourceScope,
@@ -346,13 +353,7 @@ impl<A: RowApplication> Inner<A> {
         pass: &mut Refresh,
     ) -> Result<bool, Error> {
         let generation = self.closed_held_generation(scope, time)?;
-        if self
-            .held_refresh
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&scope)
-            == Some(&generation)
-        {
+        if self.closed_held_refreshed(scope, generation) {
             return Ok(false);
         }
         if pass.generation != Some(generation) {
@@ -644,6 +645,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
             loop {
                 rocky_platform::task::yield_now().await;
                 let mut inner = self.inner.lock(Class::Background).await;
+                let current = inner.closed_held_generation(scope, now()?)?;
+                if inner.closed_held_refreshed(scope, current) {
+                    break;
+                }
                 let saved = pass.clone();
                 let more = transaction!(@without_wal_checkpoint inner, |inner| {
                     pass = saved.clone();

@@ -139,7 +139,13 @@ impl<A: RowApplication> Inner<A> {
             match (id, self.path_seals(domain)?.last()) {
                 (Some(id), Some(seal)) => self.replay_has_gaps(scope, id, seal).await?,
                 (None, Some(seal)) => self
-                    .seal_coverage_waits(domain, seal, None, &[(scope, id)])
+                    .seal_coverage_waits_with_unverified(
+                        domain,
+                        seal,
+                        None,
+                        &[(scope, id)],
+                        Some(&plan.unverified),
+                    )
                     .await?
                     .is_some(),
                 (_, None) => false,

@@ -131,12 +131,7 @@ impl Typed {
         }
     }
     pub(super) fn by_scope(&self, scope: ResourceScope) -> Option<&Projected> {
-        self.tables.iter().find(|table| {
-            table.scope == scope
-                || (self.partitioned(table)
-                    && table.scope.domain == scope.domain
-                    && table.scope.table == scope.table)
-        })
+        self.covering(&self.tables, scope)
     }
     pub(super) fn by_name(&self, sql_name: &str) -> Option<&Projected> {
         self.tables
@@ -144,11 +139,14 @@ impl Typed {
             .find(|table| table.table.sql_name.eq_ignore_ascii_case(sql_name))
     }
     pub(super) fn declared_by_scope(&self, scope: ResourceScope) -> Option<&Projected> {
-        self.declarations.iter().find(|table| {
+        self.covering(&self.declarations, scope)
+    }
+    fn covering<'a>(&self, tables: &'a [Projected], scope: ResourceScope) -> Option<&'a Projected> {
+        tables.iter().find(|table| {
             table.scope == scope
-                || (self.partitioned(table)
-                    && table.scope.domain == scope.domain
-                    && table.scope.table == scope.table)
+                || (table.scope.domain == scope.domain
+                    && table.scope.table == scope.table
+                    && self.partitioned(table))
         })
     }
     pub(super) fn plan(&self, scopes: &BTreeSet<ResourceScope>) -> Result<Plan, Error> {

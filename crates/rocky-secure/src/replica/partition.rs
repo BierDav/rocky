@@ -474,10 +474,19 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 impl<A: RowApplication> Inner<A> {
     pub(super) async fn table_complete(&self, table: Commitment) -> Result<bool, Error> {
-        let selectors = self.local_selectors(now()?)?;
         let Some(typed) = &self.workspace.typed else {
             return Ok(false);
         };
+        let readiness = self.readiness(typed.domain).await?;
+        self.table_complete_in(typed, &readiness, table).await
+    }
+    async fn table_complete_in(
+        &self,
+        typed: &typed::Typed,
+        readiness: &blockers::DomainReadiness,
+        table: Commitment,
+    ) -> Result<bool, Error> {
+        let selectors = self.local_selectors(now()?)?;
         let Some(projected) = typed
             .tables
             .iter()
@@ -510,12 +519,11 @@ impl<A: RowApplication> Inner<A> {
         if !covers || self.role().await?.role != ReplicaRole::Full {
             return Ok(false);
         }
-        let readiness = self.readiness(typed.domain).await?;
         for scope in self.partitions.keys().filter(|scope| scope.table == table) {
             if !self.holds(*scope).await?
                 || !self.can_read_key(*scope, &self.local_grants(now()?)?)
                 || !self.config.keys.iter().any(|key| key.scope == *scope)
-                || self.partition_waits(&readiness, *scope).await?
+                || self.partition_waits(readiness, *scope).await?
             {
                 return Ok(false);
             }
@@ -565,7 +573,9 @@ impl<A: RowApplication> Inner<A> {
             };
             let mut held = Vec::new();
             let mut waiting = Vec::new();
-            let mut complete = self.table_complete(projected.table.id).await?;
+            let mut complete = self
+                .table_complete_in(typed, &readiness, projected.table.id)
+                .await?;
             for (scope, tuple) in self.partitions.iter().filter(|(scope, _)| {
                 scope.table == projected.table.id && scope.domain == typed.domain
             }) {

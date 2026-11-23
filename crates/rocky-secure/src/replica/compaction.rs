@@ -358,6 +358,17 @@ impl<A: RowApplication> Inner<A> {
         previous: Option<&SignedSeal>,
         scopes: &[(ResourceScope, Option<i64>)],
     ) -> Result<Option<String>, Error> {
+        self.seal_coverage_waits_with_unverified(domain, seal, previous, scopes, None)
+            .await
+    }
+    pub(in crate::replica) async fn seal_coverage_waits_with_unverified(
+        &self,
+        domain: Scope,
+        seal: &SignedSeal,
+        previous: Option<&SignedSeal>,
+        scopes: &[(ResourceScope, Option<i64>)],
+        known_unverified: Option<&BTreeSet<ResourceScope>>,
+    ) -> Result<Option<String>, Error> {
         let at = self.path_index(domain, seal.id().map_err(credential)?)?;
         let mut open = Vec::new();
         for (scope, id) in scopes {
@@ -374,12 +385,16 @@ impl<A: RowApplication> Inner<A> {
             }
             open.push((*scope, *id));
         }
-        let unverified: BTreeSet<_> = self
-            .unverified_scopes(domain)
-            .await?
-            .into_iter()
-            .map(|(scope, _)| scope)
-            .collect();
+        let unverified = match known_unverified {
+            Some(unverified) => std::borrow::Cow::Borrowed(unverified),
+            None => std::borrow::Cow::Owned(
+                self.unverified_scopes(domain)
+                    .await?
+                    .into_iter()
+                    .map(|(scope, _)| scope)
+                    .collect(),
+            ),
+        };
         let held_scopes = self.custody_scopes(now()?)?;
         let (held, last) = self.held_positions(domain, &open, &held_scopes).await?;
         for (scope, id) in &open {

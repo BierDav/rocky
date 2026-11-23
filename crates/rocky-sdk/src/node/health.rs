@@ -10,7 +10,7 @@ const MAX_DEVICES: usize = 256;
 pub(super) const REFRESH: Duration = Duration::from_secs(60);
 const MAX_ITEMS: usize = 32;
 const SETTLE: Duration = Duration::from_secs(1);
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 
 #[derive(Default)]
 pub(super) struct TrustedWatch {
@@ -142,7 +142,34 @@ impl Node {
         alerts.sort();
         alerts
     }
-    pub(super) async fn tip_chain_alerts(&self) -> Result<Vec<Alert>, Failure> {
+    pub(super) async fn replica_alerts(&self) -> Result<Vec<Alert>, Failure> {
+        let mut alerts = self.tip_chain_alerts().await?;
+        let lanes = self.replica.lane_alerts().await?;
+        let superseded = lanes
+            .superseded
+            .into_iter()
+            .map(|store| AlertKind::StoreSuperseded {
+                node: store.node.to_hex(),
+                held: store.held,
+                reported: store.reported,
+            });
+        let regressed = lanes
+            .regressions
+            .into_iter()
+            .map(|peer| AlertKind::PeerStoreRegressed {
+                node: peer.node.to_hex(),
+                scope: rocky_core::scope_label(&peer.scope),
+                held: peer.held,
+                reported: peer.reported,
+            });
+        alerts.extend(
+            superseded
+                .chain(regressed)
+                .map(|kind| Alert { kind, since: None }),
+        );
+        Ok(alerts)
+    }
+    async fn tip_chain_alerts(&self) -> Result<Vec<Alert>, Failure> {
         let graph = match self.replica.tip_graph(self.domain().scope).await {
             Ok(graph) => graph,
             Err(_graph_not_installed) => return Ok(Vec::new()),
@@ -412,7 +439,7 @@ impl Node {
             },
             since: None,
         }));
-        alerts.extend(self.tip_chain_alerts().await?);
+        alerts.extend(self.replica_alerts().await?);
         alerts.sort();
         alerts.truncate(MAX_ITEMS);
         Ok(HealthReport {

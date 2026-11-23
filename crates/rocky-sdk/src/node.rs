@@ -2238,6 +2238,12 @@ fn migration_pending(error: &Failure) -> bool {
         Some(Error::Application(cause)) if cause.is::<rocky_secure::MigrationPending>()
     )
 }
+fn store_superseded(error: &Failure) -> bool {
+    matches!(
+        error.downcast_ref::<Error>(),
+        Some(Error::Application(cause)) if cause.is::<rocky_secure::StoreSuperseded>()
+    )
+}
 fn renewal_cannot_repair(error: &Failure) -> bool {
     match error.downcast_ref::<Error>() {
         Some(Error::Io(_)) => true,
@@ -2278,6 +2284,8 @@ pub(crate) fn typed_error(error: &Failure) -> crate::Error {
         (crate::ErrorKind::Rejected, false)
     } else if migration_pending(error) {
         (crate::ErrorKind::MigrationPending, false)
+    } else if store_superseded(error) {
+        (crate::ErrorKind::StoreSuperseded, false)
     } else if let Some(service) = error.downcast_ref::<ServiceError>() {
         (
             crate::ErrorKind::Service(service.clone()),
@@ -2369,6 +2377,29 @@ mod error_tests {
         let typed = crate::Error::from_failure(&pending);
         assert_eq!(typed.kind(), &crate::ErrorKind::MigrationPending);
         assert_eq!(code(pending), ("migration_pending".into(), false));
+    }
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = test)]
+    fn a_superseded_store_refusal_is_typed_and_final() {
+        let superseded: Failure = Box::new(Error::Application(Box::new(
+            rocky_secure::StoreSuperseded {
+                node: rocky_secure::PrivateKey::new().public_key(),
+                scope: rocky_core::ResourceScope {
+                    domain: rocky_core::Scope {
+                        mesh: rocky_core::MeshId([1; 16]),
+                        app: rocky_core::AppId([2; 16]),
+                        domain: rocky_core::DomainId([3; 16]),
+                    },
+                    encryption: [4; 32],
+                    table: [5; 32],
+                },
+                held: 2,
+                reported: 4,
+            },
+        )));
+        let typed = crate::Error::from_failure(&superseded);
+        assert_eq!(typed.kind(), &crate::ErrorKind::StoreSuperseded);
+        assert!(typed.detail().contains("re-invite it as a new device"));
+        assert_eq!(code(superseded), ("store_superseded".into(), false));
     }
 }
 #[cfg(all(test, not(target_family = "wasm")))]

@@ -71,6 +71,9 @@ with members; a member hands the secret of a partition it created only to
 trusted nodes, and no access delegates further. A trusted identity becomes an
 administrator by provisioning it, granting `Database::trust` with the root key
 and calling `Database::install_trust` on its node.
+Copying a closed database folder is a valid backup; a restored copy that
+peers have moved past reads and syncs but refuses to write
+(`StoreSuperseded`), and rejoins as a new device.
 A relay is an ordinary identity invited with store-only access
 (`Access::Store`): it holds and forwards encrypted frames and
 partition-key mailboxes for devices that are never online together, but never

@@ -78,6 +78,7 @@ impl NativeSession {
                 }
                 remaining = &remaining[states.len()..];
                 frontiers.truncate(states.len());
+                let mut unheld = Vec::new();
                 let held: Vec<_> = frontiers
                     .iter()
                     .zip(states)
@@ -87,11 +88,13 @@ impl NativeSession {
                             Some((local, state))
                         }
                         FrontierReply::Refused(scope) => {
-                            refused.push(scope);
+                            unheld.push(scope);
                             None
                         }
                     })
                     .collect();
+                replica.peer_holds_none_of(&unheld).await?;
+                refused.extend(unheld);
 
                 let remote: Vec<_> = held
                     .iter()

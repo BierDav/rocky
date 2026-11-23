@@ -645,6 +645,7 @@ impl<A: RowApplication> Inner<A> {
     async fn state_listing(&self) -> Result<Vec<Blocker>, Error> {
         let mut blockers = self.line_node_blockers()?;
         blockers.extend(self.scope_state_blockers().await?);
+        blockers.extend(self.lane_blockers().await?);
         Ok(blockers)
     }
 }

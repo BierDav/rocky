@@ -54,6 +54,8 @@ mod identity;
 mod incoming;
 mod intents;
 mod keys;
+mod lanes;
+pub use lanes::{LaneAlerts, PeerRegression, StoreSuperseded};
 mod metadata;
 pub(crate) mod migrate;
 pub(crate) mod moves;
@@ -199,6 +201,7 @@ pub struct OpenConfig {
     table_scopes: Option<Vec<ResourceScope>>,
     lease_clock: sql::LeaseClock,
     page_cache: PageCache,
+    newest_copy: bool,
 }
 impl From<SecureConfig> for OpenConfig {
     fn from(security: SecureConfig) -> Self {
@@ -207,6 +210,7 @@ impl From<SecureConfig> for OpenConfig {
             table_scopes: None,
             lease_clock: sql::LeaseClock::Wall,
             page_cache: PageCache::default(),
+            newest_copy: true,
         }
     }
 }
@@ -240,6 +244,12 @@ impl SecureConfig {
 impl OpenConfig {
     pub fn with_page_cache(self, page_cache: PageCache) -> Self {
         Self { page_cache, ..self }
+    }
+    pub fn possibly_restored(self) -> Self {
+        Self {
+            newest_copy: false,
+            ..self
+        }
     }
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_manual_lease_clock(self, clock: &ManualLeaseClock) -> Self {
@@ -436,6 +446,7 @@ pub(super) struct Inner<A> {
     graph_cache: std::sync::Mutex<tips::GraphCache>,
     pub(super) workspace: workspace::Workspace,
     line_nodes: BTreeMap<TipId, identity::NodeAuthor>,
+    lanes: std::sync::Mutex<lanes::Lanes>,
     pub(super) definition: rocky_core::ApplicationManifest,
     pub(super) engine: rocky_core::EngineIdentity,
     pub(super) tables: HashSet<Commitment>,
@@ -774,6 +785,7 @@ fn protocol_schema() -> impl Iterator<Item = String> {
         positions::SCHEMA,
         quarantine::SCHEMA,
         authority::SCHEMA,
+        lanes::SCHEMA,
     ]
     .into_iter()
     .flat_map(|schema| schema.iter().map(|sql| (*sql).to_owned()))
@@ -994,6 +1006,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let whole_tables = config.whole_tables(&manifest)?;
         let lease_clock = config.lease_clock;
         let page_cache = config.page_cache;
+        let newest_copy = config.newest_copy;
         let mut config = config.security;
         let genesis = config
             .manifest
@@ -1094,6 +1107,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             path_fields: Default::default(),
             graph_cache: Default::default(),
             line_nodes: BTreeMap::new(),
+            lanes: Default::default(),
             tables: manifest.entities.iter().map(|item| item.id).collect(),
             fields: manifest.fields.iter().map(|item| item.id).collect(),
             domains: manifest.domains.iter().map(|item| item.domain).collect(),
@@ -1356,6 +1370,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 )
                 .await?;
             identity::check_node_chain(&inner.config.credentials)?;
+            if !newest_copy {
+                inner.mark_unconfirmed().await?;
+            }
             Ok(())
         })?;
         inner.load_schemas().await?;

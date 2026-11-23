@@ -405,6 +405,17 @@ pub enum AlertKind {
         node: String,
         sequence: u64,
     },
+    StoreSuperseded {
+        node: String,
+        held: u64,
+        reported: u64,
+    },
+    PeerStoreRegressed {
+        node: String,
+        scope: String,
+        held: u64,
+        reported: u64,
+    },
 }
 pub const TRUSTED_STALE_AFTER: std::time::Duration =
     std::time::Duration::from_secs(30 * 24 * 60 * 60);

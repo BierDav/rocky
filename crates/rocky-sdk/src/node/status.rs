@@ -272,7 +272,7 @@ impl Node {
             network: self.observed_network().await?,
             alerts: {
                 let mut alerts = self.alerts();
-                alerts.extend(self.tip_chain_alerts().await?);
+                alerts.extend(self.replica_alerts().await?);
                 alerts.sort();
                 alerts
             },

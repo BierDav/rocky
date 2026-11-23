@@ -704,6 +704,9 @@ impl<A: RowApplication> Inner<A> {
         {
             return Ok(Staged::Covered);
         }
+        if self.superseded_fork(&operation.header).await? {
+            return Ok(Staged::Covered);
+        }
         self.admit_scope(&operation.header).await?;
         if migration.is_none() {
             self.check_budget(bytes).await?;

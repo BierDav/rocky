@@ -1053,6 +1053,7 @@ impl Settings {
             "author-issuer",
             "tip-nodes",
             "discovery",
+            crate::database::incarnation::ROLE,
         ]
         .into_iter()
         .map(String::from)

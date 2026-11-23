@@ -46,6 +46,15 @@ pub enum BlockerKind {
         count: u64,
         seconds: u64,
     },
+    AwaitingPeerFrontier,
+    OwnLogBehind {
+        held: u64,
+        reported: u64,
+    },
+    StoreSuperseded {
+        held: u64,
+        reported: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -147,6 +156,15 @@ impl fmt::Display for Blocker {
             } => format!(
                 "{count} frames of {} up to {seconds} s ahead",
                 node.get(..12).unwrap_or(node)
+            ),
+            BlockerKind::AwaitingPeerFrontier => {
+                "no peer has reported this device's log since it opened".into()
+            }
+            BlockerKind::OwnLogBehind { held, reported } => format!(
+                "this device holds {held} of the {reported} positions peers report for its key"
+            ),
+            BlockerKind::StoreSuperseded { held, reported } => format!(
+                "this device's store is older than what peers hold for its key ({held} of {reported} positions); re-invite it as a new device"
             ),
         };
         let clears = match &self.clears_by {

@@ -691,6 +691,12 @@ impl Simulation {
                 crate::AlertKind::TipChainEquivocation { node, sequence, .. } => {
                     format!("{} forked at {sequence}", name(node))
                 }
+                crate::AlertKind::StoreSuperseded { node, .. } => {
+                    format!("{} superseded", name(node))
+                }
+                crate::AlertKind::PeerStoreRegressed { node, .. } => {
+                    format!("{} regressed", name(node))
+                }
                 crate::AlertKind::TrustedNodeLinked { node, .. } => {
                     format!("{} linked", name(node))
                 }

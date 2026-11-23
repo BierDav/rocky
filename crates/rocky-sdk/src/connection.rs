@@ -113,6 +113,7 @@ pub(crate) fn sql_failure(error: Failure) -> SqlFailure {
         Error::Sql(SqlError::Statement { code, .. }) => *code,
         Error::Sql(SqlError::Denied) => code::AUTH,
         Error::Sql(SqlError::Aborted(_)) => code::ABORT,
+        Error::Application(cause) if cause.is::<rocky_secure::StoreSuperseded>() => code::READONLY,
         Error::Quota { .. } => code::TOOBIG,
         Error::Backpressure => code::BUSY,
         Error::Closed => code::MISUSE,

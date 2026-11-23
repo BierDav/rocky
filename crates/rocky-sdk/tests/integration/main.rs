@@ -14,6 +14,8 @@ mod continuous_sync;
 #[cfg(not(target_family = "wasm"))]
 mod credentials;
 #[cfg(not(target_family = "wasm"))]
+mod device_copies;
+#[cfg(not(target_family = "wasm"))]
 mod discovery;
 #[cfg(not(target_family = "wasm"))]
 mod engine;

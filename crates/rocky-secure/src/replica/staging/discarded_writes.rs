@@ -21,7 +21,7 @@ const OUTCOME_RECORDS: [&str; 3] = [
     "secure_outcome_divergence",
 ];
 
-const WRITTEN_SCOPE_RECORDS: [&str; 9] = [
+const WRITTEN_SCOPE_RECORDS: [&str; 10] = [
     "secure_identity_partitions",
     "secure_identity_ledger",
     "secure_identity_summary",
@@ -31,6 +31,7 @@ const WRITTEN_SCOPE_RECORDS: [&str; 9] = [
     "secure_position_ranges",
     "secure_log_ranges",
     "secure_move_rows",
+    "secure_own_logs",
 ];
 
 const SCOPE_STATE_KEYED_TABLES: &str = "SELECT m.name FROM sqlite_schema m JOIN pragma_table_info(m.name) c WHERE m.type='table' AND m.name GLOB 'secure_*' AND c.name='scope' AND c.type='INTEGER' ORDER BY m.name";

@@ -54,6 +54,10 @@ impl<A> Inner<A> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
         self.clear_applied_cache();
+        self.lanes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .forget_derived();
     }
     pub(crate) fn invalidate_held_refresh(&self) {
         self.held_refresh

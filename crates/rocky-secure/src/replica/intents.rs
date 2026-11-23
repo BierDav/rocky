@@ -164,8 +164,7 @@ impl<A: RowApplication> Inner<A> {
             .iter()
             .find(|key| key.scope == scope)
             .ok_or_else(|| denied("author needs an authorized row key"))?;
-        self.admit_author(scope, tip.as_ref().map(|log| log.sequence))
-            .await?;
+        self.admit_author(scope, signing_key.public_key()).await?;
         let (sequence, backlink, mut clock) = match tip {
             Some(log) => (
                 (log.sequence as u64)

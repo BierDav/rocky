@@ -279,16 +279,18 @@ impl<A: RowApplication> Inner<A> {
             return Err(denied("scope is not held by this replica"));
         }
         if header.public_key == self.config.node.public_key() {
-            let restorable = match self.eviction_guard(scope).await? {
+            let adoptable = match self.eviction_guard(scope).await? {
                 Some((sequence, hash)) => {
                     let at = header.seq_num as i64;
                     at < sequence || (at == sequence && hash == Some(header.hash()))
                 }
-                None => false,
+                None => header.seq_num < self.reported_own_log(scope, header.public_key).await?,
             };
-            if !restorable {
+            if !adoptable {
                 return Err(denied("unknown operation from local signing identity"));
             }
+            self.raise_author_sequence(header.public_key, header.extensions.author_sequence)
+                .await?;
         }
         Ok(())
     }
@@ -345,7 +347,7 @@ impl<A: RowApplication> Inner<A> {
     pub(crate) async fn admit_author(
         &self,
         scope: ResourceScope,
-        _tip: Option<i64>,
+        author: PublicKey,
     ) -> Result<(), Error> {
         if !self.holds(scope).await? {
             return Err(denied("author needs a held scope"));
@@ -363,7 +365,7 @@ impl<A: RowApplication> Inner<A> {
                 )
                 .await?;
         }
-        Ok(())
+        self.admit_lane(scope, author).await
     }
     pub(super) async fn merge_restoration_guard(
         &self,
@@ -454,10 +456,13 @@ impl<A: RowApplication> Inner<A> {
         if peer == self.config.node.public_key() {
             return Err(denied("a replica cannot acknowledge itself"));
         }
-        if self.peer_tip(peer) != Some(self.workspace.tip) {
-            return Ok(());
-        }
         let scopes: Vec<_> = frontiers.iter().map(|frontier| frontier.scope).collect();
+        if self.peer_tip(peer) != Some(self.workspace.tip) {
+            let Ok(grants) = self.verify_chain_scopes(credentials, peer, now()?, &scopes) else {
+                return Ok(());
+            };
+            return self.record_lane_reports(&grants, frontiers).await;
+        }
         let grants = self.verify_chain_scopes(credentials, peer, now()?, &scopes)?;
         self.store_frontiers(peer, &grants, frontiers).await
     }
@@ -480,14 +485,17 @@ impl<A: RowApplication> Inner<A> {
             if !reads && !whole(Right::Custody) {
                 return Err(denied("acknowledgment right denied"));
             }
-            reports.push((encode(&frontier.scope)?, frontier.logs.clone(), reads));
+            reports.push((frontier, encode(&frontier.scope)?, reads));
         }
-        let recorded = reports.iter().any(|(_, logs, _)| !logs.is_empty());
+        let recorded = reports
+            .iter()
+            .any(|(frontier, ..)| !frontier.logs.is_empty());
         self.known_peers.acknowledged(PeerId::of(peer), recorded);
         let first = recorded && self.unrecorded_peer(peer).await?;
         transaction!(@keeping_frontier_cache self, |inner| {
-            for (scope, logs, reads) in &reports {
-                for log in logs {
+            for (frontier, scope, reads) in &reports {
+                let regressed = inner.forget_regressed_peer(peer, frontier).await?;
+                for log in &frontier.logs {
                     inner.conn.execute(
                         "INSERT INTO secure_peer_frontiers VALUES(?,?,?,?,?) ON CONFLICT(peer,scope,author) DO UPDATE SET held=MAX(held,excluded.held),applied=MAX(applied,excluded.applied)",
                         bindings(vec![
@@ -503,7 +511,13 @@ impl<A: RowApplication> Inner<A> {
                         ]),
                     ).await?;
                 }
+                if regressed {
+                    inner.retract_lost_acknowledgments(peer, frontier.scope).await?;
+                }
+                inner.record_own_reports(frontier).await?;
             }
+            let scopes: Vec<_> = frontiers.iter().map(|frontier| frontier.scope).collect();
+            inner.confirm_scopes(&scopes).await?;
             if first {
                 inner.bound_peers().await?;
             }

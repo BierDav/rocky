@@ -20,6 +20,7 @@ use std::{
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 
 mod fault;
+pub(crate) mod incarnation;
 mod residence;
 
 pub struct Created {
@@ -1217,28 +1218,30 @@ async fn run_inner(serving: Serving, hello: &Hello) -> Result<(), Failure> {
         }
         adopt_committed_pending_schema(&mut settings, &vault, &directory, &path).await?;
         let domain = settings.domain()?;
+        let config = settings
+            .open_config(&vault, &domain)?
+            .with_page_cache(setup.page_cache);
+        let incarnation = incarnation::Incarnation::read(&path, &vault)?;
+        let config = if incarnation.vouched() {
+            config
+        } else {
+            config.possibly_restored()
+        };
         let replica = if let Some(bootstrap) = &settings.bootstrap {
             bootstrap.verify(&settings)?;
             EncryptedReplica::open_following(
                 directory.join("rocky.sqlite"),
                 domain.app.clone(),
-                settings
-                    .open_config(&vault, &domain)?
-                    .with_page_cache(setup.page_cache),
+                config,
                 bootstrap.graph.clone(),
                 bootstrap.followed.clone(),
             )
             .await?
         } else {
-            EncryptedReplica::open(
-                directory.join("rocky.sqlite"),
-                domain.app.clone(),
-                settings
-                    .open_config(&vault, &domain)?
-                    .with_page_cache(setup.page_cache),
-            )
-            .await?
+            EncryptedReplica::open(directory.join("rocky.sqlite"), domain.app.clone(), config)
+                .await?
         };
+        incarnation.renew(&replica, &vault).await?;
         if attach(&replica, &mut settings, &vault, &domain).await? {
             replica
                 .put_authority_state(

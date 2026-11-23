@@ -123,7 +123,8 @@ async fn admitted_historical_frames_do_not_need_a_fresh_unexpired_grant() {
         .lock(crate::replica::Class::Background)
         .await;
     inner.conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
-    let admitted_in_a_rolled_back_transaction = inner.admit_author(scope, None).await;
+    let node = inner.config.node.public_key();
+    let admitted_in_a_rolled_back_transaction = inner.admit_author(scope, node).await;
     let cleared = rows(&inner.conn, "SELECT count(*) FROM secure_evicted_logs")
         .await
         .unwrap();

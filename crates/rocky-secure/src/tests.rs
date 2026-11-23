@@ -1553,6 +1553,7 @@ mod formats;
 mod generations;
 mod group;
 mod header_scans;
+mod lanes;
 mod open_audit;
 mod partitions;
 mod placements;

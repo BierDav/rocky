@@ -187,6 +187,9 @@ impl NativeSession {
                 report.behind = true;
                 return Ok(report);
             }
+            replica
+                .acknowledge_frontier(self.peer, &self.credentials, &page.frontier)
+                .await?;
             if take_state && let Some(state) = page.state {
                 self.complete_frames(page.frames)?;
                 report.state = Some(state);
@@ -238,10 +241,6 @@ impl NativeSession {
                 self.acknowledged("unexpected acknowledgment response")
                     .await?;
             }
-            let sender_holds = &page.frontier;
-            replica
-                .acknowledge_frontier(self.peer, &self.credentials, sender_holds)
-                .await?;
             after = page.next;
             if after.is_none() {
                 replica.restored(scope).await?;

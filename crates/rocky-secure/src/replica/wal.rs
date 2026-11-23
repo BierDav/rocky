@@ -3,16 +3,28 @@ use super::*;
 pub(crate) struct OwnedFile {
     pub(crate) passive: Arc<Passive>,
     path: PathBuf,
+    quiet_retry_from: u64,
 }
 impl OwnedFile {
     pub(super) fn open(database: DatabaseOwner) -> Result<Self, Error> {
         Ok(Self {
             path: database.path().to_path_buf(),
             passive: Passive::open(database)?,
+            quiet_retry_from: 0,
         })
     }
     pub(super) fn path(&self) -> &Path {
         &self.path
+    }
+    pub(super) fn quiet_truncation_failed_below(&self, size: u64) -> bool {
+        size < self.quiet_retry_from
+    }
+    pub(super) fn quiet_truncation_failed_at(&mut self, size: u64, growth: u64) {
+        self.quiet_retry_from = size.saturating_add(growth);
+    }
+    pub(super) fn truncated(&mut self) {
+        self.quiet_retry_from = 0;
+        self.passive.reset();
     }
 }
 impl Drop for OwnedFile {

@@ -154,13 +154,52 @@ pub struct CursorHost {
     controls: Mutex<Vec<Weak<Control>>>,
     closed: AtomicBool,
     workers: Arc<Mutex<Vec<Worker>>>,
+    quiet: watch::Sender<usize>,
+    #[cfg(any(test, feature = "test-support"))]
+    held_opens: watch::Sender<usize>,
 }
+
+pub struct Quiet {
+    host: Arc<CursorHost>,
+    preempted: usize,
+}
+impl Quiet {
+    pub fn preempted(&self) -> usize {
+        self.preempted
+    }
+}
+impl Drop for Quiet {
+    fn drop(&mut self) {
+        self.host
+            .quiet
+            .send_modify(|quiet| *quiet = quiet.saturating_sub(1));
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+struct HeldOpen<'a>(&'a watch::Sender<usize>);
+#[cfg(any(test, feature = "test-support"))]
+impl<'a> HeldOpen<'a> {
+    fn new(held: &'a watch::Sender<usize>) -> Self {
+        held.send_modify(|held| *held += 1);
+        Self(held)
+    }
+}
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for HeldOpen<'_> {
+    fn drop(&mut self) {
+        self.0.send_modify(|held| *held = held.saturating_sub(1));
+    }
+}
+
 impl CursorHost {
     pub fn new() -> Arc<Self> {
         Arc::default()
     }
     pub fn close(&self) {
-        let Some(workers) = self.close_to_leases() else {
+        let closing = self.close_to_leases();
+        self.quiet.send_modify(|_| {});
+        let Some(workers) = closing else {
             return;
         };
         let controls = match self.controls.lock() {
@@ -190,7 +229,33 @@ impl CursorHost {
                 .count()
         })
     }
-    pub async fn preempt(&self) -> usize {
+    pub async fn quiesce(self: &Arc<Self>) -> Quiet {
+        {
+            let _no_lease_in_flight = self
+                .workers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.quiet.send_modify(|quiet| *quiet += 1);
+        }
+        Quiet {
+            host: self.clone(),
+            preempted: self.preempt().await,
+        }
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn held_opens(&self) -> watch::Receiver<usize> {
+        self.held_opens.subscribe()
+    }
+    async fn reopened(&self, quiet: &mut watch::Receiver<usize>) {
+        let reopened = |quiet: &usize| *quiet == 0 || self.closed.load(Ordering::SeqCst);
+        if reopened(&quiet.borrow_and_update()) {
+            return;
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        let _held = HeldOpen::new(&self.held_opens);
+        let _reopened_or_host_gone = quiet.wait_for(reopened).await;
+    }
+    async fn preempt(&self) -> usize {
         let open: Vec<_> = match self.controls.lock() {
             Ok(controls) => controls
                 .iter()
@@ -250,44 +315,55 @@ impl SnapshotCursor {
         plan: CursorPlan,
     ) -> Result<Self, Error> {
         plan.limits.validate()?;
-        if host.closed.load(Ordering::SeqCst) {
-            return Err(Error::Closed);
-        }
-        if count.fetch_add(1, Ordering::SeqCst) >= MAX_SESSION_CURSORS {
-            count.fetch_sub(1, Ordering::SeqCst);
-            return Err(Error::Quota {
-                resource: "open cursors",
-                limit: MAX_SESSION_CURSORS,
+        let mut quiet = host.quiet.subscribe();
+        let mut plan = plan;
+        let (mut cursor, opening) = loop {
+            host.reopened(&mut quiet).await;
+            if host.closed.load(Ordering::SeqCst) {
+                return Err(Error::Closed);
+            }
+            if count.fetch_add(1, Ordering::SeqCst) >= MAX_SESSION_CURSORS {
+                count.fetch_sub(1, Ordering::SeqCst);
+                return Err(Error::Quota {
+                    resource: "open cursors",
+                    limit: MAX_SESSION_CURSORS,
+                });
+            }
+            let (requests, receiver) = mpsc::unbounded_channel();
+            let control = Arc::new(Control {
+                cancelled: Arc::new(AtomicBool::new(false)),
+                ended: Mutex::new(None),
+                alive: task::Held::new(true),
+                dropped: AtomicBool::new(false),
+                wake: requests.downgrade(),
+                released: watch::Sender::new(false),
             });
-        }
-        let (requests, receiver) = mpsc::unbounded_channel();
-        let control = Arc::new(Control {
-            cancelled: Arc::new(AtomicBool::new(false)),
-            ended: Mutex::new(None),
-            alive: task::Held::new(true),
-            dropped: AtomicBool::new(false),
-            wake: requests.downgrade(),
-            released: watch::Sender::new(false),
-        });
-        let (opened, opening) = oneshot::channel();
-        let cursor = Self {
-            columns: Vec::new(),
-            revision: None,
-            requests: Some(requests),
-            control,
-            count,
+            let (opened, opening) = oneshot::channel();
+            let cursor = Self {
+                columns: Vec::new(),
+                revision: None,
+                requests: Some(requests),
+                control,
+                count: count.clone(),
+            };
+            let job = Job {
+                plan,
+                requests: receiver,
+                opened,
+                control: cursor.control.clone(),
+            };
+            match host.lease(job) {
+                Ok(Lease::Serving) => break (cursor, opening),
+                Ok(Lease::Quiet(job)) => {
+                    plan = job.plan;
+                    cursor.control.release();
+                }
+                Err(error) => {
+                    cursor.control.release();
+                    return Err(error);
+                }
+            }
         };
-        let job = Job {
-            plan,
-            requests: receiver,
-            opened,
-            control: cursor.control.clone(),
-        };
-        if let Err(error) = host.lease(job) {
-            cursor.control.release();
-            return Err(error);
-        }
-        let mut cursor = cursor;
         let opened = opening.await.map_err(|_| cursor.control.error())??;
         cursor.columns = opened.columns;
         cursor.revision = opened.revision;
@@ -376,11 +452,18 @@ impl Drop for CursorHost {
         self.close();
     }
 }
+enum Lease {
+    Serving,
+    Quiet(Box<Job>),
+}
 impl CursorHost {
-    fn lease(&self, job: Job) -> Result<(), Error> {
+    fn lease(&self, job: Job) -> Result<Lease, Error> {
         let mut workers = self.workers.lock().map_err(|_| Error::Closed)?;
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::Closed);
+        }
+        if *self.quiet.borrow() > 0 {
+            return Ok(Lease::Quiet(Box::new(job)));
         }
         workers.retain(|worker| !worker.retired.load(Ordering::SeqCst));
         let worker = match workers.iter_mut().find(|worker| worker.available()) {
@@ -426,7 +509,11 @@ impl CursorHost {
         }
         worker.busy.store(true, Ordering::SeqCst);
         worker.serving = Arc::downgrade(&job.control);
-        worker.jobs.try_send(job).map_err(|_| Error::Closed)
+        worker
+            .jobs
+            .try_send(job)
+            .map(|()| Lease::Serving)
+            .map_err(|_| Error::Closed)
     }
 }
 fn free(
@@ -840,8 +927,16 @@ mod tests {
     }
     use crate::sqlite::Value;
     fn plan(file: &File, sql: &str, limits: CursorLimits, guard: Guard) -> CursorPlan {
+        plan_at(&file.path, sql, limits, guard)
+    }
+    fn plan_at(
+        path: &std::path::Path,
+        sql: &str,
+        limits: CursorLimits,
+        guard: Guard,
+    ) -> CursorPlan {
         CursorPlan {
-            path: file.path.clone(),
+            path: path.to_path_buf(),
             sql: sql.into(),
             params: Vec::new(),
             readable: vec!["items".into()],
@@ -1252,7 +1347,8 @@ mod tests {
             Value::Integer(1),
             "the open snapshots pin the log"
         );
-        assert_eq!(host.preempt().await, 2);
+        let quiet = host.quiesce().await;
+        assert_eq!(quiet.preempted(), 2);
         assert_eq!(
             busy_log_and_checkpointed_frames_of_reset(),
             vec![Value::Integer(0), Value::Integer(0), Value::Integer(0)]
@@ -1264,7 +1360,8 @@ mod tests {
                 Err(Error::Sql(SqlError::Aborted(AbortReason::Preempted)))
             ));
         }
-        assert_eq!(host.preempt().await, 0);
+        drop(quiet);
+        assert_eq!(host.quiesce().await.preempted(), 0);
         drop((idle, unread));
         let mut cursor = SnapshotCursor::open(
             &host,
@@ -1279,6 +1376,78 @@ mod tests {
             "later cursors read the new snapshot"
         );
         assert_eq!(cursor.next().await.unwrap().rows.len(), 4);
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+    async fn one_quiesce_truncates_the_log_under_readers_that_keep_reopening() {
+        let file = file(3).await;
+        file.writer.set_busy_timeout(Duration::ZERO).unwrap();
+        let host = CursorHost::new();
+        let count = Arc::new(AtomicUsize::new(0));
+        let (seen, mut revisions) = mpsc::unbounded_channel();
+        let reader = {
+            let (host, count, path) = (host.clone(), count.clone(), file.path.clone());
+            let reopen = move || {
+                let (host, count) = (host.clone(), count.clone());
+                let plan = plan_at(&path, "SELECT id FROM items", small(1), open());
+                async move { SnapshotCursor::open(&host, count, plan).await }
+            };
+            rocky_platform::task::spawn(async move {
+                let Ok(mut current) = reopen().await else {
+                    return;
+                };
+                loop {
+                    let _ = current.next().await;
+                    let Ok(next) = reopen().await else {
+                        return;
+                    };
+                    if seen.send(next.revision()).is_err() {
+                        return;
+                    }
+                    current = next;
+                }
+            })
+        };
+        let observed = async |revisions: &mut mpsc::UnboundedReceiver<Option<u64>>, rows: u64| {
+            while revisions.recv().await.expect("the reader keeps reopening") != Some(rows) {}
+        };
+        observed(&mut revisions, 3).await;
+        file.writer
+            .run_now("INSERT INTO items VALUES(10,'during')")
+            .unwrap();
+        observed(&mut revisions, 4).await;
+
+        let quiet = host.quiesce().await;
+        assert!(
+            quiet.preempted() >= 1,
+            "the reopening reader always holds a snapshot"
+        );
+        host.held_opens().wait_for(|held| *held >= 1).await.unwrap();
+        assert_eq!(host.open_cursors(), 0, "the reopen waits at the gate");
+        file.writer
+            .run_now("INSERT INTO items VALUES(11,'gated')")
+            .unwrap();
+        assert_eq!(
+            file.writer
+                .rows("PRAGMA wal_checkpoint(TRUNCATE)", ())
+                .unwrap()[0],
+            vec![Value::Integer(0), Value::Integer(0), Value::Integer(0)],
+            "one quiesce resets the log although the reader keeps reopening"
+        );
+        let mut wal = file.path.as_os_str().to_owned();
+        wal.push("-wal");
+        assert_eq!(
+            rocky_platform::fs::len(std::path::Path::new(&wal)).unwrap(),
+            0
+        );
+        drop(quiet);
+
+        file.writer
+            .run_now("INSERT INTO items VALUES(12,'after')")
+            .unwrap();
+        observed(&mut revisions, 6).await;
+        host.close();
+        reader.await.unwrap();
     }
 
     #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]

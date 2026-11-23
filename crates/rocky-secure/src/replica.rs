@@ -536,6 +536,13 @@ pub(super) struct Inner<A> {
     #[cfg(test)]
     pub(super) audit_global_passes: usize,
     #[cfg(test)]
+    pub(super) quiesces: usize,
+    #[cfg(test)]
+    pub(super) quiet_pause: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+    #[cfg(test)]
     pub(super) busy_hook: Option<Box<dyn FnMut(usize) + Send + Sync>>,
     pub(super) file: wal::OwnedFile,
 }
@@ -1155,6 +1162,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
             checkpoints: 0,
             #[cfg(test)]
             audit_global_passes: 0,
+            #[cfg(test)]
+            quiesces: 0,
+            #[cfg(test)]
+            quiet_pause: None,
             #[cfg(test)]
             busy_hook: None,
         };
@@ -1837,6 +1848,23 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .lock(crate::replica::Class::Background)
             .await
             .group_commits
+    }
+    #[cfg(test)]
+    pub(crate) async fn quiesces(&self) -> usize {
+        self.inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .quiesces
+    }
+    #[cfg(test)]
+    pub(crate) async fn pause_quiet_truncation_for_test(
+        &self,
+        reached: tokio::sync::oneshot::Sender<()>,
+        resume: tokio::sync::oneshot::Receiver<()>,
+    ) -> tokio::sync::watch::Receiver<usize> {
+        let mut inner = self.inner.lock(crate::replica::Class::Background).await;
+        inner.quiet_pause = Some((reached, resume));
+        inner.workspace.queries.cursors.held_opens()
     }
     #[cfg(test)]
     pub(crate) async fn checkpoints(&self) -> usize {

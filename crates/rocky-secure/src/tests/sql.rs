@@ -1734,6 +1734,149 @@ async fn a_cursor_pinning_the_log_past_its_limit_is_preempted() {
 }
 
 #[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_reader_reopening_after_preemption_waits_until_the_log_truncates() {
+    use crate::cursor::CursorLimits;
+    let t = Typed::new();
+    let dir = Scratch::new().await;
+    let path = dir.path().join("a.db");
+    let alice = t
+        .open(&path, &PrivateKey::new(), t.full(), &[t.items])
+        .await;
+    let session = sql(&alice, &[t.items]).await;
+    let add = async |id: usize| {
+        insert(
+            &session,
+            "INSERT INTO items VALUES(?,'x',0)",
+            vec![text(&id.to_string())],
+        )
+        .await
+        .unwrap();
+    };
+    let limits = CursorLimits {
+        page_rows: 1,
+        ..CursorLimits::default()
+    };
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    let wal = std::path::PathBuf::from(wal);
+    add(0).await;
+    let mut pinning = session
+        .cursor("SELECT key FROM items", vec![], limits)
+        .await
+        .unwrap();
+    pinning.next().await.unwrap();
+    add(1).await;
+    assert!(rocky_platform::fs::len(&wal).unwrap_or(0) > 0);
+    let quiesces = alice.quiesces().await;
+    let (reached, paused) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    let mut held = alice
+        .pause_quiet_truncation_for_test(reached, resumed)
+        .await;
+    alice.set_wal_limits(0, 0).await;
+    let checkpoint = async {
+        alice
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .checkpoint_if_due()
+            .await;
+    };
+    let reader = async {
+        paused.await.unwrap();
+        assert!(matches!(
+            pinning.next().await,
+            Err(Error::Sql(SqlError::Aborted(AbortReason::Preempted)))
+        ));
+        let reopening = session.cursor("SELECT key FROM items", vec![], limits);
+        let mut reopening = std::pin::pin!(reopening);
+        let reopened = tokio::select! {
+            biased;
+            reopened = &mut reopening => Some(reopened),
+            _ = held.wait_for(|held| *held >= 1) => None,
+        };
+        assert!(
+            reopened.is_none(),
+            "an immediate reopen waits at the gate instead of pinning the log again"
+        );
+        resume.send(()).unwrap();
+        reopening.await.unwrap()
+    };
+    let ((), mut reopened) = tokio::join!(checkpoint, reader);
+    assert_eq!(
+        rocky_platform::fs::len(&wal).unwrap_or(0),
+        0,
+        "the truncation finishes before the reopened reader takes a snapshot"
+    );
+    assert_eq!(alice.quiesces().await, quiesces + 1, "a single preemption");
+    assert_eq!(rows_of(&mut reopened).await.len(), 2);
+    drop(reopened);
+    add(2).await;
+    alice
+        .inner
+        .lock(crate::replica::Class::Background)
+        .await
+        .checkpoint_if_due()
+        .await;
+    assert_eq!(rocky_platform::fs::len(&wal).unwrap_or(0), 0);
+    assert_eq!(
+        alice.quiesces().await,
+        quiesces + 1,
+        "a commit with no pinning reader truncates without preempting"
+    );
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
+async fn a_log_pinned_outside_the_cursor_host_is_not_retried_on_every_commit() {
+    let t = Typed::new();
+    let dir = Scratch::new().await;
+    let path = dir.path().join("a.db");
+    let alice = t
+        .open(&path, &PrivateKey::new(), t.full(), &[t.items])
+        .await;
+    let session = sql(&alice, &[t.items]).await;
+    let add = async |id: usize| {
+        insert(
+            &session,
+            "INSERT INTO items VALUES(?,'x',0)",
+            vec![text(&id.to_string())],
+        )
+        .await
+        .unwrap();
+    };
+    let checkpoint = async || {
+        alice
+            .inner
+            .lock(crate::replica::Class::Background)
+            .await
+            .checkpoint_if_due()
+            .await;
+    };
+    add(0).await;
+    let outside = rocky_storage::files::raw(&path).unwrap();
+    outside.execute_batch("BEGIN").unwrap();
+    outside
+        .query_row("SELECT count(*) FROM sqlite_schema", [], |_| Ok(()))
+        .unwrap();
+    add(1).await;
+    alice.set_wal_limits(0, 0).await;
+    let (truncations, quiesces) = (alice.checkpoints().await, alice.quiesces().await);
+    checkpoint().await;
+    assert_eq!(alice.checkpoints().await, truncations + 1);
+    assert_eq!(alice.quiesces().await, quiesces + 1);
+    for id in 2..5 {
+        add(id).await;
+        checkpoint().await;
+    }
+    assert_eq!(
+        (alice.checkpoints().await, alice.quiesces().await),
+        (truncations + 1, quiesces + 1),
+        "a failed quiet truncation waits for the log to grow before it preempts again"
+    );
+    outside.execute_batch("COMMIT").unwrap();
+}
+
+#[wasm_bindgen_test::wasm_bindgen_test(unsupported = tokio::test)]
 async fn secure_table_events_follow_commits_receipts_and_authority() {
     use crate::observe::Cause;
     let t = Typed::new();

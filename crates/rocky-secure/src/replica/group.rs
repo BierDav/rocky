@@ -12,6 +12,7 @@ pub(super) const APPLICATION_ROWS: u64 = 1;
 pub(super) const WAL_CHECKPOINT_BYTES: u64 = 32 * 1024 * 1024;
 pub(super) const WAL_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 const TRUNCATE_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+const QUIET_TRUNCATE_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 pub(crate) const RECLAIM_PAGES: i64 = 1024;
 pub(crate) const RECLAIM_STEP: i64 = 4096;
 #[cfg(target_os = "android")]
@@ -756,27 +757,43 @@ impl<A: RowApplication> Inner<A> {
     pub(super) async fn checkpoint_over(&mut self, limit: u64) {
         self.reclaim_free_pages().await;
         let size = rocky_platform::fs::len(&self.wal).unwrap_or(0);
-        let truncate = size >= limit;
-        if !truncate {
+        if size < limit {
             if size >= self.wal_limits.0 {
                 self.file.passive.schedule(size, self.flusher.clone());
             }
             return;
         }
         self.file.passive.clone().wait().await;
-        if !self.truncate_wal().await
-            && size >= self.wal_limits.1
-            && self.workspace.queries.cursors.preempt().await > 0
-        {
-            self.truncate_wal().await;
+        if self.file.quiet_truncation_failed_below(size) {
+            self.file.passive.schedule(size, self.flusher.clone());
+            return;
         }
+        if self.truncate_wal(TRUNCATE_WAIT).await {
+            return;
+        }
+        if size >= self.wal_limits.1 {
+            if self.truncate_quietly().await {
+                return;
+            }
+            self.file
+                .quiet_truncation_failed_at(size, WAL_CHECKPOINT_BYTES);
+        }
+        self.file.passive.schedule(size, self.flusher.clone());
     }
-    async fn truncate_wal(&mut self) -> bool {
-        let waits = self
-            .conn
-            .connection()
-            .set_busy_timeout(TRUNCATE_WAIT)
-            .is_ok();
+    async fn truncate_quietly(&mut self) -> bool {
+        let quiet = self.workspace.queries.cursors.quiesce().await;
+        #[cfg(test)]
+        {
+            self.quiesces += 1;
+            if let Some((reached, resume)) = self.quiet_pause.take() {
+                let _ = reached.send(());
+                let _ = resume.await;
+            }
+        }
+        quiet.preempted() > 0 && self.truncate_wal(QUIET_TRUNCATE_WAIT).await
+    }
+    async fn truncate_wal(&mut self, busy: std::time::Duration) -> bool {
+        let waits = self.conn.connection().set_busy_timeout(busy).is_ok();
         #[cfg(feature = "qualification")]
         let started = web_time::Instant::now();
         let checkpoint = rows(&self.conn, "PRAGMA wal_checkpoint(TRUNCATE)").await;
@@ -809,7 +826,7 @@ impl<A: RowApplication> Inner<A> {
                 if log == done
         );
         if complete {
-            self.file.passive.reset();
+            self.file.truncated();
         }
         complete
     }
